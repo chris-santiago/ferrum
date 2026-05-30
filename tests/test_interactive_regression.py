@@ -463,12 +463,18 @@ def test_y_axis_tick_labels_share_x_coordinate():
     )
 
 
-def test_tick_data_pixels_differ_from_axis_text_positions():
+def test_tick_data_pixels_coincide_with_axis_text_positions():
     """
-    Documents the root cause of the old pixel-match failure: tick_data
-    scale-function outputs do NOT match axis text positions.  The axis
-    layout uses uniform band centering while tick_data uses the actual
-    scale function — systematically different mappings.
+    Pins the continuous-axis scale-projection fix (2026-05-30).
+
+    Previously the x-axis layout placed major ticks at uniform band centers
+    while ``tick_data`` reported the scale function's actual pixel — two
+    systematically different mappings, so axis text and tick_data pixels did
+    NOT line up (this test used to assert they *differ*, documenting that old
+    bug). The fix projects each continuous tick through the same scale (with
+    the same padding inset that places data marks), so a tick at value ``v``
+    and the data mark at value ``v`` now share a pixel. Axis text x and
+    tick_data pixel must therefore coincide.
     """
     scene = _scatter_scene()
     ptl = scene["interaction"]["tick_levels"][0]
@@ -481,13 +487,15 @@ def test_tick_data_pixels_differ_from_axis_text_positions():
         for n in scene["panels"][0]["axes"]
         if n.get("type") == "text" and n["content"] in x_labels
     ]
+    assert x_tick_nodes, "expected at least one matching x-axis tick label"
 
-    # At least some labels must have mismatched positions.  A perfect match
-    # would mean the old approach worked, which we know it didn't.
+    # Every axis text label's x must now coincide with its tick_data pixel
+    # (within sub-pixel tolerance), since both are the same scale projection.
     mismatches = [n for n in x_tick_nodes if abs(n["x"] - td_px[n["content"]]) > 0.5]
-    assert len(mismatches) > 0, (
-        "Expected at least one label whose axis text x differs from tick_data pixel; "
-        "if all match, the old pixel-match approach would have worked fine."
+    assert not mismatches, (
+        "continuous-axis scale-projection fix should make axis text x and "
+        f"tick_data pixel coincide; mismatched labels: "
+        f"{[(n['content'], n['x'], td_px[n['content']]) for n in mismatches]}"
     )
 
 

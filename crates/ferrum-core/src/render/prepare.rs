@@ -403,16 +403,29 @@ pub fn prepare_render_inputs(
                 .unwrap_or_else(|| e.field.clone())
         });
     let x_tick_labels = provisional_scales.x.tick_labels(10);
+    // Continuous-axis scale projection (2026-05-30): per-tick domain fractions
+    // and the scale's padding fraction, so layout can place continuous ticks at
+    // the SAME pixels that data marks land on. `tick_fractions` projects exactly
+    // the same tick values as `tick_labels` (both via `ticks_internal(10)`), so
+    // the carrier stays index-aligned with the labels. Ordinal/discretizing
+    // scales return an empty vec → carrier is `None` → uniform-slot placement.
+    let x_tick_fractions = provisional_scales.x.tick_fractions(10);
+    let x_scale_padding_frac = provisional_scales.x.padding_fraction();
     // Y-axis tick labels arrive in domain order (low → high). `layout_y_axis`
     // places the first label at the TOP of the panel, which is the correct
     // top-down convention for ordinal y (heatmaps, confusion matrices) but
     // INVERTS quantitative/temporal labels relative to the data placement
     // (scale_resolve.rs inverts the pixel range for non-ordinal y so high
     // data → top pixel). Reverse the tick labels here for non-ordinal y so
-    // the axis labels and data points share the same orientation.
+    // the axis labels and data points share the same orientation. The projected
+    // fractions must be reversed in lockstep so `label[i]` aligns with
+    // `fraction[i]`.
     let mut y_tick_labels = provisional_scales.y.tick_labels(10);
+    let mut y_tick_fractions = provisional_scales.y.tick_fractions(10);
+    let y_scale_padding_frac = provisional_scales.y.padding_fraction();
     if !matches!(provisional_scales.y, crate::render::scale_resolve::ScaleKind::Ordinal(_)) {
         y_tick_labels.reverse();
+        y_tick_fractions.reverse();
     }
     // D7 + D12: extract per-axis style fields from encoding.axis and encoding.format.
     // All new fields default to the safe backward-compat value so SVG output is
@@ -483,6 +496,13 @@ pub fn prepare_render_inputs(
     let x_minor_fractions = provisional_scales.x.minor_tick_fractions();
     let y_minor_fractions = provisional_scales.y.minor_tick_fractions();
 
+    // Continuous-axis scale projection: an empty fraction vec means the axis is
+    // categorical/discretizing (ordinal) → carrier is `None`, so layout keeps
+    // the uniform-slot formula byte-identically. A non-empty vec means a
+    // continuous scale → carrier drives scale-projected placement.
+    let x_projected = (!x_tick_fractions.is_empty()).then_some(x_tick_fractions);
+    let y_projected = (!y_tick_fractions.is_empty()).then_some(y_tick_fractions);
+
     let axes = AxesInput {
         x: AxisInput {
             orient: AxisOrient::Bottom,
@@ -503,6 +523,8 @@ pub fn prepare_render_inputs(
             label_padding: None,
             include_minor: false,
             minor_tick_positions: x_minor_fractions,
+            projected_tick_fractions: x_projected,
+            scale_padding_frac: x_scale_padding_frac,
         },
         y: AxisInput {
             orient: AxisOrient::Left,
@@ -523,6 +545,8 @@ pub fn prepare_render_inputs(
             label_padding: None,
             include_minor: false,
             minor_tick_positions: y_minor_fractions,
+            projected_tick_fractions: y_projected,
+            scale_padding_frac: y_scale_padding_frac,
         },
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),

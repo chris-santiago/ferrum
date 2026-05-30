@@ -200,6 +200,99 @@ impl ScaleKind {
         (r[0], r[1])
     }
 
+    /// Continuous-axis scale-projection support (continuous-axis tick design,
+    /// 2026-05-30). Returns, for each major tick, its **domain fraction**
+    /// `t ∈ [0, 1]` — the scale's normalized projection of the tick value,
+    /// independent of the pixel range. Computed as `(pixel - r0) / (r1 - r0)`
+    /// over this scale's own resolved range, so the scale's nonlinearity
+    /// (log/pow/symlog/time) is captured. Layout maps each fraction onto the
+    /// panel's mark range via the *same* padding inset that places data marks,
+    /// so a tick at value `v` and a data mark at value `v` share a pixel.
+    ///
+    /// `Ordinal` (and any categorical) scales return an empty vec — categorical
+    /// axes keep uniform-slot placement and supply no projected fractions.
+    ///
+    /// The companion padding fraction (recovered by the caller from the
+    /// provisional `[0,1]`-range scale's `pixel_range`) tells layout how much to
+    /// inset the panel range before interpolating these fractions.
+    pub(crate) fn tick_fractions(&self, count_hint: usize) -> Vec<f64> {
+        if matches!(self, Self::Ordinal(_)) {
+            return Vec::new();
+        }
+        // Project the SAME tick values that `tick_labels`/`ticks_internal`
+        // produce — one fraction per value, in the same order — so the carrier
+        // stays index-aligned with `tick_labels`.
+        let values = dispatch_continuous!(self, ticks_internal, count_hint);
+        self.project_values_to_fractions(&values)
+    }
+
+    /// Continuous-axis scale-projection support for explicit tick values
+    /// (`configure_axis(tick_values=[...])`). Projects each supplied data value
+    /// to a domain fraction `t ∈ [0, 1]` over this scale's resolved range, in
+    /// input order. Returns an empty vec for ordinal scales (explicit numeric
+    /// tick values are meaningless on a categorical axis).
+    pub(crate) fn value_fractions(&self, values: &[f64]) -> Vec<f64> {
+        if matches!(self, Self::Ordinal(_)) {
+            return Vec::new();
+        }
+        self.project_values_to_fractions(values)
+    }
+
+    /// Project data values to domain fractions `(scale(v) - r0) / (r1 - r0)`,
+    /// shared by [`tick_fractions`](Self::tick_fractions) and
+    /// [`value_fractions`](Self::value_fractions). Callers must rule out ordinal
+    /// scales first.
+    ///
+    /// The returned vec is **index-aligned** with `values`, so it is all-or-
+    /// nothing: a zero-span (degenerate domain: all-equal / single distinct /
+    /// all-null column) or any non-finite projection (a value the scale maps to
+    /// `NaN`/`±inf`, e.g. out-of-domain on an unclamped scale, or a zero-span
+    /// domain's `0/0`) yields an **empty** vec. The caller then drops the
+    /// carrier (`None`) and layout falls back to uniform-slot placement —
+    /// exactly the pre-projection (baseline) behavior for degenerate axes.
+    /// Partial filtering is deliberately avoided: it would misalign fractions
+    /// from their labels.
+    fn project_values_to_fractions(&self, values: &[f64]) -> Vec<f64> {
+        let (r0, r1) = self.pixel_range();
+        let span = r1 - r0;
+        if span == 0.0 {
+            return Vec::new();
+        }
+        let fractions: Vec<f64> = values
+            .iter()
+            .map(|&v| {
+                let px = dispatch_continuous!(self, scale_internal, v);
+                (px - r0) / span
+            })
+            .collect();
+        if fractions.iter().all(|f| f.is_finite()) {
+            fractions
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Continuous-axis scale-projection support: the padding fraction implied by
+    /// this scale's resolved pixel range, recovered as the inset relative to its
+    /// own range span. For the provisional `[0,1]`-range scales built in
+    /// `prepare.rs` this equals the `padding_frac` that
+    /// [`crate::layout::geometry::inset_pixel_range`] used (the cap never binds
+    /// at a span of 1). Layout uses it to inset the panel mark range identically.
+    /// Returns `0.0` for ordinal scales.
+    pub(crate) fn padding_fraction(&self) -> f64 {
+        if matches!(self, Self::Ordinal(_)) {
+            return 0.0;
+        }
+        let (r0, r1) = self.pixel_range();
+        // The provisional scale spans the normalized base range (0,1) or (1,0);
+        // after insetting, the band is `(pad, 1-pad)` (x) or `(1-pad, pad)` (y).
+        // The inset distance from the nearer base edge [0, 1] is `pad`, which —
+        // at unit span — is the padding fraction.
+        let lo = r0.min(r1);
+        let hi = r0.max(r1);
+        lo.min(1.0 - hi).max(0.0)
+    }
+
     pub fn tick_data(&self, count_hint: usize) -> Vec<ferrum_scene::Tick> {
         match self {
             Self::Ordinal(_) => Vec::new(),

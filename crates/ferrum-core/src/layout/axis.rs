@@ -73,6 +73,23 @@ pub struct AxisInput {
     /// `panel_origin + fraction * panel_extent`. Only consumed when
     /// `include_minor` is true.
     pub minor_tick_positions: Vec<f64>,
+    /// Continuous-axis scale projection (continuous-axis tick design,
+    /// 2026-05-30). When `Some`, this carries one **domain fraction**
+    /// `t ∈ [0, 1]` per major tick label (same index order as `tick_labels`):
+    /// the scale's normalized projection of the tick value, independent of the
+    /// pixel range. Layout maps each fraction onto the panel's mark range via
+    /// the *same* padding inset used to place data marks (see
+    /// `scale_padding_frac`), so a tick at value `v` and a mark at value `v`
+    /// land on the same pixel. `None` (categorical/discretizing axes) keeps the
+    /// existing uniform-slot placement, byte-identical to before. Presence of
+    /// this field — not the scale type — drives the placement branch.
+    pub projected_tick_fractions: Option<Vec<f64>>,
+    /// Continuous-axis scale projection: the padding fraction the resolved
+    /// positional scale used. Layout insets the panel mark range by this
+    /// fraction (capped at `SCALE_PADDING_MAX_PX`) before interpolating
+    /// `projected_tick_fractions`, reproducing the mark inset exactly. Ignored
+    /// when `projected_tick_fractions` is `None`. Defaults to `0.0`.
+    pub scale_padding_frac: f64,
 }
 
 impl AxisInput {
@@ -103,6 +120,8 @@ impl AxisInput {
             label_padding: None,
             include_minor: false,
             minor_tick_positions: Vec::new(),
+            projected_tick_fractions: None,
+            scale_padding_frac: 0.0,
         }
     }
 }
@@ -162,6 +181,45 @@ pub struct AxisLayout {
 
 fn default_true() -> bool { true }
 
+/// Continuous-axis scale projection: map each per-tick domain fraction onto the
+/// panel's mark pixel range, applying the *same* padding inset that places data
+/// marks (`crate::layout::geometry::inset_pixel_range`). The base range is the
+/// panel extent oriented exactly as the resolved positional scale: `(x, x+w)`
+/// for the x axis and the inverted `(y+h, y)` for the y axis (high data → top
+/// pixel). Returns one pixel per fraction, in the supplied order. Returns
+/// `None` when the carrier is absent (categorical axes), letting callers fall
+/// back to the uniform-slot formula.
+fn project_tick_positions(input: &AxisInput, base_range: (f64, f64)) -> Option<Vec<f64>> {
+    let fractions = input.projected_tick_fractions.as_ref()?;
+    let (lo, hi) = crate::layout::geometry::inset_pixel_range(base_range, input.scale_padding_frac);
+    let span = hi - lo;
+    let positions: Vec<f64> = fractions.iter().map(|&t| lo + t * span).collect();
+    // Defensive: a non-finite fraction (or base range) would yield a NaN/±inf
+    // pixel that the SVG renderer rejects (`svg.rs` non-finite guard). The
+    // source (`ScaleKind::project_values_to_fractions`) already drops the
+    // carrier for degenerate/zero-span domains, but guard here too so a stray
+    // non-finite can never reach the scene graph — fall back to uniform slots.
+    if positions.iter().all(|p| p.is_finite()) {
+        Some(positions)
+    } else {
+        None
+    }
+}
+
+/// Smallest absolute gap between consecutive positions, or `None` when there are
+/// fewer than two. Used by the x-axis collision cascade so non-uniform
+/// (continuous) tick spacing is judged by its tightest pair, not an average.
+fn min_adjacent_gap(positions: &[f64]) -> Option<f64> {
+    if positions.len() < 2 {
+        return None;
+    }
+    positions
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .fold(f64::INFINITY, f64::min)
+        .into()
+}
+
 /// Build `minor_ticks` from normalized `[0,1]` axis fractions when the gate is
 /// on. Each fraction maps to a pixel via `origin + fraction * extent`, the same
 /// way the provisional `[0,1]` scale would place a point along the panel.
@@ -176,8 +234,13 @@ fn build_minor_ticks(input: &AxisInput, origin: f64, extent: f64) -> Vec<TickLay
     input
         .minor_tick_positions
         .iter()
-        .map(|&frac| TickLayout {
-            position: origin + frac * extent,
+        .map(|&frac| origin + frac * extent)
+        // Defensive: drop any non-finite pixel so a NaN/±inf can never reach the
+        // scene graph (the SVG renderer rejects non-finite floats). Minors carry
+        // no label, so dropping one does not misalign anything.
+        .filter(|p| p.is_finite())
+        .map(|position| TickLayout {
+            position,
             label: String::new(),
             label_angle: 0.0,
             elided: false,
@@ -358,12 +421,22 @@ pub fn layout_y_axis(
 ) -> AxisLayout {
     let n = input.tick_labels.len();
     let slot_h = if n > 0 { panel_area.h / n as f64 } else { 0.0 };
+    // Continuous axes: place each tick at its scale-projected pixel (mark range
+    // is the inverted y range `(bottom, top)`, inset exactly like data marks).
+    // Categorical axes (no projected fractions): keep the uniform-slot formula.
+    let projected = project_tick_positions(
+        input,
+        (panel_area.y + panel_area.h, panel_area.y),
+    );
     let ticks: Vec<TickLayout> = input
         .tick_labels
         .iter()
         .enumerate()
         .map(|(i, label)| TickLayout {
-            position: panel_area.y + (i as f64 + 0.5) * slot_h,
+            position: match &projected {
+                Some(px) => px[i],
+                None => panel_area.y + (i as f64 + 0.5) * slot_h,
+            },
             label: label.clone(),
             label_angle: 0.0,
             elided: false,
@@ -754,6 +827,26 @@ pub fn layout_x_axis(
     let n = input.tick_labels.len();
     let slot_w = if n > 0 { panel_area.w / n as f64 } else { 0.0 };
 
+    // Continuous axes: place each tick at its scale-projected pixel; categorical
+    // axes (no projected fractions) keep the uniform-slot center. The closure
+    // resolves a tick's position by index against whichever placement applies.
+    let projected = project_tick_positions(input, (panel_area.x, panel_area.x + panel_area.w));
+    let tick_position = |i: usize| -> f64 {
+        match &projected {
+            Some(px) => px[i],
+            None => panel_area.x + (i as f64 + 0.5) * slot_w,
+        }
+    };
+    // The collision cascade judges label fit against the available horizontal
+    // budget per tick. For uniform (categorical) axes that is `slot_w`. For
+    // continuous axes the spacing is non-uniform (log/pow/symlog), so use the
+    // *minimum* adjacent gap between projected positions — the worst case — to
+    // avoid under-counting collisions where ticks bunch toward one end.
+    let cascade_slot_w = match &projected {
+        Some(px) => min_adjacent_gap(px).unwrap_or(slot_w),
+        None => slot_w,
+    };
+
     let (ticks, warning) = if let Some(override_angle) = input.label_angle_override {
         // label_angle_override always bypasses the cascade (spec SS7).
         // Apply the override angle, then elide if labels still collide.
@@ -763,7 +856,7 @@ pub fn layout_x_axis(
             .map(|s| metrics.measure_width(s, label_font_size))
             .collect();
         let cos_factor = override_angle.to_radians().cos().abs();
-        let any_still_colliding = widths.iter().any(|w| *w * cos_factor > slot_w);
+        let any_still_colliding = widths.iter().any(|w| *w * cos_factor > cascade_slot_w);
         let mut elided_count: u32 = 0;
         let ticks: Vec<TickLayout> = input
             .tick_labels
@@ -771,16 +864,16 @@ pub fn layout_x_axis(
             .enumerate()
             .map(|(i, label)| {
                 let w = widths[i];
-                let needs_elide = any_still_colliding && (w * cos_factor > slot_w);
+                let needs_elide = any_still_colliding && (w * cos_factor > cascade_slot_w);
                 let final_label = if needs_elide {
                     elided_count += 1;
-                    let budget = slot_w / cos_factor.max(1e-6);
+                    let budget = cascade_slot_w / cos_factor.max(1e-6);
                     elide_to_fit(label, budget, label_font_size, metrics)
                 } else {
                     label.clone()
                 };
                 TickLayout {
-                    position: panel_area.x + (i as f64 + 0.5) * slot_w,
+                    position: tick_position(i),
                     label: final_label,
                     label_angle: override_angle,
                     elided: needs_elide,
@@ -800,7 +893,7 @@ pub fn layout_x_axis(
         // Run the graduated collision cascade.
         let cascade = cascade_collision_recovery(
             &input.tick_labels,
-            slot_w,
+            cascade_slot_w,
             label_font_size,
             cull_threshold,
             metrics,
@@ -811,7 +904,7 @@ pub fn layout_x_axis(
             .iter()
             .enumerate()
             .map(|(i, label)| TickLayout {
-                position: panel_area.x + (i as f64 + 0.5) * slot_w,
+                position: tick_position(i),
                 label: label.clone(),
                 label_angle: cascade.angle,
                 elided: is_elision_strategy && label != &input.tick_labels[i],
@@ -1852,5 +1945,171 @@ mod tests {
             (band - (1e18 + 2.0)).abs() < 1.0,
             "fallback path should return max_label_w + 2.0, got {band}"
         );
+    }
+
+    // --- continuous-axis scale-projection tests (2026-05-30) ---
+
+    /// Build an AxisInput carrying projected tick fractions (continuous axis).
+    fn axis_input_projected(
+        orient: AxisOrient,
+        labels: Vec<String>,
+        fractions: Vec<f64>,
+        padding_frac: f64,
+    ) -> AxisInput {
+        let mut input = AxisInput::new(orient, None, labels, None);
+        input.projected_tick_fractions = Some(fractions);
+        input.scale_padding_frac = padding_frac;
+        input
+    }
+
+    #[test]
+    fn x_axis_continuous_places_ticks_at_projected_pixels_not_slots() {
+        // 3 ticks (lo/mid/hi) with padding_frac=0.05 in a 0..600 panel. The cap
+        // binds (600*0.05=30 > 8), so the inset is 8px → range (8, 592). Ticks at
+        // fractions 0.0/0.5/1.0 land at 8 / 300 / 592 — NOT the uniform-slot
+        // centers (100 / 300 / 500) for n=3.
+        let input = axis_input_projected(
+            AxisOrient::Bottom,
+            vec!["0".into(), "50".into(), "100".into()],
+            vec![0.0, 0.5, 1.0],
+            0.05,
+        );
+        let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
+        let m = mock(10.0);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        assert_eq!(axis.ticks.len(), 3);
+        assert!((axis.ticks[0].position - 8.0).abs() < 1e-9, "got {}", axis.ticks[0].position);
+        assert!((axis.ticks[1].position - 300.0).abs() < 1e-9, "got {}", axis.ticks[1].position);
+        assert!((axis.ticks[2].position - 592.0).abs() < 1e-9, "got {}", axis.ticks[2].position);
+        // Not at the n=3 uniform slot centers (100/300/500).
+        assert!((axis.ticks[0].position - 100.0).abs() > 1.0);
+        assert!((axis.ticks[2].position - 500.0).abs() > 1.0);
+    }
+
+    #[test]
+    fn x_axis_continuous_panel_origin_offsets_projection() {
+        // Same as above but a non-zero panel origin; inset is applied to the
+        // panel's own (x, x+w) range.
+        let input = axis_input_projected(
+            AxisOrient::Bottom,
+            vec!["0".into(), "100".into()],
+            vec![0.0, 1.0],
+            0.05,
+        );
+        let panel = Rect { x: 100.0, y: 0.0, w: 600.0, h: 200.0 };
+        let m = mock(10.0);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        assert!((axis.ticks[0].position - 108.0).abs() < 1e-9);
+        assert!((axis.ticks[1].position - 692.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn x_axis_categorical_keeps_uniform_slot_centers() {
+        // No projected fractions → byte-identical uniform-slot placement.
+        // This reproduces the pre-change positions for n=4 in a 100..500 panel.
+        let input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            None,
+        );
+        assert!(input.projected_tick_fractions.is_none());
+        let panel = Rect { x: 100.0, y: 50.0, w: 400.0, h: 200.0 };
+        let m = mock(10.0);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        assert!((axis.ticks[0].position - 150.0).abs() < 1e-9);
+        assert!((axis.ticks[1].position - 250.0).abs() < 1e-9);
+        assert!((axis.ticks[2].position - 350.0).abs() < 1e-9);
+        assert!((axis.ticks[3].position - 450.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn y_axis_continuous_places_ticks_at_projected_pixels() {
+        // y mark range is the inverted (bottom, top) = (panel.y+h, panel.y),
+        // inset by the cap → (panel.y+h-8, panel.y+8). Fraction 0.0 → bottom,
+        // 1.0 → top. With reversed labels (high first) the carrier holds
+        // [1.0, 0.5, 0.0] so label[0]=high sits at the top.
+        let input = axis_input_projected(
+            AxisOrient::Left,
+            vec!["100".into(), "50".into(), "0".into()],
+            vec![1.0, 0.5, 0.0],
+            0.05,
+        );
+        let panel = Rect { x: 0.0, y: 0.0, w: 200.0, h: 600.0 };
+        let m = mock(10.0);
+        let axis = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, &m);
+        // inset range (592, 8): t=1 → 8 (top), t=0.5 → 300, t=0 → 592 (bottom).
+        assert!((axis.ticks[0].position - 8.0).abs() < 1e-9, "top tick; got {}", axis.ticks[0].position);
+        assert!((axis.ticks[1].position - 300.0).abs() < 1e-9, "got {}", axis.ticks[1].position);
+        assert!((axis.ticks[2].position - 592.0).abs() < 1e-9, "bottom tick; got {}", axis.ticks[2].position);
+        // Not the n=3 uniform slot centers (100/300/500).
+        assert!((axis.ticks[0].position - 100.0).abs() > 1.0);
+    }
+
+    #[test]
+    fn y_axis_categorical_keeps_uniform_slot_centers() {
+        // No projected fractions → uniform-slot placement (pre-change positions).
+        let input = AxisInput::new(
+            AxisOrient::Left,
+            Some("Price".into()),
+            vec!["0".into(), "1".into(), "2".into(), "3".into()],
+            None,
+        );
+        assert!(input.projected_tick_fractions.is_none());
+        let panel = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let m = mock(10.0);
+        let axis = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, &m);
+        assert!((axis.ticks[0].position - 75.0).abs() < 1e-9);
+        assert!((axis.ticks[3].position - 225.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cascade_uses_min_gap_on_nonuniform_continuous_spacing() {
+        // Simulate a log axis: ticks bunch toward the right so the min adjacent
+        // gap is far smaller than the average slot. 6 labels of width 70px in a
+        // 600px panel. The uniform slot would be 100px (labels fit flat), but the
+        // tightest projected gap is ~21px — labels must NOT stay flat; the
+        // cascade rotates because the real min gap is too small.
+        // Fractions chosen so consecutive pixel gaps shrink: cumulative spread
+        // with the last pair ~21px apart after the 8px-capped inset on 600px.
+        let fractions = vec![0.0, 0.45, 0.72, 0.88, 0.965, 1.0];
+        let input = axis_input_projected(
+            AxisOrient::Bottom,
+            (0..6).map(|i| format!("L{i}")).collect(),
+            fractions,
+            0.05,
+        );
+        let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
+        // Each label is 70px wide. Uniform slot=100 → would stay flat (70<90).
+        let m = MockMetrics { measure: |_, _| 70.0, line_h_factor: 1.2 };
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        // The tightest gap is between fractions 0.965 and 1.0 over inset span 584:
+        // 0.035 * 584 ≈ 20.4px. 70px labels cannot stay flat at that gap, so the
+        // cascade must rotate (non-zero angle) — proving it used the real min gap,
+        // not the uniform slot (which would have kept them flat at angle 0).
+        assert!(
+            axis.ticks.iter().all(|t| t.label_angle != 0.0),
+            "cascade should rotate when the real min gap is too tight; \
+             angles={:?}",
+            axis.ticks.iter().map(|t| t.label_angle).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cascade_uniform_slot_would_keep_flat_baseline() {
+        // Control for the previous test: with the SAME labels and panel but NO
+        // projected fractions (categorical), the uniform slot (100px) easily fits
+        // 70px labels, so the cascade stays flat. This pins that the rotation in
+        // the continuous case is caused by the min-gap logic, not the labels.
+        let input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            (0..6).map(|i| format!("L{i}")).collect(),
+            None,
+        );
+        let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
+        let m = MockMetrics { measure: |_, _| 70.0, line_h_factor: 1.2 };
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        assert!(axis.ticks.iter().all(|t| t.label_angle == 0.0));
     }
 }

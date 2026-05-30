@@ -871,3 +871,56 @@ fn sqrt_scale_expands_low_values() {
         "x=5 with sqrt scale should map to ~{expected:.4}, got {px_at_5}"
     );
 }
+
+/// Continuous-axis scale projection: a zero-span (degenerate) domain must NOT
+/// emit non-finite fractions — `(scale(v) - r0)/span` is `0/0 = NaN` there.
+/// Both `tick_fractions` (auto) and `value_fractions` (explicit `tick_values`)
+/// must return an empty vec so the caller drops the carrier and layout falls
+/// back to uniform-slot placement (baseline behavior), never feeding a NaN to
+/// the SVG renderer's non-finite guard.
+#[test]
+fn fractions_on_zero_span_domain_are_empty_not_nan() {
+    use crate::scale::linear::LinearScale;
+    // Degenerate domain: lo == hi (all-equal column / single distinct value).
+    let scale = ScaleKind::Linear(LinearScale::new_internal(
+        vec![3.0, 3.0],
+        vec![0.0, 1.0],
+        false,
+        false,
+    ));
+
+    let auto = scale.tick_fractions(10);
+    assert!(
+        auto.is_empty(),
+        "tick_fractions on a zero-span domain must be empty (no NaN), got {auto:?}"
+    );
+    assert!(auto.iter().all(|f| f.is_finite()));
+
+    let explicit = scale.value_fractions(&[1.0, 2.0, 3.0]);
+    assert!(
+        explicit.is_empty(),
+        "value_fractions on a zero-span domain must be empty (no NaN), got {explicit:?}"
+    );
+    assert!(explicit.iter().all(|f| f.is_finite()));
+}
+
+/// Companion to the zero-span case: on a normal linear domain the projection is
+/// finite and index-aligned with the input values (the path that must keep
+/// working for `configure_axis(tick_values=[...])`).
+#[test]
+fn value_fractions_on_normal_domain_are_finite_and_aligned() {
+    use crate::scale::linear::LinearScale;
+    // Domain [0, 10] over the normalized [0, 1] provisional range.
+    let scale = ScaleKind::Linear(LinearScale::new_internal(
+        vec![0.0, 10.0],
+        vec![0.0, 1.0],
+        false,
+        false,
+    ));
+    let fr = scale.value_fractions(&[0.0, 5.0, 10.0]);
+    assert_eq!(fr.len(), 3, "one fraction per input value, index-aligned");
+    assert!(fr.iter().all(|f| f.is_finite()));
+    assert!((fr[0] - 0.0).abs() < 1e-9);
+    assert!((fr[1] - 0.5).abs() < 1e-9);
+    assert!((fr[2] - 1.0).abs() < 1e-9);
+}
