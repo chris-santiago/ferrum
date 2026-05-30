@@ -421,10 +421,7 @@ def _roc_binary(
 
     rb = roc_curve_kernel(yt, ys, drop_intermediate)
     base = cast("pl.DataFrame", pl.from_arrow(rb))
-    try:
-        auc = float(roc_auc(yt, ys))
-    except Exception:
-        auc = float("nan")
+    auc = float(roc_auc(yt, ys))
     return base.with_columns(
         pl.lit(classes[1]).alias("class"),
         pl.lit(auc).alias("auc"),
@@ -449,10 +446,7 @@ def _roc_one_class(
 
     rb = roc_curve_kernel(yt, ys, drop_intermediate)
     base = cast("pl.DataFrame", pl.from_arrow(rb))
-    try:
-        auc = float(roc_auc(yt, ys))
-    except Exception:
-        auc = float("nan")
+    auc = float(roc_auc(yt, ys))
     return base.with_columns(
         pl.lit(str(cls)).alias("class"),
         pl.lit(auc).alias("auc"),
@@ -477,10 +471,7 @@ def _roc_average(
         ys = pa.array(y_score_matrix.ravel().astype(np.float64), type=pa.float64())
         rb = roc_curve_kernel(yt, ys, drop_intermediate)
         base = cast("pl.DataFrame", pl.from_arrow(rb))
-        try:
-            auc = float(roc_auc(yt, ys))
-        except Exception:
-            auc = float("nan")
+        auc = float(roc_auc(yt, ys))
         return base.with_columns(
             pl.lit("micro").alias("class"),
             pl.lit(auc).alias("auc"),
@@ -497,10 +488,7 @@ def _roc_average(
         fpr_i = rb_i["fpr"].to_numpy()
         tpr_i = rb_i["tpr"].to_numpy()
         tprs.append(np.interp(grid, fpr_i, tpr_i))
-        try:
-            per_class_auc.append(float(roc_auc(yt_i, ys_i)))
-        except Exception:
-            per_class_auc.append(float("nan"))
+        per_class_auc.append(float(roc_auc(yt_i, ys_i)))
 
     if average == "macro":
         weights = np.ones(len(classes)) / len(classes)
@@ -538,10 +526,7 @@ def _pr_binary(
 
     rb = pr_curve_kernel(yt, ys)
     base = cast("pl.DataFrame", pl.from_arrow(rb))
-    try:
-        ap = float(average_precision(yt, ys))
-    except Exception:
-        ap = float("nan")
+    ap = float(average_precision(yt, ys))
     return base.with_columns(
         pl.lit(classes[1]).alias("class"),
         pl.lit(ap).alias("ap"),
@@ -565,10 +550,7 @@ def _pr_one_class(
 
     rb = pr_curve_kernel(yt, ys)
     base = cast("pl.DataFrame", pl.from_arrow(rb))
-    try:
-        ap = float(average_precision(yt, ys))
-    except Exception:
-        ap = float("nan")
+    ap = float(average_precision(yt, ys))
     return base.with_columns(
         pl.lit(str(cls)).alias("class"),
         pl.lit(ap).alias("ap"),
@@ -598,11 +580,8 @@ def _pr_average(
         ys = pa.array(y_score_matrix.ravel().astype(np.float64), type=pa.float64())
         rb = pr_curve_kernel(yt, ys)
         base = cast("pl.DataFrame", pl.from_arrow(rb))
-        try:
-            # Micro AP: average_precision on raveled arrays (matches sklearn).
-            ap = float(average_precision(yt, ys))
-        except Exception:
-            ap = float("nan")
+        # Micro AP: average_precision on raveled arrays (matches sklearn).
+        ap = float(average_precision(yt, ys))
         return base.with_columns(
             pl.lit("micro").alias("class"),
             pl.lit(ap).alias("ap"),
@@ -621,10 +600,7 @@ def _pr_average(
         # sklearn's curve has recall descending from 1 to 0; sort ascending for interp.
         order = np.argsort(r_i)
         precisions.append(np.interp(grid, r_i[order], p_i[order]))
-        try:
-            per_class_ap.append(float(average_precision(yt_i, ys_i)))
-        except Exception:
-            per_class_ap.append(float("nan"))
+        per_class_ap.append(float(average_precision(yt_i, ys_i)))
 
     if average == "macro":
         weights = np.ones(len(classes)) / len(classes)
