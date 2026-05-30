@@ -7,9 +7,10 @@ spec is deep-copied on each call so chains compose without aliasing surprises.
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Optional, Union
 
 from ferrum._coerce import to_arrow_table
@@ -80,6 +81,56 @@ _POLAR_CHANNELS = frozenset(("theta", "radius"))
 _FACET_CHANNELS = frozenset(("facet", "facet_row", "facet_col"))
 
 _logger = logging.getLogger(__name__)
+
+
+def _split_style_kwargs(desugar_fn, user_kwargs: dict) -> tuple[dict, dict]:
+    """Partition a composite mark's user kwargs into transform vs. style keys.
+
+    A user kwarg whose name is a declared parameter of *desugar_fn* (positional-
+    or-keyword / keyword-only) is a transform kwarg; every other key is a
+    constant mark-style override (e.g. ``opacity``, ``stroke_width``).  This is
+    per-mark and resolves name collisions automatically: ``fill`` is a real
+    ``desugar_density`` parameter, so it stays on the transform side, while
+    ``opacity`` matches no parameter and routes to style.
+
+    ``inspect.signature`` follows ``__wrapped__``, so the thin ``_resolve_*``
+    wrappers (which use ``**kwargs``) still expose the underlying desugar
+    signature.  ``x_field``/``y_field`` are passed positionally and
+    ``chart_encoding`` is injected separately, so they never appear in
+    *user_kwargs*.
+
+    Returns
+    -------
+    tuple[dict, dict]
+        ``(transform_kwargs, style_kwargs)``.
+    """
+    params = inspect.signature(desugar_fn).parameters
+    transform_names = {
+        name
+        for name, p in params.items()
+        if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+    transform_kwargs: dict = {}
+    style_kwargs: dict = {}
+    for k, v in user_kwargs.items():
+        if k in transform_names:
+            transform_kwargs[k] = v
+        else:
+            style_kwargs[k] = v
+    return transform_kwargs, style_kwargs
+
+
+def _apply_style_to_layer(layer: _Layer, style_dict: dict) -> _Layer:
+    """Merge constant *style_dict* into *layer*'s ``mark_kwargs``.
+
+    User style values override any desugar-set per-layer defaults.  When
+    *style_dict* is empty the layer is returned unchanged so output stays
+    byte-identical to pre-feature renders.
+    """
+    if not style_dict:
+        return layer
+    merged = {**(layer.mark_kwargs or {}), **style_dict}
+    return replace(layer, mark_kwargs=merged)
 
 
 @dataclass(frozen=True)
@@ -362,38 +413,44 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
 
         if isinstance(x_field, _RepeatPlaceholder) or isinstance(y_field, _RepeatPlaceholder):
             return self
-        # Ribbon needs y2 from the encoding — inject as a kwarg.
+        # Partition the user kwargs by the desugar signature: declared params
+        # are transform kwargs; everything else is a constant mark-style
+        # override.  ``style_dict`` is validated/normalised through MarkBase so
+        # aliases (color→fill, alpha→opacity) resolve and unknown keys raise.
+        transform_kwargs, style_kwargs = _split_style_kwargs(desugar_fn, kwargs)
+        style_dict = MarkBase(kind, **style_kwargs).to_mark_kwargs_dict()
+        # Ribbon needs y2 from the encoding — inject as a transform kwarg.
         if kind == "ribbon":
             y2_enc = self._encoding.get("y2")
             if y2_enc is not None:
                 y2_field = y2_enc.field if isinstance(y2_enc, ChannelBase) else y2_enc
-                kwargs = {**kwargs, "y2_field": y2_field}
+                transform_kwargs = {**transform_kwargs, "y2_field": y2_field}
         # density/histogram: auto-set groupby from color encoding when not explicit.
-        if kind in ("density", "histogram") and "groupby" not in kwargs:
+        if kind in ("density", "histogram") and "groupby" not in transform_kwargs:
             color_enc = self._encoding.get("color")
             if color_enc is not None:
                 color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
                 if color_field:
-                    kwargs = {**kwargs, "groupby": color_field}
+                    transform_kwargs = {**transform_kwargs, "groupby": color_field}
         # hex: infer aggregate field from color encoding when not explicit.
         if (
             kind == "hex"
-            and kwargs.get("aggregate", "count") != "count"
-            and kwargs.get("field") is None
+            and transform_kwargs.get("aggregate", "count") != "count"
+            and transform_kwargs.get("field") is None
         ):
             color_enc = self._encoding.get("color")
             if color_enc is not None:
                 color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
                 if color_field:
-                    kwargs = {**kwargs, "field": color_field}
+                    transform_kwargs = {**transform_kwargs, "field": color_field}
         # When mark_smooth was called on a chart that already had a primitive
         # mark (e.g. chart.mark_point().mark_smooth().encode(...)), preserve
         # the existing mark as a scatter layer. Force the Smooth transform
         # to be named so __final__ stays as the raw data for the scatter layer.
         _prior_mark = self._pending_stat_mark.prior_mark
-        if _prior_mark is not None and kind == "smooth" and "name" not in kwargs:
-            kwargs = {**kwargs, "name": "smooth"}
-        result = desugar_fn(x_field, y_field, **kwargs)
+        if _prior_mark is not None and kind == "smooth" and "name" not in transform_kwargs:
+            transform_kwargs = {**transform_kwargs, "name": "smooth"}
+        result = desugar_fn(x_field, y_field, **transform_kwargs)
         new = self._clone()
         new._pending_stat_mark = None
 
@@ -403,7 +460,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             try:
                 import polars as pl
 
-                orient = kwargs.get("orient", "vertical")
+                orient = transform_kwargs.get("orient", "vertical")
                 value_field = y_field if orient != "horizontal" else x_field
                 if (
                     value_field
@@ -462,9 +519,13 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         # Layered mode: result.layers is set.
         if result.layers is not None:
             new._transforms = list(self._transforms) + list(result.transforms)
-            all_layers = list(result.layers)
+            # Apply constant style to every emitted layer (user value wins over
+            # any desugar-set per-layer default).  The prior primitive layer is
+            # left untouched.
+            emitted = [_apply_style_to_layer(lyr, style_dict) for lyr in result.layers]
+            all_layers = emitted
             if _prior_layer is not None:
-                all_layers = [_prior_layer] + all_layers
+                all_layers = [_prior_layer] + emitted
             new._layers = all_layers
             new._mark = None  # signals layered mode in to_spec
             return new
@@ -479,10 +540,12 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             smooth_enc = dict(self._encoding)
             if remap:
                 _apply_remap(smooth_enc, remap, orig_encoding=self._encoding)
+            # Style applies to the composite's emitted smooth layer only; the
+            # prior scatter layer keeps its own mark_kwargs.
             smooth_layer = _SmoothLyr(
                 mark=mark,
                 encoding=smooth_enc,
-                mark_kwargs=None,
+                mark_kwargs=(dict(style_dict) if style_dict else None),
                 data_source="smooth",
             )
             new._transforms = list(self._transforms) + list(transforms)
@@ -491,6 +554,10 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             return new
         new._mark = mark
         new._transforms = list(self._transforms) + list(transforms)
+        # Only override the cloned default when the user passed style kwargs, so
+        # output stays byte-identical when none are given.
+        if style_dict:
+            new._mark_kwargs = style_dict
         if result.position is not None:
             new._position = result.position
         if remap:

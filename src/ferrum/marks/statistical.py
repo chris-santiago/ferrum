@@ -552,6 +552,15 @@ def _resolve_smooth(x_field, y_field, **kwargs):
     return desugar_smooth(x_field, y_field, **kwargs)
 
 
+# Expose the wrapped desugar signature so ``inspect.signature(..)`` (which
+# follows ``__wrapped__``) can partition user kwargs into transform vs. style
+# keys in ``Chart._resolve_pending``.  The thin ``_resolve_*`` wrappers use
+# ``**kwargs`` and would otherwise hide the real transform parameter names.
+_resolve_density.__wrapped__ = desugar_density
+_resolve_histogram.__wrapped__ = desugar_histogram
+_resolve_smooth.__wrapped__ = desugar_smooth
+
+
 def _build_prior_layer(mark, encoding, mark_kwargs, position):
     """Build a ``_Layer`` preserving a prior primitive mark as a scatter layer.
 
