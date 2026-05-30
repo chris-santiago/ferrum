@@ -237,16 +237,27 @@ mod tests {
     use super::*;
     use crate::layout::{AxisLayout, AxisOrient, AxisTitleLayout, Rect, TickLayout};
 
+    /// Construct a major `TickLayout` (`is_major = true`) for test fixtures.
+    fn major_tick(position: f64, label: &str) -> TickLayout {
+        TickLayout {
+            position,
+            label: label.into(),
+            label_angle: 0.0,
+            elided: false,
+            culled: false,
+            label_font_size: None,
+            is_major: true,
+        }
+    }
+
     #[test]
     fn axis_builds_line_ticks_and_title() {
         let axis = AxisLayout {
             orient: AxisOrient::Bottom,
             panel_index: 0,
             axis_line: Rect { x: 0.0, y: 80.0, w: 100.0, h: 0.0 },
-            ticks: vec![
-                TickLayout { position: 25.0, label: "0".into(), label_angle: 0.0, elided: false, culled: false, label_font_size: None },
-                TickLayout { position: 75.0, label: "1".into(), label_angle: 0.0, elided: false, culled: false, label_font_size: None },
-            ],
+            ticks: vec![major_tick(25.0, "0"), major_tick(75.0, "1")],
+            minor_ticks: vec![],
             title: Some(AxisTitleLayout {
                 text: "x".into(),
                 anchor_x: 50.0,
@@ -277,9 +288,10 @@ mod tests {
             panel_index: 0,
             axis_line: Rect { x: 0.0, y: 80.0, w: 100.0, h: 0.0 },
             ticks: vec![
-                TickLayout { position: 25.0, label: "visible".into(), label_angle: 0.0, elided: false, culled: false, label_font_size: None },
-                TickLayout { position: 75.0, label: "culled".into(), label_angle: 0.0, elided: false, culled: true, label_font_size: None },
+                major_tick(25.0, "visible"),
+                TickLayout { position: 75.0, label: "culled".into(), label_angle: 0.0, elided: false, culled: true, label_font_size: None, is_major: true },
             ],
+            minor_ticks: vec![],
             title: None,
             show_labels: true,
             show_ticks: true,
@@ -317,8 +329,10 @@ mod tests {
                     elided: false,
                     culled: false,
                     label_font_size: None,
+                    is_major: true,
                 },
             ],
+            minor_ticks: vec![],
             title: None,
             show_labels: true,
             show_ticks: true,
@@ -366,8 +380,10 @@ mod tests {
                     elided: false,
                     culled: false,
                     label_font_size: Some(9.0),
+                    is_major: true,
                 },
             ],
+            minor_ticks: vec![],
             title: None,
             show_labels: true,
             show_ticks: true,
@@ -409,10 +425,11 @@ mod tests {
             panel_index: 0,
             axis_line: Rect { x: 50.0, y: 10.0, w: 1.0, h: 300.0 },
             ticks: vec![
-                TickLayout { position: 60.0, label: "a".into(), label_angle: 0.0, elided: false, culled: false, label_font_size: None },
-                TickLayout { position: 160.0, label: "b".into(), label_angle: 0.0, elided: false, culled: false, label_font_size: None },
-                TickLayout { position: 260.0, label: "c".into(), label_angle: 0.0, elided: false, culled: false, label_font_size: None },
+                major_tick(60.0, "a"),
+                major_tick(160.0, "b"),
+                major_tick(260.0, "c"),
             ],
+            minor_ticks: vec![],
             title: None,
             show_labels: true,
             show_ticks: true,
@@ -444,9 +461,8 @@ mod tests {
             orient: AxisOrient::Left,
             panel_index: 0,
             axis_line: Rect { x: 50.0, y: 10.0, w: 1.0, h: 300.0 },
-            ticks: vec![
-                TickLayout { position: 60.0, label: "a".into(), label_angle: 0.0, elided: false, culled: false, label_font_size: None },
-            ],
+            ticks: vec![major_tick(60.0, "a")],
+            minor_ticks: vec![],
             title: None,
             show_labels: true, show_ticks: true, show_domain: true, show_grid: true,
             title_font_size: None, title_color_rgba: None, label_padding: None,
@@ -467,6 +483,7 @@ mod tests {
             panel_index: 0,
             axis_line: Rect { x: 0.0, y: 80.0, w: 100.0, h: 0.0 },
             ticks: vec![],
+            minor_ticks: vec![],
             title: Some(crate::layout::AxisTitleLayout {
                 text: "My Title".into(),
                 anchor_x: 50.0,

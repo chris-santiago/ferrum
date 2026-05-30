@@ -62,6 +62,17 @@ pub struct AxisInput {
     /// Pixel gap between the end of a tick mark and the tick label baseline.
     /// Overrides the renderer's hardcoded per-orient gaps.
     pub label_padding: Option<f64>,
+    /// Grid item 18 gate: when `false` (default), no minor ticks are emitted and
+    /// the major path is byte-identical to today. When `true`,
+    /// `minor_tick_positions` are threaded into `AxisLayout.minor_ticks`.
+    pub include_minor: bool,
+    /// Grid item 18: minor tick positions as **normalized fractions in `[0, 1]`**
+    /// along the axis (the scale's projection of each minor `Tick`, built from
+    /// the provisional scale's `[0,1]` pixel range — the same projection that
+    /// places majors). Layout maps each fraction to a pixel via
+    /// `panel_origin + fraction * panel_extent`. Only consumed when
+    /// `include_minor` is true.
+    pub minor_tick_positions: Vec<f64>,
 }
 
 impl AxisInput {
@@ -90,6 +101,8 @@ impl AxisInput {
             title_color: None,
             title_padding: None,
             label_padding: None,
+            include_minor: false,
+            minor_tick_positions: Vec::new(),
         }
     }
 }
@@ -113,6 +126,12 @@ pub struct AxisLayout {
     pub panel_index: usize,
     pub axis_line: Rect,
     pub ticks: Vec<TickLayout>,
+    /// Grid item 18: minor (unlabeled) tick positions, kept separate from
+    /// `ticks` so the major label/culling path is untouched. Empty unless minor
+    /// rendering is enabled (`AxisInput.include_minor`). Each entry has
+    /// `is_major == false`, an empty label, and `culled == false`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub minor_ticks: Vec<TickLayout>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub title: Option<AxisTitleLayout>,
     /// D7: whether to render tick labels. Default `true`.
@@ -143,6 +162,32 @@ pub struct AxisLayout {
 
 fn default_true() -> bool { true }
 
+/// Build `minor_ticks` from normalized `[0,1]` axis fractions when the gate is
+/// on. Each fraction maps to a pixel via `origin + fraction * extent`, the same
+/// way the provisional `[0,1]` scale would place a point along the panel.
+/// Minors carry no label, are never elided/culled, and are tagged
+/// `is_major == false`. `origin`/`extent` are `panel_area.x`/`panel_area.w` for
+/// x and `panel_area.y`/`panel_area.h` for y. Returns an empty vec when
+/// `include_minor` is false.
+fn build_minor_ticks(input: &AxisInput, origin: f64, extent: f64) -> Vec<TickLayout> {
+    if !input.include_minor {
+        return Vec::new();
+    }
+    input
+        .minor_tick_positions
+        .iter()
+        .map(|&frac| TickLayout {
+            position: origin + frac * extent,
+            label: String::new(),
+            label_angle: 0.0,
+            elided: false,
+            culled: false,
+            label_font_size: None,
+            is_major: false,
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TickLayout {
     pub position: f64,
@@ -155,6 +200,11 @@ pub struct TickLayout {
     /// Per-tick font-size override. `None` means use the theme default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label_font_size: Option<f64>,
+    /// Grid item 18: `true` for major ticks (all of `AxisLayout.ticks`),
+    /// `false` for minor ticks (only present in `AxisLayout.minor_ticks`).
+    /// Defaults to `true` so previously serialized layouts deserialize as majors.
+    #[serde(default = "default_true")]
+    pub is_major: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -319,8 +369,10 @@ pub fn layout_y_axis(
             elided: false,
             culled: false,
             label_font_size: None,
+            is_major: true,
         })
         .collect();
+    let minor_ticks = build_minor_ticks(input, panel_area.y, panel_area.h);
 
     let axis_line = Rect {
         x: panel_area.x,
@@ -348,6 +400,7 @@ pub fn layout_y_axis(
         panel_index,
         axis_line,
         ticks,
+        minor_ticks,
         title,
         show_labels: input.show_labels,
         show_ticks: input.show_ticks,
@@ -733,6 +786,7 @@ pub fn layout_x_axis(
                     elided: needs_elide,
                     culled: false,
                     label_font_size: None,
+                    is_major: true,
                 }
             })
             .collect();
@@ -763,6 +817,7 @@ pub fn layout_x_axis(
                 elided: is_elision_strategy && label != &input.tick_labels[i],
                 culled: !cascade.visible[i],
                 label_font_size: cascade.font_size,
+                is_major: true,
             })
             .collect();
         let warning = match cascade.strategy {
@@ -795,11 +850,14 @@ pub fn layout_x_axis(
         }
     });
 
+    let minor_ticks = build_minor_ticks(input, panel_area.x, panel_area.w);
+
     (AxisLayout {
         orient: AxisOrient::Bottom,
         panel_index,
         axis_line,
         ticks,
+        minor_ticks,
         title,
         show_labels: input.show_labels,
         show_ticks: input.show_ticks,
@@ -828,7 +886,9 @@ mod tests {
                 elided: false,
                 culled: false,
                 label_font_size: None,
+                is_major: true,
             }],
+            minor_ticks: vec![],
             title: Some(AxisTitleLayout {
                 text: "Price".into(),
                 anchor_x: 300.0,
@@ -855,6 +915,7 @@ mod tests {
             panel_index: 0,
             axis_line: Rect::ZERO,
             ticks: vec![],
+            minor_ticks: vec![],
             title: None,
             show_labels: true,
             show_ticks: true,
@@ -1075,6 +1136,154 @@ mod tests {
         for t in &axis.ticks {
             assert!(t.elided);
             assert!(t.label.is_char_boundary(t.label.len()));
+        }
+    }
+
+    // --- minor-tick threading tests (Grid item 18, Task 2) ---
+
+    /// Build an AxisInput with the minor gate and positions set explicitly.
+    fn axis_input_with_minor(
+        orient: AxisOrient,
+        labels: Vec<String>,
+        include_minor: bool,
+        minor_positions: Vec<f64>,
+    ) -> AxisInput {
+        let mut input = AxisInput::new(orient, None, labels, None);
+        input.include_minor = include_minor;
+        input.minor_tick_positions = minor_positions;
+        input
+    }
+
+    #[test]
+    fn minor_gate_off_emits_only_majors() {
+        // Even with minor fractions supplied, the gate being off must yield an
+        // empty minor_ticks and major-only `ticks` (each tagged is_major=true).
+        let input = axis_input_with_minor(
+            AxisOrient::Bottom,
+            vec!["0".into(), "1".into(), "2".into(), "3".into()],
+            false,
+            vec![0.1, 0.2, 0.3],
+        );
+        let panel = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
+        let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+
+        assert!(axis.minor_ticks.is_empty(), "gate off must produce no minors");
+        assert_eq!(axis.ticks.len(), 4);
+        for t in &axis.ticks {
+            assert!(t.is_major, "all `ticks` entries must be majors");
+        }
+    }
+
+    #[test]
+    fn minor_gate_off_y_axis_emits_only_majors() {
+        let input = axis_input_with_minor(
+            AxisOrient::Left,
+            vec!["0".into(), "1".into(), "2".into()],
+            false,
+            vec![0.2, 0.6],
+        );
+        let panel = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let m = mock(10.0);
+        let axis = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, &m);
+
+        assert!(axis.minor_ticks.is_empty());
+        assert_eq!(axis.ticks.len(), 3);
+        for t in &axis.ticks {
+            assert!(t.is_major);
+        }
+    }
+
+    #[test]
+    fn minor_gate_on_continuous_threads_minors_between_majors() {
+        // 2 majors in a 0..400 panel with 2 labels → slot centers 100 and 300.
+        // Supply normalized minor fractions; with extent=400 they map to pixels
+        // 50, 150, 200, 250, 350 — interior ones strictly between the majors.
+        // All must appear in minor_ticks: unlabeled, is_major=false, culled=false.
+        // Majors stay labeled and is_major=true.
+        let input = axis_input_with_minor(
+            AxisOrient::Bottom,
+            vec!["0".into(), "10".into()],
+            true,
+            vec![0.125, 0.375, 0.5, 0.625, 0.875],
+        );
+        let panel = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
+        let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+
+        // Majors unchanged: 2 labeled ticks at 100 and 300.
+        assert_eq!(axis.ticks.len(), 2);
+        assert!((axis.ticks[0].position - 100.0).abs() < 1e-9);
+        assert!((axis.ticks[1].position - 300.0).abs() < 1e-9);
+        for t in &axis.ticks {
+            assert!(t.is_major);
+            assert!(!t.label.is_empty());
+        }
+
+        // Minors: 5 of them, fraction * 400 + panel.x (0.0 here).
+        assert_eq!(axis.minor_ticks.len(), 5);
+        let expected = [50.0, 150.0, 200.0, 250.0, 350.0];
+        for (mt, &exp) in axis.minor_ticks.iter().zip(expected.iter()) {
+            assert!((mt.position - exp).abs() < 1e-9);
+            assert!(!mt.is_major, "minor must be is_major=false");
+            assert_eq!(mt.label, "", "minor must carry no label");
+            assert!(!mt.culled, "minors are never culled");
+            assert!(!mt.elided, "minors are never elided");
+        }
+
+        // The three interior minors fall strictly between the two majors.
+        let m0 = axis.ticks[0].position;
+        let m1 = axis.ticks[1].position;
+        for interior in [150.0, 200.0, 250.0] {
+            assert!(
+                interior > m0 && interior < m1,
+                "minor {interior} must lie strictly between majors {m0} and {m1}"
+            );
+        }
+    }
+
+    #[test]
+    fn minor_positions_offset_by_panel_origin() {
+        // Minors are normalized fractions; layout maps them via origin + frac*extent.
+        let input = axis_input_with_minor(
+            AxisOrient::Left,
+            vec!["0".into(), "1".into()],
+            true,
+            vec![0.125, 0.375],
+        );
+        let panel = Rect { x: 100.0, y: 40.0, w: 300.0, h: 200.0 };
+        let m = mock(10.0);
+        let axis = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, &m);
+
+        assert_eq!(axis.minor_ticks.len(), 2);
+        // panel.y (40) + frac * panel.h (200): 40 + 25 = 65, 40 + 75 = 115.
+        assert!((axis.minor_ticks[0].position - 65.0).abs() < 1e-9);
+        assert!((axis.minor_ticks[1].position - 115.0).abs() < 1e-9);
+        for mt in &axis.minor_ticks {
+            assert!(!mt.is_major);
+            assert_eq!(mt.label, "");
+        }
+    }
+
+    #[test]
+    fn minor_gate_on_categorical_empty_positions_yields_no_minors() {
+        // Categorical/band scales return empty minors at the engine boundary;
+        // with the gate on but no positions, minor_ticks stays empty and majors
+        // are unchanged. (Mirrors the band-scale case.)
+        let input = axis_input_with_minor(
+            AxisOrient::Bottom,
+            vec!["a".into(), "b".into(), "c".into()],
+            true,
+            vec![],
+        );
+        let panel = Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
+        let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+
+        assert!(axis.minor_ticks.is_empty(), "no positions → no minors");
+        assert_eq!(axis.ticks.len(), 3);
+        for t in &axis.ticks {
+            assert!(t.is_major);
         }
     }
 

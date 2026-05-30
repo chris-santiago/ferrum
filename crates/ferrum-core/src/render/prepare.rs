@@ -474,6 +474,15 @@ pub fn prepare_render_inputs(
     let x_tick_labels = apply_tick_format(x_tick_labels, x_tick_format.as_deref(), x_tick_format_type.as_deref());
     let y_tick_labels = apply_tick_format(y_tick_labels, y_tick_format.as_deref(), y_tick_format_type.as_deref());
 
+    // Grid item 18: minor tick fractions from the provisional scales, projected
+    // through the same `[0,1]`-range scale that places majors. Carried into the
+    // AxisInput so layout can build `AxisLayout.minor_ticks` when the
+    // `include_minor` gate is on. The gate stays `false` here (Task 2); a later
+    // task flips it from the theme's minor-grid flag. Categorical/discretizing
+    // scales yield an empty vec (no continuum to subdivide).
+    let x_minor_fractions = provisional_scales.x.minor_tick_fractions();
+    let y_minor_fractions = provisional_scales.y.minor_tick_fractions();
+
     let axes = AxesInput {
         x: AxisInput {
             orient: AxisOrient::Bottom,
@@ -492,6 +501,8 @@ pub fn prepare_render_inputs(
             title_color: None,
             title_padding: None,
             label_padding: None,
+            include_minor: false,
+            minor_tick_positions: x_minor_fractions,
         },
         y: AxisInput {
             orient: AxisOrient::Left,
@@ -510,6 +521,8 @@ pub fn prepare_render_inputs(
             title_color: None,
             title_padding: None,
             label_padding: None,
+            include_minor: false,
+            minor_tick_positions: y_minor_fractions,
         },
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),

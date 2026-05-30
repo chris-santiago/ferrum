@@ -150,6 +150,38 @@ impl ScaleKind {
         }
     }
 
+    /// Grid item 18: project this scale's minor ticks to axis positions using
+    /// the **same projection as majors** (`scale_internal`).
+    ///
+    /// The provisional scales built in `prepare.rs` use a normalized `[0, 1]`
+    /// pixel range (x: `(0,1)`, y: `(1,0)`), so each returned value is a
+    /// fraction along the axis that layout multiplies by the panel extent.
+    /// Ordinal (and any non-continuous) scales return an empty vec, matching
+    /// the engine's empty `minor_ticks_internal()` for discrete scales.
+    pub(crate) fn minor_tick_fractions(&self) -> Vec<f64> {
+        // Each minor `Tick` is a data-space position; project it through the
+        // same `scale_internal` used for the major path, then drop non-finite
+        // results (e.g. a minor that lands outside a clamped domain).
+        fn project<I>(minors: I, scale: impl Fn(f64) -> f64) -> Vec<f64>
+        where
+            I: IntoIterator<Item = crate::scale::ticks::Tick>,
+        {
+            minors
+                .into_iter()
+                .map(|t| scale(t.position))
+                .filter(|p| p.is_finite())
+                .collect()
+        }
+        match self {
+            Self::Ordinal(_) => Vec::new(),
+            Self::Linear(s) => project(s.minor_ticks_internal(), |x| s.scale_internal(x)),
+            Self::Time(s) => project(s.minor_ticks_internal(), |x| s.scale_internal(x)),
+            Self::Log(s) => project(s.minor_ticks_internal(), |x| s.scale_internal(x)),
+            Self::Symlog(s) => project(s.minor_ticks_internal(), |x| s.scale_internal(x)),
+            Self::Pow(s) => project(s.minor_ticks_internal(), |x| s.scale_internal(x)),
+        }
+    }
+
     /// Return the data-space domain `(lo, hi)` for continuous scales.
     /// Returns `None` for ordinal scales (no numeric domain).
     pub(crate) fn data_domain(&self) -> Option<(f64, f64)> {
