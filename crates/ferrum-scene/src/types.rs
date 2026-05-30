@@ -66,6 +66,9 @@ pub enum MarkBatchKind {
     Area,
     Rule,
     Text,
+    /// Label marks — identical rendering to `Text` but serializes as `"label"`
+    /// so downstream consumers can distinguish `mark_label` from `mark_text`.
+    Label,
     Tick,
     Rect,
     Polygon,

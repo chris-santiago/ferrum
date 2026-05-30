@@ -216,8 +216,9 @@ fn hit_test_batch(batch: &MarkBatch, panel: &ferrum_scene::Panel, x: f64, y: f64
         MarkBatchKind::Arc => hit_test_polar_arcs(&batch.nodes, panel, x, y),
         // Short line segments (rug ticks, boxplot caps, etc.) — emit Line nodes.
         MarkBatchKind::Tick => hit_test_lines(&batch.nodes, x, y),
-        // Text labels — point proximity using font_size as tolerance.
-        MarkBatchKind::Text => hit_test_texts(&batch.nodes, x, y),
+        // Text and Label marks — point proximity using font_size as tolerance.
+        // Label routes identically to Text: same nodes, same hit-test policy.
+        MarkBatchKind::Text | MarkBatchKind::Label => hit_test_texts(&batch.nodes, x, y),
         // Confidence band / filled area between two lines — emit closed Path nodes.
         MarkBatchKind::Ribbon => hit_test_lines(&batch.nodes, x, y),
         // Diagonal line segments between two (x,y) / (x2,y2) pairs — emit Line nodes.
@@ -1448,5 +1449,69 @@ mod tests {
         ];
         assert!(point_in_polygon(5.0, 5.0, &square));
         assert!(!point_in_polygon(15.0, 5.0, &square));
+    }
+
+    // ── Task 2: Label kind hit-test routing ──────────────────────────────────
+
+    fn text_style_small() -> ferrum_scene::TextStyle {
+        ferrum_scene::TextStyle {
+            font_size: 12.0,
+            font_weight: ferrum_scene::FontWeight::Normal,
+            anchor: ferrum_scene::TextAnchor::Middle,
+            baseline: ferrum_scene::TextBaseline::Alphabetic,
+            angle: 0.0,
+            color: ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 },
+            opacity: 1.0,
+            font_family: "sans-serif".into(),
+        }
+    }
+
+    /// A Label batch routes to hit_test_texts (same as Text).
+    #[test]
+    fn label_batch_routes_to_hit_test_texts() {
+        let panel = Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        };
+        let batch = MarkBatch {
+            kind: MarkBatchKind::Label,
+            nodes: vec![SceneNode::Text {
+                x: 100.0,
+                y: 100.0,
+                content: "label-node".into(),
+                style: text_style_small(),
+            }],
+            data_indices: Some(vec![0]),
+            tooltips: None,
+            hrefs: None,
+            keys: None,
+            blend: ferrum_scene::BlendMode::Normal,
+            descriptions: None,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+        };
+        // Click on the label anchor — must hit (routes to hit_test_texts).
+        assert!(
+            hit_test_batch(&batch, &panel, 100.0, 100.0).is_some(),
+            "Label batch must hit on anchor point via hit_test_texts"
+        );
+        // Click far away — must miss.
+        assert!(
+            hit_test_batch(&batch, &panel, 400.0, 400.0).is_none(),
+            "Label batch must miss far from anchor"
+        );
     }
 }
