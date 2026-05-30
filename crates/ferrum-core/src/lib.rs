@@ -55,6 +55,14 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;
     // Phase 10g Task 35: Kendall's tau-b (Knight's O(n log n)).
     m.add_function(wrap_pyfunction!(diagnostics::py_kendall_tau_b, m)?)?;
+    // Classification diagnostic curve kernels (sklearn-parity).
+    m.add_function(wrap_pyfunction!(diagnostics::roc_curve_kernel, m)?)?;
+    m.add_function(wrap_pyfunction!(diagnostics::roc_auc, m)?)?;
+    m.add_function(wrap_pyfunction!(diagnostics::pr_curve_kernel, m)?)?;
+    m.add_function(wrap_pyfunction!(diagnostics::average_precision, m)?)?;
+    m.add_function(wrap_pyfunction!(diagnostics::calibration_kernel, m)?)?;
+    m.add_function(wrap_pyfunction!(diagnostics::confusion_kernel, m)?)?;
+    m.add_function(wrap_pyfunction!(diagnostics::prf_at_thresholds, m)?)?;
     // Tier 3: Rust-native statistics (replaces stats.py).
     m.add_function(wrap_pyfunction!(transform::stats::hat_matrix_stats, m)?)?;
     m.add_function(wrap_pyfunction!(transform::stats::studentized_residual_no_x, m)?)?;
