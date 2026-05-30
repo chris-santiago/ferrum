@@ -19,14 +19,13 @@ use crate::render::RenderError;
 use super::domain::{apply_sort_to_domain, locate_field, numeric_domain_union};
 use super::{distinct_values_in_order, infer_spec_type, ScaleKind};
 
-/// Themes-T4 default inward padding fraction for quantitative / temporal
-/// scales when neither `scale.padding` nor `scale.domain` is set.
-const DEFAULT_SCALE_PADDING_FRAC: f64 = 0.05;
-
-/// Themes-T4 maximum inward padding in pixels. The padding band is the
-/// smaller of `fraction * span` and this cap so small panels don't lose
-/// too much plot area.
-const SCALE_PADDING_MAX_PX: f64 = 8.0;
+// The padding-inset constants and `inset_pixel_range` now live in
+// `crate::layout::geometry` (the geometry layer) so that the layout engine can
+// reproduce the *exact same* inset when projecting axis ticks. Re-export the
+// helper here under its existing `pub(in crate::render)` path so render-side
+// callers are unchanged.
+use crate::layout::geometry::DEFAULT_SCALE_PADDING_FRAC;
+pub(in crate::render) use crate::layout::geometry::inset_pixel_range;
 
 /// Resolve the effective padding fraction.
 ///
@@ -42,19 +41,6 @@ pub(in crate::render) fn resolve_padding_fraction(scale_padding: Option<f64>, ha
         return 0.0;
     }
     DEFAULT_SCALE_PADDING_FRAC
-}
-
-/// Inset a pixel range by the resolved padding band (capped at
-/// `SCALE_PADDING_MAX_PX`). Handles inverted ranges (y-axis is
-/// `(high_px, low_px)` for quantitative scales).
-pub(in crate::render) fn inset_pixel_range(pr: (f64, f64), padding_frac: f64) -> (f64, f64) {
-    if padding_frac == 0.0 {
-        return pr;
-    }
-    let span = (pr.1 - pr.0).abs();
-    let pad = (span * padding_frac).min(SCALE_PADDING_MAX_PX);
-    let sign = if pr.1 >= pr.0 { 1.0 } else { -1.0 };
-    (pr.0 + sign * pad, pr.1 - sign * pad)
 }
 
 pub(in crate::render) fn build_axis_scale(

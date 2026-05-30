@@ -70,18 +70,18 @@ fn candidate_offsets(w: f64, h: f64) -> [(f64, f64); 8] {
 pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     let xf = match ctx.spec.encoding.x.as_ref().map(|e| e.field.as_str()) {
         Some(f) => f,
-        None => return MarkBuildResult::empty(MarkBatchKind::Text),
+        None => return MarkBuildResult::empty(MarkBatchKind::Label),
     };
     let yf = match ctx.spec.encoding.y.as_ref().map(|e| e.field.as_str()) {
         Some(f) => f,
-        None => return MarkBuildResult::empty(MarkBatchKind::Text),
+        None => return MarkBuildResult::empty(MarkBatchKind::Label),
     };
 
     let Ok(xs) = col_as_f64(ctx.batch, xf) else {
-        return MarkBuildResult::empty(MarkBatchKind::Text);
+        return MarkBuildResult::empty(MarkBatchKind::Label);
     };
     let Ok(ys) = col_as_f64(ctx.batch, yf) else {
-        return MarkBuildResult::empty(MarkBatchKind::Text);
+        return MarkBuildResult::empty(MarkBatchKind::Label);
     };
 
     // Optional text content: `text` encoding field, else format x value.
@@ -195,7 +195,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     }
 
     MarkBuildResult {
-        kind: MarkBatchKind::Text,
+        kind: MarkBatchKind::Label,
         nodes,
         data_indices: Some(data_indices),
         tooltips: None,
@@ -254,6 +254,54 @@ mod tests {
         )
         .unwrap();
         (spec, batch)
+    }
+
+    // ── Task 2: MarkBatchKind::Label tests ──────────────────────────────
+
+    /// mark_label build produces MarkBuildResult with kind == MarkBatchKind::Label.
+    #[test]
+    fn label_build_produces_label_kind() {
+        let (spec, batch) = two_point_spec_and_batch();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None,
+        };
+        let (scales, _) = resolve_scales(
+            &spec, &batch, (0.0, 100.0), (0.0, 100.0),
+            &ThemeInputs::default(),
+        )
+        .unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+        let result = build(&ctx);
+        assert_eq!(
+            result.kind,
+            MarkBatchKind::Label,
+            "mark_label build must produce MarkBatchKind::Label, got {:?}",
+            result.kind
+        );
+    }
+
+    /// MarkBatchKind::Label serializes to "label" and round-trips through serde.
+    #[test]
+    fn label_kind_serde_round_trip() {
+        let kind = MarkBatchKind::Label;
+        let serialized = serde_json::to_string(&kind).expect("serialize MarkBatchKind::Label");
+        assert_eq!(serialized, "\"label\"", "Label must serialize to \"label\"");
+        let deserialized: MarkBatchKind =
+            serde_json::from_str(&serialized).expect("deserialize MarkBatchKind::Label");
+        assert_eq!(deserialized, MarkBatchKind::Label, "round-trip must restore Label");
     }
 
     // ── F3 regression tests ──────────────────────────────────────────

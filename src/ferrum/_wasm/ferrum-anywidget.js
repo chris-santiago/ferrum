@@ -128,6 +128,159 @@ function _placeTextSvg(svgEl, texts) {
   }
 }
 
+// ── Raw SVG fragment injection ────────────────────────────────────────────
+// Injects verbatim SVG fragments from SceneNode::Raw into the text-overlay
+// <svg>.  Two groups are maintained:
+//   .ferrum-raw-chrome — fixed during pan/zoom (legend colorbar, inset)
+//   .ferrum-raw-data   — receives the same canvas transform (data-anchored)
+//
+// ID namespacing: each fragment is namespaced INDEPENDENTLY with its own
+// per-fragment prefix.  Every ferrum Raw fragment is self-contained — each
+// `id="X"` definition and all of its `url(#X)` / `href="#X"` consumers live in
+// the SAME fragment (the legend colorbar's gradient def and its consuming rect
+// are emitted as one merged Raw node; insets embed a complete nested <svg>).
+// Because no id is referenced across a fragment boundary, per-fragment prefixes
+// are both collision-free and reference-complete: two fragments that each
+// author `id="ferrum-colorbar-0"` (e.g. an outer continuous-color chart plus an
+// .inset() of another) get DISTINCT namespaced ids instead of collapsing to one
+// (R5 — a single shared map silently let one <linearGradient> win, rendering the
+// other colorbar with the wrong gradient).
+//
+// Namespacing contract (per fragment, where {fragIdx} is its index):
+//   - Every id="X" defined IN this fragment maps to
+//     id="ferrum-raw-{loadIdx}-{fragIdx}-X" ({loadIdx} is a per-loadScene
+//     counter so ids from stale scenes can't collide with a new scene).
+//   - In this fragment: id="X" → id="ferrum-raw-{loadIdx}-{fragIdx}-X"
+//   - In this fragment: url(#X) → url(#ferrum-raw-{loadIdx}-{fragIdx}-X)
+//   - In this fragment: href="#X" → href="#ferrum-raw-{loadIdx}-{fragIdx}-X"
+//   - In this fragment: xlink:href="#X" → xlink:href="#ferrum-raw-{loadIdx}-{fragIdx}-X"
+//   - Only ids actually DEFINED in this fragment are rewritten.  External URLs,
+//     data URIs, and unrelated # anchors are left untouched.
+//
+// Injection is done ONCE per loadScene call.  On pan/zoom ticks, only the
+// data group's transform attribute is updated — no DOM re-parse, no re-inject.
+//
+// Transform model: the data Raw group carries the same CSS-pixel affine as
+// the GPU canvas.  D3-zoom (k, tx, ty) defines x' = x*k + tx, y' = y*k + ty
+// in CSS pixels.  The GPU renderer applies the same affine (via setTransform).
+// Both operate in CSS pixel space; DPR scaling is only in the canvas backing
+// store and does not affect the SVG coordinate system.  Text labels are
+// re-generated with new pixel positions on each tick (Rust setTransform), so
+// they do not need a group transform — their approach is incompatible with Raw
+// (opaque SVG), hence the separate transform-on-group approach here.
+//
+// The overlay remains pointer-events:none at all times.
+
+// Build the id→namespaced-id map for ONE fragment.  Every ferrum Raw fragment
+// is self-contained, so namespacing per fragment is both collision-free across
+// fragments and reference-complete within each one.  prefix encodes both the
+// per-loadScene counter and the fragment index so ids from stale scenes — or
+// from sibling fragments that authored the same id — can never collide.
+function _buildIdMap(fragmentSvg, prefix) {
+  const idMap = new Map(); // id → namespaced id
+  const idDefRe = /\bid="([^"]+)"/g;
+  let m;
+  while ((m = idDefRe.exec(fragmentSvg)) !== null) {
+    const id = m[1];
+    if (!idMap.has(id)) {
+      idMap.set(id, `${prefix}${id}`);
+    }
+  }
+  return idMap;
+}
+
+// Rewrite a single SVG string using the shared id map.
+function _applyIdMap(svgStr, idMap) {
+  if (idMap.size === 0) return svgStr;
+  let result = svgStr;
+  for (const [id, namespaced] of idMap) {
+    const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // id="X" → id="namespaced"
+    result = result.replace(
+      new RegExp(`\\bid="${escaped}"`, 'g'),
+      `id="${namespaced}"`
+    );
+    // url(#X) → url(#namespaced)
+    result = result.replace(
+      new RegExp(`url\\(#${escaped}\\)`, 'g'),
+      `url(#${namespaced})`
+    );
+    // href="#X" → href="#namespaced"  (only exact #X, not data URIs or external)
+    result = result.replace(
+      new RegExp(`\\bhref="#${escaped}"`, 'g'),
+      `href="#${namespaced}"`
+    );
+    // xlink:href="#X" → xlink:href="#namespaced"
+    result = result.replace(
+      new RegExp(`\\bxlink:href="#${escaped}"`, 'g'),
+      `xlink:href="#${namespaced}"`
+    );
+  }
+  return result;
+}
+
+// Build and inject the chrome/data Raw groups once per loadScene.
+// Returns { chromeG, dataG } for later transform-only updates, or null if
+// rawFragments is empty.
+let _rawLoadCounter = 0;
+function _buildRawOverlay(svgEl, rawFragments) {
+  // Remove any previously injected raw groups from a prior loadScene.
+  svgEl.querySelectorAll('g.ferrum-raw-chrome, g.ferrum-raw-data').forEach(g => g.remove());
+
+  if (!rawFragments || rawFragments.length === 0) return null;
+
+  const loadIdx = _rawLoadCounter++;
+  const ns = 'http://www.w3.org/2000/svg';
+
+  // Chrome group: fixed, no pan/zoom transform.
+  const chromeG = document.createElementNS(ns, 'g');
+  chromeG.setAttribute('class', 'ferrum-raw-chrome');
+  chromeG.style.pointerEvents = 'none';
+
+  // Data group: receives the canvas pan/zoom transform.
+  const dataG = document.createElementNS(ns, 'g');
+  dataG.setAttribute('class', 'ferrum-raw-data');
+  dataG.style.pointerEvents = 'none';
+
+  rawFragments.forEach((frag, fragIdx) => {
+    // Namespace this fragment with its own per-fragment prefix.  Every ferrum
+    // Raw fragment is self-contained (ids and their references are co-located),
+    // so per-fragment namespacing never dangles a reference and never collides
+    // with a sibling fragment that authored the same id.
+    const idMap = _buildIdMap(frag.svg, `ferrum-raw-${loadIdx}-${fragIdx}-`);
+    const namespacedSvg = _applyIdMap(frag.svg, idMap);
+    // Wrap in a <g> and insert via innerHTML — only the fragment content,
+    // not a full SVG document.
+    const wrapper = document.createElementNS(ns, 'g');
+    // Use innerHTML on a detached SVG element to parse fragment markup.
+    // This is intentional: the fragment is trusted ferrum-generated SVG,
+    // not user-controlled content, and verbatim injection is the spec'd approach.
+    const parseEl = document.createElementNS(ns, 'svg');
+    parseEl.innerHTML = namespacedSvg;
+    while (parseEl.firstChild) {
+      wrapper.appendChild(parseEl.firstChild);
+    }
+    if (frag.anchor === 'data') {
+      dataG.appendChild(wrapper);
+    } else {
+      // 'chrome' (default) — fixed overlay.
+      chromeG.appendChild(wrapper);
+    }
+  });
+
+  // Append both groups. Chrome painted first, data on top.
+  svgEl.appendChild(chromeG);
+  svgEl.appendChild(dataG);
+
+  return { chromeG, dataG };
+}
+
+// Build a CSS matrix transform string from D3-zoom k/tx/ty values.
+// Matches the GPU affine: x' = x*k + tx, y' = y*k + ty (CSS pixel space).
+function _zoomMatrix(k, tx, ty) {
+  return `matrix(${k},0,0,${k},${tx},${ty})`;
+}
+
 // ── SVG icon builder (safe DOM construction, no innerHTML) ───────────────
 // All icons are 16x16, stroke-based, currentColor. Built via DOM API to
 // avoid innerHTML and potential XSS vectors.
@@ -291,6 +444,9 @@ async function _render(container, sceneJson, adapter) {
   let effectiveDpr = 1;
   let maxTex = 2048;
   let renderer = null;
+  // Raw overlay groups built once per loadScene.  Only dataG.transform is
+  // mutated on zoom/pan ticks — no re-parsing or re-injection.
+  let _rawOverlay = null; // { chromeG, dataG } or null
   try {
     await _ensureWasm();
     renderer = await WasmRenderer.create(canvas);
@@ -308,8 +464,14 @@ async function _render(container, sceneJson, adapter) {
       renderer.resize(physW, physH);
     }
     const packedArr = adapter.getPackedData();
-    const textJson = renderer.loadScene(sceneJson, packedArr);
-    _placeTextSvg(svgEl, JSON.parse(textJson));
+    const overlayJson = renderer.loadScene(sceneJson, packedArr);
+    // loadScene returns {"text": [...], "raw": [...]} since Task 6 (item 19).
+    const overlay = JSON.parse(overlayJson);
+    const textArr = Array.isArray(overlay) ? overlay : (overlay.text || []);
+    const rawFragments = Array.isArray(overlay) ? [] : (overlay.raw || []);
+    _placeTextSvg(svgEl, textArr);
+    // Inject raw fragments once; subsequent zoom/pan ticks only update transform.
+    _rawOverlay = _buildRawOverlay(svgEl, rawFragments);
   } catch (e) {
     console.warn('[ferrum] GPU init failed — rendering disabled, tooltips still active.', e);
   }
@@ -349,6 +511,10 @@ async function _render(container, sceneJson, adapter) {
       try {
         const textJson = renderer.setTransform(k, x, y);
         _placeTextSvg(svgEl, JSON.parse(textJson));
+        // Update only the data group's transform — no re-injection.
+        if (_rawOverlay) {
+          _rawOverlay.dataG.setAttribute('transform', _zoomMatrix(k, x, y));
+        }
       } catch (err) { /* GPU not ready */ }
       // Debounced adapter callback for Jupyter zoom rebuild.
       clearTimeout(_zoomDebounceId);
@@ -365,6 +531,10 @@ async function _render(container, sceneJson, adapter) {
   function onReset() {
     if (!renderer) return;
     select(chartWrapper).call(zoomBehavior.transform, zoomIdentity);
+    // Reset data Raw group to identity — remove the transform attribute.
+    if (_rawOverlay) {
+      _rawOverlay.dataG.removeAttribute('transform');
+    }
     try { const stateJson = renderer.clearSelections(); adapter.onSelectionChange(JSON.parse(stateJson)); } catch (_) {}
   }
 
@@ -516,6 +686,10 @@ async function _render(container, sceneJson, adapter) {
             const t = zoomTransform(chartWrapper);
             const textJson = renderer.setTransform(t.k, t.x, t.y);
             _placeTextSvg(svgEl, JSON.parse(textJson));
+            // Raw overlay already injected; only update data group transform.
+            if (_rawOverlay) {
+              _rawOverlay.dataG.setAttribute('transform', _zoomMatrix(t.k, t.x, t.y));
+            }
           } catch (err) {
             console.warn('[ferrum] handleDrag error:', err);
           }

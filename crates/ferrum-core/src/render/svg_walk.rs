@@ -56,9 +56,9 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
         svg.clip_open(&clip_id, clip_rect);
         svg.use_clip_open(&clip_id);
 
-        // Marks (non-text first, inside clip)
+        // Marks (non-text/label first, inside clip)
         for batch in &panel.marks {
-            if batch.kind == ferrum_scene::MarkBatchKind::Text { continue; }
+            if matches!(batch.kind, ferrum_scene::MarkBatchKind::Text | ferrum_scene::MarkBatchKind::Label) { continue; }
             // Additive blend: wrap batch in <g style="mix-blend-mode:screen">.
             let blend_wrap = matches!(batch.blend, ferrum_scene::BlendMode::Additive);
             if blend_wrap {
@@ -140,10 +140,10 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
             emit_node(&mut svg, node);
         }
 
-        // Text-kind mark batches (mark_text, mark_label) outside clip so
+        // Text/Label-kind mark batches (mark_text, mark_label) outside clip so
         // dy/dx offsets near panel edges are not cut off.
         for batch in &panel.marks {
-            if batch.kind != ferrum_scene::MarkBatchKind::Text { continue; }
+            if !matches!(batch.kind, ferrum_scene::MarkBatchKind::Text | ferrum_scene::MarkBatchKind::Label) { continue; }
             for (i, node) in batch.nodes.iter().enumerate() {
                 let href = batch.hrefs.as_ref().and_then(|h| h.get(i).and_then(|o| o.as_deref()));
                 let tooltip = batch.tooltips.as_ref().and_then(|t| t.get(i));
@@ -255,7 +255,9 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
             }
             svg.g_close();
         }
-        SceneNode::Raw { svg: raw } => {
+        // `anchor` is intentionally ignored by the static SVG renderer — it is
+        // consumed only by the WASM renderer to decide pan/zoom behaviour.
+        SceneNode::Raw { svg: raw, .. } => {
             svg.raw(raw);
         }
     }

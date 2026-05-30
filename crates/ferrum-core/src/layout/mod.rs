@@ -27,7 +27,7 @@ pub(crate) const DEFAULT_CULL_THRESHOLD: u32 = 8;
 use serde::{Deserialize, Serialize};
 
 pub use self::axis::{
-    AxesInput, AxisInput, AxisLayout, AxisOrient, AxisTitleLayout, TickLayout,
+    AxesInput, AxisInput, AxisLayout, AxisOrient, AxisTitleLayout, TickLayout, TickProjection,
 };
 pub use self::facet::{FacetGroup, FacetMode, FacetSpec};
 pub use self::geometry::{Inset, Rect, Viewport};
@@ -158,7 +158,11 @@ pub struct ThemeRenderSizes {
     pub axis_line_width: f64,
     pub tick_size: f64,
     pub tick_width: f64,
+    /// Major gridline stroke width. The legacy `grid_width` theme key maps here.
     pub grid_width: f64,
+    /// Minor gridline stroke width. Derived lighter/thinner default (see
+    /// `ThemeRenderSizes::default`); overridable via the `minor_grid_width` key.
+    pub minor_grid_width: f64,
     pub strip_text_size: f64,
     pub point_size_min: f64,
     pub point_size_max: f64,
@@ -179,6 +183,9 @@ impl Default for ThemeRenderSizes {
             tick_size: 4.0,
             tick_width: 1.0,
             grid_width: 0.5,
+            // Minor gridlines are thinner than major by default (matplotlib/
+            // seaborn convention). Overridable via `minor_grid_width`.
+            minor_grid_width: 0.3,
             strip_text_size: 12.0,
             point_size_min: 4.0,
             point_size_max: 36.0,
@@ -194,7 +201,11 @@ pub struct ThemeColors {
     pub mark_color: palette::Srgba<u8>,
     pub axis_line_color: palette::Srgba<u8>,
     pub tick_color: palette::Srgba<u8>,
+    /// Major gridline color. The legacy `grid_color` theme key maps here.
     pub grid_color: palette::Srgba<u8>,
+    /// Minor gridline color. Derived lighter default (see `ThemeColors::default`);
+    /// overridable via the `minor_grid_color` key.
+    pub minor_grid_color: palette::Srgba<u8>,
     pub font_color: palette::Srgba<u8>,
     pub background_color: palette::Srgba<u8>,
     pub strip_background_color: palette::Srgba<u8>,
@@ -209,6 +220,9 @@ impl Default for ThemeColors {
         let text_fg    = palette::Srgba::new(0x1F, 0x29, 0x37, 0xFF);
         let label_gray = palette::Srgba::new(0x6B, 0x72, 0x80, 0xFF);
         let grid_warm  = palette::Srgba::new(0xD6, 0xD3, 0xD1, 0xFF);
+        // Minor gridlines are lighter than major by default (derived tint of the
+        // warm grid color). Overridable via `minor_grid_color`.
+        let grid_minor = palette::Srgba::new(0xE8, 0xE6, 0xE4, 0xFF);
         let bg_cream   = palette::Srgba::new(0xFA, 0xF7, 0xF2, 0xFF);
         let strip_bg   = palette::Srgba::new(0xED, 0xE9, 0xE3, 0xFF);
         Self {
@@ -216,6 +230,7 @@ impl Default for ThemeColors {
             axis_line_color: label_gray,
             tick_color: label_gray,
             grid_color: grid_warm,
+            minor_grid_color: grid_minor,
             font_color: text_fg,
             background_color: bg_cream,
             strip_background_color: strip_bg,
@@ -280,12 +295,28 @@ impl Default for ThemeLegend {
     }
 }
 
-/// Grid visibility and styling.
+/// Grid visibility and styling, split into a major and a minor level.
+///
+/// The legacy single-level fields (`grid`, `grid_dash`, `grid_opacity`) are the
+/// **major** level — existing themes/goldens are unchanged. The `minor` enable
+/// flag defaults `false`, so minor gridlines are not emitted unless a theme opts
+/// in; when off, `build_grid` output is byte-identical to before. Per-level
+/// color/width live on `ThemeColors`/`ThemeRenderSizes`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThemeGrid {
+    /// Major gridline enable (legacy `grid` key). Default `true`.
     pub grid: bool,
+    /// Major gridline dash (legacy `grid_dash` key).
     pub grid_dash: Option<Vec<f64>>,
+    /// Major gridline opacity (legacy `grid_opacity` key).
     pub grid_opacity: f64,
+    /// Minor gridline enable (`minor` key). Default `false` — minor gridlines
+    /// are emitted only when a theme opts in, keeping default output unchanged.
+    pub minor: bool,
+    /// Minor gridline dash (`minor_grid_dash` key). Defaults to no dash.
+    pub minor_grid_dash: Option<Vec<f64>>,
+    /// Minor gridline opacity (`minor_grid_opacity` key). Derived lighter default.
+    pub minor_grid_opacity: f64,
 }
 
 impl Default for ThemeGrid {
@@ -294,6 +325,11 @@ impl Default for ThemeGrid {
             grid: true,
             grid_dash: None,
             grid_opacity: 1.0,
+            // Minor disabled by default → default output byte-identical.
+            minor: false,
+            minor_grid_dash: None,
+            // Minor gridlines are fainter than major by default.
+            minor_grid_opacity: 0.6,
         }
     }
 }
@@ -1367,6 +1403,11 @@ mod tests {
         assert_eq!(t.sizes.tick_size, 4.0);
         assert_eq!(t.sizes.grid_width, 0.5);
         assert_eq!(t.grid.grid, true);
+        // Minor level: disabled by default (byte-identical output) with derived
+        // lighter/thinner styling so unstyled minors look right when enabled.
+        assert_eq!(t.grid.minor, false);
+        assert!(t.sizes.minor_grid_width < t.sizes.grid_width);
+        assert!(t.grid.minor_grid_opacity < t.grid.grid_opacity);
         assert_eq!(t.sizes.strip_text_size, 12.0);
         assert_eq!(t.padding.strip_padding, 6.0);
         assert_eq!(t.padding.axis_title_padding, 8.0);

@@ -67,6 +67,17 @@ pub struct BandScale {
     domain_set: bool,
 }
 
+impl BandScale {
+    /// Band (categorical) scales have no numeric continuum to subdivide.
+    ///
+    /// Returns empty — a documented semantic absence, not an error.
+    // Wired to the render layer in Task 2 of the grid subsystem.
+    #[allow(dead_code)]
+    pub(crate) fn minor_ticks_internal(&self) -> Vec<crate::scale::ticks::Tick> {
+        Vec::new()
+    }
+}
+
 #[pymethods]
 impl BandScale {
     #[new]
@@ -222,5 +233,21 @@ mod tests {
             align: 0.5,
         };
         assert!(s.scale_str("z", 0.0, 100.0).is_nan());
+    }
+
+    /// Band scale is categorical — minor_ticks_internal must always return empty.
+    #[test]
+    fn band_minor_ticks_always_empty() {
+        let scale = BandScale {
+            data: BandScaleData {
+                domain: vec!["a".into(), "b".into(), "c".into()],
+                padding_inner: 0.1,
+                padding_outer: 0.05,
+                align: 0.5,
+            },
+            range: Some([0.0, 300.0]),
+            domain_set: true,
+        };
+        assert!(scale.minor_ticks_internal().is_empty());
     }
 }

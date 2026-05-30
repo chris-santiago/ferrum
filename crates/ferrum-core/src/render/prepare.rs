@@ -15,7 +15,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::layout::{
     AxesInput, AxisInput, AxisOrient, ColorbarInput, FacetGroup, FacetKey, LegendEntry,
-    LegendOrient, SymbolKind,
+    LegendOrient, SymbolKind, TickProjection,
 };
 use crate::spec::chart::ChartSpec;
 use crate::transform::context::TransformContext;
@@ -403,16 +403,29 @@ pub fn prepare_render_inputs(
                 .unwrap_or_else(|| e.field.clone())
         });
     let x_tick_labels = provisional_scales.x.tick_labels(10);
+    // Continuous-axis scale projection (2026-05-30): per-tick domain fractions
+    // and the scale's padding fraction, so layout can place continuous ticks at
+    // the SAME pixels that data marks land on. `tick_fractions` projects exactly
+    // the same tick values as `tick_labels` (both via `ticks_internal(10)`), so
+    // the carrier stays index-aligned with the labels. Ordinal/discretizing
+    // scales return an empty vec → carrier is `None` → uniform-slot placement.
+    let x_tick_fractions = provisional_scales.x.tick_fractions(10);
+    let x_scale_padding_frac = provisional_scales.x.padding_fraction();
     // Y-axis tick labels arrive in domain order (low → high). `layout_y_axis`
     // places the first label at the TOP of the panel, which is the correct
     // top-down convention for ordinal y (heatmaps, confusion matrices) but
     // INVERTS quantitative/temporal labels relative to the data placement
     // (scale_resolve.rs inverts the pixel range for non-ordinal y so high
     // data → top pixel). Reverse the tick labels here for non-ordinal y so
-    // the axis labels and data points share the same orientation.
+    // the axis labels and data points share the same orientation. The projected
+    // fractions must be reversed in lockstep so `label[i]` aligns with
+    // `fraction[i]`.
     let mut y_tick_labels = provisional_scales.y.tick_labels(10);
+    let mut y_tick_fractions = provisional_scales.y.tick_fractions(10);
+    let y_scale_padding_frac = provisional_scales.y.padding_fraction();
     if !matches!(provisional_scales.y, crate::render::scale_resolve::ScaleKind::Ordinal(_)) {
         y_tick_labels.reverse();
+        y_tick_fractions.reverse();
     }
     // D7 + D12: extract per-axis style fields from encoding.axis and encoding.format.
     // All new fields default to the safe backward-compat value so SVG output is
@@ -474,6 +487,41 @@ pub fn prepare_render_inputs(
     let x_tick_labels = apply_tick_format(x_tick_labels, x_tick_format.as_deref(), x_tick_format_type.as_deref());
     let y_tick_labels = apply_tick_format(y_tick_labels, y_tick_format.as_deref(), y_tick_format_type.as_deref());
 
+    // Grid item 18: minor tick fractions from the provisional scales, projected
+    // through the same `[0,1]`-range scale that places majors. Carried into the
+    // AxisInput's `TickProjection.minor` so layout can build
+    // `AxisLayout.minor_ticks`. The `theme.grid.minor` gate (default `false`) is
+    // the single source of truth: when off, `minor` is empty → no minors built →
+    // default output byte-identical. "Minor enabled" downstream is derived purely
+    // from `minor` being non-empty. Categorical/discretizing scales yield an
+    // empty vec (no continuum to subdivide), so they stay minor-free regardless.
+    let x_minor_fractions = if theme.grid.minor {
+        provisional_scales.x.minor_tick_fractions()
+    } else {
+        Vec::new()
+    };
+    let y_minor_fractions = if theme.grid.minor {
+        provisional_scales.y.minor_tick_fractions()
+    } else {
+        Vec::new()
+    };
+
+    // Continuous-axis scale projection: an empty major-fraction vec means the
+    // axis is categorical/discretizing (ordinal) → carrier is `None`, so layout
+    // keeps the uniform-slot formula byte-identically. A non-empty vec means a
+    // continuous scale → carrier drives scale-projected placement, and groups the
+    // padding fraction + projected major/minor fractions that share the inset.
+    let x_tick_projection = (!x_tick_fractions.is_empty()).then(|| TickProjection {
+        padding_frac: x_scale_padding_frac,
+        major: x_tick_fractions,
+        minor: x_minor_fractions,
+    });
+    let y_tick_projection = (!y_tick_fractions.is_empty()).then(|| TickProjection {
+        padding_frac: y_scale_padding_frac,
+        major: y_tick_fractions,
+        minor: y_minor_fractions,
+    });
+
     let axes = AxesInput {
         x: AxisInput {
             orient: AxisOrient::Bottom,
@@ -492,6 +540,7 @@ pub fn prepare_render_inputs(
             title_color: None,
             title_padding: None,
             label_padding: None,
+            tick_projection: x_tick_projection,
         },
         y: AxisInput {
             orient: AxisOrient::Left,
@@ -510,6 +559,7 @@ pub fn prepare_render_inputs(
             title_color: None,
             title_padding: None,
             label_padding: None,
+            tick_projection: y_tick_projection,
         },
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),

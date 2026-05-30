@@ -5,8 +5,8 @@
 //! coordinates) or directly against the pixel/normalized plot-area extent.
 
 use ferrum_scene::{
-    Color, FillStroke, FontWeight, PathCmd, SceneNode, StrokeStyle, TextAnchor, TextBaseline,
-    TextStyle,
+    Color, FillStroke, FontWeight, PathCmd, RawAnchor, SceneNode, StrokeStyle, TextAnchor,
+    TextBaseline, TextStyle,
 };
 use serde::Deserialize;
 
@@ -395,11 +395,16 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 .replace('"', "&quot;")
                 .replace('<', "&lt;")
                 .replace('>', "&gt;");
+            // Data: image annotations are positioned via the panel's coordinate
+            // system (resolve_x/resolve_y maps data/pixel/norm values through the
+            // panel scales). The resulting px/py are in data space relative to the
+            // plot area, so this fragment must track the canvas transform on pan/zoom.
             out.push(SceneNode::Raw {
                 svg: format!(
                     r#"<image x="{}" y="{}" width="{}" height="{}" href="{}"/>"#,
                     px, py, width, height, escaped_src
                 ),
+                anchor: RawAnchor::Data,
             });
         }
     }
@@ -863,5 +868,31 @@ mod tests {
         let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
         let nodes = build_annotations(&[], &ctx);
         assert!(nodes.is_empty());
+    }
+
+    /// Image annotation Raw nodes must carry `anchor == Data` — they are
+    /// positioned via the panel's coordinate system (data/pixel/norm → plot-area
+    /// pixels) and must track the canvas transform during pan/zoom.
+    #[test]
+    fn image_annotation_raw_node_has_data_anchor() {
+        use ferrum_scene::RawAnchor;
+        let (x_scale, y_scale, plot_area) = test_ctx();
+        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        let specs = vec![AnnotationSpec::Image {
+            x: CoordValue::Norm { norm: 0.5 },
+            y: CoordValue::Norm { norm: 0.5 },
+            src: "https://example.com/logo.png".to_string(),
+            width: 40.0,
+            height: 30.0,
+            anchor: "middle".to_string(),
+        }];
+        let nodes = build_annotations(&specs, &ctx);
+        assert_eq!(nodes.len(), 1, "expected exactly one node for image annotation");
+        match &nodes[0] {
+            SceneNode::Raw { anchor, .. } => {
+                assert_eq!(*anchor, RawAnchor::Data, "image annotation Raw node must have Data anchor");
+            }
+            _ => panic!("expected SceneNode::Raw for image annotation"),
+        }
     }
 }

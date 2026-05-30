@@ -64,6 +64,17 @@ pub struct PointScale {
     range: Option<[f64; 2]>,
 }
 
+impl PointScale {
+    /// Point (categorical) scales have no numeric continuum to subdivide.
+    ///
+    /// Returns empty — a documented semantic absence, not an error.
+    // Wired to the render layer in Task 2 of the grid subsystem.
+    #[allow(dead_code)]
+    pub(crate) fn minor_ticks_internal(&self) -> Vec<crate::scale::ticks::Tick> {
+        Vec::new()
+    }
+}
+
 #[pymethods]
 impl PointScale {
     #[new]
@@ -221,5 +232,20 @@ mod tests {
             reverse: false,
         };
         assert!(s.scale_str("z", 0.0, 100.0).is_nan());
+    }
+
+    /// Point scale is categorical — minor_ticks_internal must always return empty.
+    #[test]
+    fn point_minor_ticks_always_empty() {
+        let scale = PointScale {
+            data: PointScaleData {
+                domain: vec!["a".into(), "b".into(), "c".into()],
+                padding: 0.5,
+                align: 0.5,
+                reverse: false,
+            },
+            range: Some([0.0, 300.0]),
+        };
+        assert!(scale.minor_ticks_internal().is_empty());
     }
 }

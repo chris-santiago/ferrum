@@ -463,12 +463,18 @@ def test_y_axis_tick_labels_share_x_coordinate():
     )
 
 
-def test_tick_data_pixels_differ_from_axis_text_positions():
+def test_tick_data_pixels_coincide_with_axis_text_positions():
     """
-    Documents the root cause of the old pixel-match failure: tick_data
-    scale-function outputs do NOT match axis text positions.  The axis
-    layout uses uniform band centering while tick_data uses the actual
-    scale function — systematically different mappings.
+    Pins the continuous-axis scale-projection fix (2026-05-30).
+
+    Previously the x-axis layout placed major ticks at uniform band centers
+    while ``tick_data`` reported the scale function's actual pixel — two
+    systematically different mappings, so axis text and tick_data pixels did
+    NOT line up (this test used to assert they *differ*, documenting that old
+    bug). The fix projects each continuous tick through the same scale (with
+    the same padding inset that places data marks), so a tick at value ``v``
+    and the data mark at value ``v`` now share a pixel. Axis text x and
+    tick_data pixel must therefore coincide.
     """
     scene = _scatter_scene()
     ptl = scene["interaction"]["tick_levels"][0]
@@ -481,13 +487,15 @@ def test_tick_data_pixels_differ_from_axis_text_positions():
         for n in scene["panels"][0]["axes"]
         if n.get("type") == "text" and n["content"] in x_labels
     ]
+    assert x_tick_nodes, "expected at least one matching x-axis tick label"
 
-    # At least some labels must have mismatched positions.  A perfect match
-    # would mean the old approach worked, which we know it didn't.
+    # Every axis text label's x must now coincide with its tick_data pixel
+    # (within sub-pixel tolerance), since both are the same scale projection.
     mismatches = [n for n in x_tick_nodes if abs(n["x"] - td_px[n["content"]]) > 0.5]
-    assert len(mismatches) > 0, (
-        "Expected at least one label whose axis text x differs from tick_data pixel; "
-        "if all match, the old pixel-match approach would have worked fine."
+    assert not mismatches, (
+        "continuous-axis scale-projection fix should make axis text x and "
+        f"tick_data pixel coincide; mismatched labels: "
+        f"{[(n['content'], n['x'], td_px[n['content']]) for n in mismatches]}"
     )
 
 
@@ -972,3 +980,260 @@ class TestPackedTooltips:
         assert batch.get("tooltips") is not None, "small chart must keep tooltips in JSON"
         assert len(batch["tooltips"]) == 3
         assert len(batch["tooltips"][0]["fields"]) == 2
+
+
+# ── Item 19: SceneNode::Raw not silently dropped in WASM scene graph ───────────
+#
+# Regression against the previous `console.warn` silent drop of Raw nodes.
+# The scene graph is the shared representation consumed by both the static SVG
+# renderer and the WASM renderer. These tests assert that Raw nodes appear in
+# the scene JSON so they can reach the WASM export path.
+
+
+def _continuous_color_chart() -> fm.Chart:
+    """A continuous-color scatter that produces a colorbar gradient Raw node."""
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "y": [2.0, 4.0, 1.0, 3.0, 5.0],
+            "z": [0.1, 0.4, 0.2, 0.9, 0.6],
+        }
+    )
+    return (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", color="z:Q")
+        .properties(width=300, height=200)
+    )
+
+
+def _find_raw_nodes(scene: dict) -> list[dict]:
+    """Collect all SceneNode::Raw nodes from a scene graph dict."""
+    raw_nodes: list[dict] = []
+
+    def _walk(nodes: list[dict]) -> None:
+        for node in nodes:
+            if node.get("type") == "raw":
+                raw_nodes.append(node)
+            elif node.get("type") == "group":
+                _walk(node.get("children", []))
+
+    for region in ("title", "legend", "decorations"):
+        _walk(scene.get(region, []))
+    for panel in scene.get("panels", []):
+        for region in ("grid", "axes", "annotations", "strip_title"):
+            _walk(panel.get(region, []))
+        for batch in panel.get("marks", []):
+            _walk(batch.get("nodes", []))
+
+    return raw_nodes
+
+
+class TestRawNodeNotSilentlyDropped:
+    """Item 19 regression: SceneNode::Raw must appear in scene JSON."""
+
+    def test_continuous_color_chart_has_raw_nodes(self):
+        """A continuous-color chart must produce Raw nodes (colorbar gradient).
+
+        This is the core regression test: previously Raw nodes were dropped
+        with a console.warn in the WASM renderer. The scene graph must contain
+        them so the JS injection path can receive them.
+        """
+        scene = _render(_continuous_color_chart())
+        raw_nodes = _find_raw_nodes(scene)
+        assert len(raw_nodes) > 0, (
+            "continuous-color chart must produce Raw scene nodes (colorbar gradient); "
+            "found none. This means the gradient is silently dropped."
+        )
+
+    def test_continuous_color_colorbar_contains_linearGradient(self):
+        """The Raw nodes from a continuous-color chart must contain a linearGradient.
+
+        Regression: the colorbar SVG was previously silently dropped in the WASM
+        renderer. The `svg` field of the Raw node must contain the gradient markup
+        that the JS overlay will inject into the text-overlay <svg>.
+        """
+        scene = _render(_continuous_color_chart())
+        raw_nodes = _find_raw_nodes(scene)
+        assert any(
+            "linearGradient" in node.get("svg", "") for node in raw_nodes
+        ), (
+            "at least one Raw node must contain 'linearGradient'; "
+            f"found raw svgs: {[n.get('svg', '')[:80] for n in raw_nodes]}"
+        )
+
+    def test_continuous_color_raw_nodes_have_chrome_anchor(self):
+        """Colorbar Raw nodes must have anchor='chrome' (fixed during pan/zoom).
+
+        Chrome anchor means the colorbar stays fixed in the overlay during
+        pan/zoom, consistent with the legend being non-data-space UI chrome.
+        """
+        scene = _render(_continuous_color_chart())
+        raw_nodes = _find_raw_nodes(scene)
+        grad_nodes = [n for n in raw_nodes if "linearGradient" in n.get("svg", "")]
+        assert len(grad_nodes) > 0, "must have at least one linearGradient Raw node"
+        for node in grad_nodes:
+            assert node.get("anchor") in ("chrome", None), (
+                f"colorbar gradient Raw node must have anchor='chrome' or default; "
+                f"got anchor={node.get('anchor')!r}"
+            )
+
+    def test_colorbar_emits_single_self_contained_raw_fragment(self):
+        """The continuous-color colorbar must emit ONE Raw fragment that carries
+        both its gradient ``<defs>`` and the consuming ``<rect fill="url(#…)">``.
+
+        Part 1 of the R5 fix merged the previously-separate defs and rect Raw
+        nodes into a single self-contained fragment.  Co-locating the id
+        definition with its only consumer is the precondition that lets the JS
+        overlay namespace each fragment independently (Part 2) without dangling
+        the ``url(#…)`` reference.
+        """
+        import re
+
+        scene = _render(_continuous_color_chart())
+        raw_nodes = _find_raw_nodes(scene)
+        grad_frags = [
+            n.get("svg", "")
+            for n in raw_nodes
+            if "linearGradient" in n.get("svg", "")
+        ]
+        assert len(grad_frags) == 1, (
+            "colorbar must emit exactly one gradient Raw fragment (defs + rect "
+            f"merged); found {len(grad_frags)}"
+        )
+        frag = grad_frags[0]
+        ids = re.findall(r'\bid="([^"]+)"', frag)
+        urls = re.findall(r"url\(#([^)]+)\)", frag)
+        assert ids, "fragment must define the gradient id"
+        # Every url(#X) consumer must reference an id DEFINED in the same fragment.
+        assert set(urls) <= set(ids), (
+            f"colorbar fragment has a url(#…) with no co-located id def: "
+            f"defs={ids!r} refs={urls!r}"
+        )
+
+    def test_per_fragment_namespacing_distinguishes_colliding_colorbar_ids(self):
+        """Two self-contained Raw fragments that each author ``ferrum-colorbar-0``
+        must receive DISTINCT ids after per-fragment namespacing — the R5 bug.
+
+        Trigger: a continuous-color chart (outer colorbar) that also contains an
+        ``.inset()`` of another continuous-color chart.  The inset is rendered in
+        a separate pass and embedded verbatim as one nested-``<svg>`` Raw
+        fragment, so it carries its OWN ``ferrum-colorbar-0``.  Both fragments are
+        self-contained (defs + consumer co-located).
+
+        This test replicates both the OLD shared-map logic and the NEW
+        per-fragment logic from ``ferrum-anywidget.js``:
+
+        - OLD shared map: one id→namespaced map across ALL fragments collapses
+          both ``ferrum-colorbar-0`` defs to the SAME namespaced id → one
+          ``<linearGradient>`` wins, the other colorbar renders with the wrong
+          gradient.
+        - NEW per-fragment: each fragment gets prefix ``ferrum-raw-{load}-{frag}-``
+          so the two colorbars get distinct ids AND no reference dangles.
+        """
+        import re
+
+        from ferrum.structural import Inset
+
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+                "y": [2.0, 4.0, 1.0, 3.0, 5.0],
+                "z": [0.1, 0.4, 0.2, 0.9, 0.6],
+            }
+        )
+        inner = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q", color="z:Q")
+            .properties(width=300, height=200)
+        )
+        outer = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q", color="z:Q")
+            .properties(width=700, height=500)
+        )
+        outer = outer + Inset(chart=inner, bounds=(0.55, 0.1, 0.95, 0.55))
+
+        spec, data, viewport, theme, chart_config = outer._render_inputs()
+        result = render_interactive(
+            spec, data, viewport=viewport, theme=theme,
+            chart_config=chart_config or None,
+        )
+        scene = json.loads(result[0] if isinstance(result, tuple) else result)
+        raw_nodes = _find_raw_nodes(scene)
+        svgs = [n.get("svg", "") for n in raw_nodes]
+
+        # Precondition: two distinct fragments must each author ferrum-colorbar-0.
+        colliding = [s for s in svgs if 'id="ferrum-colorbar-0"' in s]
+        assert len(colliding) >= 2, (
+            "fixture must produce two Raw fragments that each author "
+            f"id='ferrum-colorbar-0' (outer + inset colorbars); found {len(colliding)}"
+        )
+
+        load_idx = 0
+
+        def _build_id_map(fragment: str, prefix: str) -> dict[str, str]:
+            """Mirror of JS _buildIdMap (per fragment)."""
+            id_map: dict[str, str] = {}
+            for id_val in re.findall(r'\bid="([^"]+)"', fragment):
+                id_map.setdefault(id_val, f"{prefix}{id_val}")
+            return id_map
+
+        def _apply_id_map(svg: str, id_map: dict[str, str]) -> str:
+            """Mirror of JS _applyIdMap."""
+            result = svg
+            for id_val, namespaced in id_map.items():
+                esc = re.escape(id_val)
+                result = re.sub(rf'\bid="{esc}"', f'id="{namespaced}"', result)
+                result = re.sub(rf"url\(#{esc}\)", f"url(#{namespaced})", result)
+                result = re.sub(rf'\bhref="#{esc}"', f'href="#{namespaced}"', result)
+                result = re.sub(
+                    rf'\bxlink:href="#{esc}"', f'xlink:href="#{namespaced}"', result
+                )
+            return result
+
+        # ── NEW per-fragment namespacing ─────────────────────────────────────
+        new_rewritten = [
+            _apply_id_map(s, _build_id_map(s, f"ferrum-raw-{load_idx}-{i}-"))
+            for i, s in enumerate(svgs)
+        ]
+        new_defined: set[str] = set()
+        for frag in new_rewritten:
+            new_defined.update(re.findall(r'\bid="([^"]+)"', frag))
+
+        # The two colliding colorbars must now carry DISTINCT namespaced ids.
+        new_colorbar_ids = sorted(
+            i for i in new_defined if i.endswith("-ferrum-colorbar-0")
+        )
+        assert len(new_colorbar_ids) >= 2, (
+            "per-fragment namespacing must give each colorbar a distinct id; "
+            f"got {new_colorbar_ids!r}"
+        )
+        assert len(new_colorbar_ids) == len(set(new_colorbar_ids))
+
+        # No url(#X)/href references in any fragment may dangle after namespacing.
+        for frag in new_rewritten:
+            refs = set(re.findall(r"url\(#([^)]+)\)", frag))
+            refs |= set(re.findall(r'\bhref="#([^"]+)"', frag))
+            refs |= set(re.findall(r'\bxlink:href="#([^"]+)"', frag))
+            dangling = {r for r in refs if "ferrum-raw-" in r} - new_defined
+            assert dangling == set(), (
+                f"per-fragment namespacing left dangling references: {dangling!r}"
+            )
+
+        # ── OLD shared-map namespacing collapses the two colorbars (R5 bug) ───
+        shared_map: dict[str, str] = {}
+        for frag in svgs:
+            for id_val in re.findall(r'\bid="([^"]+)"', frag):
+                shared_map.setdefault(id_val, f"ferrum-raw-{load_idx}-{id_val}")
+        old_rewritten = [_apply_id_map(s, shared_map) for s in svgs]
+        old_defined: set[str] = set()
+        for frag in old_rewritten:
+            old_defined.update(re.findall(r'\bid="([^"]+)"', frag))
+        old_colorbar_ids = sorted(i for i in old_defined if i.endswith("ferrum-colorbar-0"))
+        assert old_colorbar_ids == ["ferrum-raw-0-ferrum-colorbar-0"], (
+            "OLD shared-map logic must collapse both ferrum-colorbar-0 fragments "
+            f"to ONE namespaced id (the R5 bug); got {old_colorbar_ids!r}"
+        )

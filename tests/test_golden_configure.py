@@ -197,6 +197,23 @@ class TestConfigureGoldens:
         )
         _check_or_update("configure_grid.svg", chart.show_svg())
 
+    def test_grid_minor(self, sample_df):
+        """Minor gridlines via ferrum.Grid (item 18) on a continuous chart.
+
+        Exercises the full Python->Rust minor path: a theme-level
+        ``Grid(minor=True)`` renders minor gridlines (lighter/thinner, here an
+        explicit minor color) between the scale-projected major gridlines on
+        both continuous axes. Inspect the PNG to confirm minors sit between
+        majors and coincide with the projected grid.
+        """
+        theme = fm.Theme(grid=True).update(
+            grid=fm.Grid(major=True, minor=True, minor_color="#e8e8e8")
+        )
+        chart = (
+            fm.Chart(sample_df).mark_point().encode(x="x", y="y").theme(theme)
+        )
+        _check_or_update("grid_minor.svg", chart.show_svg())
+
 
 # ---------------------------------------------------------------------------
 # Combined golden

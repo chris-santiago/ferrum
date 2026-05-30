@@ -495,6 +495,36 @@ fn apply_label_format_to_axis(axis: &mut crate::layout::AxisInput) {
     }
 }
 
+/// Continuous-axis scale projection: when `tick_values_override` replaced the
+/// axis labels with explicit data values, recompute the `tick_projection`'s
+/// `major` fractions from those values via the scale so the carrier matches the
+/// new labels. Only acts on continuous axes that already carry a projection
+/// (categorical axes have `None` and keep uniform-slot placement). When the
+/// scale yields no fractions (e.g. ordinal), the carrier is cleared so layout
+/// falls back to uniform slots rather than indexing a stale vec.
+fn sync_projected_fractions_to_tick_values(
+    axis: &mut crate::layout::AxisInput,
+    scale: &scale_resolve::ScaleKind,
+) {
+    if axis.tick_projection.is_none() {
+        return;
+    }
+    let Some(values) = axis.tick_values_override.clone() else {
+        return;
+    };
+    let fractions = scale.value_fractions(&values);
+    if fractions.is_empty() {
+        // Scale yields no fractions (e.g. ordinal / degenerate domain): clear the
+        // carrier so layout falls back to uniform slots rather than indexing a
+        // stale vec. The minor carrier is dropped in lockstep — empty
+        // `value_fractions` implies an axis with no continuum, so its minors are
+        // already empty.
+        axis.tick_projection = None;
+    } else if let Some(proj) = axis.tick_projection.as_mut() {
+        proj.major = fractions;
+    }
+}
+
 /// Apply `ChartConfig.color.domain` and `color.range` overrides to the
 /// resolved color scale. `pub(crate)` so `scene_build` can call it after
 /// per-panel scale resolution (which re-resolves the scale independently of
@@ -600,6 +630,13 @@ fn prepare_and_layout(
     // Apply label_format_override to tick labels (requires axis config to be set first).
     apply_label_format_to_axis(&mut prep.axes.x);
     apply_label_format_to_axis(&mut prep.axes.y);
+    // Continuous-axis scale projection: when explicit `tick_values` replaced the
+    // auto tick labels, recompute the projected fractions from those same values
+    // so the carrier stays index-aligned with the new labels. The explicit
+    // labels are NOT reversed for y (unlike auto labels), so the value-order
+    // fractions align directly.
+    sync_projected_fractions_to_tick_values(&mut prep.axes.x, &prep.provisional_scales.x);
+    sync_projected_fractions_to_tick_values(&mut prep.axes.y, &prep.provisional_scales.y);
     // Apply color domain/range overrides (level 3) to resolved color scale.
     if let Some(ref cfg) = chart_config.color {
         apply_color_config_to_color_scale(&mut prep.provisional_scales.color, cfg);

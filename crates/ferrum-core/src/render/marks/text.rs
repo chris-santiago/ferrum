@@ -322,4 +322,71 @@ mod tests {
         assert!(contents.contains(&"42"), "expected literal '42' label, got: {contents:?}");
         assert!(contents.contains(&"hello"), "expected literal 'hello' label, got: {contents:?}");
     }
+
+    // ── Task 2: mark_text must still produce MarkBatchKind::Text (not Label) ──
+
+    /// Plain mark_text build produces MarkBuildResult with kind == MarkBatchKind::Text.
+    /// This guards against accidentally rerouting mark_text to Label.
+    #[test]
+    fn text_build_still_produces_text_kind() {
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0, 80.0])),
+            Arc::new(Float64Array::from(vec![20.0, 70.0])),
+        ])
+        .unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None,
+        };
+        let (scales, _) = resolve_scales(
+            &spec, &batch, (0.0, 100.0), (0.0, 100.0),
+            &ThemeInputs::default(),
+        )
+        .unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Text);
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+        let result = super::build(&ctx);
+        assert_eq!(
+            result.kind,
+            ferrum_scene::MarkBatchKind::Text,
+            "mark_text must still produce MarkBatchKind::Text, got {:?}",
+            result.kind
+        );
+    }
 }

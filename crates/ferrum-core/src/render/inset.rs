@@ -4,7 +4,7 @@
 //! Insets use SVG's native nested `<svg>` element support to embed the
 //! pre-rendered content inside a positioned, sized viewport.
 
-use ferrum_scene::{FillStroke, SceneNode, StrokeStyle};
+use ferrum_scene::{FillStroke, RawAnchor, SceneNode, StrokeStyle};
 
 use crate::layout::Rect;
 use crate::render::chart_config::InsetSpec;
@@ -92,7 +92,9 @@ pub fn build_inset_nodes(spec: &InsetSpec, plot_area: &Rect) -> Vec<SceneNode> {
         "<svg x=\"{:.3}\" y=\"{:.3}\" width=\"{:.3}\" height=\"{:.3}\" viewBox=\"{}\" overflow=\"hidden\">{}</svg>",
         px_left, px_top, px_w, px_h, viewbox, inner_content
     );
-    nodes.push(SceneNode::Raw { svg: svg_raw });
+    // Chrome: insets are fixed overlays positioned in normalized plot-area space,
+    // not anchored to data coordinates. They do not track pan/zoom.
+    nodes.push(SceneNode::Raw { svg: svg_raw, anchor: RawAnchor::Chrome });
 
     // 4. Border rect drawn on top of the content.
     if spec.border {
@@ -316,10 +318,23 @@ mod tests {
     fn inset_raw_svg_is_nested_svg_element() {
         let spec = basic_spec();
         let nodes = build_inset_nodes(&spec, &plot());
-        if let Some(SceneNode::Raw { svg }) = nodes.iter().find(|n| matches!(n, SceneNode::Raw { .. })) {
+        if let Some(SceneNode::Raw { svg, .. }) = nodes.iter().find(|n| matches!(n, SceneNode::Raw { .. })) {
             assert!(svg.starts_with("<svg "), "Raw node should be a nested <svg> element");
             assert!(svg.contains("overflow=\"hidden\""));
         }
+    }
+
+    /// Inset Raw nodes must carry `anchor == Chrome` — insets are fixed overlays
+    /// in normalized plot-area space, not anchored to data coordinates.
+    #[test]
+    fn inset_raw_node_has_chrome_anchor() {
+        use ferrum_scene::RawAnchor;
+        let spec = basic_spec();
+        let nodes = build_inset_nodes(&spec, &plot());
+        let raw = nodes.iter().find_map(|n| {
+            if let SceneNode::Raw { anchor, .. } = n { Some(*anchor) } else { None }
+        });
+        assert_eq!(raw, Some(RawAnchor::Chrome), "inset Raw node must have Chrome anchor");
     }
 
     #[test]

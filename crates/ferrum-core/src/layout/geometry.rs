@@ -4,6 +4,33 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Themes-T4 default inward padding fraction for quantitative / temporal
+/// scales when neither `scale.padding` nor `scale.domain` is set.
+pub(crate) const DEFAULT_SCALE_PADDING_FRAC: f64 = 0.05;
+
+/// Themes-T4 maximum inward padding in pixels. The padding band is the
+/// smaller of `fraction * span` and this cap so small panels don't lose
+/// too much plot area.
+pub(crate) const SCALE_PADDING_MAX_PX: f64 = 8.0;
+
+/// Inset a pixel range by the resolved padding band (capped at
+/// `SCALE_PADDING_MAX_PX`). Handles inverted ranges (the y-axis range is
+/// `(high_px, low_px)` for quantitative scales).
+///
+/// This is the single source of truth for the positional-scale padding inset.
+/// `scale_resolve::positional` re-exports it so that data marks and
+/// scale-projected axis ticks share *exactly* the same inset — a tick at value
+/// `v` and a data mark at value `v` land on the same pixel.
+pub(crate) fn inset_pixel_range(pr: (f64, f64), padding_frac: f64) -> (f64, f64) {
+    if padding_frac == 0.0 {
+        return pr;
+    }
+    let span = (pr.1 - pr.0).abs();
+    let pad = (span * padding_frac).min(SCALE_PADDING_MAX_PX);
+    let sign = if pr.1 >= pr.0 { 1.0 } else { -1.0 };
+    (pr.0 + sign * pad, pr.1 - sign * pad)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: f64,

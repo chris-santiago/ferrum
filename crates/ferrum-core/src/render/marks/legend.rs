@@ -4,7 +4,7 @@ use crate::layout::{LegendLayout, SymbolKind, TextAnchor, ThemeInputs};
 use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke, to_scene_text_style};
 use crate::render::scale_resolve::ColorScale;
 use crate::render::svg::fmt_f;
-use ferrum_scene::SceneNode;
+use ferrum_scene::{RawAnchor, SceneNode};
 
 pub fn build_legend(
     legend: &LegendLayout,
@@ -63,22 +63,26 @@ pub fn build_legend(
                 pos, color,
             ));
         }
-        // Gradient defs as raw SVG.
+        // Gradient defs + the gradient-filled rect that consumes them, emitted
+        // as a SINGLE self-contained Raw fragment. Keeping the `id="{grad_id}"`
+        // definition and its only `url(#{grad_id})` consumer co-located in one
+        // fragment means the WASM overlay can namespace each Raw fragment
+        // independently without dangling the cross-reference (R5). Chrome: the
+        // colorbar is fixed UI chrome, not positioned in data space — it does
+        // not track pan/zoom. (FillStroke cannot express url(#…) fills, so the
+        // rect is raw too.) Byte order: defs then rect, identical to the prior
+        // two consecutive Raw nodes, so static SVG output is unchanged.
         nodes.push(SceneNode::Raw {
             svg: format!(
-                "<defs><linearGradient id=\"{grad_id}\" x1=\"0\" y1=\"1\" x2=\"0\" y2=\"0\">{stops_xml}</linearGradient></defs>"
-            ),
-        });
-        // Gradient-filled rect as raw SVG (FillStroke cannot express url(#…) fills).
-        nodes.push(SceneNode::Raw {
-            svg: format!(
-                "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"url(#{grad_id})\" stroke=\"{}\" stroke-width=\"0.5\"/>",
+                "<defs><linearGradient id=\"{grad_id}\" x1=\"0\" y1=\"1\" x2=\"0\" y2=\"0\">{stops_xml}</linearGradient></defs>\
+                 <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"url(#{grad_id})\" stroke=\"{}\" stroke-width=\"0.5\"/>",
                 fmt_f(cb.bar_rect.x),
                 fmt_f(cb.bar_rect.y),
                 fmt_f(cb.bar_rect.w),
                 fmt_f(cb.bar_rect.h),
                 crate::render::color::fmt_svg(theme.colors.axis_line_color),
             ),
+            anchor: RawAnchor::Chrome,
         });
 
         // Tick marks + labels on the right edge.
@@ -162,7 +166,77 @@ pub fn build_legend(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{LegendDirection, LegendEntryLayout, LegendOrient, Rect};
+    use crate::layout::{ColorbarLayout, LegendDirection, LegendEntryLayout, LegendOrient, Rect};
+    use ferrum_scene::RawAnchor;
+
+    /// Colorbar Raw nodes must carry `anchor == Chrome` (they are legend chrome,
+    /// not positioned in data space).
+    #[test]
+    fn colorbar_raw_nodes_have_chrome_anchor() {
+        let legend = LegendLayout {
+            rect: Rect { x: 80.0, y: 0.0, w: 20.0, h: 100.0 },
+            orient: LegendOrient::Right,
+            direction: LegendDirection::Vertical,
+            entries: vec![],
+            title: None,
+            colorbar: Some(ColorbarLayout {
+                bar_rect: Rect { x: 85.0, y: 10.0, w: 10.0, h: 80.0 },
+                stops: vec![(0.0, "#0000ff".to_string()), (1.0, "#ff0000".to_string())],
+                ticks: vec![],
+            }),
+        };
+        let theme = ThemeInputs::default();
+        let nodes = build_legend(&legend, None, &theme);
+        let raw_nodes: Vec<_> = nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Raw { anchor, .. } = n { Some(*anchor) } else { None })
+            .collect();
+        assert!(!raw_nodes.is_empty(), "expected at least one Raw node for colorbar");
+        for anchor in raw_nodes {
+            assert_eq!(anchor, RawAnchor::Chrome, "all colorbar Raw nodes must be Chrome");
+        }
+    }
+
+    /// The colorbar must emit its gradient `<defs>` and the consuming
+    /// `<rect fill="url(#…)">` as ONE self-contained Raw fragment, with the
+    /// defs preceding the rect (so static SVG bytes are unchanged from the
+    /// prior two consecutive Raw nodes). This co-location is what lets the
+    /// WASM overlay namespace each fragment independently without dangling
+    /// the cross-reference (R5).
+    #[test]
+    fn colorbar_emits_single_self_contained_raw_fragment() {
+        let legend = LegendLayout {
+            rect: Rect { x: 80.0, y: 0.0, w: 20.0, h: 100.0 },
+            orient: LegendOrient::Right,
+            direction: LegendDirection::Vertical,
+            entries: vec![],
+            title: None,
+            colorbar: Some(ColorbarLayout {
+                bar_rect: Rect { x: 85.0, y: 10.0, w: 10.0, h: 80.0 },
+                stops: vec![(0.0, "#0000ff".to_string()), (1.0, "#ff0000".to_string())],
+                ticks: vec![],
+            }),
+        };
+        let theme = ThemeInputs::default();
+        let nodes = build_legend(&legend, None, &theme);
+        let raw_svgs: Vec<&str> = nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Raw { svg, .. } = n { Some(svg.as_str()) } else { None })
+            .collect();
+        assert_eq!(raw_svgs.len(), 1, "colorbar must emit exactly one Raw fragment");
+        let frag = raw_svgs[0];
+        // Both the gradient def and its only consumer live in this one fragment.
+        assert!(frag.contains("<linearGradient id=\"ferrum-colorbar-0\""));
+        assert!(frag.contains("fill=\"url(#ferrum-colorbar-0)\""));
+        // defs precede the rect, with no whitespace between (byte-order preserved).
+        let defs_end = frag.find("</linearGradient></defs>").expect("defs block present");
+        let rect_start = frag.find("<rect").expect("rect present");
+        assert!(defs_end < rect_start, "defs must precede rect");
+        assert!(
+            frag.contains("</defs><rect "),
+            "rect must immediately follow defs (no intervening bytes): {frag}"
+        );
+    }
 
     #[test]
     fn legend_builds_circle_swatch_per_entry() {

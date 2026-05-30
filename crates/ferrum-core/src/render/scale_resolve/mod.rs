@@ -56,6 +56,20 @@ pub enum ScaleKind {
     Pow(PowScale),
 }
 
+/// Policy for non-finite fraction projections in
+/// [`ScaleKind::project_values_to_fractions`]. Makes the labeled-vs-unlabeled
+/// distinction explicit at each call site rather than implicit in two parallel
+/// projection loops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NonFinite {
+    /// Drop each non-finite projection individually. For unlabeled minor ticks,
+    /// where dropping one entry cannot misalign anything.
+    DropOne,
+    /// If any projection is non-finite, return an empty vec. For labeled major /
+    /// explicit ticks that must stay index-aligned with `tick_labels`.
+    RejectAll,
+}
+
 /// Dispatch a method call to all `ScaleKind` variants.
 macro_rules! dispatch_all {
     ($self:expr, $method:ident $(, $arg:expr)*) => {
@@ -150,6 +164,33 @@ impl ScaleKind {
         }
     }
 
+    /// Grid item 18: project this scale's minor ticks to **domain fractions**
+    /// `t ∈ [0, 1]` over the scale's resolved range — the *same* projection
+    /// majors use (`project_values_to_fractions`), so a minor at domain value
+    /// `v` lands at the identical pixel the major projection of `v` would give.
+    ///
+    /// Layout then maps each fraction onto the panel's mark range via the same
+    /// `inset_pixel_range` padding inset that places majors and data marks (see
+    /// [`crate::layout::axis::build_minor_ticks`]) — **not** the naive
+    /// `origin + frac * extent`. This keeps minor gridlines aligned with both
+    /// the projected major gridlines and the data marks.
+    ///
+    /// Unlike the all-or-nothing major carrier, a single out-of-domain minor is
+    /// dropped individually: minors carry no label, so dropping one cannot
+    /// misalign anything. Ordinal (and any non-continuous) scales return an
+    /// empty vec, matching the engine's empty `minor_ticks_internal()`.
+    pub(crate) fn minor_tick_fractions(&self) -> Vec<f64> {
+        if matches!(self, Self::Ordinal(_)) {
+            return Vec::new();
+        }
+        let minors = dispatch_continuous!(self, minor_ticks_internal);
+        let positions: Vec<f64> = minors.into_iter().map(|t| t.position).collect();
+        // Minors carry no label, so a single out-of-domain minor can be dropped
+        // individually without misaligning anything (`DropOne`). Majors must stay
+        // index-aligned with `tick_labels`, so they use `RejectAll`.
+        self.project_values_to_fractions(&positions, NonFinite::DropOne)
+    }
+
     /// Return the data-space domain `(lo, hi)` for continuous scales.
     /// Returns `None` for ordinal scales (no numeric domain).
     pub(crate) fn data_domain(&self) -> Option<(f64, f64)> {
@@ -166,6 +207,110 @@ impl ScaleKind {
     pub fn pixel_range(&self) -> (f64, f64) {
         let r = dispatch_all!(self, range_pair);
         (r[0], r[1])
+    }
+
+    /// Continuous-axis scale-projection support (continuous-axis tick design,
+    /// 2026-05-30). Returns, for each major tick, its **domain fraction**
+    /// `t ∈ [0, 1]` — the scale's normalized projection of the tick value,
+    /// independent of the pixel range. Computed as `(pixel - r0) / (r1 - r0)`
+    /// over this scale's own resolved range, so the scale's nonlinearity
+    /// (log/pow/symlog/time) is captured. Layout maps each fraction onto the
+    /// panel's mark range via the *same* padding inset that places data marks,
+    /// so a tick at value `v` and a data mark at value `v` share a pixel.
+    ///
+    /// `Ordinal` (and any categorical) scales return an empty vec — categorical
+    /// axes keep uniform-slot placement and supply no projected fractions.
+    ///
+    /// The companion padding fraction (recovered by the caller from the
+    /// provisional `[0,1]`-range scale's `pixel_range`) tells layout how much to
+    /// inset the panel range before interpolating these fractions.
+    pub(crate) fn tick_fractions(&self, count_hint: usize) -> Vec<f64> {
+        if matches!(self, Self::Ordinal(_)) {
+            return Vec::new();
+        }
+        // Project the SAME tick values that `tick_labels`/`ticks_internal`
+        // produce — one fraction per value, in the same order — so the carrier
+        // stays index-aligned with `tick_labels`.
+        let values = dispatch_continuous!(self, ticks_internal, count_hint);
+        self.project_values_to_fractions(&values, NonFinite::RejectAll)
+    }
+
+    /// Continuous-axis scale-projection support for explicit tick values
+    /// (`configure_axis(tick_values=[...])`). Projects each supplied data value
+    /// to a domain fraction `t ∈ [0, 1]` over this scale's resolved range, in
+    /// input order. Returns an empty vec for ordinal scales (explicit numeric
+    /// tick values are meaningless on a categorical axis).
+    pub(crate) fn value_fractions(&self, values: &[f64]) -> Vec<f64> {
+        if matches!(self, Self::Ordinal(_)) {
+            return Vec::new();
+        }
+        self.project_values_to_fractions(values, NonFinite::RejectAll)
+    }
+
+    /// Project data values to domain fractions `(scale(v) - r0) / (r1 - r0)`,
+    /// shared by [`tick_fractions`](Self::tick_fractions),
+    /// [`value_fractions`](Self::value_fractions), and
+    /// [`minor_tick_fractions`](Self::minor_tick_fractions). Callers must rule
+    /// out ordinal scales first.
+    ///
+    /// A zero-span (degenerate domain: all-equal / single distinct / all-null
+    /// column) always yields an **empty** vec regardless of policy.
+    ///
+    /// Non-finite projections (a value the scale maps to `NaN`/`±inf`, e.g.
+    /// out-of-domain on an unclamped scale) are handled per [`NonFinite`]:
+    ///
+    /// * [`NonFinite::RejectAll`] — labeled major / explicit ticks. The result
+    ///   must stay **index-aligned** with `tick_labels`, so a single non-finite
+    ///   projection collapses the whole vec to empty. The caller then drops the
+    ///   carrier (`None`) and layout falls back to uniform-slot placement —
+    ///   exactly the pre-projection (baseline) behavior for degenerate axes.
+    /// * [`NonFinite::DropOne`] — unlabeled minor ticks. Each non-finite
+    ///   projection is dropped individually; dropping one minor cannot misalign
+    ///   anything.
+    fn project_values_to_fractions(&self, values: &[f64], non_finite: NonFinite) -> Vec<f64> {
+        let (r0, r1) = self.pixel_range();
+        let span = r1 - r0;
+        if span == 0.0 {
+            return Vec::new();
+        }
+        let fractions = values
+            .iter()
+            .map(|&v| {
+                let px = dispatch_continuous!(self, scale_internal, v);
+                (px - r0) / span
+            });
+        match non_finite {
+            NonFinite::DropOne => fractions.filter(|f| f.is_finite()).collect(),
+            NonFinite::RejectAll => {
+                let collected: Vec<f64> = fractions.collect();
+                if collected.iter().all(|f| f.is_finite()) {
+                    collected
+                } else {
+                    Vec::new()
+                }
+            }
+        }
+    }
+
+    /// Continuous-axis scale-projection support: the padding fraction implied by
+    /// this scale's resolved pixel range, recovered as the inset relative to its
+    /// own range span. For the provisional `[0,1]`-range scales built in
+    /// `prepare.rs` this equals the `padding_frac` that
+    /// [`crate::layout::geometry::inset_pixel_range`] used (the cap never binds
+    /// at a span of 1). Layout uses it to inset the panel mark range identically.
+    /// Returns `0.0` for ordinal scales.
+    pub(crate) fn padding_fraction(&self) -> f64 {
+        if matches!(self, Self::Ordinal(_)) {
+            return 0.0;
+        }
+        let (r0, r1) = self.pixel_range();
+        // The provisional scale spans the normalized base range (0,1) or (1,0);
+        // after insetting, the band is `(pad, 1-pad)` (x) or `(1-pad, pad)` (y).
+        // The inset distance from the nearer base edge [0, 1] is `pad`, which —
+        // at unit span — is the padding fraction.
+        let lo = r0.min(r1);
+        let hi = r0.max(r1);
+        lo.min(1.0 - hi).max(0.0)
     }
 
     pub fn tick_data(&self, count_hint: usize) -> Vec<ferrum_scene::Tick> {

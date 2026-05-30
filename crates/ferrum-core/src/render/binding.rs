@@ -26,9 +26,9 @@ use super::{render_png as render_png_internal, render_svg as render_svg_internal
 /// viewport : tuple[float, float]
 ///     ``(width, height)`` of the output SVG canvas in pixels.
 /// theme : dict, optional
-///     Sparse theme override dict. Accepted keys: ``mark_color``,
-///     ``background_color``, ``point_size``, ``line_stroke_width``,
-///     ``bar_corner_radius``, ``area_opacity``, ``grid``, ``padding``.
+///     Sparse theme override dict. The authoritative set of accepted keys is
+///     the ``ThemeOverridesSpec`` struct in this module, which carries
+///     ``#[serde(deny_unknown_fields)]`` — that struct IS the contract.
 ///     Unset keys fall back to ``ThemeInputs`` defaults.
 /// config : dict, optional
 ///     Render-config dict. Accepted keys: ``scale``, ``embed_fonts``,
@@ -97,9 +97,9 @@ pub fn render_svg(
 ///     ``(width, height)`` of the output image in pixels (before the
 ///     ``config["scale"]`` multiplier is applied).
 /// theme : dict, optional
-///     Sparse theme override dict. Accepted keys: ``mark_color``,
-///     ``background_color``, ``point_size``, ``line_stroke_width``,
-///     ``bar_corner_radius``, ``area_opacity``, ``grid``, ``padding``.
+///     Sparse theme override dict. The authoritative set of accepted keys is
+///     the ``ThemeOverridesSpec`` struct in this module, which carries
+///     ``#[serde(deny_unknown_fields)]`` — that struct IS the contract.
 ///     Unset keys fall back to ``ThemeInputs`` defaults.
 /// config : dict, optional
 ///     Render-config dict. Accepted keys: ``scale`` (pixel ratio, default
@@ -244,12 +244,24 @@ struct ThemeOverridesSpec {
     tick_size: Option<f64>,
     tick_width: Option<f64>,
 
-    // Grid
+    // Grid — legacy single-level keys style the MAJOR level (back-compat).
     grid: Option<bool>,
     grid_color: Option<String>,
     grid_width: Option<f64>,
     grid_dash: Option<Vec<f64>>,
     grid_opacity: Option<f64>,
+    // Grid — per-level keys (Grid item 18). `major_*` overrides the legacy
+    // `grid_*` value for the major level; `minor_*` styles the minor level.
+    // `minor` enables minor gridline emission (default off).
+    minor: Option<bool>,
+    major_grid_color: Option<String>,
+    minor_grid_color: Option<String>,
+    major_grid_width: Option<f64>,
+    minor_grid_width: Option<f64>,
+    major_grid_dash: Option<Vec<f64>>,
+    minor_grid_dash: Option<Vec<f64>>,
+    major_grid_opacity: Option<f64>,
+    minor_grid_opacity: Option<f64>,
 
     // Marks
     point_size: Option<f64>,
@@ -331,12 +343,24 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
     if let Some(v) = spec.tick_size { t.sizes.tick_size = v; }
     if let Some(v) = spec.tick_width { t.sizes.tick_width = v; }
 
-    // Grid
+    // Grid — legacy single-level keys feed the MAJOR level (back-compat).
     if let Some(v) = spec.grid { t.grid.grid = v; }
     if let Some(s) = spec.grid_color { t.colors.grid_color = parse_color_val(&s)?; }
     if let Some(v) = spec.grid_width { t.sizes.grid_width = v; }
     if let Some(v) = spec.grid_dash { t.grid.grid_dash = Some(v); }
     if let Some(v) = spec.grid_opacity { t.grid.grid_opacity = v; }
+
+    // Grid — per-level keys (Grid item 18). Applied AFTER the legacy keys so an
+    // explicit `major_*` value wins over the corresponding `grid_*` fallback.
+    if let Some(v) = spec.minor { t.grid.minor = v; }
+    if let Some(s) = spec.major_grid_color { t.colors.grid_color = parse_color_val(&s)?; }
+    if let Some(s) = spec.minor_grid_color { t.colors.minor_grid_color = parse_color_val(&s)?; }
+    if let Some(v) = spec.major_grid_width { t.sizes.grid_width = v; }
+    if let Some(v) = spec.minor_grid_width { t.sizes.minor_grid_width = v; }
+    if let Some(v) = spec.major_grid_dash { t.grid.grid_dash = Some(v); }
+    if let Some(v) = spec.minor_grid_dash { t.grid.minor_grid_dash = Some(v); }
+    if let Some(v) = spec.major_grid_opacity { t.grid.grid_opacity = v; }
+    if let Some(v) = spec.minor_grid_opacity { t.grid.minor_grid_opacity = v; }
 
     // Marks
     if let Some(v) = spec.point_size { t.sizes.point_size = v; }
@@ -528,6 +552,66 @@ mod theme_dict_tests {
                 let t = theme_from_dict(Some(&d)).expect(name);
                 assert_eq!(t.palette.sequential_scheme, name);
             }
+        });
+    }
+
+    #[test]
+    fn per_level_grid_keys_round_trip() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("minor", true).unwrap();
+            d.set_item("major_grid_color", "#111111").unwrap();
+            d.set_item("minor_grid_color", "#eeeeee").unwrap();
+            d.set_item("major_grid_width", 2.0).unwrap();
+            d.set_item("minor_grid_width", 0.25).unwrap();
+            d.set_item("major_grid_dash", vec![1.0, 2.0]).unwrap();
+            d.set_item("minor_grid_dash", vec![3.0, 4.0]).unwrap();
+            d.set_item("major_grid_opacity", 0.9).unwrap();
+            d.set_item("minor_grid_opacity", 0.4).unwrap();
+            let t = theme_from_dict(Some(&d)).unwrap();
+            assert!(t.grid.minor);
+            assert_eq!(t.colors.grid_color.red, 0x11);
+            assert_eq!(t.colors.minor_grid_color.red, 0xEE);
+            assert_eq!(t.sizes.grid_width, 2.0);
+            assert_eq!(t.sizes.minor_grid_width, 0.25);
+            assert_eq!(t.grid.grid_dash, Some(vec![1.0, 2.0]));
+            assert_eq!(t.grid.minor_grid_dash, Some(vec![3.0, 4.0]));
+            assert_eq!(t.grid.grid_opacity, 0.9);
+            assert_eq!(t.grid.minor_grid_opacity, 0.4);
+        });
+    }
+
+    #[test]
+    fn major_grid_keys_fall_back_to_legacy_grid_keys() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            // Only the legacy keys are present → they style the major level.
+            let d = PyDict::new(py);
+            d.set_item("grid_color", "#abcdef").unwrap();
+            d.set_item("grid_width", 1.25).unwrap();
+            d.set_item("grid_opacity", 0.75).unwrap();
+            let t = theme_from_dict(Some(&d)).unwrap();
+            assert_eq!(t.colors.grid_color.red, 0xAB);
+            assert_eq!(t.sizes.grid_width, 1.25);
+            assert_eq!(t.grid.grid_opacity, 0.75);
+            // Minor level untouched (still the derived default).
+            assert_eq!(t.colors.minor_grid_color, ThemeInputs::default().colors.minor_grid_color);
+        });
+    }
+
+    #[test]
+    fn major_grid_key_wins_over_legacy_when_both_present() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let d = PyDict::new(py);
+            d.set_item("grid_color", "#abcdef").unwrap();
+            d.set_item("major_grid_color", "#123456").unwrap();
+            let t = theme_from_dict(Some(&d)).unwrap();
+            // major_* applied after legacy → wins.
+            assert_eq!(t.colors.grid_color.red, 0x12);
+            assert_eq!(t.colors.grid_color.green, 0x34);
+            assert_eq!(t.colors.grid_color.blue, 0x56);
         });
     }
 

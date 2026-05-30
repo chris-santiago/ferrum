@@ -85,7 +85,7 @@
 | `lmplot(truncate=False)` / `regplot(truncate=False)` | ✅ Confirmed — `x_range` now forwarded to `mark_smooth()` (`91dd487`). Fit line extends to axis boundary. Verified in SVG output. |
 | `Chart(data=None)` with per-layer data | ✅ Confirmed — both layers render; verified in SVG output |
 | `Layer(data=...)` via `Chart.layer()` | ✅ Confirmed — verified in SVG output |
-| `mark_hex(stroke=..., stroke_width=...)` | Open — still raises |
+| `mark_hex(stroke=..., stroke_width=...)` | ✅ Fixed `b2aa797` (2026-05-30) — `desugar_hex` passes `stroke`/`stroke_width` into the polygon layer's `mark_kwargs`; ValueError guards removed. Literal semantics: stroke color + width 0 = no visible border (no call-time auto-bump), consistent with other polygon marks. |
 | `mark_function(clip=False)` | ✅ Now rejects with `ValueError` — clipping always enabled by design |
 
 > **2026-05-15:** `mark_raster(blend="additive")` SVG already implemented; WASM additive pipeline wired `26f20b3`. `mark_swarm(dodge=...)` already wired. Legend kwargs fully confirmed: `orient` ✅ `title` ✅ `format` ✅ `columns` ✅ — all four verified by behavioral tests (`test_silent_drop_verification.py::TestLegendKwargsSVGPosition`). `format` and `columns` wired in `10c1931`.
@@ -110,12 +110,12 @@
 | `Legend(...)` kwargs | `ferrum-spec.md §3.7` | ✅ All 11 kwargs confirmed: `orient`, `title`, `format`, `columns` (`10c1931`) + `tickCount`, `labelFontSize`, `gradientLength`, `gradientThickness`, `direction`, `values`, `type` (wired through `LegendOverrides` in layout). 14 regression tests. |
 | Auto-raster policy (`raster_threshold`, `raster_behavior`, `raster_aggregate`, `raster_cmap`) | `ferrum-spec.md §3.16/3.18` | ✅ Implemented `5effc0d` — `_apply_auto_raster()` in `chart.py` substitutes `mark_raster` when mark count exceeds threshold (default 500k). Eligible marks: point, bar, rect, tick, rule, segment. Skips composite marks, color-encoded charts. `RenderConfig` dataclass controls policy. 9 acceptance tests. |
 | `RenderConfig` Python class (public) | `ferrum-spec.md §3.16` | ✅ Implemented `5effc0d` — `fm.RenderConfig(raster_threshold=, raster_behavior=, raster_aggregate=, raster_cmap=)` exposed via `__init__.py`, accepted by `Chart.properties(render_config=)`. |
-| `ferrum.Grid` utility class | `ferrum-spec.md §3.19` | Absent from source — not in Phase 12 scope |
+| `ferrum.Grid` utility class | `ferrum-spec.md §3.19` | ✅ **Fixed (2026-05-30, `feat/render-gaps-17-19-21`)** — full §3.19 `Grid` shipped with a real minor-tick generation subsystem. Scale engine emits classified minor ticks (`Tick{position,is_major}`; subdivision in transformed space, log 2-9 per decade; categorical/discretizing produce none); layout threads them; per-level `major_*`/`minor_*` theme keys + builtin lighter/thinner minor defaults; `build_grid` emits minors under majors gated on `minor`. Python `ferrum.Grid` frozen dataclass (bare shorthand = both-levels fallback, per-level overrides) ingested by `Theme`. **Prerequisite landed first:** continuous-axis ticks/gridlines now scale-projected (commit `dc69206`) so they coincide with data marks — fixed a pre-existing major-vs-mark misalignment uncovered during this work. `GridConfig` (chart-level) unchanged = major level. Commits `ccce9c8` (scale), `e635c24` (layout), `dc69206` (projection prereq), `dff4aaa` (per-level styling), `dfd2c63` (Python Grid). |
 | `ferrum.WindowTransform` | `ferrum-spec.md §3.19` | ✅ **Phase 12 done** — `transform_window` in Rust (`data_window.rs`) + Python API (`transforms.py`). Supports rolling sum/mean/count/min/max, rank, dense_rank, row_number, lag, lead, first_value, last_value with frame/groupby. |
 | Full palette library (cyclical schemes, tealblues, brewer extended sequential) | `ferrum-spec.md §3.13` | ⚠️ **Partially resolved** — `ferrum.color` wraps existing Rust registry (7 categorical + 5 sequential + 6 diverging); cyclical schemes (`rainbow`, `sinebow`) and brewer-extended sequential remain deferred |
 | `mark_text` multiline via `<tspan>` | `docs/superpowers/followups/2026-05-12-mark-text-multiline-tspan.md` | ✅ Fixed — `SvgBuffer::text()` in `svg.rs` splits `\n` into `<tspan>` elements with `dy="1.2em"` line spacing. Single-line text unchanged. 6 regression tests + 4 Rust unit tests. |
 | Sixel terminal rendering | `ferrum-spec.md §3.16` | **Intentionally dropped (2026-05-15)** — niche format, inconsistent across terminal emulators, audience is Jupyter/browser-first |
-| `SceneNode::Raw` support in WASM renderer | `crates/ferrum-wasm/src/scene_load.rs:181` | Skipped with `console.warn` — not in Phase 12 scope |
+| `SceneNode::Raw` support in WASM renderer | `crates/ferrum-wasm/src/scene_load.rs` | ✅ Fixed `d094701`+`8f3e9f6` (2026-05-30) — Raw nodes carry a `RawAnchor { Chrome, Data }` discriminant (`#[serde(default)]` → Chrome) and are collected into the scene-export channel, then injected verbatim into the existing SVG DOM overlay. Single-pass id-namespacing across fragments (so the legend's split gradient defs + consuming rect resolve to the same id); chrome Raw fixed, data Raw rides the canvas pan/zoom transform; overlay stays `pointer-events:none`. Restores colorbar/inset/annotation-image in `.interactive()`. |
 | `share_x` / `share_y` enforcement in grid compositor | `crates/ferrum-core/src/render/grid_compose.rs:4` | Accepted, silently ignored — not in Phase 12 scope |
 | Axis tick-label formatting via `format=` on X/Y | `crates/ferrum-core/src/render/format.rs:1` | ✅ Fixed `fee904d` — `apply_tick_format` rewritten with D3-subset parser: `f`, `e`, `g`, `%`, `,`, `d`, `s` (SI prefix) format specs all honored. Rust unit tests + Python behavioral tests. |
 | `compare=` routing in `gain_chart`, `lift_chart`, `discrimination_threshold_chart` | `docs/superpowers/followups/2026-05-12-schwabish-audit-remaining.md` | ✅ All three now accept `compare=` kwarg (2026-05-17 audit) |
@@ -130,7 +130,7 @@
 | — | `crates/ferrum-core/src/render/color/scheme.rs` | Entire `CategoricalPalette` / `Scheme` color module unreferenced | ✅ Module removed from codebase (2026-05-17 audit) |
 | — | `crates/ferrum-core/src/transform/letter_value.rs` | `OutlierRow` type declared but never constructed | ✅ Type removed from codebase (2026-05-17 audit) |
 | — | `crates/ferrum-core/src/transform/core.rs` | `apply_transforms*` entry points unused | ✅ Not dead code — `apply_transforms_named` is actively called from `prepare.rs` (2026-05-17 audit) |
-| F16 | `crates/ferrum-core/src/render/marks/label.rs:84` | `mark_label` emits `MarkBatchKind::Text` instead of a dedicated `Label` kind | Open — labels still indistinguishable from text in the scene graph |
+| F16 | `crates/ferrum-core/src/render/marks/label.rs` | `mark_label` emits `MarkBatchKind::Text` instead of a dedicated `Label` kind | ✅ Fixed `6aad1da` (2026-05-30) — dedicated `MarkBatchKind::Label` variant (serde `"label"`) added; `label.rs` emits it at all 5 sites. Tag-only: routes identically to Text in `svg_walk` clip handling and WASM hit-testing, so behavior is unchanged but the scene graph / `to_json()` now distinguish labels from text. |
 
 ---
 
@@ -176,8 +176,24 @@
 16. ~~Write Phase 12 spec doc~~ — ✅ Spec + plan written 2026-05-17. ✅ Phase 12 implementation complete on `feat/phase-12-spec-completeness` (2713 pytest + 933 cargo tests pass)
 
 ### Remaining open (not covered by Phase 12)
-17. `mark_hex(stroke=, stroke_width=)` still raises `ValueError`
-18. `ferrum.Grid` utility class absent
-19. `SceneNode::Raw` WASM support (skipped with warning)
-20. `share_x` / `share_y` grid enforcement (accepted, silently ignored)
-21. F16: `MarkBatchKind::Text` for labels — labels indistinguishable from text in scene graph
+17. ~~`mark_hex(stroke=, stroke_width=)` still raises `ValueError`~~ — ✅ Fixed `b2aa797` (2026-05-30, `feat/render-gaps-17-19-21`)
+18. ~~`ferrum.Grid` utility class absent~~ — ✅ Fixed (2026-05-30, `feat/render-gaps-17-19-21`): full §3.19 `Grid` + minor-tick subsystem shipped, preceded by a continuous-axis scale-projection prerequisite that also fixed a pre-existing major-vs-mark gridline misalignment (see Missing Spec Implementations row above)
+19. ~~`SceneNode::Raw` WASM support (skipped with warning)~~ — ✅ Fixed `d094701`+`8f3e9f6` (2026-05-30, `feat/render-gaps-17-19-21`)
+20. `share_x` / `share_y` grid enforcement — confirmed intentional-by-design (binding documents the params were never functional; sharing is enforced upstream via `share_scale()`). Remaining work is dead-API cleanup of the inert `share` dict in the `.spec` properties, not a functional gap.
+21. ~~F16: `MarkBatchKind::Text` for labels — labels indistinguishable from text in scene graph~~ — ✅ Fixed `6aad1da` (2026-05-30, `feat/render-gaps-17-19-21`)
+
+---
+
+## Review findings — `feat/render-gaps-17-19-21` (2026-05-30)
+
+Surfaced by 4 parallel auditors (scene-pipeline, theme-wiring, pyo3-binding, interactive) + a heavyweight `rust-review` before merge. **Zero BUGs / S4 / S5** — the branch is correct and mergeable; these are cohesion (S2/S3), one narrow JS wrong-render, and cosmetic (S1) items.
+
+| ID | Severity | Item | Disposition |
+|---|---|---|---|
+| R1 | S3 | `minor_tick_fractions` inlines its own projection loop instead of routing through `project_values_to_fractions` — drifted parallel-API; major path is all-or-nothing on non-finite, minor path drops per-element (the difference is legitimate but should be a named policy, not a copied loop). `scale_resolve/mod.rs`. | **Fixing on this branch** (S2/S3 cleanup) |
+| R2 | S3 | `AxisInput` field sprawl (20 fields; 4 new). The projection trio (`projected_tick_fractions`, `scale_padding_frac`, `include_minor`) is one concept with a prose-only invariant — group into an `Option<TickProjection>`, which also deletes the redundant `include_minor` gate. `layout/axis.rs` + `prepare.rs`. | **Fixing on this branch** |
+| R3 | S2 | `build_grid` has four structurally-identical emission loops (x/y × major/minor) — extract one `emit_gridlines` helper. `render/marks/axis.rs`. | **Fixing on this branch** |
+| R4 | S1 | Stale `render_svg`/`render_png` `theme` param docstrings in `binding.rs` — abbreviated key list, never listed the full §3.13 set, now also omits the per-level grid keys. Real contract is `ThemeOverridesSpec` (`deny_unknown_fields`). | **Fixing on this branch** (one-line pointer) |
+| R5 | S3 | **WASM colorbar-in-inset id collision** — JS `_buildIdMap` namespaces by literal id per loadScene, so an outer colorbar gradient (`ferrum-colorbar-0`, hardcoded in `legend.rs:58`) and an inset chart that *also* has a colorbar collapse to one namespaced id → the inset's (or outer's) colorbar renders with the wrong gradient. Narrow trigger (continuous-color chart + `.inset()` of another continuous-color chart) but a genuine wrong-render. The only confirmed correctness issue across all reviews. | ✅ **Fixed `0b57b61`** — `legend.rs` merges the colorbar `<defs>`+`<rect>` into one self-contained Raw fragment (removing the only cross-fragment id ref; static SVG byte-identical); `ferrum-anywidget.js` switches to per-fragment id namespacing (`ferrum-raw-{loadIdx}-{fragIdx}-{id}`), now collision-free + reference-complete. Regression test pins old-collapses-to-1 vs new-2-distinct. |
+| R6 | S2 | Interactive text-vs-raw z-order flips on the first zoom tick (`_placeTextSvg` re-append moves labels above the raw overlay groups). Cosmetic; rarely-overlapping content. `ferrum-anywidget.js`. | Deferred — follow-up |
+| R7 | S2 | Discretizing *positional* scales (`Quantize`/`BinOrdinal`/`Sequential`/`Diverging` declared on an x/y axis) resolve to `ScaleKind::Linear` in `positional.rs` before `minor_ticks_internal` is reached, so they would get *linear-subdivided* minors rather than empty. Unreachable in practice (these are color/size specs); semantic corner only. | Deferred — add a clarifying comment when next touching `positional.rs` |

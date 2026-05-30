@@ -61,6 +61,15 @@ impl ThresholdScale {
             self.0.domain, self.0.range
         )
     }
+
+    /// Discretizing scales have no numeric continuum to subdivide into minors.
+    ///
+    /// Returns empty — a documented semantic absence, not an error.
+    // Wired to the render layer in Task 2 of the grid subsystem.
+    #[allow(dead_code)]
+    pub(crate) fn minor_ticks_internal(&self) -> Vec<crate::scale::ticks::Tick> {
+        Vec::new()
+    }
 }
 
 #[pymethods]
@@ -137,5 +146,15 @@ mod tests {
         };
         let (lo, hi) = s.invert_extent(99.0);
         assert!(lo.is_nan() && hi.is_nan());
+    }
+
+    /// Discretizing (threshold) scales must return empty for minor ticks.
+    #[test]
+    fn threshold_minor_ticks_always_empty() {
+        let scale = ThresholdScale(ThresholdScaleData {
+            domain: vec![0.0, 10.0],
+            range: vec![1.0, 2.0, 3.0],
+        });
+        assert!(scale.minor_ticks_internal().is_empty());
     }
 }

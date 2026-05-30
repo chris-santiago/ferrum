@@ -46,10 +46,37 @@ fn color_string(style: &ferrum_scene::TextStyle) -> String {
 
 /// Build the full text-element JSON array from scene data's text elements.
 ///
-/// Called from `WasmRenderer::load_scene` and `reset_zoom` (wasm32-only paths).
+/// Called from `WasmRenderer::reset_zoom` (wasm32-only path).
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn build_text_json(data: &crate::scene_load::SceneData) -> String {
     build_text_json_from(&data.text_elements)
+}
+
+/// Build the combined overlay JSON object `{"text": [...], "raw": [...]}` for
+/// `WasmRenderer::load_scene`.
+///
+/// The JS widget parses this once on scene load: `text` is forwarded to
+/// `_placeTextSvg`; `raw` is cached and injected into the SVG overlay as
+/// verbatim fragments with ID namespacing and anchor-based grouping.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn build_overlay_json(data: &crate::scene_load::SceneData) -> String {
+    let text_elements: Vec<serde_json::Value> =
+        data.text_elements.iter().map(text_element_to_json).collect();
+    let raw_elements: Vec<serde_json::Value> = data
+        .raw_fragments
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "svg": r.svg,
+                "anchor": r.anchor,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "text": text_elements,
+        "raw": raw_elements,
+    })
+    .to_string()
 }
 
 /// Build the text-element JSON array from a slice of text elements.
