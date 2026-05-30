@@ -9,18 +9,30 @@ modification.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
+import pyarrow as pa
+
+from ferrum._core import (
+    average_precision,
+    calibration_kernel,
+    confusion_kernel,
+    pr_curve_kernel,
+    prf_at_thresholds,
+    roc_auc,
+    roc_curve_kernel,
+    studentized_residual_no_x,
+)
 
 
 class _PrecomputedSource:
     """Lightweight adapter that wraps raw (y_true, y_pred) arrays.
 
     Satisfies the subset of ``ModelSource``'s method protocol required by the
-    nine in-scope diagnostic chart builders.  Delegates computation directly
-    to ``sklearn.metrics.*``; no bespoke math lives here.
+    nine in-scope diagnostic chart builders.  Delegates computation to Rust
+    kernels in ``ferrum._core``; no scikit-learn is required.
 
     Parameters
     ----------
@@ -57,57 +69,33 @@ class _PrecomputedSource:
         drop_intermediate: bool = True,
     ) -> pl.DataFrame:
         """ROC curve(s).  Mirrors ``ModelSource.roc_curve`` column schema."""
-        from sklearn.metrics import roc_curve as _sk_roc, roc_auc_score
-
         y_true = self._y_true_np
         y_pred = self._y_pred_np
-        rows: list[dict] = []
 
         if y_pred.ndim == 1:
             # Binary: y_pred is 1-D scores for the positive class.
             pos_class = str(np.unique(y_true)[-1]) if len(np.unique(y_true)) >= 2 else "1"
-            fpr, tpr, thr = _sk_roc(y_true, y_pred, drop_intermediate=drop_intermediate)
-            try:
-                auc = float(roc_auc_score(y_true, y_pred))
-            except ValueError:
-                auc = float("nan")
-            for f, t, h in zip(fpr, tpr, thr):
-                rows.append(
-                    {
-                        "fpr": float(f),
-                        "tpr": float(t),
-                        "threshold": float(h),
-                        "class": pos_class,
-                        "auc": auc,
-                    }
-                )
+            frame = _roc_frame_binary(y_true, y_pred, pos_class, drop_intermediate)
+            return frame
         else:
             # Multiclass: y_pred is (n_samples, n_classes); columns map to
-            # sorted unique classes (sklearn convention).
+            # sorted unique classes (sorted ascending, matching the per-class score column order).
             classes = list(np.unique(y_true))
-            for i, cls in enumerate(classes):
-                y_bin = (y_true == cls).astype(int)
-                y_score = y_pred[:, i]
-                fpr, tpr, thr = _sk_roc(y_bin, y_score, drop_intermediate=drop_intermediate)
-                try:
-                    auc = float(roc_auc_score(y_bin, y_score))
-                except ValueError:
-                    auc = float("nan")
-                for f, t, h in zip(fpr, tpr, thr):
-                    rows.append(
-                        {
-                            "fpr": float(f),
-                            "tpr": float(t),
-                            "threshold": float(h),
-                            "class": str(cls),
-                            "auc": auc,
-                        }
-                    )
-
+            per_class_frames = [
+                _roc_frame_binary(
+                    (y_true == cls).astype(int),
+                    y_pred[:, i],
+                    str(cls),
+                    drop_intermediate,
+                )
+                for i, cls in enumerate(classes)
+            ]
+            frames = per_class_frames
             if average in ("micro", "macro", "weighted"):
-                rows.extend(_avg_roc_rows(y_true, y_pred, classes, average, drop_intermediate))
-
-        return pl.DataFrame(rows)
+                frames = per_class_frames + [
+                    _avg_roc_frame(y_true, y_pred, classes, average, drop_intermediate)
+                ]
+            return pl.concat(frames)
 
     def pr_curve(self, *, average: str | None = None) -> pl.DataFrame:
         """Precision-recall curve(s).  Mirrors ``ModelSource.pr_curve`` schema."""
@@ -115,15 +103,21 @@ class _PrecomputedSource:
         y_pred = self._y_pred_np
 
         if y_pred.ndim == 1:
-            rows = _pr_rows_binary_np(y_true, y_pred)
+            return _pr_frame_binary(y_true, y_pred)
         elif average in ("micro", "macro", "weighted"):
             classes = list(np.unique(y_true))
-            rows = _avg_pr_rows(y_true, y_pred, classes, average)
+            return _avg_pr_frame(y_true, y_pred, classes, average)
         else:
             classes = list(np.unique(y_true))
-            rows = _pr_rows_per_class_np(y_true, y_pred, classes)
-
-        return pl.DataFrame(rows)
+            frames = [
+                _pr_frame_binary(
+                    (y_true == cls).astype(int),
+                    y_pred[:, i],
+                    str(cls),
+                )
+                for i, cls in enumerate(classes)
+            ]
+            return pl.concat(frames)
 
     def calibration_curve(
         self,
@@ -132,42 +126,24 @@ class _PrecomputedSource:
         strategy: str = "uniform",
     ) -> pl.DataFrame:
         """Reliability diagram bins.  Mirrors ``ModelSource.calibration_curve`` schema."""
-        from sklearn.calibration import calibration_curve as _ccurve
-
         y_true = self._y_true_np
         y_pred = self._y_pred_np  # 1-D probabilities for positive class
 
-        frac_pos, mean_pred = _ccurve(y_true, y_pred, n_bins=n_bins, strategy=strategy)
-
-        if strategy == "uniform":
-            edges = np.linspace(0.0, 1.0, n_bins + 1)
-        else:  # "quantile" — sklearn has already validated strategy above
-            edges = np.quantile(y_pred, np.linspace(0.0, 1.0, n_bins + 1))
-        bin_idx = np.clip(np.digitize(y_pred, edges[1:-1]), 0, n_bins - 1)
-        counts_all = np.bincount(bin_idx, minlength=n_bins)
-        centers = edges[:-1] + np.diff(edges) / 2.0
-        used_bins = np.array([int(np.argmin(np.abs(centers - mp))) for mp in mean_pred], dtype=int)
-        counts = counts_all[used_bins] if used_bins.size else np.empty(0, dtype=int)
-
-        return pl.DataFrame(
-            {
-                "mean_predicted": [float(x) for x in mean_pred],
-                "fraction_positive": [float(x) for x in frac_pos],
-                "count": [int(x) for x in counts],
-            }
-        )
+        yt_arrow = pa.array(y_true.astype(np.float64), type=pa.float64())
+        yp_arrow = pa.array(y_pred.astype(np.float64), type=pa.float64())
+        rb = calibration_kernel(yt_arrow, yp_arrow, n_bins, strategy)
+        return cast("pl.DataFrame", pl.from_arrow(rb))
 
     def cumulative_gain(self) -> pl.DataFrame:
         """Cumulative-gain curve.  Mirrors ``ModelSource.cumulative_gain`` schema."""
         y_true = self._y_true_np
         y_pred = self._y_pred_np
         n = len(y_true)
-        rows: list[dict] = []
+        classes = list(np.unique(y_true))
 
+        per_class_parts: list[pl.DataFrame] = []
         if y_pred.ndim == 1:
-            # Binary: treat as scores for the single positive class.
-            classes = list(np.unique(y_true))
-            for i, cls in enumerate(classes):
+            for cls in classes:
                 y_bin = (y_true == cls).astype(int)
                 scores = y_pred
                 order = np.argsort(-scores)
@@ -177,12 +153,16 @@ class _PrecomputedSource:
                 gain = cum_pos / total_pos
                 xs = np.concatenate([[0.0], pct_pop])
                 ys = np.concatenate([[0.0], gain])
-                for pp, g in zip(xs, ys):
-                    rows.append(
-                        {"percent_population": float(pp), "gain": float(g), "class": str(cls)}
+                per_class_parts.append(
+                    pl.DataFrame(
+                        {
+                            "percent_population": xs,
+                            "gain": ys,
+                            "class": [str(cls)] * len(xs),
+                        }
                     )
+                )
         else:
-            classes = list(np.unique(y_true))
             for i, cls in enumerate(classes):
                 y_bin = (y_true == cls).astype(int)
                 order = np.argsort(-y_pred[:, i])
@@ -192,24 +172,34 @@ class _PrecomputedSource:
                 gain = cum_pos / total_pos
                 xs = np.concatenate([[0.0], pct_pop])
                 ys = np.concatenate([[0.0], gain])
-                for pp, g in zip(xs, ys):
-                    rows.append(
-                        {"percent_population": float(pp), "gain": float(g), "class": str(cls)}
+                per_class_parts.append(
+                    pl.DataFrame(
+                        {
+                            "percent_population": xs,
+                            "gain": ys,
+                            "class": [str(cls)] * len(xs),
+                        }
                     )
+                )
 
-        rows.append({"percent_population": 0.0, "gain": 0.0, "class": "baseline"})
-        rows.append({"percent_population": 1.0, "gain": 1.0, "class": "baseline"})
-        return pl.DataFrame(rows)
+        baseline = pl.DataFrame(
+            {
+                "percent_population": [0.0, 1.0],
+                "gain": [0.0, 1.0],
+                "class": ["baseline", "baseline"],
+            }
+        )
+        return pl.concat(per_class_parts + [baseline])
 
     def lift_curve(self) -> pl.DataFrame:
         """Lift curve.  Mirrors ``ModelSource.lift_curve`` schema."""
         y_true = self._y_true_np
         y_pred = self._y_pred_np
         n = len(y_true)
-        rows: list[dict] = []
+        classes = list(np.unique(y_true))
 
+        per_class_parts: list[pl.DataFrame] = []
         if y_pred.ndim == 1:
-            classes = list(np.unique(y_true))
             for cls in classes:
                 y_bin = (y_true == cls).astype(int)
                 base_rate = float(y_bin.mean()) if n else 0.0
@@ -221,12 +211,16 @@ class _PrecomputedSource:
                 cum_rate = cum_pos / denom
                 lift = cum_rate / base_rate
                 pct_pop = denom / n
-                for pp, lv in zip(pct_pop, lift):
-                    rows.append(
-                        {"percent_population": float(pp), "lift": float(lv), "class": str(cls)}
+                per_class_parts.append(
+                    pl.DataFrame(
+                        {
+                            "percent_population": pct_pop.astype(float),
+                            "lift": lift.astype(float),
+                            "class": [str(cls)] * len(pct_pop),
+                        }
                     )
+                )
         else:
-            classes = list(np.unique(y_true))
             for i, cls in enumerate(classes):
                 y_bin = (y_true == cls).astype(int)
                 base_rate = float(y_bin.mean()) if n else 0.0
@@ -238,34 +232,66 @@ class _PrecomputedSource:
                 cum_rate = cum_pos / denom
                 lift = cum_rate / base_rate
                 pct_pop = denom / n
-                for pp, lv in zip(pct_pop, lift):
-                    rows.append(
-                        {"percent_population": float(pp), "lift": float(lv), "class": str(cls)}
+                per_class_parts.append(
+                    pl.DataFrame(
+                        {
+                            "percent_population": pct_pop.astype(float),
+                            "lift": lift.astype(float),
+                            "class": [str(cls)] * len(pct_pop),
+                        }
                     )
+                )
 
-        rows.append({"percent_population": 0.0, "lift": 1.0, "class": "baseline"})
-        rows.append({"percent_population": 1.0, "lift": 1.0, "class": "baseline"})
-        return pl.DataFrame(rows)
+        baseline = pl.DataFrame(
+            {
+                "percent_population": [0.0, 1.0],
+                "lift": [1.0, 1.0],
+                "class": ["baseline", "baseline"],
+            }
+        )
+        return pl.concat(per_class_parts + [baseline])
 
     def confusion_matrix(self, *, normalize: str | None = None) -> pl.DataFrame:
         """Confusion matrix in long form.  Mirrors ``ModelSource.confusion_matrix`` schema.
 
         ``y_pred`` must be 1-D hard class labels.
         """
-        from sklearn.metrics import confusion_matrix as _cm
-
         y_true = self._y_true_np
         y_pred = self._y_pred_np
         labels = sorted(set(y_true.tolist()) | set(y_pred.tolist()), key=str)
 
-        cm = _cm(y_true, y_pred, labels=labels, normalize=normalize)
-        rows: list[dict] = []
-        for i, a in enumerate(labels):
-            for j, p in enumerate(labels):
-                val = float(cm[i, j])
-                fmt = f"{val:.2f}" if normalize is not None else f"{int(val)}"
-                rows.append({"actual": str(a), "predicted": str(p), "value": val, "value_fmt": fmt})
-        return pl.DataFrame(rows)
+        # Encode labels as integer codes for the Rust kernel.
+        # Use .get(v, -1) so that out-of-vocabulary values (including NaN) map
+        # to code -1, which confusion_kernel drops — matching the behaviour of
+        # _confusion_matrix_columnar in sources/_classification.py.
+        label_to_code = {lbl: i for i, lbl in enumerate(labels)}
+        yt_codes = np.array([label_to_code.get(v, -1) for v in y_true.tolist()], dtype=np.int64)
+        yp_codes = np.array([label_to_code.get(v, -1) for v in y_pred.tolist()], dtype=np.int64)
+        label_codes = np.arange(len(labels), dtype=np.int64)
+
+        yt_arrow = pa.array(yt_codes, type=pa.int64())
+        yp_arrow = pa.array(yp_codes, type=pa.int64())
+        labels_arrow = pa.array(label_codes, type=pa.int64())
+        normalize_str = normalize if normalize is not None else ""
+
+        rb = confusion_kernel(yt_arrow, yp_arrow, labels_arrow, normalize_str)
+        cm_df = cast("pl.DataFrame", pl.from_arrow(rb))
+
+        # Map integer row/col indices back to original label strings and
+        # build the long-form output with value_fmt.
+        label_strs = [str(lbl) for lbl in labels]
+        actual_col = [label_strs[r] for r in cm_df["row"].to_list()]
+        predicted_col = [label_strs[c] for c in cm_df["col"].to_list()]
+        values = cm_df["value"].to_list()
+        fmt_col = [f"{v:.2f}" if normalize is not None else f"{int(v)}" for v in values]
+        return pl.DataFrame(
+            {
+                "actual": actual_col,
+                "predicted": predicted_col,
+                "value": values,
+                "value_fmt": fmt_col,
+            }
+        )
 
     def predictions(self) -> pl.DataFrame:
         """Return y_true, y_pred, residual, studentized_residual, cooks_distance, leverage.
@@ -275,9 +301,6 @@ class _PrecomputedSource:
         matching the non-linear estimator path in ``ModelSource``.
         ``cooks_distance`` and ``leverage`` are NaN (no design matrix available).
         """
-        import pyarrow as pa
-        from ferrum._core import studentized_residual_no_x
-
         y_true = self._y_true_np.astype(np.float64)
         y_pred = self._y_pred_np.astype(np.float64)
         residual = y_true - y_pred
@@ -316,7 +339,6 @@ class _PrecomputedSource:
                 "precomputed y_true/y_pred inputs — cross-validation requires "
                 "a fitted model.  Pass cv=None or use the model-backed path."
             )
-        from sklearn.metrics import precision_recall_fscore_support
 
         y_true = self._y_true_np
         y_pred = self._y_pred_np  # 1-D positive-class scores
@@ -329,25 +351,24 @@ class _PrecomputedSource:
             )
         positive_class = unique[-1]
         y_true_bin = (y_true == positive_class).astype(int)
-        thresholds = np.linspace(0.0, 1.0, n_thresholds)
+        thresholds_np = np.linspace(0.0, 1.0, n_thresholds)
 
-        rows: list[dict] = []
-        for t in thresholds:
-            y_hard = (y_pred >= t).astype(int)
-            p, r, f1, _ = precision_recall_fscore_support(
-                y_true_bin, y_hard, average="binary", zero_division=0
-            )
-            queue_rate = float((y_pred >= t).mean()) if y_pred.size else 0.0
-            rows.append(
-                {
-                    "threshold": float(t),
-                    "precision": float(p),
-                    "recall": float(r),
-                    "f1": float(f1),
-                    "queue_rate": queue_rate,
-                }
-            )
-        return pl.DataFrame(rows)
+        yt_arrow = pa.array(y_true_bin.astype(np.float64), type=pa.float64())
+        yp_arrow = pa.array(y_pred.astype(np.float64), type=pa.float64())
+        thr_arrow = pa.array(thresholds_np, type=pa.float64())
+
+        rb = prf_at_thresholds(yt_arrow, yp_arrow, thr_arrow)
+        df = cast("pl.DataFrame", pl.from_arrow(rb))
+
+        return pl.DataFrame(
+            {
+                "threshold": thresholds_np,
+                "precision": df["precision"].to_list(),
+                "recall": df["recall"].to_list(),
+                "f1": df["f1"].to_list(),
+                "queue_rate": df["queue_rate"].to_list(),
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -355,131 +376,188 @@ class _PrecomputedSource:
 # ---------------------------------------------------------------------------
 
 
-def _pr_rows_binary_np(y_true: np.ndarray, y_pred: np.ndarray) -> list[dict]:
-    from sklearn.metrics import precision_recall_curve, average_precision_score
-
-    pos_class = str(np.unique(y_true)[-1]) if len(np.unique(y_true)) >= 2 else "1"
-    p, r, thr = precision_recall_curve(y_true, y_pred)
+def _roc_frame_binary(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    class_label: str,
+    drop_intermediate: bool,
+) -> pl.DataFrame:
+    """Return a ROC DataFrame for one binary class."""
+    yt_arrow = pa.array(y_true.astype(np.float64), type=pa.float64())
+    ys_arrow = pa.array(y_score.astype(np.float64), type=pa.float64())
+    rb = roc_curve_kernel(yt_arrow, ys_arrow, drop_intermediate)
+    curve = cast("pl.DataFrame", pl.from_arrow(rb))
     try:
-        ap = float(average_precision_score(y_true, y_pred))
-    except ValueError:
-        ap = float("nan")
-    thresholds_padded = np.concatenate([thr, [float("nan")]])
-    return [
-        {
-            "precision": float(pi),
-            "recall": float(ri),
-            "threshold": float(ti),
-            "class": pos_class,
-            "ap": ap,
-        }
-        for pi, ri, ti in zip(p, r, thresholds_padded)
-    ]
-
-
-def _pr_rows_per_class_np(y_true: np.ndarray, y_pred: np.ndarray, classes: list) -> list[dict]:
-    from sklearn.metrics import precision_recall_curve, average_precision_score
-
-    rows: list[dict] = []
-    for i, cls in enumerate(classes):
-        y_bin = (y_true == cls).astype(int)
-        y_score = y_pred[:, i]
-        p, r, thr = precision_recall_curve(y_bin, y_score)
-        try:
-            ap = float(average_precision_score(y_bin, y_score))
-        except ValueError:
-            ap = float("nan")
-        thresholds_padded = np.concatenate([thr, [float("nan")]])
-        for pi, ri, ti in zip(p, r, thresholds_padded):
-            rows.append(
-                {
-                    "precision": float(pi),
-                    "recall": float(ri),
-                    "threshold": float(ti),
-                    "class": str(cls),
-                    "ap": ap,
-                }
-            )
-    return rows
-
-
-def _avg_pr_rows(y_true: np.ndarray, y_pred: np.ndarray, classes: list, average: str) -> list[dict]:
-    from sklearn.metrics import precision_recall_curve, average_precision_score
-    from sklearn.preprocessing import label_binarize
-
-    y_bin = label_binarize(y_true, classes=classes)
-    if average == "micro":
-        p, r, thr = precision_recall_curve(y_bin.ravel(), y_pred.ravel())
-        ap = float(average_precision_score(y_bin, y_pred, average="micro"))
-        thresholds_padded = np.concatenate([thr, [float("nan")]])
-        return [
-            {
-                "precision": float(pi),
-                "recall": float(ri),
-                "threshold": float(ti),
-                "class": "micro",
-                "ap": ap,
-            }
-            for pi, ri, ti in zip(p, r, thresholds_padded)
+        auc_val = float(roc_auc(yt_arrow, ys_arrow))
+    except Exception:
+        auc_val = float("nan")
+    return curve.with_columns(
+        [
+            pl.lit(class_label).alias("class"),
+            pl.lit(auc_val).alias("auc"),
         ]
-    grid = np.linspace(0.0, 1.0, 100)
-    precisions = []
-    for i in range(y_bin.shape[1]):
-        p_i, r_i, _ = precision_recall_curve(y_bin[:, i], y_pred[:, i])
-        order = np.argsort(r_i)
-        precisions.append(np.interp(grid, r_i[order], p_i[order]))
-    if average == "macro":
-        weights = np.ones(len(classes)) / len(classes)
-    else:
-        total = max(int(y_bin.sum()), 1)
-        weights = y_bin.sum(axis=0) / total
-    precision_avg = (np.array(precisions).T * weights).sum(axis=1)
-    ap = float(average_precision_score(y_bin, y_pred, average=average))
-    return [
-        {
-            "precision": float(p),
-            "recall": float(r),
-            "threshold": float("nan"),
-            "class": average,
-            "ap": ap,
-        }
-        for p, r in zip(precision_avg, grid)
-    ]
+    ).select(["fpr", "tpr", "threshold", "class", "auc"])
 
 
-def _avg_roc_rows(
+def _avg_roc_frame(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     classes: list,
     average: str,
     drop_intermediate: bool,
-) -> list[dict]:
-    from sklearn.metrics import roc_curve, roc_auc_score
-    from sklearn.preprocessing import label_binarize
+) -> pl.DataFrame:
+    """Return a single averaged ROC curve row-set (micro, macro, or weighted)."""
+    y_bin = _one_hot(y_true, classes)
 
-    y_bin = label_binarize(y_true, classes=classes)
     if average == "micro":
-        fpr, tpr, thr = roc_curve(
-            y_bin.ravel(), y_pred.ravel(), drop_intermediate=drop_intermediate
-        )
-        auc = float(roc_auc_score(y_bin, y_pred, average="micro"))
-        return [
-            {"fpr": float(f), "tpr": float(t), "threshold": float(h), "class": "micro", "auc": auc}
-            for f, t, h in zip(fpr, tpr, thr)
-        ]
+        yt_arrow = pa.array(y_bin.ravel().astype(np.float64), type=pa.float64())
+        ys_arrow = pa.array(y_pred.ravel().astype(np.float64), type=pa.float64())
+        rb = roc_curve_kernel(yt_arrow, ys_arrow, drop_intermediate)
+        curve = cast("pl.DataFrame", pl.from_arrow(rb))
+        auc_val = float(roc_auc(yt_arrow, ys_arrow))
+        return curve.with_columns(
+            [
+                pl.lit("micro").alias("class"),
+                pl.lit(auc_val).alias("auc"),
+            ]
+        ).select(["fpr", "tpr", "threshold", "class", "auc"])
+
+    # macro / weighted: interpolate each per-class curve onto a shared FPR grid
     grid = np.linspace(0.0, 1.0, 100)
     tprs = []
+    auc_per_class = []
     for i in range(y_bin.shape[1]):
-        fpr_i, tpr_i, _ = roc_curve(y_bin[:, i], y_pred[:, i])
-        tprs.append(np.interp(grid, fpr_i, tpr_i))
+        yt_i = pa.array(y_bin[:, i].astype(np.float64), type=pa.float64())
+        ys_i = pa.array(y_pred[:, i].astype(np.float64), type=pa.float64())
+        rb_i = roc_curve_kernel(yt_i, ys_i, drop_intermediate)
+        c_i = cast("pl.DataFrame", pl.from_arrow(rb_i))
+        tprs.append(np.interp(grid, c_i["fpr"].to_numpy(), c_i["tpr"].to_numpy()))
+        try:
+            auc_per_class.append(float(roc_auc(yt_i, ys_i)))
+        except Exception:
+            auc_per_class.append(float("nan"))
+
     if average == "macro":
         weights = np.ones(len(classes)) / len(classes)
-    else:
-        total = max(int(y_bin.sum()), 1)
-        weights = y_bin.sum(axis=0) / total
+    else:  # weighted
+        support = y_bin.sum(axis=0)
+        total = max(int(support.sum()), 1)
+        weights = support / total
+
     tpr_avg = (np.array(tprs).T * weights).sum(axis=1)
-    auc = float(roc_auc_score(y_bin, y_pred, average=average))
-    return [
-        {"fpr": float(f), "tpr": float(t), "threshold": float("nan"), "class": average, "auc": auc}
-        for f, t in zip(grid, tpr_avg)
-    ]
+    auc_val = float(np.average(auc_per_class, weights=weights))
+
+    n = len(grid)
+    return pl.DataFrame(
+        {
+            "fpr": grid,
+            "tpr": tpr_avg,
+            "threshold": [float("nan")] * n,
+            "class": [average] * n,
+            "auc": [auc_val] * n,
+        }
+    )
+
+
+def _pr_frame_binary(
+    y_true: np.ndarray,
+    y_score: np.ndarray,
+    class_label: str | None = None,
+) -> pl.DataFrame:
+    """Return a PR DataFrame for one binary class.
+
+    The Rust kernel already emits the final NaN threshold; do not pad again.
+    """
+    if class_label is None:
+        class_label = str(np.unique(y_true)[-1]) if len(np.unique(y_true)) >= 2 else "1"
+    yt_arrow = pa.array(y_true.astype(np.float64), type=pa.float64())
+    ys_arrow = pa.array(y_score.astype(np.float64), type=pa.float64())
+    rb = pr_curve_kernel(yt_arrow, ys_arrow)
+    curve = cast("pl.DataFrame", pl.from_arrow(rb))
+    try:
+        ap_val = float(average_precision(yt_arrow, ys_arrow))
+    except Exception:
+        ap_val = float("nan")
+    return curve.with_columns(
+        [
+            pl.lit(class_label).alias("class"),
+            pl.lit(ap_val).alias("ap"),
+        ]
+    ).select(["precision", "recall", "threshold", "class", "ap"])
+
+
+def _avg_pr_frame(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    classes: list,
+    average: str,
+) -> pl.DataFrame:
+    """Return a single averaged PR curve row-set (micro, macro, or weighted)."""
+    y_bin = _one_hot(y_true, classes)
+
+    if average == "micro":
+        yt_arrow = pa.array(y_bin.ravel().astype(np.float64), type=pa.float64())
+        ys_arrow = pa.array(y_pred.ravel().astype(np.float64), type=pa.float64())
+        rb = pr_curve_kernel(yt_arrow, ys_arrow)
+        curve = cast("pl.DataFrame", pl.from_arrow(rb))
+        ap_val = float(average_precision(yt_arrow, ys_arrow))
+        return curve.with_columns(
+            [
+                pl.lit("micro").alias("class"),
+                pl.lit(ap_val).alias("ap"),
+            ]
+        ).select(["precision", "recall", "threshold", "class", "ap"])
+
+    # macro / weighted: interpolate each per-class P-R curve onto a shared
+    # recall grid, then take a weighted mean.
+    grid = np.linspace(0.0, 1.0, 100)
+    precisions = []
+    ap_per_class = []
+    for i in range(y_bin.shape[1]):
+        yt_i = pa.array(y_bin[:, i].astype(np.float64), type=pa.float64())
+        ys_i = pa.array(y_pred[:, i].astype(np.float64), type=pa.float64())
+        rb_i = pr_curve_kernel(yt_i, ys_i)
+        c_i = cast("pl.DataFrame", pl.from_arrow(rb_i))
+        r_i = c_i["recall"].to_numpy()
+        p_i = c_i["precision"].to_numpy()
+        order = np.argsort(r_i)
+        precisions.append(np.interp(grid, r_i[order], p_i[order]))
+        try:
+            ap_per_class.append(float(average_precision(yt_i, ys_i)))
+        except Exception:
+            ap_per_class.append(float("nan"))
+
+    if average == "macro":
+        weights = np.ones(len(classes)) / len(classes)
+    else:  # weighted
+        support = y_bin.sum(axis=0)
+        total = max(int(support.sum()), 1)
+        weights = support / total
+
+    precision_avg = (np.array(precisions).T * weights).sum(axis=1)
+    ap_val = float(np.average(ap_per_class, weights=weights))
+
+    n = len(grid)
+    return pl.DataFrame(
+        {
+            "precision": precision_avg,
+            "recall": grid,
+            "threshold": [float("nan")] * n,
+            "class": [average] * n,
+            "ap": [ap_val] * n,
+        }
+    )
+
+
+def _one_hot(y_true: np.ndarray, classes: list) -> np.ndarray:
+    """One-hot encode y_true for the given sorted class list.
+
+    Equivalent to one-hot encoding with columns ordered by ``classes``
+    for a fully multiclass (len(classes) >= 3) input.
+    """
+    n_classes = len(classes)
+    class_to_idx = {c: i for i, c in enumerate(classes)}
+    codes = np.array([class_to_idx[v] for v in y_true.tolist()], dtype=int)
+    onehot = np.zeros((len(y_true), n_classes), dtype=int)
+    onehot[np.arange(len(y_true)), codes] = 1
+    return onehot
