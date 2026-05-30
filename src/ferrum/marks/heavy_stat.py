@@ -566,9 +566,16 @@ def desugar_hex(
         Colormap name applied to the polygon layer.  ``None`` defers to the
         theme's sequential scheme.
     stroke : str or None, default None
-        Reserved for future use (no-op today).
+        Border color for hex cells.  Passed directly to the polygon layer's
+        ``stroke`` mark kwarg, which the Rust polygon renderer reads via
+        ``resolve_mark_style``.  A stroke color with ``stroke_width`` left at
+        its ``0`` default renders **no visible border** — there is no call-time
+        auto-bump of width from a stroke color (literal semantics, consistent
+        with all other polygon-family marks).
     stroke_width : float, default 0
-        Reserved for future use (no-op today).
+        Border width for hex cells in pixels.  Only produces a visible border
+        when non-zero.  Passed directly to the polygon layer's
+        ``stroke_width`` mark kwarg.
 
     Returns
     -------
@@ -594,10 +601,6 @@ def desugar_hex(
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_hex() requires .encode(x=..., y=...)")
-    if stroke is not None:
-        raise ValueError(f"mark_hex(stroke={stroke!r}) is not supported")
-    if stroke_width != 0:
-        raise ValueError(f"mark_hex(stroke_width={stroke_width!r}) is not supported")
     _VALID_AGGREGATES = ("count", "mean", "sum", "min", "max", "median", "std", "var")
     if aggregate not in _VALID_AGGREGATES:
         raise ValueError(f"mark_hex aggregate={aggregate!r} must be one of {_VALID_AGGREGATES}")
@@ -609,6 +612,10 @@ def desugar_hex(
     mk: dict = {"detail": "hex_id", "opacity": 1.0}
     if cmap is not None:
         mk["cmap"] = cmap
+    if stroke is not None:
+        mk["stroke"] = stroke
+    if stroke_width != 0:
+        mk["stroke_width"] = stroke_width
     layers = [
         _Layer(
             name="polygon",

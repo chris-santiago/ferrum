@@ -141,6 +141,66 @@ def test_hex_bin_size_propagates(df_xy):
     assert '"bin_size":0.5' in json_str
 
 
+# ---- mark_hex stroke tests (item 17) ----
+
+
+def test_hex_stroke_and_width_no_longer_raises(df_xy):
+    """Passing stroke= and stroke_width= no longer raises ValueError."""
+    # Both together — use full 6-digit hex (from_hex_str does not support 3-digit shorthand)
+    spec = (
+        fe.Chart(df_xy)
+        .mark_hex(stroke="#ffffff", stroke_width=1)
+        .encode(x="x", y="y")
+        ._build_spec()
+    )
+    assert spec.layers is not None
+    # stroke alone
+    spec2 = fe.Chart(df_xy).mark_hex(stroke="#ffffff").encode(x="x", y="y")._build_spec()
+    assert spec2.layers is not None
+    # stroke_width alone (non-zero)
+    spec3 = fe.Chart(df_xy).mark_hex(stroke_width=2).encode(x="x", y="y")._build_spec()
+    assert spec3.layers is not None
+
+
+def test_hex_stroke_with_width_renders_border_attributes(df_xy):
+    """mark_hex(stroke="#ffffff", stroke_width=1) emits stroke/stroke-width on hex polygons.
+
+    Note: stroke color must be a full 6-digit hex. The Rust color parser (from_hex_str)
+    handles only 6- and 8-digit hex codes; 3-digit shorthand (e.g. #fff) is silently
+    dropped. This is a pre-existing constraint in the renderer, not a limitation of the
+    hex-stroke wiring.
+    """
+    svg = fe.Chart(df_xy).mark_hex(stroke="#ffffff", stroke_width=1).encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+    # The polygon <path> elements should carry stroke="..." (white = #ffffff)
+    assert 'stroke="#ffffff"' in svg
+    # stroke-width attribute is emitted for nonzero widths
+    assert 'stroke-width="1"' in svg
+
+
+def test_hex_stroke_alone_width_zero_renders_no_visible_border(df_xy):
+    """mark_hex(stroke="#ffffff") alone (stroke_width=0 default) renders with no stroke-width.
+
+    Per the locked literal semantics (spec §8): a stroke color with stroke_width left at
+    its 0 default produces no visible border. The Rust SVG writer only emits stroke-width
+    when the value is nonzero, so no stroke-width attribute appears on the hex polygons.
+    """
+    import re
+
+    svg = fe.Chart(df_xy).mark_hex(stroke="#ffffff").encode(x="x", y="y").show_svg()
+    assert "<svg" in svg
+    # The polygon paths carry stroke="#ffffff" but no stroke-width (0 = invisible).
+    assert 'stroke="#ffffff"' in svg
+    # Confirm no nonzero stroke-width on polygon paths. The SVG may have stroke-width
+    # from axis/colorbar chrome, but not from the hex polygon paths themselves.
+    # Find path elements with stroke="#ffffff" and assert they have no stroke-width.
+    poly_blocks = re.findall(r'<path\b[^>]*stroke="#ffffff"[^>]*/>', svg)
+    for block in poly_blocks:
+        assert "stroke-width" not in block, (
+            f"Expected no stroke-width on zero-width hex polygon but found: {block!r}"
+        )
+
+
 # ---- mark_swarm ----
 
 
