@@ -451,6 +451,28 @@ pub fn roc_auc(_py: Python<'_>, y_true: PyArray, y_score: PyArray) -> PyResult<f
 
 // --- Precision-recall curve --------------------------------------------------
 
+/// Reversed precision and recall arrays (length `m`, no trailing endpoint).
+///
+/// Iterates `k` in `(0..m).rev()` to match sklearn's `precision_recall_curve`
+/// ordering (highest threshold first).
+///
+/// - `precision[k] = tps[k] / (tps[k] + fps[k])`, or `1.0` when the denominator
+///   is zero (no predictions above the threshold).
+/// - `recall[k]    = tps[k] / total_pos`,          or `1.0` when `total_pos == 0`
+///   (callers that guard against the all-negative case before calling may rely on
+///   the guarded form; both branches are numerically correct).
+fn reversed_pr(fps: &[f64], tps: &[f64], total_pos: f64) -> (Vec<f64>, Vec<f64>) {
+    let m = tps.len();
+    let mut precision = Vec::with_capacity(m);
+    let mut recall = Vec::with_capacity(m);
+    for k in (0..m).rev() {
+        let denom = tps[k] + fps[k];
+        precision.push(if denom > 0.0 { tps[k] / denom } else { 1.0 });
+        recall.push(if total_pos > 0.0 { tps[k] / total_pos } else { 1.0 });
+    }
+    (precision, recall)
+}
+
 /// Pure-Rust PR curve core: reversed precision/recall plus the (1, 0) endpoint.
 /// `threshold` is equal length to precision/recall, with NaN in the final slot
 /// (sklearn's threshold array is one element shorter).
@@ -461,21 +483,21 @@ fn pr_curve_core(y_true: &[f64], y_score: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f6
     // sklearn precision_recall_curve: precision = tps / (tps + fps),
     // recall = tps / tps[-1]; reverse, then append the (1, 0) endpoint.
     let m = tps.len();
-    let mut precision = Vec::with_capacity(m + 1);
-    let mut recall = Vec::with_capacity(m + 1);
-    let mut threshold = Vec::with_capacity(m + 1);
+    let (mut precision, mut recall) = reversed_pr(&fps, &tps, total_pos);
 
-    for k in (0..m).rev() {
-        let denom = tps[k] + fps[k];
-        precision.push(if denom > 0.0 { tps[k] / denom } else { 1.0 });
-        recall.push(if total_pos > 0.0 { tps[k] / total_pos } else { 1.0 });
-        threshold.push(thresholds[k]);
-    }
+    // Reversed threshold column (one-to-one with precision/recall).
+    let mut threshold: Vec<f64> = thresholds.iter().rev().cloned().collect();
+    threshold.reserve(1);
+
     // Trailing endpoint (precision=1, recall=0); its threshold slot is NaN
     // because sklearn's threshold array is one element shorter.
     precision.push(1.0);
     recall.push(0.0);
     threshold.push(f64::NAN);
+
+    debug_assert_eq!(precision.len(), m + 1);
+    debug_assert_eq!(recall.len(), m + 1);
+    debug_assert_eq!(threshold.len(), m + 1);
 
     (precision, recall, threshold)
 }
@@ -517,15 +539,9 @@ fn average_precision_core(y_true: &[f64], y_score: &[f64]) -> f64 {
     }
 
     // Reversed precision/recall with the (P=1, R=0) endpoint, matching
-    // sklearn's precision_recall_curve.
-    let m = tps.len();
-    let mut precision = Vec::with_capacity(m + 1);
-    let mut recall = Vec::with_capacity(m + 1);
-    for k in (0..m).rev() {
-        let denom = tps[k] + fps[k];
-        precision.push(if denom > 0.0 { tps[k] / denom } else { 1.0 });
-        recall.push(tps[k] / total_pos);
-    }
+    // sklearn's precision_recall_curve.  The `total_pos > 0` guard above
+    // ensures the `else 1.0` recall branch in `reversed_pr` is never reached.
+    let (mut precision, mut recall) = reversed_pr(&fps, &tps, total_pos);
     precision.push(1.0);
     recall.push(0.0);
 
