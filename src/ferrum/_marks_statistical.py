@@ -623,6 +623,10 @@ class StatisticalMarksMixin:
                 raise ValueError("mark_qq() requires .encode(x=...) to specify the sample field")
             return desugar_qq(x_field, **kw)
 
+        # Expose desugar_qq's signature for the transform/style kwarg split in
+        # Chart._resolve_pending (inspect.signature follows __wrapped__).
+        _resolve_qq.__wrapped__ = desugar_qq
+
         return self._set_composite_mark(
             "qq",
             _resolve_qq,
