@@ -4,7 +4,7 @@ use crate::layout::{LegendLayout, SymbolKind, TextAnchor, ThemeInputs};
 use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke, to_scene_text_style};
 use crate::render::scale_resolve::ColorScale;
 use crate::render::svg::fmt_f;
-use ferrum_scene::SceneNode;
+use ferrum_scene::{RawAnchor, SceneNode};
 
 pub fn build_legend(
     legend: &LegendLayout,
@@ -63,13 +63,16 @@ pub fn build_legend(
                 pos, color,
             ));
         }
-        // Gradient defs as raw SVG.
+        // Gradient defs as raw SVG. Chrome: legend colorbar is fixed UI chrome,
+        // not positioned in data space — it does not track pan/zoom.
         nodes.push(SceneNode::Raw {
             svg: format!(
                 "<defs><linearGradient id=\"{grad_id}\" x1=\"0\" y1=\"1\" x2=\"0\" y2=\"0\">{stops_xml}</linearGradient></defs>"
             ),
+            anchor: RawAnchor::Chrome,
         });
         // Gradient-filled rect as raw SVG (FillStroke cannot express url(#…) fills).
+        // Chrome for the same reason as the defs block above.
         nodes.push(SceneNode::Raw {
             svg: format!(
                 "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"url(#{grad_id})\" stroke=\"{}\" stroke-width=\"0.5\"/>",
@@ -79,6 +82,7 @@ pub fn build_legend(
                 fmt_f(cb.bar_rect.h),
                 crate::render::color::fmt_svg(theme.colors.axis_line_color),
             ),
+            anchor: RawAnchor::Chrome,
         });
 
         // Tick marks + labels on the right edge.
@@ -162,7 +166,36 @@ pub fn build_legend(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{LegendDirection, LegendEntryLayout, LegendOrient, Rect};
+    use crate::layout::{ColorbarLayout, LegendDirection, LegendEntryLayout, LegendOrient, Rect};
+    use ferrum_scene::RawAnchor;
+
+    /// Colorbar Raw nodes must carry `anchor == Chrome` (they are legend chrome,
+    /// not positioned in data space).
+    #[test]
+    fn colorbar_raw_nodes_have_chrome_anchor() {
+        let legend = LegendLayout {
+            rect: Rect { x: 80.0, y: 0.0, w: 20.0, h: 100.0 },
+            orient: LegendOrient::Right,
+            direction: LegendDirection::Vertical,
+            entries: vec![],
+            title: None,
+            colorbar: Some(ColorbarLayout {
+                bar_rect: Rect { x: 85.0, y: 10.0, w: 10.0, h: 80.0 },
+                stops: vec![(0.0, "#0000ff".to_string()), (1.0, "#ff0000".to_string())],
+                ticks: vec![],
+            }),
+        };
+        let theme = ThemeInputs::default();
+        let nodes = build_legend(&legend, None, &theme);
+        let raw_nodes: Vec<_> = nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Raw { anchor, .. } = n { Some(*anchor) } else { None })
+            .collect();
+        assert!(!raw_nodes.is_empty(), "expected at least one Raw node for colorbar");
+        for anchor in raw_nodes {
+            assert_eq!(anchor, RawAnchor::Chrome, "all colorbar Raw nodes must be Chrome");
+        }
+    }
 
     #[test]
     fn legend_builds_circle_swatch_per_entry() {

@@ -146,7 +146,31 @@ pub enum SceneNode {
     },
     Raw {
         svg: String,
+        /// Whether this fragment is fixed chrome (e.g. legend colorbar, inset) or
+        /// data-anchored (tracks pan/zoom, e.g. annotation images in data space).
+        ///
+        /// The static SVG renderer ignores `anchor` and always emits `svg` verbatim.
+        /// WASM uses `anchor` to decide whether to apply the canvas transform.
+        /// Defaults to `Chrome` so scenes serialized before this field still
+        /// deserialize correctly.
+        #[serde(default)]
+        anchor: RawAnchor,
     },
+}
+
+/// Discriminant for `SceneNode::Raw` that controls pan/zoom behavior in the
+/// interactive (WASM) renderer. The static SVG renderer ignores it.
+///
+/// - `Chrome`: the fragment is fixed chrome (legend colorbar gradient, inset
+///   overlay) — it stays at its authored position during pan/zoom.
+/// - `Data`: the fragment is positioned in panel/data space (e.g. annotation
+///   image anchored to a data coordinate) — it rides the canvas transform.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RawAnchor {
+    #[default]
+    Chrome,
+    Data,
 }
 
 // ── 3.5 Style types ─────────────────────────────────────────────────

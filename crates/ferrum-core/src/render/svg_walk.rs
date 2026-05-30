@@ -255,7 +255,9 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
             }
             svg.g_close();
         }
-        SceneNode::Raw { svg: raw } => {
+        // `anchor` is intentionally ignored by the static SVG renderer — it is
+        // consumed only by the WASM renderer to decide pan/zoom behaviour.
+        SceneNode::Raw { svg: raw, .. } => {
             svg.raw(raw);
         }
     }

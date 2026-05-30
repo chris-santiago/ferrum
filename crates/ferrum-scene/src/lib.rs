@@ -10,6 +10,74 @@ pub use selection::*;
 mod tests {
     use super::*;
 
+    // ── RawAnchor serde round-trip ────────────────────────────────────────────
+
+    #[test]
+    fn raw_anchor_chrome_serializes_to_snake_case() {
+        let json = serde_json::to_string(&RawAnchor::Chrome).unwrap();
+        assert_eq!(json, "\"chrome\"");
+    }
+
+    #[test]
+    fn raw_anchor_data_serializes_to_snake_case() {
+        let json = serde_json::to_string(&RawAnchor::Data).unwrap();
+        assert_eq!(json, "\"data\"");
+    }
+
+    #[test]
+    fn raw_anchor_round_trips() {
+        for anchor in [RawAnchor::Chrome, RawAnchor::Data] {
+            let json = serde_json::to_string(&anchor).unwrap();
+            let back: RawAnchor = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, anchor);
+        }
+    }
+
+    /// A `SceneNode::Raw` JSON WITHOUT an `anchor` key must deserialize with
+    /// `anchor == Chrome` (serde back-compat default).
+    #[test]
+    fn raw_node_without_anchor_field_defaults_to_chrome() {
+        let json = r#"{"type":"raw","svg":"<rect/>"}"#;
+        let node: SceneNode = serde_json::from_str(json).unwrap();
+        match node {
+            SceneNode::Raw { anchor, .. } => {
+                assert_eq!(anchor, RawAnchor::Chrome, "missing anchor should default to Chrome");
+            }
+            _ => panic!("expected SceneNode::Raw"),
+        }
+    }
+
+    /// A `SceneNode::Raw` with explicit `anchor: "data"` deserializes correctly.
+    #[test]
+    fn raw_node_with_data_anchor_deserializes() {
+        let json = r#"{"type":"raw","svg":"<image/>","anchor":"data"}"#;
+        let node: SceneNode = serde_json::from_str(json).unwrap();
+        match node {
+            SceneNode::Raw { anchor, .. } => {
+                assert_eq!(anchor, RawAnchor::Data);
+            }
+            _ => panic!("expected SceneNode::Raw"),
+        }
+    }
+
+    /// Round-trip a `SceneNode::Raw` with `Chrome` anchor through JSON.
+    #[test]
+    fn raw_node_chrome_serde_round_trip() {
+        let node = SceneNode::Raw { svg: "<defs/>".to_string(), anchor: RawAnchor::Chrome };
+        let json = serde_json::to_string(&node).unwrap();
+        let back: SceneNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, node);
+    }
+
+    /// Round-trip a `SceneNode::Raw` with `Data` anchor through JSON.
+    #[test]
+    fn raw_node_data_serde_round_trip() {
+        let node = SceneNode::Raw { svg: "<image/>".to_string(), anchor: RawAnchor::Data };
+        let json = serde_json::to_string(&node).unwrap();
+        let back: SceneNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, node);
+    }
+
     #[test]
     fn scene_graph_serde_round_trip() {
         let scene = SceneGraph {
