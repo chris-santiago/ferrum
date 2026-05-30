@@ -1055,9 +1055,7 @@ class TestRawNodeNotSilentlyDropped:
         """
         scene = _render(_continuous_color_chart())
         raw_nodes = _find_raw_nodes(scene)
-        assert any(
-            "linearGradient" in node.get("svg", "") for node in raw_nodes
-        ), (
+        assert any("linearGradient" in node.get("svg", "") for node in raw_nodes), (
             "at least one Raw node must contain 'linearGradient'; "
             f"found raw svgs: {[n.get('svg', '')[:80] for n in raw_nodes]}"
         )
@@ -1092,11 +1090,7 @@ class TestRawNodeNotSilentlyDropped:
 
         scene = _render(_continuous_color_chart())
         raw_nodes = _find_raw_nodes(scene)
-        grad_frags = [
-            n.get("svg", "")
-            for n in raw_nodes
-            if "linearGradient" in n.get("svg", "")
-        ]
+        grad_frags = [n.get("svg", "") for n in raw_nodes if "linearGradient" in n.get("svg", "")]
         assert len(grad_frags) == 1, (
             "colorbar must emit exactly one gradient Raw fragment (defs + rect "
             f"merged); found {len(grad_frags)}"
@@ -1107,8 +1101,7 @@ class TestRawNodeNotSilentlyDropped:
         assert ids, "fragment must define the gradient id"
         # Every url(#X) consumer must reference an id DEFINED in the same fragment.
         assert set(urls) <= set(ids), (
-            f"colorbar fragment has a url(#…) with no co-located id def: "
-            f"defs={ids!r} refs={urls!r}"
+            f"colorbar fragment has a url(#…) with no co-located id def: defs={ids!r} refs={urls!r}"
         )
 
     def test_per_fragment_namespacing_distinguishes_colliding_colorbar_ids(self):
@@ -1158,7 +1151,10 @@ class TestRawNodeNotSilentlyDropped:
 
         spec, data, viewport, theme, chart_config = outer._render_inputs()
         result = render_interactive(
-            spec, data, viewport=viewport, theme=theme,
+            spec,
+            data,
+            viewport=viewport,
+            theme=theme,
             chart_config=chart_config or None,
         )
         scene = json.loads(result[0] if isinstance(result, tuple) else result)
@@ -1189,9 +1185,7 @@ class TestRawNodeNotSilentlyDropped:
                 result = re.sub(rf'\bid="{esc}"', f'id="{namespaced}"', result)
                 result = re.sub(rf"url\(#{esc}\)", f"url(#{namespaced})", result)
                 result = re.sub(rf'\bhref="#{esc}"', f'href="#{namespaced}"', result)
-                result = re.sub(
-                    rf'\bxlink:href="#{esc}"', f'xlink:href="#{namespaced}"', result
-                )
+                result = re.sub(rf'\bxlink:href="#{esc}"', f'xlink:href="#{namespaced}"', result)
             return result
 
         # ── NEW per-fragment namespacing ─────────────────────────────────────
@@ -1204,9 +1198,7 @@ class TestRawNodeNotSilentlyDropped:
             new_defined.update(re.findall(r'\bid="([^"]+)"', frag))
 
         # The two colliding colorbars must now carry DISTINCT namespaced ids.
-        new_colorbar_ids = sorted(
-            i for i in new_defined if i.endswith("-ferrum-colorbar-0")
-        )
+        new_colorbar_ids = sorted(i for i in new_defined if i.endswith("-ferrum-colorbar-0"))
         assert len(new_colorbar_ids) >= 2, (
             "per-fragment namespacing must give each colorbar a distinct id; "
             f"got {new_colorbar_ids!r}"

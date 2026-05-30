@@ -91,10 +91,7 @@ class TestMarkDensityStyle:
 
     def test_stroke_width_lands_on_mark_kwargs(self, density_df):
         resolved = (
-            fm.Chart(density_df)
-            .mark_density(stroke_width=2)
-            .encode(x="value:Q")
-            ._resolve_pending()
+            fm.Chart(density_df).mark_density(stroke_width=2).encode(x="value:Q")._resolve_pending()
         )
         assert resolved._mark_kwargs == {"stroke_width": 2}
 
@@ -112,10 +109,7 @@ class TestMarkDensityStyle:
     def test_alias_alpha_resolves_to_opacity(self, density_df):
         """alpha= is aliased to opacity= by MarkBase."""
         resolved = (
-            fm.Chart(density_df)
-            .mark_density(alpha=0.3)
-            .encode(x="value:Q")
-            ._resolve_pending()
+            fm.Chart(density_df).mark_density(alpha=0.3).encode(x="value:Q")._resolve_pending()
         )
         assert resolved._mark_kwargs.get("opacity") == pytest.approx(0.3)
         assert "alpha" not in resolved._mark_kwargs
@@ -152,9 +146,7 @@ class TestMarkDensityStyle:
 
     def test_byte_identity_no_style(self, density_df):
         """No style kwargs => _mark_kwargs is empty (byte-identity invariant)."""
-        resolved = (
-            fm.Chart(density_df).mark_density().encode(x="value:Q")._resolve_pending()
-        )
+        resolved = fm.Chart(density_df).mark_density().encode(x="value:Q")._resolve_pending()
         assert not resolved._mark_kwargs  # empty dict or falsy
 
     def test_rendered_svg_contains_rgba_fill(self, density_group_df):
@@ -173,9 +165,9 @@ class TestMarkDensityStyle:
         assert "rgba(" in svg, "Expected rgba() fill in SVG but got none"
         # Match alpha component 0.4 (may be formatted as 0.400, 0.4, etc.)
         rgba_values = re.findall(r"rgba\([^)]+\)", svg)
-        assert any(
-            re.search(r"0\.4\d*\)", v) for v in rgba_values
-        ), f"Expected alpha ~0.4 in rgba() calls; found: {rgba_values[:5]}"
+        assert any(re.search(r"0\.4\d*\)", v) for v in rgba_values), (
+            f"Expected alpha ~0.4 in rgba() calls; found: {rgba_values[:5]}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -186,38 +178,26 @@ class TestMarkDensityStyle:
 class TestMarkHistogramStyle:
     def test_opacity_lands_on_mark_kwargs(self, density_df):
         resolved = (
-            fm.Chart(density_df)
-            .mark_histogram(opacity=0.5)
-            .encode(x="value:Q")
-            ._resolve_pending()
+            fm.Chart(density_df).mark_histogram(opacity=0.5).encode(x="value:Q")._resolve_pending()
         )
         assert resolved._mark_kwargs == {"opacity": 0.5}
 
     def test_mark_is_bar(self, density_df):
         resolved = (
-            fm.Chart(density_df)
-            .mark_histogram(opacity=0.5)
-            .encode(x="value:Q")
-            ._resolve_pending()
+            fm.Chart(density_df).mark_histogram(opacity=0.5).encode(x="value:Q")._resolve_pending()
         )
         assert resolved._mark == "bar"
 
     def test_stroke_lands_on_mark_kwargs(self, density_df):
         resolved = (
-            fm.Chart(density_df)
-            .mark_histogram(stroke="red")
-            .encode(x="value:Q")
-            ._resolve_pending()
+            fm.Chart(density_df).mark_histogram(stroke="red").encode(x="value:Q")._resolve_pending()
         )
         assert resolved._mark_kwargs.get("stroke") == "red"
 
     def test_collision_bin_count_stays_on_transform(self, density_df):
         """bin_count= is a declared desugar_histogram param; must not appear in _mark_kwargs."""
         resolved = (
-            fm.Chart(density_df)
-            .mark_histogram(bin_count=10)
-            .encode(x="value:Q")
-            ._resolve_pending()
+            fm.Chart(density_df).mark_histogram(bin_count=10).encode(x="value:Q")._resolve_pending()
         )
         assert "bin_count" not in resolved._mark_kwargs
 
@@ -227,9 +207,7 @@ class TestMarkHistogramStyle:
             chart._resolve_pending()
 
     def test_byte_identity_no_style(self, density_df):
-        resolved = (
-            fm.Chart(density_df).mark_histogram().encode(x="value:Q")._resolve_pending()
-        )
+        resolved = fm.Chart(density_df).mark_histogram().encode(x="value:Q")._resolve_pending()
         assert not resolved._mark_kwargs  # empty dict or falsy
 
 
@@ -241,9 +219,7 @@ class TestMarkHistogramStyle:
 class TestMarkHexStyle:
     def test_opacity_applied_to_polygon_layer(self, hex_df):
         """opacity= (not a desugar_hex param) routes to style and merges into the polygon layer."""
-        resolved = (
-            fm.Chart(hex_df).mark_hex(opacity=0.5).encode(x="x", y="y")._resolve_pending()
-        )
+        resolved = fm.Chart(hex_df).mark_hex(opacity=0.5).encode(x="x", y="y")._resolve_pending()
         assert resolved._layers is not None
         poly_layer = next(l for l in resolved._layers if l.mark == "polygon")
         assert poly_layer.mark_kwargs.get("opacity") == 0.5
@@ -260,17 +236,14 @@ class TestMarkHexStyle:
         from ferrum.marks.heavy_stat import desugar_hex
 
         _, style_kwargs = _split_style_kwargs(desugar_hex, {"cmap": "viridis", "opacity": 0.7})
-        assert "cmap" not in style_kwargs, "cmap must not appear in style_kwargs (it's a transform param)"
+        assert "cmap" not in style_kwargs, (
+            "cmap must not appear in style_kwargs (it's a transform param)"
+        )
         assert "opacity" in style_kwargs
 
     def test_cmap_resolves_without_error(self, hex_df):
         """mark_hex(cmap='viridis') resolves without raising."""
-        resolved = (
-            fm.Chart(hex_df)
-            .mark_hex(cmap="viridis")
-            .encode(x="x", y="y")
-            ._resolve_pending()
-        )
+        resolved = fm.Chart(hex_df).mark_hex(cmap="viridis").encode(x="x", y="y")._resolve_pending()
         assert resolved._layers is not None
 
     def test_stroke_width_is_a_transform_param(self):
@@ -292,9 +265,7 @@ class TestMarkHexStyle:
 
     def test_byte_identity_no_style(self, hex_df):
         """No user style kwargs => polygon layer mark_kwargs contains only desugar defaults."""
-        resolved_no_style = (
-            fm.Chart(hex_df).mark_hex().encode(x="x", y="y")._resolve_pending()
-        )
+        resolved_no_style = fm.Chart(hex_df).mark_hex().encode(x="x", y="y")._resolve_pending()
         poly = next(l for l in resolved_no_style._layers if l.mark == "polygon")
         # desugar_hex always sets 'detail' and 'opacity' defaults; no user keys added
         assert poly.mark_kwargs == {"detail": "hex_id", "opacity": 1.0}
@@ -309,9 +280,7 @@ class TestMarkSmoothLayeredStyle:
     def test_opacity_on_all_layers(self, smooth_df):
         """opacity=0.4 must appear in every layer emitted by the CI smooth path."""
         chart = (
-            fm.Chart(smooth_df)
-            .mark_smooth(method="lm", ci=0.95, opacity=0.4)
-            .encode(x="x", y="y")
+            fm.Chart(smooth_df).mark_smooth(method="lm", ci=0.95, opacity=0.4).encode(x="x", y="y")
         )
         resolved = chart._resolve_pending()
         assert resolved._layers is not None

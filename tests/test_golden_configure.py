@@ -209,9 +209,7 @@ class TestConfigureGoldens:
         theme = fm.Theme(grid=True).update(
             grid=fm.Grid(major=True, minor=True, minor_color="#e8e8e8")
         )
-        chart = (
-            fm.Chart(sample_df).mark_point().encode(x="x", y="y").theme(theme)
-        )
+        chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y").theme(theme)
         _check_or_update("grid_minor.svg", chart.show_svg())
 
 
@@ -234,8 +232,26 @@ class TestCompositeMarkStyleGoldens:
         df = pl.DataFrame(
             {
                 "value": [
-                    1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5,
-                    2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0,
+                    1.0,
+                    1.5,
+                    2.0,
+                    2.5,
+                    3.0,
+                    3.5,
+                    4.0,
+                    4.5,
+                    5.0,
+                    5.5,
+                    2.5,
+                    3.0,
+                    3.5,
+                    4.0,
+                    4.5,
+                    5.0,
+                    5.5,
+                    6.0,
+                    6.5,
+                    7.0,
                 ],
                 "group": ["a"] * 10 + ["b"] * 10,
             }

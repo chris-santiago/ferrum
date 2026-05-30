@@ -6,6 +6,35 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.13.0
+
+*2026-05-30*
+
+### Added
+
+- `ferrum.Grid` value class for theme-level gridline control: major/minor levels with per-level styling (`major_color`/`minor_color`, `major_width`/`minor_width`, dash, opacity) plus bare `color`/`width`/`dash`/`opacity` shorthand that sets both levels
+- Minor gridlines on continuous axes (linear, log, time, pow, sqrt, symlog); log axes place minors at the 2–9 intra-decade multiples; categorical/discretizing axes have no minors
+- Constant mark-style kwargs on composite/statistical marks — `mark_density(opacity=0.4)`, `mark_smooth(stroke_width=2)`, `mark_boxplot(fill=...)`, etc. now work like simple marks, applied to every emitted layer
+- `mark_hex(stroke=, stroke_width=)` renders hex-cell borders
+- Native Rust diagnostic curve kernels (ROC, precision-recall, calibration, confusion matrix, threshold sweep); raw-array (`y_true=`/`y_pred=`) diagnostics are now fully scikit-learn-free
+- `SceneNode::Raw` rendering in the WASM interactive renderer (chrome-vs-data anchoring) and a dedicated `MarkBatchKind::Label` scene-graph kind
+
+### Fixed
+
+- Continuous-axis gridlines and ticks now coincide with the data marks they label (previously used uniform-slot placement, causing visible misalignment on continuous scales)
+- WASM colorbar gradient id collision when a colorbar chart was placed in an inset (outer and inset colorbars collapsed to one id)
+- Diagnostic kernels reject null-containing Arrow inputs instead of silently mishandling them
+- Degenerate single-class ROC matches scikit-learn's NaN convention
+
+### Changed
+
+- Diagnostic chart paths (precomputed and model-backed) route through the shared Rust kernels; scikit-learn is now required only when a fitted model is passed
+- Internal cohesion refactors (no API change): post-review cleanups in the scale-projection/grid code, consolidated diagnostic frame assembly into a shared `_curve_frames` module, and unified precision/recall cores in the PR kernel
+
+### Other
+
+- Documented `ferrum.Grid`, minor gridlines, and composite mark-style kwargs across the guides and API reference; clarified that raw-array diagnostics need no scikit-learn; regenerated guide PNGs for the gridline-coincidence rendering
+
 ## 0.12.0
 
 *2026-05-24*
