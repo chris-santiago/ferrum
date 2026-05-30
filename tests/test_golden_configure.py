@@ -216,6 +216,42 @@ class TestConfigureGoldens:
 
 
 # ---------------------------------------------------------------------------
+# Composite mark style goldens
+# ---------------------------------------------------------------------------
+
+
+class TestCompositeMarkStyleGoldens:
+    def test_density_styled(self):
+        """Overlapping translucent KDE areas via mark_density(opacity=0.4).
+
+        Renders two density curves (one per group) with 40% opacity, so the
+        overlap region shows through both fills. The resulting SVG must contain
+        rgba() fill values with the 0.4 alpha component. Inspect the PNG to
+        confirm two translucent overlapping area fills are visible.
+        """
+        import polars as pl
+
+        df = pl.DataFrame(
+            {
+                "value": [
+                    1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5,
+                    2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0,
+                ],
+                "group": ["a"] * 10 + ["b"] * 10,
+            }
+        )
+        chart = (
+            fm.Chart(df)
+            .mark_density(multiple="layer", opacity=0.4)
+            .encode(x="value:Q", color="group:N")
+            .properties(width=400, height=250)
+        )
+        svg = chart.show_svg()
+        assert "rgba(" in svg, "Expected rgba() fill in SVG for translucent density areas"
+        _check_or_update("density_styled.svg", svg)
+
+
+# ---------------------------------------------------------------------------
 # Combined golden
 # ---------------------------------------------------------------------------
 
