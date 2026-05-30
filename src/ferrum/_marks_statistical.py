@@ -53,6 +53,10 @@ class StatisticalMarksMixin:
             present: ``"layer"`` (default), ``"stack"``, ``"fill"``.
         position : Position, optional
             Position adjustment.
+        **mark_kwargs
+            Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
+            ``alpha``→``opacity``) forwarded to the rendered area/line layer.
 
         Returns
         -------
@@ -100,6 +104,10 @@ class StatisticalMarksMixin:
             present: ``"layer"`` (default), ``"stack"``, ``"dodge"``.
         position : Position, optional
             Position adjustment.
+        **mark_kwargs
+            Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
+            ``alpha``→``opacity``) forwarded to the rendered bar layer.
 
         Returns
         -------
@@ -155,6 +163,11 @@ class StatisticalMarksMixin:
             the output so downstream ``color=`` encoding maps to it.
         position : Position, optional
             Position adjustment.
+        **mark_kwargs
+            Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
+            ``alpha``→``opacity``) forwarded to all emitted layers (the regression
+            line, plus the CI ribbon when ``ci`` is set).
 
         Returns
         -------
@@ -750,7 +763,10 @@ class StatisticalMarksMixin:
         position : Position, optional
             Position adjustment.
         **mark_kwargs
-            Mark-style overrides forwarded to the polygon layer.
+            Constant mark-style overrides forwarded to the polygon layer.
+            Note: ``stroke`` and ``stroke_width`` are method parameters (cell borders);
+            ``cmap`` is a transform parameter (fill colormap). Other style kwargs
+            like ``opacity``, ``fill``, ``size`` override the polygon defaults.
 
         Returns
         -------

@@ -369,6 +369,15 @@ These marks compute a transform on your data before rendering — KDE, binning, 
 | [`mark_qq()`][ferrum.Chart.mark_qq] | Quantile-quantile plot against a reference distribution. |
 | [`mark_function()`][ferrum.Chart.mark_function] | Plot an arbitrary `f(x)` over a domain. |
 
+Transform kwargs (`bandwidth`, `bin_count`, `ci`, …) control the computation; they are independent of the constant mark-style kwargs above. Statistical marks accept both, and the style applies to **every layer the mark emits** — for `mark_smooth(ci=...)` that means the regression line and the CI ribbon together:
+
+```python
+# Overlapping translucent KDEs: opacity is a mark-style kwarg, bandwidth is a transform kwarg
+fm.Chart(df).mark_density(bandwidth="scott", opacity=0.4).encode(x="value:Q", color="group:N")
+```
+
+A few marks reserve a name for the transform: `mark_density(fill=False)` selects a line instead of a filled area, and `mark_hex` reads `cmap`/`stroke`/`stroke_width` as its own parameters — use `color=` for a constant hex fill.
+
 #### `mark_smooth` methods
 
 The smoothing method is selected with the `method=` kwarg. The computation runs in Rust.
@@ -563,7 +572,7 @@ chart = fm.Chart(df).mark_point(shape="|").encode(x="x", y="group:N")
 
 ## Friendly kwarg aliases
 
-Several mark parameters accept short, familiar names in addition to their canonical forms. These aliases are resolved before the spec is compiled — they have no runtime cost and produce identical output.
+Every mark — primitive (`mark_point`, `mark_line`), statistical (`mark_density`, `mark_histogram`, `mark_smooth`), and composite (`mark_boxplot`, `mark_violin`) — accepts the same constant mark-style kwargs (`opacity`, `fill`, `stroke`, `stroke_width`, `stroke_dash`, `size`), plus short, familiar aliases for them. Aliases are resolved before the spec is compiled — they have no runtime cost and produce identical output.
 
 | Alias | Canonical | Notes |
 |---|---|---|

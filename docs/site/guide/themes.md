@@ -171,6 +171,8 @@ Notes:
 | `area_opacity` | float | Default opacity for area marks. |
 | `opacity` | float | Global default opacity for all marks. |
 
+These are *defaults*. A constant mark-style kwarg on the mark itself wins — e.g. `mark_density(opacity=0.6)` overrides the theme's `area_opacity`. See [Marks & Encodings](marks-encodings.md#friendly-kwarg-aliases).
+
 ### Palettes
 
 | Key | Type | What it controls |
