@@ -348,15 +348,19 @@ fn roc_curve_core(
     let mut fpr = Vec::with_capacity(fps.len() + 1);
     let mut tpr = Vec::with_capacity(tps.len() + 1);
     let mut thr = Vec::with_capacity(thresholds.len() + 1);
-    fpr.push(0.0);
-    tpr.push(0.0);
+    // sklearn: when all-positive (fp_last == 0) every fpr value is NaN because
+    // it is computed as fps / fps[-1] = x / 0.  The leading origin slot follows
+    // the same division, so it is also NaN.  Symmetric reasoning applies to tpr
+    // when all-negative (tp_last == 0).  We implement this via the same division
+    // so the 0/0 → NaN semantic falls out naturally, matching sklearn 1.7.2.
+    fpr.push(0.0_f64 / fp_last); // NaN when fp_last == 0 (all-positive input)
+    tpr.push(0.0_f64 / tp_last); // NaN when tp_last == 0 (all-negative input)
     thr.push(f64::INFINITY);
     for &f in &fps {
-        // Normalize to rates; if no negatives/positives, sklearn yields NaN.
-        fpr.push(if fp_last > 0.0 { f / fp_last } else { f64::NAN });
+        fpr.push(f / fp_last);
     }
     for &t in &tps {
-        tpr.push(if tp_last > 0.0 { t / tp_last } else { f64::NAN });
+        tpr.push(t / tp_last);
     }
     thr.extend_from_slice(&thresholds);
 
@@ -930,8 +934,57 @@ mod tests {
         let ys = [0.1, 0.2, 0.3];
         assert!(roc_auc_core(&yt, &ys).is_nan());
         let (fpr, _, _) = roc_curve_core(&yt, &ys, true);
-        // No negatives, so fpr (after the origin) is NaN per sklearn.
-        assert!(fpr[1..].iter().all(|v| v.is_nan()));
+        // No negatives: ALL fpr values are NaN (including the leading origin
+        // slot) because fpr = fps / fps[-1] = x / 0, matching sklearn 1.7.2.
+        assert!(fpr.iter().all(|v| v.is_nan()));
+    }
+
+    // --- Degenerate single-class input: sklearn 1.7.2 byte-parity ----
+
+    #[test]
+    fn roc_all_negative_tpr_all_nan() {
+        // y_true = [0, 0, 0]: zero positives → tpr = tps / tps[-1] = x / 0 → all NaN.
+        // Verified against sklearn 1.7.2:
+        //   roc_curve([0,0,0], [0.1, 0.5, 0.9]) →
+        //     fpr = [0, 1/3, 2/3, 1], tpr = [nan, nan, nan, nan],
+        //     thresholds = [+inf, 0.9, 0.5, 0.1]
+        let yt = [0.0, 0.0, 0.0];
+        let ys = [0.1, 0.5, 0.9];
+        let (fpr, tpr, thr) = roc_curve_core(&yt, &ys, false);
+        // All tpr values are NaN.
+        assert!(
+            tpr.iter().all(|v| v.is_nan()),
+            "all-negative y_true must yield all-NaN tpr; got {tpr:?}"
+        );
+        // fpr is finite and matches the expected rates (0 positives → fps == cumulative counts).
+        assert!(fpr.iter().all(|v| v.is_finite()), "fpr must be finite; got {fpr:?}");
+        slices_approx_eq(&fpr, &[0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0], 1e-12);
+        // Leading threshold is +inf; remaining descend from highest score.
+        assert!(thr[0].is_infinite());
+        slices_approx_eq(&thr[1..], &[0.9, 0.5, 0.1], 1e-12);
+    }
+
+    #[test]
+    fn roc_all_positive_fpr_all_nan() {
+        // y_true = [1, 1, 1]: zero negatives → fpr = fps / fps[-1] = x / 0 → all NaN.
+        // Verified against sklearn 1.7.2:
+        //   roc_curve([1,1,1], [0.1, 0.5, 0.9]) →
+        //     fpr = [nan, nan, nan, nan], tpr = [0, 1/3, 2/3, 1],
+        //     thresholds = [+inf, 0.9, 0.5, 0.1]
+        let yt = [1.0, 1.0, 1.0];
+        let ys = [0.1, 0.5, 0.9];
+        let (fpr, tpr, thr) = roc_curve_core(&yt, &ys, false);
+        // All fpr values are NaN.
+        assert!(
+            fpr.iter().all(|v| v.is_nan()),
+            "all-positive y_true must yield all-NaN fpr; got {fpr:?}"
+        );
+        // tpr is finite and matches the expected rates.
+        assert!(tpr.iter().all(|v| v.is_finite()), "tpr must be finite; got {tpr:?}");
+        slices_approx_eq(&tpr, &[0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0], 1e-12);
+        // Leading threshold is +inf; remaining descend from highest score.
+        assert!(thr[0].is_infinite());
+        slices_approx_eq(&thr[1..], &[0.9, 0.5, 0.1], 1e-12);
     }
 
     #[test]
