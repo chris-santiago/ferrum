@@ -99,7 +99,7 @@ impl WasmRenderer {
             .map_err(|e| JsValue::from(WasmRenderError::SceneDeserialization(e.to_string())))?;
 
         let data = scene_load::load_scene_with_packed(&scene, packed_data);
-        let text_json = text_json::build_text_json(&data);
+        let text_json = text_json::build_overlay_json(&data);
         let buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &data);
         let clear_color = data.background;
 
@@ -191,6 +191,7 @@ impl WasmRenderer {
                 annotation_mesh_buffers: tr.new_data.annotation_mesh_buffers.clone(),
                 text_elements: tr.new_data.text_elements.clone(),
                 image_quads: tr.new_data.image_quads.clone(),
+                raw_fragments: tr.new_data.raw_fragments.clone(),
                 background: tr.new_data.background,
                 width: tr.new_data.width,
                 height: tr.new_data.height,
@@ -734,6 +735,7 @@ mod tests {
             annotation_mesh_buffers: VertexBuffers::new(),
             text_elements: vec![],
             image_quads: vec![],
+            raw_fragments: vec![],
             background: None,
             width: 500.0,
             height: 500.0,

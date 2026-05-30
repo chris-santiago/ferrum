@@ -132,6 +132,10 @@ pub struct SceneData {
     pub annotation_mesh_buffers: VertexBuffers<MeshVertex, u32>,
     pub text_elements: Vec<TextElementData>,
     pub image_quads: Vec<ImageQuad>,
+    /// Verbatim SVG fragments from `SceneNode::Raw` nodes (colorbar gradients,
+    /// insets, annotation images). Exported to JS for DOM injection into the
+    /// text-overlay `<svg>`. Mirrors the `text_elements` export path.
+    pub raw_fragments: Vec<RawFragmentData>,
     pub background: Option<[f32; 4]>,
     pub width: f32,
     pub height: f32,
@@ -152,6 +156,20 @@ pub struct TextElementData {
     pub y: f64,
     pub content: String,
     pub style: TextStyle,
+}
+
+/// A verbatim SVG fragment collected from `SceneNode::Raw`.
+///
+/// Exported to JS as a JSON array alongside text elements.  The JS overlay
+/// injects each fragment into the existing text-overlay `<svg>` — chrome
+/// fragments in a fixed `<g>` (stays put during pan/zoom), data-anchored
+/// fragments in a transform-tracking `<g>`.
+#[derive(Clone)]
+pub struct RawFragmentData {
+    /// The verbatim SVG markup to inject.
+    pub svg: String,
+    /// `"chrome"` (fixed) or `"data"` (tracks pan/zoom transform).
+    pub anchor: String,
 }
 
 #[derive(Clone)]
@@ -238,6 +256,9 @@ pub struct SceneCollector {
     pub annotation_mesh: VertexBuffers<MeshVertex, u32>,
     pub texts: Vec<TextElementData>,
     pub images: Vec<ImageQuad>,
+    /// Verbatim SVG fragments from `SceneNode::Raw` nodes.
+    /// Collected alongside text elements and exported to JS.
+    pub raws: Vec<RawFragmentData>,
     pub draw_commands: Vec<DrawCommand>,
     /// Snapshot of `circles.len()` at the last `emit` call.
     prev_c: usize,
@@ -261,6 +282,7 @@ impl SceneCollector {
             annotation_mesh: VertexBuffers::new(),
             texts: Vec::new(),
             images: Vec::new(),
+            raws: Vec::new(),
             draw_commands: Vec::new(),
             prev_c: 0,
             prev_r: 0,
@@ -283,6 +305,7 @@ impl SceneCollector {
             &mut self.static_mesh,
             &mut self.texts,
             &mut self.images,
+            &mut self.raws,
             batch_cap,
             batch_join,
         );
@@ -307,6 +330,7 @@ impl SceneCollector {
             &mut self.mesh,
             &mut self.texts,
             &mut self.images,
+            &mut self.raws,
             batch_cap,
             batch_join,
         );
@@ -334,6 +358,7 @@ impl SceneCollector {
             &mut self.annotation_mesh,
             &mut self.texts,
             &mut self.images,
+            &mut self.raws,
             batch_cap,
             batch_join,
         );
@@ -485,6 +510,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         annotation_mesh_buffers: collector.annotation_mesh,
         text_elements: collector.texts,
         image_quads: collector.images,
+        raw_fragments: collector.raws,
         background,
         width: scene.width as f32,
         height: scene.height as f32,
@@ -628,6 +654,7 @@ fn collect_nodes(
     mesh: &mut VertexBuffers<MeshVertex, u32>,
     texts: &mut Vec<TextElementData>,
     images: &mut Vec<ImageQuad>,
+    raws: &mut Vec<RawFragmentData>,
     batch_cap: Option<StrokeCap>,
     batch_join: Option<StrokeJoin>,
 ) {
@@ -701,12 +728,17 @@ fn collect_nodes(
                 }
             }
             SceneNode::Group { children, .. } => {
-                collect_nodes(children, circles, rects, mesh, texts, images, batch_cap, batch_join);
+                collect_nodes(children, circles, rects, mesh, texts, images, raws, batch_cap, batch_join);
             }
-            SceneNode::Raw { .. } => {
-                web_sys::console::warn_1(
-                    &"ferrum: Raw SVG node skipped in WASM renderer".into(),
-                );
+            SceneNode::Raw { svg, anchor } => {
+                let anchor_str = match anchor {
+                    ferrum_scene::RawAnchor::Chrome => "chrome",
+                    ferrum_scene::RawAnchor::Data => "data",
+                };
+                raws.push(RawFragmentData {
+                    svg: svg.clone(),
+                    anchor: anchor_str.to_string(),
+                });
             }
         }
     }
@@ -3605,5 +3637,178 @@ mod bug_hunt_tests {
         );
         // RGB channels are still linearized (opacity only affects alpha).
         assert!(result[0] > 0.0, "R channel must still be linearized");
+    }
+
+    // ── Task 6 (item 19): SceneNode::Raw collection ───────────────────
+    //
+    // Verifies that Raw nodes are collected into `SceneData::raw_fragments`
+    // instead of being dropped with a console.warn. This is the Rust-side
+    // regression test against the silent drop.
+
+    /// A scene with a single chrome Raw node must yield exactly one raw fragment
+    /// with anchor = "chrome".
+    #[test]
+    fn raw_chrome_node_collected_with_correct_anchor() {
+        use ferrum_scene::{Panel, MarkBatch, MarkBatchKind, BlendMode, RawAnchor};
+        use ferrum_scene::{CoordKind, Rect, SceneGraph, InteractionConfig};
+
+        let svg_content = r#"<linearGradient id="g"><stop offset="0" stop-color="red"/></linearGradient>"#;
+        let node = SceneNode::Raw {
+            svg: svg_content.to_string(),
+            anchor: RawAnchor::Chrome,
+        };
+
+        let scene = SceneGraph {
+            width: 400.0,
+            height: 300.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 50.0, y: 10.0, w: 300.0, h: 250.0 },
+                clip: Rect { x: 50.0, y: 10.0, w: 300.0, h: 250.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                },
+                grid: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![],
+                    data_indices: None, tooltips: None, hrefs: None,
+                    descriptions: None, keys: None,
+                    blend: BlendMode::Normal,
+                    stroke_cap: None, stroke_join: None, packed_instances: None,
+                }],
+                axes: vec![],
+                annotations: vec![node],
+                strip_title: vec![],
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let data = load_scene(&scene);
+        assert_eq!(
+            data.raw_fragments.len(), 1,
+            "SceneNode::Raw must be collected into raw_fragments, not dropped"
+        );
+        assert_eq!(
+            data.raw_fragments[0].anchor, "chrome",
+            "chrome anchor must serialize as 'chrome'"
+        );
+        assert!(
+            data.raw_fragments[0].svg.contains("linearGradient"),
+            "raw fragment must preserve svg content"
+        );
+    }
+
+    /// A scene with a data-anchored Raw node must yield anchor = "data".
+    #[test]
+    fn raw_data_node_collected_with_correct_anchor() {
+        use ferrum_scene::{RawAnchor, SceneGraph, InteractionConfig};
+
+        let node = SceneNode::Raw {
+            svg: r#"<image href="data:image/png;base64,abc" x="0" y="0"/>"#.to_string(),
+            anchor: RawAnchor::Data,
+        };
+
+        let scene = SceneGraph {
+            width: 400.0,
+            height: 300.0,
+            background: None,
+            title: vec![],
+            panels: vec![],
+            legend: vec![],
+            decorations: vec![node],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let data = load_scene(&scene);
+        assert_eq!(
+            data.raw_fragments.len(), 1,
+            "data-anchored Raw node must be collected"
+        );
+        assert_eq!(
+            data.raw_fragments[0].anchor, "data",
+            "data anchor must serialize as 'data'"
+        );
+    }
+
+    /// Two Raw nodes in different scene regions are both collected.
+    #[test]
+    fn multiple_raw_nodes_all_collected() {
+        use ferrum_scene::{RawAnchor, SceneGraph, InteractionConfig};
+
+        let chrome_node = SceneNode::Raw {
+            svg: "<g id='chrome-raw'/>".to_string(),
+            anchor: RawAnchor::Chrome,
+        };
+        let data_node = SceneNode::Raw {
+            svg: "<g id='data-raw'/>".to_string(),
+            anchor: RawAnchor::Data,
+        };
+
+        let scene = SceneGraph {
+            width: 400.0,
+            height: 300.0,
+            background: None,
+            title: vec![],
+            panels: vec![],
+            legend: vec![chrome_node],
+            decorations: vec![data_node],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let data = load_scene(&scene);
+        assert_eq!(
+            data.raw_fragments.len(), 2,
+            "both Raw nodes must be collected"
+        );
+        let anchors: Vec<&str> = data.raw_fragments.iter().map(|r| r.anchor.as_str()).collect();
+        assert!(anchors.contains(&"chrome"), "must have a chrome fragment");
+        assert!(anchors.contains(&"data"), "must have a data fragment");
+    }
+
+    /// A Raw node nested inside a Group must also be collected (recursive walk).
+    #[test]
+    fn raw_node_inside_group_is_collected() {
+        use ferrum_scene::{RawAnchor, SceneGraph, InteractionConfig};
+
+        let raw = SceneNode::Raw {
+            svg: "<rect id='nested'/>".to_string(),
+            anchor: RawAnchor::Chrome,
+        };
+        let group = SceneNode::Group {
+            attrs: vec![],
+            children: vec![raw],
+        };
+
+        let scene = SceneGraph {
+            width: 400.0,
+            height: 300.0,
+            background: None,
+            title: vec![],
+            panels: vec![],
+            legend: vec![group],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let data = load_scene(&scene);
+        assert_eq!(
+            data.raw_fragments.len(), 1,
+            "Raw node nested inside Group must be collected via recursive walk"
+        );
+        assert_eq!(data.raw_fragments[0].anchor, "chrome");
+        assert!(data.raw_fragments[0].svg.contains("nested"));
     }
 }
