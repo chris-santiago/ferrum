@@ -13,7 +13,7 @@ Ferrum builds every chart — scatter plot, faceted histogram, ROC curve, SHAP b
 For 'batteries included'-- ML diagnostic plots and interactive Jupyter rendering:
 
 ```bash
-pip install ferrum-viz[all]   # recommended — includes scikit-learn, SHAP, Jupyter interactive
+pip install ferrum-viz[all]   # recommended — optional deps for fitted-model diagnostics (scikit-learn), SHAP, and Jupyter interactive
 ```
 
 For a lean install without optional extras:

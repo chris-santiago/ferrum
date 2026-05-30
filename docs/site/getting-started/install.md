@@ -63,12 +63,14 @@ Ferrum ships four optional dependency groups for features that need external pac
 
 | Extra | What it adds | Install |
 |---|---|---|
-| `models` | Model diagnostics (ROC, confusion matrix, residuals, etc.) via sklearn | `pip install ferrum-viz[models]` |
+| `models` | Diagnostics from a **fitted model** (`fm.roc_chart(model, X, y)`, etc.) via sklearn. Not needed for the raw-array path — see below. | `pip install ferrum-viz[models]` |
 | `shap` | SHAP explanations (beeswarm, bar, waterfall) via sklearn + shap | `pip install ferrum-viz[shap]` |
 | `jupyter` | Interactive rendering via anywidget (WASM/GPU canvas in notebooks) | `pip install ferrum-viz[jupyter]` |
 | `all` | Everything above | `pip install ferrum-viz[all]` |
 
-The base install (`pip install ferrum-viz`) covers the grammar API, all marks, themes, composition, static SVG/PNG rendering, and DataFrame ingestion. The extras add sklearn-dependent diagnostics, SHAP, and Jupyter interactivity.
+The base install (`pip install ferrum-viz`) covers the grammar API, all marks, themes, composition, static SVG/PNG rendering, and DataFrame ingestion. The extras add fitted-model diagnostics (sklearn), SHAP explanations, and Jupyter interactivity.
+
+Diagnostic charts built from raw `y_true=` / `y_pred=` arrays need **none** of these extras: the metric computations (ROC, precision-recall, calibration, confusion matrix, threshold sweep) run on Ferrum's built-in Rust kernels. sklearn is required only when you pass a fitted model object.
 
 ## Optional dataframe ecosystems
 

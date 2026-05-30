@@ -114,7 +114,7 @@ The `report` value is a regular composed chart — `(roc | cm) & importances` la
 
 The boundary `ModelSource` enforces is the load-bearing one: it computes the derived diagnostic tables *once*, then every chart consumes the result. Without `ModelSource`, computing a ROC curve and a calibration curve on the same model would re-predict probabilities twice, and you'd have to thread that data plumbing through your own code.
 
-`ModelSource` also lazy-imports sklearn, shap, and umap as needed: `import ferrum` does not pull those packages into your process. They load only when you actually compute a diagnostic that requires them.
+`ModelSource` also lazy-imports sklearn, shap, and umap as needed: `import ferrum` does not pull those packages into your process. They load only when you actually compute a diagnostic that requires them — and only on the **fitted-model** path. The raw-array path (below) computes its metrics on Ferrum's native Rust kernels and imports none of them.
 
 ## Comparing multiple models
 
@@ -157,7 +157,7 @@ assert report.show_svg().startswith("<svg")
 
 ## Precomputed scores (no model required)
 
-Every classification and regression helper also accepts raw `y_true=` / `y_pred=` arrays instead of a fitted model. This is useful when you already have predictions — from a saved CSV, a batch inference job, a non-sklearn framework, or an evaluation pipeline that separates prediction from visualization:
+Every classification and regression helper also accepts raw `y_true=` / `y_pred=` arrays instead of a fitted model. This is useful when you already have predictions — from a saved CSV, a batch inference job, a non-sklearn framework, or an evaluation pipeline that separates prediction from visualization. This path is **fully sklearn-free**: ROC, precision-recall, calibration, confusion-matrix, and threshold-sweep metrics are computed by Ferrum's native Rust kernels, so no `[models]` extra is required.
 
 ```python
 import ferrum as fm

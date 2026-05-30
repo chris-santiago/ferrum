@@ -50,7 +50,7 @@ Default color schemes are perceptually uniform and colorblind-safe (OKabe-Ito fo
 - **No matplotlib dependency.** Ever. Not as a fallback, not for "legacy support."
 - **No mutable global state.** No `rcParams`, no `set_theme()` that mutates a module-level object. Themes are values passed to charts.
 - **No magic inference that silently fails.** If Ferrum infers a scale or encoding type incorrectly, it raises a descriptive error with a suggested fix.
-- **Sklearn-compatible, not sklearn-dependent.** The model diagnostics layer works with any object that implements `predict`, `predict_proba`, or `transform`. Sklearn is not imported unless the user's model is from sklearn.
+- **Sklearn-compatible, not sklearn-dependent.** The model diagnostics layer works with any object that implements `predict`, `predict_proba`, or `transform`. Sklearn is not imported unless the user passes a fitted sklearn model (or uses an sklearn-backed extra such as SHAP). The raw-array path (`y_true=` / `y_pred=`) computes ROC, precision-recall, calibration, confusion-matrix, and threshold-sweep metrics on native Rust kernels with no sklearn dependency.
 - **One output format per render call.** A chart produces SVG, PNG, HTML (WASM bundle), or a Vega-Lite JSON spec. Producing all four from the same spec is supported; producing ambiguous mixed output is not.
 
 ---
