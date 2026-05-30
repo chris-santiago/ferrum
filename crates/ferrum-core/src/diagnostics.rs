@@ -229,8 +229,27 @@ pub fn py_kendall_tau_b<'py>(
 
 // --- Arrow extraction helpers ------------------------------------------------
 
+/// Reject Arrow null entries (validity-bitmap nulls).
+///
+/// Returns an error message string so the check can be tested without a live
+/// Python interpreter. Call sites convert it to `PyValueError` via
+/// `.map_err(PyValueError::new_err)`.
+///
+/// NaN is a valid f64 *value* and is never counted by `null_count`, so a
+/// `Float64Array` containing NaN has `null_count == 0` and passes this check.
+/// Only genuine Arrow nulls (entries absent from the validity bitmap) are
+/// rejected.
+fn check_no_nulls(null_count: usize, name: &str) -> Result<(), String> {
+    if null_count > 0 {
+        return Err(format!("{name} must not contain nulls"));
+    }
+    Ok(())
+}
+
 fn as_f64_slice<'a>(arr: &'a PyArray, name: &str) -> PyResult<&'a [f64]> {
-    arr.array()
+    let array_ref = arr.array();
+    check_no_nulls(array_ref.null_count(), name).map_err(PyValueError::new_err)?;
+    array_ref
         .as_any()
         .downcast_ref::<Float64Array>()
         .map(|a| a.values().as_ref())
@@ -238,7 +257,9 @@ fn as_f64_slice<'a>(arr: &'a PyArray, name: &str) -> PyResult<&'a [f64]> {
 }
 
 fn as_i64_slice<'a>(arr: &'a PyArray, name: &str) -> PyResult<&'a [i64]> {
-    arr.array()
+    let array_ref = arr.array();
+    check_no_nulls(array_ref.null_count(), name).map_err(PyValueError::new_err)?;
+    array_ref
         .as_any()
         .downcast_ref::<Int64Array>()
         .map(|a| a.values().as_ref())
@@ -825,6 +846,7 @@ pub fn prf_at_thresholds(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::Array;
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol || (a.is_nan() && b.is_nan())
@@ -1192,5 +1214,46 @@ mod tests {
 
         // Drop unused variable warning suppression.
         let _ = l;
+    }
+
+    // ---- Null-reject guard (check_no_nulls) ----
+
+    /// A null entry (`null_count > 0`) must be rejected.
+    ///
+    /// `check_no_nulls` returns `Result<(), String>` so it can be exercised
+    /// without a live Python interpreter (no `PyValueError::new_err` needed).
+    #[test]
+    fn null_guard_rejects_nonzero_null_count() {
+        // Build a Float64Array that genuinely has Arrow nulls.
+        let arr = Float64Array::from(vec![Some(1.0_f64), None, Some(2.0)]);
+        let null_count = arr.null_count();
+        assert!(null_count > 0, "test array must have at least one null");
+
+        let result = check_no_nulls(null_count, "y_score");
+        assert!(
+            result.is_err(),
+            "check_no_nulls must return Err when null_count > 0"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("y_score") && msg.contains("nulls"),
+            "error message must mention the field name and 'nulls'; got: {msg}"
+        );
+    }
+
+    /// `null_count == 0` must pass, even when the backing buffer contains NaN.
+    ///
+    /// Arrow stores NaN as a regular f64 value; the validity bitmap is fully
+    /// set, so `null_count` is zero. The guard must NOT fire.
+    #[test]
+    fn null_guard_passes_nan_values_with_zero_null_count() {
+        // A Float64Array built from plain f64 values (including NaN) has no
+        // Arrow nulls, so null_count() == 0.
+        let arr = Float64Array::from(vec![1.0_f64, f64::NAN, 2.0]);
+        assert_eq!(arr.null_count(), 0, "NaN values must not set the null bitmap");
+        assert!(
+            check_no_nulls(arr.null_count(), "y_score").is_ok(),
+            "NaN-containing array with null_count==0 must pass the guard"
+        );
     }
 }
