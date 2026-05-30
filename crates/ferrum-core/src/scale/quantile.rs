@@ -74,6 +74,15 @@ impl QuantileScale {
             self.0.domain.len(), self.0.range, self.0.quantiles
         )
     }
+
+    /// Discretizing scales have no numeric continuum to subdivide into minors.
+    ///
+    /// Returns empty — a documented semantic absence, not an error.
+    // Wired to the render layer in Task 2 of the grid subsystem.
+    #[allow(dead_code)]
+    pub(crate) fn minor_ticks_internal(&self) -> Vec<crate::scale::ticks::Tick> {
+        Vec::new()
+    }
 }
 
 #[pymethods]
@@ -164,5 +173,18 @@ mod tests {
         };
         let t = s.ticks(None);
         assert_eq!(t.len(), 4);
+    }
+
+    /// Discretizing (quantile) scales must return empty for minor ticks.
+    #[test]
+    fn quantile_minor_ticks_always_empty() {
+        let sorted = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let cuts = compute_quantile_cuts(&sorted, 3);
+        let scale = QuantileScale(QuantileScaleData {
+            domain: sorted,
+            range: vec![10.0, 20.0, 30.0],
+            quantiles: cuts,
+        });
+        assert!(scale.minor_ticks_internal().is_empty());
     }
 }

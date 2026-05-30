@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 
 use super::core::validate_continuous_pair;
-use super::ticks::{nice_step, nice_ticks};
+use super::ticks::{minor_ticks_default, nice_step, nice_ticks, Tick};
 
 /// Internal data for a linear-affine scale. Shared by [`LinearScale`] and
 /// [`super::time::TimeScale`] (time scales use the same domain-to-range
@@ -128,6 +128,25 @@ impl LinearScale {
     /// Crate-internal tick call.
     pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> {
         self.0.ticks(count)
+    }
+
+    /// Return minor ticks between the major ticks for this scale.
+    ///
+    /// Linear scales use the default subdivision algorithm: each major interval
+    /// is divided into [`DEFAULT_MINOR_SUBDIVISIONS`] sub-intervals (5), yielding
+    /// 4 interior minor ticks per gap.  For a plain linear scale the transformed
+    /// space is identical to the data domain, so the subdivision is uniform in
+    /// data space.
+    ///
+    /// The major tick count is fixed at 10 (the conventional default).  The
+    /// minor tick *density* is always controlled by the locked
+    /// `DEFAULT_MINOR_SUBDIVISIONS` constant (5 sub-intervals → 4 interior
+    /// minors per major gap); there is no per-call override.
+    // Wired to the render layer in Task 2 of the grid subsystem.
+    #[allow(dead_code)]
+    pub(crate) fn minor_ticks_internal(&self) -> Vec<Tick> {
+        let majors = self.0.ticks(10);
+        minor_ticks_default(&majors, |x| x)
     }
 
     pub(crate) fn range_pair(&self) -> [f64; 2] {
@@ -285,5 +304,59 @@ mod tests {
         let n1 = s.clone().nice();
         let n2 = n1.clone().nice();
         assert_eq!(n1, n2);
+    }
+
+    // ── Minor tick tests ─────────────────────────────────────────────────────
+
+    /// Regression: major positions for [0, 10] must be exactly 0,1,2,...,10.
+    #[test]
+    fn linear_major_positions_unchanged() {
+        let scale = LinearScale::new_internal(
+            vec![0.0, 10.0], vec![0.0, 600.0], false, false,
+        );
+        let majors = scale.ticks_internal(10);
+        assert_eq!(majors.first().copied(), Some(0.0));
+        assert_eq!(majors.last().copied(), Some(10.0));
+        assert_eq!(majors.len(), 11);
+    }
+
+    /// Minor count per major interval = DEFAULT_MINOR_SUBDIVISIONS - 1 = 4.
+    ///
+    /// `minor_ticks_internal()` uses the fixed major count of 10.  For domain
+    /// [0, 10] that gives 11 major positions (0..=10), so 10 intervals × 4
+    /// interior minors = 40 total minors.
+    #[test]
+    fn linear_minor_count_per_interval() {
+        let scale = LinearScale::new_internal(
+            vec![0.0, 10.0], vec![0.0, 600.0], false, false,
+        );
+        // minor_ticks_internal() uses the fixed major count of 10 internally.
+        let majors = scale.ticks_internal(10);
+        let minors = scale.minor_ticks_internal();
+        // 10 intervals × (DEFAULT_MINOR_SUBDIVISIONS - 1) = 10 × 4 = 40
+        let expected = (majors.len() - 1) * 4; // 40
+        assert_eq!(minors.len(), expected, "minors: {minors:?}");
+        assert!(minors.iter().all(|t| !t.is_major));
+    }
+
+    /// Minors lie strictly between consecutive major positions.
+    #[test]
+    fn linear_minors_strictly_between_majors() {
+        let scale = LinearScale::new_internal(
+            vec![0.0, 100.0], vec![0.0, 600.0], false, false,
+        );
+        // minor_ticks_internal() uses the fixed major count of 10 internally.
+        let majors = scale.ticks_internal(10);
+        let minors = scale.minor_ticks_internal();
+        let major_set: std::collections::HashSet<u64> =
+            majors.iter().map(|&v| v.to_bits()).collect();
+        for m in &minors {
+            assert!(
+                !major_set.contains(&m.position.to_bits()),
+                "minor at {} coincides with major",
+                m.position,
+            );
+            assert!(m.position >= 0.0 && m.position <= 100.0, "minor out of domain: {}", m.position);
+        }
     }
 }

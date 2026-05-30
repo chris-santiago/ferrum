@@ -2,7 +2,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use super::core::validate_continuous_pair;
-use super::ticks::{nice_step, nice_ticks};
+use super::ticks::{minor_ticks_default, nice_step, nice_ticks, Tick};
 
 fn symlog_fwd(x: f64, c: f64) -> f64 {
     x.signum() * (x.abs() / c).ln_1p()
@@ -128,6 +128,27 @@ impl SymlogScale {
 
     pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> { self.0.ticks(count) }
 
+    /// Return minor ticks subdivided in **symlog-transformed** space.
+    ///
+    /// Symlog maps raw values via `sign(x) * ln(1 + |x|/c)`.  Major ticks
+    /// from `nice_ticks` are evenly spaced in the raw domain; to produce
+    /// visually-uniform minors this method converts each major to symlog space,
+    /// subdivides uniformly there, and maps back via the symlog inverse.
+    ///
+    /// The major tick count is fixed at 10 (the conventional default).  Minor
+    /// tick density is always `DEFAULT_MINOR_SUBDIVISIONS` (5 sub-intervals →
+    /// 4 interior minors per gap); there is no per-call override.
+    // Wired to the render layer in Task 2 of the grid subsystem.
+    #[allow(dead_code)]
+    pub(crate) fn minor_ticks_internal(&self) -> Vec<Tick> {
+        let majors = self.0.ticks(10);
+        let c = self.0.constant;
+        let fwd = move |v: f64| symlog_fwd(v, c);
+        let inv = move |t: f64| symlog_inv(t, c);
+        let transformed: Vec<f64> = majors.iter().map(|&v| fwd(v)).collect();
+        minor_ticks_default(&transformed, inv)
+    }
+
     pub(crate) fn range_pair(&self) -> [f64; 2] { self.0.range }
 
     pub(crate) fn domain_pair(&self) -> [f64; 2] { self.0.domain }
@@ -249,5 +270,77 @@ mod tests {
         assert!(y1 > y2, "expected y1={y1} > y2={y2}: smaller constant compresses more");
         assert!(y1 > 0.5 && y1 < 1.0, "y1={y1} out of (0.5,1.0)");
         assert!(y2 > 0.5 && y2 < 1.0, "y2={y2} out of (0.5,1.0)");
+    }
+
+    // ── Minor tick tests ─────────────────────────────────────────────────────
+
+    /// Regression: symlog major positions are unchanged after adding minor support.
+    ///
+    /// `minor_ticks_internal()` uses the fixed major count of 10 internally.
+    #[test]
+    fn symlog_major_positions_unchanged() {
+        let scale = SymlogScale::new_internal(
+            vec![-100.0, 100.0], vec![0.0, 600.0], 1.0, false, false,
+        );
+        // minor_ticks_internal uses count=10 for majors; compare at the same count.
+        let before = scale.ticks_internal(10);
+        let _ = scale.minor_ticks_internal();
+        let after = scale.ticks_internal(10);
+        assert_eq!(before, after);
+    }
+
+    /// Symlog minors must be evenly spaced in the SYMLOG-transformed space,
+    /// not in the raw data domain.  In transformed space minor gaps are uniform;
+    /// in raw domain they are non-uniform (closer together near zero).
+    ///
+    /// `minor_ticks_internal()` uses the fixed major count of 10.
+    #[test]
+    fn symlog_minors_evenly_spaced_in_transformed_space() {
+        let constant = 1.0_f64;
+        let scale = SymlogScale::new_internal(
+            vec![-100.0, 100.0], vec![0.0, 600.0], constant, false, false,
+        );
+        // minor_ticks_internal uses count=10 for majors.
+        let majors = scale.ticks_internal(10);
+        let minors = scale.minor_ticks_internal();
+
+        assert!(!minors.is_empty(), "expected non-empty symlog minors");
+
+        // Minors must not coincide with majors.
+        let major_set: std::collections::HashSet<u64> =
+            majors.iter().map(|&v| v.to_bits()).collect();
+        for m in &minors {
+            assert!(!major_set.contains(&m.position.to_bits()),
+                "symlog minor at {} coincides with major", m.position);
+            assert!(!m.is_major);
+            assert!(m.position.is_finite(), "symlog minor is non-finite");
+        }
+
+        // Verify uniformity in symlog space for the first major interval.
+        // DEFAULT_MINOR_SUBDIVISIONS = 5 → step = (t1-t0)/5, 4 interior minors.
+        if majors.len() >= 2 {
+            let t0 = symlog_fwd(majors[0], constant);
+            let t1 = symlog_fwd(majors[1], constant);
+            let step = (t1 - t0) / 5.0; // 5 = DEFAULT_MINOR_SUBDIVISIONS
+            // Interior transformed positions: t0+step, t0+2*step, t0+3*step, t0+4*step.
+            let group_minors: Vec<f64> = minors
+                .iter()
+                .filter(|m| {
+                    m.position > majors[0].min(majors[1]) &&
+                    m.position < majors[0].max(majors[1])
+                })
+                .map(|m| symlog_fwd(m.position, constant))
+                .collect();
+            assert_eq!(group_minors.len(), 4,
+                "expected 4 interior minors in first interval, got {}: {group_minors:?}",
+                group_minors.len());
+            for (i, &got) in group_minors.iter().enumerate() {
+                let expected = t0 + (i as f64 + 1.0) * step;
+                assert!(
+                    (got - expected).abs() < 1e-9,
+                    "symlog minor {i} in transformed space: expected {expected:.6}, got {got:.6}"
+                );
+            }
+        }
     }
 }

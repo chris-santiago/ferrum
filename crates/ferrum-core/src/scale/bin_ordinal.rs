@@ -48,6 +48,17 @@ impl BinOrdinalScaleData {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BinOrdinalScale(BinOrdinalScaleData);
 
+impl BinOrdinalScale {
+    /// Discretizing scales have no numeric continuum to subdivide into minors.
+    ///
+    /// Returns empty — a documented semantic absence, not an error.
+    // Wired to the render layer in Task 2 of the grid subsystem.
+    #[allow(dead_code)]
+    pub(crate) fn minor_ticks_internal(&self) -> Vec<crate::scale::ticks::Tick> {
+        Vec::new()
+    }
+}
+
 #[pymethods]
 impl BinOrdinalScale {
     #[new]
@@ -138,5 +149,15 @@ mod tests {
             scheme: None,
         };
         assert_eq!(s.num_bins(), 5);
+    }
+
+    /// Discretizing (bin-ordinal) scales must return empty for minor ticks.
+    #[test]
+    fn bin_ordinal_minor_ticks_always_empty() {
+        let scale = BinOrdinalScale(BinOrdinalScaleData {
+            bins: vec![10.0, 20.0, 30.0],
+            scheme: None,
+        });
+        assert!(scale.minor_ticks_internal().is_empty());
     }
 }

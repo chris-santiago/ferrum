@@ -2,7 +2,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use super::core::validate_continuous_pair;
-use super::ticks::{nice_step, nice_ticks};
+use super::ticks::{minor_ticks_default, nice_step, nice_ticks, Tick};
 
 #[derive(Debug, Clone, PartialEq)]
 struct PowScaleData {
@@ -117,6 +117,30 @@ impl PowScale {
         self.0.ticks(count)
     }
 
+    /// Return minor ticks subdivided in the **power-transformed** space.
+    ///
+    /// Major ticks from `nice_ticks` are evenly spaced in the raw domain, but
+    /// they map to non-uniform pixel positions because the power transform is
+    /// non-linear.  To produce visually-uniform minor ticks, this method
+    /// converts each major position to power space (`x^exponent`), subdivides
+    /// uniformly there, and maps back via the inverse (`y^(1/exponent)`).
+    ///
+    /// The major tick count is fixed at 10 (the conventional default).  Minor
+    /// tick density is always `DEFAULT_MINOR_SUBDIVISIONS` (5 sub-intervals →
+    /// 4 interior minors per gap); there is no per-call override.
+    // Wired to the render layer in Task 2 of the grid subsystem.
+    #[allow(dead_code)]
+    pub(crate) fn minor_ticks_internal(&self) -> Vec<Tick> {
+        let majors = self.0.ticks(10);
+        let exp = self.0.exponent;
+        // Forward: data → transformed (same sign preserved via signum).
+        let fwd = |v: f64| v.signum() * v.abs().powf(exp);
+        // Inverse: transformed → data.
+        let inv = move |t: f64| t.signum() * t.abs().powf(1.0 / exp);
+        let transformed: Vec<f64> = majors.iter().map(|&v| fwd(v)).collect();
+        minor_ticks_default(&transformed, inv)
+    }
+
     pub(crate) fn range_pair(&self) -> [f64; 2] {
         self.0.range
     }
@@ -226,6 +250,38 @@ impl PowScale {
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct SqrtScale(PowScaleData, Option<f64>, bool);
+
+impl SqrtScale {
+    /// Crate-internal scale call (no PyO3 boundary).
+    // Wired to the render layer in Task 2 of the grid subsystem.
+    #[allow(dead_code)]
+    pub(crate) fn scale_internal(&self, x: f64) -> f64 {
+        self.0.scale(x)
+    }
+
+    /// Crate-internal tick call.
+    // Wired to the render layer in Task 2 of the grid subsystem.
+    #[allow(dead_code)]
+    pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> {
+        self.0.ticks(count)
+    }
+
+    /// Return minor ticks subdivided in sqrt-transformed space (exponent=0.5).
+    ///
+    /// The major tick count is fixed at 10.  Minor tick density is always
+    /// `DEFAULT_MINOR_SUBDIVISIONS` (5 sub-intervals → 4 interior minors per
+    /// gap); there is no per-call override.
+    // Wired to the render layer in Task 2 of the grid subsystem.
+    #[allow(dead_code)]
+    pub(crate) fn minor_ticks_internal(&self) -> Vec<Tick> {
+        let majors = self.0.ticks(10);
+        // SqrtScale has exponent = 0.5: fwd = sqrt, inv = square.
+        let fwd = |v: f64| v.signum() * v.abs().powf(0.5);
+        let inv = |t: f64| t.signum() * t.abs().powf(2.0);
+        let transformed: Vec<f64> = majors.iter().map(|&v| fwd(v)).collect();
+        minor_ticks_default(&transformed, inv)
+    }
+}
 
 #[pymethods]
 impl SqrtScale {
@@ -375,5 +431,103 @@ mod tests {
             true,
         );
         assert_eq!(s.0.exponent, 0.5);
+    }
+
+    // ── Minor tick tests ─────────────────────────────────────────────────────
+
+    /// Regression: pow scale major positions must be unchanged by minor tick addition.
+    ///
+    /// `minor_ticks_internal()` uses the fixed major count of 10 internally;
+    /// the explicit `ticks_internal(5)` call here uses count=5.  We compare
+    /// the major list at count=10 (what minor_ticks_internal uses) to verify
+    /// no mutation occurs.
+    #[test]
+    fn pow_major_positions_unchanged() {
+        let scale = PowScale::new_internal(vec![0.0, 100.0], vec![0.0, 600.0], 2.0, false);
+        let before = scale.ticks_internal(10);
+        let _ = scale.minor_ticks_internal();
+        let after = scale.ticks_internal(10);
+        assert_eq!(before, after);
+    }
+
+    /// Pow(exponent=2) minors must be evenly spaced in the TRANSFORMED (squared) space,
+    /// not in the raw data domain.
+    ///
+    /// For [0,100] with exponent=2, the transformed range is [0,10000].
+    /// `minor_ticks_internal()` uses the fixed major count of 10 internally.
+    /// Major ticks at (nice_ticks with count=10 in raw space) e.g. 0,10,20,...,100.
+    /// In transformed space: 0,100,400,900,...,10000 — NOT uniform.
+    /// Minors are computed by subdividing uniformly in transformed space, then
+    /// inverting; in the raw domain they will be at non-uniform positions.
+    #[test]
+    fn pow_minors_evenly_spaced_in_transformed_space() {
+        let scale = PowScale::new_internal(vec![0.0, 100.0], vec![0.0, 600.0], 2.0, false);
+        // minor_ticks_internal uses fixed count=10 for majors.
+        let majors = scale.ticks_internal(10);
+        let minors = scale.minor_ticks_internal();
+
+        // Minors should be non-empty.
+        assert!(!minors.is_empty(), "expected non-empty minors for pow scale");
+
+        // All minors must be within domain and not coincide with majors.
+        let major_set: std::collections::HashSet<u64> =
+            majors.iter().map(|&v| v.to_bits()).collect();
+        for m in &minors {
+            assert!(!major_set.contains(&m.position.to_bits()),
+                "minor at {} coincides with major", m.position);
+            assert!(m.position >= 0.0 && m.position <= 100.0,
+                "minor out of domain: {}", m.position);
+            assert!(!m.is_major);
+        }
+
+        // Verify the minors are evenly spaced in transformed (squared) space:
+        // Pick the first group (between major[0] and major[1]).
+        if majors.len() >= 2 {
+            let m0 = majors[0].signum() * majors[0].abs().powf(2.0);
+            let m1 = majors[1].signum() * majors[1].abs().powf(2.0);
+            // DEFAULT_MINOR_SUBDIVISIONS = 5 → 4 interior positions
+            let step = (m1 - m0) / 5.0;
+            let expected_transformed: Vec<f64> = (1..5).map(|i| m0 + i as f64 * step).collect();
+            let minor_positions_in_group: Vec<f64> = minors
+                .iter()
+                .filter(|t| t.position > majors[0] && t.position < majors[1])
+                .map(|t| t.position.signum() * t.position.abs().powf(2.0))
+                .collect();
+            assert_eq!(
+                minor_positions_in_group.len(),
+                expected_transformed.len(),
+                "wrong count of minors in first interval"
+            );
+            for (got, exp) in minor_positions_in_group.iter().zip(&expected_transformed) {
+                assert!(
+                    (got - exp).abs() < 1e-6,
+                    "minor in transformed space: expected {exp}, got {got}"
+                );
+            }
+        }
+    }
+
+    /// Sqrt scale minors are evenly spaced in sqrt-transformed space.
+    ///
+    /// `minor_ticks_internal()` uses the fixed major count of 10 internally.
+    #[test]
+    fn sqrt_minors_evenly_spaced_in_sqrt_space() {
+        let scale = SqrtScale(
+            PowScaleData { domain: [0.0, 100.0], range: [0.0, 600.0], exponent: 0.5, clamp: false },
+            None,
+            true,
+        );
+        let minors = scale.minor_ticks_internal();
+        assert!(!minors.is_empty(), "expected non-empty sqrt minors");
+
+        // minor_ticks_internal uses fixed count=10 for majors.
+        let majors = scale.ticks_internal(10);
+        let major_set: std::collections::HashSet<u64> =
+            majors.iter().map(|&v| v.to_bits()).collect();
+        for m in &minors {
+            assert!(!major_set.contains(&m.position.to_bits()),
+                "sqrt minor at {} coincides with major", m.position);
+            assert!(!m.is_major);
+        }
     }
 }

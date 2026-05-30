@@ -2,7 +2,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use super::core::validate_continuous_pair;
-use super::ticks::nice_ticks;
+use super::ticks::{minor_ticks_log, nice_ticks, Tick};
 
 #[derive(Debug, Clone, PartialEq)]
 struct LogScaleData {
@@ -184,6 +184,25 @@ impl LogScale {
 
     pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> { self.0.ticks(count) }
 
+    /// Return minor ticks using the standard 2-9 intra-decade multiples.
+    ///
+    /// For base-10 log scales this produces the visually-standard minor ticks
+    /// that crowd towards the top of each decade.  For other bases the minor
+    /// tick list is empty (2-9 multiples are not meaningful for non-decimal
+    /// logarithm bases).
+    ///
+    /// The major tick count is fixed at 10 (the conventional default) to
+    /// determine which decade boundaries act as major ticks.  The minor tick
+    /// *positions* are always the 2-9 intra-decade multiples, independent of
+    /// any count parameter.
+    // Wired to the render layer in Task 2 of the grid subsystem.
+    #[allow(dead_code)]
+    pub(crate) fn minor_ticks_internal(&self) -> Vec<Tick> {
+        let majors = self.0.ticks(10);
+        let [lo, hi] = self.0.domain;
+        minor_ticks_log(lo, hi, self.0.base, &majors)
+    }
+
     pub(crate) fn range_pair(&self) -> [f64; 2] { self.0.range }
 
     pub(crate) fn domain_pair(&self) -> [f64; 2] { self.0.domain }
@@ -359,5 +378,98 @@ mod tests {
         assert!(y.is_finite(), "x=0 with clamp must be finite, got {y}");
         // 0 < domain[0], so the clamped result is the lower range bound.
         assert_eq!(y, 0.0);
+    }
+
+    // ── Minor tick tests ─────────────────────────────────────────────────────
+
+    /// Regression: major tick positions must be stable (not changed by adding minor support).
+    ///
+    /// `minor_ticks_internal()` uses the fixed major count of 10 internally.
+    /// The stability check compares `ticks_internal(10)` before and after — the
+    /// same count that `minor_ticks_internal()` uses — so the comparison is exact.
+    ///
+    /// For [1, 1000] with count=10, span_decades=3 < 10 so the decade-per-tick path
+    /// is NOT triggered; but for count=3 (span_decades >= count) it would be.  We
+    /// also verify the count=3 path produces the expected integer-exponent ticks.
+    #[test]
+    fn log_major_positions_unchanged() {
+        let scale = LogScale::new_internal(
+            vec![1.0, 1000.0], vec![0.0, 600.0], 10.0, false, false,
+        );
+        // Verify count=3 triggers integer-exponent path (3 decades >= count=3).
+        let majors3 = scale.ticks_internal(3);
+        assert!(majors3.iter().any(|&v| (v - 1.0).abs() < 1e-9), "1 not in {majors3:?}");
+        assert!(majors3.iter().any(|&v| (v - 10.0).abs() < 1e-9), "10 not in {majors3:?}");
+        assert!(majors3.iter().any(|&v| (v - 100.0).abs() < 1e-9), "100 not in {majors3:?}");
+        assert!(majors3.iter().any(|&v| (v - 1000.0).abs() < 1e-9), "1000 not in {majors3:?}");
+
+        // Stability: calling minor_ticks_internal() does not mutate the scale.
+        // Compare at count=10 (the count minor_ticks_internal uses internally).
+        let before = scale.ticks_internal(10);
+        let _ = scale.minor_ticks_internal();
+        let after = scale.ticks_internal(10);
+        assert_eq!(before, after);
+    }
+
+    /// Log minors for [1, 100] land at 2-9 and 20-90.
+    ///
+    /// `minor_ticks_internal()` uses count=10 for majors internally.
+    /// For [1,100] with count=10, the major ticks include 1, 10, 100 as the
+    /// decade boundaries, so the 2-9 and 20-90 multiples are all produced.
+    #[test]
+    fn log_minors_at_standard_multiples() {
+        let scale = LogScale::new_internal(
+            vec![1.0, 100.0], vec![0.0, 600.0], 10.0, false, false,
+        );
+        let minors = scale.minor_ticks_internal();
+        assert_eq!(minors.len(), 16, "expected 16 minors, got {}: {:?}", minors.len(), minors);
+
+        let positions: Vec<f64> = minors.iter().map(|t| t.position).collect();
+        for m in [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0,
+                  20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0] {
+            assert!(
+                positions.iter().any(|&p| (p - m).abs() < 1e-9),
+                "{m} not in {positions:?}",
+            );
+        }
+        assert!(minors.iter().all(|t| !t.is_major));
+    }
+
+    /// Log minors have non-uniform spacing in log space (crowding at top of decade).
+    ///
+    /// `minor_ticks_internal()` uses count=10 for majors internally.
+    #[test]
+    fn log_minors_nonuniform_in_linear_space() {
+        let scale = LogScale::new_internal(
+            vec![1.0, 100.0], vec![0.0, 600.0], 10.0, false, false,
+        );
+        let minors = scale.minor_ticks_internal();
+        // First decade: 2,3,...,9 — uniform in LINEAR space but NOT in LOG space.
+        let first_decade: Vec<f64> = minors
+            .iter()
+            .filter(|t| t.position >= 2.0 && t.position < 10.0)
+            .map(|t| t.position)
+            .collect();
+        let log_gaps: Vec<f64> = first_decade
+            .windows(2)
+            .map(|w| w[1].ln() - w[0].ln())
+            .collect();
+        let first_gap = log_gaps[0];
+        let all_equal = log_gaps.iter().all(|&g| (g - first_gap).abs() < 1e-9);
+        assert!(!all_equal, "log-space gaps should be non-uniform: {log_gaps:?}");
+    }
+
+    /// Log major positions are unchanged by the introduction of minor ticks.
+    ///
+    /// Both calls use count=10 (the fixed internal count for `minor_ticks_internal`).
+    #[test]
+    fn log_majors_are_preserved_after_minor_call() {
+        let scale = LogScale::new_internal(
+            vec![1.0, 1000.0], vec![0.0, 600.0], 10.0, false, false,
+        );
+        let before = scale.ticks_internal(10);
+        let _ = scale.minor_ticks_internal(); // side-effect free
+        let after = scale.ticks_internal(10);
+        assert_eq!(before, after);
     }
 }
