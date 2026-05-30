@@ -1078,77 +1078,107 @@ class TestRawNodeNotSilentlyDropped:
                 f"got anchor={node.get('anchor')!r}"
             )
 
-    def test_id_namespacing_prevents_collision_across_fragments(self):
-        """Two Raw fragments each defining the same id must receive distinct ids
-        after namespacing in the JS injection layer.
+    def test_colorbar_emits_single_self_contained_raw_fragment(self):
+        """The continuous-color colorbar must emit ONE Raw fragment that carries
+        both its gradient ``<defs>`` and the consuming ``<rect fill="url(#…)">``.
 
-        This test verifies the namespacing contract at the Python/scene level
-        by asserting that the raw SVG strings from two separate Raw nodes both
-        contain an id attribute (confirming they have ids to namespace), and
-        that the scene carries both fragments as distinct nodes.
-
-        The actual namespacing (ferrum-raw-{n}-X) is applied in JS at injection
-        time, not in the Rust scene graph. This test verifies the precondition:
-        the scene carries multiple Raw nodes with ids that would collide without
-        namespacing.
-        """
-        scene = _render(_continuous_color_chart())
-        raw_nodes = _find_raw_nodes(scene)
-        # Continuous-color chart produces at least 2 Raw nodes (defs + rect).
-        id_bearing = [n for n in raw_nodes if 'id="' in n.get("svg", "")]
-        # Both the linearGradient defs and the rect's url(#...) reference should exist.
-        has_url_ref = any('url(#' in n.get("svg", "") for n in raw_nodes)
-        if id_bearing:
-            # The id is present in the scene graph SVG strings (to be namespaced in JS).
-            assert len(id_bearing) >= 1, "must have at least one id-bearing Raw node"
-            # If there are multiple Raw nodes sharing the same id, JS namespacing is needed.
-            all_ids: list[str] = []
-            import re
-            for node in raw_nodes:
-                all_ids.extend(re.findall(r'id="([^"]+)"', node.get("svg", "")))
-            # The presence of matching url(#...) references confirms namespacing is needed.
-            if has_url_ref and len(all_ids) > 0:
-                # This validates the precondition for JS namespacing.
-                assert True  # namespacing precondition confirmed
-
-    def test_cross_fragment_id_reference_integrity(self):
-        """Cross-fragment url(#X) / href="#X" references must resolve after
-        single-pass shared-namespace rewriting.
-
-        The legend colorbar emits the gradient definition and its consuming
-        rect as TWO separate Raw nodes:
-          Node A: <defs><linearGradient id="grad_legend_color">...</linearGradient></defs>
-          Node B: <rect ... fill="url(#grad_legend_color)" .../>
-
-        With per-fragment (old) namespacing, Node A's id becomes
-        ferrum-raw-0-grad_legend_color, but Node B has no id definitions so its
-        url(#grad_legend_color) reference is left untouched → dangling reference.
-
-        With single-pass (new) namespacing, the global id map is built from all
-        fragments, so BOTH the definition and the reference are rewritten to the
-        same namespaced id → reference integrity preserved.
-
-        This test replicates the JS namespacing logic in Python and asserts that
-        every url(#X) / href="#X" reference whose target X is defined anywhere
-        in the fragment set resolves after rewriting.  It also asserts that the
-        OLD per-fragment logic would produce a dangling reference (failing case).
+        Part 1 of the R5 fix merged the previously-separate defs and rect Raw
+        nodes into a single self-contained fragment.  Co-locating the id
+        definition with its only consumer is the precondition that lets the JS
+        overlay namespace each fragment independently (Part 2) without dangling
+        the ``url(#…)`` reference.
         """
         import re
 
         scene = _render(_continuous_color_chart())
         raw_nodes = _find_raw_nodes(scene)
+        grad_frags = [
+            n.get("svg", "")
+            for n in raw_nodes
+            if "linearGradient" in n.get("svg", "")
+        ]
+        assert len(grad_frags) == 1, (
+            "colorbar must emit exactly one gradient Raw fragment (defs + rect "
+            f"merged); found {len(grad_frags)}"
+        )
+        frag = grad_frags[0]
+        ids = re.findall(r'\bid="([^"]+)"', frag)
+        urls = re.findall(r"url\(#([^)]+)\)", frag)
+        assert ids, "fragment must define the gradient id"
+        # Every url(#X) consumer must reference an id DEFINED in the same fragment.
+        assert set(urls) <= set(ids), (
+            f"colorbar fragment has a url(#…) with no co-located id def: "
+            f"defs={ids!r} refs={urls!r}"
+        )
+
+    def test_per_fragment_namespacing_distinguishes_colliding_colorbar_ids(self):
+        """Two self-contained Raw fragments that each author ``ferrum-colorbar-0``
+        must receive DISTINCT ids after per-fragment namespacing — the R5 bug.
+
+        Trigger: a continuous-color chart (outer colorbar) that also contains an
+        ``.inset()`` of another continuous-color chart.  The inset is rendered in
+        a separate pass and embedded verbatim as one nested-``<svg>`` Raw
+        fragment, so it carries its OWN ``ferrum-colorbar-0``.  Both fragments are
+        self-contained (defs + consumer co-located).
+
+        This test replicates both the OLD shared-map logic and the NEW
+        per-fragment logic from ``ferrum-anywidget.js``:
+
+        - OLD shared map: one id→namespaced map across ALL fragments collapses
+          both ``ferrum-colorbar-0`` defs to the SAME namespaced id → one
+          ``<linearGradient>`` wins, the other colorbar renders with the wrong
+          gradient.
+        - NEW per-fragment: each fragment gets prefix ``ferrum-raw-{load}-{frag}-``
+          so the two colorbars get distinct ids AND no reference dangles.
+        """
+        import re
+
+        from ferrum.structural import Inset
+
+        df = pl.DataFrame(
+            {
+                "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+                "y": [2.0, 4.0, 1.0, 3.0, 5.0],
+                "z": [0.1, 0.4, 0.2, 0.9, 0.6],
+            }
+        )
+        inner = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q", color="z:Q")
+            .properties(width=300, height=200)
+        )
+        outer = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q", color="z:Q")
+            .properties(width=700, height=500)
+        )
+        outer = outer + Inset(chart=inner, bounds=(0.55, 0.1, 0.95, 0.55))
+
+        spec, data, viewport, theme, chart_config = outer._render_inputs()
+        result = render_interactive(
+            spec, data, viewport=viewport, theme=theme,
+            chart_config=chart_config or None,
+        )
+        scene = json.loads(result[0] if isinstance(result, tuple) else result)
+        raw_nodes = _find_raw_nodes(scene)
         svgs = [n.get("svg", "") for n in raw_nodes]
 
-        # ── Simulate the CORRECT single-pass namespacing ──────────────────────
+        # Precondition: two distinct fragments must each author ferrum-colorbar-0.
+        colliding = [s for s in svgs if 'id="ferrum-colorbar-0"' in s]
+        assert len(colliding) >= 2, (
+            "fixture must produce two Raw fragments that each author "
+            f"id='ferrum-colorbar-0' (outer + inset colorbars); found {len(colliding)}"
+        )
+
         load_idx = 0
 
-        def _build_id_map_single_pass(fragments: list[str]) -> dict[str, str]:
-            """Mirror of JS _buildIdMap: one pass over all fragments."""
+        def _build_id_map(fragment: str, prefix: str) -> dict[str, str]:
+            """Mirror of JS _buildIdMap (per fragment)."""
             id_map: dict[str, str] = {}
-            for frag in fragments:
-                for id_val in re.findall(r'\bid="([^"]+)"', frag):
-                    if id_val not in id_map:
-                        id_map[id_val] = f"ferrum-raw-{load_idx}-{id_val}"
+            for id_val in re.findall(r'\bid="([^"]+)"', fragment):
+                id_map.setdefault(id_val, f"{prefix}{id_val}")
             return id_map
 
         def _apply_id_map(svg: str, id_map: dict[str, str]) -> str:
@@ -1157,77 +1187,53 @@ class TestRawNodeNotSilentlyDropped:
             for id_val, namespaced in id_map.items():
                 esc = re.escape(id_val)
                 result = re.sub(rf'\bid="{esc}"', f'id="{namespaced}"', result)
-                result = re.sub(rf'url\(#{esc}\)', f'url(#{namespaced})', result)
+                result = re.sub(rf"url\(#{esc}\)", f"url(#{namespaced})", result)
                 result = re.sub(rf'\bhref="#{esc}"', f'href="#{namespaced}"', result)
-                result = re.sub(rf'\bxlink:href="#{esc}"', f'xlink:href="#{namespaced}"', result)
+                result = re.sub(
+                    rf'\bxlink:href="#{esc}"', f'xlink:href="#{namespaced}"', result
+                )
             return result
 
-        id_map = _build_id_map_single_pass(svgs)
-        rewritten = [_apply_id_map(s, id_map) for s in svgs]
+        # ── NEW per-fragment namespacing ─────────────────────────────────────
+        new_rewritten = [
+            _apply_id_map(s, _build_id_map(s, f"ferrum-raw-{load_idx}-{i}-"))
+            for i, s in enumerate(svgs)
+        ]
+        new_defined: set[str] = set()
+        for frag in new_rewritten:
+            new_defined.update(re.findall(r'\bid="([^"]+)"', frag))
 
-        # Collect all defined ids across all rewritten fragments.
-        defined_ids: set[str] = set()
-        for frag in rewritten:
-            defined_ids.update(re.findall(r'\bid="([^"]+)"', frag))
-
-        # Collect all url(#X) and href="#X" references across all rewritten fragments.
-        referenced_ids: set[str] = set()
-        for frag in rewritten:
-            referenced_ids.update(re.findall(r'url\(#([^)]+)\)', frag))
-            referenced_ids.update(re.findall(r'\bhref="#([^"]+)"', frag))
-            referenced_ids.update(re.findall(r'\bxlink:href="#([^"]+)"', frag))
-
-        # Only care about references whose target was in the original defined-id set
-        # (external hrefs, data URIs, etc. are not in id_map so remain unchanged).
-        namespaced_targets = set(id_map.values())
-        dangling = referenced_ids & namespaced_targets - defined_ids
-        assert dangling == set(), (
-            f"single-pass namespacing left dangling id references: {dangling!r}. "
-            "This means url(#X) in one fragment references an id defined in another "
-            "fragment that was not rewritten because it was scoped to that fragment only."
+        # The two colliding colorbars must now carry DISTINCT namespaced ids.
+        new_colorbar_ids = sorted(
+            i for i in new_defined if i.endswith("-ferrum-colorbar-0")
         )
+        assert len(new_colorbar_ids) >= 2, (
+            "per-fragment namespacing must give each colorbar a distinct id; "
+            f"got {new_colorbar_ids!r}"
+        )
+        assert len(new_colorbar_ids) == len(set(new_colorbar_ids))
 
-        # ── Show that the OLD per-fragment logic WOULD produce a dangling ref ─
-        # (Only run this check if we actually have cross-fragment refs to test.)
-        def _old_per_fragment_namespace(svg: str, n: int) -> str:
-            """Mirror of old JS _namespaceSvgIds: per-fragment scope."""
-            local_ids = set(re.findall(r'\bid="([^"]+)"', svg))
-            if not local_ids:
-                return svg  # old code returned early → url(#X) left untouched!
-            result = svg
-            for id_val in local_ids:
-                esc = re.escape(id_val)
-                result = re.sub(rf'\bid="{esc}"', f'id="ferrum-raw-{n}-{id_val}"', result)
-                result = re.sub(rf'url\(#{esc}\)', f'url(#ferrum-raw-{n}-{id_val})', result)
-            return result
+        # No url(#X)/href references in any fragment may dangle after namespacing.
+        for frag in new_rewritten:
+            refs = set(re.findall(r"url\(#([^)]+)\)", frag))
+            refs |= set(re.findall(r'\bhref="#([^"]+)"', frag))
+            refs |= set(re.findall(r'\bxlink:href="#([^"]+)"', frag))
+            dangling = {r for r in refs if "ferrum-raw-" in r} - new_defined
+            assert dangling == set(), (
+                f"per-fragment namespacing left dangling references: {dangling!r}"
+            )
 
-        old_rewritten = [_old_per_fragment_namespace(s, i) for i, s in enumerate(svgs)]
+        # ── OLD shared-map namespacing collapses the two colorbars (R5 bug) ───
+        shared_map: dict[str, str] = {}
+        for frag in svgs:
+            for id_val in re.findall(r'\bid="([^"]+)"', frag):
+                shared_map.setdefault(id_val, f"ferrum-raw-{load_idx}-{id_val}")
+        old_rewritten = [_apply_id_map(s, shared_map) for s in svgs]
         old_defined: set[str] = set()
         for frag in old_rewritten:
             old_defined.update(re.findall(r'\bid="([^"]+)"', frag))
-
-        # Collect references in the old-rewritten set that look like namespaced ids.
-        old_referenced: set[str] = set()
-        for frag in old_rewritten:
-            # url(#X) references that match the namespaced prefix pattern.
-            old_referenced.update(re.findall(r'url\(#(ferrum-raw-\d+-[^)]+)\)', frag))
-
-        # Collect url(#X) references that are still in their UN-namespaced form
-        # (i.e., the old logic left them unrewritten because the consuming fragment
-        # had no ids of its own).  These are the dangling references.
-        # A reference is dangling if it still points at an id in the original set
-        # but that id no longer exists (it was renamed in another fragment).
-        all_original_ids = set(id_map.keys())  # ids that were defined somewhere
-        old_dangling_urls: set[str] = set()
-        for frag in old_rewritten:
-            for ref in re.findall(r'url\(#([^)]+)\)', frag):
-                if ref in all_original_ids and ref not in old_defined:
-                    old_dangling_urls.add(ref)
-
-        if svgs and any('url(#' in s for s in svgs) and id_map:
-            assert old_dangling_urls, (
-                "Expected the OLD per-fragment logic to produce at least one dangling "
-                "url(#X) reference (cross-fragment ref not rewritten), but none found. "
-                "Either the chart no longer produces cross-fragment refs or the test "
-                "fixture needs updating."
-            )
+        old_colorbar_ids = sorted(i for i in old_defined if i.endswith("ferrum-colorbar-0"))
+        assert old_colorbar_ids == ["ferrum-raw-0-ferrum-colorbar-0"], (
+            "OLD shared-map logic must collapse both ferrum-colorbar-0 fragments "
+            f"to ONE namespaced id (the R5 bug); got {old_colorbar_ids!r}"
+        )

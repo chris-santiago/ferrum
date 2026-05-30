@@ -134,23 +134,28 @@ function _placeTextSvg(svgEl, texts) {
 //   .ferrum-raw-chrome — fixed during pan/zoom (legend colorbar, inset)
 //   .ferrum-raw-data   — receives the same canvas transform (data-anchored)
 //
-// ID namespacing: ALL fragments are scanned in a SINGLE pass to build one
-// shared id map, so a <defs> definition in fragment A and its url(#...) or
-// href="#..." consumer in fragment B both resolve to the SAME namespaced id.
-// The legend colorbar emits the gradient definition and its consuming rect as
-// two separate Raw nodes; per-fragment namespacing would leave the consumer's
-// url(#...) reference pointing at a non-existent id.
+// ID namespacing: each fragment is namespaced INDEPENDENTLY with its own
+// per-fragment prefix.  Every ferrum Raw fragment is self-contained — each
+// `id="X"` definition and all of its `url(#X)` / `href="#X"` consumers live in
+// the SAME fragment (the legend colorbar's gradient def and its consuming rect
+// are emitted as one merged Raw node; insets embed a complete nested <svg>).
+// Because no id is referenced across a fragment boundary, per-fragment prefixes
+// are both collision-free and reference-complete: two fragments that each
+// author `id="ferrum-colorbar-0"` (e.g. an outer continuous-color chart plus an
+// .inset() of another) get DISTINCT namespaced ids instead of collapsing to one
+// (R5 — a single shared map silently let one <linearGradient> win, rendering the
+// other colorbar with the wrong gradient).
 //
-// Namespacing contract:
-//   - Every id="X" defined across all fragments is mapped to
-//     id="ferrum-raw-{loadIdx}-X" where {loadIdx} is a per-loadScene counter.
-//   - In every fragment: id="X" → id="ferrum-raw-{loadIdx}-X"
-//   - In every fragment: url(#X) → url(#ferrum-raw-{loadIdx}-X)
-//   - In every fragment: href="#X" → href="#ferrum-raw-{loadIdx}-X"
-//   - In every fragment: xlink:href="#X" → xlink:href="#ferrum-raw-{loadIdx}-X"
-//   - Only ids that are actually defined somewhere in the fragment set are
-//     rewritten.  External URLs, data URIs, and unrelated # anchors are left
-//     untouched.
+// Namespacing contract (per fragment, where {fragIdx} is its index):
+//   - Every id="X" defined IN this fragment maps to
+//     id="ferrum-raw-{loadIdx}-{fragIdx}-X" ({loadIdx} is a per-loadScene
+//     counter so ids from stale scenes can't collide with a new scene).
+//   - In this fragment: id="X" → id="ferrum-raw-{loadIdx}-{fragIdx}-X"
+//   - In this fragment: url(#X) → url(#ferrum-raw-{loadIdx}-{fragIdx}-X)
+//   - In this fragment: href="#X" → href="#ferrum-raw-{loadIdx}-{fragIdx}-X"
+//   - In this fragment: xlink:href="#X" → xlink:href="#ferrum-raw-{loadIdx}-{fragIdx}-X"
+//   - Only ids actually DEFINED in this fragment are rewritten.  External URLs,
+//     data URIs, and unrelated # anchors are left untouched.
 //
 // Injection is done ONCE per loadScene call.  On pan/zoom ticks, only the
 // data group's transform attribute is updated — no DOM re-parse, no re-inject.
@@ -166,20 +171,19 @@ function _placeTextSvg(svgEl, texts) {
 //
 // The overlay remains pointer-events:none at all times.
 
-// Build the global id→namespaced-id map from all fragments.
-// loadIdx is incremented by _buildRawOverlay on each loadScene call to ensure
-// ids from stale scenes can't collide with the new scene.
-function _buildIdMap(rawFragments, loadIdx) {
+// Build the id→namespaced-id map for ONE fragment.  Every ferrum Raw fragment
+// is self-contained, so namespacing per fragment is both collision-free across
+// fragments and reference-complete within each one.  prefix encodes both the
+// per-loadScene counter and the fragment index so ids from stale scenes — or
+// from sibling fragments that authored the same id — can never collide.
+function _buildIdMap(fragmentSvg, prefix) {
   const idMap = new Map(); // id → namespaced id
   const idDefRe = /\bid="([^"]+)"/g;
-  for (const frag of rawFragments) {
-    let m;
-    idDefRe.lastIndex = 0;
-    while ((m = idDefRe.exec(frag.svg)) !== null) {
-      const id = m[1];
-      if (!idMap.has(id)) {
-        idMap.set(id, `ferrum-raw-${loadIdx}-${id}`);
-      }
+  let m;
+  while ((m = idDefRe.exec(fragmentSvg)) !== null) {
+    const id = m[1];
+    if (!idMap.has(id)) {
+      idMap.set(id, `${prefix}${id}`);
     }
   }
   return idMap;
@@ -228,9 +232,6 @@ function _buildRawOverlay(svgEl, rawFragments) {
   const loadIdx = _rawLoadCounter++;
   const ns = 'http://www.w3.org/2000/svg';
 
-  // Single-pass: build the global id map from all fragments.
-  const idMap = _buildIdMap(rawFragments, loadIdx);
-
   // Chrome group: fixed, no pan/zoom transform.
   const chromeG = document.createElementNS(ns, 'g');
   chromeG.setAttribute('class', 'ferrum-raw-chrome');
@@ -241,8 +242,12 @@ function _buildRawOverlay(svgEl, rawFragments) {
   dataG.setAttribute('class', 'ferrum-raw-data');
   dataG.style.pointerEvents = 'none';
 
-  for (const frag of rawFragments) {
-    // Apply the shared id map to this fragment.
+  rawFragments.forEach((frag, fragIdx) => {
+    // Namespace this fragment with its own per-fragment prefix.  Every ferrum
+    // Raw fragment is self-contained (ids and their references are co-located),
+    // so per-fragment namespacing never dangles a reference and never collides
+    // with a sibling fragment that authored the same id.
+    const idMap = _buildIdMap(frag.svg, `ferrum-raw-${loadIdx}-${fragIdx}-`);
     const namespacedSvg = _applyIdMap(frag.svg, idMap);
     // Wrap in a <g> and insert via innerHTML — only the fragment content,
     // not a full SVG document.
@@ -261,7 +266,7 @@ function _buildRawOverlay(svgEl, rawFragments) {
       // 'chrome' (default) — fixed overlay.
       chromeG.appendChild(wrapper);
     }
-  }
+  });
 
   // Append both groups. Chrome painted first, data on top.
   svgEl.appendChild(chromeG);
