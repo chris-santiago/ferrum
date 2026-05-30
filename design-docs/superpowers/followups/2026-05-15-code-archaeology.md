@@ -181,3 +181,19 @@
 19. ~~`SceneNode::Raw` WASM support (skipped with warning)~~ — ✅ Fixed `d094701`+`8f3e9f6` (2026-05-30, `feat/render-gaps-17-19-21`)
 20. `share_x` / `share_y` grid enforcement — confirmed intentional-by-design (binding documents the params were never functional; sharing is enforced upstream via `share_scale()`). Remaining work is dead-API cleanup of the inert `share` dict in the `.spec` properties, not a functional gap.
 21. ~~F16: `MarkBatchKind::Text` for labels — labels indistinguishable from text in scene graph~~ — ✅ Fixed `6aad1da` (2026-05-30, `feat/render-gaps-17-19-21`)
+
+---
+
+## Review findings — `feat/render-gaps-17-19-21` (2026-05-30)
+
+Surfaced by 4 parallel auditors (scene-pipeline, theme-wiring, pyo3-binding, interactive) + a heavyweight `rust-review` before merge. **Zero BUGs / S4 / S5** — the branch is correct and mergeable; these are cohesion (S2/S3), one narrow JS wrong-render, and cosmetic (S1) items.
+
+| ID | Severity | Item | Disposition |
+|---|---|---|---|
+| R1 | S3 | `minor_tick_fractions` inlines its own projection loop instead of routing through `project_values_to_fractions` — drifted parallel-API; major path is all-or-nothing on non-finite, minor path drops per-element (the difference is legitimate but should be a named policy, not a copied loop). `scale_resolve/mod.rs`. | **Fixing on this branch** (S2/S3 cleanup) |
+| R2 | S3 | `AxisInput` field sprawl (20 fields; 4 new). The projection trio (`projected_tick_fractions`, `scale_padding_frac`, `include_minor`) is one concept with a prose-only invariant — group into an `Option<TickProjection>`, which also deletes the redundant `include_minor` gate. `layout/axis.rs` + `prepare.rs`. | **Fixing on this branch** |
+| R3 | S2 | `build_grid` has four structurally-identical emission loops (x/y × major/minor) — extract one `emit_gridlines` helper. `render/marks/axis.rs`. | **Fixing on this branch** |
+| R4 | S1 | Stale `render_svg`/`render_png` `theme` param docstrings in `binding.rs` — abbreviated key list, never listed the full §3.13 set, now also omits the per-level grid keys. Real contract is `ThemeOverridesSpec` (`deny_unknown_fields`). | **Fixing on this branch** (one-line pointer) |
+| R5 | S3 | **WASM colorbar-in-inset id collision** — JS `_buildIdMap` namespaces by literal id per loadScene, so an outer colorbar gradient (`ferrum-colorbar-0`, hardcoded in `legend.rs:58`) and an inset chart that *also* has a colorbar collapse to one namespaced id → the inset's (or outer's) colorbar renders with the wrong gradient. Narrow trigger (continuous-color chart + `.inset()` of another continuous-color chart) but a genuine wrong-render. The only confirmed correctness issue across all reviews. | **Fixing immediately after cleanups** (this branch) |
+| R6 | S2 | Interactive text-vs-raw z-order flips on the first zoom tick (`_placeTextSvg` re-append moves labels above the raw overlay groups). Cosmetic; rarely-overlapping content. `ferrum-anywidget.js`. | Deferred — follow-up |
+| R7 | S2 | Discretizing *positional* scales (`Quantize`/`BinOrdinal`/`Sequential`/`Diverging` declared on an x/y axis) resolve to `ScaleKind::Linear` in `positional.rs` before `minor_ticks_internal` is reached, so they would get *linear-subdivided* minors rather than empty. Unreachable in practice (these are color/size specs); semantic corner only. | Deferred — add a clarifying comment when next touching `positional.rs` |
