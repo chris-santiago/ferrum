@@ -62,36 +62,36 @@ pub struct AxisInput {
     /// Pixel gap between the end of a tick mark and the tick label baseline.
     /// Overrides the renderer's hardcoded per-orient gaps.
     pub label_padding: Option<f64>,
-    /// Grid item 18 gate: when `false` (default), no minor ticks are emitted and
-    /// the major path is byte-identical to today. When `true`,
-    /// `minor_tick_positions` are threaded into `AxisLayout.minor_ticks`.
-    pub include_minor: bool,
-    /// Grid item 18: minor tick positions as per-minor **domain fractions in
-    /// `[0, 1]`** — the scale's projection of each minor `Tick` over its
-    /// resolved range, the *same* projection that produces
-    /// `projected_tick_fractions` for majors. Layout maps each fraction onto the
-    /// panel via the *same* `inset_pixel_range` padding inset
-    /// (`scale_padding_frac`) used for majors and data marks, so a minor at
-    /// domain `v` coincides with the major projection of `v`. Only consumed when
-    /// `include_minor` is true.
-    pub minor_tick_positions: Vec<f64>,
     /// Continuous-axis scale projection (continuous-axis tick design,
-    /// 2026-05-30). When `Some`, this carries one **domain fraction**
-    /// `t ∈ [0, 1]` per major tick label (same index order as `tick_labels`):
-    /// the scale's normalized projection of the tick value, independent of the
-    /// pixel range. Layout maps each fraction onto the panel's mark range via
-    /// the *same* padding inset used to place data marks (see
-    /// `scale_padding_frac`), so a tick at value `v` and a mark at value `v`
-    /// land on the same pixel. `None` (categorical/discretizing axes) keeps the
-    /// existing uniform-slot placement, byte-identical to before. Presence of
-    /// this field — not the scale type — drives the placement branch.
-    pub projected_tick_fractions: Option<Vec<f64>>,
-    /// Continuous-axis scale projection: the padding fraction the resolved
-    /// positional scale used. Layout insets the panel mark range by this
-    /// fraction (capped at `SCALE_PADDING_MAX_PX`) before interpolating
-    /// `projected_tick_fractions`, reproducing the mark inset exactly. Ignored
-    /// when `projected_tick_fractions` is `None`. Defaults to `0.0`.
-    pub scale_padding_frac: f64,
+    /// 2026-05-30). `Some` for continuous (linear/log/pow/symlog/time) axes;
+    /// `None` for categorical/discretizing (ordinal) axes, which keep the
+    /// uniform-slot placement byte-identically. Presence of this field — not the
+    /// scale type — drives the placement branch. See [`TickProjection`].
+    pub tick_projection: Option<TickProjection>,
+}
+
+/// Continuous-axis scale projection carried by [`AxisInput`]. Groups the three
+/// projection inputs that share the `padding_frac` inset invariant: a tick at
+/// domain value `v` and a data mark at value `v` land on the same pixel because
+/// both are mapped through `inset_pixel_range(base_range, padding_frac)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TickProjection {
+    /// The padding fraction the resolved positional scale used. Layout insets
+    /// the panel mark range by this fraction (capped at `SCALE_PADDING_MAX_PX`)
+    /// before interpolating `major`/`minor`, reproducing the mark inset exactly.
+    pub padding_frac: f64,
+    /// One **domain fraction** `t ∈ [0, 1]` per major tick label, in the same
+    /// index order as `AxisInput.tick_labels`: the scale's normalized projection
+    /// of the tick value, independent of the pixel range.
+    pub major: Vec<f64>,
+    /// Minor tick positions as per-minor **domain fractions in `[0, 1]`** — the
+    /// same projection that produces `major`, applied to the scale's minor
+    /// ticks. Layout maps each onto the panel via the *same* padding inset used
+    /// for majors and data marks, so a minor at domain `v` coincides with the
+    /// major projection of `v`. Empty when minor gridlines are disabled
+    /// (`theme.grid.minor` off) — `prepare.rs` only populates it when the gate is
+    /// on, and "minor enabled" is derived from this vec being non-empty.
+    pub minor: Vec<f64>,
 }
 
 impl AxisInput {
@@ -120,10 +120,7 @@ impl AxisInput {
             title_color: None,
             title_padding: None,
             label_padding: None,
-            include_minor: false,
-            minor_tick_positions: Vec::new(),
-            projected_tick_fractions: None,
-            scale_padding_frac: 0.0,
+            tick_projection: None,
         }
     }
 }
@@ -149,7 +146,8 @@ pub struct AxisLayout {
     pub ticks: Vec<TickLayout>,
     /// Grid item 18: minor (unlabeled) tick positions, kept separate from
     /// `ticks` so the major label/culling path is untouched. Empty unless minor
-    /// rendering is enabled (`AxisInput.include_minor`). Each entry has
+    /// rendering is enabled (`AxisInput.tick_projection`'s non-empty `minor`).
+    /// Each entry has
     /// `is_major == false`, an empty label, and `culled == false`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub minor_ticks: Vec<TickLayout>,
@@ -192,9 +190,15 @@ fn default_true() -> bool { true }
 /// `None` when the carrier is absent (categorical axes), letting callers fall
 /// back to the uniform-slot formula.
 fn project_tick_positions(input: &AxisInput, base_range: (f64, f64)) -> Option<Vec<f64>> {
-    let fractions = input.projected_tick_fractions.as_ref()?;
-    let (lo, hi) = crate::layout::geometry::inset_pixel_range(base_range, input.scale_padding_frac);
+    let proj = input.tick_projection.as_ref()?;
+    // An empty major vec carries no per-label projection (e.g. a minor-only
+    // fixture); fall back to uniform-slot placement for the major ticks.
+    if proj.major.is_empty() {
+        return None;
+    }
+    let (lo, hi) = crate::layout::geometry::inset_pixel_range(base_range, proj.padding_frac);
     let span = hi - lo;
+    let fractions = &proj.major;
     let positions: Vec<f64> = fractions.iter().map(|&t| lo + t * span).collect();
     // Defensive: a non-finite fraction (or base range) would yield a NaN/±inf
     // pixel that the SVG renderer rejects (`svg.rs` non-finite guard). The
@@ -232,16 +236,18 @@ fn min_adjacent_gap(positions: &[f64]) -> Option<f64> {
 /// `base_range` must be oriented exactly like the resolved positional scale:
 /// `(x, x+w)` for the x axis and the inverted `(y+h, y)` for the y axis. Minors
 /// carry no label, are never elided/culled, and are tagged `is_major == false`.
-/// Returns an empty vec when `include_minor` is false.
+/// Returns an empty vec when there is no `tick_projection` or its `minor` is empty.
 fn build_minor_ticks(input: &AxisInput, base_range: (f64, f64)) -> Vec<TickLayout> {
-    if !input.include_minor {
+    // "Minor enabled" is derived from `minor` being non-empty: `prepare.rs` only
+    // populates it when the `theme.grid.minor` gate is on. `None` (categorical)
+    // and an empty `minor` both yield no minor ticks.
+    let Some(proj) = input.tick_projection.as_ref() else {
         return Vec::new();
-    }
+    };
     let (lo, hi) =
-        crate::layout::geometry::inset_pixel_range(base_range, input.scale_padding_frac);
+        crate::layout::geometry::inset_pixel_range(base_range, proj.padding_frac);
     let span = hi - lo;
-    input
-        .minor_tick_positions
+    proj.minor
         .iter()
         .map(|&frac| lo + frac * span)
         // Defensive: drop any non-finite pixel so a NaN/±inf can never reach the
@@ -1257,8 +1263,17 @@ mod tests {
         minor_positions: Vec<f64>,
     ) -> AxisInput {
         let mut input = AxisInput::new(orient, None, labels, None);
-        input.include_minor = include_minor;
-        input.minor_tick_positions = minor_positions;
+        // Mirror prepare.rs: the gate empties `minor` when off. With no major
+        // fractions supplied, presence of the projection is driven by the
+        // minors here (these fixtures pre-date the continuous-major path).
+        let minor = if include_minor { minor_positions } else { Vec::new() };
+        if !minor.is_empty() {
+            input.tick_projection = Some(TickProjection {
+                padding_frac: 0.0,
+                major: Vec::new(),
+                minor,
+            });
+        }
         input
     }
 
@@ -1414,10 +1429,11 @@ mod tests {
             vec!["lo".into(), "hi".into()],
             None,
         );
-        input.projected_tick_fractions = Some(vec![0.0, 1.0]);
-        input.scale_padding_frac = 0.05;
-        input.include_minor = true;
-        input.minor_tick_positions = vec![0.25];
+        input.tick_projection = Some(TickProjection {
+            padding_frac: 0.05,
+            major: vec![0.0, 1.0],
+            minor: vec![0.25],
+        });
 
         let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
         let m = mock(10.0);
@@ -1442,8 +1458,11 @@ mod tests {
             vec!["q".into()],
             None,
         );
-        major_input.projected_tick_fractions = Some(vec![0.25]);
-        major_input.scale_padding_frac = 0.05;
+        major_input.tick_projection = Some(TickProjection {
+            padding_frac: 0.05,
+            major: vec![0.25],
+            minor: Vec::new(),
+        });
         let (major_axis, _) = layout_x_axis(&major_input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
         let major_px = major_axis.ticks[0].position;
         assert!(
@@ -2029,8 +2048,11 @@ mod tests {
         padding_frac: f64,
     ) -> AxisInput {
         let mut input = AxisInput::new(orient, None, labels, None);
-        input.projected_tick_fractions = Some(fractions);
-        input.scale_padding_frac = padding_frac;
+        input.tick_projection = Some(TickProjection {
+            padding_frac,
+            major: fractions,
+            minor: Vec::new(),
+        });
         input
     }
 
@@ -2085,7 +2107,7 @@ mod tests {
             vec!["A".into(), "B".into(), "C".into(), "D".into()],
             None,
         );
-        assert!(input.projected_tick_fractions.is_none());
+        assert!(input.tick_projection.is_none());
         let panel = Rect { x: 100.0, y: 50.0, w: 400.0, h: 200.0 };
         let m = mock(10.0);
         let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
@@ -2127,7 +2149,7 @@ mod tests {
             vec!["0".into(), "1".into(), "2".into(), "3".into()],
             None,
         );
-        assert!(input.projected_tick_fractions.is_none());
+        assert!(input.tick_projection.is_none());
         let panel = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
         let m = mock(10.0);
         let axis = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, &m);

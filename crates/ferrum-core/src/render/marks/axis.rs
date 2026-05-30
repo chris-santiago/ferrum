@@ -211,66 +211,67 @@ pub fn build_grid(
     // nothing and the output below is byte-identical to the pre-minor renderer.
     if minor_enabled {
         if let Some(ax) = x_axis.filter(|a| a.show_grid) {
-            for tick in &ax.minor_ticks {
-                if (tick.position - y_baseline_x).abs() < 0.5 {
-                    continue;
-                }
-                nodes.push(SceneNode::Line {
-                    x1: tick.position,
-                    y1: plot_area.y,
-                    x2: tick.position,
-                    y2: plot_area.y + plot_area.h,
-                    style: to_scene_stroke(minor_color, minor_width, minor_opacity, minor_dash, None, None),
-                });
-            }
+            let style = to_scene_stroke(minor_color, minor_width, minor_opacity, minor_dash, None, None);
+            emit_gridlines(&mut nodes, &ax.minor_ticks, true, plot_area, y_baseline_x, &style);
         }
         if let Some(ay) = y_axis.filter(|a| a.show_grid) {
-            for tick in &ay.minor_ticks {
-                if (tick.position - x_baseline_y).abs() < 0.5 {
-                    continue;
-                }
-                nodes.push(SceneNode::Line {
-                    x1: plot_area.x,
-                    y1: tick.position,
-                    x2: plot_area.x + plot_area.w,
-                    y2: tick.position,
-                    style: to_scene_stroke(minor_color, minor_width, minor_opacity, minor_dash, None, None),
-                });
-            }
+            let style = to_scene_stroke(minor_color, minor_width, minor_opacity, minor_dash, None, None);
+            emit_gridlines(&mut nodes, &ay.minor_ticks, false, plot_area, x_baseline_y, &style);
         }
     }
 
     if let Some(ax) = x_axis.filter(|a| a.show_grid) {
-        for tick in &ax.ticks {
-            if (tick.position - y_baseline_x).abs() < 0.5 {
-                continue;
-            }
-            nodes.push(SceneNode::Line {
+        let style = to_scene_stroke(major_color, major_width, major_opacity, major_dash, None, None);
+        emit_gridlines(&mut nodes, &ax.ticks, true, plot_area, y_baseline_x, &style);
+    }
+
+    if let Some(ay) = y_axis.filter(|a| a.show_grid) {
+        let style = to_scene_stroke(major_color, major_width, major_opacity, major_dash, None, None);
+        emit_gridlines(&mut nodes, &ay.ticks, false, plot_area, x_baseline_y, &style);
+    }
+
+    nodes
+}
+
+/// Emit one `SceneNode::Line` per tick spanning the plot area, skipping any
+/// tick that coincides (within 0.5px) with the axis baseline. Shared by all
+/// four x/y × minor/major gridline levels.
+///
+/// `is_x_orient` selects geometry: x-orient ticks emit vertical lines at
+/// `tick.position` across the plot height; y-orient ticks emit horizontal lines
+/// at `tick.position` across the plot width. `baseline_coord` is the axis-line
+/// coordinate to skip against (`y_baseline_x` for x, `x_baseline_y` for y).
+fn emit_gridlines(
+    nodes: &mut Vec<SceneNode>,
+    ticks: &[crate::layout::TickLayout],
+    is_x_orient: bool,
+    plot_area: Rect,
+    baseline_coord: f64,
+    style: &ferrum_scene::StrokeStyle,
+) {
+    for tick in ticks {
+        if (tick.position - baseline_coord).abs() < 0.5 {
+            continue;
+        }
+        let line = if is_x_orient {
+            SceneNode::Line {
                 x1: tick.position,
                 y1: plot_area.y,
                 x2: tick.position,
                 y2: plot_area.y + plot_area.h,
-                style: to_scene_stroke(major_color, major_width, major_opacity, major_dash, None, None),
-            });
-        }
-    }
-
-    if let Some(ay) = y_axis.filter(|a| a.show_grid) {
-        for tick in &ay.ticks {
-            if (tick.position - x_baseline_y).abs() < 0.5 {
-                continue;
+                style: style.clone(),
             }
-            nodes.push(SceneNode::Line {
+        } else {
+            SceneNode::Line {
                 x1: plot_area.x,
                 y1: tick.position,
                 x2: plot_area.x + plot_area.w,
                 y2: tick.position,
-                style: to_scene_stroke(major_color, major_width, major_opacity, major_dash, None, None),
-            });
-        }
+                style: style.clone(),
+            }
+        };
+        nodes.push(line);
     }
-
-    nodes
 }
 
 #[cfg(test)]

@@ -15,7 +15,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::layout::{
     AxesInput, AxisInput, AxisOrient, ColorbarInput, FacetGroup, FacetKey, LegendEntry,
-    LegendOrient, SymbolKind,
+    LegendOrient, SymbolKind, TickProjection,
 };
 use crate::spec::chart::ChartSpec;
 use crate::transform::context::TransformContext;
@@ -489,21 +489,38 @@ pub fn prepare_render_inputs(
 
     // Grid item 18: minor tick fractions from the provisional scales, projected
     // through the same `[0,1]`-range scale that places majors. Carried into the
-    // AxisInput so layout can build `AxisLayout.minor_ticks` when the
-    // `include_minor` gate is on. The gate is driven by the theme's `minor`
-    // enable flag (default `false` → no minors built → default output
-    // byte-identical). Categorical/discretizing scales yield an empty vec (no
-    // continuum to subdivide), so they stay minor-free even with the gate on.
-    let include_minor = theme.grid.minor;
-    let x_minor_fractions = provisional_scales.x.minor_tick_fractions();
-    let y_minor_fractions = provisional_scales.y.minor_tick_fractions();
+    // AxisInput's `TickProjection.minor` so layout can build
+    // `AxisLayout.minor_ticks`. The `theme.grid.minor` gate (default `false`) is
+    // the single source of truth: when off, `minor` is empty → no minors built →
+    // default output byte-identical. "Minor enabled" downstream is derived purely
+    // from `minor` being non-empty. Categorical/discretizing scales yield an
+    // empty vec (no continuum to subdivide), so they stay minor-free regardless.
+    let x_minor_fractions = if theme.grid.minor {
+        provisional_scales.x.minor_tick_fractions()
+    } else {
+        Vec::new()
+    };
+    let y_minor_fractions = if theme.grid.minor {
+        provisional_scales.y.minor_tick_fractions()
+    } else {
+        Vec::new()
+    };
 
-    // Continuous-axis scale projection: an empty fraction vec means the axis is
-    // categorical/discretizing (ordinal) → carrier is `None`, so layout keeps
-    // the uniform-slot formula byte-identically. A non-empty vec means a
-    // continuous scale → carrier drives scale-projected placement.
-    let x_projected = (!x_tick_fractions.is_empty()).then_some(x_tick_fractions);
-    let y_projected = (!y_tick_fractions.is_empty()).then_some(y_tick_fractions);
+    // Continuous-axis scale projection: an empty major-fraction vec means the
+    // axis is categorical/discretizing (ordinal) → carrier is `None`, so layout
+    // keeps the uniform-slot formula byte-identically. A non-empty vec means a
+    // continuous scale → carrier drives scale-projected placement, and groups the
+    // padding fraction + projected major/minor fractions that share the inset.
+    let x_tick_projection = (!x_tick_fractions.is_empty()).then(|| TickProjection {
+        padding_frac: x_scale_padding_frac,
+        major: x_tick_fractions,
+        minor: x_minor_fractions,
+    });
+    let y_tick_projection = (!y_tick_fractions.is_empty()).then(|| TickProjection {
+        padding_frac: y_scale_padding_frac,
+        major: y_tick_fractions,
+        minor: y_minor_fractions,
+    });
 
     let axes = AxesInput {
         x: AxisInput {
@@ -523,10 +540,7 @@ pub fn prepare_render_inputs(
             title_color: None,
             title_padding: None,
             label_padding: None,
-            include_minor,
-            minor_tick_positions: x_minor_fractions,
-            projected_tick_fractions: x_projected,
-            scale_padding_frac: x_scale_padding_frac,
+            tick_projection: x_tick_projection,
         },
         y: AxisInput {
             orient: AxisOrient::Left,
@@ -545,10 +559,7 @@ pub fn prepare_render_inputs(
             title_color: None,
             title_padding: None,
             label_padding: None,
-            include_minor,
-            minor_tick_positions: y_minor_fractions,
-            projected_tick_fractions: y_projected,
-            scale_padding_frac: y_scale_padding_frac,
+            tick_projection: y_tick_projection,
         },
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),

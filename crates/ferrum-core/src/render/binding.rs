@@ -26,9 +26,9 @@ use super::{render_png as render_png_internal, render_svg as render_svg_internal
 /// viewport : tuple[float, float]
 ///     ``(width, height)`` of the output SVG canvas in pixels.
 /// theme : dict, optional
-///     Sparse theme override dict. Accepted keys: ``mark_color``,
-///     ``background_color``, ``point_size``, ``line_stroke_width``,
-///     ``bar_corner_radius``, ``area_opacity``, ``grid``, ``padding``.
+///     Sparse theme override dict. The authoritative set of accepted keys is
+///     the ``ThemeOverridesSpec`` struct in this module, which carries
+///     ``#[serde(deny_unknown_fields)]`` — that struct IS the contract.
 ///     Unset keys fall back to ``ThemeInputs`` defaults.
 /// config : dict, optional
 ///     Render-config dict. Accepted keys: ``scale``, ``embed_fonts``,
@@ -97,9 +97,9 @@ pub fn render_svg(
 ///     ``(width, height)`` of the output image in pixels (before the
 ///     ``config["scale"]`` multiplier is applied).
 /// theme : dict, optional
-///     Sparse theme override dict. Accepted keys: ``mark_color``,
-///     ``background_color``, ``point_size``, ``line_stroke_width``,
-///     ``bar_corner_radius``, ``area_opacity``, ``grid``, ``padding``.
+///     Sparse theme override dict. The authoritative set of accepted keys is
+///     the ``ThemeOverridesSpec`` struct in this module, which carries
+///     ``#[serde(deny_unknown_fields)]`` — that struct IS the contract.
 ///     Unset keys fall back to ``ThemeInputs`` defaults.
 /// config : dict, optional
 ///     Render-config dict. Accepted keys: ``scale`` (pixel ratio, default

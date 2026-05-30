@@ -27,7 +27,7 @@ pub(crate) const DEFAULT_CULL_THRESHOLD: u32 = 8;
 use serde::{Deserialize, Serialize};
 
 pub use self::axis::{
-    AxesInput, AxisInput, AxisLayout, AxisOrient, AxisTitleLayout, TickLayout,
+    AxesInput, AxisInput, AxisLayout, AxisOrient, AxisTitleLayout, TickLayout, TickProjection,
 };
 pub use self::facet::{FacetGroup, FacetMode, FacetSpec};
 pub use self::geometry::{Inset, Rect, Viewport};

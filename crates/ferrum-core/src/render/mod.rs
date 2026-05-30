@@ -496,24 +496,33 @@ fn apply_label_format_to_axis(axis: &mut crate::layout::AxisInput) {
 }
 
 /// Continuous-axis scale projection: when `tick_values_override` replaced the
-/// axis labels with explicit data values, recompute `projected_tick_fractions`
-/// from those values via the scale so the carrier matches the new labels. Only
-/// acts on continuous axes that already carry projected fractions (categorical
-/// axes have `None` and keep uniform-slot placement). When the scale yields no
-/// fractions (e.g. ordinal), the carrier is cleared so layout falls back to
-/// uniform slots rather than indexing a stale vec.
+/// axis labels with explicit data values, recompute the `tick_projection`'s
+/// `major` fractions from those values via the scale so the carrier matches the
+/// new labels. Only acts on continuous axes that already carry a projection
+/// (categorical axes have `None` and keep uniform-slot placement). When the
+/// scale yields no fractions (e.g. ordinal), the carrier is cleared so layout
+/// falls back to uniform slots rather than indexing a stale vec.
 fn sync_projected_fractions_to_tick_values(
     axis: &mut crate::layout::AxisInput,
     scale: &scale_resolve::ScaleKind,
 ) {
-    if axis.projected_tick_fractions.is_none() {
+    if axis.tick_projection.is_none() {
         return;
     }
     let Some(values) = axis.tick_values_override.clone() else {
         return;
     };
     let fractions = scale.value_fractions(&values);
-    axis.projected_tick_fractions = (!fractions.is_empty()).then_some(fractions);
+    if fractions.is_empty() {
+        // Scale yields no fractions (e.g. ordinal / degenerate domain): clear the
+        // carrier so layout falls back to uniform slots rather than indexing a
+        // stale vec. The minor carrier is dropped in lockstep — empty
+        // `value_fractions` implies an axis with no continuum, so its minors are
+        // already empty.
+        axis.tick_projection = None;
+    } else if let Some(proj) = axis.tick_projection.as_mut() {
+        proj.major = fractions;
+    }
 }
 
 /// Apply `ChartConfig.color.domain` and `color.range` overrides to the

@@ -56,6 +56,20 @@ pub enum ScaleKind {
     Pow(PowScale),
 }
 
+/// Policy for non-finite fraction projections in
+/// [`ScaleKind::project_values_to_fractions`]. Makes the labeled-vs-unlabeled
+/// distinction explicit at each call site rather than implicit in two parallel
+/// projection loops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NonFinite {
+    /// Drop each non-finite projection individually. For unlabeled minor ticks,
+    /// where dropping one entry cannot misalign anything.
+    DropOne,
+    /// If any projection is non-finite, return an empty vec. For labeled major /
+    /// explicit ticks that must stay index-aligned with `tick_labels`.
+    RejectAll,
+}
+
 /// Dispatch a method call to all `ScaleKind` variants.
 macro_rules! dispatch_all {
     ($self:expr, $method:ident $(, $arg:expr)*) => {
@@ -169,20 +183,12 @@ impl ScaleKind {
         if matches!(self, Self::Ordinal(_)) {
             return Vec::new();
         }
-        let (r0, r1) = self.pixel_range();
-        let span = r1 - r0;
-        if span == 0.0 {
-            return Vec::new();
-        }
         let minors = dispatch_continuous!(self, minor_ticks_internal);
-        minors
-            .into_iter()
-            .map(|t| {
-                let px = dispatch_continuous!(self, scale_internal, t.position);
-                (px - r0) / span
-            })
-            .filter(|f| f.is_finite())
-            .collect()
+        let positions: Vec<f64> = minors.into_iter().map(|t| t.position).collect();
+        // Minors carry no label, so a single out-of-domain minor can be dropped
+        // individually without misaligning anything (`DropOne`). Majors must stay
+        // index-aligned with `tick_labels`, so they use `RejectAll`.
+        self.project_values_to_fractions(&positions, NonFinite::DropOne)
     }
 
     /// Return the data-space domain `(lo, hi)` for continuous scales.
@@ -226,7 +232,7 @@ impl ScaleKind {
         // produce — one fraction per value, in the same order — so the carrier
         // stays index-aligned with `tick_labels`.
         let values = dispatch_continuous!(self, ticks_internal, count_hint);
-        self.project_values_to_fractions(&values)
+        self.project_values_to_fractions(&values, NonFinite::RejectAll)
     }
 
     /// Continuous-axis scale-projection support for explicit tick values
@@ -238,40 +244,51 @@ impl ScaleKind {
         if matches!(self, Self::Ordinal(_)) {
             return Vec::new();
         }
-        self.project_values_to_fractions(values)
+        self.project_values_to_fractions(values, NonFinite::RejectAll)
     }
 
     /// Project data values to domain fractions `(scale(v) - r0) / (r1 - r0)`,
-    /// shared by [`tick_fractions`](Self::tick_fractions) and
-    /// [`value_fractions`](Self::value_fractions). Callers must rule out ordinal
-    /// scales first.
+    /// shared by [`tick_fractions`](Self::tick_fractions),
+    /// [`value_fractions`](Self::value_fractions), and
+    /// [`minor_tick_fractions`](Self::minor_tick_fractions). Callers must rule
+    /// out ordinal scales first.
     ///
-    /// The returned vec is **index-aligned** with `values`, so it is all-or-
-    /// nothing: a zero-span (degenerate domain: all-equal / single distinct /
-    /// all-null column) or any non-finite projection (a value the scale maps to
-    /// `NaN`/`±inf`, e.g. out-of-domain on an unclamped scale, or a zero-span
-    /// domain's `0/0`) yields an **empty** vec. The caller then drops the
-    /// carrier (`None`) and layout falls back to uniform-slot placement —
-    /// exactly the pre-projection (baseline) behavior for degenerate axes.
-    /// Partial filtering is deliberately avoided: it would misalign fractions
-    /// from their labels.
-    fn project_values_to_fractions(&self, values: &[f64]) -> Vec<f64> {
+    /// A zero-span (degenerate domain: all-equal / single distinct / all-null
+    /// column) always yields an **empty** vec regardless of policy.
+    ///
+    /// Non-finite projections (a value the scale maps to `NaN`/`±inf`, e.g.
+    /// out-of-domain on an unclamped scale) are handled per [`NonFinite`]:
+    ///
+    /// * [`NonFinite::RejectAll`] — labeled major / explicit ticks. The result
+    ///   must stay **index-aligned** with `tick_labels`, so a single non-finite
+    ///   projection collapses the whole vec to empty. The caller then drops the
+    ///   carrier (`None`) and layout falls back to uniform-slot placement —
+    ///   exactly the pre-projection (baseline) behavior for degenerate axes.
+    /// * [`NonFinite::DropOne`] — unlabeled minor ticks. Each non-finite
+    ///   projection is dropped individually; dropping one minor cannot misalign
+    ///   anything.
+    fn project_values_to_fractions(&self, values: &[f64], non_finite: NonFinite) -> Vec<f64> {
         let (r0, r1) = self.pixel_range();
         let span = r1 - r0;
         if span == 0.0 {
             return Vec::new();
         }
-        let fractions: Vec<f64> = values
+        let fractions = values
             .iter()
             .map(|&v| {
                 let px = dispatch_continuous!(self, scale_internal, v);
                 (px - r0) / span
-            })
-            .collect();
-        if fractions.iter().all(|f| f.is_finite()) {
-            fractions
-        } else {
-            Vec::new()
+            });
+        match non_finite {
+            NonFinite::DropOne => fractions.filter(|f| f.is_finite()).collect(),
+            NonFinite::RejectAll => {
+                let collected: Vec<f64> = fractions.collect();
+                if collected.iter().all(|f| f.is_finite()) {
+                    collected
+                } else {
+                    Vec::new()
+                }
+            }
         }
     }
 
