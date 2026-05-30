@@ -109,11 +109,44 @@ Every key listed below is plumbed end-to-end from the Python `Theme(...)` constr
 
 | Key | Type | What it controls |
 |---|---|---|
-| `grid` | bool | Whether to draw grid lines. |
+| `grid` | bool \| [`Grid`][ferrum.Grid] | Whether to draw grid lines, or a `Grid` value for major/minor control. |
 | `grid_color` | str | Grid line color. |
 | `grid_width` | float | Grid line width. |
 | `grid_dash` | list | Dash pattern (e.g. `[5, 3]`). |
 | `grid_opacity` | float | Grid line opacity. |
+
+#### Major and minor gridlines with `fm.Grid`
+
+Passing a bool (`grid=True`/`False`) toggles a single level of gridlines. For two
+levels — major lines at the labelled ticks and lighter minor lines between them —
+pass a [`Grid`][ferrum.Grid] value instead:
+
+```python
+import ferrum as fm
+
+theme = fm.Theme(grid=fm.Grid(major=True, minor=True, minor_color="#eeeeee"))
+```
+
+`Grid` carries per-level styling: `major_color`/`minor_color`, `major_width`/`minor_width`,
+`major_dash`/`minor_dash`, and `major_opacity`/`minor_opacity`. The bare `color`, `width`,
+`dash`, and `opacity` arguments are a shorthand that sets **both** levels; an explicit
+`major_*`/`minor_*` overrides that level. So `fm.Grid(color="#f5f5f5")` styles both major
+and minor the same, while `fm.Grid(color="#eeeeee", minor_color="#f8f8f8")` keeps major at
+`#eeeeee` and lightens only the minors.
+
+Notes:
+
+- **Minor gridlines render on continuous axes only** (linear, log, time, pow, sqrt, symlog).
+  Categorical and discretizing axes have no continuum to subdivide, so `minor=True` is a
+  documented no-op there — no error, no extra lines.
+- **Log axes** place minors at the standard 2–9 intra-decade multiples (crowding toward each
+  decade top), not at uniform subdivisions.
+- **Gridlines coincide with the data.** On a continuous axis, a major gridline at value *v*
+  lands exactly where a data mark at *v* renders; minors subdivide between them on the same
+  grid.
+
+`Grid` is theme-level. For per-chart gridline overrides see
+[`.configure_grid()`](customizing-charts.md#configure_grid).
 
 ### Axes
 

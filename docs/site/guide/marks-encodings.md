@@ -364,7 +364,7 @@ These marks compute a transform on your data before rendering — KDE, binning, 
 | [`mark_histogram()`][ferrum.Chart.mark_histogram] | Binned counts or densities. |
 | [`mark_density()`][ferrum.Chart.mark_density] | 1-D kernel density estimate. |
 | [`mark_contour()`][ferrum.Chart.mark_contour] | 2-D density contours. |
-| [`mark_hex()`][ferrum.Chart.mark_hex] | Hexagonal binning for large datasets. |
+| [`mark_hex()`][ferrum.Chart.mark_hex] | Hexagonal binning for large datasets. `stroke`/`stroke_width` draw cell borders. |
 | [`mark_raster()`][ferrum.Chart.mark_raster] | Pre-aggregated rectangular grid. |
 | [`mark_qq()`][ferrum.Chart.mark_qq] | Quantile-quantile plot against a reference distribution. |
 | [`mark_function()`][ferrum.Chart.mark_function] | Plot an arbitrary `f(x)` over a domain. |

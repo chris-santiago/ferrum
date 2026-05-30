@@ -280,6 +280,11 @@ Controls gridlines independently from axis configuration. `GridConfig` lives at 
 level; for per-axis grid control, use the `grid`, `grid_color`, `grid_dash`, and
 `grid_width` parameters on `AxisConfig`.
 
+`GridConfig` styles a single gridline level (the **major** lines). For two-level gridlines
+with separate major/minor styling, use the theme-level [`Grid`][ferrum.Grid] value class
+(`Theme(grid=Grid(major=..., minor=...))`) — see the
+[Themes guide](../themes.md#major-and-minor-gridlines-with-fmgrid).
+
 ```python
 from ferrum import GridConfig
 

@@ -226,7 +226,9 @@ chart.configure_title(
 
 ### `.configure_grid()`
 
-Controls gridlines independently from axis configuration.
+Controls gridlines independently from axis configuration. This is a chart-level override
+and styles the **major** gridlines. For two-level (major + minor) gridlines, set a
+[`Grid`](themes.md#major-and-minor-gridlines-with-fmgrid) value on the theme instead.
 
 ```python
 chart.configure_grid(
