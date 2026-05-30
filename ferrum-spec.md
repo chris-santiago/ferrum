@@ -1605,10 +1605,19 @@ ferrum.Title(text, *, subtitle=None, anchor="start", offset=None,
              subtitle_font_size=None, subtitle_color=None)
 
 ferrum.Grid(major=True, minor=False, *,
+            color=None, width=None, dash=None, opacity=None,
             major_color=None, minor_color=None,
             major_dash=None, minor_dash=None,
             major_width=None, minor_width=None,
             major_opacity=None, minor_opacity=None)
+# 2026-05-30 (item 18): the bare color=/width=/dash=/opacity= shorthand
+# (shown in the Theme example above) is a FALLBACK that sets BOTH the major
+# and minor level; an explicit major_*/minor_* overrides that level. minor
+# gridlines render on continuous axes only (linear/log/time/pow/sqrt/symlog);
+# categorical/discretizing axes have no continuum to subdivide, so minor=True
+# is a documented no-op there. Major ticks/gridlines are scale-projected (a
+# tick at value v coincides with a data mark at v); minors subdivide between
+# them on the same grid.
 
 ferrum.Aggregate(fn, field, *, as_=None)   # used in transform_aggregate
 ferrum.WindowTransform(fn, *, field=None, param=None, as_=None, peer=False)
