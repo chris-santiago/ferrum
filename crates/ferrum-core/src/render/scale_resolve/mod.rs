@@ -150,36 +150,39 @@ impl ScaleKind {
         }
     }
 
-    /// Grid item 18: project this scale's minor ticks to axis positions using
-    /// the **same projection as majors** (`scale_internal`).
+    /// Grid item 18: project this scale's minor ticks to **domain fractions**
+    /// `t ∈ [0, 1]` over the scale's resolved range — the *same* projection
+    /// majors use (`project_values_to_fractions`), so a minor at domain value
+    /// `v` lands at the identical pixel the major projection of `v` would give.
     ///
-    /// The provisional scales built in `prepare.rs` use a normalized `[0, 1]`
-    /// pixel range (x: `(0,1)`, y: `(1,0)`), so each returned value is a
-    /// fraction along the axis that layout multiplies by the panel extent.
-    /// Ordinal (and any non-continuous) scales return an empty vec, matching
-    /// the engine's empty `minor_ticks_internal()` for discrete scales.
+    /// Layout then maps each fraction onto the panel's mark range via the same
+    /// `inset_pixel_range` padding inset that places majors and data marks (see
+    /// [`crate::layout::axis::build_minor_ticks`]) — **not** the naive
+    /// `origin + frac * extent`. This keeps minor gridlines aligned with both
+    /// the projected major gridlines and the data marks.
+    ///
+    /// Unlike the all-or-nothing major carrier, a single out-of-domain minor is
+    /// dropped individually: minors carry no label, so dropping one cannot
+    /// misalign anything. Ordinal (and any non-continuous) scales return an
+    /// empty vec, matching the engine's empty `minor_ticks_internal()`.
     pub(crate) fn minor_tick_fractions(&self) -> Vec<f64> {
-        // Each minor `Tick` is a data-space position; project it through the
-        // same `scale_internal` used for the major path, then drop non-finite
-        // results (e.g. a minor that lands outside a clamped domain).
-        fn project<I>(minors: I, scale: impl Fn(f64) -> f64) -> Vec<f64>
-        where
-            I: IntoIterator<Item = crate::scale::ticks::Tick>,
-        {
-            minors
-                .into_iter()
-                .map(|t| scale(t.position))
-                .filter(|p| p.is_finite())
-                .collect()
+        if matches!(self, Self::Ordinal(_)) {
+            return Vec::new();
         }
-        match self {
-            Self::Ordinal(_) => Vec::new(),
-            Self::Linear(s) => project(s.minor_ticks_internal(), |x| s.scale_internal(x)),
-            Self::Time(s) => project(s.minor_ticks_internal(), |x| s.scale_internal(x)),
-            Self::Log(s) => project(s.minor_ticks_internal(), |x| s.scale_internal(x)),
-            Self::Symlog(s) => project(s.minor_ticks_internal(), |x| s.scale_internal(x)),
-            Self::Pow(s) => project(s.minor_ticks_internal(), |x| s.scale_internal(x)),
+        let (r0, r1) = self.pixel_range();
+        let span = r1 - r0;
+        if span == 0.0 {
+            return Vec::new();
         }
+        let minors = dispatch_continuous!(self, minor_ticks_internal);
+        minors
+            .into_iter()
+            .map(|t| {
+                let px = dispatch_continuous!(self, scale_internal, t.position);
+                (px - r0) / span
+            })
+            .filter(|f| f.is_finite())
+            .collect()
     }
 
     /// Return the data-space domain `(lo, hi)` for continuous scales.

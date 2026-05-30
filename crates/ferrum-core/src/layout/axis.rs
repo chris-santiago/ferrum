@@ -66,11 +66,13 @@ pub struct AxisInput {
     /// the major path is byte-identical to today. When `true`,
     /// `minor_tick_positions` are threaded into `AxisLayout.minor_ticks`.
     pub include_minor: bool,
-    /// Grid item 18: minor tick positions as **normalized fractions in `[0, 1]`**
-    /// along the axis (the scale's projection of each minor `Tick`, built from
-    /// the provisional scale's `[0,1]` pixel range — the same projection that
-    /// places majors). Layout maps each fraction to a pixel via
-    /// `panel_origin + fraction * panel_extent`. Only consumed when
+    /// Grid item 18: minor tick positions as per-minor **domain fractions in
+    /// `[0, 1]`** — the scale's projection of each minor `Tick` over its
+    /// resolved range, the *same* projection that produces
+    /// `projected_tick_fractions` for majors. Layout maps each fraction onto the
+    /// panel via the *same* `inset_pixel_range` padding inset
+    /// (`scale_padding_frac`) used for majors and data marks, so a minor at
+    /// domain `v` coincides with the major projection of `v`. Only consumed when
     /// `include_minor` is true.
     pub minor_tick_positions: Vec<f64>,
     /// Continuous-axis scale projection (continuous-axis tick design,
@@ -220,21 +222,28 @@ fn min_adjacent_gap(positions: &[f64]) -> Option<f64> {
         .into()
 }
 
-/// Build `minor_ticks` from normalized `[0,1]` axis fractions when the gate is
-/// on. Each fraction maps to a pixel via `origin + fraction * extent`, the same
-/// way the provisional `[0,1]` scale would place a point along the panel.
-/// Minors carry no label, are never elided/culled, and are tagged
-/// `is_major == false`. `origin`/`extent` are `panel_area.x`/`panel_area.w` for
-/// x and `panel_area.y`/`panel_area.h` for y. Returns an empty vec when
-/// `include_minor` is false.
-fn build_minor_ticks(input: &AxisInput, origin: f64, extent: f64) -> Vec<TickLayout> {
+/// Build `minor_ticks` from per-minor **domain fractions** when the gate is on.
+/// Each fraction is mapped onto the panel via the *same* `inset_pixel_range`
+/// padding inset that places majors (`project_tick_positions`) and data marks —
+/// **not** the naive `origin + frac * extent`. This guarantees a minor at
+/// domain value `v` lands at the identical pixel the major projection of `v`
+/// would give, so minor and major gridlines coincide.
+///
+/// `base_range` must be oriented exactly like the resolved positional scale:
+/// `(x, x+w)` for the x axis and the inverted `(y+h, y)` for the y axis. Minors
+/// carry no label, are never elided/culled, and are tagged `is_major == false`.
+/// Returns an empty vec when `include_minor` is false.
+fn build_minor_ticks(input: &AxisInput, base_range: (f64, f64)) -> Vec<TickLayout> {
     if !input.include_minor {
         return Vec::new();
     }
+    let (lo, hi) =
+        crate::layout::geometry::inset_pixel_range(base_range, input.scale_padding_frac);
+    let span = hi - lo;
     input
         .minor_tick_positions
         .iter()
-        .map(|&frac| origin + frac * extent)
+        .map(|&frac| lo + frac * span)
         // Defensive: drop any non-finite pixel so a NaN/±inf can never reach the
         // scene graph (the SVG renderer rejects non-finite floats). Minors carry
         // no label, so dropping one does not misalign anything.
@@ -445,7 +454,10 @@ pub fn layout_y_axis(
             is_major: true,
         })
         .collect();
-    let minor_ticks = build_minor_ticks(input, panel_area.y, panel_area.h);
+    // Minors use the SAME inverted base range + padding inset as the major
+    // projection above, so a minor at domain `v` coincides with the major
+    // projection of `v`.
+    let minor_ticks = build_minor_ticks(input, (panel_area.y + panel_area.h, panel_area.y));
 
     let axis_line = Rect {
         x: panel_area.x,
@@ -943,7 +955,10 @@ pub fn layout_x_axis(
         }
     });
 
-    let minor_ticks = build_minor_ticks(input, panel_area.x, panel_area.w);
+    // Minors use the SAME base range + padding inset as the major projection
+    // (`(x, x+w)`), so a minor at domain `v` coincides with the major
+    // projection of `v`.
+    let minor_ticks = build_minor_ticks(input, (panel_area.x, panel_area.x + panel_area.w));
 
     (AxisLayout {
         orient: AxisOrient::Bottom,
@@ -1336,8 +1351,10 @@ mod tests {
     }
 
     #[test]
-    fn minor_positions_offset_by_panel_origin() {
-        // Minors are normalized fractions; layout maps them via origin + frac*extent.
+    fn minor_positions_use_inverted_inset_projection_on_y() {
+        // Minors are domain fractions; on the y axis layout maps them through the
+        // SAME inverted base range `(y+h, y)` + inset that places majors. With
+        // scale_padding_frac=0 the inset is a no-op, so frac f → (y+h) - f*h.
         let input = axis_input_with_minor(
             AxisOrient::Left,
             vec!["0".into(), "1".into()],
@@ -1349,9 +1366,9 @@ mod tests {
         let axis = layout_y_axis(&input, panel, 0, 11.0, 13.0, 4.0, &m);
 
         assert_eq!(axis.minor_ticks.len(), 2);
-        // panel.y (40) + frac * panel.h (200): 40 + 25 = 65, 40 + 75 = 115.
-        assert!((axis.minor_ticks[0].position - 65.0).abs() < 1e-9);
-        assert!((axis.minor_ticks[1].position - 115.0).abs() < 1e-9);
+        // base_range = (240, 40), span = -200: 240 - 0.125*200 = 215, 240 - 0.375*200 = 165.
+        assert!((axis.minor_ticks[0].position - 215.0).abs() < 1e-9);
+        assert!((axis.minor_ticks[1].position - 165.0).abs() < 1e-9);
         for mt in &axis.minor_ticks {
             assert!(!mt.is_major);
             assert_eq!(mt.label, "");
@@ -1378,6 +1395,61 @@ mod tests {
         for t in &axis.ticks {
             assert!(t.is_major);
         }
+    }
+
+    #[test]
+    fn minor_pixel_matches_inset_projection_of_its_domain_value() {
+        // Alignment fix: a minor at domain fraction f must land at the SAME pixel
+        // the major projection of f gives — the inset projection
+        // (inset_pixel_range + lerp), NOT the naive origin + f*extent.
+        //
+        // Padding_frac=0.05 in a 0..600 panel: cap binds (600*0.05=30 > 8), so
+        // inset is 8px → band (8, 592), span 584. A minor at f=0.5 lands at
+        // 8 + 0.5*584 = 300 — coinciding with a major at f=0.5. The naive
+        // origin+f*extent would give 0.5*600 = 300 here only because the panel
+        // origin is 0 and f=0.5 is the midpoint; use f=0.25 to separate them.
+        let mut input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            vec!["lo".into(), "hi".into()],
+            None,
+        );
+        input.projected_tick_fractions = Some(vec![0.0, 1.0]);
+        input.scale_padding_frac = 0.05;
+        input.include_minor = true;
+        input.minor_tick_positions = vec![0.25];
+
+        let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
+        let m = mock(10.0);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+
+        // Inset band (8, 592), span 584 → minor at f=0.25: 8 + 0.25*584 = 154.
+        assert_eq!(axis.minor_ticks.len(), 1);
+        let minor_px = axis.minor_ticks[0].position;
+        assert!((minor_px - 154.0).abs() < 1e-9, "inset projection expected 154, got {minor_px}");
+
+        // The minor must NOT equal the naive origin + f*extent (0.25*600 = 150).
+        assert!(
+            (minor_px - 150.0).abs() > 1.0,
+            "minor must use inset projection (154), not naive linear interp (150); got {minor_px}"
+        );
+
+        // Cross-check: a MAJOR projected at the same fraction 0.25 lands at the
+        // same pixel. Reuse the same inset path via projected_tick_fractions.
+        let mut major_input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            vec!["q".into()],
+            None,
+        );
+        major_input.projected_tick_fractions = Some(vec![0.25]);
+        major_input.scale_padding_frac = 0.05;
+        let (major_axis, _) = layout_x_axis(&major_input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        let major_px = major_axis.ticks[0].position;
+        assert!(
+            (minor_px - major_px).abs() < 1e-9,
+            "minor at f=0.25 ({minor_px}) must coincide with major projection of f=0.25 ({major_px})"
+        );
     }
 
     // --- wrap_label tests ---

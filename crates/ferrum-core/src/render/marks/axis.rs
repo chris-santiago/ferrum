@@ -152,10 +152,17 @@ pub fn build_grid(
         return Vec::new();
     }
     let mut nodes = Vec::new();
-    let color = theme.colors.grid_color;
-    let width = theme.sizes.grid_width;
-    let dash: Option<&[f64]> = theme.grid.grid_dash.as_deref();
-    let opacity = theme.grid.grid_opacity;
+    // Major level — legacy single-level theme fields are the major level.
+    let major_color = theme.colors.grid_color;
+    let major_width = theme.sizes.grid_width;
+    let major_dash: Option<&[f64]> = theme.grid.grid_dash.as_deref();
+    let major_opacity = theme.grid.grid_opacity;
+    // Minor level (Grid item 18). Emitted only when `theme.grid.minor` is on.
+    let minor_enabled = theme.grid.minor;
+    let minor_color = theme.colors.minor_grid_color;
+    let minor_width = theme.sizes.minor_grid_width;
+    let minor_dash: Option<&[f64]> = theme.grid.minor_grid_dash.as_deref();
+    let minor_opacity = theme.grid.minor_grid_opacity;
 
     let y_baseline_x = y_axis.map(|a| a.axis_line.x).unwrap_or(plot_area.x);
     let x_baseline_y = x_axis
@@ -199,6 +206,40 @@ pub fn build_grid(
         }
     }
 
+    // Minor gridlines are drawn FIRST so the heavier major lines render on top
+    // of them. Gated entirely on `theme.grid.minor`; when off, this block emits
+    // nothing and the output below is byte-identical to the pre-minor renderer.
+    if minor_enabled {
+        if let Some(ax) = x_axis.filter(|a| a.show_grid) {
+            for tick in &ax.minor_ticks {
+                if (tick.position - y_baseline_x).abs() < 0.5 {
+                    continue;
+                }
+                nodes.push(SceneNode::Line {
+                    x1: tick.position,
+                    y1: plot_area.y,
+                    x2: tick.position,
+                    y2: plot_area.y + plot_area.h,
+                    style: to_scene_stroke(minor_color, minor_width, minor_opacity, minor_dash, None, None),
+                });
+            }
+        }
+        if let Some(ay) = y_axis.filter(|a| a.show_grid) {
+            for tick in &ay.minor_ticks {
+                if (tick.position - x_baseline_y).abs() < 0.5 {
+                    continue;
+                }
+                nodes.push(SceneNode::Line {
+                    x1: plot_area.x,
+                    y1: tick.position,
+                    x2: plot_area.x + plot_area.w,
+                    y2: tick.position,
+                    style: to_scene_stroke(minor_color, minor_width, minor_opacity, minor_dash, None, None),
+                });
+            }
+        }
+    }
+
     if let Some(ax) = x_axis.filter(|a| a.show_grid) {
         for tick in &ax.ticks {
             if (tick.position - y_baseline_x).abs() < 0.5 {
@@ -209,7 +250,7 @@ pub fn build_grid(
                 y1: plot_area.y,
                 x2: tick.position,
                 y2: plot_area.y + plot_area.h,
-                style: to_scene_stroke(color, width, opacity, dash, None, None),
+                style: to_scene_stroke(major_color, major_width, major_opacity, major_dash, None, None),
             });
         }
     }
@@ -224,7 +265,7 @@ pub fn build_grid(
                 y1: tick.position,
                 x2: plot_area.x + plot_area.w,
                 y2: tick.position,
-                style: to_scene_stroke(color, width, opacity, dash, None, None),
+                style: to_scene_stroke(major_color, major_width, major_opacity, major_dash, None, None),
             });
         }
     }
@@ -248,6 +289,112 @@ mod tests {
             label_font_size: None,
             is_major: true,
         }
+    }
+
+    /// Construct a minor (unlabeled, `is_major = false`) `TickLayout`.
+    fn minor_tick(position: f64) -> TickLayout {
+        TickLayout {
+            position,
+            label: String::new(),
+            label_angle: 0.0,
+            elided: false,
+            culled: false,
+            label_font_size: None,
+            is_major: false,
+        }
+    }
+
+    /// A y-axis layout with three major ticks and two minor ticks between them.
+    fn y_axis_with_minors() -> AxisLayout {
+        AxisLayout {
+            orient: AxisOrient::Left,
+            panel_index: 0,
+            axis_line: Rect { x: 50.0, y: 10.0, w: 1.0, h: 300.0 },
+            ticks: vec![major_tick(60.0, "a"), major_tick(160.0, "b"), major_tick(260.0, "c")],
+            minor_ticks: vec![minor_tick(110.0), minor_tick(210.0)],
+            title: None,
+            show_labels: true,
+            show_ticks: true,
+            show_domain: true,
+            show_grid: true,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding: None,
+        }
+    }
+
+    #[test]
+    fn build_grid_minor_disabled_emits_only_majors() {
+        // Default theme has minor disabled → only major gridlines, byte-identical
+        // to the pre-minor renderer (no minor lines emitted, major style unchanged).
+        let y_axis = y_axis_with_minors();
+        let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
+        let theme = ThemeInputs::default();
+        assert!(!theme.grid.minor, "default theme must have minor off");
+        let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &[]);
+
+        let lines: Vec<&SceneNode> = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).collect();
+        // 3 majors (none coincide with the x baseline since x_axis=None →
+        // baseline at plot bottom y=310, far from 60/160/260). No minors.
+        assert_eq!(lines.len(), 3, "minor off must emit only the 3 major lines");
+        for n in &lines {
+            if let SceneNode::Line { style, .. } = n {
+                assert_eq!(style.width, theme.sizes.grid_width, "major width");
+                assert_eq!(style.color.r, theme.colors.grid_color.red);
+            }
+        }
+    }
+
+    #[test]
+    fn build_grid_minor_enabled_emits_minors_under_majors() {
+        // Enable minor → 2 minor lines (minor style) followed by 3 major lines
+        // (major style). Minors must precede majors in the node order (drawn under).
+        let y_axis = y_axis_with_minors();
+        let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
+        let mut theme = ThemeInputs::default();
+        theme.grid.minor = true;
+        let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &[]);
+
+        let lines: Vec<&SceneNode> = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).collect();
+        assert_eq!(lines.len(), 5, "2 minors + 3 majors");
+
+        // First two lines are minors (minor style: thinner + fainter).
+        for n in &lines[0..2] {
+            if let SceneNode::Line { style, .. } = n {
+                assert_eq!(style.width, theme.sizes.minor_grid_width, "minor width");
+                assert!(style.width < theme.sizes.grid_width, "minor thinner than major");
+                assert_eq!(style.color.r, theme.colors.minor_grid_color.red, "minor color");
+            }
+        }
+        // Last three lines are majors.
+        for n in &lines[2..5] {
+            if let SceneNode::Line { style, .. } = n {
+                assert_eq!(style.width, theme.sizes.grid_width, "major width");
+                assert_eq!(style.color.r, theme.colors.grid_color.red, "major color");
+            }
+        }
+
+        // Minor y-positions match the layout's minor_ticks (110, 210).
+        let minor_ys: Vec<f64> = lines[0..2].iter().filter_map(|n| {
+            if let SceneNode::Line { y1, .. } = n { Some(*y1) } else { None }
+        }).collect();
+        assert_eq!(minor_ys, vec![110.0, 210.0]);
+    }
+
+    #[test]
+    fn build_grid_minor_enabled_no_minor_ticks_emits_only_majors() {
+        // Categorical axis: minor enabled but minor_ticks empty (engine returns
+        // none for categorical) → only majors emitted, no minor lines.
+        let y_axis = AxisLayout {
+            minor_ticks: vec![],
+            ..y_axis_with_minors()
+        };
+        let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
+        let mut theme = ThemeInputs::default();
+        theme.grid.minor = true;
+        let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &[]);
+        let line_count = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
+        assert_eq!(line_count, 3, "no minor_ticks → only the 3 majors even with minor enabled");
     }
 
     #[test]

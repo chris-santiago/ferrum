@@ -490,9 +490,11 @@ pub fn prepare_render_inputs(
     // Grid item 18: minor tick fractions from the provisional scales, projected
     // through the same `[0,1]`-range scale that places majors. Carried into the
     // AxisInput so layout can build `AxisLayout.minor_ticks` when the
-    // `include_minor` gate is on. The gate stays `false` here (Task 2); a later
-    // task flips it from the theme's minor-grid flag. Categorical/discretizing
-    // scales yield an empty vec (no continuum to subdivide).
+    // `include_minor` gate is on. The gate is driven by the theme's `minor`
+    // enable flag (default `false` → no minors built → default output
+    // byte-identical). Categorical/discretizing scales yield an empty vec (no
+    // continuum to subdivide), so they stay minor-free even with the gate on.
+    let include_minor = theme.grid.minor;
     let x_minor_fractions = provisional_scales.x.minor_tick_fractions();
     let y_minor_fractions = provisional_scales.y.minor_tick_fractions();
 
@@ -521,7 +523,7 @@ pub fn prepare_render_inputs(
             title_color: None,
             title_padding: None,
             label_padding: None,
-            include_minor: false,
+            include_minor,
             minor_tick_positions: x_minor_fractions,
             projected_tick_fractions: x_projected,
             scale_padding_frac: x_scale_padding_frac,
@@ -543,7 +545,7 @@ pub fn prepare_render_inputs(
             title_color: None,
             title_padding: None,
             label_padding: None,
-            include_minor: false,
+            include_minor,
             minor_tick_positions: y_minor_fractions,
             projected_tick_fractions: y_projected,
             scale_padding_frac: y_scale_padding_frac,
