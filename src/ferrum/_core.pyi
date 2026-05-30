@@ -789,3 +789,36 @@ class _KendallResult(TypedDict):
     n_tied_both: int
 
 def kendall_tau_b(x: Sequence[float], y: Sequence[float]) -> _KendallResult: ...
+
+# ---------- Model-diagnostic kernels (Phase 10g) ----------
+# Arrow arrays are passed as Any (pyarrow is a runtime dep, not a type dep).
+# RecordBatch returns are also typed as Any for the same reason.
+
+def hat_matrix_stats(X: Any, y_true: Any, y_pred: Any) -> Any: ...
+def studentized_residual_no_x(y_true: Any, y_pred: Any) -> Any: ...
+
+def roc_curve_kernel(y_true: Any, y_score: Any, drop_intermediate: bool) -> Any: ...
+def roc_auc(y_true: Any, y_score: Any) -> float: ...
+
+def pr_curve_kernel(y_true: Any, y_score: Any) -> Any: ...
+def average_precision(y_true: Any, y_score: Any) -> float: ...
+
+def calibration_kernel(
+    y_true: Any,
+    y_prob: Any,
+    n_bins: int,
+    strategy: str,
+) -> Any: ...
+
+def confusion_kernel(
+    y_true: Any,
+    y_pred: Any,
+    labels: Any,
+    normalize: str,
+) -> Any: ...
+
+def prf_at_thresholds(
+    y_true: Any,
+    y_score: Any,
+    thresholds: Any,
+) -> Any: ...
