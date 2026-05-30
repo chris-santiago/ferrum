@@ -60,6 +60,8 @@ _COLOR_KEYS: frozenset[str] = frozenset(
         "title_color",
         "label_color",
         "grid_color",
+        "major_grid_color",
+        "minor_grid_color",
         "axis_line_color",
         "tick_color",
         "strip_background_color",
@@ -289,6 +291,12 @@ area_opacity, opacity : optional
         fully-resolved dict; no Option fallback chains in the binding.
         """
         d = dict(self._props)
+        # Expand Grid value objects: if the "grid" prop is a value object
+        # (has .to_spec_dict()), call it and splice the per-level keys into
+        # the dict.  Bool values (existing behavior) pass through as-is.
+        if "grid" in d and hasattr(d["grid"], "to_spec_dict"):
+            grid_spec = d.pop("grid").to_spec_dict()
+            d.update(grid_spec)
         # Apply fallback chains BEFORE the background rename so a future
         # fallback whose source is "background" (none today) still resolves.
         for derived, source in self._FALLBACKS.items():

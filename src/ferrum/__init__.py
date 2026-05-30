@@ -96,6 +96,7 @@ from ferrum.annotations import (
     OutlierLabel,
 )
 from ferrum.axis import Axis
+from ferrum.grid import Grid
 from ferrum.legend import Legend
 from ferrum.title import Title
 from ferrum.selection import (
@@ -503,8 +504,9 @@ __all__ = [
     "BrierLabel",
     "OutlierLabel",
     "Title",
-    # Phase 12 — Axis and Legend value classes
+    # Phase 12 — Axis, Grid, and Legend value classes
     "Axis",
+    "Grid",
     "Legend",
     # Phase 11c — selections
     "Selection",

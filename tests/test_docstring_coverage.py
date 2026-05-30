@@ -102,6 +102,7 @@ _DOC_ALLOWLIST: set[str] = {
     "OutlierLabel",
     "Title",
     "Axis",
+    "Grid",
     "Legend",
     "continuous_palette",
     # Task 7 — spec types (Rust)
