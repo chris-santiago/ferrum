@@ -18,9 +18,24 @@
 //!
 //! When `encoding.y2` is unset the drawer silently skips — ribbon requires y2.
 
-use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::scale_resolve::ScaleKind;
 
 fn resolve_x_pixels(ctx: &DrawCtx, xf: &str, n: usize) -> Option<(Vec<Option<f64>>, bool)> {
+    // For ordinal x scales, stringify the column (works for Utf8 and integer
+    // dtypes) and look up band centers. This must come before the f64 path
+    // because col_as_f64 succeeds on integer columns, but to_pixel_f64 returns
+    // None for ordinal scales, producing all-None pixels.
+    if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) {
+        if let Ok(xs_s) = col_as_ordinal_category_str(ctx.batch, xf) {
+            let pixels: Vec<Option<f64>> = xs_s
+                .into_iter()
+                .take(n)
+                .map(|v| v.as_deref().and_then(|s| ctx.scales.x.to_pixel_str(s)))
+                .collect();
+            return Some((pixels, true));
+        }
+    }
     if let Ok(xs_f) = col_as_f64(ctx.batch, xf) {
         let pixels: Vec<Option<f64>> = xs_f
             .into_iter()

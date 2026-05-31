@@ -302,11 +302,53 @@ pub(crate) fn nice_calendar_interval(span_ms: f64, count: usize) -> CalendarInte
     }
 }
 
+/// Pick a "nice" month stride (1, 2, 3, 6, or 12) so that `span_months`
+/// subdivided by the stride lands near `count` ticks. Keeps month labels evenly
+/// spaced (quarters, half-years, years) instead of one tick per month.
+fn nice_month_step(span_months: i64, count: usize) -> i64 {
+    if count == 0 {
+        return 1;
+    }
+    let target = (span_months as f64 / count as f64).max(1.0);
+    for &s in &[1, 2, 3, 6, 12] {
+        if (s as f64) >= target {
+            return s;
+        }
+    }
+    12
+}
+
+/// Pick a "nice" year stride (1, 2, 5, 10, 20, 50, ... — the standard 1/2/5
+/// decade progression) so `span_years / step` lands near `count`.
+fn nice_year_step(span_years: i64, count: usize) -> i64 {
+    if count == 0 {
+        return 1;
+    }
+    let target = (span_years as f64 / count as f64).max(1.0);
+    let mut step = 1i64;
+    let mults = [1i64, 2, 5];
+    let mut pow = 1i64;
+    loop {
+        for &m in &mults {
+            step = m * pow;
+            if step as f64 >= target {
+                return step;
+            }
+        }
+        pow *= 10;
+        if pow > 1_000_000 {
+            return step;
+        }
+    }
+}
+
 /// Generate calendar-snapped tick positions (ms since Unix epoch) for a time axis.
 ///
 /// Month ticks snap to the 1st of each month at 00:00 UTC; year ticks snap to
-/// Jan 1 of each year. Sub-month intervals fall back to the approximate math in
-/// `nice_time_interval_ms`.
+/// Jan 1 of each year. Both strides are widened toward `count` (via
+/// [`nice_month_step`] / [`nice_year_step`]) so a long span does not emit one
+/// tick per calendar unit. Sub-month intervals fall back to the approximate
+/// math in `nice_time_interval_ms`.
 pub(crate) fn calendar_ticks(lo_ms: f64, hi_ms: f64, count: usize) -> Vec<f64> {
     if count == 0 || !lo_ms.is_finite() || !hi_ms.is_finite() {
         return Vec::new();
@@ -324,19 +366,35 @@ pub(crate) fn calendar_ticks(lo_ms: f64, hi_ms: f64, count: usize) -> Vec<f64> {
             let Some(start_dt) = Utc.timestamp_millis_opt(lo as i64).single() else {
                 return Vec::new(); // out-of-range timestamp
             };
+            // Stride by a "nice" number of months so a long span (e.g. 72 months)
+            // approximates `count` ticks instead of emitting one per month.
+            let span_months = (span / _MONTH).round().max(1.0) as i64;
+            let step = nice_month_step(span_months, count);
             let mut year = start_dt.year();
             let mut month = start_dt.month();
             if start_dt.day() > 1 || start_dt.hour() > 0 || start_dt.minute() > 0 {
                 month += 1;
                 if month > 12 { month = 1; year += 1; }
             }
+            // Snap the first tick to a stride-aligned month so the labels read
+            // evenly (e.g. Jan/Apr/Jul/Oct for a 3-month stride within a year).
+            if step > 1 {
+                let from_jan = (month as i64 - 1).rem_euclid(step);
+                if from_jan != 0 {
+                    let advance = step - from_jan;
+                    let m0 = month as i64 - 1 + advance;
+                    year += (m0 / 12) as i32;
+                    month = (m0 % 12) as u32 + 1;
+                }
+            }
             let mut out = Vec::new();
             while let Some(t) = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).single() {
                 let ms = t.timestamp_millis() as f64;
                 if ms > hi { break; }
                 out.push(ms);
-                month += 1;
-                if month > 12 { month = 1; year += 1; }
+                let m0 = month as i64 - 1 + step;
+                year += (m0 / 12) as i32;
+                month = (m0 % 12) as u32 + 1;
             }
             out
         }
@@ -344,14 +402,24 @@ pub(crate) fn calendar_ticks(lo_ms: f64, hi_ms: f64, count: usize) -> Vec<f64> {
             let Some(start_dt) = Utc.timestamp_millis_opt(lo as i64).single() else {
                 return Vec::new();
             };
+            // Stride by a "nice" number of years (1, 2, 5, 10, ...) toward `count`.
+            let span_years = (span / _YEAR).round().max(1.0) as i64;
+            let step = nice_year_step(span_years, count);
             let mut year = start_dt.year();
             if start_dt.month() > 1 || start_dt.day() > 1 { year += 1; }
+            // Snap to a stride-aligned year so labels land on round multiples.
+            if step > 1 {
+                let rem = (year as i64).rem_euclid(step);
+                if rem != 0 {
+                    year += (step - rem) as i32;
+                }
+            }
             let mut out = Vec::new();
             while let Some(t) = Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).single() {
                 let ms = t.timestamp_millis() as f64;
                 if ms > hi { break; }
                 out.push(ms);
-                year += 1;
+                year += step as i32;
             }
             out
         }
@@ -413,6 +481,53 @@ mod tests {
         assert!(nice_step(0.0, 10.0, 0).is_nan());
         assert!(nice_step(f64::NAN, 10.0, 5).is_nan());
         assert!(nice_step(0.0, f64::INFINITY, 5).is_nan());
+    }
+
+    #[test]
+    fn test_nice_month_step_progression() {
+        // 72 months over ~6 ticks → 12-month stride.
+        assert_eq!(nice_month_step(72, 6), 12);
+        // 12 months over 6 ticks → ~2-month stride.
+        assert_eq!(nice_month_step(12, 6), 2);
+        // 6 months over 6 ticks → monthly.
+        assert_eq!(nice_month_step(6, 6), 1);
+    }
+
+    #[test]
+    fn test_nice_year_step_progression() {
+        assert_eq!(nice_year_step(10, 10), 1);
+        assert_eq!(nice_year_step(20, 5), 5);
+        assert_eq!(nice_year_step(100, 5), 20);
+    }
+
+    #[test]
+    fn test_calendar_ticks_month_count_limits_dense_span() {
+        // A 72-month span (2020-01 .. 2025-12) must NOT emit ~72 ticks; with a
+        // target count of 6 it should subsample to roughly that many.
+        // 2020-01-01 = 1577836800000 ms; +72 months ≈ 2026-01-01.
+        let lo = 1_577_836_800_000.0;
+        let hi = lo + 72.0 * 30.0 * 86_400_000.0;
+        let dense = calendar_ticks(lo, hi, 6);
+        assert!(
+            dense.len() <= 12,
+            "tick_count=6 over 72 months should subsample, got {} ticks",
+            dense.len()
+        );
+        assert!(!dense.is_empty());
+    }
+
+    #[test]
+    fn test_calendar_ticks_more_count_more_ticks() {
+        let lo = 1_577_836_800_000.0;
+        let hi = lo + 72.0 * 30.0 * 86_400_000.0;
+        let few = calendar_ticks(lo, hi, 4);
+        let many = calendar_ticks(lo, hi, 24);
+        assert!(
+            many.len() >= few.len(),
+            "higher count should not produce fewer ticks: few={} many={}",
+            few.len(),
+            many.len()
+        );
     }
 
     #[test]

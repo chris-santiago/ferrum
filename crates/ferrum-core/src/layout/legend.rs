@@ -103,6 +103,23 @@ pub struct LegendEntryLayout {
     pub symbol_anchor_x: f64,
     pub symbol_anchor_y: f64,
     pub symbol_kind: SymbolKind,
+    /// Size-legend graduated symbol radius in pixels. When `Some`, the entry's
+    /// circle swatch is drawn at this radius (graduated-symbol size legend)
+    /// rather than the fixed legend swatch radius. `None` for color/shape
+    /// entries (byte-identical serialization to the pre-size-legend shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_radius: Option<f64>,
+    /// Shape-legend point-shape name (e.g. `"diamond"`, `"triangle-up"`). When
+    /// `Some`, the renderer draws the matching point glyph instead of the
+    /// `symbol_kind` swatch. `None` for color/size entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_name: Option<String>,
+    /// Explicit per-entry swatch color (css hex). Set on a merged color+size
+    /// legend so each graduated symbol also carries the color the shared field
+    /// maps to. `None` falls back to the color-scale lookup (color legend) or
+    /// the theme mark color (size/shape legend).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_hex: Option<String>,
 }
 
 use super::text_metrics::TextMetrics;
@@ -351,6 +368,9 @@ pub fn layout_legend(
                         symbol_anchor_x: symbol_x,
                         symbol_anchor_y: y,
                         symbol_kind: override_symbol.unwrap_or(e.symbol),
+                        symbol_radius: None,
+                        shape_name: None,
+                        color_hex: None,
                     }
                 })
                 .collect()
@@ -386,6 +406,9 @@ pub fn layout_legend(
                         symbol_anchor_x: symbol_x,
                         symbol_anchor_y: cy,
                         symbol_kind: override_symbol.unwrap_or(e.symbol),
+                        symbol_radius: None,
+                        shape_name: None,
+                        color_hex: None,
                     }
                 })
                 .collect()
@@ -580,6 +603,304 @@ pub fn layout_colorbar(
     (Some(legend), new_inner)
 }
 
+// ── Auxiliary (size / shape) legends ────────────────────────────────────────
+
+/// A graduated size-legend value: the data value's formatted label and the
+/// pixel *radius* its size scale maps to. Built in `prepare.rs` from the size
+/// scale's nice round values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SizeLegendEntry {
+    pub label: String,
+    /// Symbol radius in pixels (output of the size scale for this value).
+    pub radius: f64,
+    /// Optional per-entry swatch color (css hex). Set on a merged color+size
+    /// legend so the graduated symbol also varies in color. `None` → theme
+    /// mark color.
+    pub color_hex: Option<String>,
+}
+
+/// A shape-legend category: the formatted label and the point-shape name the
+/// shape scale assigned to it (e.g. `"diamond"`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapeLegendEntry {
+    pub label: String,
+    pub shape_name: String,
+}
+
+/// Input for one auxiliary legend block (size or shape) stacked below the
+/// color legend. Built in `prepare.rs`; consumed by [`layout_aux_legends`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum AuxLegendInput {
+    Size { title: Option<String>, entries: Vec<SizeLegendEntry> },
+    Shape { title: Option<String>, entries: Vec<ShapeLegendEntry> },
+}
+
+/// The optional title of an aux legend block, regardless of variant.
+fn aux_title(input: &AuxLegendInput) -> Option<&str> {
+    match input {
+        AuxLegendInput::Size { title, .. } | AuxLegendInput::Shape { title, .. } =>
+            title.as_deref(),
+    }
+}
+
+/// Estimate the (width, height) of one auxiliary legend block.
+fn estimate_aux_block_size(
+    input: &AuxLegendInput,
+    label_font_size: f64,
+    title_font_size: f64,
+    metrics: &dyn TextMetrics,
+) -> LegendSize {
+    let line_h = metrics.line_height(label_font_size);
+    let (labels, max_symbol_w): (Vec<&str>, f64) = match input {
+        AuxLegendInput::Size { entries, .. } => {
+            let w = entries.iter().map(|e| 2.0 * e.radius).fold(SYMBOL_WIDTH, f64::max);
+            (entries.iter().map(|e| e.label.as_str()).collect(), w)
+        }
+        AuxLegendInput::Shape { entries, .. } => (
+            entries.iter().map(|e| e.label.as_str()).collect(),
+            SYMBOL_WIDTH,
+        ),
+    };
+    let max_label_w = labels
+        .iter()
+        .map(|l| metrics.measure_width(l, label_font_size))
+        .fold(0.0_f64, f64::max);
+    let n = labels.len() as f64;
+    // Per-row pitch must clear the tallest symbol in a size legend.
+    let row_h = match input {
+        AuxLegendInput::Size { entries, .. } => entries
+            .iter()
+            .map(|e| 2.0 * e.radius)
+            .fold(line_h, f64::max),
+        AuxLegendInput::Shape { .. } => line_h,
+    };
+    let entry_w = max_symbol_w + SYMBOL_LABEL_GAP + max_label_w;
+    let width = entry_w + 2.0 * LEGEND_OUTER_PAD;
+    let entries_h = if labels.is_empty() {
+        0.0
+    } else {
+        n * row_h + (n - 1.0).max(0.0) * LEGEND_ENTRY_ROW_PAD
+    };
+    let title_h = aux_title(input)
+        .map(|_| metrics.line_height(title_font_size) + LEGEND_TITLE_GAP)
+        .unwrap_or(0.0);
+    let height = title_h + entries_h + 2.0 * LEGEND_OUTER_PAD;
+    LegendSize { width, height }
+}
+
+/// The y-pixel at the bottom of a color legend's drawn content (last entry row
+/// or colorbar + its lowest tick), used to anchor stacked aux blocks. Falls
+/// back to the rect top when the legend has neither entries nor a colorbar.
+fn color_legend_content_bottom(
+    legend: &LegendLayout,
+    label_font_size: f64,
+    metrics: &dyn TextMetrics,
+) -> f64 {
+    let line_h = metrics.line_height(label_font_size);
+    let mut bottom = legend.rect.y + LEGEND_OUTER_PAD;
+    for e in &legend.entries {
+        bottom = bottom.max(e.symbol_anchor_y + line_h / 2.0);
+    }
+    if let Some(cb) = &legend.colorbar {
+        bottom = bottom.max(cb.bar_rect.y + cb.bar_rect.h);
+        for t in &cb.ticks {
+            bottom = bottom.max(t.y + line_h / 2.0);
+        }
+    }
+    bottom
+}
+
+/// Lay out auxiliary (size / shape) legend blocks, stacked vertically beneath
+/// the color legend in the same gutter. Returns the laid-out blocks plus a
+/// possibly-reduced `inner_after_legend` rect: if the widest aux block exceeds
+/// the color block's reserved width, the plot region shrinks to accommodate it.
+///
+/// `color_legend` is the already-placed color legend (`None` when only
+/// size/shape are encoded). `inner_pre_legend` is the rect *before* any legend
+/// reservation (used to compute the gutter when there is no color block).
+/// `inner_after_legend` is the plot rect remaining after the color reservation.
+///
+/// Blocks stack from the bottom of the color block (or the top of the gutter
+/// when there is no color block) downward. Each block is left-aligned with the
+/// color block's gutter `x`.
+#[allow(clippy::too_many_arguments)]
+pub fn layout_aux_legends(
+    inputs: &[AuxLegendInput],
+    color_legend: Option<&LegendLayout>,
+    orient: LegendOrient,
+    inner_pre_legend: Rect,
+    inner_after_legend: Rect,
+    label_font_size: f64,
+    title_font_size: f64,
+    metrics: &dyn TextMetrics,
+    legend_gutter: f64,
+) -> (Vec<LegendLayout>, Rect) {
+    if inputs.is_empty() {
+        return (Vec::new(), inner_after_legend);
+    }
+
+    // Determine the gutter x-origin and the y at which to start stacking.
+    // With a color legend present, reuse its rect; otherwise carve a fresh
+    // strip from the pre-legend inner on the requested orient.
+    let (gutter_x, mut cursor_y, mut new_inner, color_w) =
+        if let Some(cl) = color_legend {
+            // Stack starts below the color block's *content* (its entries or
+            // colorbar), not its full-height gutter rect — otherwise the aux
+            // blocks land at the bottom of the viewport and clip.
+            let content_bottom = color_legend_content_bottom(cl, label_font_size, metrics);
+            (cl.rect.x, content_bottom, inner_after_legend, cl.rect.w)
+        } else {
+            // No color legend: place the aux stack in the gutter on `orient`.
+            // Reserve a provisional width (the widest aux block) from the
+            // pre-legend inner.
+            let max_w = inputs
+                .iter()
+                .map(|i| estimate_aux_block_size(i, label_font_size, title_font_size, metrics).width)
+                .fold(0.0_f64, f64::max);
+            const LEGEND_PLOT_GAP: f64 = 8.0;
+            let (gutter_x, new_inner) = match orient {
+                LegendOrient::Right | LegendOrient::Top | LegendOrient::Bottom => {
+                    let w = max_w.min(inner_pre_legend.w * 0.5);
+                    let (_strip, rest) = inner_pre_legend.split_right(w + LEGEND_PLOT_GAP);
+                    (inner_pre_legend.x + inner_pre_legend.w - w, rest)
+                }
+                LegendOrient::Left => {
+                    let w = max_w.min(inner_pre_legend.w * 0.5);
+                    let (strip, rest) = inner_pre_legend.split_left(w + LEGEND_PLOT_GAP);
+                    (strip.x, rest)
+                }
+            };
+            (gutter_x, inner_pre_legend.y, new_inner, max_w)
+        };
+
+    let mut blocks: Vec<LegendLayout> = Vec::with_capacity(inputs.len());
+    let mut max_block_w = color_w;
+    // Gap between stacked legend blocks.
+    const AUX_BLOCK_GAP: f64 = 12.0;
+
+    for input in inputs {
+        let size = estimate_aux_block_size(input, label_font_size, title_font_size, metrics);
+        max_block_w = max_block_w.max(size.width);
+        let block_rect = Rect {
+            x: gutter_x,
+            y: cursor_y + AUX_BLOCK_GAP,
+            w: size.width,
+            h: size.height,
+        };
+        let block = layout_aux_block(input, block_rect, label_font_size, title_font_size, metrics);
+        cursor_y = block_rect.y + block_rect.h;
+        blocks.push(block);
+    }
+
+    // If the widest aux block exceeds the color block, shrink the plot region.
+    if max_block_w > color_w {
+        let extra = max_block_w - color_w;
+        new_inner = match orient {
+            LegendOrient::Right | LegendOrient::Top | LegendOrient::Bottom => Rect {
+                x: new_inner.x,
+                y: new_inner.y,
+                w: (new_inner.w - extra - legend_gutter.min(0.0)).max(0.0),
+                h: new_inner.h,
+            },
+            LegendOrient::Left => Rect {
+                x: new_inner.x + extra,
+                y: new_inner.y,
+                w: (new_inner.w - extra).max(0.0),
+                h: new_inner.h,
+            },
+        };
+    }
+
+    (blocks, new_inner)
+}
+
+/// Lay out a single aux block (size or shape) within `block_rect`: title at
+/// top, then one row per entry. Returns a `LegendLayout` whose `entries` carry
+/// `symbol_radius` (size) or `shape_name` (shape) so the renderer draws the
+/// graduated / shaped glyph.
+fn layout_aux_block(
+    input: &AuxLegendInput,
+    block_rect: Rect,
+    label_font_size: f64,
+    title_font_size: f64,
+    metrics: &dyn TextMetrics,
+) -> LegendLayout {
+    let line_h = metrics.line_height(label_font_size);
+    let title_h = aux_title(input)
+        .map(|_| metrics.line_height(title_font_size))
+        .unwrap_or(0.0);
+    let title_layout = aux_title(input).map(|text| LegendTitleLayout {
+        text: text.to_string(),
+        x: block_rect.x + LEGEND_OUTER_PAD,
+        y: block_rect.y + LEGEND_OUTER_PAD + title_h,
+    });
+    let title_offset = if title_layout.is_some() {
+        title_h + LEGEND_TITLE_GAP
+    } else {
+        0.0
+    };
+
+    // The largest symbol radius (size legend) sets the symbol column width so
+    // labels clear the biggest circle.
+    let max_radius = match input {
+        AuxLegendInput::Size { entries, .. } =>
+            entries.iter().map(|e| e.radius).fold(SYMBOL_WIDTH / 2.0, f64::max),
+        AuxLegendInput::Shape { .. } => SYMBOL_WIDTH / 2.0,
+    };
+    let symbol_col_x = block_rect.x + LEGEND_OUTER_PAD + max_radius;
+    let label_x = block_rect.x + LEGEND_OUTER_PAD + 2.0 * max_radius + SYMBOL_LABEL_GAP;
+
+    let mut entries: Vec<LegendEntryLayout> = Vec::new();
+    let mut row_top = block_rect.y + LEGEND_OUTER_PAD + title_offset;
+
+    match input {
+        AuxLegendInput::Size { entries: ses, .. } => {
+            for e in ses {
+                let row_h = (2.0 * e.radius).max(line_h);
+                let cy = row_top + row_h / 2.0;
+                entries.push(LegendEntryLayout {
+                    label: e.label.clone(),
+                    label_anchor_x: label_x,
+                    label_anchor_y: cy + label_font_size * 0.35,
+                    symbol_anchor_x: symbol_col_x,
+                    symbol_anchor_y: cy,
+                    symbol_kind: SymbolKind::Circle,
+                    symbol_radius: Some(e.radius),
+                    shape_name: None,
+                    color_hex: e.color_hex.clone(),
+                });
+                row_top += row_h + LEGEND_ENTRY_ROW_PAD;
+            }
+        }
+        AuxLegendInput::Shape { entries: shes, .. } => {
+            for e in shes {
+                let cy = row_top + line_h / 2.0;
+                entries.push(LegendEntryLayout {
+                    label: e.label.clone(),
+                    label_anchor_x: label_x,
+                    label_anchor_y: cy + label_font_size * 0.35,
+                    symbol_anchor_x: symbol_col_x,
+                    symbol_anchor_y: cy,
+                    symbol_kind: SymbolKind::Circle,
+                    symbol_radius: None,
+                    shape_name: Some(e.shape_name.clone()),
+                    color_hex: None,
+                });
+                row_top += line_h + LEGEND_ENTRY_ROW_PAD;
+            }
+        }
+    }
+
+    LegendLayout {
+        rect: block_rect,
+        orient: LegendOrient::Right,
+        direction: LegendDirection::Vertical,
+        entries,
+        title: title_layout,
+        colorbar: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,6 +918,9 @@ mod tests {
                 symbol_anchor_x: 510.0,
                 symbol_anchor_y: 70.0,
                 symbol_kind: SymbolKind::Circle,
+                symbol_radius: None,
+                shape_name: None,
+                color_hex: None,
             }],
             title: None,
             colorbar: None,
@@ -745,5 +1069,106 @@ mod tests {
         let legend = legend.unwrap();
         assert_eq!(legend.entries[0].symbol_kind, SymbolKind::Circle);
         assert_eq!(legend.entries[1].symbol_kind, SymbolKind::Square);
+    }
+
+    // ── Multivariate B1: auxiliary (size / shape) legend layout ──────────
+
+    fn size_input(n: usize) -> AuxLegendInput {
+        AuxLegendInput::Size {
+            title: Some("pop".into()),
+            entries: (0..n)
+                .map(|i| SizeLegendEntry {
+                    label: format!("{}", (i + 1) * 20),
+                    radius: 3.0 + i as f64 * 4.0,
+                    color_hex: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn shape_input(n: usize) -> AuxLegendInput {
+        AuxLegendInput::Shape {
+            title: Some("region".into()),
+            entries: (0..n)
+                .map(|i| ShapeLegendEntry {
+                    label: format!("cat{i}"),
+                    shape_name: "circle".into(),
+                })
+                .collect(),
+        }
+    }
+
+    /// A color legend rect to anchor aux blocks beneath.
+    fn color_legend_rect() -> LegendLayout {
+        LegendLayout {
+            rect: Rect { x: 500.0, y: 0.0, w: 80.0, h: 100.0 },
+            orient: LegendOrient::Right,
+            direction: LegendDirection::Vertical,
+            entries: vec![],
+            title: None,
+            colorbar: None,
+        }
+    }
+
+    #[test]
+    fn aux_legend_empty_is_noop() {
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let m = mock(8.0);
+        let (blocks, new_inner) = layout_aux_legends(
+            &[], None, LegendOrient::Right, inner, inner, 11.0, 13.0, &m, 13.0,
+        );
+        assert!(blocks.is_empty());
+        assert_eq!(new_inner, inner, "no aux legends → plot region unchanged");
+    }
+
+    #[test]
+    fn aux_size_block_has_five_graduated_entries() {
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let after = Rect { x: 0.0, y: 0.0, w: 480.0, h: 400.0 };
+        let m = mock(8.0);
+        let cl = color_legend_rect();
+        let (blocks, _) = layout_aux_legends(
+            &[size_input(5)], Some(&cl), LegendOrient::Right, inner, after, 11.0, 13.0, &m, 13.0,
+        );
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].entries.len(), 5, "five graduated size entries");
+        for e in &blocks[0].entries {
+            assert!(e.symbol_radius.is_some(), "size entry must carry a radius");
+        }
+    }
+
+    #[test]
+    fn aux_blocks_stack_below_color_and_do_not_overlap() {
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let after = Rect { x: 0.0, y: 0.0, w: 480.0, h: 400.0 };
+        let m = mock(8.0);
+        let cl = color_legend_rect();
+        let (blocks, _) = layout_aux_legends(
+            &[size_input(4), shape_input(3)],
+            Some(&cl), LegendOrient::Right, inner, after, 11.0, 13.0, &m, 13.0,
+        );
+        assert_eq!(blocks.len(), 2, "two stacked blocks (size, shape)");
+        // First block starts below the color legend's content top.
+        assert!(blocks[0].rect.y >= cl.rect.y, "size block below color legend top");
+        // Second block starts below the first (no vertical overlap).
+        let first_bottom = blocks[0].rect.y + blocks[0].rect.h;
+        assert!(
+            blocks[1].rect.y >= first_bottom,
+            "shape block (y={}) must start below size block bottom ({})",
+            blocks[1].rect.y, first_bottom
+        );
+    }
+
+    #[test]
+    fn aux_legend_without_color_reserves_gutter() {
+        // Size-only chart: no color legend. The aux stack must carve its own
+        // gutter and shrink the plot region.
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let m = mock(8.0);
+        let (blocks, new_inner) = layout_aux_legends(
+            &[size_input(5)], None, LegendOrient::Right, inner, inner, 11.0, 13.0, &m, 13.0,
+        );
+        assert_eq!(blocks.len(), 1);
+        assert!(new_inner.w < inner.w, "size-only legend must reserve gutter width");
     }
 }

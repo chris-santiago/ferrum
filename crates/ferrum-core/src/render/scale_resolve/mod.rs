@@ -38,7 +38,7 @@ pub use self::color::build_color_scale;
 
 // Internal re-exports used by the orchestrator in this module.
 use self::positional::{
-    apply_coord_domain_overrides, build_axis_scale,
+    apply_coord_domain_overrides, build_axis_scale, PositionalFields,
 };
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -161,6 +161,23 @@ impl ScaleKind {
                 .into_iter()
                 .map(super::format::format_numeric)
                 .collect(),
+        }
+    }
+
+    /// Raw tick *values* (epoch-milliseconds) for a temporal scale, in the same
+    /// order and count as [`tick_labels`](Self::tick_labels). Returns `None` for
+    /// non-temporal scales. Used by `prepare.rs` to apply an explicit
+    /// `chrono`/d3 time format to the underlying timestamps (the formatted
+    /// strings from `tick_labels` have already lost the epoch values).
+    pub(crate) fn temporal_tick_values(&self, count_hint: usize) -> Option<Vec<i64>> {
+        match self {
+            Self::Time(s) => Some(
+                s.ticks_internal(count_hint)
+                    .into_iter()
+                    .map(|v| v as i64)
+                    .collect(),
+            ),
+            _ => None,
         }
     }
 
@@ -505,6 +522,23 @@ pub enum ShapeKind {
     HLine,
 }
 
+impl ShapeKind {
+    /// Canonical shape name, the inverse of `point::shape_from_str`. Used by the
+    /// shape legend so each entry's glyph matches what the mark draws.
+    pub fn name(self) -> &'static str {
+        match self {
+            ShapeKind::Circle => "circle",
+            ShapeKind::Square => "square",
+            ShapeKind::Cross => "cross",
+            ShapeKind::Diamond => "diamond",
+            ShapeKind::TriangleUp => "triangle-up",
+            ShapeKind::TriangleDown => "triangle-down",
+            ShapeKind::VLine => "vline",
+            ShapeKind::HLine => "hline",
+        }
+    }
+}
+
 /// Fixed 8-shape palette used by `build_shape_scale`. Wraps on overflow.
 pub const SHAPE_PALETTE: [ShapeKind; 8] = [
     ShapeKind::Circle,
@@ -666,12 +700,13 @@ pub fn resolve_scales_with_outputs(
         if has_x && !has_y {
             let x_enc = spec.encoding.x.as_ref().unwrap();
             let x2_enc = spec.encoding.x2.as_ref();
-            let x = build_axis_scale("x", x_enc, x2_enc, primary_batch, transform_outputs, x_pixel_range, spec)?;
+            let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
+            let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, &mut warnings)?;
             let dummy_y = ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 1.0], vec![y_pixel_range.1, y_pixel_range.0], false, false,
             ));
-            let (color, color_warn) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme)?;
-            if let Some(w) = color_warn { warnings.push(w); }
+            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme)?;
+            warnings.extend(color_warns);
             let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
             let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
             if let Some(w) = shape_warn { warnings.push(w); }
@@ -682,12 +717,13 @@ pub fn resolve_scales_with_outputs(
             let y_enc = spec.encoding.y.as_ref().unwrap();
             let y2_enc = spec.encoding.y2.as_ref();
             let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
-            let y = build_axis_scale("y", y_enc, y2_enc, &y_batch, transform_outputs, y_pixel_range, spec)?;
+            let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
+            let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, &mut warnings)?;
             let dummy_x = ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 1.0], vec![x_pixel_range.0, x_pixel_range.1], false, false,
             ));
-            let (color, color_warn) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme)?;
-            if let Some(w) = color_warn { warnings.push(w); }
+            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme)?;
+            warnings.extend(color_warns);
             let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
             let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
             if let Some(w) = shape_warn { warnings.push(w); }
@@ -720,12 +756,19 @@ pub fn resolve_scales_with_outputs(
     // resolved range and produce non-finite pixels downstream.
     let x2_enc = spec.encoding.x2.as_ref();
     let y2_enc = spec.encoding.y2.as_ref();
-    let mut x = build_axis_scale("x", x_enc, x2_enc, primary_batch, transform_outputs, x_pixel_range, spec)?;
+    // Data-aware sort (channel shorthand `"-y"`, sort-field objects) needs both
+    // positional field names so an ordinal axis can aggregate the opposite
+    // channel's quantitative field.
+    let pos_fields = PositionalFields {
+        x: Some(x_enc.field.as_str()),
+        y: Some(y_enc.field.as_str()),
+    };
+    let mut x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, &mut warnings)?;
     // Stack-aware y-axis: resolve against the post-Stack batch when the
     // spec carries a matching Stack adjustment. See
     // `position::axis_batch_for_y` for the rationale.
     let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
-    let mut y = build_axis_scale("y", y_enc, y2_enc, &y_batch, transform_outputs, y_pixel_range, spec)?;
+    let mut y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, &mut warnings)?;
 
     // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the
     // data domain; expand=false removes the default 5% inward padding.
@@ -737,12 +780,10 @@ pub fn resolve_scales_with_outputs(
     // matching Phase 8a behavior. (build_color_scale is the one exception —
     // it accepts transform_outputs because composite-mark color fields may
     // live in a named output rather than primary.)
-    let (color, color_warn) = build_color_scale(
+    let (color, color_warns) = build_color_scale(
         &spec.encoding, primary_batch, transform_outputs, theme,
     )?;
-    if let Some(w) = color_warn {
-        warnings.push(w);
-    }
+    warnings.extend(color_warns);
 
     let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
     let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;

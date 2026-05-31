@@ -66,7 +66,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .unwrap_or(ctx.mark_style.stroke_width);
 
         let row_style = to_scene_stroke(
-            ctx.mark_style.fill,
+            ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill),
             row_stroke_width,
             row_opacity,
             ctx.mark_style.stroke_dash.as_deref(),
@@ -165,5 +165,80 @@ mod tests {
         };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Line { .. })).count(), 2);
+    }
+
+    #[test]
+    fn segment_uses_explicit_stroke_color() {
+        use crate::spec::mark_style::MarkKwargsSpec;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Segment,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                x2: Some(EncodingSpec { field: "x2".into(), type_: None, ..Default::default() }),
+                y2: Some(EncodingSpec { field: "y2".into(), type_: None, ..Default::default() }),
+                color: None,
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("x2", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0])),
+            Arc::new(Float64Array::from(vec![0.0])),
+            Arc::new(Float64Array::from(vec![1.0])),
+            Arc::new(Float64Array::from(vec![1.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+
+        // Create mark style with explicit stroke color
+        let overrides = MarkKwargsSpec { stroke: Some("#e4572e".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Segment);
+
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+        let result = super::build(&ctx);
+
+        // Check that the segment line has the correct stroke color
+        assert_eq!(result.nodes.len(), 1);
+        if let ferrum_scene::SceneNode::Line { style, .. } = &result.nodes[0] {
+            assert_eq!(style.color.r, 0xe4, "stroke red component should match explicit color");
+            assert_eq!(style.color.g, 0x57, "stroke green component should match explicit color");
+            assert_eq!(style.color.b, 0x2e, "stroke blue component should match explicit color");
+        } else {
+            panic!("Expected Line node");
+        }
     }
 }

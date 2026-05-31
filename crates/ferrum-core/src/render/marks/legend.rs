@@ -113,43 +113,76 @@ pub fn build_legend(
         }
     }
 
-    // Categorical entries.
+    // Categorical entries (color), graduated size symbols, and shape glyphs.
+    // Per-entry precedence for the swatch color: an explicit `color_hex`
+    // (merged color+size legend) wins; else the categorical color-scale
+    // lookup; else the theme mark color.
     for entry in &legend.entries {
-        let color = color_scale
-            .and_then(|s| match s {
-                ColorScale::Categorical { .. } => s.lookup(&entry.label),
-                ColorScale::Continuous { .. } => None,
+        let color = entry
+            .color_hex
+            .as_deref()
+            .and_then(|hex| crate::render::color::from_hex_str(hex).ok())
+            .or_else(|| {
+                color_scale.and_then(|s| match s {
+                    ColorScale::Categorical { .. } => s.lookup(&entry.label),
+                    ColorScale::Continuous { .. } => None,
+                })
             })
             .unwrap_or(theme.colors.mark_color);
         let sx = entry.symbol_anchor_x;
         let sy = entry.symbol_anchor_y;
-        match entry.symbol_kind {
-            SymbolKind::Circle => {
-                nodes.push(SceneNode::Circle {
-                    cx: sx,
-                    cy: sy,
-                    r: 4.0,
-                    style: to_scene_fill_stroke(Some(color), None, 0.0, 1.0, None),
-                });
-            }
-            SymbolKind::Square => {
-                nodes.push(SceneNode::Rect {
-                    x: sx - 4.0,
-                    y: sy - 4.0,
-                    w: 8.0,
-                    h: 8.0,
-                    style: to_scene_fill_stroke(Some(color), None, 0.0, 1.0, None),
-                    corner_radius: 0.0,
-                });
-            }
-            SymbolKind::Line => {
-                nodes.push(SceneNode::Line {
-                    x1: sx - 6.0,
-                    y1: sy,
-                    x2: sx + 6.0,
-                    y2: sy,
-                    style: to_scene_stroke(color, theme.sizes.line_stroke_width, 1.0, None, None, None),
-                });
+
+        if let Some(shape_name) = &entry.shape_name {
+            // Shape legend: draw the category's point glyph at a fixed radius.
+            let kind = crate::render::marks::point::shape_from_str(shape_name);
+            let style = crate::render::marks::point::ShapeStyle {
+                fill: Some(color),
+                stroke: None,
+                stroke_width: 0.0,
+                opacity: 1.0,
+                stroke_opacity: 1.0,
+                fill_opacity: 1.0,
+                stroke_dash_idx: None,
+                angle: 0.0,
+            };
+            nodes.extend(crate::render::marks::point::emit_shape_nodes(kind, sx, sy, 5.0, style));
+        } else if let Some(radius) = entry.symbol_radius {
+            // Graduated size legend: a filled circle at the scaled radius.
+            nodes.push(SceneNode::Circle {
+                cx: sx,
+                cy: sy,
+                r: radius,
+                style: to_scene_fill_stroke(Some(color), None, 0.0, 1.0, None),
+            });
+        } else {
+            match entry.symbol_kind {
+                SymbolKind::Circle => {
+                    nodes.push(SceneNode::Circle {
+                        cx: sx,
+                        cy: sy,
+                        r: 4.0,
+                        style: to_scene_fill_stroke(Some(color), None, 0.0, 1.0, None),
+                    });
+                }
+                SymbolKind::Square => {
+                    nodes.push(SceneNode::Rect {
+                        x: sx - 4.0,
+                        y: sy - 4.0,
+                        w: 8.0,
+                        h: 8.0,
+                        style: to_scene_fill_stroke(Some(color), None, 0.0, 1.0, None),
+                        corner_radius: 0.0,
+                    });
+                }
+                SymbolKind::Line => {
+                    nodes.push(SceneNode::Line {
+                        x1: sx - 6.0,
+                        y1: sy,
+                        x2: sx + 6.0,
+                        y2: sy,
+                        style: to_scene_stroke(color, theme.sizes.line_stroke_width, 1.0, None, None, None),
+                    });
+                }
             }
         }
         nodes.push(SceneNode::Text {
@@ -252,6 +285,9 @@ mod tests {
                     symbol_anchor_x: 84.0,
                     symbol_anchor_y: 10.0,
                     symbol_kind: SymbolKind::Circle,
+                    symbol_radius: None,
+                    shape_name: None,
+                    color_hex: None,
                 },
                 LegendEntryLayout {
                     label: "b".into(),
@@ -260,6 +296,9 @@ mod tests {
                     symbol_anchor_x: 84.0,
                     symbol_anchor_y: 24.0,
                     symbol_kind: SymbolKind::Circle,
+                    symbol_radius: None,
+                    shape_name: None,
+                    color_hex: None,
                 },
             ],
             title: None,
@@ -271,5 +310,78 @@ mod tests {
         let text_count = nodes.iter().filter(|n| matches!(n, SceneNode::Text { .. })).count();
         assert_eq!(circle_count, 2);
         assert_eq!(text_count, 2);
+    }
+
+    /// A graduated size legend draws one circle per entry at the entry's
+    /// `symbol_radius`, plus a numeric label per entry.
+    #[test]
+    fn size_legend_draws_graduated_circles_with_labels() {
+        let entry = |label: &str, r: f64, y: f64| LegendEntryLayout {
+            label: label.into(),
+            label_anchor_x: 100.0,
+            label_anchor_y: y,
+            symbol_anchor_x: 90.0,
+            symbol_anchor_y: y,
+            symbol_kind: SymbolKind::Circle,
+            symbol_radius: Some(r),
+            shape_name: None,
+            color_hex: None,
+        };
+        let legend = LegendLayout {
+            rect: Rect { x: 80.0, y: 0.0, w: 40.0, h: 100.0 },
+            orient: LegendOrient::Right,
+            direction: LegendDirection::Vertical,
+            entries: vec![entry("20", 3.0, 10.0), entry("60", 6.0, 30.0), entry("100", 10.0, 55.0)],
+            title: None,
+            colorbar: None,
+        };
+        let theme = ThemeInputs::default();
+        let nodes = build_legend(&legend, None, &theme);
+        let radii: Vec<f64> = nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Circle { r, .. } = n { Some(*r) } else { None })
+            .collect();
+        assert_eq!(radii, vec![3.0, 6.0, 10.0], "graduated radii drawn in order");
+        let labels: Vec<&str> = nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Text { content, .. } = n { Some(content.as_str()) } else { None })
+            .collect();
+        assert_eq!(labels, vec!["20", "60", "100"], "numeric size labels present");
+    }
+
+    /// A shape legend draws the category's point glyph (here a diamond → a
+    /// `Path` node) plus a label, honoring an explicit `color_hex`.
+    #[test]
+    fn shape_legend_draws_glyph_per_category() {
+        let legend = LegendLayout {
+            rect: Rect { x: 80.0, y: 0.0, w: 40.0, h: 100.0 },
+            orient: LegendOrient::Right,
+            direction: LegendDirection::Vertical,
+            entries: vec![LegendEntryLayout {
+                label: "cat".into(),
+                label_anchor_x: 100.0,
+                label_anchor_y: 10.0,
+                symbol_anchor_x: 90.0,
+                symbol_anchor_y: 10.0,
+                symbol_kind: SymbolKind::Circle,
+                symbol_radius: None,
+                shape_name: Some("diamond".into()),
+                color_hex: None,
+            }],
+            title: None,
+            colorbar: None,
+        };
+        let theme = ThemeInputs::default();
+        let nodes = build_legend(&legend, None, &theme);
+        assert_eq!(
+            nodes.iter().filter(|n| matches!(n, SceneNode::Path { .. })).count(),
+            1,
+            "diamond glyph emits one Path node"
+        );
+        assert_eq!(
+            nodes.iter().filter(|n| matches!(n, SceneNode::Text { .. })).count(),
+            1,
+            "one shape label"
+        );
     }
 }

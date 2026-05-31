@@ -9,10 +9,17 @@ from __future__ import annotations
 from typing import Any
 
 
+# Marks whose primary visual channel is stroke rather than fill.
+# For these marks, the user-facing ``color=`` alias resolves to ``stroke``
+# instead of ``fill``.  Fill-primary marks (bar, area, point, rect, arc,
+# tick, …) keep the ``color`` → ``fill`` mapping.
+_STROKE_PRIMARY_MARKS: frozenset[str] = frozenset(["line", "rule", "segment", "trail"])
+
 # Aliases map user-friendly names to their canonical renderer-level keys.
-# Canonical keys (fill, opacity, stroke_dash) continue to work unchanged.
+# ``color`` is handled separately in ``MarkBase.__init__`` because the
+# canonical target depends on whether the mark is stroke-primary or not.
+# All other aliases are mark-type-independent.
 _MARK_KWARG_ALIASES: dict[str, str] = {
-    "color": "fill",
     "alpha": "opacity",
     "linetype": "stroke_dash",
     "line_type": "stroke_dash",
@@ -109,9 +116,16 @@ class MarkBase:
         # and friendly aliases (color, alpha, linetype) are transparently
         # remapped.  Canonical keys (fill, opacity, stroke_dash) still work
         # unchanged — the alias dict only covers the friendly names.
+        #
+        # ``color`` is mark-type-aware: stroke-primary marks (line, rule,
+        # segment, trail) map it to ``stroke``; all other marks map to ``fill``.
+        color_target = "stroke" if mark_name in _STROKE_PRIMARY_MARKS else "fill"
         resolved: dict[str, Any] = {}
         for k, v in kwargs.items():
-            canonical = _MARK_KWARG_ALIASES.get(k, k)
+            if k == "color":
+                canonical = color_target
+            else:
+                canonical = _MARK_KWARG_ALIASES.get(k, k)
             if canonical == "stroke_dash" and k in ("linetype", "line_type") and isinstance(v, str):
                 if v in _LINETYPE_MAP:
                     v = _LINETYPE_MAP[v]

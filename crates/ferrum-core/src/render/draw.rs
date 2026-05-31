@@ -242,7 +242,7 @@ pub fn resolve_mark_style(
     style
 }
 
-pub(crate) use super::arrow_cast::{col_as_f64, col_as_str};
+pub(crate) use super::arrow_cast::{col_as_f64, col_as_ordinal_category_str, col_as_str};
 
 /// Pre-read per-row SVG metadata columns (tooltip, href, description).
 /// Constructed once per draw call; individual mark renderers call

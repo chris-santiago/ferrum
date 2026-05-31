@@ -74,13 +74,21 @@ class Size(ChannelBase):
 
     Notes
     -----
-    ``legend`` and ``condition`` kwargs are accepted but are reserved for
-    future use (no-op today) — they trigger a one-time deprecation warning.
+    ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
+    the size legend in the rendered SVG.  ``legend=Legend(title=..., format=...)``
+    customizes the legend title and numeric format string.  When ``legend`` is
+    omitted, a graduated size legend is rendered automatically showing ~5 round
+    representative values from the field's domain.  ``condition`` is accepted but
+    reserved for future use.
+
+    When ``size`` and ``color`` are both mapped to the same field, ferrum merges
+    them into a single combined legend block.
 
     Examples
     --------
     >>> import ferrum as fm
     >>> fm.Chart(df).encode(x="hp", y="mpg", size=fm.Size("weight"))
+    >>> fm.Chart(df).encode(x="hp", y="mpg", size=fm.Size("pop", legend=None))
     """
 
     _channel_name = "size"
@@ -108,13 +116,17 @@ class Shape(ChannelBase):
 
     Notes
     -----
-    ``legend`` and ``condition`` kwargs are accepted but are reserved for
-    future use (no-op today) — they trigger a one-time deprecation warning.
+    ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
+    the shape legend in the rendered SVG.  ``legend=Legend(title=..., format=...)``
+    customizes the legend title.  When ``legend`` is omitted, a categorical shape
+    legend is rendered automatically showing one glyph per distinct category value.
+    ``condition`` is accepted but reserved for future use.
 
     Examples
     --------
     >>> import ferrum as fm
     >>> fm.Chart(df).encode(x="hp", y="mpg", shape=fm.Shape("origin", type_="N"))
+    >>> fm.Chart(df).encode(x="hp", y="mpg", shape=fm.Shape("origin", legend=None))
     """
 
     _channel_name = "shape"

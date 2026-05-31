@@ -38,10 +38,40 @@ _DISPLOT_VALID_MULTIPLE = {"layer", "stack", "fill", "dodge"}
 _CATPLOT_VALID_KINDS = {"strip", "swarm", "box", "violin", "boxen", "point", "bar", "count"}
 _RELPLOT_VALID_KINDS = {"scatter", "line"}
 
+# Minimum per-panel height (px) used by the auto-sizing path in displot/catplot
+# when `height` is not set and the chart is faceted across rows.  Derived from
+# the Rust layout minimum: EmptyPanel triggers at ~55 px; 150 px gives comfortable
+# axes + mark area and matches seaborn's default facet height.
+_FACET_DEFAULT_PANEL_HEIGHT_PX: float = 150.0
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _count_facet_levels(data: Any, field: str) -> int:
+    """Return the number of distinct non-null values in *field* within *data*.
+
+    Used to auto-scale chart height when faceting across rows.  Returns 1 on
+    any error (field absent, data not a supported type, etc.) so the caller
+    degrades gracefully to the default size rather than raising.
+    """
+    try:
+        import polars as pl
+        from ferrum._coerce import to_arrow_table
+
+        if isinstance(data, pl.DataFrame):
+            df = data
+        elif isinstance(data, pl.LazyFrame):
+            df = data.collect()
+        else:
+            df = pl.from_arrow(to_arrow_table(data))
+        if field not in df.columns:
+            return 1
+        return df[field].n_unique()
+    except Exception:
+        return 1
 
 
 def _multiple_to_position(multiple: str, hue: Any):
@@ -390,7 +420,25 @@ def displot(
             chart = chart.facet(row=row)
 
     # Properties.
-    if height is not None or aspect is not None:
+    # When row-faceting is active, `height` is treated as per-panel height
+    # (seaborn semantics).  The total canvas height is per-panel height ×
+    # number of row facet levels.  When `height` is absent and row-faceting
+    # is active, auto-compute a total height so every panel is at least
+    # _FACET_DEFAULT_PANEL_HEIGHT_PX tall.
+    if row is not None:
+        n_row_panels = _count_facet_levels(data, str(row))
+        if height is not None:
+            # height= is per-panel: total = height × n_panels
+            total_h = height * n_row_panels
+        else:
+            # No explicit height: ensure each panel meets the minimum.
+            total_h = _FACET_DEFAULT_PANEL_HEIGHT_PX * n_row_panels
+        w = total_h * aspect if aspect is not None else None
+        props: dict = {"height": total_h}
+        if w is not None:
+            props["width"] = w
+        chart = chart.properties(**props)
+    elif height is not None or aspect is not None:
         h = height if height is not None else 300.0
         w = h * aspect if aspect is not None else h
         chart = chart.properties(width=w, height=h)

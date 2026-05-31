@@ -121,6 +121,15 @@ pub enum RenderWarning {
     ColorPaletteOverflowed { categories: u32 },
     ShapePaletteOverflowed { categories: u32 },
     EmptyPanel { panel_index: usize },
+    /// An explicit color range string could not be parsed. The entire range is
+    /// discarded and the default theme palette is used instead.
+    /// `entry` is the offending color string.
+    ColorRangeParseFailure { entry: String },
+    /// A data-aware `sort` spec (channel shorthand `"-y"` or a sort-field
+    /// object) could not be resolved — the referenced field is missing from the
+    /// batch, has an unsupported dtype, or the spec is otherwise malformed. The
+    /// categorical domain falls back to insertion order; `reason` explains why.
+    SortSpecIgnored { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +162,8 @@ mod tests {
             RenderWarning::ColorPaletteOverflowed { categories: 12 },
             RenderWarning::ShapePaletteOverflowed { categories: 7 },
             RenderWarning::EmptyPanel { panel_index: 1 },
+            RenderWarning::ColorRangeParseFailure { entry: "#zzz".into() },
+            RenderWarning::SortSpecIgnored { reason: "missing field".into() },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
@@ -710,6 +721,7 @@ fn prepare_and_layout(
         prep.colorbar.as_ref(),
         &metrics,
         &legend_overrides,
+        &prep.aux_legends,
     )
     .map_err(|e| RenderError::LayoutFailed(e.to_string()))?;
     for w in &layout.warnings {
@@ -1023,6 +1035,7 @@ mod orchestration_tests {
             &prep.axes, &prep.facet_groups, &prep.legend_entries,
             effective_legend_title, prep.colorbar.as_ref(), &metrics,
             &legend_overrides,
+            &prep.aux_legends,
         ).unwrap();
         for w in &layout.warnings {
             warnings.push(RenderWarning::Layout(w.clone()));

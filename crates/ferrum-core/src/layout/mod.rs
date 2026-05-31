@@ -33,7 +33,8 @@ pub use self::facet::{FacetGroup, FacetMode, FacetSpec};
 pub use self::geometry::{Inset, Rect, Viewport};
 pub use self::legend::{
     ColorbarInput, ColorbarLayout, ColorbarTick, LegendDirection, LegendEntry,
-    LegendEntryLayout, LegendLayout, LegendOrient, LegendOverrides, SymbolKind,
+    AuxLegendInput, LegendEntryLayout, LegendLayout, LegendOrient, LegendOverrides,
+    ShapeLegendEntry, SizeLegendEntry, SymbolKind,
 };
 pub use self::panel::{FacetKey, PanelLayout, StripTitleLayout, TextAnchor};
 pub use self::text_metrics::{HeuristicMetrics, TextMetrics};
@@ -45,6 +46,11 @@ pub struct LayoutResult {
     pub axes: Vec<AxisLayout>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub legend: Option<LegendLayout>,
+    /// Auxiliary (size / shape) legend blocks stacked beneath the color
+    /// legend. Empty for color-only charts (byte-identical serialization to
+    /// the pre-size-legend shape via `skip_serializing_if`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aux_legends: Vec<LegendLayout>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub chart_title: Option<ChartTitleLayout>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -436,6 +442,7 @@ pub fn compute_layout(
     colorbar: Option<&ColorbarInput>,
     metrics: &dyn TextMetrics,
     legend_overrides: &legend::LegendOverrides,
+    aux_legend_inputs: &[legend::AuxLegendInput],
 ) -> Result<LayoutResult, LayoutError> {
     // 1. Validate inputs.
     if viewport.width <= 0.0 || viewport.height <= 0.0 {
@@ -587,6 +594,22 @@ pub fn compute_layout(
         .len()
         .saturating_sub(legend_layout.as_ref().map_or(0, |l| l.entries.len()))
         as u32;
+
+    // 3b. Auxiliary (size / shape) legends, stacked beneath the color legend in
+    //     the same gutter. When the widest aux block exceeds the color block,
+    //     `layout_aux_legends` shrinks `inner_after_legend` further. Empty for
+    //     color-only charts, so this is a no-op (plot region unchanged).
+    let (aux_legends, inner_after_legend) = legend::layout_aux_legends(
+        aux_legend_inputs,
+        legend_layout.as_ref(),
+        theme.legend.legend_orient,
+        inner,
+        inner_after_legend,
+        effective_label_font_size,
+        theme.typography.legend_title_font_size,
+        metrics,
+        theme.padding.column_padding,
+    );
 
     // 4 + 5. Reserve y-axis title gutter + label band; reserve x-axis label band.
     let y_title_gutter = axis::compute_y_title_width(
@@ -833,6 +856,7 @@ pub fn compute_layout(
         panels,
         axes: axis_layouts,
         legend: legend_layout,
+        aux_legends,
         chart_title: chart_title_layout,
         warnings,
     })
@@ -849,6 +873,7 @@ mod tests {
             panels: vec![],
             axes: vec![],
             legend: None,
+            aux_legends: vec![],
             chart_title: None,
             warnings: vec![],
         };
@@ -945,6 +970,7 @@ mod tests {
             None,
             &m,
             &legend::LegendOverrides::default(),
+            &[],
         )
         .expect("layout should succeed on minimal spec");
 
@@ -977,6 +1003,7 @@ mod tests {
             None,
             &m,
             &legend::LegendOverrides::default(),
+            &[],
         )
         .unwrap_err();
         match err {
@@ -1002,6 +1029,7 @@ mod tests {
             None,
             &m,
             &legend::LegendOverrides::default(),
+            &[],
         )
         .unwrap_err();
         match err {
@@ -1026,6 +1054,7 @@ mod tests {
             None,
             &m,
             &legend::LegendOverrides::default(),
+            &[],
         )
         .unwrap();
         let json = serde_json::to_string(&result).unwrap();
@@ -1078,6 +1107,7 @@ mod tests {
             None,
             &m,
             &legend::LegendOverrides::default(),
+            &[],
         )
         .unwrap();
 
@@ -1120,6 +1150,7 @@ mod tests {
             None,
             &m,
             &legend::LegendOverrides::default(),
+            &[],
         )
         .unwrap();
 
@@ -1149,6 +1180,7 @@ mod tests {
             None,
             &m,
             &legend::LegendOverrides::default(),
+            &[],
         ).unwrap();
 
         assert_eq!(result.panels.len(), 3);
@@ -1180,6 +1212,7 @@ mod tests {
             None,
             &m,
             &legend::LegendOverrides::default(),
+            &[],
         ).unwrap();
         assert!(result.panels[0].strip_title.is_none());
     }
@@ -1236,6 +1269,7 @@ mod tests {
             None,
             &m,
             &legend::LegendOverrides::default(),
+            &[],
         )
         .unwrap();
 
@@ -1320,12 +1354,14 @@ mod tests {
             &spec, &default_theme_inputs(), viewport,
             &short_axes, &[], &[], None, None, &m,
             &legend::LegendOverrides::default(),
+            &[],
         ).unwrap();
 
         let long_result = compute_layout(
             &spec, &default_theme_inputs(), viewport,
             &long_axes, &[], &[], None, None, &m,
             &legend::LegendOverrides::default(),
+            &[],
         ).unwrap();
 
         let short_bottom = short_result.panels[0].plot_area.y + short_result.panels[0].plot_area.h;
@@ -1367,11 +1403,13 @@ mod tests {
             &spec, &default_theme_inputs(), viewport,
             &axes_no_x, &[], &[], None, None, &m,
             &legend::LegendOverrides::default(),
+            &[],
         ).unwrap();
         let with_x_result = compute_layout(
             &spec, &default_theme_inputs(), viewport,
             &axes_with_x, &[], &[], None, None, &m,
             &legend::LegendOverrides::default(),
+            &[],
         ).unwrap();
 
         let no_x_bottom = no_x_result.panels[0].plot_area.y + no_x_result.panels[0].plot_area.h;

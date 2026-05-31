@@ -79,6 +79,15 @@ pub struct ContinuousScaleCommon {
     /// `domain` suppresses the default to 0.0 unless `padding` is also set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub padding: Option<f64>,
+    /// Color scheme name for continuous color scales (e.g. `"viridis"`, `"blues"`,
+    /// `"rdbu"`).  Honored by `build_color_scale` when the encoding's color field
+    /// is quantitative.  Takes precedence over the theme's sequential scheme.
+    ///
+    /// This field lives on `ContinuousScaleCommon` (not on each variant separately)
+    /// so that `{"type": "linear", "scheme": "blues"}` round-trips through serde
+    /// without the scheme being silently dropped (D4 fix, 2026-05-31).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
 }
 
 /// Scale override on an encoding channel. Honored by scale_resolve.rs in Phase 8a.
@@ -123,8 +132,15 @@ pub enum ScaleSpec {
     Ordinal {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         domain: Option<Vec<String>>,
+        /// Polymorphic range: either pixel coordinates (`Vec<f64>` for positional
+        /// use) or color strings (`Vec<String>` for color-channel use).
+        ///
+        /// Stored as `serde_json::Value` so that both `[0, 300]` and
+        /// `["#ccc", "#e4572e"]` round-trip through the JSON wire format without a
+        /// type-level split.  The positional scale resolver extracts numeric values;
+        /// `build_color_scale` extracts string values (D1 fix, 2026-05-31).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        range: Option<Vec<f64>>,
+        range: Option<serde_json::Value>,
         #[serde(default)]
         padding: f64,
     },
@@ -831,6 +847,7 @@ mod tests {
                     range: None,
                     clamp: false,
                     padding: None,
+                    scheme: None,
                 },
                 nice: true,
             }),
@@ -1198,7 +1215,7 @@ mod tests {
             x: Some(EncodingSpec {
                 field: "val".into(),
                 type_: Some(DataType::Quantitative),
-                scale: Some(ScaleSpec::Log { base: 2.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None }, nice: true }),
+                scale: Some(ScaleSpec::Log { base: 2.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None }, nice: true }),
                 title: Some("Value (log2)".into()),
                 axis: Some(AxisSpec { extra: {
                     let mut m = serde_json::Map::new();
@@ -1235,7 +1252,7 @@ mod tests {
             x: Some(EncodingSpec {
                 field: "val".into(),
                 type_: Some(DataType::Temporal),
-                scale: Some(ScaleSpec::Linear { common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None }, nice: true, zero: false }),
+                scale: Some(ScaleSpec::Linear { common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None }, nice: true, zero: false }),
                 title: Some("Parent Title".into()),
                 scheme: Some("parent_scheme".into()),
                 format: Some("parent_fmt".into()),
@@ -1248,7 +1265,7 @@ mod tests {
             x: Some(EncodingSpec {
                 field: "val".into(),
                 type_: Some(DataType::Quantitative),
-                scale: Some(ScaleSpec::Log { base: 10.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None }, nice: false }),
+                scale: Some(ScaleSpec::Log { base: 10.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None }, nice: false }),
                 title: Some("Child Title".into()),
                 scheme: Some("child_scheme".into()),
                 format: Some("child_fmt".into()),

@@ -17,7 +17,7 @@
 //! - Otherwise: one polyline over all rows in batch order.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx};
 use crate::render::scale_resolve::ScaleKind;
 
 /// Build a `Vec<PathCmd>` from a sequence of (x, y) pixel points using the
@@ -81,7 +81,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let n_rows = ctx.batch.num_rows();
     let xs_pix: Vec<Option<f64>> = match &ctx.scales.x {
         ScaleKind::Ordinal(_) => {
-            let xs_str = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
+            let xs_str = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
             xs_str.iter()
                 .map(|opt| opt.as_deref().and_then(|s| ctx.scales.x.to_pixel_str(s)))
                 .collect()
@@ -97,7 +97,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
     let ys_pix: Vec<Option<f64>> = match &ctx.scales.y {
         ScaleKind::Ordinal(_) => {
-            let ys_str = match col_as_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
+            let ys_str = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
             ys_str.iter()
                 .map(|opt| opt.as_deref().and_then(|s| ctx.scales.y.to_pixel_str(s)))
                 .collect()
@@ -439,5 +439,54 @@ mod tests {
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Polyline { .. })).count(), 1);
+    }
+
+    #[test]
+    fn line_integer_ordinal_x_emits_polylines() {
+        // D9-B regression: Int64 ordinal x must render the same number of
+        // polylines as Utf8 ordinal x. Previously col_as_str failed on Int64
+        // and the renderer returned empty().
+        use arrow::array::Int64Array;
+        use crate::spec::encoding::DataType as EncDataType;
+        let mut spec = line_spec();
+        spec.encoding.x = Some(EncodingSpec {
+            field: "year".into(),
+            type_: Some(EncDataType::Ordinal),
+            ..Default::default()
+        });
+        spec.encoding.color = Some(EncodingSpec {
+            field: "series".into(),
+            type_: Some(EncDataType::Nominal),
+            ..Default::default()
+        });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("year", DataType::Int64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("series", DataType::Utf8, false),
+        ]));
+        // 3 series × 4 years = 12 rows
+        let years: Vec<i64> = (0..3).flat_map(|_| vec![2000, 2001, 2002, 2003]).collect();
+        let ys: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let series: Vec<&str> = (0..12).map(|i| match i / 4 { 0 => "a", 1 => "b", _ => "c" }).collect();
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Int64Array::from(years)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(series)),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        // 3 series → 3 polylines; none should be missing due to the integer dtype
+        let polyline_count = result.nodes.iter()
+            .filter(|n| matches!(n, SceneNode::Polyline { .. }))
+            .count();
+        assert_eq!(polyline_count, 3,
+            "Int64 ordinal x must emit one polyline per color series; got {polyline_count}");
     }
 }

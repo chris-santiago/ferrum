@@ -447,7 +447,11 @@ fn build_legend_decorations(
     chart_config: &super::chart_config::ChartConfig,
     out: &mut Vec<SceneNode>,
 ) -> Result<(), RenderError> {
-    let Some(legend) = &layout.legend else { return Ok(()) };
+    // Nothing to draw when neither a color legend nor any size/shape block is
+    // present.
+    if layout.legend.is_none() && layout.aux_legends.is_empty() {
+        return Ok(());
+    }
     let rendering_spec_for_legend = ChartSpec {
         encoding: prep.layers[0].encoding.clone(),
         ..spec.clone()
@@ -468,7 +472,15 @@ fn build_legend_decorations(
     if let Some(ref cfg) = chart_config.color {
         super::apply_color_config_to_color_scale(&mut color_scale, cfg);
     }
-    out.extend(marks::legend::build_legend(legend, color_scale.as_ref(), theme));
+    if let Some(legend) = &layout.legend {
+        out.extend(marks::legend::build_legend(legend, color_scale.as_ref(), theme));
+    }
+    // Auxiliary (size / shape) legend blocks stacked beneath the color legend.
+    // Each carries its own per-entry color (color_hex) or falls back to the
+    // theme mark color, so the color scale is unused but passed for uniformity.
+    for aux in &layout.aux_legends {
+        out.extend(marks::legend::build_legend(aux, color_scale.as_ref(), theme));
+    }
     Ok(())
 }
 

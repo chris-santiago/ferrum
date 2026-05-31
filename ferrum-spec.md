@@ -680,6 +680,23 @@ Scales map data domain values to visual range values. Attached to encoding chann
 > `tableau10` (loud divergence from the §3.6 *"`okabe_ito` (default)"*
 > annotation above) — see the §3.13 Themes-T2 → T4 note.
 
+> **Design decision (2026-05-31, flexibility-campaign D1):** Categorical /
+> ordinal scale `range` accepts **color strings** (hex `#rrggbb`/`#rgb` or CSS
+> named colors), not only numeric pixel positions. Paired with `domain`, this
+> expresses explicit category→color mapping — the editorial "gray everything,
+> accent two" and financial "green-up/red-down" idioms
+> (`ScaleOrdinal(domain=["A","B","C"], range=["#ccc","#ccc","#e4572e"])`),
+> matching Altair's `Scale(domain=..., range=[...])`. `ScaleQuantize` string
+> ranges are the existing precedent. No new value-class is introduced.
+
+> **Design decision (2026-05-31, flexibility-campaign D2):** Layering with `+`
+> resolves color scales by **unioning their domains** across layers, so the
+> result is order-independent (`base + highlight == highlight + base`). On a
+> genuine scheme conflict the first encoding-bearing layer wins. Axis titles
+> are taken from the first **data-bearing** layer; annotation-only layers
+> (e.g. `annotate_rect`) never supply axis titles or rename axes to
+> `_x1`/`_y1`. Mirrors Altair's shared-scale resolve default.
+
 ---
 
 ### 3.7 Axes and Legends
@@ -696,6 +713,17 @@ Axis(title=None, *, orient=None, ticks=True, tick_count=None, tick_extra=False, 
      title_orient=None, title_font_size=None, title_color=None, title_padding=None,
      values=None, encode=None, zindex=None)
 ```
+
+> **Design decision (2026-05-31, flexibility-campaign D3):** Per-channel
+> `Axis(label_format=...)` and `tick_count` are honored at layout time (the
+> renderer previously hardcoded the per-channel override to `None` at
+> `render/prepare.rs`, so only chart-level `configure_axis` reached the
+> formatter). Format support is the **full d3 grammar, single source of truth
+> in Rust**, feeding SVG, PNG, and the strings baked into interactive exports
+> identically: **numbers** use a hand-rolled d3-format implementation
+> (`[[fill]align][sign][symbol][0][width][,][.precision][type]`, type chars
+> incl. `s % p r g`, plus the `~` trim flag); **time** uses `chrono` strftime
+> (`%b %Y`, `%Y-%m-%d`, `%H:%M`), replacing the prior hand-rolled date math.
 
 #### `Legend`
 

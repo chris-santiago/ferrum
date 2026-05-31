@@ -14,7 +14,14 @@ Usage::
 
 from __future__ import annotations
 
-from ferrum.annotation.coords import CoordValue, NormCoord, PixelCoord, norm, px
+from ferrum.annotation.coords import (
+    CoordValue,
+    NormCoord,
+    PixelCoord,
+    norm,
+    px,
+    temporal_coord_to_epoch_ms,
+)
 from ferrum.annotation.container import Annotate
 from ferrum.annotation.primitives import (
     AnnotationArrow,
@@ -42,6 +49,7 @@ __all__ = [
     "NormCoord",
     "px",
     "norm",
+    "temporal_coord_to_epoch_ms",
     # Container
     "Annotate",
     # Dataclass types
