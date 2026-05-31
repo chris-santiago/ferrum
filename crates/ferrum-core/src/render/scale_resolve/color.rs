@@ -137,7 +137,7 @@ pub fn build_color_scale(
                 })
                 .collect::<Result<Vec<_>, _>>();
             match parse_result {
-                Ok(parsed) if !parsed.is_empty() => {
+                Ok(parsed) => {
                     // Build the domain from the declared scale.domain (if present),
                     // falling back to data first-appearance order.
                     let mut domain = match explicit_ordinal_domain(c_enc) {
@@ -154,25 +154,11 @@ pub fn build_color_scale(
                     warnings.push(crate::render::RenderWarning::ColorRangeParseFailure {
                         entry: bad_entry,
                     });
-                    // Fall through to default palette below, carrying the warning.
+                    // Fall through to default palette, carrying the warning.
                     let mut domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
                     apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings);
-                    let resolved_name: &str = c_enc.scheme.as_deref().unwrap_or(&theme.palette.color_scheme);
-                    let static_palette: &'static [Color] = if palette::is_sequential_scheme(resolved_name) {
-                        palette::categorical_palette("tableau10")
-                    } else {
-                        palette::categorical_palette(resolved_name)
-                    };
-                    let palette: Cow<'static, [Color]> = Cow::Borrowed(static_palette);
-                    if domain.len() > palette.len() {
-                        warnings.push(crate::render::RenderWarning::ColorPaletteOverflowed {
-                            categories: domain.len() as u32,
-                        });
-                    }
-                    return Ok((Some(ColorScale::Categorical { domain, palette }), warnings));
-                }
-                Ok(_) => {
-                    // Parsed to an empty vec (color_strings was empty) — fall through.
+                    let scale = build_default_categorical_scale(domain, c_enc, theme, &mut warnings);
+                    return Ok((Some(scale), warnings));
                 }
             }
         }
@@ -181,20 +167,37 @@ pub fn build_color_scale(
         let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
         let mut domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
         apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings);
-        let resolved_name: &str = c_enc.scheme.as_deref().unwrap_or(&theme.palette.color_scheme);
-        let static_palette: &'static [Color] = if palette::is_sequential_scheme(resolved_name) {
-            palette::categorical_palette("tableau10")
-        } else {
-            palette::categorical_palette(resolved_name)
-        };
-        let palette: Cow<'static, [Color]> = Cow::Borrowed(static_palette);
-        if domain.len() > palette.len() {
-            warnings.push(crate::render::RenderWarning::ColorPaletteOverflowed {
-                categories: domain.len() as u32,
-            });
-        }
-        Ok((Some(ColorScale::Categorical { domain, palette }), warnings))
+        let scale = build_default_categorical_scale(domain, c_enc, theme, &mut warnings);
+        Ok((Some(scale), warnings))
     }
+}
+
+/// Build a `ColorScale::Categorical` from the default theme palette.
+///
+/// Resolves the palette name from (1) `enc.scheme`, falling back to
+/// `theme.palette.color_scheme`. When the resolved name is a sequential/diverging
+/// scheme (not a categorical one), "tableau10" is used as the fallback to avoid
+/// single-hue categorical color. Appends a `ColorPaletteOverflowed` warning to
+/// `warnings` when the domain has more categories than palette entries.
+fn build_default_categorical_scale(
+    domain: Vec<String>,
+    enc: &crate::spec::encoding::EncodingSpec,
+    theme: &ThemeInputs,
+    warnings: &mut Vec<crate::render::RenderWarning>,
+) -> ColorScale {
+    let resolved_name: &str = enc.scheme.as_deref().unwrap_or(&theme.palette.color_scheme);
+    let static_palette: &'static [Color] = if palette::is_sequential_scheme(resolved_name) {
+        palette::categorical_palette("tableau10")
+    } else {
+        palette::categorical_palette(resolved_name)
+    };
+    let palette: Cow<'static, [Color]> = Cow::Borrowed(static_palette);
+    if domain.len() > palette.len() {
+        warnings.push(crate::render::RenderWarning::ColorPaletteOverflowed {
+            categories: domain.len() as u32,
+        });
+    }
+    ColorScale::Categorical { domain, palette }
 }
 
 /// Extract the `scheme` string from a continuous `ScaleSpec`'s `common` field.
