@@ -86,7 +86,7 @@ A practitioner moving from Altair, Seaborn, or Yellowbrick should be able to rea
 
     ---
 
-    The [Gallery](gallery/index.md) walks through hand-crafted examples, each one teaching a technique rather than just rendering a figure.
+    The [Gallery](gallery/index.md) walks through hand-crafted examples, each one teaching a technique rather than just rendering a figure. The [Showcase](gallery/showcase.md) reproduces well-known chart designs from the matplotlib, seaborn, Altair, and D3 traditions, each built entirely in Ferrum's Python API.
 
 -   :material-api:{ .lg .middle } __Looking up a specific symbol?__
 
