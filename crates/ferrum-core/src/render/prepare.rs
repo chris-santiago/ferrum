@@ -668,7 +668,7 @@ pub fn prepare_render_inputs(
                         let t = i as f64 / 4.0;
                         let v = lo + t * (hi - lo);
                         if let Some(spec_str) = format_spec {
-                            apply_format_spec(v, spec_str)
+                            crate::render::format::format_with_spec(v, Some(spec_str))
                         } else {
                             format_colorbar_tick(v, lo, hi)
                         }
@@ -938,41 +938,6 @@ fn build_aux_legends(
     out
 }
 
-/// Apply a Python-style format spec string to a numeric value.
-///
-/// Supports the subset commonly used for chart tick labels:
-/// - `".Nf"` — fixed-point with N decimal places (e.g. `".2f"` → `"3.14"`)
-/// - `".N"` — same as `.Nf` (vega-lite shorthand)
-/// - `".N%"` or `"%"` — multiply by 100, format with N decimal places, append `%`
-///   (e.g. `".0%"` → `"75%"`, `".1%"` → `"74.5%"`)
-/// - `".Ne"` or `".Ng"` — scientific / general notation (falls back to `format_colorbar_tick`)
-///
-/// Unrecognized specs fall back to `format_colorbar_tick`.
-fn apply_format_spec(value: f64, spec: &str) -> String {
-    let s = spec.trim();
-    // Percent: optional leading `.N` then `%`
-    if s.ends_with('%') {
-        let prefix = s.trim_end_matches('%');
-        let precision: usize = if prefix.is_empty() {
-            0
-        } else if let Some(n) = prefix.strip_prefix('.') {
-            n.parse().unwrap_or(0)
-        } else {
-            0
-        };
-        let pct = value * 100.0;
-        return format!("{:.prec$}%", pct, prec = precision);
-    }
-    // Fixed-point: `.Nf` or `.N` (no suffix letter, or `f`)
-    let prefix = if s.ends_with('f') { s.trim_end_matches('f') } else { s };
-    if let Some(n) = prefix.strip_prefix('.') {
-        if let Ok(precision) = n.parse::<usize>() {
-            return format!("{:.prec$}", value, prec = precision);
-        }
-    }
-    // Fallback: auto-precision
-    format_colorbar_tick(value, value, value)
-}
 
 /// Format a single colorbar tick value into a short human-readable label.
 /// Picks decimal precision from the domain span so that small ranges still
@@ -2066,6 +2031,208 @@ mod tests {
             "tick_count=2 should produce fewer labels than default; limited={:?} default={:?}",
             limited_prep.axes.x.tick_labels,
             default_prep.axes.x.tick_labels
+        );
+    }
+
+    // --- F8: colorbar tick formatting via full d3 grammar ---
+
+    /// Build a spec with a continuous color encoding on "pop" so that the colorbar
+    /// code path activates. Returns a `ColorbarInput` with `format_spec` applied.
+    fn colorbar_with_format(format_spec: &str) -> crate::layout::ColorbarInput {
+        use crate::spec::encoding::{DataType, LegendSpec};
+        let mut spec = base_spec();
+        let mut legend_extra = serde_json::Map::new();
+        legend_extra.insert(
+            "format".into(),
+            serde_json::Value::String(format_spec.to_owned()),
+        );
+        spec.encoding.color = Some(EncodingSpec {
+            field: "pop".into(),
+            type_: Some(DataType::Quantitative),
+            legend: Some(LegendSpec { extra: legend_extra }),
+            ..Default::default()
+        });
+        let p = prep(&spec, &batch_pop());
+        p.colorbar.expect("continuous color encoding must produce a colorbar")
+    }
+
+    /// (a) Byte-stability: `.2f` colorbar output must match today's expected strings.
+    ///
+    /// Domain [10, 100]; 5 ticks at t=0,0.25,0.5,0.75,1.0 → v=10,32.5,55,77.5,100.
+    /// `.2f` → fixed 2 decimal places.
+    #[test]
+    fn colorbar_format_dot2f_byte_stable() {
+        let colorbar = colorbar_with_format(".2f");
+        assert_eq!(
+            colorbar.tick_labels,
+            vec!["10.00", "32.50", "55.00", "77.50", "100.00"],
+            "`.2f` colorbar tick labels must match fixed-2-decimal output"
+        );
+    }
+
+    /// (a) Byte-stability: `.0%` colorbar output must match today's expected strings.
+    ///
+    /// Domain [0.0, 1.0] (use batch_pop() but override to a [0,1] range by using
+    /// a spec whose pop values happen to span [10,100]; for a cleaner [0,1] domain
+    /// we build a dedicated batch).
+    #[test]
+    fn colorbar_format_dot0pct_byte_stable() {
+        use crate::spec::encoding::{DataType, LegendSpec};
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType as ArrowDt, Field, Schema};
+
+        // Build a batch with "pop" in [0.0, 1.0] so the colorbar domain is [0,1].
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDt::Float64, false),
+            Field::new("y", ArrowDt::Float64, false),
+            Field::new("pop", ArrowDt::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            ],
+        )
+        .unwrap();
+
+        let mut spec = base_spec();
+        let mut legend_extra = serde_json::Map::new();
+        legend_extra.insert(
+            "format".into(),
+            serde_json::Value::String(".0%".to_owned()),
+        );
+        spec.encoding.color = Some(EncodingSpec {
+            field: "pop".into(),
+            type_: Some(DataType::Quantitative),
+            legend: Some(LegendSpec { extra: legend_extra }),
+            ..Default::default()
+        });
+        let p = prep(&spec, &batch);
+        let colorbar = p.colorbar.expect("continuous color encoding must produce a colorbar");
+
+        // 5 ticks at t=0,0.25,0.5,0.75,1.0 → v=0,0.25,0.5,0.75,1.0
+        // `.0%` → multiply by 100, 0 decimals, append `%` → "0%","25%","50%","75%","100%"
+        assert_eq!(
+            colorbar.tick_labels,
+            vec!["0%", "25%", "50%", "75%", "100%"],
+            "`.0%` colorbar tick labels must match percent-0-decimal output"
+        );
+    }
+
+    /// (b) Capability widening: `,` (grouped thousands) now formats via the full
+    ///     d3 grammar rather than falling through to the auto-precision path.
+    ///
+    /// Domain [10, 100] from batch_pop(); 5 ticks → 10, 32.5, 55, 77.5, 100.
+    /// With `,` (no type) these are integer-valued or near-integer; the d3 grammar
+    /// groups integer-valued inputs as plain integers: "10", "33", "55", "78", "100"
+    /// (or with grouping applied, which only triggers at ≥4 digits). What matters is
+    /// that the output does NOT look like the old fallback (auto-precision float).
+    #[test]
+    fn colorbar_format_comma_grouped_widened() {
+        // Domain [1000, 100000] so we can see grouping separators.
+        use crate::spec::encoding::{DataType, LegendSpec};
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType as ArrowDt, Field, Schema};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDt::Float64, false),
+            Field::new("y", ArrowDt::Float64, false),
+            Field::new("pop", ArrowDt::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1000.0, 100_000.0])),
+            ],
+        )
+        .unwrap();
+
+        let mut spec = base_spec();
+        let mut legend_extra = serde_json::Map::new();
+        legend_extra.insert(
+            "format".into(),
+            serde_json::Value::String(",.0f".to_owned()),
+        );
+        spec.encoding.color = Some(EncodingSpec {
+            field: "pop".into(),
+            type_: Some(DataType::Quantitative),
+            legend: Some(LegendSpec { extra: legend_extra }),
+            ..Default::default()
+        });
+        let p = prep(&spec, &batch);
+        let colorbar = p.colorbar.expect("continuous color encoding must produce a colorbar");
+
+        // 5 ticks at t=0..1 over [1000, 100000]:
+        // v = 1000, 25750, 50500, 75250, 100000
+        // `,.0f` → integer with grouping: "1,000" "25,750" "50,500" "75,250" "100,000"
+        assert!(
+            colorbar.tick_labels.iter().any(|l| l.contains(',')),
+            "`,` grouped format must produce commas in large-number colorbar ticks; got {:?}",
+            colorbar.tick_labels
+        );
+        // None of the ticks should contain a decimal point (`.0f` rounds to integer).
+        assert!(
+            colorbar.tick_labels.iter().all(|l| !l.contains('.')),
+            "`.0f` format must not produce decimal points; got {:?}",
+            colorbar.tick_labels
+        );
+    }
+
+    /// (b) Capability widening: `~s` (SI with trim) formats via the full grammar.
+    ///
+    /// Domain [1000, 1_000_000]; first tick (1000) → "1k", last (1M) → "1M".
+    #[test]
+    fn colorbar_format_si_trim_widened() {
+        use crate::spec::encoding::{DataType, LegendSpec};
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType as ArrowDt, Field, Schema};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDt::Float64, false),
+            Field::new("y", ArrowDt::Float64, false),
+            Field::new("pop", ArrowDt::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1_000.0, 1_000_000.0])),
+            ],
+        )
+        .unwrap();
+
+        let mut spec = base_spec();
+        let mut legend_extra = serde_json::Map::new();
+        legend_extra.insert(
+            "format".into(),
+            serde_json::Value::String("~s".to_owned()),
+        );
+        spec.encoding.color = Some(EncodingSpec {
+            field: "pop".into(),
+            type_: Some(DataType::Quantitative),
+            legend: Some(LegendSpec { extra: legend_extra }),
+            ..Default::default()
+        });
+        let p = prep(&spec, &batch);
+        let colorbar = p.colorbar.expect("continuous color encoding must produce a colorbar");
+
+        // First tick (v=1000) → "1k", last tick (v=1_000_000) → "1M".
+        assert_eq!(
+            colorbar.tick_labels.first().map(String::as_str),
+            Some("1k"),
+            "`~s` must format 1000 as '1k'; got {:?}",
+            colorbar.tick_labels
+        );
+        assert_eq!(
+            colorbar.tick_labels.last().map(String::as_str),
+            Some("1M"),
+            "`~s` must format 1_000_000 as '1M'; got {:?}",
+            colorbar.tick_labels
         );
     }
 }
