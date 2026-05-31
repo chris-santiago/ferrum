@@ -176,13 +176,13 @@ class SymlogScale:
 
 class OrdinalScale:
     domain: list[str]
-    range: list[float]
+    range: list[float | str] | None
     padding: float
     def __init__(
         self,
         *,
         domain: Sequence[str],
-        range: Sequence[float],
+        range: Sequence[float | str] | None = None,
         padding: float = 0.0,
     ) -> None: ...
     def scale(self, value: str) -> float: ...

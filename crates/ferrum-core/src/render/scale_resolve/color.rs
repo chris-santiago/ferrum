@@ -12,7 +12,8 @@ use crate::render::color::Color;
 use crate::render::palette;
 use crate::render::RenderError;
 
-use super::domain::locate_field;
+use super::domain::{apply_sort_to_domain, locate_field};
+use super::positional::ordinal_range_as_strings;
 use super::{distinct_values_in_order, infer_spec_type, numeric_extent, ColorScale};
 
 /// Resolve the color encoding into a `ColorScale`.
@@ -27,17 +28,42 @@ use super::{distinct_values_in_order, infer_spec_type, numeric_extent, ColorScal
 /// — so this function accepts the named-outputs map. Size/shape/opacity
 /// builders below are primary-batch-only by design.
 ///
-/// Returns `(scale, optional palette-overflow warning)` so the caller
-/// can fold the warning into its accumulator alongside the
-/// build_shape_scale warning.
+/// Returns `(scale, warnings)` so the caller can fold warnings into its
+/// accumulator alongside build_shape_scale warnings.
+///
+/// # D1 — explicit string range on categorical scale
+///
+/// When the color encoding carries `scale={"type": "ordinal", "domain": [...],
+/// "range": ["#ccc", "#e4572e"]}`, the resolver builds the palette directly
+/// from the string range (parsed via `parse_color`) rather than looking up a
+/// named categorical palette.  The categorical domain is taken from the declared
+/// `scale.domain` (if present) rather than data first-appearance order, so the
+/// range colors always zip against the declared domain positions.  `enc.sort` is
+/// applied on top of the declared domain (or data-derived domain when no explicit
+/// domain is given), mirroring the positional-scale behavior.
+///
+/// The parse is all-or-nothing: if any color string fails to parse, the entire
+/// explicit range is discarded and the function emits a `ColorRangeParseFailure`
+/// warning naming the first offending entry, then falls through to the default
+/// theme palette.
+///
+/// # D4 — scheme inside `scale` dict for continuous color
+///
+/// When the color encoding carries `scale={"type": "linear", "scheme": "blues"}`,
+/// the `scheme` field now lives on `ContinuousScaleCommon` and is honored by
+/// the continuous path.  The precedence is:
+///   1. `encoding.scheme` (top-level field on `EncodingSpec`)
+///   2. `encoding.scale.common.scheme` (inside a continuous scale spec)
+///   3. Theme sequential/diverging scheme
+///   4. Hard fallback: Viridis
 pub fn build_color_scale(
     encoding: &crate::spec::encoding::Encoding,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     theme: &ThemeInputs,
-) -> Result<(Option<ColorScale>, Option<crate::render::RenderWarning>), RenderError> {
+) -> Result<(Option<ColorScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(c_enc) = &encoding.color else {
-        return Ok((None, None));
+        return Ok((None, Vec::new()));
     };
     let located = locate_field(&c_enc.field, primary_batch, transform_outputs)
         .ok_or_else(|| RenderError::UnknownColumn { name: c_enc.field.clone() })?;
@@ -57,9 +83,14 @@ pub fn build_color_scale(
         }
         let (lo, hi) = numeric_extent(located.col);
         use crate::render::color::{ContinuousScheme, NamedContinuous};
+
+        // D4: resolve scheme from (1) encoding.scheme, (2) encoding.scale.common.scheme,
+        // (3) theme, (4) Viridis fallback.
+        let scale_scheme: Option<&str> = scale_common_scheme(c_enc);
         let scheme = c_enc
             .scheme
             .as_deref()
+            .or(scale_scheme)
             .and_then(NamedContinuous::from_name)
             .map(ContinuousScheme::Named)
             .unwrap_or_else(|| {
@@ -72,9 +103,73 @@ pub fn build_color_scale(
                     .map(ContinuousScheme::Named)
                     .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis))
             });
-        Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme }), None))
+        Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme }), Vec::new()))
     } else {
-        let domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
+        // D1: if the color encoding carries an explicit ordinal string range, build
+        // the palette from those colors (parsed via `parse_color`).
+        //
+        // Domain resolution order (mirrors positional.rs OrdinalScale behavior):
+        //   1. `scale.domain` (declared explicit domain)
+        //   2. Data first-appearance order (`distinct_values_in_order`)
+        // `enc.sort` is applied on top of the resolved domain.
+        //
+        // The parse is all-or-nothing: if any entry fails to parse, the entire
+        // explicit range is discarded, a `ColorRangeParseFailure` warning is emitted
+        // naming the first offending entry, and the resolver falls through to the
+        // default theme palette below.
+        if let Some(color_strings) = explicit_string_range(c_enc) {
+            let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
+            let parse_result: Result<Vec<Color>, String> = color_strings
+                .iter()
+                .map(|s| {
+                    crate::render::color::parse_color(s)
+                        .map_err(|_| s.clone())
+                })
+                .collect::<Result<Vec<_>, _>>();
+            match parse_result {
+                Ok(parsed) if !parsed.is_empty() => {
+                    // Build the domain from the declared scale.domain (if present),
+                    // falling back to data first-appearance order.
+                    let mut domain = match explicit_ordinal_domain(c_enc) {
+                        Some(declared) => declared,
+                        None => distinct_values_in_order(primary_batch, &c_enc.field)?,
+                    };
+                    apply_sort_to_domain(&mut domain, c_enc.sort.as_ref());
+                    let palette: Cow<'static, [Color]> = Cow::Owned(parsed);
+                    // No overflow warning when the user supplied an explicit range;
+                    // they own the mapping and repeated colors are intentional.
+                    return Ok((Some(ColorScale::Categorical { domain, palette }), warnings));
+                }
+                Err(bad_entry) => {
+                    warnings.push(crate::render::RenderWarning::ColorRangeParseFailure {
+                        entry: bad_entry,
+                    });
+                    // Fall through to default palette below, carrying the warning.
+                    let mut domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
+                    apply_sort_to_domain(&mut domain, c_enc.sort.as_ref());
+                    let resolved_name: &str = c_enc.scheme.as_deref().unwrap_or(&theme.palette.color_scheme);
+                    let static_palette: &'static [Color] = if palette::is_sequential_scheme(resolved_name) {
+                        palette::categorical_palette("tableau10")
+                    } else {
+                        palette::categorical_palette(resolved_name)
+                    };
+                    let palette: Cow<'static, [Color]> = Cow::Borrowed(static_palette);
+                    if domain.len() > palette.len() {
+                        warnings.push(crate::render::RenderWarning::ColorPaletteOverflowed {
+                            categories: domain.len() as u32,
+                        });
+                    }
+                    return Ok((Some(ColorScale::Categorical { domain, palette }), warnings));
+                }
+                Ok(_) => {
+                    // Parsed to an empty vec (color_strings was empty) — fall through.
+                }
+            }
+        }
+
+        // Default path: look up a named categorical palette.
+        let mut domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
+        apply_sort_to_domain(&mut domain, c_enc.sort.as_ref());
         let resolved_name: &str = c_enc.scheme.as_deref().unwrap_or(&theme.palette.color_scheme);
         let static_palette: &'static [Color] = if palette::is_sequential_scheme(resolved_name) {
             palette::categorical_palette("tableau10")
@@ -82,9 +177,58 @@ pub fn build_color_scale(
             palette::categorical_palette(resolved_name)
         };
         let palette: Cow<'static, [Color]> = Cow::Borrowed(static_palette);
-        let warn = (domain.len() > palette.len()).then(|| {
-            crate::render::RenderWarning::ColorPaletteOverflowed { categories: domain.len() as u32 }
-        });
-        Ok((Some(ColorScale::Categorical { domain, palette }), warn))
+        let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
+        if domain.len() > palette.len() {
+            warnings.push(crate::render::RenderWarning::ColorPaletteOverflowed {
+                categories: domain.len() as u32,
+            });
+        }
+        Ok((Some(ColorScale::Categorical { domain, palette }), warnings))
+    }
+}
+
+/// Extract the `scheme` string from a continuous `ScaleSpec`'s `common` field.
+///
+/// Returns the first `Some(scheme)` found across the continuous scale variants
+/// that embed `ContinuousScaleCommon`, or `None` for ordinal/categorical variants
+/// and when no scheme is set.
+fn scale_common_scheme(enc: &crate::spec::encoding::EncodingSpec) -> Option<&str> {
+    use crate::spec::encoding::ScaleSpec;
+    match enc.scale.as_ref()? {
+        ScaleSpec::Linear   { common, .. }
+        | ScaleSpec::Log    { common, .. }
+        | ScaleSpec::Time   { common, .. }
+        | ScaleSpec::Symlog { common, .. }
+        | ScaleSpec::Pow    { common, .. }
+        | ScaleSpec::Sqrt   { common }
+        | ScaleSpec::Utc    { common, .. } => common.scheme.as_deref(),
+        _ => None,
+    }
+}
+
+/// Extract an explicit color-string range from a color `EncodingSpec`.
+///
+/// Returns `Some(Vec<String>)` when the encoding has `scale = ScaleSpec::Ordinal`
+/// with a string-array `range` (D1 path).  Returns `None` for all other scale
+/// types and when the range is absent or numeric.
+fn explicit_string_range(enc: &crate::spec::encoding::EncodingSpec) -> Option<Vec<String>> {
+    use crate::spec::encoding::ScaleSpec;
+    match enc.scale.as_ref()? {
+        ScaleSpec::Ordinal { range, .. } => ordinal_range_as_strings(range),
+        _ => None,
+    }
+}
+
+/// Extract the declared `domain` from a `ScaleSpec::Ordinal` encoding.
+///
+/// Returns `Some(Vec<String>)` when the encoding has `scale = ScaleSpec::Ordinal`
+/// with an explicit non-empty `domain`.  Returns `None` for all other scale types
+/// and when no domain is declared (the caller falls back to data first-appearance
+/// order).
+fn explicit_ordinal_domain(enc: &crate::spec::encoding::EncodingSpec) -> Option<Vec<String>> {
+    use crate::spec::encoding::ScaleSpec;
+    match enc.scale.as_ref()? {
+        ScaleSpec::Ordinal { domain: Some(d), .. } if !d.is_empty() => Some(d.clone()),
+        _ => None,
     }
 }

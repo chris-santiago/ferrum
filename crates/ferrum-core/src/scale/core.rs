@@ -46,17 +46,15 @@ pub(crate) fn validate_finite(name: &str, values: &[f64]) -> PyResult<()> {
     Ok(())
 }
 
-pub(crate) fn validate_ordinal(domain: &[String], range: &[f64], padding: f64) -> PyResult<()> {
+/// Validate domain non-emptiness, duplicate categories, and padding bounds.
+///
+/// Called independently of range validation so that string-only color ranges
+/// (which have no numeric extent to check) still get domain and padding
+/// validated.
+pub(crate) fn validate_ordinal_domain(domain: &[String], padding: f64) -> PyResult<()> {
     if domain.is_empty() {
         return Err(PyValueError::new_err("domain must be non-empty"));
     }
-    if range.len() < 2 {
-        return Err(PyValueError::new_err(format!(
-            "range must have length >= 2 (extent endpoints); got {}",
-            range.len()
-        )));
-    }
-    validate_finite("range", range)?;
     if !padding.is_finite() || !(0.0..=1.0).contains(&padding) {
         return Err(PyValueError::new_err(format!(
             "padding must be in [0, 1]; got {padding}"
@@ -70,6 +68,18 @@ pub(crate) fn validate_ordinal(domain: &[String], range: &[f64], padding: f64) -
             )));
         }
     }
+    Ok(())
+}
+
+pub(crate) fn validate_ordinal(domain: &[String], range: &[f64], padding: f64) -> PyResult<()> {
+    validate_ordinal_domain(domain, padding)?;
+    if range.len() < 2 {
+        return Err(PyValueError::new_err(format!(
+            "range must have length >= 2 (extent endpoints); got {}",
+            range.len()
+        )));
+    }
+    validate_finite("range", range)?;
     Ok(())
 }
 

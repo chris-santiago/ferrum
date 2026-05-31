@@ -670,8 +670,8 @@ pub fn resolve_scales_with_outputs(
             let dummy_y = ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 1.0], vec![y_pixel_range.1, y_pixel_range.0], false, false,
             ));
-            let (color, color_warn) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme)?;
-            if let Some(w) = color_warn { warnings.push(w); }
+            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme)?;
+            warnings.extend(color_warns);
             let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
             let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
             if let Some(w) = shape_warn { warnings.push(w); }
@@ -686,8 +686,8 @@ pub fn resolve_scales_with_outputs(
             let dummy_x = ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 1.0], vec![x_pixel_range.0, x_pixel_range.1], false, false,
             ));
-            let (color, color_warn) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme)?;
-            if let Some(w) = color_warn { warnings.push(w); }
+            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme)?;
+            warnings.extend(color_warns);
             let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
             let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
             if let Some(w) = shape_warn { warnings.push(w); }
@@ -737,12 +737,10 @@ pub fn resolve_scales_with_outputs(
     // matching Phase 8a behavior. (build_color_scale is the one exception —
     // it accepts transform_outputs because composite-mark color fields may
     // live in a named output rather than primary.)
-    let (color, color_warn) = build_color_scale(
+    let (color, color_warns) = build_color_scale(
         &spec.encoding, primary_batch, transform_outputs, theme,
     )?;
-    if let Some(w) = color_warn {
-        warnings.push(w);
-    }
+    warnings.extend(color_warns);
 
     let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
     let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;

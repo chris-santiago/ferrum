@@ -321,14 +321,14 @@ mod tests {
         let x_scale = ScaleSpec::Linear {
             common: crate::spec::encoding::ContinuousScaleCommon {
                 domain: Some(vec![x_domain.0, x_domain.1]),
-                range: None, clamp: false, padding: None,
+                range: None, clamp: false, padding: None, scheme: None,
             },
             nice: false, zero: false,
         };
         let y_scale = ScaleSpec::Linear {
             common: crate::spec::encoding::ContinuousScaleCommon {
                 domain: Some(vec![y_domain.0, y_domain.1]),
-                range: None, clamp: false, padding: None,
+                range: None, clamp: false, padding: None, scheme: None,
             },
             nice: false, zero: false,
         };
@@ -365,14 +365,14 @@ mod tests {
         let x_scale = ScaleSpec::Linear {
             common: crate::spec::encoding::ContinuousScaleCommon {
                 domain: Some(vec![x_domain.0, x_domain.1]),
-                range: None, clamp: false, padding: None,
+                range: None, clamp: false, padding: None, scheme: None,
             },
             nice: false, zero: false,
         };
         let y_scale = ScaleSpec::Linear {
             common: crate::spec::encoding::ContinuousScaleCommon {
                 domain: Some(vec![y_domain.0, y_domain.1]),
-                range: None, clamp: false, padding: None,
+                range: None, clamp: false, padding: None, scheme: None,
             },
             nice: false, zero: false,
         };

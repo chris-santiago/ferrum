@@ -121,6 +121,10 @@ pub enum RenderWarning {
     ColorPaletteOverflowed { categories: u32 },
     ShapePaletteOverflowed { categories: u32 },
     EmptyPanel { panel_index: usize },
+    /// An explicit color range string could not be parsed. The entire range is
+    /// discarded and the default theme palette is used instead.
+    /// `entry` is the offending color string.
+    ColorRangeParseFailure { entry: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +157,7 @@ mod tests {
             RenderWarning::ColorPaletteOverflowed { categories: 12 },
             RenderWarning::ShapePaletteOverflowed { categories: 7 },
             RenderWarning::EmptyPanel { panel_index: 1 },
+            RenderWarning::ColorRangeParseFailure { entry: "#zzz".into() },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
