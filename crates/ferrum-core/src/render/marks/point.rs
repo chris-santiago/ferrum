@@ -3,7 +3,7 @@
 //! Phase 8a: honors per-row size/shape/opacity from ctx.scales when populated.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::{ColorScale, ScaleKind, ShapeKind};
 
 /// Parse a shape name string to a `ShapeKind`. Unknown values fall back to `Circle`.
@@ -210,9 +210,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
 
     let xs_f64 = col_as_f64(ctx.batch, xf).ok();
-    let xs_str = col_as_str(ctx.batch, xf).ok();
+    // Use col_as_ordinal_category_str so integer-typed ordinal columns (e.g.
+    // Int64 year values) stringify the same way the ordinal domain was built.
+    let xs_str = col_as_ordinal_category_str(ctx.batch, xf).ok();
     let ys_f64 = col_as_f64(ctx.batch, yf).ok();
-    let ys_str = col_as_str(ctx.batch, yf).ok();
+    let ys_str = col_as_ordinal_category_str(ctx.batch, yf).ok();
     let n = xs_f64
         .as_ref().map(|v| v.len())
         .or_else(|| xs_str.as_ref().map(|v| v.len()))
@@ -916,5 +918,67 @@ mod tests {
             "index 1 should be dashed [6,3]");
         assert_eq!(circles[2].stroke_dash.as_deref(), Some([2.0, 3.0].as_ref()),
             "index 2 should be dotted [2,3]");
+    }
+
+    #[test]
+    fn point_integer_ordinal_x_emits_circles() {
+        // D9-B regression: ordinal x with Int64 column must emit circles, not
+        // skip every row because xs_str is None. Previously col_as_str returned
+        // Err for Int64 → xs_str = None → every ordinal arm continued.
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        use crate::layout::{PanelLayout, Rect, ThemeInputs};
+        use crate::render::draw::resolve_mark_style;
+        use crate::render::scale_resolve::resolve_scales;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{DataType as EncDataType, Encoding, EncodingSpec};
+        use crate::spec::mark::Mark;
+        use arrow::array::Float64Array;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec {
+                    field: "year".into(),
+                    type_: Some(EncDataType::Ordinal),
+                    ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(),
+                    type_: Some(EncDataType::Quantitative),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("year", DataType::Int64, false),
+            Field::new("y",    DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Int64Array::from(vec![2000i64, 2001, 2002])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let circle_count = result.nodes.iter()
+            .filter(|n| matches!(n, SceneNode::Circle { .. }))
+            .count();
+        assert_eq!(circle_count, 3,
+            "Int64 ordinal x must emit one circle per row; got {circle_count}");
     }
 }

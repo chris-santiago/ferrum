@@ -8,7 +8,7 @@
 #[cfg(test)]
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::{ColorScale, ScaleKind};
 
 struct BarBaseStyle<'a> {
@@ -149,7 +149,9 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let spec = ctx.spec;
     let xf = match x_field(ctx, spec) { Some(f) => f, None => return empty_result() };
     let yf = match y_field(ctx, spec) { Some(f) => f, None => return empty_result() };
-    let x_strs = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+    // Use col_as_ordinal_category_str so integer-typed ordinal x columns (e.g.
+    // Int64 year values) stringify consistently with the ordinal domain.
+    let x_strs = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
     let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
     if x_strs.len() != ys.len() { return empty_result(); }
 
@@ -250,7 +252,9 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let spec = ctx.spec;
     let xf = match x_field(ctx, spec) { Some(f) => f, None => return empty_result() };
     let yf = match y_field(ctx, spec) { Some(f) => f, None => return empty_result() };
-    let y_strs = match col_as_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+    // Use col_as_ordinal_category_str so integer-typed ordinal y columns
+    // stringify consistently with the ordinal domain.
+    let y_strs = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
     let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
     if y_strs.len() != xs.len() { return empty_result(); }
 
@@ -842,5 +846,48 @@ mod tests {
             }
         });
         assert!(has_corner_radius, "expected at least one rect with corner_radius == 3.0");
+    }
+
+    #[test]
+    fn bar_integer_ordinal_x_emits_rects() {
+        // D9-B regression: ordinal x with Int64 column must emit bars, not return
+        // empty. Previously col_as_str failed on Int64 and build_ordinal returned
+        // empty_result().
+        use arrow::array::Int64Array;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "year".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("year", DataType::Int64, false),
+            Field::new("v",    DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Int64Array::from(vec![2000i64, 2001, 2002, 2003])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let rect_count = result.nodes.iter()
+            .filter(|n| matches!(n, SceneNode::Rect { .. }))
+            .count();
+        assert_eq!(rect_count, 4,
+            "Int64 ordinal x must emit one rect per row; got {rect_count}");
     }
 }

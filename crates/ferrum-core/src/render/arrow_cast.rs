@@ -132,6 +132,94 @@ pub(crate) fn col_as_str(batch: &RecordBatch, field: &str) -> Result<Vec<Option<
     }
 }
 
+/// Read any column that can serve as an ordinal category key as
+/// `Vec<Option<String>>`.
+///
+/// This is the correct helper to use when a scale is `ScaleKind::Ordinal` and
+/// you need per-row category strings for `to_pixel_str`. Unlike `col_as_str`,
+/// it accepts non-string numeric dtypes by stringifying them — using the same
+/// formatting that `distinct_values_in_order` applies when building the ordinal
+/// domain, so the per-row strings always match the domain entries.
+///
+/// Supported dtypes and their formatting:
+/// - Utf8 / LargeUtf8 → value as-is (identity, same as `col_as_str`)
+/// - Int64/32/16/8, UInt64/32/16/8 → native `.to_string()` (e.g. `2000i64` → `"2000"`)
+/// - Float64/32 → `format!("{v}")` when the value has a non-zero fractional
+///   part (e.g. `1.5` → `"1.5"`), or integer-formatted otherwise (e.g.
+///   `2000.0` → `"2000"`), so integer-valued float columns behave identically
+///   to Int64 ordinal columns.
+/// - Boolean → `"true"` / `"false"` (same as `distinct_values_in_order`).
+///
+/// Returns `Err(UnsupportedDtype)` only for dtypes that cannot be sensibly
+/// turned into category strings (timestamps, durations, etc.).
+pub(crate) fn col_as_ordinal_category_str(
+    batch: &RecordBatch,
+    field: &str,
+) -> Result<Vec<Option<String>>, RenderError> {
+    let col = batch.column_by_name(field)
+        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+
+    // Macro for integer types: native value → .to_string()
+    macro_rules! collect_int_as_str {
+        ($t:ty) => {
+            if let Some(a) = col.as_any().downcast_ref::<$t>() {
+                return Ok(a.iter().map(|v| v.map(|x| x.to_string())).collect());
+            }
+        };
+    }
+
+    // Utf8 / LargeUtf8 — identity (most common, checked first).
+    if let Some(a) = col.as_any().downcast_ref::<StringArray>() {
+        return Ok(a.iter().map(|o| o.map(|s| s.to_string())).collect());
+    }
+    if let Some(a) = col.as_any().downcast_ref::<LargeStringArray>() {
+        return Ok(a.iter().map(|o| o.map(|s| s.to_string())).collect());
+    }
+
+    // Integer types — .to_string() matches distinct_values_in_order exactly.
+    collect_int_as_str!(Int64Array);
+    collect_int_as_str!(Int32Array);
+    collect_int_as_str!(Int16Array);
+    collect_int_as_str!(Int8Array);
+    collect_int_as_str!(UInt64Array);
+    collect_int_as_str!(UInt32Array);
+    collect_int_as_str!(UInt16Array);
+    collect_int_as_str!(UInt8Array);
+
+    // Float types — format as integer when the value is whole, otherwise as float.
+    // This ensures that a column of [2000.0, 2001.0, ...] produces ["2000", "2001", ...]
+    // matching an Int64 ordinal domain built by distinct_values_in_order.
+    if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
+        return Ok(a.iter().map(|v| v.map(|x| {
+            if x.fract() == 0.0 && x.is_finite() {
+                format!("{}", x as i64)
+            } else {
+                format!("{x}")
+            }
+        })).collect());
+    }
+    if let Some(a) = col.as_any().downcast_ref::<Float32Array>() {
+        return Ok(a.iter().map(|v| v.map(|x| {
+            if x.fract() == 0.0 && x.is_finite() {
+                format!("{}", x as i64)
+            } else {
+                format!("{x}")
+            }
+        })).collect());
+    }
+
+    // Boolean — "true" / "false".
+    if let Some(a) = col.as_any().downcast_ref::<arrow::array::BooleanArray>() {
+        return Ok(a.iter().map(|v| v.map(|b| b.to_string())).collect());
+    }
+
+    Err(RenderError::UnsupportedDtype {
+        field: field.to_string(),
+        dtype: format!("{:?} (cannot convert to ordinal category string)", col.data_type()),
+        context: None,
+    })
+}
+
 /// `(min, max)` over a numeric Arrow column, including non-finite values.
 /// Returns `Err(message)` for unsupported dtypes — matches the prior
 /// `scale_resolve::column_min_max_f64` semantics exactly. Caller is
@@ -482,5 +570,80 @@ mod tests {
         let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
         let out = col_as_f64(&b, "d").unwrap();
         assert_eq!(out, vec![Some(86_400_000.0), None]);
+    }
+
+    // ── col_as_ordinal_category_str ──────────────────────────────────────────
+
+    #[test]
+    fn col_as_ordinal_category_str_utf8_passthrough() {
+        let schema = Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec![Some("a"), None, Some("b")]))],
+        ).unwrap();
+        let out = col_as_ordinal_category_str(&b, "s").unwrap();
+        assert_eq!(out, vec![Some("a".into()), None, Some("b".into())]);
+    }
+
+    #[test]
+    fn col_as_ordinal_category_str_int64_stringifies() {
+        // Int64 values must stringify the same way distinct_values_in_order does.
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![Field::new("year", DataType::Int64, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int64Array::from(vec![Some(2000i64), Some(2001i64), None]))],
+        ).unwrap();
+        let out = col_as_ordinal_category_str(&b, "year").unwrap();
+        assert_eq!(out, vec![Some("2000".into()), Some("2001".into()), None]);
+    }
+
+    #[test]
+    fn col_as_ordinal_category_str_int32_stringifies() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int32Array::from(vec![Some(10), Some(20), None]))],
+        ).unwrap();
+        let out = col_as_ordinal_category_str(&b, "x").unwrap();
+        assert_eq!(out, vec![Some("10".into()), Some("20".into()), None]);
+    }
+
+    #[test]
+    fn col_as_ordinal_category_str_float64_whole_values_format_as_integer() {
+        // Float64 ordinal columns with integer-valued data (e.g. 2000.0) must
+        // produce "2000", not "2000.0", to match Int64 domain strings.
+        let schema = Arc::new(Schema::new(vec![Field::new("y", DataType::Float64, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![Some(2000.0), Some(2001.0), None]))],
+        ).unwrap();
+        let out = col_as_ordinal_category_str(&b, "y").unwrap();
+        assert_eq!(out, vec![Some("2000".into()), Some("2001".into()), None]);
+    }
+
+    #[test]
+    fn col_as_ordinal_category_str_float64_fractional_preserves_decimal() {
+        // Float64 with a non-zero fractional part must keep the decimal.
+        let schema = Arc::new(Schema::new(vec![Field::new("y", DataType::Float64, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![Some(1.5), Some(2.0), None]))],
+        ).unwrap();
+        let out = col_as_ordinal_category_str(&b, "y").unwrap();
+        assert_eq!(out[0], Some("1.5".into()));
+        assert_eq!(out[1], Some("2".into()));
+        assert_eq!(out[2], None);
+    }
+
+    #[test]
+    fn col_as_ordinal_category_str_uint8_stringifies() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::UInt8, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(UInt8Array::from(vec![Some(5u8), Some(10u8), None]))],
+        ).unwrap();
+        let out = col_as_ordinal_category_str(&b, "x").unwrap();
+        assert_eq!(out, vec![Some("5".into()), Some("10".into()), None]);
     }
 }
