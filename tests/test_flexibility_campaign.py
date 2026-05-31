@@ -778,3 +778,130 @@ def test_d5_horizontal_boxplot_sort_descending(sort_composite_df: pl.DataFrame) 
         f"horizontal boxplot Y(sort='-x') should place A(80) first (top), "
         f"then B(50), then C(20); got {order}"
     )
+
+
+# ---------------------------------------------------------------------------
+# D6 — line/segment color→stroke alias (stroke-primary marks)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def line_df() -> pl.DataFrame:
+    return pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
+
+
+@pytest.fixture
+def segment_df() -> pl.DataFrame:
+    return pl.DataFrame({"x": [0.0], "y": [0.0], "x2": [1.0], "y2": [1.0]})
+
+
+def _hex_strokes(svg: str) -> set[str]:
+    """Extract distinct hex stroke colors from SVG elements."""
+    return set(re.findall(r'stroke="#([0-9a-fA-F]{6})"', svg))
+
+
+def _hex_fills(svg: str) -> set[str]:
+    """Extract distinct hex fill colors (not rgba) from SVG elements."""
+    return set(re.findall(r'fill="#([0-9a-fA-F]{6})"', svg))
+
+
+def test_d6_line_color_maps_to_stroke_in_svg(line_df: pl.DataFrame) -> None:
+    """mark_line(color='#e4572e') sets the line stroke color in SVG.
+
+    Before the fix, ``color`` was globally aliased to ``fill``.  Lines have no
+    fill; their visible color is the stroke.  The hex must appear as
+    ``stroke="#e4572e"`` in the rendered SVG, not as a fill attribute.
+    """
+    svg = fm.Chart(line_df).mark_line(color="#e4572e").encode(x="x:Q", y="y:Q").show_svg()
+    strokes = _hex_strokes(svg)
+    assert "e4572e" in strokes, (
+        f"mark_line(color='#e4572e') must produce stroke='#e4572e' in SVG; found strokes: {strokes}"
+    )
+
+
+def test_d6_rule_color_maps_to_stroke_in_svg() -> None:
+    """mark_rule(color='#e4572e') sets the rule stroke color in SVG."""
+    df = pl.DataFrame({"y": [1.0]})
+    svg = fm.Chart(df).mark_rule(color="#e4572e").encode(y="y:Q").show_svg()
+    strokes = _hex_strokes(svg)
+    assert "e4572e" in strokes, (
+        f"mark_rule(color='#e4572e') must produce stroke='#e4572e' in SVG; found strokes: {strokes}"
+    )
+
+
+def test_d6_segment_color_resolves_to_stroke_in_mark_kwargs(
+    segment_df: pl.DataFrame,
+) -> None:
+    """mark_segment(color='#e4572e') resolves color to stroke in mark_kwargs.
+
+    The Python alias must map ``color`` to ``stroke`` (not ``fill``) for the
+    segment mark because segment is stroke-primary.  Verified at the Python
+    layer (mark_kwargs dict) because the Rust segment renderer has a separate
+    bug where it reads ``mark_style.fill`` instead of ``mark_style.stroke``
+    for its line color; that Rust fix is tracked separately.  This test
+    confirms the Python alias produces the correct canonical key.
+    """
+    chart = (
+        fm.Chart(segment_df)
+        .mark_segment(color="#e4572e")
+        .encode(x="x:Q", y="y:Q", x2="x2:Q", y2="y2:Q")
+    )
+    assert chart._mark_kwargs.get("stroke") == "#e4572e", (
+        f"mark_segment(color='#e4572e') must store stroke='#e4572e' in mark_kwargs; "
+        f"got: {chart._mark_kwargs}"
+    )
+    assert "fill" not in chart._mark_kwargs, (
+        f"mark_segment(color='#e4572e') must not store fill in mark_kwargs; "
+        f"got: {chart._mark_kwargs}"
+    )
+
+
+def test_d6_line_explicit_stroke_still_works(line_df: pl.DataFrame) -> None:
+    """mark_line(stroke='#123456') still sets stroke when passed directly."""
+    svg = fm.Chart(line_df).mark_line(stroke="#123456").encode(x="x:Q", y="y:Q").show_svg()
+    strokes = _hex_strokes(svg)
+    assert "123456" in strokes, (
+        f"mark_line(stroke='#123456') must produce stroke='#123456' in SVG; "
+        f"found strokes: {strokes}"
+    )
+
+
+# --- Regressions: fill-primary marks must still map color → fill ---
+
+
+def test_d6_bar_color_still_maps_to_fill() -> None:
+    """mark_bar(color='#e4572e') still sets fill (bar is fill-primary)."""
+    df = pl.DataFrame({"cat": ["A", "B"], "val": [10.0, 20.0]})
+    svg = fm.Chart(df).mark_bar(color="#e4572e").encode(x="cat:N", y="val:Q").show_svg()
+    fills = _hex_fills(svg)
+    assert "e4572e" in fills, (
+        f"mark_bar(color='#e4572e') must produce fill='#e4572e' in SVG; found fills: {fills}"
+    )
+
+
+def test_d6_point_color_still_maps_to_fill(line_df: pl.DataFrame) -> None:
+    """mark_point(color='#e4572e') still sets fill (point is fill-primary)."""
+    svg = fm.Chart(line_df).mark_point(color="#e4572e").encode(x="x:Q", y="y:Q").show_svg()
+    fills = _hex_fills(svg)
+    assert "e4572e" in fills, (
+        f"mark_point(color='#e4572e') must produce fill='#e4572e' in SVG; found fills: {fills}"
+    )
+
+
+def test_d6_area_color_resolves_to_fill_in_mark_kwargs(line_df: pl.DataFrame) -> None:
+    """mark_area(color='#e4572e') resolves color to fill in mark_kwargs (area is fill-primary).
+
+    The Rust area renderer bakes the fill color into an rgba() value (with area
+    opacity applied), so the exact hex does not appear verbatim in the SVG.  The
+    assertion targets the Python-layer contract: mark_kwargs must carry ``fill``,
+    not ``stroke``.
+    """
+    chart = fm.Chart(line_df).mark_area(color="#e4572e").encode(x="x:Q", y="y:Q")
+    assert chart._mark_kwargs.get("fill") == "#e4572e", (
+        f"mark_area(color='#e4572e') must store fill='#e4572e' in mark_kwargs; "
+        f"got: {chart._mark_kwargs}"
+    )
+    assert "stroke" not in chart._mark_kwargs, (
+        f"mark_area(color='#e4572e') must not store stroke in mark_kwargs; "
+        f"got: {chart._mark_kwargs}"
+    )
