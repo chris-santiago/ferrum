@@ -515,6 +515,7 @@ def desugar_boxen(
     color_field: str | None = None,
     x_sort: Any = None,
     y_sort: Any = None,
+    boxen_agg_sort: dict | None = None,
     **mark_kwargs: Any,
 ) -> "MarkDesugarResult":
     """Letter-value (boxen) composite mark.
@@ -543,6 +544,13 @@ def desugar_boxen(
     # Resolve the sort for the categorical axis.  When horizontal, y is the
     # categorical channel; otherwise x is categorical.
     cat_sort = y_sort if horizontal else x_sort
+    # Aggregate-form sort (op/order) is resolved inside the LetterValue transform,
+    # which emits its group rows in aggregate order.  The categorical axis domain
+    # then falls out in first-appearance order, so no explicit layer sort is set.
+    # Non-aggregate sorts (explicit list / "ascending" / "descending") still apply
+    # to the renamed "group" encoding in the layers.
+    if boxen_agg_sort is not None:
+        cat_sort = None
     # The LetterValue transform renames the groupby column to "group" in its
     # output, so sort must be applied to the "group" encoding in the layers.
     group_enc_x = X("group", sort=cat_sort) if cat_sort is not None else "group"
@@ -556,6 +564,7 @@ def desugar_boxen(
             k_proportion=k_proportion,
             outlier_threshold=outlier_threshold,
             name="lv",
+            sort=boxen_agg_sort,
         ),
     ]
 

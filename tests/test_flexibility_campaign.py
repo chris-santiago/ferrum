@@ -683,14 +683,17 @@ def test_d5_boxen_sort_descending(sort_boxen_df: pl.DataFrame) -> None:
     Regression guard for the bug where boxen's LetterValue transform renames the
     groupby column to "group" and drops the original value column from its per-depth
     batches, causing sort dicts referencing the original value field to be silently
-    ignored by Rust.  The fix pre-resolves the sort to an explicit ordered category
-    list in Python so the explicit-array sort path is used instead.
+    ignored by Rust.  The fix (R2) hands the aggregate op/order to the LetterValue
+    transform via its ``sort=`` kwarg; the transform emits its group rows in
+    aggregate order, so the categorical domain falls out in first-appearance order
+    with no explicit layer sort.
 
     The assertion strategy uses three independent checks:
 
     1. No ``SortSpecIgnored`` Rust warning (the core bug symptom).
-    2. The resolved layer encoding carries the expected explicit sort list (Python-level
-       correctness — the fix must produce this list for the layer to receive it).
+    2. The LetterValue transform carries the aggregate sort, and the layer's
+       categorical encoding carries NO explicit sort (Python-level correctness —
+       the aggregate ordering must live on the transform, not the layer).
     3. The sorted SVG differs from the unsorted SVG (Rust-side effect: the sort is
        actually applied to the rendered domain).
 
@@ -712,15 +715,21 @@ def test_d5_boxen_sort_descending(sort_boxen_df: pl.DataFrame) -> None:
     sort_ignored = any("SortSpecIgnored" in str(ww.message) for ww in w)
     assert not sort_ignored, "sort='-y' on mark_boxen must not emit SortSpecIgnored"
 
-    # Check 2: Python-level sort pre-resolution produces expected explicit list.
-    # Z≈80 > B≈50 > A≈20, so descending by mean gives ['Z', 'B', 'A'].
+    # Check 2: aggregate sort lives on the LetterValue transform, not the layer.
+    # Z≈80 > B≈50 > A≈20, so descending by sum reorders the emitted group rows.
     chart_resolved = (
         fm.Chart(sort_boxen_df).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
     )._resolve_pending()
+    transform_repr = repr(chart_resolved._transforms[0])
+    assert "LetterValueSort" in transform_repr and "Desc" in transform_repr, (
+        f"boxen sort='-y' must set a descending aggregate sort on the LetterValue "
+        f"transform; got {transform_repr!r}"
+    )
     x_enc = chart_resolved._layers[0].encoding["x"]
-    resolved_sort = x_enc._kwargs.get("sort") if hasattr(x_enc, "_kwargs") else None
-    assert resolved_sort == ["Z", "B", "A"], (
-        f"boxen sort='-y' must resolve to explicit list ['Z','B','A']; got {resolved_sort!r}"
+    layer_sort = x_enc._kwargs.get("sort") if hasattr(x_enc, "_kwargs") else None
+    assert layer_sort is None, (
+        f"boxen aggregate sort must NOT set an explicit layer sort (the transform's "
+        f"row order drives the domain); got layer sort {layer_sort!r}"
     )
 
     # Check 3: sorted SVG differs from unsorted (the sort visually affects rendering).
@@ -2346,12 +2355,11 @@ def sort_boxen_pandas_df():
 
 
 def test_rf2_boxen_sort_descending_pandas(sort_boxen_pandas_df) -> None:
-    """mark_boxen with X(sort='-y') pre-resolves sort correctly for pandas input.
+    """mark_boxen with X(sort='-y') resolves the aggregate sort for pandas input.
 
-    Regression guard for the bug where _resolve_boxen_cat_sort returned the sort
-    dict unchanged for non-polars data, causing Rust to emit SortSpecIgnored.
-    The fix converts the data to polars via _to_polars (which routes through
-    to_arrow_table) before computing the aggregate order.
+    Regression guard: the aggregate ordering is computed inside the Rust
+    LetterValue transform (R2), so backend-agnostic input (pandas/pyarrow)
+    must produce the same ordered domain without emitting SortSpecIgnored.
     """
     import warnings
 
@@ -2369,16 +2377,19 @@ def test_rf2_boxen_sort_descending_pandas(sort_boxen_pandas_df) -> None:
         "sort='-y' on mark_boxen with pandas input must not emit SortSpecIgnored"
     )
 
-    # Check 2: Python-level sort pre-resolution produces the explicit ordered list.
-    # Z≈80 > B≈50 > A≈20, so descending by mean gives ['Z', 'B', 'A'].
+    # Check 2: the aggregate sort lives on the LetterValue transform, not the layer.
     chart_resolved = (
         fm.Chart(sort_boxen_pandas_df).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
     )._resolve_pending()
+    transform_repr = repr(chart_resolved._transforms[0])
+    assert "LetterValueSort" in transform_repr and "Desc" in transform_repr, (
+        f"boxen sort='-y' on pandas input must set a descending aggregate sort on the "
+        f"LetterValue transform; got {transform_repr!r}"
+    )
     x_enc = chart_resolved._layers[0].encoding["x"]
-    resolved_sort = x_enc._kwargs.get("sort") if hasattr(x_enc, "_kwargs") else None
-    assert resolved_sort == ["Z", "B", "A"], (
-        f"boxen sort='-y' on pandas input must resolve to explicit list "
-        f"['Z','B','A']; got {resolved_sort!r}"
+    layer_sort = x_enc._kwargs.get("sort") if hasattr(x_enc, "_kwargs") else None
+    assert layer_sort is None, (
+        f"aggregate boxen sort must not set an explicit layer sort; got {layer_sort!r}"
     )
 
     # Check 3: sorted SVG differs from unsorted.
@@ -2420,10 +2431,16 @@ def test_rf2_boxen_sort_descending_pyarrow() -> None:
     chart_resolved = (
         fm.Chart(table).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
     )._resolve_pending()
+    transform_repr = repr(chart_resolved._transforms[0])
+    assert "LetterValueSort" in transform_repr and "Desc" in transform_repr, (
+        f"boxen sort='-y' on PyArrow input must set a descending aggregate sort on the "
+        f"LetterValue transform; got {transform_repr!r}"
+    )
     x_enc = chart_resolved._layers[0].encoding["x"]
-    resolved_sort = x_enc._kwargs.get("sort") if hasattr(x_enc, "_kwargs") else None
-    assert resolved_sort == ["Z", "B", "A"], (
-        f"boxen sort='-y' on PyArrow input must resolve to ['Z','B','A']; got {resolved_sort!r}"
+    layer_sort = x_enc._kwargs.get("sort") if hasattr(x_enc, "_kwargs") else None
+    assert layer_sort is None, (
+        f"aggregate boxen sort on PyArrow input must not set an explicit layer sort; "
+        f"got {layer_sort!r}"
     )
 
 
@@ -2955,3 +2972,117 @@ def test_r3b_catplot_no_height_aspect_still_renders(_r3b_cat_df: pl.DataFrame) -
     assert len(svg) > 0, "catplot without height/aspect must produce non-empty SVG"
     # Violin bodies are <path> elements.
     assert svg.count('d="M') >= 1, "catplot without height/aspect must render mark elements"
+
+
+# ---------------------------------------------------------------------------
+# R2 — boxen sort via LetterValue transform
+# ---------------------------------------------------------------------------
+#
+# Boxen aggregate sorts ("-y"/"y"/"-x"/"x" shorthands and explicit Vega-Lite
+# {field, op, order} dicts) are resolved inside the Rust LetterValue transform:
+# it emits its group rows in aggregate order, so the categorical axis domain
+# falls out in first-appearance order with no explicit categorical layer sort.
+# Non-aggregate forms (explicit list / "ascending" / "descending") still route
+# through the standard layer-sort path on the renamed "group" column.
+
+
+@pytest.fixture
+def _r2_boxen_df() -> pl.DataFrame:
+    """Categories Z (≈80), B (≈50), A (≈20); descending by sum/mean is Z > B > A."""
+    import numpy as np
+
+    rng = np.random.default_rng(7)
+    rows = []
+    for cat, loc in [("A", 20.0), ("Z", 80.0), ("B", 50.0)]:
+        for v in rng.normal(loc, 15.0, 300).tolist():
+            rows.append({"cat": cat, "val": v})
+    return pl.DataFrame(rows)
+
+
+@pytest.mark.parametrize("shorthand,order_token", [("-y", "Desc"), ("y", "Asc")])
+def test_r2_boxen_aggregate_sort_on_transform(
+    _r2_boxen_df: pl.DataFrame, shorthand: str, order_token: str
+) -> None:
+    """Aggregate sort shorthands set sort on the LetterValue transform, not the layer."""
+    chart = (
+        fm.Chart(_r2_boxen_df).mark_boxen().encode(x=fm.X("cat:N", sort=shorthand), y="val:Q")
+    )._resolve_pending()
+
+    transform_repr = repr(chart._transforms[0])
+    assert "LetterValueSort" in transform_repr and order_token in transform_repr, (
+        f"boxen sort={shorthand!r} must carry a {order_token} aggregate sort on the "
+        f"LetterValue transform; got {transform_repr!r}"
+    )
+    # No redundant explicit layer sort for the aggregate case.
+    x_enc = chart._layers[0].encoding["x"]
+    layer_sort = x_enc._kwargs.get("sort") if hasattr(x_enc, "_kwargs") else None
+    assert layer_sort is None, (
+        f"aggregate boxen sort must not set an explicit layer sort; got {layer_sort!r}"
+    )
+
+
+def test_r2_boxen_aggregate_sort_cross_backend_parity(_r2_boxen_df: pl.DataFrame) -> None:
+    """sort='-y' boxen produces byte-identical SVG across polars/pandas/pyarrow."""
+    pddf = _r2_boxen_df.to_pandas()
+    patbl = _r2_boxen_df.to_arrow()
+
+    def render(data: object) -> str:
+        return fm.Chart(data).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q").show_svg()
+
+    svg_pl = render(_r2_boxen_df)
+    svg_pd = render(pddf)
+    svg_pa = render(patbl)
+    assert svg_pl == svg_pd, "polars vs pandas boxen sort='-y' SVG must be byte-identical"
+    assert svg_pl == svg_pa, "polars vs pyarrow boxen sort='-y' SVG must be byte-identical"
+
+
+def test_r2_boxen_explicit_list_sort_uses_layer_path(_r2_boxen_df: pl.DataFrame) -> None:
+    """Explicit-list sort routes through the standard layer-sort path, not the transform."""
+    chart = (
+        fm.Chart(_r2_boxen_df).mark_boxen().encode(x=fm.X("cat:N", sort=["B", "A", "Z"]), y="val:Q")
+    )._resolve_pending()
+
+    # No aggregate sort on the transform for the explicit-list form.
+    transform_repr = repr(chart._transforms[0])
+    assert "sort=None" in transform_repr, (
+        f"explicit-list boxen sort must not set an aggregate transform sort; got {transform_repr!r}"
+    )
+    # The explicit list lands on the layer's categorical encoding.
+    x_enc = chart._layers[0].encoding["x"]
+    layer_sort = x_enc._kwargs.get("sort") if hasattr(x_enc, "_kwargs") else None
+    assert layer_sort == ["B", "A", "Z"], (
+        f"explicit-list boxen sort must reach the layer encoding; got {layer_sort!r}"
+    )
+
+
+def test_r2_boxen_horizontal_aggregate_sort(_r2_boxen_df: pl.DataFrame) -> None:
+    """Horizontal boxen with Y(sort='-x') sets the aggregate sort on the transform."""
+    chart = (
+        fm.Chart(_r2_boxen_df)
+        .mark_boxen(horizontal=True)
+        .encode(x="val:Q", y=fm.Y("cat:N", sort="-x"))
+    )._resolve_pending()
+
+    transform_repr = repr(chart._transforms[0])
+    assert "LetterValueSort" in transform_repr and "Desc" in transform_repr, (
+        f"horizontal boxen Y(sort='-x') must carry a descending aggregate sort on the "
+        f"LetterValue transform; got {transform_repr!r}"
+    )
+    y_enc = chart._layers[0].encoding["y"]
+    layer_sort = y_enc._kwargs.get("sort") if hasattr(y_enc, "_kwargs") else None
+    assert layer_sort is None, (
+        f"horizontal aggregate boxen sort must not set an explicit layer sort; got {layer_sort!r}"
+    )
+
+
+def test_r2_boxen_no_sort_unchanged(_r2_boxen_df: pl.DataFrame) -> None:
+    """Unsorted boxen sets no aggregate transform sort and no layer sort."""
+    chart = (fm.Chart(_r2_boxen_df).mark_boxen().encode(x="cat:N", y="val:Q"))._resolve_pending()
+    transform_repr = repr(chart._transforms[0])
+    assert "sort=None" in transform_repr, (
+        f"unsorted boxen must not set an aggregate transform sort; got {transform_repr!r}"
+    )
+    x_enc = chart._layers[0].encoding["x"]
+    assert not hasattr(x_enc, "_kwargs") or x_enc._kwargs.get("sort") is None, (
+        "unsorted boxen must not set an explicit layer sort"
+    )

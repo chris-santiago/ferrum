@@ -113,90 +113,6 @@ def _resolve_sort_for_composite(sort: Any, x_field: str | None, y_field: str | N
     return sort
 
 
-def _resolve_boxen_cat_sort(
-    sort: Any,
-    cat_field: str,
-    val_field: str,
-    data: Any,
-) -> Any:
-    """Pre-resolve a boxen categorical sort to an explicit ordered category list.
-
-    The LetterValue transform renames the groupby column to ``"group"`` and drops
-    the original value column from its per-depth output batches.  A sort dict like
-    ``{"field": "val", "op": "sum", "order": "descending"}`` therefore references a
-    column absent from the layer batch, causing Rust to emit ``SortSpecIgnored``.
-
-    This function computes the ordered category list in Python from the source
-    DataFrame and returns it as an explicit list (e.g. ``["A", "B", "C"]``).
-    Explicit list sorts bypass the missing-field problem entirely because they
-    specify domain order directly, without referencing any data column.
-
-    Conditions for pre-resolution:
-    - *sort* is a dict with a ``"field"`` key (field-based aggregate sort).
-    - *data* is a polars DataFrame containing *cat_field* and *val_field*.
-
-    All other sort values (bare strings, explicit lists, ``None``) are returned
-    unchanged.
-
-    Parameters
-    ----------
-    sort : Any
-        The resolved sort spec for the categorical axis.
-    cat_field : str
-        The original category (groupby) field name in the source data.
-    val_field : str
-        The original value (numeric) field name in the source data.
-    data : Any
-        The chart's source data.  Only polars DataFrames are processed; other
-        types are returned with *sort* unchanged.
-    """
-    if not isinstance(sort, dict) or "field" not in sort:
-        # Explicit list or unsupported form: return unchanged.
-        return sort
-    try:
-        import polars as pl
-
-        # Coerce to polars so pandas/pyarrow/narwhals input all work the same
-        # way.  The LetterValue transform drops the original value column, so a
-        # field-based sort dict referencing it would cause Rust to emit
-        # SortSpecIgnored.  We compute the explicit category order here in
-        # Python from the source data regardless of backend.
-        if isinstance(data, pl.DataFrame):
-            df = data
-        else:
-            df = pl.from_arrow(to_arrow_table(data))
-
-        if cat_field not in df.columns or val_field not in df.columns:
-            return sort
-
-        op = sort.get("op", "sum")
-        order = sort.get("order", "ascending")
-        descending = order == "descending"
-
-        _OP_MAP = {
-            "sum": pl.sum,
-            "mean": pl.mean,
-            "max": pl.max,
-            "min": pl.min,
-            "count": pl.count,
-            "median": pl.median,
-        }
-        agg_fn = _OP_MAP.get(op, pl.sum)
-        agg_col = f"_sort_{val_field}"
-        ordered = (
-            df.group_by(cat_field)
-            .agg(agg_fn(val_field).alias(agg_col))
-            .sort(agg_col, descending=descending)
-            .get_column(cat_field)
-            .to_list()
-        )
-        return ordered
-    except Exception:
-        # Defensive: if anything goes wrong, fall back to the original sort spec
-        # so the chart still renders (it will emit SortSpecIgnored rather than crash).
-        return sort
-
-
 def _resolve_cat_axis(
     transform_kwargs: dict,
     x_field: str | None,
@@ -677,23 +593,33 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 transform_kwargs = {**transform_kwargs, "y2_field": y2_field}
         # Boxen: the LetterValue transform renames the groupby column to "group"
         # and drops the original value column from its per-depth output batches.
-        # A field-based sort dict (e.g. {"field": "val", "op": "sum", "order":
-        # "descending"}) therefore references a column absent from the layer batch,
-        # causing Rust to emit SortSpecIgnored and leave the domain in insertion
-        # order.  Pre-resolve to an explicit ordered category list in Python, which
-        # bypasses the missing-field problem because list sorts specify domain order
-        # directly without referencing any data column.
-        if kind == "boxen" and self._data is not None:
-            cat_f, cat_sort, val_f = _resolve_cat_axis(
-                transform_kwargs, x_field, y_field, x_sort, y_sort
-            )
+        # A field-based aggregate sort dict (e.g. {"field": "val", "op": "sum",
+        # "order": "descending"}) therefore cannot resolve through the standard
+        # layer-sort path — the value column is absent from the layer batch.
+        # Instead, hand the aggregate op/order to the LetterValue transform via
+        # its ``sort=`` kwarg: it reorders its emitted group rows so the
+        # categorical axis domain falls out in first-appearance order, with no
+        # explicit categorical layer sort needed.  Non-aggregate forms (explicit
+        # list, "ascending"/"descending", None) still resolve via the standard
+        # layer-sort path on the renamed ``group`` column, so they pass through
+        # unchanged.
+        if kind == "boxen":
             cat_is_y = bool(transform_kwargs.get("horizontal", False))
-            if cat_f and val_f and cat_sort is not None:
-                resolved = _resolve_boxen_cat_sort(cat_sort, cat_f, val_f, self._data)
+            cat_sort = y_sort if cat_is_y else x_sort
+            if isinstance(cat_sort, dict) and "field" in cat_sort:
+                transform_kwargs = {
+                    **transform_kwargs,
+                    "boxen_agg_sort": {
+                        "op": cat_sort.get("op", "sum"),
+                        "order": cat_sort.get("order", "ascending"),
+                    },
+                }
+                # Drop the categorical layer sort for the aggregate case; the
+                # transform's row order drives the domain.
                 if cat_is_y:
-                    y_sort = resolved
+                    y_sort = None
                 else:
-                    x_sort = resolved
+                    x_sort = None
         # Composites with a categorical positional axis: inject x_sort and y_sort
         # so the desugar function can forward sort to the categorical channel
         # encoding, enabling e.g. X("c:N", sort="-y") on mark_boxplot/violin/etc.

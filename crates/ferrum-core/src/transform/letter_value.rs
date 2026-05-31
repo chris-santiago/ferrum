@@ -40,6 +40,40 @@ pub(crate) enum KDepth {
     Full,
 }
 
+/// Aggregate operation used to order boxen groups along the categorical axis.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SortOp {
+    Sum,
+    Mean,
+    Max,
+    Min,
+    Count,
+    Median,
+}
+
+/// Direction of the group ordering.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SortOrder {
+    Asc,
+    Desc,
+}
+
+/// Optional group ordering for the letter-value transform.
+///
+/// When present, output groups are emitted in the order produced by ranking
+/// each group's per-group aggregate of the (non-null) value column. Because
+/// the categorical axis domain is built from the first-appearance order of the
+/// `group` column in the primary batch, emitting groups in this order is what
+/// makes the boxen categorical axis come out sorted — no separate layer sort or
+/// domain step is required.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct LetterValueSort {
+    pub op: SortOp,
+    pub order: SortOrder,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct LetterValueSpec {
     pub value: String,
@@ -50,6 +84,8 @@ pub(crate) struct LetterValueSpec {
     pub outlier_threshold: f64,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sort: Option<LetterValueSort>,
 }
 
 fn default_outlier_threshold() -> f64 { 1.5 }
@@ -162,18 +198,81 @@ pub(crate) fn apply(spec: &LetterValueSpec, batch: &RecordBatch) -> PyResult<Rec
     build_primary_batch(&depths)
 }
 
+/// Determine the order in which groups are emitted.
+///
+/// With `sort = None` the order is lexicographic over the (optional) group key
+/// — identical to the historical `BTreeMap` iteration order. With `sort =
+/// Some`, groups are ranked by the requested per-group aggregate over the SAME
+/// `(group, value)` pairs the transform extracts (so `count` counts only the
+/// non-null value rows that boxen actually plots). Ties are broken
+/// lexicographically for byte-deterministic output.
+fn group_order(
+    sort: &Option<LetterValueSort>,
+    grouped: &BTreeMap<Option<String>, Vec<f64>>,
+) -> Vec<Option<String>> {
+    // BTreeMap keys are already lexicographically ordered; this is the
+    // `sort = None` answer and the lexicographic tie-break baseline.
+    let lexicographic: Vec<Option<String>> = grouped.keys().cloned().collect();
+    let Some(sort) = sort else {
+        return lexicographic;
+    };
+
+    let aggregate = |vs: &[f64]| -> f64 {
+        match sort.op {
+            SortOp::Count => vs.len() as f64,
+            SortOp::Sum => vs.iter().sum(),
+            SortOp::Mean => {
+                if vs.is_empty() { f64::NAN } else { vs.iter().sum::<f64>() / vs.len() as f64 }
+            }
+            SortOp::Max => vs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            SortOp::Min => vs.iter().copied().fold(f64::INFINITY, f64::min),
+            SortOp::Median => {
+                if vs.is_empty() {
+                    f64::NAN
+                } else {
+                    let mut s = vs.to_vec();
+                    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    quantile_sorted(&s, 0.5)
+                }
+            }
+        }
+    };
+
+    // Rank lexicographic order by aggregate; stable sort keeps lexicographic
+    // order among ties, then we reverse for descending.
+    let mut ordered = lexicographic;
+    ordered.sort_by(|a, b| {
+        let av = aggregate(grouped.get(a).map(Vec::as_slice).unwrap_or(&[]));
+        let bv = aggregate(grouped.get(b).map(Vec::as_slice).unwrap_or(&[]));
+        let cmp = av.partial_cmp(&bv).unwrap_or(std::cmp::Ordering::Equal);
+        match sort.order {
+            SortOrder::Asc => cmp,
+            SortOrder::Desc => cmp.reverse(),
+        }
+        // Tie-break: BTreeMap order is already lexicographic and `sort_by` is
+        // stable, so equal aggregates retain ascending-lexicographic order
+        // under both directions.
+    });
+    ordered
+}
+
 fn compute_depths(spec: &LetterValueSpec, pairs: &[(Option<String>, f64)]) -> Vec<DepthRow> {
-    // Group values; preserve first-seen order via BTreeMap → group order is lexicographic
-    // for stability across runs.
+    // Group values; BTreeMap keys give a deterministic lexicographic baseline.
     let mut groups: BTreeMap<Option<String>, Vec<f64>> = BTreeMap::new();
     for (g, v) in pairs {
         groups.entry(g.clone()).or_insert_with(Vec::new).push(*v);
     }
+    for vs in groups.values_mut() {
+        vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    let order = group_order(&spec.sort, &groups);
 
     let mut rows = Vec::new();
-    for (g, vs) in groups.iter_mut() {
-        if vs.is_empty() { continue; }
-        vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    for g in &order {
+        let vs = match groups.get(g) {
+            Some(vs) if !vs.is_empty() => vs,
+            _ => continue,
+        };
         let k = k_for_depth(&spec.k_depth, vs.len());
         for depth in 1..=k {
             let p = 0.5_f64.powi(depth as i32);
@@ -339,8 +438,48 @@ pub(crate) fn secondary_outputs(
 // ---------- PyO3 wrapper ----------
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use crate::transform::core::TransformSpec;
+
+/// Parse the optional `sort={"op": ..., "order": ...}` kwarg into a
+/// [`LetterValueSort`]. Returns `Ok(None)` when no dict is supplied.
+fn parse_sort(sort: Option<&Bound<'_, PyDict>>) -> PyResult<Option<LetterValueSort>> {
+    let Some(d) = sort else { return Ok(None) };
+    let op_str: String = match d.get_item("op")? {
+        Some(v) => v.extract()?,
+        None => "sum".to_string(),
+    };
+    let order_str: String = match d.get_item("order")? {
+        Some(v) => v.extract()?,
+        None => "ascending".to_string(),
+    };
+    let op = match op_str.as_str() {
+        "sum" => SortOp::Sum,
+        "mean" => SortOp::Mean,
+        "max" => SortOp::Max,
+        "min" => SortOp::Min,
+        "count" => SortOp::Count,
+        "median" => SortOp::Median,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "LetterValue: unknown sort op '{other}'; expected \
+                 'sum'|'mean'|'max'|'min'|'count'|'median'"
+            )))
+        }
+    };
+    let order = match order_str.as_str() {
+        "ascending" | "asc" => SortOrder::Asc,
+        "descending" | "desc" => SortOrder::Desc,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "LetterValue: unknown sort order '{other}'; expected \
+                 'ascending'|'descending'"
+            )))
+        }
+    };
+    Ok(Some(LetterValueSort { op, order }))
+}
 
 /// Letter-value (boxen) summary statistics for a numeric column.
 ///
@@ -375,6 +514,15 @@ use crate::transform::core::TransformSpec;
 ///     Tukey fence multiplier for labelling outliers. Must be ≥ 0.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+/// sort : dict, optional
+///     Group ordering for the categorical axis, as ``{"op": ..., "order":
+///     ...}``. ``op`` is one of ``"sum" | "mean" | "max" | "min" | "count" |
+///     "median"`` and ``order`` is ``"ascending" | "descending"`` (``"asc"``
+///     / ``"desc"`` also accepted). The aggregate is computed over the value
+///     column per group; ``count`` counts non-null value rows. Groups are then
+///     emitted in ranked order (ties broken lexicographically), which sets the
+///     boxen categorical axis domain directly. When omitted, groups are emitted
+///     in lexicographic order.
 ///
 /// Examples
 /// --------
@@ -394,6 +542,7 @@ impl PyLetterValue {
         k_proportion = 0.007,
         outlier_threshold = 1.5,
         name = None,
+        sort = None,
     ))]
     fn new(
         value: &str,
@@ -402,6 +551,7 @@ impl PyLetterValue {
         k_proportion: f64,
         outlier_threshold: f64,
         name: Option<String>,
+        sort: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
         if value.is_empty() {
             return Err(PyValueError::new_err("LetterValue: value must be non-empty"));
@@ -427,20 +577,22 @@ impl PyLetterValue {
                 "LetterValue: unknown k_depth '{other}'; expected 'tukey'|'proportion'|'trustworthy'|'full'"
             ))),
         };
+        let sort = parse_sort(sort)?;
         Ok(PyLetterValue(TransformSpec::LetterValue(LetterValueSpec {
             value: value.to_string(),
             group,
             k_depth: kd,
             outlier_threshold,
             name,
+            sort,
         })))
     }
 
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::LetterValue(s) => format!(
-                "LetterValue(value='{}', group={:?}, k_depth={:?}, outlier_threshold={})",
-                s.value, s.group, s.k_depth, s.outlier_threshold,
+                "LetterValue(value='{}', group={:?}, k_depth={:?}, outlier_threshold={}, sort={:?})",
+                s.value, s.group, s.k_depth, s.outlier_threshold, s.sort,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
@@ -478,6 +630,7 @@ mod tests {
             k_depth: KDepth::Proportion { p: 0.007 },
             outlier_threshold: 1.5,
             name: Some("lv".into()),
+            sort: None,
         };
         let wrapped = TransformSpec::LetterValue(spec.clone());
         let json = serde_json::to_string(&wrapped).unwrap();
@@ -497,6 +650,7 @@ mod tests {
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
             name: None,
+            sort: None,
         };
         let out = apply(&spec, &batch).unwrap();
         // First row is depth=1 (median). lower == upper == median of 1..=100 = 50.5
@@ -539,6 +693,7 @@ mod tests {
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
             name: None,
+            sort: None,
         };
         let out = apply(&spec, &batch).unwrap();
         // n=10 per group → Tukey K = max(1, floor(log2(10)) - 3) = max(1, 3-3) = 1.
@@ -565,6 +720,7 @@ mod tests {
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
             name: None,
+            sort: None,
         };
         let primary = apply(&spec, &batch).unwrap();
         let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
@@ -596,6 +752,7 @@ mod tests {
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
             name: None,
+            sort: None,
         };
         let primary = apply(&spec, &batch).unwrap();
         let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
@@ -615,6 +772,7 @@ mod tests {
             k_depth: KDepth::Tukey,
             outlier_threshold: 1.5,
             name: Some("lv".into()),
+            sort: None,
         };
         let primary = apply(&spec, &batch).unwrap();
         let secs = secondary_outputs(&spec, &batch, &primary).unwrap();
@@ -623,5 +781,101 @@ mod tests {
             let key = format!("lv_depth_{k}");
             assert!(secs.iter().any(|(name, _)| name == &key), "missing {key}");
         }
+    }
+
+    /// First-appearance order of the `group` column in the primary batch.
+    /// This is exactly what the categorical-axis domain is built from, so it is
+    /// the order that controls the boxen axis.
+    fn group_first_appearance(batch: &RecordBatch) -> Vec<String> {
+        let g = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for i in 0..batch.num_rows() {
+            let s = g.value(i).to_string();
+            if seen.insert(s.clone()) {
+                out.push(s);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_letter_value_sort_none_is_lexicographic() {
+        // Groups appear in source as c, a, b but unsorted output is lexicographic.
+        let groups: Vec<&str> = (0..30).map(|i| ["c", "a", "b"][i % 3]).collect();
+        let values: Vec<f64> = (0..30).map(|i| i as f64).collect();
+        let batch = batch_grouped(groups, values);
+        let spec = LetterValueSpec {
+            value: "v".into(), group: Some("g".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(group_first_appearance(&out), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_letter_value_sort_sum_desc() {
+        // a: [0,1,2] sum=3 ; b: [10,11,12] sum=33 ; c: [5,6,7] sum=18.
+        // Descending by sum → b, c, a.
+        let groups: Vec<&str> = vec![
+            "a", "a", "a", "b", "b", "b", "c", "c", "c",
+        ];
+        let values: Vec<f64> = vec![0.0, 1.0, 2.0, 10.0, 11.0, 12.0, 5.0, 6.0, 7.0];
+        let batch = batch_grouped(groups, values);
+        let spec = LetterValueSpec {
+            value: "v".into(), group: Some("g".into()),
+            k_depth: KDepth::Full,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: Some(LetterValueSort { op: SortOp::Sum, order: SortOrder::Desc }),
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(group_first_appearance(&out), vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn test_letter_value_sort_tie_breaks_lexicographically() {
+        // a and b both sum to 3; c sums to 30. Ascending → a, b (tie, lex), c.
+        let groups: Vec<&str> = vec![
+            "b", "b", "a", "a", "c", "c",
+        ];
+        let values: Vec<f64> = vec![1.0, 2.0, 1.0, 2.0, 15.0, 15.0];
+        let batch = batch_grouped(groups, values);
+        let spec = LetterValueSpec {
+            value: "v".into(), group: Some("g".into()),
+            k_depth: KDepth::Full,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: Some(LetterValueSort { op: SortOp::Sum, order: SortOrder::Asc }),
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(group_first_appearance(&out), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_letter_value_sort_count_uses_extracted_rows() {
+        // a has 5 non-null rows, b has 2, c has 3 (one b value is NaN → dropped).
+        // count descending → a, c, b.
+        let groups: Vec<&str> = vec![
+            "a", "a", "a", "a", "a", "b", "b", "b", "c", "c", "c",
+        ];
+        let values: Vec<f64> = vec![
+            1.0, 1.0, 1.0, 1.0, 1.0, // a: 5
+            2.0, 2.0, f64::NAN,      // b: NaN dropped → 2
+            3.0, 3.0, 3.0,           // c: 3
+        ];
+        let batch = batch_grouped(groups, values);
+        let spec = LetterValueSpec {
+            value: "v".into(), group: Some("g".into()),
+            k_depth: KDepth::Full,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: Some(LetterValueSort { op: SortOp::Count, order: SortOrder::Desc }),
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(group_first_appearance(&out), vec!["a", "c", "b"]);
     }
 }

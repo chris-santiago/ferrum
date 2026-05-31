@@ -609,6 +609,7 @@ class LetterValue:
         k_proportion: float = 0.007,
         outlier_threshold: float = 1.5,
         name: Optional[str] = None,
+        sort: Optional[dict[str, str]] = None,
     ) -> None: ...
 
 class Logistic:
