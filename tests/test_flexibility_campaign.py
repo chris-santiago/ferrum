@@ -104,10 +104,7 @@ def test_d1_declared_domain_overrides_data_appearance_order() -> None:
         range=["#cccccc", "#e4572e", "#cccccc"],
     )
     svg = (
-        fm.Chart(df)
-        .mark_bar()
-        .encode(x="c:N", y="y:Q", color=Color("c:N", scale=scale))
-        .show_svg()
+        fm.Chart(df).mark_bar().encode(x="c:N", y="y:Q", color=Color("c:N", scale=scale)).show_svg()
     )
     # Both colors must appear.
     svg_lower = svg.lower()
@@ -117,9 +114,9 @@ def test_d1_declared_domain_overrides_data_appearance_order() -> None:
     # This proves colors follow the declared domain, not data appearance order.
     accent_count = svg_lower.count("e4572e")
     gray_count = svg_lower.count("cccccc")
-    assert (
-        accent_count < gray_count
-    ), f"accent should appear fewer times than gray (accent={accent_count}, gray={gray_count})"
+    assert accent_count < gray_count, (
+        f"accent should appear fewer times than gray (accent={accent_count}, gray={gray_count})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -210,9 +207,7 @@ def test_d3_numeric_grouping_format(two_cat_numeric_df: pl.DataFrame) -> None:
         .show_svg()
     )
     tick_labels = _tick_texts(svg)
-    assert "10,000" in tick_labels, (
-        f"expected '10,000' in tick labels; got {tick_labels}"
-    )
+    assert "10,000" in tick_labels, f"expected '10,000' in tick labels; got {tick_labels}"
 
 
 def test_d3_si_prefix_format(two_cat_large_df: pl.DataFrame) -> None:
@@ -245,9 +240,7 @@ def test_d3_percent_format(two_cat_fraction_df: pl.DataFrame) -> None:
         .show_svg()
     )
     tick_labels = _tick_texts(svg)
-    assert "50%" in tick_labels, (
-        f"expected '50%' in tick labels; got {tick_labels}"
-    )
+    assert "50%" in tick_labels, f"expected '50%' in tick labels; got {tick_labels}"
 
 
 def test_d3_temporal_format_month_year(monthly_date_df: pl.DataFrame) -> None:
@@ -263,12 +256,8 @@ def test_d3_temporal_format_month_year(monthly_date_df: pl.DataFrame) -> None:
     )
     tick_labels = _tick_texts(svg)
     # Must have at least one label matching the '<MonthAbbrev> <Year>' pattern.
-    month_year_labels = [
-        t for t in tick_labels if re.match(r"[A-Z][a-z]{2} 20\d{2}$", t)
-    ]
-    assert month_year_labels, (
-        f"expected at least one 'MMM YYYY' label; got {tick_labels}"
-    )
+    month_year_labels = [t for t in tick_labels if re.match(r"[A-Z][a-z]{2} 20\d{2}$", t)]
+    assert month_year_labels, f"expected at least one 'MMM YYYY' label; got {tick_labels}"
     # Specifically confirm 'Jan 2020' (the first tick in the domain) is present.
     assert "Jan 2020" in month_year_labels, (
         f"expected 'Jan 2020' among month-year labels; got {month_year_labels}"
@@ -278,10 +267,7 @@ def test_d3_temporal_format_month_year(monthly_date_df: pl.DataFrame) -> None:
 def test_d3_tick_count_limits_temporal_ticks(long_monthly_date_df: pl.DataFrame) -> None:
     """Axis(tick_count=4) on a 30-month :T axis produces far fewer labels than default."""
     svg_default = (
-        fm.Chart(long_monthly_date_df)
-        .mark_line()
-        .encode(x="date:T", y="val:Q")
-        .show_svg()
+        fm.Chart(long_monthly_date_df).mark_line().encode(x="date:T", y="val:Q").show_svg()
     )
     svg_limited = (
         fm.Chart(long_monthly_date_df)
@@ -292,6 +278,7 @@ def test_d3_tick_count_limits_temporal_ticks(long_monthly_date_df: pl.DataFrame)
         )
         .show_svg()
     )
+
     # Count date-like tick labels: text elements that contain a 4-digit year.
     def _date_tick_count(svg: str) -> int:
         return sum(1 for t in _tick_texts(svg) if re.search(r"20\d{2}", t))
@@ -312,15 +299,176 @@ def test_d3_default_quantitative_axis_still_renders(
     two_cat_numeric_df: pl.DataFrame,
 ) -> None:
     """A quantitative axis with no label_format renders plain numeric labels (default path)."""
-    svg = (
-        fm.Chart(two_cat_numeric_df)
-        .mark_bar()
-        .encode(x="cat:N", y="val:Q")
-        .show_svg()
-    )
+    svg = fm.Chart(two_cat_numeric_df).mark_bar().encode(x="cat:N", y="val:Q").show_svg()
     tick_labels = _tick_texts(svg)
     # Expect plain integer-style labels (no commas, no percent, no SI suffix).
     numeric_labels = [t for t in tick_labels if re.match(r"^\d+$", t)]
     assert numeric_labels, (
         f"default quantitative axis should produce plain numeric labels; got {tick_labels}"
     )
+
+
+# ---------------------------------------------------------------------------
+# D2 — order-independent layer merge
+# ---------------------------------------------------------------------------
+
+
+def _polyline_strokes(svg: str) -> set[str]:
+    """Extract distinct hex stroke colors from <polyline> elements."""
+    return set(re.findall(r'<polyline[^>]*stroke="(#[0-9a-fA-F]{6})"', svg))
+
+
+@pytest.fixture
+def layer_order_dfs() -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Two disjoint DataFrames: background (gray group) and highlight (colored group)."""
+    import numpy as np
+
+    rng = np.random.default_rng(42)
+    rows = []
+    for country in ["China", "Nigeria"]:
+        for year in range(2000, 2010):
+            rows.append({"year": year, "country": country, "value": float(rng.uniform(10, 50))})
+    hl_df = pl.DataFrame(rows)
+
+    rows2 = []
+    for country in ["USA", "Japan"]:
+        for year in range(2000, 2010):
+            rows2.append({"year": year, "country": country, "value": float(rng.uniform(10, 50))})
+    bg_df = pl.DataFrame(rows2)
+
+    return bg_df, hl_df
+
+
+def test_d2_color_scale_order_independent(
+    layer_order_dfs: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """(base + highlight) and (highlight + base) must resolve the same color set.
+
+    The highlight layer uses scheme='set1' with 2 categories (China, Nigeria).
+    Without the fix, (base + highlight) collapses both categories to a single
+    theme color because the chart-level color encoding is None (inherited from
+    base, which has no color encoding).
+
+    After the fix both orderings must contain all accent colors from the
+    highlight layer.
+    """
+    bg_df, hl_df = layer_order_dfs
+
+    base = (
+        fm.Chart(bg_df)
+        .mark_line(stroke="#cccccc", stroke_width=1)
+        .encode(x="year:Q", y="value:Q", detail="country:N")
+    )
+    highlight = (
+        fm.Chart(hl_df)
+        .mark_line(stroke_width=2.5)
+        .encode(
+            x="year:Q",
+            y="value:Q",
+            color=fm.Color("country:N", scheme="set1"),
+        )
+    )
+
+    # Establish the ground-truth color set from highlight rendered alone.
+    standalone_colors = _polyline_strokes(highlight.show_svg())
+    assert len(standalone_colors) == 2, (
+        f"highlight standalone should produce exactly 2 distinct colors; got {standalone_colors}"
+    )
+
+    svg_bh = (base + highlight).show_svg()
+    svg_hb = (highlight + base).show_svg()
+
+    colors_bh = _polyline_strokes(svg_bh)
+    colors_hb = _polyline_strokes(svg_hb)
+
+    # Both orderings must contain every accent color from the highlight layer.
+    missing_in_bh = standalone_colors - colors_bh
+    assert not missing_in_bh, (
+        f"base + highlight is missing highlight colors {missing_in_bh}; "
+        f"got {colors_bh} (standalone: {standalone_colors})"
+    )
+    missing_in_hb = standalone_colors - colors_hb
+    assert not missing_in_hb, (
+        f"highlight + base is missing highlight colors {missing_in_hb}; "
+        f"got {colors_hb} (standalone: {standalone_colors})"
+    )
+
+
+def test_d2_color_scale_not_collapsed_to_single_theme_color(
+    layer_order_dfs: tuple[pl.DataFrame, pl.DataFrame],
+) -> None:
+    """When base has no color encoding, (base + highlight) must not collapse
+    2 highlight categories to a single theme color.
+
+    Regression guard: before the fix, both highlight countries rendered
+    identically with the theme default blue (#2563eb) instead of two distinct
+    set1 colors.
+    """
+    bg_df, hl_df = layer_order_dfs
+
+    base = (
+        fm.Chart(bg_df)
+        .mark_line(stroke="#cccccc", stroke_width=1)
+        .encode(x="year:Q", y="value:Q", detail="country:N")
+    )
+    highlight = (
+        fm.Chart(hl_df)
+        .mark_line(stroke_width=2.5)
+        .encode(
+            x="year:Q",
+            y="value:Q",
+            color=fm.Color("country:N", scheme="set1"),
+        )
+    )
+
+    svg = (base + highlight).show_svg()
+    colors = _polyline_strokes(svg)
+
+    # There must be at least 2 non-gray colors — one per highlight category.
+    non_gray = {c for c in colors if c.lower() != "#cccccc"}
+    assert len(non_gray) >= 2, (
+        f"base + highlight must have at least 2 non-gray colors (one per highlight category); "
+        f"got colors={colors!r}"
+    )
+
+
+def test_d2_annotation_does_not_supply_axis_titles() -> None:
+    """Annotation layers used as LHS must not rename axes to internal field names.
+
+    annotate_rect encodes x='_x1', y='_y1' etc. internally. When used as the
+    base (LHS) of a layer, the data layer's axis titles (x, y) must survive —
+    not be replaced by _x1/_y1 from the annotation layer.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    data = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    rect = fm.annotate_rect(x1=1.5, x2=2.5, y1=3.5, y2=6.5)
+
+    for label, chart in [
+        ("data + rect", data + rect),
+        ("rect + data", rect + data),
+    ]:
+        svg = chart.show_svg()
+        assert "_x1" not in svg, f"{label}: internal annotation field '_x1' must not appear in SVG"
+        assert "_y1" not in svg, f"{label}: internal annotation field '_y1' must not appear in SVG"
+
+    tick_labels_dr = _tick_texts((data + rect).show_svg())
+    tick_labels_rd = _tick_texts((rect + data).show_svg())
+    # Both orderings must produce the same axis-label set.
+    assert set(tick_labels_dr) == set(tick_labels_rd), (
+        f"axis labels must be order-independent: "
+        f"data+rect={tick_labels_dr!r} vs rect+data={tick_labels_rd!r}"
+    )
+
+
+def test_d2_annotation_hline_does_not_pollute_axes() -> None:
+    """annotate_hline as base (LHS) must not supply axis titles from its internal _y field."""
+    df = pl.DataFrame({"t": [1.0, 2.0, 3.0], "r": [0.5, 1.5, 2.5]})
+    data = fm.Chart(df).mark_line().encode(x="t:Q", y="r:Q")
+    hline = fm.annotate_hline(y=1.0, stroke="red")
+
+    for label, chart in [
+        ("data + hline", data + hline),
+        ("hline + data", hline + data),
+    ]:
+        svg = chart.show_svg()
+        assert "_y" not in svg, f"{label}: internal annotation field '_y' must not appear in SVG"

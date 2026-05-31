@@ -174,7 +174,12 @@ class _NamedTransform:
         return bool(self.transform == inner)
 
 
-from ferrum.composition import _expand_layers, _merge_top_transforms, _warn_on_layer_conflicts
+from ferrum.composition import (
+    _expand_layers,
+    _merge_top_transforms,
+    _promote_layer_color,
+    _warn_on_layer_conflicts,
+)
 
 
 def _rename_encoding_fields(encoding: dict, renames: dict[str, str]) -> dict:
@@ -1534,6 +1539,12 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             _merge_top_transforms(new, rhs_top_xforms)
 
         new._layers = lhs_layers + rhs_layers
+        # D2: when the LHS has no color encoding, promote the first layer's
+        # color encoding to chart level so the Rust renderer can build the
+        # correct color scale.  Without this, build_color_scale sees
+        # spec.encoding.color = None and returns no color scale, causing every
+        # layer with a color encoding to fall back to the theme default color.
+        _promote_layer_color(new)
         # Merge RHS selections and conditionals into the layered chart
         # so interactive features from all layers are preserved.
         if rhs._selections:

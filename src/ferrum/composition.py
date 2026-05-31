@@ -2169,3 +2169,39 @@ def _warn_on_layer_conflicts(lhs, rhs) -> None:
             UserWarning,
             stacklevel=3,
         )
+
+
+def _promote_layer_color(new) -> None:
+    """Promote the first layer's ``ChannelBase`` color encoding to chart level when absent.
+
+    When the LHS of ``Chart + Chart`` has no color encoding, the merged chart
+    inherits ``_encoding["color"] = None`` from the LHS clone.  The Rust
+    renderer builds the chart-level color scale from ``spec.encoding.color``
+    only, so a ``None`` chart-level color means no color scale is created —
+    every layer that carries a layer-level color encoding then falls back to
+    the theme default color, collapsing all categories to one.
+
+    This function scans the merged layers in order and promotes the first
+    layer that carries a ``ChannelBase`` color encoding (not a plain string
+    shorthand) to the chart level, so ``build_color_scale`` can see the
+    scheme and build the correct domain.
+
+    Plain string-valued color encodings (e.g. ``"class"`` from composite-mark
+    desugars like ``mark_roc``) are intentionally skipped — they are
+    layer-internal shorthands and must not be promoted to chart level because
+    ``_build_encoding_specs`` expects ``ChannelBase`` objects there.
+
+    This is a no-op when:
+    - the chart-level color encoding is already set (first encoding-bearing
+      layer already won via the LHS clone), or
+    - no layer carries a ``ChannelBase`` color encoding.
+    """
+    from ferrum.encoding.base import ChannelBase
+
+    if new._encoding.get("color") is not None:
+        return
+    for layer in new._layers or []:
+        color_ch = layer.encoding.get("color")
+        if isinstance(color_ch, ChannelBase):
+            new._encoding["color"] = color_ch
+            return
