@@ -20,9 +20,16 @@ pub(crate) struct LocatedColumn<'a> {
 
 /// Pick the batch whose schema contains `field` and return both the batch
 /// and the resolved column. Prefer `primary_batch` for back-compat
-/// single-batch behavior; fall back to any named output (iteration order
-/// is HashMap-undefined but only matters when the field appears in
-/// multiple named outputs and not in primary, which is unusual).
+/// single-batch behavior; fall back to named outputs.
+///
+/// The named-output fallback iterates keys in **sorted order** rather than
+/// raw `HashMap` order. When the field appears in several named outputs
+/// (e.g. boxen publishes `group` in every `lv_depth_K` slice plus
+/// `lv_outliers`), the categorical domain is built from `located.batch` via
+/// first-appearance order, so the *choice* of batch must be deterministic.
+/// `HashMap` iteration order is unspecified and varies per process, which
+/// previously made boxen renders non-deterministic (byte-identical-golden
+/// violation). Sorting the keys pins the selection.
 pub(in crate::render) fn locate_field<'a>(
     field: &str,
     primary_batch: &'a RecordBatch,
@@ -31,7 +38,10 @@ pub(in crate::render) fn locate_field<'a>(
     if let Some(c) = primary_batch.column_by_name(field) {
         return Some(LocatedColumn { batch: primary_batch, col: c.as_ref() });
     }
-    for batch in transform_outputs.values() {
+    let mut keys: Vec<&String> = transform_outputs.keys().collect();
+    keys.sort_unstable();
+    for key in keys {
+        let batch = &transform_outputs[key];
         if let Some(c) = batch.column_by_name(field) {
             return Some(LocatedColumn { batch, col: c.as_ref() });
         }
@@ -463,4 +473,60 @@ pub(in crate::render) fn numeric_domain_union(
 
 fn column_min_max_f64(col: &dyn Array) -> Result<(f64, f64), String> {
     crate::render::arrow_cast::min_max_f64(col)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    fn group_batch(groups: Vec<&str>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("group", DataType::Utf8, true)]));
+        let arr: Vec<Option<&str>> = groups.into_iter().map(Some).collect();
+        RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(arr))]).unwrap()
+    }
+
+    /// Regression guard for the boxen render non-determinism bug: when a field
+    /// (e.g. `group`) is absent from the primary batch but present in several
+    /// named outputs whose rows differ in order, `locate_field` must pick the
+    /// *same* batch every time. Raw `HashMap` iteration order is unspecified and
+    /// varied per process, producing distinct categorical domains (hence
+    /// distinct SVGs) across repeated renders of the same chart.
+    #[test]
+    fn locate_field_named_output_fallback_is_deterministic() {
+        // Mimic boxen's fan-out: several named outputs each carry `group`, but
+        // in different row orders. Sorted-key selection lands on "lv".
+        let primary = RecordBatch::new_empty(Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Float64,
+            true,
+        )])));
+
+        // Build the map fresh on every iteration so HashMap seeding differs, and
+        // assert the located batch's first row is stable regardless.
+        let mut first_seen: Option<String> = None;
+        for _ in 0..64 {
+            let mut outputs: HashMap<String, RecordBatch> = HashMap::new();
+            outputs.insert("lv".to_string(), group_batch(vec!["A", "B", "Z"]));
+            outputs.insert("lv_depth_1".to_string(), group_batch(vec!["Z", "A", "B"]));
+            outputs.insert("lv_depth_2".to_string(), group_batch(vec!["B", "Z", "A"]));
+            outputs.insert("lv_outliers".to_string(), group_batch(vec!["Z", "B", "A"]));
+
+            let located = locate_field("group", &primary, &outputs)
+                .expect("group present in named outputs");
+            let col = located.col.as_any().downcast_ref::<StringArray>().unwrap();
+            let first = col.value(0).to_string();
+            match &first_seen {
+                None => first_seen = Some(first),
+                Some(prev) => assert_eq!(
+                    prev, &first,
+                    "locate_field must select the same named output across runs"
+                ),
+            }
+        }
+        // Sorted keys: "lv" < "lv_depth_1" < … so the "lv" batch (A, B, Z) wins.
+        assert_eq!(first_seen.as_deref(), Some("A"));
+    }
 }
