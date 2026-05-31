@@ -140,6 +140,8 @@ area_opacity, opacity : optional
         Legend layout.
     padding, axis_title_padding, column_padding, row_padding : optional
         Spacing in pixels.
+    reference_line_color, reference_line_dash : optional
+        Color and dash pattern for reference / annotation guide lines.
     strip_background_color : optional
         Facet strip-title background color.
     strip_text_size : float, optional

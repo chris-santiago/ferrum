@@ -67,10 +67,52 @@ class ConfigureMixin:
             Which axes this config applies to.
         label_angle : float, optional
             Tick label rotation in degrees.
+        label_font_size : float, optional
+            Tick label font size in pixels.
+        label_color : str, optional
+            Tick label color.
         label_format : str, optional
             Named format preset (e.g. ``"currency"``, ``"percent"``).
+        label_format_raw : str, optional
+            Raw d3-format string (e.g. ``".2f"``, ``"~s"``); overrides
+            ``label_format`` when both are given.
+        label_overlap : str, optional
+            Overlap-handling strategy for crowded tick labels
+            (e.g. ``"parity"``, ``"greedy"``).
+        tick_count : int, optional
+            Target number of ticks on the axis.
+        tick_size : float, optional
+            Tick mark length in pixels.
+        tick_values : list, optional
+            Explicit tick positions, overriding automatic tick selection.
+        title_font_size : float, optional
+            Axis title font size in pixels.
+        title_color : str, optional
+            Axis title color.
+        title_padding : float, optional
+            Gap between the axis title and its labels in pixels.
+        label_padding : float, optional
+            Gap between tick labels and the axis line in pixels.
+        domain : bool, optional
+            Whether to draw the axis domain (baseline) line.
+        domain_color : str, optional
+            Domain line color.
+        domain_width : float, optional
+            Domain line width in pixels.
+        grid : bool, optional
+            Whether to draw grid lines for this axis.
+        grid_color : str, optional
+            Grid line color.
+        grid_dash : list[float], optional
+            Grid line dash pattern (on/off pixel lengths).
+        grid_width : float, optional
+            Grid line width in pixels.
         domain_min, domain_max : float, optional
             Explicit scale domain bounds.
+        nice : bool, optional
+            Extend the domain to nice round numbers.
+        zero : bool, optional
+            Include zero in the scale domain.
 
         Returns
         -------
@@ -136,6 +178,20 @@ class ConfigureMixin:
             Layout direction: ``"vertical"`` or ``"horizontal"``.
         columns : int, optional
             Number of columns for multi-column layout.
+        title_font_size : float, optional
+            Legend title font size in pixels.
+        label_font_size : float, optional
+            Legend entry label font size in pixels.
+        symbol_size : float, optional
+            Legend symbol size in pixels.
+        symbol_type : str, optional
+            Legend symbol shape (e.g. ``"circle"``, ``"square"``).
+        gradient_length : float, optional
+            Length of the continuous-legend gradient bar in pixels.
+        offset : float, optional
+            Legend offset from the plot edge in pixels.
+        padding : float, optional
+            Padding inside the legend box in pixels.
 
         Returns
         -------
@@ -177,9 +233,19 @@ class ConfigureMixin:
         Parameters
         ----------
         font_size : float, optional
-            Title font size.
+            Title font size in pixels.
+        font_weight : str, optional
+            Title font weight (e.g. ``"normal"``, ``"bold"``).
         anchor : str, optional
             Title alignment: ``"start"``, ``"middle"``, or ``"end"``.
+        color : str, optional
+            Title text color.
+        offset : float, optional
+            Title offset from the plot in pixels.
+        subtitle_font_size : float, optional
+            Subtitle font size in pixels.
+        subtitle_color : str, optional
+            Subtitle text color.
 
         Returns
         -------
@@ -221,6 +287,12 @@ class ConfigureMixin:
             Enable/disable grid on each axis.
         color : str, optional
             Grid line color.
+        width : float, optional
+            Grid line width in pixels.
+        dash : list[float], optional
+            Grid line dash pattern (on/off pixel lengths).
+        opacity : float, optional
+            Grid line opacity (0--1).
         band_colors : list[str], optional
             Alternating band fill colors (``None`` to disable).
 
@@ -295,6 +367,10 @@ class ConfigureMixin:
             Sequential color scheme name.
         diverging_scheme : str, optional
             Diverging color scheme name.
+        domain : list, optional
+            Explicit color-scale domain values.
+        range : list[str], optional
+            Explicit color range, overriding the scheme.
 
         Returns
         -------

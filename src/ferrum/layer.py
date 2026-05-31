@@ -19,6 +19,9 @@ class Layer:
     mark : str or MarkSpec, optional
         Mark type string (e.g. ``"point"``, ``"line"``) or a ``MarkSpec``
         object.
+    name : str, optional
+        Identifier for this layer, used by composite-mark expansion and
+        layer-targeted mark overrides. ``None`` for unnamed layers.
     encoding : dict, optional
         Mapping of channel names to ``ChannelBase`` objects.  Defaults to an
         empty dict when omitted.

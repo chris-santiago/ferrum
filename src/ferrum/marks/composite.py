@@ -77,6 +77,9 @@ def desugar_boxplot(
         ``groupby`` list for the transforms).
     horizontal : bool, default False
         If ``True``, flip axes so that categories are on the y-axis.
+    x_sort, y_sort : optional
+        Sort order applied to the categorical positional axis, injected by
+        the composite-mark expansion from ``sort=`` on the encoding.
 
     Returns
     -------
@@ -239,6 +242,9 @@ def desugar_errorbar(
     ticks : bool, default True
         Whether to add endpoint tick marks at the top and bottom of each
         error bar.
+    x_sort : optional
+        Sort order applied to the categorical positional axis, injected by
+        the composite-mark expansion from ``sort=`` on the encoding.
 
     Returns
     -------
