@@ -2740,6 +2740,28 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             # Schwabish SB1: Title.to_spec_dict() emits the JSON shape that
             # Rust's ChartSpec accepts (subtitle, anchor, offset, font sizes).
             kw["title"] = resolved._title.to_spec_dict()
+        # --- Per-channel axis=None suppression (D8) ---
+        # X("a:Q", axis=None) / Y("b:Q", axis=None) routes into the same
+        # axis_x / axis_y suppression machinery as Chart.axis(x=False).
+        # Precedence: Chart.axis() (resolved._axis_x/_axis_y, set below) wins
+        # over per-channel axis=None when both are present.
+        _ch_x = enc.get("x")
+        if (
+            isinstance(_ch_x, ChannelBase)
+            and "axis" in _ch_x._kwargs
+            and _ch_x._kwargs["axis"] is None
+            and resolved._axis_x is None
+        ):
+            kw["axis_x"] = False
+        _ch_y = enc.get("y")
+        if (
+            isinstance(_ch_y, ChannelBase)
+            and "axis" in _ch_y._kwargs
+            and _ch_y._kwargs["axis"] is None
+            and resolved._axis_y is None
+        ):
+            kw["axis_y"] = False
+        # Chart-level axis() always wins — overwrite whatever per-channel set.
         if resolved._axis_x is not None:
             kw["axis_x"] = resolved._axis_x
         if resolved._axis_y is not None:

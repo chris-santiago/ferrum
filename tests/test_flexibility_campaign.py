@@ -1060,3 +1060,140 @@ def test_d7_invalid_iso_string_raises_value_error() -> None:
     """An unparseable string raises ValueError with a clear message."""
     with pytest.raises(ValueError, match="Cannot parse annotation coordinate"):
         fm.annotate_vline(x="not-a-date")
+
+
+# ---------------------------------------------------------------------------
+# D8 — X("a:Q", axis=None) hides the x-axis; Y("b:Q", axis=None) hides y-axis
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _d8_df() -> pl.DataFrame:
+    return pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [10.0, 20.0, 30.0]})
+
+
+def _d8_tick_texts(svg: str) -> list[str]:
+    """Extract inner text from all SVG <text> elements."""
+    return re.findall(r"<text[^>]*>([^<]+)</text>", svg)
+
+
+def test_d8_x_axis_none_hides_x_axis(_d8_df: pl.DataFrame) -> None:
+    """X('a:Q', axis=None) must suppress x-axis tick labels and field title."""
+    svg_with = fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q")).show_svg()
+    svg_without = (
+        fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q", axis=None), y=fm.Y("b:Q")).show_svg()
+    )
+    texts_with = _d8_tick_texts(svg_with)
+    texts_without = _d8_tick_texts(svg_without)
+
+    # The x field title "a" must appear in the default chart.
+    assert "a" in texts_with, f"expected field title 'a' in default chart texts; got {texts_with}"
+    # With axis=None on x, the field title "a" must be absent.
+    assert "a" not in texts_without, (
+        f"field title 'a' must be suppressed by X(axis=None); got {texts_without}"
+    )
+    # Numeric x-axis tick labels (1, 2, 3) must be absent.
+    x_ticks_present = [t for t in texts_without if t in ("1", "2", "3")]
+    assert not x_ticks_present, (
+        f"x-axis tick labels must be suppressed by X(axis=None); found {x_ticks_present}"
+    )
+    # The y field title "b" must still appear.
+    assert "b" in texts_without, (
+        f"y-axis field title 'b' must remain when only x is suppressed; got {texts_without}"
+    )
+
+
+def test_d8_y_axis_none_hides_y_axis(_d8_df: pl.DataFrame) -> None:
+    """Y('b:Q', axis=None) must suppress y-axis tick labels and field title."""
+    svg_with = fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q")).show_svg()
+    svg_without = (
+        fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q", axis=None)).show_svg()
+    )
+    texts_with = _d8_tick_texts(svg_with)
+    texts_without = _d8_tick_texts(svg_without)
+
+    # The y field title "b" must appear in the default chart.
+    assert "b" in texts_with, f"expected field title 'b' in default chart texts; got {texts_with}"
+    # With axis=None on y, the field title "b" must be absent.
+    assert "b" not in texts_without, (
+        f"field title 'b' must be suppressed by Y(axis=None); got {texts_without}"
+    )
+    # Numeric y-axis tick labels (10, 20, 30) must be absent.
+    y_ticks_present = [t for t in texts_without if t in ("10", "20", "30")]
+    assert not y_ticks_present, (
+        f"y-axis tick labels must be suppressed by Y(axis=None); found {y_ticks_present}"
+    )
+    # The x field title "a" must still appear.
+    assert "a" in texts_without, (
+        f"x-axis field title 'a' must remain when only y is suppressed; got {texts_without}"
+    )
+
+
+def test_d8_both_axes_none_hides_both(_d8_df: pl.DataFrame) -> None:
+    """X(axis=None) + Y(axis=None) must hide both axes."""
+    svg = (
+        fm.Chart(_d8_df)
+        .mark_point()
+        .encode(x=fm.X("a:Q", axis=None), y=fm.Y("b:Q", axis=None))
+        .show_svg()
+    )
+    texts = _d8_tick_texts(svg)
+    assert "a" not in texts, f"field title 'a' must be absent; got {texts}"
+    assert "b" not in texts, f"field title 'b' must be absent; got {texts}"
+
+
+def test_d8_layered_chart_axis_none_hides_axis(_d8_df: pl.DataFrame) -> None:
+    """axis=None on the data layer's channel suppresses the axis in a layered chart."""
+    svg = fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q", axis=None), y=fm.Y("b:Q")).show_svg()
+    texts = _d8_tick_texts(svg)
+    assert "a" not in texts, (
+        f"x field title 'a' must be absent under axis=None in layered context; got {texts}"
+    )
+    assert "b" in texts, (
+        f"y field title 'b' must still appear when only x axis is suppressed; got {texts}"
+    )
+
+
+def test_d8_real_axis_object_still_renders(_d8_df: pl.DataFrame) -> None:
+    """Axis(title='Speed') on X must render the configured title, not suppress the axis."""
+    svg = (
+        fm.Chart(_d8_df)
+        .mark_point()
+        .encode(x=fm.X("a:Q", axis=fm.Axis(title="Speed")), y=fm.Y("b:Q"))
+        .show_svg()
+    )
+    texts = _d8_tick_texts(svg)
+    assert "Speed" in texts, f"Axis(title='Speed') must render title in SVG; got {texts}"
+
+
+def test_d8_no_axis_kwarg_renders_normally(_d8_df: pl.DataFrame) -> None:
+    """Default (no axis kwarg) must still render both axes."""
+    svg = fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q")).show_svg()
+    texts = _d8_tick_texts(svg)
+    assert "a" in texts, f"x field title 'a' must appear by default; got {texts}"
+    assert "b" in texts, f"y field title 'b' must appear by default; got {texts}"
+
+
+def test_d8_chart_axis_method_still_works(_d8_df: pl.DataFrame) -> None:
+    """Chart.axis(x=False) must still suppress the x-axis regardless of encoding."""
+    svg = (
+        fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q")).axis(x=False).show_svg()
+    )
+    texts = _d8_tick_texts(svg)
+    assert "a" not in texts, f"Chart.axis(x=False) must suppress x-axis; got {texts}"
+    assert "b" in texts, f"y-axis must still render after Chart.axis(x=False); got {texts}"
+
+
+def test_d8_channel_axis_none_does_not_override_chart_axis_true(_d8_df: pl.DataFrame) -> None:
+    """Chart.axis(x=True) with X(axis=None): spec-level show wins, axis is visible."""
+    # Per spec §3.7: Chart.axis() is chart-level and takes precedence.
+    # When Chart.axis(x=True) is explicit, it overrides the per-channel None.
+    svg = (
+        fm.Chart(_d8_df)
+        .mark_point()
+        .encode(x=fm.X("a:Q", axis=None), y=fm.Y("b:Q"))
+        .axis(x=True)
+        .show_svg()
+    )
+    texts = _d8_tick_texts(svg)
+    assert "a" in texts, f"Chart.axis(x=True) must override per-channel axis=None; got {texts}"
