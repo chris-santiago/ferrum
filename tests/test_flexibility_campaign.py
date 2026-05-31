@@ -2425,3 +2425,195 @@ def test_rf2_boxen_sort_descending_pyarrow() -> None:
     assert resolved_sort == ["Z", "B", "A"], (
         f"boxen sort='-y' on PyArrow input must resolve to ['Z','B','A']; got {resolved_sort!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# R7 — promoted color channel is an independent copy, not an alias
+# ---------------------------------------------------------------------------
+
+
+def test_r7_promoted_color_channel_is_independent_copy() -> None:
+    """_promote_layer_color must assign a copy, not an alias of the layer's channel.
+
+    When (base + highlight) promotes the highlight layer's color encoding to
+    chart level, the chart-level channel and the layer's channel must be
+    distinct objects (``is not``).  Aliasing means an in-place mutation of
+    one would silently corrupt the other.
+    """
+    import numpy as np
+    from ferrum.encoding.base import ChannelBase
+
+    rng = np.random.default_rng(0)
+    rows_hl = [
+        {"year": y, "country": c, "value": float(rng.uniform(10, 50))}
+        for c in ["China", "Nigeria"]
+        for y in range(2000, 2005)
+    ]
+    rows_bg = [
+        {"year": y, "country": c, "value": float(rng.uniform(10, 50))}
+        for c in ["USA", "Japan"]
+        for y in range(2000, 2005)
+    ]
+    hl_df = pl.DataFrame(rows_hl)
+    bg_df = pl.DataFrame(rows_bg)
+
+    base = (
+        fm.Chart(bg_df)
+        .mark_line(stroke="#cccccc")
+        .encode(x="year:Q", y="value:Q", detail="country:N")
+    )
+    highlight = (
+        fm.Chart(hl_df)
+        .mark_line()
+        .encode(x="year:Q", y="value:Q", color=fm.Color("country:N", scheme="set1"))
+    )
+
+    merged = base + highlight
+
+    # Chart-level color must exist and be a ChannelBase (promotion happened).
+    chart_color = merged._encoding.get("color")
+    assert chart_color is not None, "chart-level color must be promoted from the highlight layer"
+    assert isinstance(chart_color, ChannelBase), (
+        f"promoted color must be a ChannelBase; got {type(chart_color).__name__}"
+    )
+
+    # Find the layer that carries the color encoding.
+    layer_color = None
+    for layer in merged._layers or []:
+        ch = layer.encoding.get("color")
+        if isinstance(ch, ChannelBase):
+            layer_color = ch
+            break
+    assert layer_color is not None, "highlight layer must still carry its color encoding"
+
+    # The two must be equal in value but NOT the same object.
+    assert chart_color == layer_color, (
+        "promoted chart-level color must equal the layer's color in value"
+    )
+    assert chart_color is not layer_color, (
+        "promoted chart-level color must be an independent copy, not the same object as the layer's color"
+    )
+
+
+# ---------------------------------------------------------------------------
+# R6 — inferred-type dedup: _apply_inferred_type helper covers both code paths
+# ---------------------------------------------------------------------------
+
+
+def test_r6_single_mark_x_temporal_inferred_via_build_encoding_specs(
+    _t2b_monthly_df: pl.DataFrame,
+) -> None:
+    """Single-mark path: unannotated Date x-column gets type=temporal via _build_encoding_specs.
+
+    This exercises the code path that goes through Chart.to_spec() ->
+    _build_encoding_specs() -> _apply_inferred_type().  The spec must emit
+    type='temporal' on the x encoding without an explicit ':T' annotation.
+    """
+    import json
+
+    spec = json.loads(fm.Chart(_t2b_monthly_df).mark_line().encode(x="date", y="val:Q").to_json())
+    x_enc = spec.get("encoding", {}).get("x", {})
+    assert x_enc.get("type") == "temporal", (
+        f"single-mark path: unannotated Date x must produce type='temporal'; got {x_enc!r}"
+    )
+
+
+def test_r6_layered_mark_x_temporal_inferred_via_build_layers_list(
+    _t2b_monthly_df: pl.DataFrame,
+) -> None:
+    """Layered path: unannotated Date x-column gets type=temporal via _build_layers_list.
+
+    This exercises the code path that goes through Chart.to_spec() ->
+    _build_layers_list() -> _apply_inferred_type().  The SVG must render
+    date-formatted axis ticks (not raw epoch integers) even when the temporal
+    type is inferred rather than explicit, and the chart is layered (e.g.
+    a scatter + smoothed line overlay).
+    """
+    chart = fm.Chart(_t2b_monthly_df).mark_point().encode(x="date", y="val:Q") + fm.Chart(
+        _t2b_monthly_df
+    ).mark_line().encode(x="date", y="val:Q")
+    svg = chart.show_svg()
+    texts = _tick_texts(svg)
+    assert _is_date_formatted(texts), (
+        f"layered path: unannotated Date x must produce date-formatted ticks; got {texts}"
+    )
+    assert not _is_epoch_integer(texts), (
+        f"layered path: unannotated Date x must not produce raw epoch integers; got {texts}"
+    )
+
+
+def test_r6_inferred_type_identical_across_both_paths(
+    _t2b_monthly_df: pl.DataFrame,
+) -> None:
+    """Both code paths must produce the same type annotation.
+
+    The single-mark path (via _build_encoding_specs) and the layered path
+    (via _build_layers_list) must agree: a polars Date column without an
+    explicit ':T' annotation produces type='temporal' in both cases.
+    This is the characterization test for the R6 dedup: the helper
+    _apply_inferred_type is the single source of truth.
+    """
+    import json
+
+    # Single-mark spec: type goes through _build_encoding_specs.
+    single_spec = json.loads(
+        fm.Chart(_t2b_monthly_df).mark_line().encode(x="date", y="val:Q").to_json()
+    )
+    single_type = single_spec.get("encoding", {}).get("x", {}).get("type")
+
+    # Force layered mode so the x encoding is processed by _build_layers_list.
+    layered = fm.Chart(_t2b_monthly_df).mark_point().encode(x="date", y="val:Q") + fm.Chart(
+        _t2b_monthly_df
+    ).mark_line().encode(x="date", y="val:Q")
+    layered_svg = layered.show_svg()
+    layered_texts = _tick_texts(layered_svg)
+
+    assert single_type == "temporal", (
+        f"single-mark path must produce type='temporal'; got {single_type!r}"
+    )
+    assert _is_date_formatted(layered_texts), (
+        f"layered path must also produce date-formatted ticks; got {layered_texts}"
+    )
+
+
+def test_r7_d2_behavior_still_holds() -> None:
+    """The color-promotion copy must not break the D2 multi-color rendering behavior.
+
+    Both highlight categories must appear as distinct colors in (base + highlight).
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(1)
+    rows_hl = [
+        {"year": y, "country": c, "value": float(rng.uniform(10, 50))}
+        for c in ["China", "Nigeria"]
+        for y in range(2000, 2005)
+    ]
+    rows_bg = [
+        {"year": y, "country": c, "value": float(rng.uniform(10, 50))}
+        for c in ["USA", "Japan"]
+        for y in range(2000, 2005)
+    ]
+    hl_df = pl.DataFrame(rows_hl)
+    bg_df = pl.DataFrame(rows_bg)
+
+    base = (
+        fm.Chart(bg_df)
+        .mark_line(stroke="#cccccc")
+        .encode(x="year:Q", y="value:Q", detail="country:N")
+    )
+    highlight = (
+        fm.Chart(hl_df)
+        .mark_line()
+        .encode(x="year:Q", y="value:Q", color=fm.Color("country:N", scheme="set1"))
+    )
+
+    standalone_colors = _polyline_strokes(highlight.show_svg())
+    assert len(standalone_colors) == 2, (
+        f"highlight standalone should have 2 distinct colors; got {standalone_colors}"
+    )
+
+    svg = (base + highlight).show_svg()
+    colors = _polyline_strokes(svg)
+    missing = standalone_colors - colors
+    assert not missing, f"base + highlight is missing highlight colors {missing}; got {colors}"

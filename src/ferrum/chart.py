@@ -427,6 +427,25 @@ def _infer_type_from_data(field: str | None, data: Any) -> str | None:
     return None
 
 
+def _apply_inferred_type(d: dict, field: str | None, data: Any) -> dict:
+    """Return *d* with ``"type_": "T"`` added when *field* is a temporal column.
+
+    Applies temporal type inference only when ``"type_"`` is absent from *d*
+    (i.e., the user did not supply an explicit type annotation).  When the
+    inferred type is ``None`` (non-temporal or missing column), *d* is returned
+    unchanged.
+
+    This is the single apply-site for the infer-and-write pattern shared by
+    ``_build_encoding_specs`` and ``_build_layers_list``.
+    """
+    if "type_" in d:
+        return d
+    inferred = _infer_type_from_data(field, data)
+    if inferred is not None:
+        return {**d, "type_": inferred}
+    return d
+
+
 class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _RenderMixin):
     """Top-level chart value class.
 
@@ -2270,10 +2289,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                         continue
                     # Auto-infer temporal type from column dtype when no explicit type
                     # annotation was given (same logic as _build_encoding_specs).
-                    if "type_" not in d:
-                        inferred = _infer_type_from_data(field, self._data)
-                        if inferred is not None:
-                            d = {**d, "type_": inferred}
+                    d = _apply_inferred_type(d, field, self._data)
                     # Build a JSON-safe dict matching EncodingSpec's JSON shape.
                     # Note: to_encoding_spec_dict() emits the data-type under
                     # "type_" (Python convention to avoid shadowing the builtin),
@@ -2645,10 +2661,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             # Auto-infer temporal type from column dtype when no explicit type
             # annotation was given.  Explicit ":T" / ":Q" / type_= / type= always
             # win; only the unannotated case is changed here.
-            if "type_" not in d:
-                inferred = _infer_type_from_data(d.get("field"), resolved._data)
-                if inferred is not None:
-                    d = {**d, "type_": inferred}
+            d = _apply_inferred_type(d, d.get("field"), resolved._data)
             # Bar y-axis zero-anchor (gallery defaults A3): inject
             # scale.zero=True on the y-encoding so bar charts always
             # start at zero unless the caller explicitly sets domain or

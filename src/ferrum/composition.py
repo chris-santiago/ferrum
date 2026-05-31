@@ -2203,5 +2203,5 @@ def _promote_layer_color(new) -> None:
     for layer in new._layers or []:
         color_ch = layer.encoding.get("color")
         if isinstance(color_ch, ChannelBase):
-            new._encoding["color"] = color_ch
+            new._encoding["color"] = copy.copy(color_ch)
             return
