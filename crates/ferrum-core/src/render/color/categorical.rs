@@ -11,7 +11,7 @@ impl std::fmt::Display for ColorParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "invalid color string: '{}' (expected a CSS color name or #rrggbb / #rrggbbaa)",
+            "invalid color string: '{}' (expected a CSS color name or #rgb / #rgba / #rrggbb / #rrggbbaa)",
             self.0
         )
     }
@@ -27,9 +27,10 @@ pub fn from_rgba(r: u8, g: u8, b: u8, a: u8) -> Color {
     Srgba::new(r, g, b, a)
 }
 
-/// Parse a CSS color string: either an `#rrggbb` / `#rrggbbaa` hex literal or
-/// any of the 148 standard CSS named colors. The input is trimmed of surrounding
-/// whitespace and matched case-insensitively.
+/// Parse a CSS color string: either a hex literal (`#rgb`, `#rgba`, `#rrggbb`,
+/// or `#rrggbbaa`) or any of the 148 standard CSS named colors. Three- and
+/// four-digit shorthand is expanded by doubling each digit (`#abc` → `#aabbcc`).
+/// The input is trimmed of surrounding whitespace and matched case-insensitively.
 pub fn parse_color(s: &str) -> Result<Color, ColorParseError> {
     let trimmed = s.trim();
     if trimmed.starts_with('#') {
@@ -188,7 +189,17 @@ pub fn from_hex_str(s: &str) -> Result<Color, ColorParseError> {
     if !s.starts_with('#') {
         return Err(ColorParseError(s.to_string()));
     }
-    let hex = &s[1..];
+    // Expand CSS shorthand: #rgb -> #rrggbb and #rgba -> #rrggbbaa
+    // (each digit doubled, e.g. #abc -> #aabbcc).
+    let short = &s[1..];
+    let expanded: String;
+    let hex: &str = match short.len() {
+        3 | 4 => {
+            expanded = short.chars().flat_map(|c| [c, c]).collect();
+            &expanded
+        }
+        _ => short,
+    };
     let parse = |i: usize| -> Result<u8, ColorParseError> {
         u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| ColorParseError(s.to_string()))
     };
@@ -311,6 +322,45 @@ mod tests {
     #[test]
     fn parse_named_color_fails() {
         assert!(from_hex_str("red").is_err());
+    }
+
+    #[test]
+    fn parse_three_digit_hex_shorthand() {
+        // #rgb expands to #rrggbb (each digit doubled).
+        assert_eq!(parse_color("#ccc").unwrap(), parse_color("#cccccc").unwrap());
+        assert_eq!(parse_color("#abc").unwrap(), parse_color("#aabbcc").unwrap());
+        let c = parse_color("#abc").unwrap();
+        assert_eq!(c.red, 0xaa);
+        assert_eq!(c.green, 0xbb);
+        assert_eq!(c.blue, 0xcc);
+        assert_eq!(c.alpha, 0xFF);
+    }
+
+    #[test]
+    fn parse_four_digit_hex_shorthand() {
+        // #rgba expands to #rrggbbaa (alpha included).
+        assert_eq!(parse_color("#abcd").unwrap(), parse_color("#aabbccdd").unwrap());
+        let c = parse_color("#abcd").unwrap();
+        assert_eq!(c.red, 0xaa);
+        assert_eq!(c.green, 0xbb);
+        assert_eq!(c.blue, 0xcc);
+        assert_eq!(c.alpha, 0xdd);
+    }
+
+    #[test]
+    fn parse_six_and_eight_digit_unchanged_by_shorthand() {
+        let c6 = parse_color("#1f77b4").unwrap();
+        assert_eq!((c6.red, c6.green, c6.blue, c6.alpha), (0x1f, 0x77, 0xb4, 0xFF));
+        let c8 = parse_color("#1f77b4cc").unwrap();
+        assert_eq!((c8.red, c8.green, c8.blue, c8.alpha), (0x1f, 0x77, 0xb4, 0xcc));
+    }
+
+    #[test]
+    fn parse_invalid_short_hex_errors() {
+        // #xy is not valid hex and not a valid length.
+        assert!(parse_color("#xy").is_err());
+        // 3 chars but non-hex digits must error.
+        assert!(parse_color("#xyz").is_err());
     }
 
     #[test]

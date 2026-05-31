@@ -362,9 +362,19 @@ pub(crate) fn apply_with_context(
 
     // 12. Pack normalized f64 values as 8-byte little-endian blobs.
     // The image drawer will apply the colormap and produce RGBA8 pixels.
+    //
+    // Cells are accumulated with `idx = gy*nxs + gx`, where `gy = 0` is the
+    // `y_min` (bottom) data row. PNG/raster row 0 is the TOP of the image, and
+    // the image node anchors that top row at `y_max`. We therefore emit rows in
+    // descending data-Y order (top row first) so the raster's Y orientation
+    // matches every other mark — high-Y data renders at the top, not the bottom.
     let mut pixel_data: Vec<u8> = Vec::with_capacity(n_cells * 8);
-    for i in 0..n_cells {
-        pixel_data.extend_from_slice(&normalized[i].to_le_bytes());
+    for screen_row in 0..nys {
+        let data_row = nys - 1 - screen_row;
+        for gx in 0..nxs {
+            let idx = data_row * nxs + gx;
+            pixel_data.extend_from_slice(&normalized[idx].to_le_bytes());
+        }
     }
 
     // 13. Build single-row output batch.
@@ -577,9 +587,19 @@ mod tests {
         .unwrap()
     }
 
+    /// Read a cell in DATA coordinates (`gy = 0` is the bottom, `y_min` row).
+    /// The packed buffer stores rows in SCREEN order (row 0 = top = `y_max`), so
+    /// data-row `gy` maps to screen-row `height-1-gy`.
     fn pixel_at(batch: &RecordBatch, gx: u32, gy: u32) -> f64 {
         let width = batch
             .column_by_name("width")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap()
+            .value(0);
+        let height = batch
+            .column_by_name("height")
             .unwrap()
             .as_any()
             .downcast_ref::<UInt32Array>()
@@ -592,8 +612,51 @@ mod tests {
             .downcast_ref::<BinaryArray>()
             .unwrap();
         let bytes = bin.value(0);
-        let i = ((gy as usize) * (width as usize) + (gx as usize)) * 8;
+        let screen_row = (height - 1 - gy) as usize;
+        let i = (screen_row * (width as usize) + (gx as usize)) * 8;
         f64::from_le_bytes(bytes[i..i + 8].try_into().unwrap())
+    }
+
+    #[test]
+    fn raster_packs_rows_top_to_bottom_screen_order() {
+        // Regression: a positive-correlation cloud must not flip the Y axis.
+        // High-Y, high-X data must land in the TOP-RIGHT of the packed buffer
+        // (screen row 0 = top, anchored at y_max), matching every other mark.
+        pyo3::Python::initialize();
+        // Single dense cluster at high X and high Y. On a 2x2 grid spanning the
+        // data extent, those points occupy data-cell (gx=1, gy=1) = top-right.
+        let b = make_xy_batch(
+            vec![0.1, 0.8, 0.85, 0.9],
+            vec![0.1, 0.8, 0.85, 0.9],
+        );
+        let spec = RasterSpec {
+            x: "x".into(),
+            y: "y".into(),
+            aggregate: "count".into(),
+            field: None,
+            resolution: ResolutionSpec::Fixed(2),
+            min_count: None,
+            log_scale: false,
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+        let width = out.column_by_name("width").unwrap()
+            .as_any().downcast_ref::<UInt32Array>().unwrap().value(0) as usize;
+        let bin = out.column_by_name("pixel_data").unwrap()
+            .as_any().downcast_ref::<BinaryArray>().unwrap();
+        let bytes = bin.value(0);
+        let raw = |screen_row: usize, col: usize| -> f64 {
+            let i = (screen_row * width + col) * 8;
+            f64::from_le_bytes(bytes[i..i + 8].try_into().unwrap())
+        };
+        // The densest cell (3 points at high X/Y) is the normalized max (1.0).
+        // In SCREEN order it must be the TOP-RIGHT cell: row 0, col 1.
+        let top_right = raw(0, 1);
+        let bottom_right = raw(1, 1);
+        assert!((top_right - 1.0).abs() < 1e-9,
+            "high-Y data must render at the top (screen row 0); top_right={top_right}");
+        assert!(bottom_right.is_nan(),
+            "bottom-right must be empty for high-Y data; got {bottom_right}");
     }
 
     #[test]
