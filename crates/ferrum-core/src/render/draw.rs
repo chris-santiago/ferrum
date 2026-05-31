@@ -72,6 +72,11 @@ pub struct MarkStyle {
     pub height: Option<f64>,
     // ── S11: leader_line (label) ─────
     pub leader_line: Option<bool>,
+    /// `true` when `stroke` was set by an explicit user `mark_kwargs` override
+    /// (including `"theme:label"` sentinel), not merely inherited from the
+    /// mark's theme default. Used by rule/segment renderers to enforce the
+    /// precedence: explicit constant stroke > per-row color encoding > fill fallback.
+    pub stroke_is_user_set: bool,
 }
 
 impl MarkStyle {
@@ -110,6 +115,7 @@ impl MarkStyle {
             width: None,
             height: None,
             leader_line: None,
+            stroke_is_user_set: false,
         }
     }
 }
@@ -189,8 +195,10 @@ pub fn resolve_mark_style(
     if let Some(ref hex) = o.stroke {
         if hex == "theme:label" {
             style.stroke = Some(theme.colors.label_color);
+            style.stroke_is_user_set = true;
         } else if let Ok(c) = from_hex_str(hex) {
             style.stroke = Some(c);
+            style.stroke_is_user_set = true;
         }
         // other parse failure: silently skip; warn at Python layer
     }

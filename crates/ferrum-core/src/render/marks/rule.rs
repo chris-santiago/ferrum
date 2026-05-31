@@ -56,12 +56,19 @@ fn rule_stroke_style(
         .filter(|v| v.is_finite())
         .and_then(resolve_stroke_dash);
     let effective_dash = dash_vec.as_deref().or(ctx.mark_style.stroke_dash.as_deref());
-    // Per-row color encoding wins; otherwise fall back to the constant mark-style
-    // stroke (so a literal `color=` mark style keeps working).
+    // Precedence: explicit constant stroke (user mark_kwargs) > per-row color
+    // encoding > theme stroke > fill fallback.
+    // An explicit `stroke=` in mark_kwargs must not be overridden by a color
+    // encoding inherited from a parent chart (e.g. boxplot whiskers keep their
+    // neutral gray even when the chart encodes `hue` via color).
     let row_color = color_vals
         .as_ref()
         .and_then(|v| v.get(i).copied().flatten());
-    let base_color = row_color.unwrap_or_else(|| ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill));
+    let base_color = if ctx.mark_style.stroke_is_user_set {
+        ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill)
+    } else {
+        row_color.or(ctx.mark_style.stroke).unwrap_or(ctx.mark_style.fill)
+    };
     let stroke_color = with_opacity(base_color, opacity);
     let mut style = to_scene_stroke(stroke_color, stroke_width, 1.0, effective_dash, None, None);
     style.stroke_opacity = stroke_opacity;
@@ -403,6 +410,61 @@ mod tests {
         }).collect();
         assert_eq!(strokes.len(), 2, "expected 2 ranged rule lines");
         assert_ne!(strokes[0], strokes[1], "color encoding must yield distinct per-row stroke colors");
+    }
+
+    #[test]
+    fn ranged_rule_explicit_stroke_wins_over_color_encoding() {
+        // Regression: an explicit constant stroke= in mark_kwargs must NOT be
+        // overridden by a per-row color encoding inherited from a parent chart
+        // (e.g. boxplot whiskers set stroke="theme:label" but catplot encodes
+        // hue via color — the whisker must stay gray, not turn per-row accent).
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rule,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(crate::spec::encoding::DataType::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "lo".into(), type_: None, ..Default::default() }),
+                y2: Some(EncodingSpec { field: "hi".into(), type_: None, ..Default::default() }),
+                // Color encoding present (simulates chart-level hue=species).
+                color: Some(EncodingSpec { field: "dir".into(), type_: Some(crate::spec::encoding::DataType::Nominal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("lo",  DataType::Float64, false),
+            Field::new("hi",  DataType::Float64, false),
+            Field::new("dir", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![5.0, 8.0])),
+            Arc::new(StringArray::from(vec!["up", "down"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        // Explicit constant stroke override — simulates what boxplot whisker layers do.
+        let overrides = MarkKwargsSpec { stroke: Some("#6b7280".into()), stroke_dash: Some(vec![]), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Rule);
+        assert!(mark_style.stroke_is_user_set, "stroke_is_user_set must be true after explicit override");
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let strokes: Vec<_> = result.nodes.iter().filter_map(|n| match n {
+            SceneNode::Line { style, .. } => Some((style.color.r, style.color.g, style.color.b)),
+            _ => None,
+        }).collect();
+        assert_eq!(strokes.len(), 2, "expected 2 ranged rule lines");
+        // Both rows must use the explicit constant stroke, NOT per-row accent colors.
+        assert_eq!(strokes[0], strokes[1], "explicit constant stroke must win over per-row color encoding");
+        // And the color must match the explicit override (#6b7280).
+        assert_eq!(strokes[0], (0x6b, 0x72, 0x80), "stroke must be the explicitly set color, not a per-row accent");
     }
 
     #[test]

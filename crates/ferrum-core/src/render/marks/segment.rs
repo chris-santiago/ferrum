@@ -36,7 +36,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
     // Per-row stroke color from the color encoding + color scale (same path as
-    // line.rs/point.rs). Falls back to the constant mark-style stroke per row.
+    // line.rs/point.rs). Only wins when no explicit user stroke override is set.
     let color_values: Option<Vec<Option<crate::render::color::Color>>> =
         match (color_field(ctx, spec), ctx.scales.color.as_ref()) {
             (Some(field), Some(scale)) => col_as_str(ctx.batch, field).ok().map(|cats| {
@@ -77,10 +77,16 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .and_then(|v| v.get(i).copied().flatten())
             .unwrap_or(ctx.mark_style.stroke_width);
 
-        let row_color = color_values
+        // Precedence: explicit constant stroke (user mark_kwargs) > per-row color
+        // encoding > theme stroke > fill fallback.
+        let row_color_opt = color_values
             .as_ref()
-            .and_then(|v| v.get(i).copied().flatten())
-            .unwrap_or_else(|| ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill));
+            .and_then(|v| v.get(i).copied().flatten());
+        let row_color = if ctx.mark_style.stroke_is_user_set {
+            ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill)
+        } else {
+            row_color_opt.or(ctx.mark_style.stroke).unwrap_or(ctx.mark_style.fill)
+        };
         let row_style = to_scene_stroke(
             row_color,
             row_stroke_width,
