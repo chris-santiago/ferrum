@@ -86,6 +86,46 @@ def _multiple_to_position(multiple: str, hue: Any):
     raise ValueError(f"unknown multiple {multiple!r}")
 
 
+def _apply_facet_sizing(
+    chart: Any,
+    *,
+    data: Any,
+    row: Any,
+    height: float | None,
+    aspect: float | None,
+) -> Any:
+    """Apply per-panel height/aspect sizing to a (possibly row-faceted) chart.
+
+    When ``row`` is set, ``height`` is treated as per-panel height (seaborn
+    semantics).  The total canvas height is ``per_panel_h * n_panels``.  Width
+    is ``per_panel_h * aspect`` regardless of panel count, so the canvas width
+    does not grow with the number of panels.
+
+    When ``row`` is not set, height and aspect are applied directly: the canvas
+    is ``height × (height * aspect)``.
+
+    Returns the chart with ``properties()`` applied, or the chart unchanged when
+    neither ``height`` nor ``aspect`` is given and there is no row faceting.
+    """
+    if row is not None:
+        n_row_panels = _count_facet_levels(data, str(row))
+        per_panel_h = height if height is not None else _FACET_DEFAULT_PANEL_HEIGHT_PX
+        total_h = per_panel_h * n_row_panels
+        # Width is per-panel height × aspect (independent of panel count).
+        # Using total_h here would make width grow linearly with n_panels, which
+        # violates seaborn semantics where aspect governs per-panel width.
+        w = per_panel_h * aspect if aspect is not None else None
+        props: dict = {"height": total_h}
+        if w is not None:
+            props["width"] = w
+        return chart.properties(**props)
+    elif height is not None or aspect is not None:
+        h = height if height is not None else 300.0
+        w = h * aspect if aspect is not None else h
+        return chart.properties(width=w, height=h)
+    return chart
+
+
 # ---------------------------------------------------------------------------
 # displot
 # ---------------------------------------------------------------------------
@@ -419,33 +459,8 @@ def displot(
         else:
             chart = chart.facet(row=row)
 
-    # Properties.
-    # When row-faceting is active, `height` is treated as per-panel height
-    # (seaborn semantics).  The total canvas height is per-panel height ×
-    # number of row facet levels.  When `height` is absent and row-faceting
-    # is active, auto-compute a total height so every panel is at least
-    # _FACET_DEFAULT_PANEL_HEIGHT_PX tall.
-    if row is not None:
-        n_row_panels = _count_facet_levels(data, str(row))
-        per_panel_h = height if height is not None else _FACET_DEFAULT_PANEL_HEIGHT_PX
-        if height is not None:
-            # height= is per-panel: total = height × n_panels
-            total_h = height * n_row_panels
-        else:
-            # No explicit height: ensure each panel meets the minimum.
-            total_h = _FACET_DEFAULT_PANEL_HEIGHT_PX * n_row_panels
-        # Width is per-panel height × aspect (independent of panel count).
-        # Using total_h here would make width grow linearly with n_panels, which
-        # violates seaborn semantics where aspect governs per-panel width.
-        w = per_panel_h * aspect if aspect is not None else None
-        props: dict = {"height": total_h}
-        if w is not None:
-            props["width"] = w
-        chart = chart.properties(**props)
-    elif height is not None or aspect is not None:
-        h = height if height is not None else 300.0
-        w = h * aspect if aspect is not None else h
-        chart = chart.properties(width=w, height=h)
+    # Properties: delegate to shared helper so displot and catplot cannot drift.
+    chart = _apply_facet_sizing(chart, data=data, row=row, height=height, aspect=aspect)
 
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
@@ -475,6 +490,8 @@ def catplot(
     ci: Any = 95,
     n_boot: int = 1000,
     seed: int | None = None,
+    height: float | None = None,
+    aspect: float | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
     properties: dict | None = None,
@@ -542,6 +559,12 @@ def catplot(
         raises ``ValueError`` alongside ``ci``.
     seed : int or None, optional
         Random seed forwarded to ``Jitter`` for reproducible strip positions.
+    height : float or None, optional
+        Height of the chart in pixels.  When ``row`` is set, this is treated
+        as per-panel height (seaborn semantics): the total canvas height is
+        ``height * n_row_panels``.  Width is derived from ``aspect``.
+    aspect : float or None, optional
+        Aspect ratio (width = per_panel_height * aspect).  Requires ``height``.
     theme : Theme, optional
         Visual theme applied via ``Chart.theme()``.
     mark : dict, optional
@@ -724,6 +747,9 @@ def catplot(
             chart = chart.facet(col=col)
         else:
             chart = chart.facet(row=row)
+
+    # Properties: delegate to shared helper so catplot and displot cannot drift.
+    chart = _apply_facet_sizing(chart, data=data, row=row, height=height, aspect=aspect)
 
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme

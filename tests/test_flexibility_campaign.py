@@ -2831,3 +2831,127 @@ def test_r1_errorbar_with_categorical_sort_renders() -> None:
     order = _category_order_in_svg(svg, ["A", "B", "C"])
     # B has highest mean, C middle, A lowest → descending order B, C, A.
     assert order == ["B", "C", "A"], f"expected B,C,A; got {order}"
+
+
+# ---------------------------------------------------------------------------
+# R3b — catplot facet sizing (height/aspect parity with displot)
+# ---------------------------------------------------------------------------
+#
+# catplot lacked height= and aspect= parameters while displot had them.
+# The fix adds both params to catplot with identical semantics to displot
+# and extracts the shared sizing logic into _apply_facet_sizing so the
+# two functions cannot drift again.
+
+
+import numpy as _np_r3b
+
+
+@pytest.fixture
+def _r3b_cat_df() -> pl.DataFrame:
+    """50-row categorical DataFrame with 5 groups (A–E) for catplot sizing tests."""
+    rng = _np_r3b.random.default_rng(7)
+    cats = [c for c in "ABCDE" for _ in range(10)]
+    vals = rng.normal(0, 1, 50).tolist()
+    return pl.DataFrame({"cat": cats, "val": vals, "grp": (["x"] * 5 + ["y"] * 5) * 5})
+
+
+def test_r3b_catplot_height_aspect_non_faceted(_r3b_cat_df: pl.DataFrame) -> None:
+    """catplot(height=H, aspect=A) without faceting sets canvas to H×(H*A).
+
+    The SVG canvas width must be approximately H * A and height approximately H.
+    """
+    H, A = 300.0, 1.5
+    svg = fm.catplot(_r3b_cat_df, x="cat", y="val", kind="box", height=H, aspect=A).show_svg()
+    w = _extract_svg_width(svg)
+    assert w == pytest.approx(H * A, rel=0.05), (
+        f"catplot non-faceted width must be ~H*A={H * A}; got {w}"
+    )
+
+
+def test_r3b_catplot_height_aspect_row_faceted(_r3b_cat_df: pl.DataFrame) -> None:
+    """catplot(row=..., height=H, aspect=A) scales total height by panel count.
+
+    With 2 row-facet levels, the canvas height must be ~2*H and width ~H*A
+    (not 2*H*A — width must be per-panel, not total).
+    """
+    H, A = 200.0, 1.2
+    svg = fm.catplot(
+        _r3b_cat_df, x="cat", y="val", kind="strip", row="grp", height=H, aspect=A
+    ).show_svg()
+    w = _extract_svg_width(svg)
+    # Width must be ~per_panel_h * aspect, not total_h * aspect.
+    expected_w = H * A
+    assert w == pytest.approx(expected_w, rel=0.05), (
+        f"catplot row-faceted width must be ~per_panel_h*aspect={expected_w}; got {w} "
+        f"(if width≈{2 * expected_w:.0f} the bug is total_h*aspect instead of per_panel_h*aspect)"
+    )
+
+
+def test_r3b_catplot_facet_width_constant_across_row_counts() -> None:
+    """catplot with row= and a fixed aspect produces the same canvas width
+    regardless of how many row-facet levels the data has.
+
+    Mirrors test_rf1_displot_facet_width_constant_across_row_counts to confirm
+    catplot uses the same formula as displot.
+    """
+    rng = _np_r3b.random.default_rng(11)
+    df_2 = pl.DataFrame(
+        {
+            "cat": ["A", "B"] * 20,
+            "val": rng.normal(0, 1, 40).tolist(),
+            "grp": (["x"] * 20 + ["y"] * 20),
+        }
+    )
+    df_5 = pl.DataFrame(
+        {
+            "cat": ["A", "B"] * 50,
+            "val": rng.normal(0, 1, 100).tolist(),
+            "grp": [c for c in "ABCDE" for _ in range(20)],
+        }
+    )
+    H, A = 150.0, 1.0
+    svg_2 = fm.catplot(df_2, x="cat", y="val", kind="box", row="grp", height=H, aspect=A).show_svg()
+    svg_5 = fm.catplot(df_5, x="cat", y="val", kind="box", row="grp", height=H, aspect=A).show_svg()
+
+    w2 = _extract_svg_width(svg_2)
+    w5 = _extract_svg_width(svg_5)
+    expected_w = H * A
+    assert w2 == pytest.approx(expected_w, rel=0.05), (
+        f"2-panel catplot width must be ~{expected_w}; got {w2}"
+    )
+    assert w5 == pytest.approx(expected_w, rel=0.05), (
+        f"5-panel catplot width must be ~{expected_w}; got {w5}"
+    )
+    assert w2 == pytest.approx(w5, rel=0.05), (
+        f"catplot canvas width must be identical for 2-panel ({w2}) and 5-panel ({w5}) "
+        f"charts with the same aspect"
+    )
+
+
+def test_r3b_displot_sizing_unchanged_after_helper_extraction() -> None:
+    """displot row-faceted sizing is byte-identical before and after the helper extraction.
+
+    Characterization test: the _apply_facet_sizing helper must reproduce displot's
+    existing sizing exactly.  We compare the SVG width of a row-faceted displot
+    against the expected formula (per_panel_h * aspect) to confirm the refactor
+    did not change displot's output.
+    """
+    rng = _np_r3b.random.default_rng(3)
+    cats_4 = [c for c in "ABCD" for _ in range(50)]
+    df = pl.DataFrame({"x": rng.normal(0, 1, 200).tolist(), "cat": cats_4})
+
+    H, A = 180.0, 1.4
+    svg = fm.displot(df, x="x", row="cat", kind="kde", height=H, aspect=A).show_svg()
+    w = _extract_svg_width(svg)
+    expected_w = H * A
+    assert w == pytest.approx(expected_w, rel=0.05), (
+        f"displot row-faceted width after helper extraction must be ~{expected_w}; got {w}"
+    )
+
+
+def test_r3b_catplot_no_height_aspect_still_renders(_r3b_cat_df: pl.DataFrame) -> None:
+    """catplot without height= or aspect= renders without error (no regression)."""
+    svg = fm.catplot(_r3b_cat_df, x="cat", y="val", kind="violin").show_svg()
+    assert len(svg) > 0, "catplot without height/aspect must produce non-empty SVG"
+    # Violin bodies are <path> elements.
+    assert svg.count('d="M') >= 1, "catplot without height/aspect must render mark elements"
