@@ -6,6 +6,48 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.14.0
+
+*2026-05-31*
+
+### Added
+
+- `catplot(height=, aspect=)` for per-panel facet sizing, matching `displot`
+- Automatic temporal scale inference from `Datetime`/`Date` dtypes (no explicit `:T` needed); microsecond/nanosecond timestamps normalized to milliseconds
+- Size and shape legends, with multi-legend stacking and same-field legend merging
+
+### Fixed
+
+- Float ordinal domains, displot facet width, and boxen sort on pandas/pyarrow inputs
+- Explicit constant stroke now beats an inherited color encoding on rule/segment marks
+- 3- and 4-digit hex colors, `~e`/`~s` scientific-notation trimming, ranged-mark per-row color, and raster Y-axis orientation
+- Deterministic batch selection in `locate_field` for named transform outputs
+- Integer/float ordinal columns render correctly; per-panel facet sizing on `displot`
+- Channel-level `axis=None` hides the axis
+- Date/datetime/ISO coordinates accepted in annotations
+- Color routes to stroke on line-family marks
+- Value-sort and the full sort spec honored on axes and composite marks
+- Order-independent color-scale merge on layered charts
+- Per-channel axis `label_format` with the full d3-format grammar and chrono time formatting
+- Categorical color-string ranges; rect/heatmap scheme routing
+
+### Changed
+
+- Boxen sort moved into the Rust `LetterValue` transform (new `sort=` kwarg); Python shim removed
+- Typed ordinal `scale.range` wire format
+- Unified categorical-axis sort resolution; removed the dead errorbar `y_sort`
+- New `ChannelBase.option()` accessor; dropped private `_kwargs` reach-ins
+- Deduplicated inferred-type application; reconstruct the promoted color channel on layer merge
+- Shared fill/stroke color-resolution helpers across marks
+- Colorbar tick formatting routes through the full d3-format grammar
+- Extracted `build_default_categorical_scale`
+
+### Other
+
+- Fixed docstring parameter drift across the public API; added a docstring-drift auditor (`scripts/audit_docstring_drift.py`)
+- Added a capabilities showcase docs page for power-user chart designs
+- Regenerated configure goldens for corrected 3-digit hex colors
+
 ## 0.13.0
 
 *2026-05-30*
