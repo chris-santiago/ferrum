@@ -113,88 +113,39 @@ def _resolve_sort_for_composite(sort: Any, x_field: str | None, y_field: str | N
     return sort
 
 
-def _resolve_boxen_cat_sort(
-    sort: Any,
-    cat_field: str,
-    val_field: str,
-    data: Any,
-) -> Any:
-    """Pre-resolve a boxen categorical sort to an explicit ordered category list.
+def _resolve_cat_axis(
+    transform_kwargs: dict,
+    x_field: str | None,
+    y_field: str | None,
+    x_sort: Any,
+    y_sort: Any,
+) -> tuple[str | None, Any, str | None]:
+    """Return ``(cat_field, cat_sort, val_field)`` for a composite mark.
 
-    The LetterValue transform renames the groupby column to ``"group"`` and drops
-    the original value column from its per-depth output batches.  A sort dict like
-    ``{"field": "val", "op": "sum", "order": "descending"}`` therefore references a
-    column absent from the layer batch, causing Rust to emit ``SortSpecIgnored``.
+    Composite marks that build a categorical positional axis declare their
+    orientation with one of two historically divergent conventions:
 
-    This function computes the ordered category list in Python from the source
-    DataFrame and returns it as an explicit list (e.g. ``["A", "B", "C"]``).
-    Explicit list sorts bypass the missing-field problem entirely because they
-    specify domain order directly, without referencing any data column.
+    - ``horizontal: bool`` (boxplot, boxen) — ``True`` puts the categorical
+      axis on **y** and the value axis on **x**.
+    - ``orient: "vertical" | "horizontal"`` (swarm) — ``"horizontal"`` puts the
+      value axis on **x**, hence the categorical axis on **y**.
 
-    Conditions for pre-resolution:
-    - *sort* is a dict with a ``"field"`` key (field-based aggregate sort).
-    - *data* is a polars DataFrame containing *cat_field* and *val_field*.
+    Both reduce to a single question: *is the categorical axis y?*  This helper
+    normalizes them into one boolean and returns the categorical field, the
+    sort that applies to that categorical axis, and the value field.
 
-    All other sort values (bare strings, explicit lists, ``None``) are returned
-    unchanged.
-
-    Parameters
-    ----------
-    sort : Any
-        The resolved sort spec for the categorical axis.
-    cat_field : str
-        The original category (groupby) field name in the source data.
-    val_field : str
-        The original value (numeric) field name in the source data.
-    data : Any
-        The chart's source data.  Only polars DataFrames are processed; other
-        types are returned with *sort* unchanged.
+    Precedence: the two keys are set by disjoint marks today (no mark passes
+    both), so they never conflict in practice.  Should both ever be present,
+    ``horizontal=True`` and ``orient="horizontal"`` agree (cat axis is y); a
+    truthy ``horizontal`` therefore wins, and ``orient`` is consulted only when
+    ``horizontal`` is falsy.  This preserves each mark's existing result.
     """
-    if not isinstance(sort, dict) or "field" not in sort:
-        # Explicit list or unsupported form: return unchanged.
-        return sort
-    try:
-        import polars as pl
-
-        # Coerce to polars so pandas/pyarrow/narwhals input all work the same
-        # way.  The LetterValue transform drops the original value column, so a
-        # field-based sort dict referencing it would cause Rust to emit
-        # SortSpecIgnored.  We compute the explicit category order here in
-        # Python from the source data regardless of backend.
-        if isinstance(data, pl.DataFrame):
-            df = data
-        else:
-            df = pl.from_arrow(to_arrow_table(data))
-
-        if cat_field not in df.columns or val_field not in df.columns:
-            return sort
-
-        op = sort.get("op", "sum")
-        order = sort.get("order", "ascending")
-        descending = order == "descending"
-
-        _OP_MAP = {
-            "sum": pl.sum,
-            "mean": pl.mean,
-            "max": pl.max,
-            "min": pl.min,
-            "count": pl.count,
-            "median": pl.median,
-        }
-        agg_fn = _OP_MAP.get(op, pl.sum)
-        agg_col = f"_sort_{val_field}"
-        ordered = (
-            df.group_by(cat_field)
-            .agg(agg_fn(val_field).alias(agg_col))
-            .sort(agg_col, descending=descending)
-            .get_column(cat_field)
-            .to_list()
-        )
-        return ordered
-    except Exception:
-        # Defensive: if anything goes wrong, fall back to the original sort spec
-        # so the chart still renders (it will emit SortSpecIgnored rather than crash).
-        return sort
+    horizontal = bool(transform_kwargs.get("horizontal", False))
+    orient = transform_kwargs.get("orient", "vertical")
+    cat_is_y = horizontal or orient == "horizontal"
+    if cat_is_y:
+        return y_field, y_sort, x_field
+    return x_field, x_sort, y_field
 
 
 def _split_style_kwargs(desugar_fn, user_kwargs: dict) -> tuple[dict, dict]:
@@ -427,6 +378,25 @@ def _infer_type_from_data(field: str | None, data: Any) -> str | None:
     return None
 
 
+def _apply_inferred_type(d: dict, field: str | None, data: Any) -> dict:
+    """Return *d* with ``"type_": "T"`` added when *field* is a temporal column.
+
+    Applies temporal type inference only when ``"type_"`` is absent from *d*
+    (i.e., the user did not supply an explicit type annotation).  When the
+    inferred type is ``None`` (non-temporal or missing column), *d* is returned
+    unchanged.
+
+    This is the single apply-site for the infer-and-write pattern shared by
+    ``_build_encoding_specs`` and ``_build_layers_list``.
+    """
+    if "type_" in d:
+        return d
+    inferred = _infer_type_from_data(field, data)
+    if inferred is not None:
+        return {**d, "type_": inferred}
+    return d
+
+
 class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _RenderMixin):
     """Top-level chart value class.
 
@@ -597,8 +567,8 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         # here using the original field names.  Composite desugars replace the
         # y-channel field with computed columns (e.g. lower_whisker, q1), so the
         # Rust renderer would otherwise sort by the wrong column.
-        _raw_x_sort = x_enc._kwargs.get("sort") if isinstance(x_enc, ChannelBase) else None
-        _raw_y_sort = y_enc._kwargs.get("sort") if isinstance(y_enc, ChannelBase) else None
+        _raw_x_sort = x_enc.option("sort") if isinstance(x_enc, ChannelBase) else None
+        _raw_y_sort = y_enc.option("sort") if isinstance(y_enc, ChannelBase) else None
         x_sort = (
             _resolve_sort_for_composite(_raw_x_sort, x_field, y_field)
             if _raw_x_sort is not None
@@ -623,28 +593,44 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 transform_kwargs = {**transform_kwargs, "y2_field": y2_field}
         # Boxen: the LetterValue transform renames the groupby column to "group"
         # and drops the original value column from its per-depth output batches.
-        # A field-based sort dict (e.g. {"field": "val", "op": "sum", "order":
-        # "descending"}) therefore references a column absent from the layer batch,
-        # causing Rust to emit SortSpecIgnored and leave the domain in insertion
-        # order.  Pre-resolve to an explicit ordered category list in Python, which
-        # bypasses the missing-field problem because list sorts specify domain order
-        # directly without referencing any data column.
-        if kind == "boxen" and self._data is not None:
-            horizontal = transform_kwargs.get("horizontal", False)
-            cat_f = y_field if horizontal else x_field
-            val_f = x_field if horizontal else y_field
-            if cat_f and val_f:
-                if x_sort is not None and not horizontal:
-                    x_sort = _resolve_boxen_cat_sort(x_sort, cat_f, val_f, self._data)
-                if y_sort is not None and horizontal:
-                    y_sort = _resolve_boxen_cat_sort(y_sort, cat_f, val_f, self._data)
+        # A field-based aggregate sort dict (e.g. {"field": "val", "op": "sum",
+        # "order": "descending"}) therefore cannot resolve through the standard
+        # layer-sort path — the value column is absent from the layer batch.
+        # Instead, hand the aggregate op/order to the LetterValue transform via
+        # its ``sort=`` kwarg: it reorders its emitted group rows so the
+        # categorical axis domain falls out in first-appearance order, with no
+        # explicit categorical layer sort needed.  Non-aggregate forms (explicit
+        # list, "ascending"/"descending", None) still resolve via the standard
+        # layer-sort path on the renamed ``group`` column, so they pass through
+        # unchanged.
+        if kind == "boxen":
+            cat_is_y = bool(transform_kwargs.get("horizontal", False))
+            cat_sort = y_sort if cat_is_y else x_sort
+            if isinstance(cat_sort, dict) and "field" in cat_sort:
+                transform_kwargs = {
+                    **transform_kwargs,
+                    "boxen_agg_sort": {
+                        "op": cat_sort.get("op", "sum"),
+                        "order": cat_sort.get("order", "ascending"),
+                    },
+                }
+                # Drop the categorical layer sort for the aggregate case; the
+                # transform's row order drives the domain.
+                if cat_is_y:
+                    y_sort = None
+                else:
+                    x_sort = None
         # Composites with a categorical positional axis: inject x_sort and y_sort
         # so the desugar function can forward sort to the categorical channel
         # encoding, enabling e.g. X("c:N", sort="-y") on mark_boxplot/violin/etc.
+        #
+        # errorbar always treats x as the categorical grouping axis (see
+        # desugar_errorbar), so it only consumes x_sort; y_sort is never read
+        # there and is deliberately not injected (R4: dead-param removal).
         if kind in ("boxplot", "boxen", "errorbar", "violin", "swarm"):
             if x_sort is not None:
                 transform_kwargs = {**transform_kwargs, "x_sort": x_sort}
-            if y_sort is not None:
+            if y_sort is not None and kind != "errorbar":
                 transform_kwargs = {**transform_kwargs, "y_sort": y_sort}
         # density/histogram: auto-set groupby from color encoding when not explicit.
         if kind in ("density", "histogram") and "groupby" not in transform_kwargs:
@@ -681,8 +667,9 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             try:
                 import polars as pl
 
-                orient = transform_kwargs.get("orient", "vertical")
-                value_field = y_field if orient != "horizontal" else x_field
+                _, _, value_field = _resolve_cat_axis(
+                    transform_kwargs, x_field, y_field, x_sort, y_sort
+                )
                 if (
                     value_field
                     and new._data is not None
@@ -2270,10 +2257,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                         continue
                     # Auto-infer temporal type from column dtype when no explicit type
                     # annotation was given (same logic as _build_encoding_specs).
-                    if "type_" not in d:
-                        inferred = _infer_type_from_data(field, self._data)
-                        if inferred is not None:
-                            d = {**d, "type_": inferred}
+                    d = _apply_inferred_type(d, field, self._data)
                     # Build a JSON-safe dict matching EncodingSpec's JSON shape.
                     # Note: to_encoding_spec_dict() emits the data-type under
                     # "type_" (Python convention to avoid shadowing the builtin),
@@ -2645,10 +2629,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             # Auto-infer temporal type from column dtype when no explicit type
             # annotation was given.  Explicit ":T" / ":Q" / type_= / type= always
             # win; only the unannotated case is changed here.
-            if "type_" not in d:
-                inferred = _infer_type_from_data(d.get("field"), resolved._data)
-                if inferred is not None:
-                    d = {**d, "type_": inferred}
+            d = _apply_inferred_type(d, d.get("field"), resolved._data)
             # Bar y-axis zero-anchor (gallery defaults A3): inject
             # scale.zero=True on the y-encoding so bar charts always
             # start at zero unless the caller explicitly sets domain or
@@ -2825,7 +2806,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         if (
             isinstance(_ch_x, ChannelBase)
             and "axis" in _ch_x._kwargs
-            and _ch_x._kwargs["axis"] is None
+            and _ch_x.option("axis") is None
             and resolved._axis_x is None
         ):
             kw["axis_x"] = False
@@ -2833,7 +2814,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         if (
             isinstance(_ch_y, ChannelBase)
             and "axis" in _ch_y._kwargs
-            and _ch_y._kwargs["axis"] is None
+            and _ch_y.option("axis") is None
             and resolved._axis_y is None
         ):
             kw["axis_y"] = False

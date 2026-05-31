@@ -132,15 +132,18 @@ pub enum ScaleSpec {
     Ordinal {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         domain: Option<Vec<String>>,
-        /// Polymorphic range: either pixel coordinates (`Vec<f64>` for positional
-        /// use) or color strings (`Vec<String>` for color-channel use).
+        /// Polymorphic range: either pixel coordinates (numbers, for positional
+        /// use) or color strings (for color-channel use), or a mix.
         ///
-        /// Stored as `serde_json::Value` so that both `[0, 300]` and
-        /// `["#ccc", "#e4572e"]` round-trip through the JSON wire format without a
-        /// type-level split.  The positional scale resolver extracts numeric values;
-        /// `build_color_scale` extracts string values (D1 fix, 2026-05-31).
+        /// Typed as `Vec<OrdinalRangeValue>` (an `untagged` enum over
+        /// `Number` | `Str`) so both `[0, 300]` and `["#ccc", "#e4572e"]`
+        /// round-trip through the JSON wire format as a plain array — the exact
+        /// shape Python emits for `scale.range`. The positional resolver pulls
+        /// the `Number` arms; `build_color_scale` pulls the `Str` arms (F2
+        /// typed-range fix, 2026-05-31, replacing the prior `serde_json::Value`
+        /// + JSON-sniffing approach from the D1 fix).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        range: Option<serde_json::Value>,
+        range: Option<Vec<crate::scale::ordinal::OrdinalRangeValue>>,
         #[serde(default)]
         padding: f64,
     },

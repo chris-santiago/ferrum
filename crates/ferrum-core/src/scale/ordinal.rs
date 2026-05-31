@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::PyList;
+use serde::{Deserialize, Serialize};
 
 use super::core::{validate_ordinal, validate_ordinal_domain};
 
@@ -14,8 +15,22 @@ use super::core::{validate_ordinal, validate_ordinal_domain};
 /// The `#[derive(FromPyObject)]` implementation in PyO3 0.28 tries each variant
 /// in order; `Number` is tried first so integer literals (which Python can
 /// extract as both `f64` and `String`) are always captured as numbers.
-#[derive(Debug, Clone, PartialEq, FromPyObject)]
-pub(crate) enum OrdinalRangeValue {
+///
+/// The `#[serde(untagged)]` representation makes a `Vec<OrdinalRangeValue>`
+/// serialize to (and deserialize from) a plain JSON array — `[0.0, 300.0]`
+/// for a numeric range, `["#ccc", "#e4572e"]` for a color range, or a mix.
+/// This is the exact shape the Python side already emits for `scale.range`
+/// (a flat `list[float | str]`), so the typed wire representation requires no
+/// Python-side change (F2 fix, 2026-05-31).  As with `FromPyObject`, variant
+/// order matters: serde tries `Number` first, so JSON numbers never get
+/// captured as strings.
+// `pub` (not `pub(crate)`) only so it can appear in the `pub` `ScaleSpec::Ordinal`
+// field without tripping `private_interfaces`. The `scale` module is itself
+// private (`mod scale;` in lib.rs), so this type stays crate-internal in
+// practice — exactly like `ScaleSpec` and `ContinuousScaleCommon`.
+#[derive(Debug, Clone, PartialEq, FromPyObject, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OrdinalRangeValue {
     #[pyo3(transparent)]
     Number(f64),
     #[pyo3(transparent)]
@@ -23,6 +38,51 @@ pub(crate) enum OrdinalRangeValue {
 }
 
 impl OrdinalRangeValue {
+    /// The pixel coordinate, if this entry is a `Number`.
+    pub(crate) fn as_number(&self) -> Option<f64> {
+        match self {
+            OrdinalRangeValue::Number(f) => Some(*f),
+            OrdinalRangeValue::Str(_) => None,
+        }
+    }
+
+    /// The string value, if this entry is a `Str` (e.g. a CSS color).
+    pub(crate) fn as_str(&self) -> Option<&str> {
+        match self {
+            OrdinalRangeValue::Str(s) => Some(s),
+            OrdinalRangeValue::Number(_) => None,
+        }
+    }
+
+    /// Extract the numeric pixel coordinates from a typed ordinal range.
+    ///
+    /// Returns the numbers in order, dropping any string (color) entries. An
+    /// empty result means the range carried no pixel coordinates — the caller
+    /// (positional resolver) should fall back to the plot-area extent.
+    pub(crate) fn numbers(range: &[OrdinalRangeValue]) -> Vec<f64> {
+        range.iter().filter_map(OrdinalRangeValue::as_number).collect()
+    }
+
+    /// Extract the color strings from a typed ordinal range, but only when the
+    /// range is entirely strings.
+    ///
+    /// Returns `Some` only for a non-empty all-string range (the color path);
+    /// `None` when the range is empty or contains any numeric entry (a pixel
+    /// range intended for the positional resolver). This preserves the exact
+    /// all-or-nothing semantics of the previous JSON sniffer.
+    pub(crate) fn all_strings(range: &[OrdinalRangeValue]) -> Option<Vec<String>> {
+        if range.is_empty() {
+            return None;
+        }
+        let strings: Vec<String> =
+            range.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+        if strings.len() == range.len() {
+            Some(strings)
+        } else {
+            None
+        }
+    }
+
     /// Convert to a Python object (`float` or `str`) for use in getters.
     fn into_py_any(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match self {
@@ -408,5 +468,77 @@ mod tests {
         assert!(matches!(&orig[2], OrdinalRangeValue::Str(s) if s == "#e4572e"));
         // Internal data range is the placeholder — string ranges are NOT used for math.
         assert_eq!(scale.data.range, vec![0.0, 1.0]);
+    }
+
+    // ── OrdinalRangeValue serde + typed-accessor tests (F2) ──────────────────
+
+    /// A numeric range deserializes from a plain JSON number array and
+    /// serializes back to one. This is the exact JSON Python emits for
+    /// `scale.range = [0.0, 300.0]`.
+    #[test]
+    fn ordinal_range_value_numeric_json_round_trip() {
+        let json = "[0.0,300.0]";
+        let parsed: Vec<OrdinalRangeValue> = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed,
+            vec![OrdinalRangeValue::Number(0.0), OrdinalRangeValue::Number(300.0)]
+        );
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    /// Integer JSON literals (`[0, 300]`) deserialize as `Number` — variant
+    /// order means numbers are never captured as strings.
+    #[test]
+    fn ordinal_range_value_integer_json_parses_as_number() {
+        let parsed: Vec<OrdinalRangeValue> = serde_json::from_str("[0,300]").unwrap();
+        assert_eq!(
+            parsed,
+            vec![OrdinalRangeValue::Number(0.0), OrdinalRangeValue::Number(300.0)]
+        );
+    }
+
+    /// A string range deserializes from a plain JSON string array.
+    #[test]
+    fn ordinal_range_value_string_json_round_trip() {
+        let json = r##"["#ccc","#e4572e"]"##;
+        let parsed: Vec<OrdinalRangeValue> = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                OrdinalRangeValue::Str("#ccc".into()),
+                OrdinalRangeValue::Str("#e4572e".into())
+            ]
+        );
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    /// `numbers()` extracts the `Number` arms, dropping strings.
+    #[test]
+    fn ordinal_range_value_numbers_drops_strings() {
+        let range = vec![
+            OrdinalRangeValue::Number(10.0),
+            OrdinalRangeValue::Str("#ccc".into()),
+            OrdinalRangeValue::Number(20.0),
+        ];
+        assert_eq!(OrdinalRangeValue::numbers(&range), vec![10.0, 20.0]);
+    }
+
+    /// `all_strings()` returns `Some` only for a non-empty all-string range,
+    /// matching the old JSON sniffer's all-or-nothing semantics.
+    #[test]
+    fn ordinal_range_value_all_strings_semantics() {
+        let strings = vec![
+            OrdinalRangeValue::Str("#ccc".into()),
+            OrdinalRangeValue::Str("#e4572e".into()),
+        ];
+        assert_eq!(
+            OrdinalRangeValue::all_strings(&strings),
+            Some(vec!["#ccc".to_string(), "#e4572e".to_string()])
+        );
+        // Mixed → None (a numeric pixel entry disqualifies the color path).
+        let mixed = vec![OrdinalRangeValue::Number(0.0), OrdinalRangeValue::Str("#ccc".into())];
+        assert_eq!(OrdinalRangeValue::all_strings(&mixed), None);
+        // Empty → None.
+        assert_eq!(OrdinalRangeValue::all_strings(&[]), None);
     }
 }

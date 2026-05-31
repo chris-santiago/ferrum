@@ -1904,3 +1904,134 @@ fn f1_float64_ordinal_fractional_values_resolve() {
         );
     }
 }
+
+// ── F5: characterization — default categorical palette is byte-stable ─────────
+
+/// Characterization test pinning the default categorical palette produced by
+/// `build_color_scale` for a string-typed color field with no explicit range.
+///
+/// The default theme uses `paper_ink`; its first color is rgb(0x25, 0x63, 0xEB).
+/// This test must pass byte-identically before and after the F5 helper-extraction
+/// refactor, proving that the helper produces the same output as the two inline
+/// constructions it replaces.
+#[test]
+fn f5_default_categorical_palette_is_byte_stable() {
+    let spec = make_spec_with_color();
+    let batch = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let (scales, warnings) =
+        resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    assert!(warnings.is_empty(), "default path must not warn: {warnings:?}");
+    let color_scale = scales.color.expect("color scale must be resolved");
+    match &color_scale {
+        ColorScale::Categorical { domain, palette } => {
+            assert_eq!(domain, &["a", "b", "c"]);
+            // Default theme = paper_ink; first color is rgb(0x25, 0x63, 0xEB).
+            assert_eq!(
+                (palette[0].red, palette[0].green, palette[0].blue),
+                (0x25, 0x63, 0xEB),
+                "default palette first color must be paper_ink[0] = rgb(0x25,0x63,0xEB); \
+                 got rgb({},{},{})",
+                palette[0].red, palette[0].green, palette[0].blue
+            );
+        }
+        other => panic!("expected Categorical color scale, got {other:?}"),
+    }
+}
+
+/// Characterization test pinning the fallback palette produced when an explicit
+/// color-string range fails to parse.  The parse-failure arm now delegates to the
+/// same `build_default_categorical_scale` helper as the default arm; this test
+/// proves the two arms produce identical palette colors for an equivalent input.
+#[test]
+fn f5_parse_failure_fallback_palette_matches_default_palette() {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
+    use crate::spec::mark::Mark;
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("species", ArrowDataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+        ],
+    )
+    .unwrap();
+
+    // Spec with a bad range that will trigger the parse-failure arm.
+    let bad_range_spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            color: Some(EncodingSpec {
+                field: "species".into(),
+                type_: None,
+                scale: Some(serde_json::from_value(serde_json::json!({
+                    "type": "ordinal",
+                    "domain": ["a", "b", "c"],
+                    "range": ["#ff0000", "#not-a-color", "#0000ff"]
+                })).unwrap()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+    };
+
+    let theme = ThemeInputs::default();
+
+    // Fallback result (parse failure arm).
+    let (scales_fallback, warnings_fallback) =
+        resolve_scales(&bad_range_spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    assert_eq!(warnings_fallback.len(), 1, "expected exactly one parse-failure warning");
+    assert!(matches!(
+        warnings_fallback[0],
+        crate::render::RenderWarning::ColorRangeParseFailure { .. }
+    ));
+
+    // Default result (no range spec).
+    let (scales_default, warnings_default) =
+        resolve_scales(&make_spec_with_color(), &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    assert!(warnings_default.is_empty());
+
+    // Both must produce the same palette colors (same domain, same palette bytes).
+    match (
+        scales_fallback.color.as_ref().unwrap(),
+        scales_default.color.as_ref().unwrap(),
+    ) {
+        (
+            ColorScale::Categorical { domain: d1, palette: p1 },
+            ColorScale::Categorical { domain: d2, palette: p2 },
+        ) => {
+            assert_eq!(d1, d2, "fallback and default must have the same domain");
+            assert_eq!(p1.len(), p2.len(), "palette lengths must match");
+            for (i, (c1, c2)) in p1.iter().zip(p2.iter()).enumerate() {
+                assert_eq!(
+                    (c1.red, c1.green, c1.blue),
+                    (c2.red, c2.green, c2.blue),
+                    "palette color at index {i} must be identical in fallback and default paths"
+                );
+            }
+        }
+        _ => panic!("expected both to be Categorical"),
+    }
+}

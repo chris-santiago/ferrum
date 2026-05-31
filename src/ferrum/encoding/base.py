@@ -170,6 +170,23 @@ class ChannelBase:
             )
         return out
 
+    def option(self, name: str, default: Any = None) -> Any:
+        """Return the value of encoding option *name*, or *default* if unset.
+
+        Parameters
+        ----------
+        name : str
+            The option key to look up (e.g. ``"sort"``, ``"axis"``).
+        default : Any, optional
+            Value returned when *name* is not present.  Defaults to ``None``.
+
+        Returns
+        -------
+        Any
+            The option value, or *default* when the key is absent.
+        """
+        return self._kwargs.get(name, default)
+
     def __repr__(self) -> str:
         """Return a string representation of this channel."""
         kw_parts = [f"{k}={v!r}" for k, v in self._kwargs.items()]
