@@ -6,6 +6,11 @@
 
 Close the 9 cross-cutting defects (D1–D9) surfaced by the v0.13.0 flexibility audit, in the synthesis fix order, so power-user chart designs stop breaking on shared root causes.
 
+> **STATUS (2026-05-31): COMPLETE** on branch `fix/flexibility-campaign`.
+> D1+D4 `e12ac67` · D3 `7ddaff7` · D2 `e298e66` · D5 `50bfd52` · D6 `103777b` · D7 `d489a6b` · D8 `43b2e05` · D9 `fcab5ef` · Task 9 legends `7d99276` · Task 2b temporal-inference + item 2 µs/ns `6641ccf`.
+> Each TDD-first with regression coverage in `tests/test_flexibility_campaign.py` (76 tests), quality-reviewed, committed individually; Gapminder legend visually inspected.
+> **Tracked follow-ups (user-accepted, NOT done):** Item 3 full D2 cross-layer color-domain union (rare; needs Rust `build_color_scale`); two Task-9 nits (translucent-color merge round-trip, dead `.min(0.0)` in `layout/legend.rs`); the capabilities docs page (§8).
+
 ## 2. Spec references
 
 - `/tmp/ferrum-ux-audit/SYNTHESIS.md` — defect table (D1–D9), per-defect root cause + file:line, fix order, "don't regress" wins.
@@ -98,5 +103,14 @@ Close the 9 cross-cutting defects (D1–D9) surfaced by the v0.13.0 flexibility 
 
 ## 7. Open questions
 
-- D1 API shape and D2 merge semantics are the two decisions most likely to change downstream task code — resolve in Task 0 before starting Task 1/Task 3.
+- D1 API shape and D2 merge semantics are the two decisions most likely to change downstream task code — resolve in Task 0 before starting Task 1/Task 3. **(RESOLVED 2026-05-31, see Task 0.)**
 - Size/shape legend (Task 9) is the largest single item; if it balloons, split into its own plan rather than blocking D1–D8.
+
+## 8. Surfaced during execution (decisions / follow-ups)
+
+- **D5 sort op (RESOLVED):** `'-y'` shorthand defaults to sum, but sort is NOT sum-only — also support explicit `sort=[...]` arrays and the Vega-Lite `sort={"field":..,"op":"mean"/"max"/..,"order":..}` form for arbitrary ordering.
+- **Size legend (RESOLVED):** ~5 nice round representative values. **Multi-legend (RESOLVED):** stack vertically, merge channels that encode the same field.
+- **Item 1 — temporal auto-type inference (DECISION 2026-05-31: AUTO-INFER).** A polars `Datetime`/`Date` column without `:T` resolved to a Linear scale (raw epoch ticks). → Becomes **Task 2b**: `_coerce.py` / type inference auto-detects polars `Datetime`/`Date` dtypes → temporal scale (Vega-Lite-consistent). Requires golden refresh + visual inspection (any date columns previously rendered numeric will flip).
+- **Item 2 — arrow_cast µs/ns timestamp units (DECISION: FOLD IN as hardening).** `Timestamp(Microsecond/Nanosecond)` read as raw `f64` without normalizing to epoch-ms; safe today only because `_coerce.py` pre-casts to `Datetime("ms")`. Defensive normalization in `crates/ferrum-core/src/render/arrow_cast.rs`, done alongside Task 2b (it lives in the same temporal area).
+- **Item 3 — D2 cross-layer color-domain union (DECISION: ACCEPT + TRACK).** The Python fix closes the documented D2 case (gray base + colored highlight). The rarer case — two layers BOTH coloring the same field with disjoint category sets — is NOT a true union (resolves to one layer's categories); full union needs a high-blast-radius Rust `build_color_scale` change. **Not done this campaign — tracked follow-up.**
+- **Follow-up — capabilities docs page (user request 2026-05-31):** once the campaign lands, build a docs page showcasing the power-user / well-known-example plots (Gapminder, raincloud, candlestick, slopegraph, ridgeline, contourf, linked brushing, etc.) to highlight the now-working capabilities. Source material: the audit repro scripts in `/tmp/ferrum-ux-audit/<category>/`. Do AFTER fixes land so every example renders correctly.
