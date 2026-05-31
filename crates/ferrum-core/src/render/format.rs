@@ -402,7 +402,15 @@ pub(crate) fn format_parsed(v: f64, spec: &D3Spec) -> String {
     };
 
     if spec.trim {
-        body = trim_insignificant(&body);
+        // Exponential types carry an exponent suffix in the body (e.g. "3.140e3"),
+        // so they must trim only the mantissa via the exp-aware trimmer. SI (`s`)
+        // also routes through it: its body has no exponent, so the exp trimmer
+        // falls back to the plain trimmer, but this keeps the e/s split aligned
+        // with the `g`-format split at lines ~477/482.
+        body = match spec.ty {
+            'e' | 'E' | 's' => trim_insignificant_exp(&body),
+            _ => trim_insignificant(&body),
+        };
     }
 
     // Symbol prefix (`$`); `#` alternate-form prefix for radix types.
@@ -713,6 +721,19 @@ mod tests {
     fn space_sign() {
         assert_eq!(format_with_spec(3.0, Some(" .1f")), " 3.0");
         assert_eq!(format_with_spec(-3.0, Some(" .1f")), "-3.0");
+    }
+    #[test]
+    fn trim_flag_exponential() {
+        // "~e" must trim only the mantissa, preserving the exponent suffix.
+        // Default precision (6) on 3140 -> "3.140000e+3", trimmed -> "3.14e+3".
+        assert_eq!(format_with_spec(3140.0, Some("~e")), "3.14e+3");
+        // No-trim ".2e" stays fully zero-padded.
+        assert_eq!(format_with_spec(1500.0, Some(".2e")), "1.50e+3");
+    }
+    #[test]
+    fn trim_flag_si_keeps_suffix() {
+        // "~s" already worked; this guards against the e/s split regressing it.
+        assert_eq!(format_with_spec(1_500_000.0, Some("~s")), "1.5M");
     }
     #[test]
     fn trim_flag_fixed() {

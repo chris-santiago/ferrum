@@ -1917,3 +1917,511 @@ def test_t2b_spec_type_is_temporal_for_unannotated_datetime_us(
     assert x_enc.get("type") == "temporal", (
         f"unannotated Datetime(us) column must produce type='temporal' in spec; got x={x_enc!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Cleanup pass — four targeted fixes merged on fix/flexibility-cleanup
+#
+# Fix 1: 3- and 4-digit CSS hex shorthand (#ccc → #cccccc) is now parsed.
+# Fix 2: ~e / ~s scientific trim trims only the mantissa, preserving the
+#         exponent suffix.
+# Fix 3: Ranged mark_rule / mark_segment honor a per-row color encoding.
+# Fix 4: mark_raster Y-axis orientation is correct (was flipped).
+# ---------------------------------------------------------------------------
+
+import base64
+import struct
+import zlib
+import warnings
+
+
+def _decode_png_alpha(png_bytes: bytes) -> tuple[list[list[int]], int, int]:
+    """Decode an RGBA PNG blob and return (alpha_grid, width, height).
+
+    alpha_grid[row][col] is the alpha channel value (0-255).  Proper
+    reconstruction of all five PNG filter types is applied so the result
+    is accurate even when the encoder uses Sub/Up/Average/Paeth filters.
+    """
+    pos = 8  # skip 8-byte PNG signature
+    chunks: dict[bytes, bytes] = {}
+    while pos < len(png_bytes):
+        length = struct.unpack(">I", png_bytes[pos : pos + 4])[0]
+        ctype = png_bytes[pos + 4 : pos + 8]
+        data = png_bytes[pos + 8 : pos + 8 + length]
+        chunks[ctype] = chunks.get(ctype, b"") + data
+        pos += 12 + length
+        if ctype == b"IEND":
+            break
+
+    w, h = struct.unpack(">II", chunks[b"IHDR"][:8])
+    color_type = struct.unpack("B", chunks[b"IHDR"][9:10])[0]
+    bpp = 4 if color_type == 6 else 3  # RGBA=6, RGB=2
+
+    raw = zlib.decompress(chunks[b"IDAT"])
+    stride = 1 + w * bpp
+
+    def _paeth(a: int, b: int, c: int) -> int:
+        p = a + b - c
+        pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+        if pa <= pb and pa <= pc:
+            return a
+        elif pb <= pc:
+            return b
+        return c
+
+    reconstructed: list[bytearray] = []
+    for r in range(h):
+        ftype = raw[r * stride]
+        row = bytearray(raw[r * stride + 1 : r * stride + 1 + w * bpp])
+        prev = reconstructed[r - 1] if r > 0 else bytearray(w * bpp)
+        if ftype == 1:  # Sub
+            for i in range(bpp, len(row)):
+                row[i] = (row[i] + row[i - bpp]) & 0xFF
+        elif ftype == 2:  # Up
+            for i in range(len(row)):
+                row[i] = (row[i] + prev[i]) & 0xFF
+        elif ftype == 3:  # Average
+            for i in range(len(row)):
+                a = row[i - bpp] if i >= bpp else 0
+                row[i] = (row[i] + (a + prev[i]) // 2) & 0xFF
+        elif ftype == 4:  # Paeth
+            for i in range(len(row)):
+                a = row[i - bpp] if i >= bpp else 0
+                b_val = prev[i]
+                c = prev[i - bpp] if i >= bpp else 0
+                row[i] = (row[i] + _paeth(a, b_val, c)) & 0xFF
+        reconstructed.append(row)
+
+    alpha = [[reconstructed[r][c * bpp + 3] for c in range(w)] for r in range(h)]
+    return alpha, w, h
+
+
+def _mark_strokes(svg: str, stroke_width: int) -> set[str]:
+    """Extract stroke hex colors from <line> elements with the given stroke-width.
+
+    Using a distinctive stroke_width (e.g. 3) on the mark isolates the mark's
+    rendered lines from the thinner axis and grid lines in the same SVG.
+    """
+    sw_str = str(stroke_width)
+    # Match lines whose stroke-width attribute exactly equals the requested value.
+    pattern = rf'<line[^>]+stroke-width="{sw_str}(?:\.0)?"[^>]*/>'
+    mark_lines = re.findall(pattern, svg)
+    return set(re.findall(r'stroke="#([0-9a-fA-F]{6})"', "\n".join(mark_lines)))
+
+
+# --- Fix 1: 3-digit hex shorthand in OrdinalScale.range ---
+
+
+def test_cleanup_three_digit_hex_parses(three_cat_df: pl.DataFrame) -> None:
+    """OrdinalScale.range accepts 3-digit CSS hex (#ccc, #f00) without a
+    ColorRangeParseFailure warning, and the expanded forms appear in the SVG.
+
+    Before the fix, #ccc was rejected by the Rust hex parser (expected exactly
+    6 hex digits), emitting a ColorRangeParseFailure warning and falling back to
+    the theme default color so all bars rendered identically.  After the fix,
+    shorthand is expanded (#ccc → #cccccc, #f00 → #ff0000) before parsing.
+    """
+    from ferrum.encoding import Color
+
+    scale = OrdinalScale(
+        domain=["A", "B", "C"],
+        range=["#ccc", "#ccc", "#f00"],
+    )
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        svg = (
+            fm.Chart(three_cat_df)
+            .mark_bar()
+            .encode(x="cat:N", y="val:Q", color=Color("cat:N", scale=scale))
+            .show_svg()
+        )
+    parse_failure_warns = [str(x.message) for x in w if "ColorRangeParseFailure" in str(x.message)]
+    assert not parse_failure_warns, (
+        f"3-digit hex in OrdinalScale.range must not emit ColorRangeParseFailure; "
+        f"got: {parse_failure_warns}"
+    )
+    assert "cccccc" in svg, "expanded #ccc → #cccccc must appear in the SVG"
+    assert "ff0000" in svg, "expanded #f00 → #ff0000 must appear in the SVG"
+
+
+# --- Fix 2: ~e scientific format trims only the mantissa ---
+
+
+@pytest.fixture
+def _orders_of_magnitude_df() -> pl.DataFrame:
+    """Two-category frame with values spanning several orders of magnitude."""
+    return pl.DataFrame({"cat": ["A", "B"], "val": [314.0, 31400.0]})
+
+
+def test_cleanup_tilde_e_scientific_trim(_orders_of_magnitude_df: pl.DataFrame) -> None:
+    """Axis(label_format='~e') produces trimmed scientific labels like '3.14e+3'.
+
+    Before the fix, the trim flag on the 'e' format type stripped the entire
+    mantissa body as if it were a plain decimal, leaving labels like '0000e+3'
+    because the exponent suffix confused the plain trimmer.  After the fix,
+    only the mantissa digits before the 'e' are trimmed, preserving the suffix.
+
+    Assertions:
+    - At least one tick label contains 'e+' or 'e-' (scientific notation present).
+    - No tick label contains a long zero run before the exponent ('0000e').
+    """
+    svg = (
+        fm.Chart(_orders_of_magnitude_df)
+        .mark_bar()
+        .encode(
+            x="cat:N",
+            y=fm.Y("val:Q", axis=fm.Axis(label_format="~e")),
+        )
+        .show_svg()
+    )
+    tick_labels = _tick_texts(svg)
+    has_sci = any("e+" in t or "e-" in t for t in tick_labels)
+    assert has_sci, (
+        f"~e format must produce scientific notation labels (containing 'e+' or 'e-'); "
+        f"got {tick_labels}"
+    )
+    has_zero_run = any("0000e" in t for t in tick_labels)
+    assert not has_zero_run, (
+        f"~e trim must not leave long zero runs before the exponent; found '0000e' in {tick_labels}"
+    )
+
+
+def test_cleanup_tilde_s_si_trim_regression(_orders_of_magnitude_df: pl.DataFrame) -> None:
+    """Axis(label_format='~s') still trims SI-suffix labels correctly.
+
+    Regression guard: the ~e fix routes 'e' and 's' through the exponent-aware
+    trimmer. The 's' format has no exponent in its body (e.g. '1.5M'), so the
+    trimmer must fall back gracefully and still produce trimmed SI labels.
+    """
+    df = pl.DataFrame({"cat": ["A", "B"], "val": [1_000_000.0, 3_000_000.0]})
+    svg = (
+        fm.Chart(df)
+        .mark_bar()
+        .encode(
+            x="cat:N",
+            y=fm.Y("val:Q", axis=fm.Axis(label_format="~s")),
+        )
+        .show_svg()
+    )
+    tick_labels = _tick_texts(svg)
+    assert any("M" in t for t in tick_labels), (
+        f"~s trim must still produce SI-suffix labels with 'M'; got {tick_labels}"
+    )
+
+
+# --- Fix 3: ranged mark_rule / mark_segment honor per-row color encoding ---
+#
+# Assertion strategy: use stroke_width=3 on the mark to produce uniquely-wide
+# lines in the SVG.  Axis and grid lines use stroke-width 0.5 or 1; mark lines
+# at width 3 are unambiguous.  The set of hex stroke colors from those elements
+# is then compared across the color-encoded and no-color variants.
+
+
+@pytest.fixture
+def _ranged_rule_df() -> pl.DataFrame:
+    """Two-row frame with distinct 'dir' categories for ranged rule tests."""
+    return pl.DataFrame(
+        {
+            "cat": ["A", "B"],
+            "lo": [1.0, 3.0],
+            "hi": [5.0, 7.0],
+            "dir": ["up", "down"],
+        }
+    )
+
+
+def test_cleanup_ranged_rule_per_row_color(_ranged_rule_df: pl.DataFrame) -> None:
+    """mark_rule with y + y2 + color encoding renders distinct stroke colors per row.
+
+    Before the fix, the ranged-rule renderer used the constant mark-style stroke
+    for every row regardless of the color encoding, so all rules shared a single
+    color even when 'color=dir:N' was encoded with two distinct categories.
+    """
+    svg = (
+        fm.Chart(_ranged_rule_df)
+        .mark_rule(stroke_width=3)
+        .encode(x="cat:N", y="lo:Q", y2="hi:Q", color="dir:N")
+        .show_svg()
+    )
+    mark_strokes = _mark_strokes(svg, stroke_width=3)
+    assert len(mark_strokes) >= 2, (
+        f"ranged mark_rule with color='dir:N' (2 categories) must produce "
+        f"at least 2 distinct stroke colors; got {mark_strokes}"
+    )
+
+
+def test_cleanup_ranged_rule_no_color_single_stroke(_ranged_rule_df: pl.DataFrame) -> None:
+    """mark_rule with y + y2 but NO color encoding uses a single constant stroke.
+
+    Regression guard: the per-row color resolution must not activate when there
+    is no color encoding, so all ranged rules share the mark-style default.
+    """
+    df = _ranged_rule_df.drop("dir")
+    svg = fm.Chart(df).mark_rule(stroke_width=3).encode(x="cat:N", y="lo:Q", y2="hi:Q").show_svg()
+    mark_strokes = _mark_strokes(svg, stroke_width=3)
+    assert len(mark_strokes) == 1, (
+        f"ranged mark_rule without color encoding must use a single constant stroke; "
+        f"got {mark_strokes}"
+    )
+
+
+def test_cleanup_ranged_segment_per_row_color() -> None:
+    """mark_segment with x/y/x2/y2 + color encoding renders distinct stroke colors per row."""
+    df = pl.DataFrame(
+        {
+            "x": [0.0, 1.0],
+            "y": [0.0, 0.5],
+            "x2": [0.5, 1.5],
+            "y2": [1.0, 0.0],
+            "dir": ["up", "down"],
+        }
+    )
+    svg = (
+        fm.Chart(df)
+        .mark_segment(stroke_width=3)
+        .encode(x="x:Q", y="y:Q", x2="x2:Q", y2="y2:Q", color="dir:N")
+        .show_svg()
+    )
+    mark_strokes = _mark_strokes(svg, stroke_width=3)
+    assert len(mark_strokes) >= 2, (
+        f"mark_segment with color='dir:N' (2 categories) must produce "
+        f"at least 2 distinct stroke colors; got {mark_strokes}"
+    )
+
+
+# --- Fix 4: mark_raster Y-axis orientation ---
+#
+# Assertion strategy: render mark_raster on a strong positive-correlation cloud
+# (y ≈ 0.9*x), decode the embedded PNG (base64 data URI in the SVG image node),
+# and compare pixel-mass in the four quadrants.  For a correct Y orientation,
+# high-X/high-Y data maps to the TOP-RIGHT of the image (screen row 0 is the
+# top); the dense diagonal runs from bottom-left to top-right.
+#
+# The full-resolution PNG (256×256) is decoded with proper filter reconstruction
+# (filter types 0-4) using stdlib zlib + struct only (no PIL/pypng needed).
+# The quadrant test is deterministic for seeds that produce a clear correlation.
+#
+# Why this approach: the raster mark bakes the grid into a PNG data URI, so the
+# PNG quadrant mass directly proves the Y mapping.  Comparing render to a
+# point-mark version would add render-path noise; the PNG approach is tighter.
+
+
+@pytest.fixture
+def _positive_corr_df() -> pl.DataFrame:
+    """300-point positive-correlation cloud: y ≈ 0.9*x + noise."""
+    import numpy as np
+
+    rng = np.random.default_rng(42)
+    n = 300
+    x = rng.normal(0, 1, n)
+    y = 0.9 * x + rng.normal(0, 0.3, n)
+    return pl.DataFrame({"x": x.tolist(), "y": y.tolist()})
+
+
+def test_cleanup_raster_y_orientation(_positive_corr_df: pl.DataFrame) -> None:
+    """mark_raster Y orientation is correct: high-Y data renders at the top of the image.
+
+    Before the fix, the Rust raster transform packed pixel rows in ascending
+    data-Y order (gy=0 first), which is bottom-up in data space but top-down
+    in screen space.  The PNG image node anchors row 0 at the top, so the raster
+    was rendered upside-down relative to every other mark.
+
+    For a positive-correlation cloud, correct Y orientation means the dense mass
+    lies on the bottom-left to top-right diagonal, i.e.
+        top_right_mass + bottom_left_mass > top_left_mass + bottom_right_mass.
+    """
+    svg = fm.Chart(_positive_corr_df).mark_raster().encode(x="x:Q", y="y:Q").show_svg()
+    # Extract the embedded PNG from the data URI.
+    m = re.search(r"data:image/png;base64,([A-Za-z0-9+/=]+)", svg)
+    assert m is not None, "mark_raster SVG must contain an embedded PNG data URI"
+    png_bytes = base64.b64decode(m.group(1))
+
+    alpha, w, h = _decode_png_alpha(png_bytes)
+    mid_r = h // 2
+    mid_c = w // 2
+
+    tl = sum(alpha[r][c] for r in range(mid_r) for c in range(mid_c))
+    tr = sum(alpha[r][c] for r in range(mid_r) for c in range(mid_c, w))
+    bl = sum(alpha[r][c] for r in range(mid_r, h) for c in range(mid_c))
+    br = sum(alpha[r][c] for r in range(mid_r, h) for c in range(mid_c, w))
+
+    diagonal_mass = tr + bl
+    anti_diagonal_mass = tl + br
+    assert diagonal_mass > anti_diagonal_mass, (
+        f"mark_raster with positive-correlation data must have more pixel mass on the "
+        f"bottom-left↔top-right diagonal (correct Y) than the anti-diagonal (flipped Y); "
+        f"diagonal={diagonal_mass}, anti-diagonal={anti_diagonal_mass}. "
+        f"Quadrant breakdown: TL={tl}, TR={tr}, BL={bl}, BR={br}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review fixes — heavyweight review findings (2026-05-31)
+# ---------------------------------------------------------------------------
+
+
+import re as _re
+
+
+def _extract_svg_width(svg: str) -> float:
+    """Return the canvas width from an SVG string's ``width`` attribute or viewBox."""
+    # Try width="NNN" first.
+    m = _re.search(r'<svg[^>]+\bwidth="([0-9.]+)"', svg)
+    if m:
+        return float(m.group(1))
+    # Fall back to viewBox="minX minY width height".
+    m = _re.search(r'<svg[^>]+\bviewBox="[0-9.]+ [0-9.]+ ([0-9.]+) [0-9.]+"', svg)
+    if m:
+        return float(m.group(1))
+    raise ValueError("Could not extract width from SVG")
+
+
+# -- RF1: displot facet width must not scale with panel count -----------------
+
+
+def test_rf1_displot_facet_width_constant_across_row_counts() -> None:
+    """displot with row= and a fixed aspect produces the same canvas width
+    regardless of how many row-facet levels the data has.
+
+    The bug was: w = total_h * aspect, where total_h = per_panel_height * n_panels.
+    So width grew linearly with panel count.  The fix computes width from
+    per_panel_height alone: w = per_panel_height * aspect.
+    """
+    import polars as pl
+    from ferrum.plots.distribution import displot
+
+    rng_seed = 0
+    import numpy as np
+
+    rng = np.random.default_rng(rng_seed)
+
+    # 1-level facet
+    df_1 = pl.DataFrame({"x": rng.normal(0, 1, 100).tolist(), "cat": ["A"] * 100})
+    # 6-level facet
+    cats_6 = [c for c in "ABCDEF" for _ in range(100)]
+    df_6 = pl.DataFrame({"x": rng.normal(0, 1, 600).tolist(), "cat": cats_6})
+
+    per_panel_h = 200.0
+    asp = 1.0
+
+    svg_1 = displot(df_1, x="x", row="cat", height=per_panel_h, aspect=asp).show_svg()
+    svg_6 = displot(df_6, x="x", row="cat", height=per_panel_h, aspect=asp).show_svg()
+
+    w1 = _extract_svg_width(svg_1)
+    w6 = _extract_svg_width(svg_6)
+
+    expected_w = per_panel_h * asp
+    assert w1 == pytest.approx(expected_w, rel=0.05), (
+        f"1-panel displot width {w1} should be ~{expected_w} (per_panel_h * aspect)"
+    )
+    assert w6 == pytest.approx(expected_w, rel=0.05), (
+        f"6-panel displot width {w6} should be ~{expected_w} (per_panel_h * aspect), "
+        f"but was {w6} — suggests width still scales with panel count"
+    )
+    assert w1 == pytest.approx(w6, rel=0.05), (
+        f"displot canvas width must be the same for 1-row-panel ({w1}) "
+        f"and 6-row-panel ({w6}) charts with the same aspect"
+    )
+
+
+# -- RF2: boxen sort must work on pandas DataFrame input ----------------------
+
+
+@pytest.fixture
+def sort_boxen_pandas_df():
+    """Pandas DataFrame with categories Z (highest), B (medium), A (lowest).
+
+    Same distribution as sort_boxen_df but as a pandas DataFrame so we can
+    confirm mark_boxen sort pre-resolution works for non-polars input.
+    """
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(42)
+    rows = []
+    for cat, loc in [("A", 20.0), ("Z", 80.0), ("B", 50.0)]:
+        for v in rng.normal(loc, 15.0, 300).tolist():
+            rows.append({"cat": cat, "val": v})
+    return pd.DataFrame(rows)
+
+
+def test_rf2_boxen_sort_descending_pandas(sort_boxen_pandas_df) -> None:
+    """mark_boxen with X(sort='-y') pre-resolves sort correctly for pandas input.
+
+    Regression guard for the bug where _resolve_boxen_cat_sort returned the sort
+    dict unchanged for non-polars data, causing Rust to emit SortSpecIgnored.
+    The fix converts the data to polars via _to_polars (which routes through
+    to_arrow_table) before computing the aggregate order.
+    """
+    import warnings
+
+    # Check 1: no SortSpecIgnored warning.
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        svg_desc = (
+            fm.Chart(sort_boxen_pandas_df)
+            .mark_boxen()
+            .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
+            .show_svg()
+        )
+    sort_ignored = any("SortSpecIgnored" in str(ww.message) for ww in w)
+    assert not sort_ignored, (
+        "sort='-y' on mark_boxen with pandas input must not emit SortSpecIgnored"
+    )
+
+    # Check 2: Python-level sort pre-resolution produces the explicit ordered list.
+    # Z≈80 > B≈50 > A≈20, so descending by mean gives ['Z', 'B', 'A'].
+    chart_resolved = (
+        fm.Chart(sort_boxen_pandas_df).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
+    )._resolve_pending()
+    x_enc = chart_resolved._layers[0].encoding["x"]
+    resolved_sort = x_enc._kwargs.get("sort") if hasattr(x_enc, "_kwargs") else None
+    assert resolved_sort == ["Z", "B", "A"], (
+        f"boxen sort='-y' on pandas input must resolve to explicit list "
+        f"['Z','B','A']; got {resolved_sort!r}"
+    )
+
+    # Check 3: sorted SVG differs from unsorted.
+    svg_no_sort = (
+        fm.Chart(sort_boxen_pandas_df).mark_boxen().encode(x="cat:N", y="val:Q").show_svg()
+    )
+    assert svg_desc != svg_no_sort, (
+        "boxen sort='-y' on pandas input must produce a different SVG than no-sort"
+    )
+
+
+def test_rf2_boxen_sort_descending_pyarrow() -> None:
+    """mark_boxen with X(sort='-y') pre-resolves sort correctly for PyArrow Table input."""
+    import numpy as np
+    import pyarrow as pa
+    import warnings
+
+    rng = np.random.default_rng(42)
+    rows = []
+    for cat, loc in [("A", 20.0), ("Z", 80.0), ("B", 50.0)]:
+        for v in rng.normal(loc, 15.0, 300).tolist():
+            rows.append({"cat": cat, "val": v})
+
+    table = pa.table(
+        {
+            "cat": pa.array([r["cat"] for r in rows], type=pa.string()),
+            "val": pa.array([r["val"] for r in rows], type=pa.float64()),
+        }
+    )
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        (fm.Chart(table).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q").show_svg())
+    sort_ignored = any("SortSpecIgnored" in str(ww.message) for ww in w)
+    assert not sort_ignored, (
+        "sort='-y' on mark_boxen with PyArrow Table input must not emit SortSpecIgnored"
+    )
+
+    chart_resolved = (
+        fm.Chart(table).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
+    )._resolve_pending()
+    x_enc = chart_resolved._layers[0].encoding["x"]
+    resolved_sort = x_enc._kwargs.get("sort") if hasattr(x_enc, "_kwargs") else None
+    assert resolved_sort == ["Z", "B", "A"], (
+        f"boxen sort='-y' on PyArrow input must resolve to ['Z','B','A']; got {resolved_sort!r}"
+    )

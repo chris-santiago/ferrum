@@ -1,7 +1,7 @@
 //! Segment mark — diagonal line from (x, y) to (x2, y2).
 //! Distinct from rule (axis-aligned only): segments may go in any direction.
 
-use crate::render::draw::{col_as_f64, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{to_scene_stroke, MarkBuildResult, MetadataColumns};
@@ -35,6 +35,18 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
+    // Per-row stroke color from the color encoding + color scale (same path as
+    // line.rs/point.rs). Only wins when no explicit user stroke override is set.
+    let color_values: Option<Vec<Option<crate::render::color::Color>>> =
+        match (color_field(ctx, spec), ctx.scales.color.as_ref()) {
+            (Some(field), Some(scale)) => col_as_str(ctx.batch, field).ok().map(|cats| {
+                cats.iter()
+                    .map(|c| c.as_deref().and_then(|v| scale.lookup(v)))
+                    .collect()
+            }),
+            _ => None,
+        };
+
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
     let meta = MetadataColumns::from_ctx(ctx);
@@ -65,8 +77,18 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .and_then(|v| v.get(i).copied().flatten())
             .unwrap_or(ctx.mark_style.stroke_width);
 
+        // Precedence: explicit constant stroke (user mark_kwargs) > per-row color
+        // encoding > theme stroke > fill fallback.
+        let row_color_opt = color_values
+            .as_ref()
+            .and_then(|v| v.get(i).copied().flatten());
+        let row_color = if ctx.mark_style.stroke_is_user_set {
+            ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill)
+        } else {
+            row_color_opt.or(ctx.mark_style.stroke).unwrap_or(ctx.mark_style.fill)
+        };
         let row_style = to_scene_stroke(
-            ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill),
+            row_color,
             row_stroke_width,
             row_opacity,
             ctx.mark_style.stroke_dash.as_deref(),
@@ -240,5 +262,55 @@ mod tests {
         } else {
             panic!("Expected Line node");
         }
+    }
+
+    #[test]
+    fn segment_resolves_per_row_color_encoding() {
+        use arrow::array::StringArray;
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Segment,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                x2: Some(EncodingSpec { field: "x2".into(), type_: None, ..Default::default() }),
+                y2: Some(EncodingSpec { field: "y2".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "dir".into(), type_: Some(crate::spec::encoding::DataType::Nominal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None,
+            mark_style: None, position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("x2", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("dir", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(StringArray::from(vec!["up", "down"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Segment);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let colors: Vec<_> = result.nodes.iter().filter_map(|n| match n {
+            ferrum_scene::SceneNode::Line { style, .. } => Some(style.color),
+            _ => None,
+        }).collect();
+        assert_eq!(colors.len(), 2);
+        assert_ne!(
+            (colors[0].r, colors[0].g, colors[0].b),
+            (colors[1].r, colors[1].g, colors[1].b),
+            "segment color encoding must yield distinct per-row stroke colors"
+        );
     }
 }

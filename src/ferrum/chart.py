@@ -156,9 +156,17 @@ def _resolve_boxen_cat_sort(
     try:
         import polars as pl
 
-        if not isinstance(data, pl.DataFrame):
-            return sort
-        if cat_field not in data.columns or val_field not in data.columns:
+        # Coerce to polars so pandas/pyarrow/narwhals input all work the same
+        # way.  The LetterValue transform drops the original value column, so a
+        # field-based sort dict referencing it would cause Rust to emit
+        # SortSpecIgnored.  We compute the explicit category order here in
+        # Python from the source data regardless of backend.
+        if isinstance(data, pl.DataFrame):
+            df = data
+        else:
+            df = pl.from_arrow(to_arrow_table(data))
+
+        if cat_field not in df.columns or val_field not in df.columns:
             return sort
 
         op = sort.get("op", "sum")
@@ -176,7 +184,7 @@ def _resolve_boxen_cat_sort(
         agg_fn = _OP_MAP.get(op, pl.sum)
         agg_col = f"_sort_{val_field}"
         ordered = (
-            data.group_by(cat_field)
+            df.group_by(cat_field)
             .agg(agg_fn(val_field).alias(agg_col))
             .sort(agg_col, descending=descending)
             .get_column(cat_field)

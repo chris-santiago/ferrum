@@ -1761,3 +1761,146 @@ fn d5_sort_field_object_count_orders_by_row_count() {
     assert!(warnings.is_empty(), "valid count sort must not warn: {warnings:?}");
     assert_eq!(x_ordinal_domain(&scales), vec!["b", "c", "a"]);
 }
+
+// ── F1: Float64 ordinal axis scale resolution ────────────────────────────────
+
+/// F1 regression: a Float64 column explicitly typed `:O` must resolve to an
+/// ordinal x-scale without returning `UnsupportedDtype`. Previously, only
+/// `distinct_values_in_order` (domain side) lacked Float support; the drawer
+/// side (`col_as_ordinal_category_str`) already handled Float. This test
+/// validates that both sides now agree and the scale resolves successfully.
+#[test]
+fn f1_float64_explicit_ordinal_type_resolves_to_ordinal_scale() {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType as SpecDataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("yr", ArrowDataType::Float64, false),
+        Field::new("v",  ArrowDataType::Float64, false),
+    ]));
+    // Three rows: yr=[2000.0, 2001.0, 2002.0], v=[1.0, 2.0, 3.0]
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![2000.0, 2001.0, 2002.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+        ],
+    )
+    .unwrap();
+
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec {
+                field: "yr".into(),
+                type_: Some(SpecDataType::Ordinal),
+                ..Default::default()
+            }),
+            y: Some(EncodingSpec { field: "v".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+    };
+
+    let theme = ThemeInputs::default();
+    let (scales, warnings) =
+        resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    assert!(warnings.is_empty(), "float ordinal must not produce warnings: {warnings:?}");
+
+    // x must resolve to an ordinal scale with integer-formatted domain strings.
+    let domain = x_ordinal_domain(&scales);
+    assert_eq!(domain, vec!["2000", "2001", "2002"],
+        "Float64 ordinal domain must be integer-formatted (not '2000.0')"
+    );
+
+    // Each domain entry must map to a finite pixel (domain↔drawer agreement).
+    for label in &domain {
+        let px = scales.x.to_pixel_str(label);
+        assert!(
+            px.is_some(),
+            "domain value {label:?} must map to a pixel via to_pixel_str"
+        );
+        assert!(
+            px.unwrap().is_finite(),
+            "pixel for {label:?} must be finite, got {:?}", px
+        );
+    }
+}
+
+/// F1 companion: Float64 ordinal with fractional values must resolve and
+/// produce decimal-formatted domain strings that match what the drawer emits.
+#[test]
+fn f1_float64_ordinal_fractional_values_resolve() {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType as SpecDataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.5, 2.5, 1.5])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+        ],
+    )
+    .unwrap();
+
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec {
+                field: "x".into(),
+                type_: Some(SpecDataType::Ordinal),
+                ..Default::default()
+            }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+    };
+
+    let theme = ThemeInputs::default();
+    let (scales, warnings) =
+        resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    assert!(warnings.is_empty(), "float ordinal must not produce warnings: {warnings:?}");
+
+    // Fractional values must keep decimal format; deduped in encounter order.
+    let domain = x_ordinal_domain(&scales);
+    assert_eq!(domain, vec!["1.5", "2.5"]);
+
+    // Domain entries must map to finite pixels.
+    for label in &domain {
+        let px = scales.x.to_pixel_str(label);
+        assert!(px.is_some() && px.unwrap().is_finite(),
+            "domain value {label:?} must map to a finite pixel"
+        );
+    }
+}
