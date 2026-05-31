@@ -616,8 +616,8 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         # here using the original field names.  Composite desugars replace the
         # y-channel field with computed columns (e.g. lower_whisker, q1), so the
         # Rust renderer would otherwise sort by the wrong column.
-        _raw_x_sort = x_enc._kwargs.get("sort") if isinstance(x_enc, ChannelBase) else None
-        _raw_y_sort = y_enc._kwargs.get("sort") if isinstance(y_enc, ChannelBase) else None
+        _raw_x_sort = x_enc.option("sort") if isinstance(x_enc, ChannelBase) else None
+        _raw_y_sort = y_enc.option("sort") if isinstance(y_enc, ChannelBase) else None
         x_sort = (
             _resolve_sort_for_composite(_raw_x_sort, x_field, y_field)
             if _raw_x_sort is not None
@@ -2838,7 +2838,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         if (
             isinstance(_ch_x, ChannelBase)
             and "axis" in _ch_x._kwargs
-            and _ch_x._kwargs["axis"] is None
+            and _ch_x.option("axis") is None
             and resolved._axis_x is None
         ):
             kw["axis_x"] = False
@@ -2846,7 +2846,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         if (
             isinstance(_ch_y, ChannelBase)
             and "axis" in _ch_y._kwargs
-            and _ch_y._kwargs["axis"] is None
+            and _ch_y.option("axis") is None
             and resolved._axis_y is None
         ):
             kw["axis_y"] = False

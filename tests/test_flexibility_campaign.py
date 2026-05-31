@@ -2617,3 +2617,97 @@ def test_r7_d2_behavior_still_holds() -> None:
     colors = _polyline_strokes(svg)
     missing = standalone_colors - colors
     assert not missing, f"base + highlight is missing highlight colors {missing}; got {colors}"
+
+
+# ---------------------------------------------------------------------------
+# R5 — ChannelBase.option accessor
+# ---------------------------------------------------------------------------
+
+
+def test_r5_option_returns_kwarg_value() -> None:
+    """option() returns the kwarg value when the key is present."""
+    from ferrum.encoding import X
+
+    ch = X("val", sort="-y", type="Q")
+    assert ch.option("sort") == "-y"
+    assert ch.option("type") == "Q"
+
+
+def test_r5_option_returns_default_when_absent() -> None:
+    """option() returns the supplied default (or None) when the key is absent."""
+    from ferrum.encoding import X
+
+    ch = X("val", type="Q")
+    assert ch.option("sort") is None
+    assert ch.option("sort", "ascending") == "ascending"
+    assert ch.option("axis", False) is False
+
+
+def test_r5_option_none_value_distinct_from_absent() -> None:
+    """option() returns None for an explicitly-set None value.
+
+    chart.py's axis-suppression code relies on ``'axis' in _ch._kwargs`` to
+    distinguish 'axis=None explicitly passed' from 'axis not passed at all'.
+    This test confirms that option() on a channel with axis=None gives None,
+    matching the original ``_kwargs["axis"] is None`` value check.
+    """
+    from ferrum.encoding import X
+
+    ch_explicit_none = X("val", axis=None)
+    ch_absent = X("val")
+    # Both return None from option(), but only ch_explicit_none has the key
+    # present — the 'in _kwargs' guard in chart.py keeps them distinct.
+    assert ch_explicit_none.option("axis") is None
+    assert ch_absent.option("axis") is None
+    assert "axis" in ch_explicit_none._kwargs
+    assert "axis" not in ch_absent._kwargs
+
+
+def test_r5_sorted_bar_category_order_unchanged() -> None:
+    """A sorted bar chart renders identically before and after the option() swap.
+
+    Builds a nominal bar chart with sort="-y" on the x encoding, renders it,
+    and verifies the category order in the SVG matches the expected sort order
+    (highest-value category first).  This exercises both the sort read-path
+    (lines 619-620 in chart.py) and the axis read-path (lines 2840-2849).
+    """
+    df = pl.DataFrame(
+        {
+            "cat": ["A", "B", "C"],
+            "val": [10.0, 30.0, 20.0],
+        }
+    )
+    svg = (
+        fm.Chart(df)
+        .mark_bar()
+        .encode(x=fm.X("cat", type="N", sort="-y"), y=fm.Y("val", type="Q"))
+        .show_svg()
+    )
+    # B (30) should appear before C (20) should appear before A (10).
+    pos_b = svg.find(">B<")
+    pos_c = svg.find(">C<")
+    pos_a = svg.find(">A<")
+    assert pos_b != -1 and pos_c != -1 and pos_a != -1, "category labels A, B, C must appear in SVG"
+    assert pos_b < pos_c < pos_a, (
+        f"expected sort order B < C < A in SVG; got positions B={pos_b} C={pos_c} A={pos_a}"
+    )
+
+
+def test_r5_axis_none_suppression_unchanged() -> None:
+    """X('field', axis=None) still suppresses the x-axis after the option() swap."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [4.0, 5.0, 6.0]})
+    svg_with_axis = (
+        fm.Chart(df).mark_point().encode(x=fm.X("x", type="Q"), y=fm.Y("y", type="Q")).show_svg()
+    )
+    svg_no_axis = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x=fm.X("x", type="Q", axis=None), y=fm.Y("y", type="Q"))
+        .show_svg()
+    )
+    # With axis: tick labels appear; without: they should be absent or suppressed.
+    # The simplest proxy is that the suppressed SVG has fewer characters (no tick
+    # text / axis lines) than the version with a full axis.
+    assert len(svg_no_axis) < len(svg_with_axis), (
+        "axis=None should produce a smaller SVG (no x-axis tick labels/lines)"
+    )
