@@ -472,3 +472,309 @@ def test_d2_annotation_hline_does_not_pollute_axes() -> None:
     ]:
         svg = chart.show_svg()
         assert "_y" not in svg, f"{label}: internal annotation field '_y' must not appear in SVG"
+
+
+# ---------------------------------------------------------------------------
+# D5 — sort forwarding through composite marks
+# ---------------------------------------------------------------------------
+
+
+def _x_cat_order(svg: str, cat_set: set[str]) -> list[str]:
+    """Return the distinct category labels from x-axis text elements, in document order.
+
+    Extracts all <text> elements, filters to those whose content is in *cat_set*,
+    and de-duplicates while preserving first-occurrence order.  Document order
+    corresponds to left-to-right axis rendering.
+    """
+    seen: list[str] = []
+    for t in re.findall(r"<text[^>]*>([^<]+)</text>", svg):
+        if t in cat_set and t not in seen:
+            seen.append(t)
+    return seen
+
+
+@pytest.fixture
+def sort_bar_df() -> pl.DataFrame:
+    """Three-category DataFrame where distinct y sums determine sort order.
+
+    X=10, A=50, B=30.  Descending by sum/mean: A > B > X.
+    """
+    return pl.DataFrame({"c": ["X", "A", "B"], "y": [10.0, 50.0, 30.0]})
+
+
+@pytest.fixture
+def sort_composite_df() -> pl.DataFrame:
+    """Multi-observation DataFrame with categories in C, A, B appearance order.
+
+    Mean values: C≈20, A≈80, B≈50.  Descending by mean: A > B > C.
+    Data appearance order (no sort): C, A, B.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    rows = []
+    for cat, loc in [("C", 20.0), ("A", 80.0), ("B", 50.0)]:
+        for v in rng.normal(loc, 3.0, 20).tolist():
+            rows.append({"cat": cat, "val": v})
+    return pl.DataFrame(rows)
+
+
+# --- Primitive bar (lock in Rust-side sort) ---
+
+
+def test_d5_primitive_bar_sort_descending(sort_bar_df: pl.DataFrame) -> None:
+    """X('c:N', sort='-y') on a bar chart orders categories by descending sum(y)."""
+    svg = fm.Chart(sort_bar_df).mark_bar().encode(x=fm.X("c:N", sort="-y"), y="y:Q").show_svg()
+    order = _x_cat_order(svg, {"A", "B", "X"})
+    assert order == ["A", "B", "X"], (
+        f"sort='-y' should produce descending order A > B > X; got {order}"
+    )
+
+
+def test_d5_primitive_bar_sort_ascending(sort_bar_df: pl.DataFrame) -> None:
+    """X('c:N', sort='y') on a bar chart orders categories by ascending sum(y)."""
+    svg = fm.Chart(sort_bar_df).mark_bar().encode(x=fm.X("c:N", sort="y"), y="y:Q").show_svg()
+    order = _x_cat_order(svg, {"A", "B", "X"})
+    assert order == ["X", "B", "A"], (
+        f"sort='y' should produce ascending order X < B < A; got {order}"
+    )
+
+
+def test_d5_primitive_bar_sort_explicit_array(sort_bar_df: pl.DataFrame) -> None:
+    """X('c:N', sort=['A','X','B']) renders categories in the declared array order."""
+    svg = (
+        fm.Chart(sort_bar_df)
+        .mark_bar()
+        .encode(x=fm.X("c:N", sort=["A", "X", "B"]), y="y:Q")
+        .show_svg()
+    )
+    order = _x_cat_order(svg, {"A", "B", "X"})
+    assert order == ["A", "X", "B"], f"sort=['A','X','B'] should produce literal order; got {order}"
+
+
+def test_d5_primitive_bar_sort_dict_form(sort_bar_df: pl.DataFrame) -> None:
+    """X('c:N', sort={field,op,order}) renders categories in the declared aggregate order."""
+    svg = (
+        fm.Chart(sort_bar_df)
+        .mark_bar()
+        .encode(
+            x=fm.X("c:N", sort={"field": "y", "op": "mean", "order": "descending"}),
+            y="y:Q",
+        )
+        .show_svg()
+    )
+    order = _x_cat_order(svg, {"A", "B", "X"})
+    assert order == ["A", "B", "X"], (
+        f"dict sort should produce descending-mean order A > B > X; got {order}"
+    )
+
+
+# --- Composite mark sort (the fix) ---
+
+
+def test_d5_boxplot_sort_descending(sort_composite_df: pl.DataFrame) -> None:
+    """mark_boxplot with X(sort='-y') orders boxes by descending aggregate value."""
+    svg = (
+        fm.Chart(sort_composite_df)
+        .mark_boxplot()
+        .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
+        .show_svg()
+    )
+    order = _x_cat_order(svg, {"A", "B", "C"})
+    assert order == ["A", "B", "C"], (
+        f"boxplot sort='-y' should order A(80) > B(50) > C(20); got {order}"
+    )
+
+
+def test_d5_boxplot_sort_dict(sort_composite_df: pl.DataFrame) -> None:
+    """mark_boxplot with X(sort={field,op,order}) orders boxes by the explicit aggregate."""
+    svg = (
+        fm.Chart(sort_composite_df)
+        .mark_boxplot()
+        .encode(
+            x=fm.X("cat:N", sort={"field": "val", "op": "mean", "order": "descending"}),
+            y="val:Q",
+        )
+        .show_svg()
+    )
+    order = _x_cat_order(svg, {"A", "B", "C"})
+    assert order == ["A", "B", "C"], (
+        f"boxplot dict sort should order A(80) > B(50) > C(20); got {order}"
+    )
+
+
+def test_d5_violin_sort_descending(sort_composite_df: pl.DataFrame) -> None:
+    """mark_violin with X(sort='-y') orders violin bodies by descending aggregate."""
+    svg = (
+        fm.Chart(sort_composite_df)
+        .mark_violin()
+        .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
+        .show_svg()
+    )
+    order = _x_cat_order(svg, {"A", "B", "C"})
+    assert order == ["A", "B", "C"], (
+        f"violin sort='-y' should order A(80) > B(50) > C(20); got {order}"
+    )
+
+
+def test_d5_errorbar_sort_descending(sort_composite_df: pl.DataFrame) -> None:
+    """mark_errorbar with X(sort='-y') orders error bars by descending aggregate."""
+    svg = (
+        fm.Chart(sort_composite_df)
+        .mark_errorbar()
+        .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
+        .show_svg()
+    )
+    order = _x_cat_order(svg, {"A", "B", "C"})
+    assert order == ["A", "B", "C"], (
+        f"errorbar sort='-y' should order A(80) > B(50) > C(20); got {order}"
+    )
+
+
+# --- Regression: composites without sort preserve data appearance order ---
+
+
+def test_d5_boxplot_no_sort_preserves_data_order(sort_composite_df: pl.DataFrame) -> None:
+    """mark_boxplot without sort preserves data-appearance order (C, A, B)."""
+    svg = fm.Chart(sort_composite_df).mark_boxplot().encode(x="cat:N", y="val:Q").show_svg()
+    order = _x_cat_order(svg, {"A", "B", "C"})
+    assert order == ["C", "A", "B"], (
+        f"boxplot without sort should render in data-appearance order C, A, B; got {order}"
+    )
+
+
+def test_d5_violin_no_sort_preserves_data_order(sort_composite_df: pl.DataFrame) -> None:
+    """mark_violin without sort preserves data-appearance order (C, A, B)."""
+    svg = fm.Chart(sort_composite_df).mark_violin().encode(x="cat:N", y="val:Q").show_svg()
+    order = _x_cat_order(svg, {"A", "B", "C"})
+    assert order == ["C", "A", "B"], (
+        f"violin without sort should render in data-appearance order C, A, B; got {order}"
+    )
+
+
+@pytest.fixture
+def sort_boxen_df() -> pl.DataFrame:
+    """300-observation DataFrame with categories Z (highest), B (medium), A (lowest).
+
+    Mean values: Z≈80, B≈50, A≈20.  Descending by mean: Z > B > A.
+    The descending order (Z, B, A) is non-alphabetical so we can distinguish it
+    from the default alphabetical rendering (A, B, Z).
+
+    300 observations with std=15 ensure wide enough spread for boxen to produce
+    multiple visible depth bands with non-trivial x-axis tick layout, making the
+    sorted vs. unsorted SVG byte-differ in domain-related content (not just labels).
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(42)
+    rows = []
+    for cat, loc in [("A", 20.0), ("Z", 80.0), ("B", 50.0)]:
+        for v in rng.normal(loc, 15.0, 300).tolist():
+            rows.append({"cat": cat, "val": v})
+    return pl.DataFrame(rows)
+
+
+def test_d5_boxen_sort_descending(sort_boxen_df: pl.DataFrame) -> None:
+    """mark_boxen with X(sort='-y') orders bands by descending aggregate.
+
+    Regression guard for the bug where boxen's LetterValue transform renames the
+    groupby column to "group" and drops the original value column from its per-depth
+    batches, causing sort dicts referencing the original value field to be silently
+    ignored by Rust.  The fix pre-resolves the sort to an explicit ordered category
+    list in Python so the explicit-array sort path is used instead.
+
+    The assertion strategy uses three independent checks:
+
+    1. No ``SortSpecIgnored`` Rust warning (the core bug symptom).
+    2. The resolved layer encoding carries the expected explicit sort list (Python-level
+       correctness — the fix must produce this list for the layer to receive it).
+    3. The sorted SVG differs from the unsorted SVG (Rust-side effect: the sort is
+       actually applied to the rendered domain).
+
+    We deliberately avoid asserting on SVG ``<text>`` label order because boxen tick
+    labels are only rendered when depth bands are wide enough, which varies with the
+    rendering context and is not stable across pytest-xdist worker processes.
+    """
+    import warnings
+
+    # Check 1: no SortSpecIgnored warning.
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        svg_desc = (
+            fm.Chart(sort_boxen_df)
+            .mark_boxen()
+            .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
+            .show_svg()
+        )
+    sort_ignored = any("SortSpecIgnored" in str(ww.message) for ww in w)
+    assert not sort_ignored, "sort='-y' on mark_boxen must not emit SortSpecIgnored"
+
+    # Check 2: Python-level sort pre-resolution produces expected explicit list.
+    # Z≈80 > B≈50 > A≈20, so descending by mean gives ['Z', 'B', 'A'].
+    chart_resolved = (
+        fm.Chart(sort_boxen_df).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
+    )._resolve_pending()
+    x_enc = chart_resolved._layers[0].encoding["x"]
+    resolved_sort = x_enc._kwargs.get("sort") if hasattr(x_enc, "_kwargs") else None
+    assert resolved_sort == ["Z", "B", "A"], (
+        f"boxen sort='-y' must resolve to explicit list ['Z','B','A']; got {resolved_sort!r}"
+    )
+
+    # Check 3: sorted SVG differs from unsorted (the sort visually affects rendering).
+    svg_no_sort = fm.Chart(sort_boxen_df).mark_boxen().encode(x="cat:N", y="val:Q").show_svg()
+    assert svg_desc != svg_no_sort, (
+        "boxen sort='-y' must produce a different SVG than no-sort "
+        "(sort is not being applied to the domain)"
+    )
+
+
+def test_d5_swarm_sort_descending(sort_composite_df: pl.DataFrame) -> None:
+    """mark_swarm with X(sort='-y') orders dots by descending aggregate."""
+    svg = (
+        fm.Chart(sort_composite_df)
+        .mark_swarm()
+        .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
+        .show_svg()
+    )
+    order = _x_cat_order(svg, {"A", "B", "C"})
+    assert order == ["A", "B", "C"], (
+        f"swarm sort='-y' should order A(80) > B(50) > C(20); got {order}"
+    )
+
+
+def test_d5_errorbar_no_sort_preserves_data_order(sort_composite_df: pl.DataFrame) -> None:
+    """mark_errorbar without sort preserves data-appearance order (C, A, B).
+
+    Regression guard: errorbar's sort injection must not alter the default domain
+    when no sort is requested.  The data appearance order for sort_composite_df is
+    C (first rows), A (second batch), B (third batch).
+    """
+    svg = fm.Chart(sort_composite_df).mark_errorbar().encode(x="cat:N", y="val:Q").show_svg()
+    order = _x_cat_order(svg, {"A", "B", "C"})
+    assert order == ["C", "A", "B"], (
+        f"errorbar without sort should render in data-appearance order C, A, B; got {order}"
+    )
+
+
+def test_d5_horizontal_boxplot_sort_descending(sort_composite_df: pl.DataFrame) -> None:
+    """Horizontal mark_boxplot with Y(sort='-x') reorders the categorical y-axis.
+
+    Covers the y_sort injection path: when ``horizontal=True``, the categorical
+    axis is y, so ``y_sort`` must be forwarded to the desugar function and wrapped
+    into ``Y(cat, sort=...)`` on each layer.  Document order of y-axis labels in
+    SVG is top-to-bottom; descending sort puts the highest-value category at the top.
+    """
+    cats = {"A", "B", "C"}
+    svg = (
+        fm.Chart(sort_composite_df)
+        .mark_boxplot(horizontal=True)
+        .encode(x="val:Q", y=fm.Y("cat:N", sort="-x"))
+        .show_svg()
+    )
+    # For horizontal charts, y-axis labels appear in document order top-to-bottom.
+    # Descending by x (the numeric axis) means A(80) is first/topmost.
+    order = _x_cat_order(svg, cats)
+    assert order == ["A", "B", "C"], (
+        f"horizontal boxplot Y(sort='-x') should place A(80) first (top), "
+        f"then B(50), then C(20); got {order}"
+    )

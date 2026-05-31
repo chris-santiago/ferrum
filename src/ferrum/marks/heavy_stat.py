@@ -155,6 +155,8 @@ def desugar_violin(
     *,
     bandwidth: str | float = "scott",
     inner: Optional[str] = "box",
+    x_sort: Any = None,
+    y_sort: Any = None,
 ) -> "MarkDesugarResult":
     """Violin-plot composite mark desugar.
 
@@ -223,13 +225,18 @@ def desugar_violin(
             f"mark_violin inner must be one of 'box', 'quartile', 'point', or None; got {inner!r}"
         )
 
-    from ferrum.encoding import Y
+    from ferrum.encoding import X, Y
+
+    # Violin always uses x_field as the categorical grouping axis.
+    # Wrap it in X(..., sort=x_sort) when sort is present so the rendered axis
+    # honors the user's sort request across all inner layers.
+    x_enc_val = X(x_field, sort=x_sort) if x_sort is not None else x_field
 
     transforms = [Violin(field=y_field, groupby=[x_field], bandwidth=bandwidth, name="violin")]
     violin_layer = _Layer(
         name="body",
         mark="polygon",
-        encoding={"x": x_field, "y": Y("violin_y", title=y_field)},
+        encoding={"x": x_enc_val, "y": Y("violin_y", title=y_field)},
         mark_kwargs={"detail": "group_id", "fill_opacity": 0.5},
         data_source="violin",
     )
@@ -240,7 +247,7 @@ def desugar_violin(
             transforms=transforms,
             layers=[
                 violin_layer,
-                _Layer(name="point", mark="point", encoding={"x": x_field, "y": y_field}),
+                _Layer(name="point", mark="point", encoding={"x": x_enc_val, "y": y_field}),
             ],
         )
     if inner == "quartile":
@@ -252,7 +259,7 @@ def desugar_violin(
                 _Layer(
                     name=col,
                     mark="rule",
-                    encoding={"x": x_field, "y": col},
+                    encoding={"x": x_enc_val, "y": col},
                     mark_kwargs=mk if mk else None,
                     data_source="quart",
                 )
@@ -261,7 +268,9 @@ def desugar_violin(
     # inner == "box"
     from ferrum.marks.composite import desugar_boxplot
 
-    box_result = desugar_boxplot(x_field, y_field, extent=1.5, outliers=False, size=0.1)
+    box_result = desugar_boxplot(
+        x_field, y_field, extent=1.5, outliers=False, size=0.1, x_sort=x_sort, y_sort=y_sort
+    )
     return MarkDesugarResult(
         transforms=[*transforms, *box_result.transforms],
         layers=[violin_layer, *box_result.layers],
@@ -647,6 +656,8 @@ def desugar_swarm(
     spacing: float = 1.0,
     side: str = "both",
     dodge: Optional[str] = None,
+    x_sort: Any = None,
+    y_sort: Any = None,
 ) -> "MarkDesugarResult":
     """Beeswarm plot mark desugar.
 
@@ -714,6 +725,9 @@ def desugar_swarm(
         raise ValueError("mark_swarm() requires .encode(x=..., y=...)")
     cat = x_field if orient == "vertical" else y_field
     val = y_field if orient == "vertical" else x_field
+    # Resolve the categorical axis sort.  When vertical, x is categorical
+    # (x_sort applies); when horizontal, y is categorical (y_sort applies).
+    cat_sort = x_sort if orient == "vertical" else y_sort
     swarm_kwargs: dict = dict(
         category=cat,
         value=val,
@@ -726,17 +740,20 @@ def desugar_swarm(
     if dodge is not None:
         swarm_kwargs["dodge"] = str(dodge)
     transforms = [Swarm(**swarm_kwargs)]
+    from ferrum.encoding import X, Y
+
     if orient == "vertical":
         # Encode the chart's original category & value fields so the ordinal x
         # axis renders properly with the category labels. The Swarm transform
         # emits `__pos_x_offset__` (pixel offset on the cross axis) which the
         # renderer's standard position-offset path applies on top of the category
         # band center — same mechanism Dodge uses (Phase 9c).
+        x_enc_val = X(cat, sort=cat_sort) if cat_sort is not None else cat
         layers = [
             _Layer(
                 name="point",
                 mark="point",
-                encoding={"x": cat, "y": val},
+                encoding={"x": x_enc_val, "y": val},
                 data_source="swarm",
             )
         ]
@@ -747,11 +764,12 @@ def desugar_swarm(
         # the original field names lets the ordinal y axis render category labels
         # correctly, and the renderer picks up `__pos_y_offset__` automatically via
         # `render/position.rs::read_position_offsets`.
+        y_enc_val = Y(cat, sort=cat_sort) if cat_sort is not None else cat
         layers = [
             _Layer(
                 name="point",
                 mark="point",
-                encoding={"x": val, "y": cat},
+                encoding={"x": val, "y": y_enc_val},
                 data_source="swarm",
             )
         ]

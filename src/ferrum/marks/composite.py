@@ -26,6 +26,8 @@ def desugar_boxplot(
     size: Optional[float] = None,
     color_field: Optional[str] = None,
     horizontal: bool = False,
+    x_sort: Any = None,
+    y_sort: Any = None,
     **mark_kwargs: Any,
 ) -> "MarkDesugarResult":
     """Box-plot composite mark desugar.
@@ -111,14 +113,20 @@ def desugar_boxplot(
         )
 
     band = size or 0.6
+    # Resolve the sort for the categorical axis.  When horizontal, y is the
+    # categorical channel and y_sort applies; otherwise x is categorical and
+    # x_sort applies.
+    cat_sort = y_sort if horizontal else x_sort
 
     def enc(y_col, y2_col=None, *, title=None):
         if horizontal:
-            d: dict = {"x": X(y_col, title=title) if title else y_col, "y": cat}
+            d: dict = {"x": X(y_col, title=title) if title else y_col}
+            d["y"] = Y(cat, sort=cat_sort) if cat_sort is not None else cat
             if y2_col:
                 d["x2"] = y2_col
         else:
-            d = {"x": cat, "y": Y(y_col, title=title) if title else y_col}
+            d = {"x": X(cat, sort=cat_sort) if cat_sort is not None else cat}
+            d["y"] = Y(y_col, title=title) if title else y_col
             if y2_col:
                 d["y2"] = y2_col
         return d
@@ -195,6 +203,8 @@ def desugar_errorbar(
     *,
     extent: str = "ci",
     ticks: bool = True,
+    x_sort: Any = None,
+    y_sort: Any = None,
     **mark_kwargs: Any,
 ) -> "MarkDesugarResult":
     """Error-bar composite mark desugar.
@@ -252,12 +262,14 @@ def desugar_errorbar(
     user_kw = _validate("errorbar", mark_kwargs)
     if x_field is None or y_field is None:
         raise ValueError("mark_errorbar() requires .encode(x=..., y=...)")
+    # Errorbar always uses x_field as the categorical grouping axis.
+    x_enc_val = X(x_field, sort=x_sort) if x_sort is not None else x_field
     transforms = [ErrorExtent(field=y_field, groupby=[x_field], method=extent, name="err")]
     layers = [
         _Layer(
             name="rule",
             mark="rule",
-            encoding={"x": x_field, "y": "lower", "y2": "upper"},
+            encoding={"x": x_enc_val, "y": "lower", "y2": "upper"},
             mark_kwargs={"stroke": "theme:label", "stroke_dash": []},
             data_source="err",
         ),
@@ -268,14 +280,14 @@ def desugar_errorbar(
                 _Layer(
                     name="lower_cap",
                     mark="tick",
-                    encoding={"x": x_field, "y": "lower"},
+                    encoding={"x": x_enc_val, "y": "lower"},
                     mark_kwargs={"band_size": 0.3, "stroke": "theme:label"},
                     data_source="err",
                 ),
                 _Layer(
                     name="upper_cap",
                     mark="tick",
-                    encoding={"x": x_field, "y": "upper"},
+                    encoding={"x": x_enc_val, "y": "upper"},
                     mark_kwargs={"band_size": 0.3, "stroke": "theme:label"},
                     data_source="err",
                 ),
@@ -502,6 +514,8 @@ def desugar_boxen(
     palette=None,
     horizontal: bool = False,
     color_field: str | None = None,
+    x_sort: Any = None,
+    y_sort: Any = None,
     **mark_kwargs: Any,
 ) -> "MarkDesugarResult":
     """Letter-value (boxen) composite mark.
@@ -527,6 +541,13 @@ def desugar_boxen(
     cat = y_field if horizontal else x_field
     val = x_field if horizontal else y_field
     group = color_field if color_field else cat
+    # Resolve the sort for the categorical axis.  When horizontal, y is the
+    # categorical channel; otherwise x is categorical.
+    cat_sort = y_sort if horizontal else x_sort
+    # The LetterValue transform renames the groupby column to "group" in its
+    # output, so sort must be applied to the "group" encoding in the layers.
+    group_enc_x = X("group", sort=cat_sort) if cat_sort is not None else "group"
+    group_enc_y = Y("group", sort=cat_sort) if cat_sort is not None else "group"
 
     transforms = [
         LetterValue(
@@ -548,9 +569,9 @@ def desugar_boxen(
     for k in range(1, K_MAX + 1):
         opacity = 0.85 - (0.55 * (k - 1) / max(K_MAX - 1, 1))
         enc = (
-            {"x": "lower", "x2": "upper", "y": "group"}
+            {"x": "lower", "x2": "upper", "y": group_enc_y}
             if horizontal
-            else {"x": "group", "y": "lower", "y2": "upper"}
+            else {"x": group_enc_x, "y": "lower", "y2": "upper"}
         )
         layers.append(
             _Layer(
@@ -567,7 +588,9 @@ def desugar_boxen(
         _Layer(
             name="median",
             mark="rule",
-            encoding=({"x": "lower", "y": "group"} if horizontal else {"x": "group", "y": "lower"}),
+            encoding=(
+                {"x": "lower", "y": group_enc_y} if horizontal else {"x": group_enc_x, "y": "lower"}
+            ),
             mark_kwargs={"stroke": "theme:label", "stroke_dash": []},
             data_source="lv_depth_1",
         )
@@ -579,7 +602,9 @@ def desugar_boxen(
         _Layer(
             name="outlier",
             mark="point",
-            encoding=({"x": "value", "y": "group"} if horizontal else {"x": "group", "y": "value"}),
+            encoding=(
+                {"x": "value", "y": group_enc_y} if horizontal else {"x": group_enc_x, "y": "value"}
+            ),
             data_source="lv_outliers",
         )
     )

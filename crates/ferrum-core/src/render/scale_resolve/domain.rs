@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 
-use crate::render::RenderError;
+use crate::render::{RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
 
 /// Result of looking up a field across the primary batch and named
@@ -39,17 +39,116 @@ pub(in crate::render) fn locate_field<'a>(
     None
 }
 
+/// Aggregate operation used by data-aware sort forms (channel shorthand and
+/// sort-field object). Vega-Lite's default `op` is `"sum"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortOp {
+    Sum,
+    Mean,
+    Max,
+    Min,
+    Count,
+    Median,
+}
+
+impl SortOp {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "sum" => Some(Self::Sum),
+            "mean" | "average" => Some(Self::Mean),
+            "max" => Some(Self::Max),
+            "min" => Some(Self::Min),
+            "count" => Some(Self::Count),
+            "median" => Some(Self::Median),
+            _ => None,
+        }
+    }
+
+    /// Reduce a category's per-row values (already filtered to non-null) to a
+    /// single ordering key. An empty slice yields `f64::NEG_INFINITY` so empty
+    /// categories sort to the bottom under ascending order (and to the top under
+    /// descending), which keeps them out of the visually-meaningful extremes.
+    fn aggregate(self, values: &[f64]) -> f64 {
+        if matches!(self, Self::Count) {
+            return values.len() as f64;
+        }
+        if values.is_empty() {
+            return f64::NEG_INFINITY;
+        }
+        match self {
+            Self::Sum => values.iter().sum(),
+            Self::Mean => values.iter().sum::<f64>() / values.len() as f64,
+            Self::Max => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            Self::Min => values.iter().copied().fold(f64::INFINITY, f64::min),
+            Self::Count => unreachable!("handled above"),
+            Self::Median => {
+                let mut sorted = values.to_vec();
+                sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let n = sorted.len();
+                if n % 2 == 1 {
+                    sorted[n / 2]
+                } else {
+                    (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+                }
+            }
+        }
+    }
+}
+
+/// Sort order for data-aware forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortOrder {
+    Ascending,
+    Descending,
+}
+
+/// Data needed to resolve the *data-aware* sort forms (channel shorthand
+/// `"x"`/`"-x"`/`"y"`/`"-y"` and the sort-field object). The alphabetical and
+/// explicit-array forms ignore this context entirely.
+///
+/// `category_field` is the categorical axis field whose distinct values make up
+/// the domain. `value_field_for_other_channel` resolves the field bound to the
+/// *opposite* positional channel (used by the channel-shorthand form: `"-y"` on
+/// an x-categorical axis sorts by the aggregate of the y field). `batch` is the
+/// record batch the domain was built from — the same batch carries both the
+/// category column and the candidate value columns.
+pub(in crate::render) struct SortContext<'a> {
+    pub(in crate::render) category_field: &'a str,
+    pub(in crate::render) batch: &'a RecordBatch,
+    /// Field bound to the x channel (if any), for resolving `"x"`/`"-x"`.
+    pub(in crate::render) x_field: Option<&'a str>,
+    /// Field bound to the y channel (if any), for resolving `"y"`/`"-y"`.
+    pub(in crate::render) y_field: Option<&'a str>,
+}
+
 /// Apply `encoding.sort` to an ordinal domain in place.
 ///
 /// Accepted forms (mirrors the Vega-Lite `sort` field):
 /// - `"ascending"` — sort alphabetically ascending (locale-independent byte order).
 /// - `"descending"` — sort alphabetically descending.
+/// - Channel shorthand `"x"`/`"-x"`/`"y"`/`"-y"` — sort the categorical domain by
+///   the per-category aggregate of the *other* positional channel's field. The
+///   leading `-` selects descending; the default aggregate is `sum`.
+/// - Sort-field object `{"field": "...", "op": "sum"|"mean"|"max"|"min"|
+///   "count"|"median", "order": "ascending"|"descending"}` — sort the domain by
+///   the per-category aggregate of `field`. `op` defaults to `sum`, `order` to
+///   `ascending`.
 /// - JSON array of strings — replace domain with that explicit order. Values not
 ///   present in the original domain are silently ignored; values in the original
 ///   domain that are absent from the array are appended at the end in their
 ///   original relative order so no data disappears from the scale.
-/// - Absent or any other JSON value — no-op (preserves insertion order).
-pub(in crate::render) fn apply_sort_to_domain(domain: &mut Vec<String>, sort: Option<&serde_json::Value>) {
+/// - Absent — no-op (preserves insertion order).
+///
+/// When a data-aware form references a missing field, an unsupported dtype, or
+/// an invalid `op`, the domain is left in insertion order and a
+/// [`RenderWarning::SortSpecIgnored`] is pushed onto `warnings` — never a silent
+/// no-op and never a panic.
+pub(in crate::render) fn apply_sort_to_domain(
+    domain: &mut Vec<String>,
+    sort: Option<&serde_json::Value>,
+    ctx: &SortContext<'_>,
+    warnings: &mut Vec<RenderWarning>,
+) {
     match sort {
         None => {}
         Some(serde_json::Value::String(s)) if s == "ascending" => {
@@ -57,6 +156,19 @@ pub(in crate::render) fn apply_sort_to_domain(domain: &mut Vec<String>, sort: Op
         }
         Some(serde_json::Value::String(s)) if s == "descending" => {
             domain.sort_unstable_by(|a, b| b.cmp(a));
+        }
+        Some(serde_json::Value::String(s))
+            if matches!(s.as_str(), "x" | "-x" | "y" | "-y") =>
+        {
+            apply_channel_shorthand_sort(domain, s, ctx, warnings);
+        }
+        Some(serde_json::Value::String(other)) => {
+            // A bare string that isn't a recognized keyword/shorthand. Treating
+            // it as a field name would be ambiguous with the keyword forms, so
+            // surface it rather than silently no-op.
+            warnings.push(RenderWarning::SortSpecIgnored {
+                reason: format!("unrecognized sort spec {other:?}"),
+            });
         }
         Some(serde_json::Value::Array(arr)) => {
             let explicit: Vec<String> = arr
@@ -77,8 +189,163 @@ pub(in crate::render) fn apply_sort_to_domain(domain: &mut Vec<String>, sort: Op
             }
             *domain = reordered;
         }
-        _ => {} // Unknown sort spec — no-op.
+        Some(serde_json::Value::Object(obj)) => {
+            apply_sort_field_object(domain, obj, ctx, warnings);
+        }
+        Some(other) => {
+            warnings.push(RenderWarning::SortSpecIgnored {
+                reason: format!("unsupported sort spec {other}"),
+            });
+        }
     }
+}
+
+/// Resolve the channel-shorthand form (`"x"`/`"-x"`/`"y"`/`"-y"`). The domain is
+/// reordered by the per-category aggregate (default op = sum) of the field bound
+/// to the named channel.
+fn apply_channel_shorthand_sort(
+    domain: &mut Vec<String>,
+    shorthand: &str,
+    ctx: &SortContext<'_>,
+    warnings: &mut Vec<RenderWarning>,
+) {
+    let (order, channel) = if let Some(ch) = shorthand.strip_prefix('-') {
+        (SortOrder::Descending, ch)
+    } else {
+        (SortOrder::Ascending, shorthand)
+    };
+    let value_field = match channel {
+        "x" => ctx.x_field,
+        "y" => ctx.y_field,
+        _ => None,
+    };
+    let Some(value_field) = value_field else {
+        warnings.push(RenderWarning::SortSpecIgnored {
+            reason: format!("sort={shorthand:?} but no field is bound to channel {channel:?}"),
+        });
+        return;
+    };
+    sort_domain_by_aggregate(domain, value_field, SortOp::Sum, order, ctx, warnings);
+}
+
+/// Resolve the sort-field object form
+/// `{"field": ..., "op": ..., "order": ...}`.
+fn apply_sort_field_object(
+    domain: &mut Vec<String>,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    ctx: &SortContext<'_>,
+    warnings: &mut Vec<RenderWarning>,
+) {
+    let Some(field) = obj.get("field").and_then(|v| v.as_str()) else {
+        warnings.push(RenderWarning::SortSpecIgnored {
+            reason: "sort object missing string \"field\"".to_string(),
+        });
+        return;
+    };
+    // `op` defaults to sum (Vega-Lite default). `count` ignores the field's
+    // values but still requires the category column.
+    let op = match obj.get("op") {
+        None => SortOp::Sum,
+        Some(serde_json::Value::String(s)) => match SortOp::parse(s) {
+            Some(op) => op,
+            None => {
+                warnings.push(RenderWarning::SortSpecIgnored {
+                    reason: format!("unsupported sort op {s:?}"),
+                });
+                return;
+            }
+        },
+        Some(other) => {
+            warnings.push(RenderWarning::SortSpecIgnored {
+                reason: format!("sort \"op\" must be a string, got {other}"),
+            });
+            return;
+        }
+    };
+    let order = match obj.get("order").and_then(|v| v.as_str()) {
+        Some("descending") => SortOrder::Descending,
+        // Absent, "ascending", or anything else → ascending (Vega-Lite default).
+        _ => SortOrder::Ascending,
+    };
+    sort_domain_by_aggregate(domain, field, op, order, ctx, warnings);
+}
+
+/// Shared driver for both data-aware forms: compute the per-category aggregate
+/// of `value_field` (using the category column from `ctx`) and reorder `domain`
+/// accordingly. On any data failure, leave the domain untouched and warn.
+fn sort_domain_by_aggregate(
+    domain: &mut [String],
+    value_field: &str,
+    op: SortOp,
+    order: SortOrder,
+    ctx: &SortContext<'_>,
+    warnings: &mut Vec<RenderWarning>,
+) {
+    let categories = match crate::render::arrow_cast::col_as_str(ctx.batch, ctx.category_field) {
+        Ok(c) => c,
+        Err(e) => {
+            warnings.push(RenderWarning::SortSpecIgnored {
+                reason: format!("cannot read category field {:?}: {e}", ctx.category_field),
+            });
+            return;
+        }
+    };
+    // `count` does not read the value column; every other op does.
+    let values: Vec<Option<f64>> = if matches!(op, SortOp::Count) {
+        vec![None; categories.len()]
+    } else {
+        match crate::render::arrow_cast::col_as_f64(ctx.batch, value_field) {
+            Ok(v) => v,
+            Err(e) => {
+                warnings.push(RenderWarning::SortSpecIgnored {
+                    reason: format!("cannot read sort value field {value_field:?}: {e}"),
+                });
+                return;
+            }
+        }
+    };
+    if categories.len() != values.len() {
+        warnings.push(RenderWarning::SortSpecIgnored {
+            reason: format!(
+                "row-count mismatch sorting {:?} by {value_field:?}",
+                ctx.category_field
+            ),
+        });
+        return;
+    }
+
+    // Bucket each row's value under its category, skipping null categories and
+    // (for value-reading ops) null/non-finite values.
+    let mut buckets: HashMap<&str, Vec<f64>> = HashMap::new();
+    for (cat, val) in categories.iter().zip(values.iter()) {
+        let Some(cat) = cat.as_deref() else { continue };
+        let entry = buckets.entry(cat).or_default();
+        if matches!(op, SortOp::Count) {
+            // Count of rows in the category — the pushed sentinel is unused by
+            // `SortOp::Count::aggregate` (it uses slice length).
+            entry.push(0.0);
+        } else if let Some(v) = val {
+            if v.is_finite() {
+                entry.push(*v);
+            }
+        }
+    }
+
+    let key_for = |cat: &str| -> f64 {
+        match buckets.get(cat) {
+            Some(vals) => op.aggregate(vals),
+            None => f64::NEG_INFINITY,
+        }
+    };
+    domain.sort_by(|a, b| {
+        let ka = key_for(a);
+        let kb = key_for(b);
+        let ord = ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal);
+        match order {
+            SortOrder::Ascending => ord,
+            SortOrder::Descending => ord.reverse(),
+        }
+    });
 }
 
 /// Compute the unioned numeric/temporal extent for an axis field across

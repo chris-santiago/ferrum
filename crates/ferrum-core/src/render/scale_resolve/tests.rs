@@ -1574,3 +1574,190 @@ fn d4_linear_scale_with_scheme_survives_serde_round_trip() {
         "re-serialized JSON must contain scheme: {re}"
     );
 }
+
+// ── D5: value-sort + sort spec on a categorical positional axis ───────────────
+
+/// Bar-chart batch: x is categorical ("a","b","c") with multiple rows per
+/// category; y is quantitative. Per-category SUM(y): a=1+1=2, b=5+5=10, c=3+3=6.
+/// MEAN(y) is identical here (two equal rows each), so a dedicated mean batch is
+/// built below where mean and sum disagree.
+fn make_bar_batch_for_sort() -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("cat", ArrowDataType::Utf8, false),
+        Field::new("y", ArrowDataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["a", "b", "c", "a", "b", "c"])),
+            Arc::new(Float64Array::from(vec![1.0, 5.0, 3.0, 1.0, 5.0, 3.0])),
+        ],
+    )
+    .unwrap()
+}
+
+fn make_bar_spec_with_sort(sort: serde_json::Value) -> ChartSpec {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Bar,
+        encoding: Encoding {
+            x: Some(EncodingSpec {
+                field: "cat".into(),
+                type_: Some(DataType::Nominal),
+                sort: Some(sort),
+                ..Default::default()
+            }),
+            y: Some(EncodingSpec { field: "y".into(), type_: Some(DataType::Quantitative), ..Default::default() }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+    }
+}
+
+/// Read the resolved x-axis ordinal domain order, asserting the scale is ordinal.
+fn x_ordinal_domain(scales: &ResolvedScales) -> Vec<String> {
+    match &scales.x {
+        ScaleKind::Ordinal(s) => s.ticks_internal(),
+        other => panic!("expected ordinal x scale, got {other:?}"),
+    }
+}
+
+#[test]
+fn d5_sort_neg_y_orders_categories_by_descending_sum() {
+    // SUM(y): a=2, b=10, c=6. Descending → [b, c, a].
+    let spec = make_bar_spec_with_sort(serde_json::json!("-y"));
+    let batch = make_bar_batch_for_sort();
+    let theme = ThemeInputs::default();
+    let (scales, warnings) =
+        resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    assert!(warnings.is_empty(), "valid sort must not warn: {warnings:?}");
+    assert_eq!(x_ordinal_domain(&scales), vec!["b", "c", "a"]);
+}
+
+#[test]
+fn d5_sort_y_orders_categories_by_ascending_sum() {
+    // SUM(y): a=2, b=10, c=6. Ascending → [a, c, b].
+    let spec = make_bar_spec_with_sort(serde_json::json!("y"));
+    let batch = make_bar_batch_for_sort();
+    let theme = ThemeInputs::default();
+    let (scales, warnings) =
+        resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    assert!(warnings.is_empty(), "valid sort must not warn: {warnings:?}");
+    assert_eq!(x_ordinal_domain(&scales), vec!["a", "c", "b"]);
+}
+
+#[test]
+fn d5_sort_field_object_mean_descending() {
+    // Build a batch where MEAN and SUM disagree:
+    //   a: [10] → sum 10, mean 10
+    //   b: [1, 1, 1] → sum 3, mean 1
+    //   c: [4, 6] → sum 10, mean 5
+    // Descending MEAN → [a(10), c(5), b(1)]. (Descending SUM would tie a and c.)
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("cat", ArrowDataType::Utf8, false),
+        Field::new("y", ArrowDataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["a", "b", "b", "b", "c", "c"])),
+            Arc::new(Float64Array::from(vec![10.0, 1.0, 1.0, 1.0, 4.0, 6.0])),
+        ],
+    )
+    .unwrap();
+    let spec = make_bar_spec_with_sort(serde_json::json!({
+        "field": "y", "op": "mean", "order": "descending"
+    }));
+    let theme = ThemeInputs::default();
+    let (scales, warnings) =
+        resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    assert!(warnings.is_empty(), "valid sort must not warn: {warnings:?}");
+    assert_eq!(x_ordinal_domain(&scales), vec!["a", "c", "b"]);
+}
+
+#[test]
+fn d5_explicit_array_yields_that_domain_order() {
+    let spec = make_bar_spec_with_sort(serde_json::json!(["c", "a", "b"]));
+    let batch = make_bar_batch_for_sort();
+    let theme = ThemeInputs::default();
+    let (scales, warnings) =
+        resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    assert!(warnings.is_empty(), "explicit array must not warn: {warnings:?}");
+    assert_eq!(x_ordinal_domain(&scales), vec!["c", "a", "b"]);
+}
+
+#[test]
+fn d5_ascending_descending_keywords_sort_alphabetically() {
+    let batch = make_bar_batch_for_sort();
+    let theme = ThemeInputs::default();
+
+    let asc = make_bar_spec_with_sort(serde_json::json!("ascending"));
+    let (scales_asc, _) =
+        resolve_scales(&asc, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    assert_eq!(x_ordinal_domain(&scales_asc), vec!["a", "b", "c"]);
+
+    let desc = make_bar_spec_with_sort(serde_json::json!("descending"));
+    let (scales_desc, _) =
+        resolve_scales(&desc, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    assert_eq!(x_ordinal_domain(&scales_desc), vec!["c", "b", "a"]);
+}
+
+#[test]
+fn d5_invalid_sort_field_falls_back_without_panic_and_warns() {
+    // Sort-field object naming a column that does not exist: domain stays in
+    // insertion order (a, b, c) and a SortSpecIgnored warning is emitted.
+    let spec = make_bar_spec_with_sort(serde_json::json!({
+        "field": "does_not_exist", "op": "sum", "order": "descending"
+    }));
+    let batch = make_bar_batch_for_sort();
+    let theme = ThemeInputs::default();
+    let (scales, warnings) =
+        resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    // Insertion order preserved.
+    assert_eq!(x_ordinal_domain(&scales), vec!["a", "b", "c"]);
+    assert!(
+        warnings
+            .iter()
+            .any(|w| matches!(w, crate::render::RenderWarning::SortSpecIgnored { .. })),
+        "missing sort field must emit SortSpecIgnored, got: {warnings:?}"
+    );
+}
+
+#[test]
+fn d5_sort_field_object_count_orders_by_row_count() {
+    // a: 1 row, b: 3 rows, c: 2 rows. Descending count → [b, c, a].
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("cat", ArrowDataType::Utf8, false),
+        Field::new("y", ArrowDataType::Float64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["a", "b", "b", "b", "c", "c"])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0])),
+        ],
+    )
+    .unwrap();
+    let spec = make_bar_spec_with_sort(serde_json::json!({
+        "field": "y", "op": "count", "order": "descending"
+    }));
+    let theme = ThemeInputs::default();
+    let (scales, warnings) =
+        resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    assert!(warnings.is_empty(), "valid count sort must not warn: {warnings:?}");
+    assert_eq!(x_ordinal_domain(&scales), vec!["b", "c", "a"]);
+}

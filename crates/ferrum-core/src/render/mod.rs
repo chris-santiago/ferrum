@@ -125,6 +125,11 @@ pub enum RenderWarning {
     /// discarded and the default theme palette is used instead.
     /// `entry` is the offending color string.
     ColorRangeParseFailure { entry: String },
+    /// A data-aware `sort` spec (channel shorthand `"-y"` or a sort-field
+    /// object) could not be resolved — the referenced field is missing from the
+    /// batch, has an unsupported dtype, or the spec is otherwise malformed. The
+    /// categorical domain falls back to insertion order; `reason` explains why.
+    SortSpecIgnored { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -158,6 +163,7 @@ mod tests {
             RenderWarning::ShapePaletteOverflowed { categories: 7 },
             RenderWarning::EmptyPanel { panel_index: 1 },
             RenderWarning::ColorRangeParseFailure { entry: "#zzz".into() },
+            RenderWarning::SortSpecIgnored { reason: "missing field".into() },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();

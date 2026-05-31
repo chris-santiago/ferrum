@@ -12,7 +12,7 @@ use crate::render::color::Color;
 use crate::render::palette;
 use crate::render::RenderError;
 
-use super::domain::{apply_sort_to_domain, locate_field};
+use super::domain::{apply_sort_to_domain, locate_field, SortContext};
 use super::positional::ordinal_range_as_strings;
 use super::{distinct_values_in_order, infer_spec_type, numeric_extent, ColorScale};
 
@@ -105,6 +105,16 @@ pub fn build_color_scale(
             });
         Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme }), Vec::new()))
     } else {
+        // Data-aware sort (channel shorthand `"-y"`, sort-field objects) reorders
+        // the legend domain by an aggregate, mirroring the positional-axis path.
+        // The category column is the color field; candidate value columns live in
+        // the primary batch alongside it.
+        let sort_ctx = SortContext {
+            category_field: &c_enc.field,
+            batch: primary_batch,
+            x_field: encoding.x.as_ref().map(|e| e.field.as_str()),
+            y_field: encoding.y.as_ref().map(|e| e.field.as_str()),
+        };
         // D1: if the color encoding carries an explicit ordinal string range, build
         // the palette from those colors (parsed via `parse_color`).
         //
@@ -134,7 +144,7 @@ pub fn build_color_scale(
                         Some(declared) => declared,
                         None => distinct_values_in_order(primary_batch, &c_enc.field)?,
                     };
-                    apply_sort_to_domain(&mut domain, c_enc.sort.as_ref());
+                    apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings);
                     let palette: Cow<'static, [Color]> = Cow::Owned(parsed);
                     // No overflow warning when the user supplied an explicit range;
                     // they own the mapping and repeated colors are intentional.
@@ -146,7 +156,7 @@ pub fn build_color_scale(
                     });
                     // Fall through to default palette below, carrying the warning.
                     let mut domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
-                    apply_sort_to_domain(&mut domain, c_enc.sort.as_ref());
+                    apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings);
                     let resolved_name: &str = c_enc.scheme.as_deref().unwrap_or(&theme.palette.color_scheme);
                     let static_palette: &'static [Color] = if palette::is_sequential_scheme(resolved_name) {
                         palette::categorical_palette("tableau10")
@@ -168,8 +178,9 @@ pub fn build_color_scale(
         }
 
         // Default path: look up a named categorical palette.
+        let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
         let mut domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
-        apply_sort_to_domain(&mut domain, c_enc.sort.as_ref());
+        apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings);
         let resolved_name: &str = c_enc.scheme.as_deref().unwrap_or(&theme.palette.color_scheme);
         let static_palette: &'static [Color] = if palette::is_sequential_scheme(resolved_name) {
             palette::categorical_palette("tableau10")
@@ -177,7 +188,6 @@ pub fn build_color_scale(
             palette::categorical_palette(resolved_name)
         };
         let palette: Cow<'static, [Color]> = Cow::Borrowed(static_palette);
-        let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
         if domain.len() > palette.len() {
             warnings.push(crate::render::RenderWarning::ColorPaletteOverflowed {
                 categories: domain.len() as u32,

@@ -83,6 +83,112 @@ _FACET_CHANNELS = frozenset(("facet", "facet_row", "facet_col"))
 _logger = logging.getLogger(__name__)
 
 
+def _resolve_sort_for_composite(sort: Any, x_field: str | None, y_field: str | None) -> Any:
+    """Resolve a shorthand sort string to an explicit dict for composite marks.
+
+    Composite desugars expand a single chart-level encoding into many layers
+    with different y columns (e.g., ``lower_whisker``, ``q1``), so the Rust
+    renderer would misidentify the sort value field when a shorthand like
+    ``"-y"`` is forwarded verbatim.  This function converts shorthands to an
+    explicit ``{"field": ..., "op": "sum", "order": ...}`` dict using the
+    original user field names, so the sort resolves correctly regardless of
+    which layer's y column the renderer inspects first.
+
+    Non-shorthand sort values (explicit arrays, explicit dicts) are returned
+    unchanged.
+    """
+    if not isinstance(sort, str):
+        return sort
+    _SHORTHANDS = {
+        "-y": (y_field, "sum", "descending"),
+        "y": (y_field, "sum", "ascending"),
+        "-x": (x_field, "sum", "descending"),
+        "x": (x_field, "sum", "ascending"),
+    }
+    if sort in _SHORTHANDS:
+        field, op, order = _SHORTHANDS[sort]
+        if field is None:
+            return sort  # cannot resolve without a field name; leave as-is
+        return {"field": field, "op": op, "order": order}
+    return sort
+
+
+def _resolve_boxen_cat_sort(
+    sort: Any,
+    cat_field: str,
+    val_field: str,
+    data: Any,
+) -> Any:
+    """Pre-resolve a boxen categorical sort to an explicit ordered category list.
+
+    The LetterValue transform renames the groupby column to ``"group"`` and drops
+    the original value column from its per-depth output batches.  A sort dict like
+    ``{"field": "val", "op": "sum", "order": "descending"}`` therefore references a
+    column absent from the layer batch, causing Rust to emit ``SortSpecIgnored``.
+
+    This function computes the ordered category list in Python from the source
+    DataFrame and returns it as an explicit list (e.g. ``["A", "B", "C"]``).
+    Explicit list sorts bypass the missing-field problem entirely because they
+    specify domain order directly, without referencing any data column.
+
+    Conditions for pre-resolution:
+    - *sort* is a dict with a ``"field"`` key (field-based aggregate sort).
+    - *data* is a polars DataFrame containing *cat_field* and *val_field*.
+
+    All other sort values (bare strings, explicit lists, ``None``) are returned
+    unchanged.
+
+    Parameters
+    ----------
+    sort : Any
+        The resolved sort spec for the categorical axis.
+    cat_field : str
+        The original category (groupby) field name in the source data.
+    val_field : str
+        The original value (numeric) field name in the source data.
+    data : Any
+        The chart's source data.  Only polars DataFrames are processed; other
+        types are returned with *sort* unchanged.
+    """
+    if not isinstance(sort, dict) or "field" not in sort:
+        # Explicit list or unsupported form: return unchanged.
+        return sort
+    try:
+        import polars as pl
+
+        if not isinstance(data, pl.DataFrame):
+            return sort
+        if cat_field not in data.columns or val_field not in data.columns:
+            return sort
+
+        op = sort.get("op", "sum")
+        order = sort.get("order", "ascending")
+        descending = order == "descending"
+
+        _OP_MAP = {
+            "sum": pl.sum,
+            "mean": pl.mean,
+            "max": pl.max,
+            "min": pl.min,
+            "count": pl.count,
+            "median": pl.median,
+        }
+        agg_fn = _OP_MAP.get(op, pl.sum)
+        agg_col = f"_sort_{val_field}"
+        ordered = (
+            data.group_by(cat_field)
+            .agg(agg_fn(val_field).alias(agg_col))
+            .sort(agg_col, descending=descending)
+            .get_column(cat_field)
+            .to_list()
+        )
+        return ordered
+    except Exception:
+        # Defensive: if anything goes wrong, fall back to the original sort spec
+        # so the chart still renders (it will emit SortSpecIgnored rather than crash).
+        return sort
+
+
 def _split_style_kwargs(desugar_fn, user_kwargs: dict) -> tuple[dict, dict]:
     """Partition a composite mark's user kwargs into transform vs. style keys.
 
@@ -418,6 +524,28 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
 
         if isinstance(x_field, _RepeatPlaceholder) or isinstance(y_field, _RepeatPlaceholder):
             return self
+        # Capture sort from the original channel objects before they are reduced
+        # to bare field strings.  Composite desugars that build a categorical
+        # positional axis (boxplot, boxen, errorbar, violin, swarm) receive these
+        # so they can wrap the `cat` field in X(cat, sort=...) / Y(cat, sort=...)
+        # and preserve the user's sort intent through the desugar expansion.
+        #
+        # Shorthand sorts ("-y", "y", "-x", "x") are resolved to explicit dicts
+        # here using the original field names.  Composite desugars replace the
+        # y-channel field with computed columns (e.g. lower_whisker, q1), so the
+        # Rust renderer would otherwise sort by the wrong column.
+        _raw_x_sort = x_enc._kwargs.get("sort") if isinstance(x_enc, ChannelBase) else None
+        _raw_y_sort = y_enc._kwargs.get("sort") if isinstance(y_enc, ChannelBase) else None
+        x_sort = (
+            _resolve_sort_for_composite(_raw_x_sort, x_field, y_field)
+            if _raw_x_sort is not None
+            else None
+        )
+        y_sort = (
+            _resolve_sort_for_composite(_raw_y_sort, x_field, y_field)
+            if _raw_y_sort is not None
+            else None
+        )
         # Partition the user kwargs by the desugar signature: declared params
         # are transform kwargs; everything else is a constant mark-style
         # override.  ``style_dict`` is validated/normalised through MarkBase so
@@ -430,6 +558,31 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             if y2_enc is not None:
                 y2_field = y2_enc.field if isinstance(y2_enc, ChannelBase) else y2_enc
                 transform_kwargs = {**transform_kwargs, "y2_field": y2_field}
+        # Boxen: the LetterValue transform renames the groupby column to "group"
+        # and drops the original value column from its per-depth output batches.
+        # A field-based sort dict (e.g. {"field": "val", "op": "sum", "order":
+        # "descending"}) therefore references a column absent from the layer batch,
+        # causing Rust to emit SortSpecIgnored and leave the domain in insertion
+        # order.  Pre-resolve to an explicit ordered category list in Python, which
+        # bypasses the missing-field problem because list sorts specify domain order
+        # directly without referencing any data column.
+        if kind == "boxen" and self._data is not None:
+            horizontal = transform_kwargs.get("horizontal", False)
+            cat_f = y_field if horizontal else x_field
+            val_f = x_field if horizontal else y_field
+            if cat_f and val_f:
+                if x_sort is not None and not horizontal:
+                    x_sort = _resolve_boxen_cat_sort(x_sort, cat_f, val_f, self._data)
+                if y_sort is not None and horizontal:
+                    y_sort = _resolve_boxen_cat_sort(y_sort, cat_f, val_f, self._data)
+        # Composites with a categorical positional axis: inject x_sort and y_sort
+        # so the desugar function can forward sort to the categorical channel
+        # encoding, enabling e.g. X("c:N", sort="-y") on mark_boxplot/violin/etc.
+        if kind in ("boxplot", "boxen", "errorbar", "violin", "swarm"):
+            if x_sort is not None:
+                transform_kwargs = {**transform_kwargs, "x_sort": x_sort}
+            if y_sort is not None:
+                transform_kwargs = {**transform_kwargs, "y_sort": y_sort}
         # density/histogram: auto-set groupby from color encoding when not explicit.
         if kind in ("density", "histogram") and "groupby" not in transform_kwargs:
             color_enc = self._encoding.get("color")

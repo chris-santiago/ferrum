@@ -14,10 +14,20 @@ use crate::scale::time::TimeScale;
 use crate::spec::chart::ChartSpec;
 use crate::spec::encoding::DataType as SpecDataType;
 
-use crate::render::RenderError;
+use crate::render::{RenderError, RenderWarning};
 
-use super::domain::{apply_sort_to_domain, locate_field, numeric_domain_union};
+use super::domain::{apply_sort_to_domain, locate_field, numeric_domain_union, SortContext};
 use super::{distinct_values_in_order, infer_spec_type, ScaleKind};
+
+/// The x/y field names bound at chart level, used to resolve data-aware sort
+/// forms (channel shorthand `"-y"` etc.). Threaded into `build_axis_scale` so an
+/// ordinal axis can sort its categories by the aggregate of the opposite
+/// channel's field. Either side may be `None` (single-axis Tick/Rule marks).
+#[derive(Clone, Copy, Default)]
+pub(in crate::render) struct PositionalFields<'a> {
+    pub(in crate::render) x: Option<&'a str>,
+    pub(in crate::render) y: Option<&'a str>,
+}
 
 // The padding-inset constants and `inset_pixel_range` now live in
 // `crate::layout::geometry` (the geometry layer) so that the layout engine can
@@ -43,14 +53,17 @@ pub(in crate::render) fn resolve_padding_fraction(scale_padding: Option<f64>, ha
     DEFAULT_SCALE_PADDING_FRAC
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn build_axis_scale(
     channel: &'static str,
     enc: &crate::spec::encoding::EncodingSpec,
     paired_enc: Option<&crate::spec::encoding::EncodingSpec>,
+    positional_fields: PositionalFields<'_>,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     pixel_range: (f64, f64),
     spec: &ChartSpec,
+    warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
     let located = locate_field(&enc.field, primary_batch, transform_outputs)
         .ok_or_else(|| RenderError::UnknownColumn { name: enc.field.clone() })?;
@@ -58,7 +71,13 @@ pub(in crate::render) fn build_axis_scale(
     let pr = axis_pixel_range(channel, &dtype, pixel_range);
 
     if let Some(scale_spec) = &enc.scale {
-        return build_from_scale_spec(scale_spec, enc, located.batch, pr);
+        let sort_ctx = SortContext {
+            category_field: &enc.field,
+            batch: located.batch,
+            x_field: positional_fields.x,
+            y_field: positional_fields.y,
+        };
+        return build_from_scale_spec(scale_spec, enc, located.batch, pr, &sort_ctx, warnings);
     }
 
     let inset = inset_pixel_range(pr, resolve_padding_fraction(None, false));
@@ -75,7 +94,13 @@ pub(in crate::render) fn build_axis_scale(
         }
         SpecDataType::Ordinal | SpecDataType::Nominal => {
             let mut domain = distinct_values_in_order(located.batch, &enc.field)?;
-            apply_sort_to_domain(&mut domain, enc.sort.as_ref());
+            let sort_ctx = SortContext {
+                category_field: &enc.field,
+                batch: located.batch,
+                x_field: positional_fields.x,
+                y_field: positional_fields.y,
+            };
+            apply_sort_to_domain(&mut domain, enc.sort.as_ref(), &sort_ctx, warnings);
             Ok(ScaleKind::Ordinal(OrdinalScale::new_internal(
                 domain, vec![pr.0, pr.1], 0.0,
             )))
@@ -107,6 +132,8 @@ pub(in crate::render) fn build_from_scale_spec(
     enc: &crate::spec::encoding::EncodingSpec,
     batch: &RecordBatch,
     pr: (f64, f64),
+    sort_ctx: &SortContext<'_>,
+    warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
     use crate::spec::encoding::ScaleSpec;
 
@@ -140,7 +167,7 @@ pub(in crate::render) fn build_from_scale_spec(
                 Some(d) => d.clone(),
                 None => distinct_values_in_order(batch, &enc.field)?,
             };
-            apply_sort_to_domain(&mut d, enc.sort.as_ref());
+            apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
             // Extract numeric pixel range from the polymorphic `range` field.
             // String values (color ranges) are handled by `build_color_scale` —
             // fall back to the pixel-range default when the range is not numeric.
@@ -164,7 +191,7 @@ pub(in crate::render) fn build_from_scale_spec(
                 Some(d) => d.clone(),
                 None => distinct_values_in_order(batch, &enc.field)?,
             };
-            apply_sort_to_domain(&mut d, enc.sort.as_ref());
+            apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
             let effective_padding = padding_inner.unwrap_or(*padding);
             ScaleKind::Ordinal(OrdinalScale::new_internal(
                 d,
@@ -177,7 +204,7 @@ pub(in crate::render) fn build_from_scale_spec(
                 Some(d) => d.clone(),
                 None => distinct_values_in_order(batch, &enc.field)?,
             };
-            apply_sort_to_domain(&mut d, enc.sort.as_ref());
+            apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
             ScaleKind::Ordinal(OrdinalScale::new_internal(
                 d,
                 vec![pr.0, pr.1],
