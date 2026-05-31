@@ -164,6 +164,23 @@ impl ScaleKind {
         }
     }
 
+    /// Raw tick *values* (epoch-milliseconds) for a temporal scale, in the same
+    /// order and count as [`tick_labels`](Self::tick_labels). Returns `None` for
+    /// non-temporal scales. Used by `prepare.rs` to apply an explicit
+    /// `chrono`/d3 time format to the underlying timestamps (the formatted
+    /// strings from `tick_labels` have already lost the epoch values).
+    pub(crate) fn temporal_tick_values(&self, count_hint: usize) -> Option<Vec<i64>> {
+        match self {
+            Self::Time(s) => Some(
+                s.ticks_internal(count_hint)
+                    .into_iter()
+                    .map(|v| v as i64)
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
     /// Grid item 18: project this scale's minor ticks to **domain fractions**
     /// `t ∈ [0, 1]` over the scale's resolved range — the *same* projection
     /// majors use (`project_values_to_fractions`), so a minor at domain value

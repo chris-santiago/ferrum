@@ -402,14 +402,22 @@ pub fn prepare_render_inputs(
                 .or_else(|| e.title.clone())
                 .unwrap_or_else(|| e.field.clone())
         });
-    let x_tick_labels = provisional_scales.x.tick_labels(10);
+    // D3 (flexibility campaign): per-channel `Axis(tick_count=N)` controls the
+    // target tick count for continuous + temporal axes (default 10). Limiting it
+    // is what de-clutters dense temporal axes (e.g. a 72-row series no longer
+    // renders 72 overlapping ticks). Read before tick generation so the count
+    // feeds every downstream tick call (labels, fractions, minors).
+    let x_tick_count = encoding_axis_tick_count(rendering_encoding.x.as_ref()).unwrap_or(10);
+    let y_tick_count = encoding_axis_tick_count(rendering_encoding.y.as_ref()).unwrap_or(10);
+
+    let x_tick_labels = provisional_scales.x.tick_labels(x_tick_count);
     // Continuous-axis scale projection (2026-05-30): per-tick domain fractions
     // and the scale's padding fraction, so layout can place continuous ticks at
     // the SAME pixels that data marks land on. `tick_fractions` projects exactly
-    // the same tick values as `tick_labels` (both via `ticks_internal(10)`), so
+    // the same tick values as `tick_labels` (both via `ticks_internal(count)`), so
     // the carrier stays index-aligned with the labels. Ordinal/discretizing
     // scales return an empty vec → carrier is `None` → uniform-slot placement.
-    let x_tick_fractions = provisional_scales.x.tick_fractions(10);
+    let x_tick_fractions = provisional_scales.x.tick_fractions(x_tick_count);
     let x_scale_padding_frac = provisional_scales.x.padding_fraction();
     // Y-axis tick labels arrive in domain order (low → high). `layout_y_axis`
     // places the first label at the TOP of the panel, which is the correct
@@ -420,8 +428,8 @@ pub fn prepare_render_inputs(
     // the axis labels and data points share the same orientation. The projected
     // fractions must be reversed in lockstep so `label[i]` aligns with
     // `fraction[i]`.
-    let mut y_tick_labels = provisional_scales.y.tick_labels(10);
-    let mut y_tick_fractions = provisional_scales.y.tick_fractions(10);
+    let mut y_tick_labels = provisional_scales.y.tick_labels(y_tick_count);
+    let mut y_tick_fractions = provisional_scales.y.tick_fractions(y_tick_count);
     let y_scale_padding_frac = provisional_scales.y.padding_fraction();
     if !matches!(provisional_scales.y, crate::render::scale_resolve::ScaleKind::Ordinal(_)) {
         y_tick_labels.reverse();
@@ -478,14 +486,37 @@ pub fn prepare_render_inputs(
         .and_then(|a| a.extra.get("title"))
         .and_then(|v| v.as_str())
         .map(str::to_owned);
-    // D12: apply encoding.format to x/y tick labels.
-    let x_tick_format = rendering_encoding.x.as_ref().and_then(|e| e.format.clone());
-    let x_tick_format_type = rendering_encoding.x.as_ref().and_then(|e| e.format_type.clone());
-    let y_tick_format = rendering_encoding.y.as_ref().and_then(|e| e.format.clone());
-    let y_tick_format_type = rendering_encoding.y.as_ref().and_then(|e| e.format_type.clone());
-    // Apply format to pre-computed tick label strings.
-    let x_tick_labels = apply_tick_format(x_tick_labels, x_tick_format.as_deref(), x_tick_format_type.as_deref());
-    let y_tick_labels = apply_tick_format(y_tick_labels, y_tick_format.as_deref(), y_tick_format_type.as_deref());
+    // D12 + D3: resolve the tick label format. A per-channel `Axis(label_format=,
+    // label_format_type=)` (carried in `encoding.axis`) takes precedence over the
+    // shorthand `encoding.format`/`format_type`, so an explicit `Axis(...)` always
+    // wins. Chart-level `configure_axis(label_format_raw=...)` is applied later in
+    // `render/mod.rs` only when no per-encoding override exists.
+    let (x_tick_format, x_tick_format_type) = resolve_axis_label_format(rendering_encoding.x.as_ref());
+    let (y_tick_format, y_tick_format_type) = resolve_axis_label_format(rendering_encoding.y.as_ref());
+    // Apply the format. For temporal axes with an explicit strftime pattern, the
+    // raw epoch-ms tick values are formatted directly here (the pre-computed
+    // strings have already lost the timestamp), and no override is carried
+    // forward. For numeric axes the spec is threaded to `label_format_override`
+    // (D3 root-cause fix for `prepare.rs:538`) so `apply_label_format_to_axis`
+    // applies it centrally — re-parsing the numeric label strings is lossless.
+    let (x_tick_labels, x_label_format_override) = apply_axis_format_or_thread(
+        x_tick_labels,
+        x_tick_format,
+        x_tick_format_type.as_deref(),
+        &provisional_scales.x,
+        x_tick_count,
+        false,
+    );
+    let (y_tick_labels, y_label_format_override) = apply_axis_format_or_thread(
+        y_tick_labels,
+        y_tick_format,
+        y_tick_format_type.as_deref(),
+        &provisional_scales.y,
+        y_tick_count,
+        // Non-ordinal y labels were reversed above; the raw temporal values must
+        // be reversed in lockstep so index `i` still aligns.
+        !matches!(provisional_scales.y, crate::render::scale_resolve::ScaleKind::Ordinal(_)),
+    );
 
     // Grid item 18: minor tick fractions from the provisional scales, projected
     // through the same `[0,1]`-range scale that places majors. Carried into the
@@ -535,7 +566,7 @@ pub fn prepare_render_inputs(
             tick_format: None, // already applied above
             tick_format_type: None,
             tick_values_override: None,
-            label_format_override: None,
+            label_format_override: x_label_format_override,
             title_font_size: None,
             title_color: None,
             title_padding: None,
@@ -554,7 +585,7 @@ pub fn prepare_render_inputs(
             tick_format: None,
             tick_format_type: None,
             tick_values_override: None,
-            label_format_override: None,
+            label_format_override: y_label_format_override,
             title_font_size: None,
             title_color: None,
             title_padding: None,
@@ -944,191 +975,145 @@ fn apply_impute(
     }
 }
 
-// ── D3-subset format spec parser ─────────────────────────────────────────────
+// ── Tick-label format application ────────────────────────────────────────────
+//
+// All number/time formatting is delegated to `crate::render::format`, the single
+// source of truth for the d3-format grammar and chrono time formatting. This
+// module only re-parses pre-computed label strings back to numbers (or epoch-ms
+// for temporal axes) and re-applies the requested format.
 
-/// Parsed representation of a D3-subset numeric format specifier.
+/// D3 (flexibility campaign): per-channel `Axis(tick_count=N)`. Read from the
+/// encoding's `axis` map (`tick_count` key, written by Python's `Axis.to_dict()`).
+/// `None` → use the caller's default (10).
+fn encoding_axis_tick_count(enc: Option<&crate::spec::encoding::EncodingSpec>) -> Option<usize> {
+    enc.and_then(|e| e.axis.as_ref())
+        .and_then(|a| a.extra.get("tick_count").or_else(|| a.extra.get("tickCount")))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+}
+
+/// Resolve the tick-label format `(spec, type)` for a positional channel.
 ///
-/// Supported grammar: `[,][.precision][type]`
+/// Precedence: a per-channel `Axis(label_format=, label_format_type=)` (in the
+/// `encoding.axis` map) wins over the shorthand `encoding.format`/`format_type`.
+/// Returns `(None, None)` when neither is set so default formatting is preserved.
+fn resolve_axis_label_format(
+    enc: Option<&crate::spec::encoding::EncodingSpec>,
+) -> (Option<String>, Option<String>) {
+    let Some(e) = enc else { return (None, None) };
+    let axis_fmt = e.axis.as_ref().and_then(|a| {
+        a.extra
+            .get("label_format")
+            .or_else(|| a.extra.get("labelFormat"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    });
+    if let Some(fmt) = axis_fmt {
+        let ty = e.axis.as_ref().and_then(|a| {
+            a.extra
+                .get("label_format_type")
+                .or_else(|| a.extra.get("labelFormatType"))
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        });
+        return (Some(fmt), ty);
+    }
+    (e.format.clone(), e.format_type.clone())
+}
+
+/// Apply a resolved tick-label format to one axis, returning the (possibly
+/// reformatted) labels and the `label_format_override` to thread into the
+/// `AxisInput`.
 ///
-/// where `type` is one of: `f`, `e`, `g`, `%`, `d`, `s` (SI), or absent.
-/// The `,` flag requests thousands-separator grouping.
-#[derive(Debug, PartialEq)]
-struct ParsedFmt {
-    thousands: bool,
-    precision: Option<usize>,
-    /// Format type char, or `'\0'` for "auto/default".
-    fmt_type: char,
-    /// Optional literal prefix to prepend to the formatted output (e.g. `'$'`).
-    prefix: Option<char>,
-}
-
-/// Parse a D3-subset format string into a `ParsedFmt`.
-///
-/// Supported d3-format features:
-/// - `$` prefix → prepend "$" to output
-/// - `,` → thousands separator
-/// - `.N` → decimal precision
-/// - Type chars: `f`, `e`, `%`, `d`, `s`, `g`
-fn parse_d3_fmt(fmt: &str) -> ParsedFmt {
-    let mut s = fmt;
-    // Strip optional `$` currency prefix (d3 fill/symbol character).
-    let prefix = if let Some(rest) = s.strip_prefix('$') {
-        s = rest;
-        Some('$')
-    } else {
-        None
-    };
-    let thousands = if let Some(rest) = s.strip_prefix(',') {
-        s = rest;
-        true
-    } else {
-        false
-    };
-    let (precision, s) = if let Some(rest) = s.strip_prefix('.') {
-        let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
-        let prec: Option<usize> = if end > 0 { rest[..end].parse().ok() } else { None };
-        (prec, &rest[end..])
-    } else {
-        (None, s)
-    };
-    let fmt_type = s.chars().next().unwrap_or('\0');
-    ParsedFmt { thousands, precision, fmt_type, prefix }
-}
-
-/// Apply thousands-separator grouping to an unsigned integer digit string.
-fn apply_thousands_sep(s: &str) -> String {
-    if s.len() <= 3 {
-        return s.to_string();
-    }
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    let rem = s.len() % 3;
-    for (i, ch) in s.chars().enumerate() {
-        if i != 0 && (i % 3 == rem || (rem == 0 && i % 3 == 0)) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
-}
-
-/// Format a float with thousands grouping and fixed decimal precision.
-fn format_grouped(v: f64, precision: usize) -> String {
-    let is_neg = v < 0.0;
-    let abs = v.abs();
-    let int_part = abs.trunc() as u64;
-    let frac = abs.fract();
-    let int_str = apply_thousands_sep(&int_part.to_string());
-    let sign = if is_neg { "-" } else { "" };
-    if precision == 0 {
-        format!("{sign}{int_str}")
-    } else {
-        let frac_str = format!("{:.prec$}", frac, prec = precision);
-        let digits = &frac_str[2..]; // skip "0."
-        format!("{sign}{int_str}.{digits}")
-    }
-}
-
-/// Format an f64 using SI prefix notation (k, M, G, m, μ, n).
-fn format_si(v: f64, precision: usize) -> String {
-    const PREFIXES: &[(f64, &str)] = &[
-        (1e12, "T"), (1e9, "G"), (1e6, "M"), (1e3, "k"),
-        (1.0, ""), (1e-3, "m"), (1e-6, "μ"), (1e-9, "n"),
-    ];
-    let abs = v.abs();
-    for &(threshold, prefix) in PREFIXES {
-        if abs >= threshold || threshold == 1e-9 {
-            let scaled = v / threshold;
-            return format!("{:.prec$}{prefix}", scaled, prec = precision);
-        }
-    }
-    format!("{v:.prec$}", prec = precision)
-}
-
-/// Apply a `ParsedFmt` spec to a single f64 value.
-fn apply_fmt_to_value(v: f64, spec: &ParsedFmt) -> String {
-    use crate::render::format::format_numeric;
-    let body = match spec.fmt_type {
-        'f' => {
-            let prec = spec.precision.unwrap_or(2);
-            if spec.thousands { format_grouped(v, prec) } else { format!("{v:.*}", prec) }
-        }
-        'e' => {
-            let prec = spec.precision.unwrap_or(2);
-            format!("{v:.*e}", prec)
-        }
-        '%' => {
-            let prec = spec.precision.unwrap_or(1);
-            let pct = v * 100.0;
-            format!("{pct:.*}%", prec)
-        }
-        'd' => {
-            let i = v.round() as i64;
-            if spec.thousands {
-                let s = i.unsigned_abs().to_string();
-                let g = apply_thousands_sep(&s);
-                if i < 0 { format!("-{g}") } else { g }
-            } else {
-                format!("{i}")
+/// Two paths:
+/// - **Temporal** axis with an explicit strftime pattern (`format` contains `%`
+///   and `format_type` is `"time"` or unset): the raw epoch-ms tick values are
+///   pulled from the scale and formatted directly via `chrono` here. No override
+///   is threaded (the strings are already final; re-parsing them downstream
+///   would fail). Returns `(formatted, None)`.
+/// - **Numeric** axis (or any non-temporal): the spec is threaded forward as the
+///   `label_format_override` (D3 root-cause fix for `prepare.rs:538`), and the
+///   labels are returned unchanged. `render/mod.rs::apply_label_format_to_axis`
+///   then applies it centrally — lossless because numeric label strings reparse
+///   to f64. Threading (not pre-applying) also lets chart-level
+///   `configure_axis` defer to the per-channel override via its `is_none()` gate.
+fn apply_axis_format_or_thread(
+    labels: Vec<String>,
+    format: Option<String>,
+    format_type: Option<&str>,
+    scale: &crate::render::scale_resolve::ScaleKind,
+    tick_count: usize,
+    reversed: bool,
+) -> (Vec<String>, Option<String>) {
+    use crate::render::format::format_time_spec;
+    let Some(fmt) = format else { return (labels, None) };
+    let is_time_pattern =
+        fmt.contains('%') && (format_type == Some("time") || format_type.is_none());
+    if is_time_pattern {
+        if let Some(mut values) = scale.temporal_tick_values(tick_count) {
+            if reversed {
+                values.reverse();
+            }
+            // Guard against index drift between the cached labels and a fresh
+            // tick computation: only substitute when the counts line up.
+            if values.len() == labels.len() {
+                let out = values
+                    .into_iter()
+                    .map(|ms| format_time_spec(ms, &fmt))
+                    .collect();
+                return (out, None);
             }
         }
-        's' => {
-            let prec = spec.precision.unwrap_or(2);
-            format_si(v, prec)
-        }
-        'g' => format_numeric(v),
-        // No type but `,` flag — thousands grouping with auto precision.
-        '\0' if spec.thousands => {
-            if v.fract() == 0.0 {
-                let i = v as i64;
-                let s = i.unsigned_abs().to_string();
-                let g = apply_thousands_sep(&s);
-                if i < 0 { format!("-{g}") } else { g }
-            } else {
-                let prec = spec.precision.unwrap_or(2);
-                format_grouped(v, prec)
-            }
-        }
-        _ => format_numeric(v),
-    };
-    match spec.prefix {
-        Some(p) => format!("{p}{body}"),
-        None => body,
+        // Temporal pattern but no raw values available (non-Time scale or drift):
+        // fall back to the string-level path, then thread nothing further.
+        return (apply_tick_format(labels, Some(&fmt), format_type), None);
     }
+    // Numeric / non-temporal: thread the spec to the override, apply later.
+    (labels, Some(fmt))
 }
 
 /// D12: apply an encoding-level `format` string to pre-computed tick label strings.
 ///
 /// The scale's `tick_labels()` method returns pre-formatted strings (via
 /// `format_numeric`). When the encoding carries an explicit `format` string
-/// (e.g. `.2f`, `.1%`, `,`), we re-parse each label back to f64 and re-format it
-/// using a D3-subset parser. When `format_type` is `"time"`, we treat the label as
-/// an epoch-ms integer. Labels that fail to parse are left unchanged (ordinal
-/// labels, already-formatted time strings, etc.).
+/// (e.g. `.2f`, `~s`, `,`), we re-parse each label back to f64 and re-format it
+/// via the canonical d3-format grammar in `crate::render::format`.
+///
+/// When `format_type == "time"`, labels are treated as epoch-ms integers. A
+/// format string containing `%` is interpreted as a `chrono` strftime pattern
+/// (e.g. `"%b %Y"`); otherwise the default spacing-keyed temporal formatter is
+/// used, preserving the prior byte output. Labels that fail to parse are left
+/// unchanged (ordinal labels, already-formatted strings, etc.).
 pub(crate) fn apply_tick_format(
     labels: Vec<String>,
     format: Option<&str>,
     format_type: Option<&str>,
 ) -> Vec<String> {
-    use crate::render::format::format_time;
-    let Some(fmt) = format else { return labels };
-    let spec = parse_d3_fmt(fmt);
+    use crate::render::format::{format_time, format_time_spec, parse_format_spec, format_parsed};
+    let is_time = format_type == Some("time");
+    // Non-time with no format string is a pure pass-through (byte-identical).
+    if !is_time && format.is_none() {
+        return labels;
+    }
+    let time_pattern = format.filter(|f| f.contains('%'));
+    let num_spec = format.map(parse_format_spec);
     labels
         .into_iter()
         .map(|raw| {
-            if format_type == Some("time") {
-                if let Ok(epoch_ms) = raw.parse::<i64>() {
-                    return format_time(epoch_ms, 86_400_000);
+            if is_time {
+                let epoch_ms = raw
+                    .parse::<i64>()
+                    .ok()
+                    .or_else(|| raw.parse::<f64>().ok().map(|f| f as i64));
+                match (epoch_ms, time_pattern) {
+                    (Some(ms), Some(pat)) => format_time_spec(ms, pat),
+                    (Some(ms), None) => format_time(ms, 86_400_000),
+                    (None, _) => raw,
                 }
-                if let Ok(f) = raw.parse::<f64>() {
-                    return format_time(f as i64, 86_400_000);
-                }
-                raw
+            } else if let (Ok(v), Some(spec)) = (raw.parse::<f64>(), num_spec.as_ref()) {
+                format_parsed(v, spec)
             } else {
-                if let Ok(v) = raw.parse::<f64>() {
-                    apply_fmt_to_value(v, &spec)
-                } else {
-                    raw // ordinal — pass through
-                }
+                raw // ordinal — pass through
             }
         })
         .collect()
@@ -1146,55 +1131,6 @@ mod tick_format_tests {
         )
     }
 
-    #[test]
-    fn parse_dotf() {
-        assert_eq!(
-            parse_d3_fmt(".2f"),
-            ParsedFmt { thousands: false, precision: Some(2), fmt_type: 'f', prefix: None }
-        );
-    }
-    #[test]
-    fn parse_pct() {
-        assert_eq!(
-            parse_d3_fmt(".1%"),
-            ParsedFmt { thousands: false, precision: Some(1), fmt_type: '%', prefix: None }
-        );
-    }
-    #[test]
-    fn parse_comma_dotf() {
-        assert_eq!(
-            parse_d3_fmt(",.0f"),
-            ParsedFmt { thousands: true, precision: Some(0), fmt_type: 'f', prefix: None }
-        );
-    }
-    #[test]
-    fn parse_comma_only() {
-        assert_eq!(
-            parse_d3_fmt(","),
-            ParsedFmt { thousands: true, precision: None, fmt_type: '\0', prefix: None }
-        );
-    }
-    #[test]
-    fn parse_d() {
-        assert_eq!(
-            parse_d3_fmt("d"),
-            ParsedFmt { thousands: false, precision: None, fmt_type: 'd', prefix: None }
-        );
-    }
-    #[test]
-    fn parse_si() {
-        assert_eq!(
-            parse_d3_fmt(".2s"),
-            ParsedFmt { thousands: false, precision: Some(2), fmt_type: 's', prefix: None }
-        );
-    }
-    #[test]
-    fn parse_currency_prefix() {
-        assert_eq!(
-            parse_d3_fmt("$,.0f"),
-            ParsedFmt { thousands: true, precision: Some(0), fmt_type: 'f', prefix: Some('$') }
-        );
-    }
     #[test]
     fn currency_format_prepends_dollar() {
         // "$,.0f" should produce "$10", "$1,000", etc.
@@ -1229,7 +1165,15 @@ mod tick_format_tests {
     }
     #[test]
     fn si_kilo() {
-        assert_eq!(fmt_labels(&["1200", "1500"], ".2s"), vec!["1.20k", "1.50k"]);
+        // d3 `s` precision is SIGNIFICANT digits: ".2s" of 1200 → "1.2k".
+        assert_eq!(fmt_labels(&["1200", "1500"], ".2s"), vec!["1.2k", "1.5k"]);
+        // ".3s" keeps three sig figs → "1.20k".
+        assert_eq!(fmt_labels(&["1200"], ".3s"), vec!["1.20k"]);
+    }
+    #[test]
+    fn si_trim_megabyte() {
+        // The audit-motivating case: "~s" trims insignificant zeros → "1.5M".
+        assert_eq!(fmt_labels(&["1500000"], "~s"), vec!["1.5M"]);
     }
     #[test]
     fn ordinal_passthrough() {
@@ -1242,10 +1186,24 @@ mod tick_format_tests {
         assert_eq!(out, labels);
     }
     #[test]
-    fn apply_thousands_sep_small() {
-        assert_eq!(apply_thousands_sep("123"), "123");
-        assert_eq!(apply_thousands_sep("1234"), "1,234");
-        assert_eq!(apply_thousands_sep("1234567"), "1,234,567");
+    fn time_pattern_via_chrono() {
+        // 2020-01-01T00:00:00Z = 1577836800000 ms; "%b %Y" → "Jan 2020".
+        let out = apply_tick_format(
+            vec!["1577836800000".to_string()],
+            Some("%b %Y"),
+            Some("time"),
+        );
+        assert_eq!(out, vec!["Jan 2020"]);
+    }
+    #[test]
+    fn time_default_when_no_pattern() {
+        // No `%` pattern → default day-spacing temporal formatter (byte-stable).
+        let out = apply_tick_format(
+            vec!["1577836800000".to_string()],
+            Some(","),
+            Some("time"),
+        );
+        assert_eq!(out, vec!["2020-01-01"]);
     }
 }
 
@@ -1694,5 +1652,90 @@ mod tests {
         // Axes titles should also reflect the flip
         assert_eq!(prepared.axes.x.title.as_deref(), Some("weight"));
         assert_eq!(prepared.axes.y.title.as_deref(), Some("price"));
+    }
+
+    // --- D3 (flexibility campaign): per-channel Axis(label_format, tick_count) ---
+
+    /// Build an `EncodingSpec` carrying an `axis` map with the given key/values.
+    fn enc_with_axis(field: &str, axis: serde_json::Value) -> EncodingSpec {
+        let extra = match axis {
+            serde_json::Value::Object(m) => m,
+            _ => serde_json::Map::new(),
+        };
+        EncodingSpec {
+            field: field.into(),
+            axis: Some(crate::spec::encoding::AxisSpec { extra }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn per_channel_label_format_reaches_override() {
+        // A per-channel `Axis(label_format=",.0f")` on x must reach the axis
+        // `label_format_override` (root-cause fix for the hardcoded `None`).
+        let mut spec = single_layer_spec();
+        spec.encoding.x = Some(enc_with_axis(
+            "price",
+            serde_json::json!({ "label_format": ",.0f" }),
+        ));
+        let batch = price_weight_batch();
+        let prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        assert_eq!(prep.axes.x.label_format_override.as_deref(), Some(",.0f"));
+    }
+
+    #[test]
+    fn per_channel_label_format_formats_after_central_apply() {
+        // End-to-end through render::mod's central application: the numeric spec
+        // must actually reformat the labels. We replicate the override-apply step
+        // that `render_pipeline` performs.
+        let mut spec = single_layer_spec();
+        spec.encoding.x = Some(enc_with_axis(
+            "price",
+            serde_json::json!({ "label_format": "$,.2f" }),
+        ));
+        let batch = price_weight_batch();
+        let mut prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        // Apply the threaded override exactly as render/mod.rs does.
+        prep.axes.x.tick_labels = apply_tick_format(
+            std::mem::take(&mut prep.axes.x.tick_labels),
+            prep.axes.x.label_format_override.as_deref(),
+            None,
+        );
+        // Every numeric label should now carry the "$" prefix and 2 decimals.
+        assert!(
+            prep.axes.x.tick_labels.iter().all(|l| l.starts_with('$') && l.contains('.')),
+            "got: {:?}",
+            prep.axes.x.tick_labels
+        );
+    }
+
+    #[test]
+    fn per_channel_tick_count_limits_numeric_ticks() {
+        // Default tick generation yields several ticks over [10, 30]; with
+        // `tick_count=2` the axis should produce noticeably fewer labels.
+        let batch = price_weight_batch();
+
+        let mut default_spec = single_layer_spec();
+        default_spec.encoding.x =
+            Some(EncodingSpec { field: "price".into(), ..Default::default() });
+        let default_prep =
+            prepare_render_inputs(&default_spec, &batch, &crate::layout::ThemeInputs::default())
+                .unwrap();
+
+        let mut limited_spec = single_layer_spec();
+        limited_spec.encoding.x =
+            Some(enc_with_axis("price", serde_json::json!({ "tick_count": 2 })));
+        let limited_prep =
+            prepare_render_inputs(&limited_spec, &batch, &crate::layout::ThemeInputs::default())
+                .unwrap();
+
+        assert!(
+            limited_prep.axes.x.tick_labels.len() < default_prep.axes.x.tick_labels.len(),
+            "tick_count=2 should produce fewer labels than default; limited={:?} default={:?}",
+            limited_prep.axes.x.tick_labels,
+            default_prep.axes.x.tick_labels
+        );
     }
 }

@@ -147,3 +147,180 @@ def test_d4_heatmap_different_cmaps_produce_different_svg(corr_df: pl.DataFrame)
     assert svg_blues != svg_reds, (
         "heatmap with cmap='blues' and cmap='reds' must render different SVG"
     )
+
+
+# ---------------------------------------------------------------------------
+# D3 — per-channel Axis(label_format=...) and tick_count now work
+# ---------------------------------------------------------------------------
+
+import re
+from datetime import date
+
+
+@pytest.fixture
+def two_cat_numeric_df() -> pl.DataFrame:
+    return pl.DataFrame({"cat": ["A", "B"], "val": [10_000.0, 20_000.0]})
+
+
+@pytest.fixture
+def two_cat_large_df() -> pl.DataFrame:
+    return pl.DataFrame({"cat": ["A", "B"], "val": [1_000_000.0, 3_000_000.0]})
+
+
+@pytest.fixture
+def two_cat_fraction_df() -> pl.DataFrame:
+    return pl.DataFrame({"cat": ["A", "B"], "val": [0.25, 0.75]})
+
+
+@pytest.fixture
+def monthly_date_df() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "date": pl.date_range(date(2020, 1, 1), date(2021, 6, 1), "1mo", eager=True),
+            "val": list(range(18)),
+        }
+    )
+
+
+@pytest.fixture
+def long_monthly_date_df() -> pl.DataFrame:
+    """30-month frame for tick_count assertions."""
+    return pl.DataFrame(
+        {
+            "date": pl.date_range(date(2020, 1, 1), date(2022, 6, 1), "1mo", eager=True),
+            "val": list(range(30)),
+        }
+    )
+
+
+def _tick_texts(svg: str) -> list[str]:
+    """Extract inner text from all SVG <text> elements."""
+    return re.findall(r"<text[^>]*>([^<]+)</text>", svg)
+
+
+def test_d3_numeric_grouping_format(two_cat_numeric_df: pl.DataFrame) -> None:
+    """Axis(label_format=',.0f') produces comma-grouped labels like '10,000'."""
+    svg = (
+        fm.Chart(two_cat_numeric_df)
+        .mark_bar()
+        .encode(
+            x="cat:N",
+            y=fm.Y("val:Q", axis=fm.Axis(label_format=",.0f")),
+        )
+        .show_svg()
+    )
+    tick_labels = _tick_texts(svg)
+    assert "10,000" in tick_labels, (
+        f"expected '10,000' in tick labels; got {tick_labels}"
+    )
+
+
+def test_d3_si_prefix_format(two_cat_large_df: pl.DataFrame) -> None:
+    """Axis(label_format='~s') trims trailing zeros and applies SI suffixes (k, M)."""
+    svg = (
+        fm.Chart(two_cat_large_df)
+        .mark_bar()
+        .encode(
+            x="cat:N",
+            y=fm.Y("val:Q", axis=fm.Axis(label_format="~s")),
+        )
+        .show_svg()
+    )
+    tick_labels = _tick_texts(svg)
+    # At least one label must carry the 'M' (mega) SI suffix.
+    assert any("M" in label for label in tick_labels), (
+        f"expected at least one 'M' SI-suffix label; got {tick_labels}"
+    )
+
+
+def test_d3_percent_format(two_cat_fraction_df: pl.DataFrame) -> None:
+    """Axis(label_format='.0%') renders percent labels like '50%' on a 0-1 axis."""
+    svg = (
+        fm.Chart(two_cat_fraction_df)
+        .mark_bar()
+        .encode(
+            x="cat:N",
+            y=fm.Y("val:Q", axis=fm.Axis(label_format=".0%")),
+        )
+        .show_svg()
+    )
+    tick_labels = _tick_texts(svg)
+    assert "50%" in tick_labels, (
+        f"expected '50%' in tick labels; got {tick_labels}"
+    )
+
+
+def test_d3_temporal_format_month_year(monthly_date_df: pl.DataFrame) -> None:
+    """Axis(label_format='%b %Y') on a :T x-axis produces 'Jan 2020'-style labels."""
+    svg = (
+        fm.Chart(monthly_date_df)
+        .mark_line()
+        .encode(
+            x=fm.X("date:T", axis=fm.Axis(label_format="%b %Y")),
+            y="val:Q",
+        )
+        .show_svg()
+    )
+    tick_labels = _tick_texts(svg)
+    # Must have at least one label matching the '<MonthAbbrev> <Year>' pattern.
+    month_year_labels = [
+        t for t in tick_labels if re.match(r"[A-Z][a-z]{2} 20\d{2}$", t)
+    ]
+    assert month_year_labels, (
+        f"expected at least one 'MMM YYYY' label; got {tick_labels}"
+    )
+    # Specifically confirm 'Jan 2020' (the first tick in the domain) is present.
+    assert "Jan 2020" in month_year_labels, (
+        f"expected 'Jan 2020' among month-year labels; got {month_year_labels}"
+    )
+
+
+def test_d3_tick_count_limits_temporal_ticks(long_monthly_date_df: pl.DataFrame) -> None:
+    """Axis(tick_count=4) on a 30-month :T axis produces far fewer labels than default."""
+    svg_default = (
+        fm.Chart(long_monthly_date_df)
+        .mark_line()
+        .encode(x="date:T", y="val:Q")
+        .show_svg()
+    )
+    svg_limited = (
+        fm.Chart(long_monthly_date_df)
+        .mark_line()
+        .encode(
+            x=fm.X("date:T", axis=fm.Axis(tick_count=4)),
+            y="val:Q",
+        )
+        .show_svg()
+    )
+    # Count date-like tick labels: text elements that contain a 4-digit year.
+    def _date_tick_count(svg: str) -> int:
+        return sum(1 for t in _tick_texts(svg) if re.search(r"20\d{2}", t))
+
+    default_count = _date_tick_count(svg_default)
+    limited_count = _date_tick_count(svg_limited)
+    assert limited_count < default_count, (
+        f"tick_count=4 should produce fewer date labels than default; "
+        f"limited={limited_count}, default={default_count}"
+    )
+    # Sanity: a coarse label (year only) should appear in the limited axis.
+    assert re.search(r"20\d{2}", svg_limited), (
+        "limited axis must still render at least one year-level tick label"
+    )
+
+
+def test_d3_default_quantitative_axis_still_renders(
+    two_cat_numeric_df: pl.DataFrame,
+) -> None:
+    """A quantitative axis with no label_format renders plain numeric labels (default path)."""
+    svg = (
+        fm.Chart(two_cat_numeric_df)
+        .mark_bar()
+        .encode(x="cat:N", y="val:Q")
+        .show_svg()
+    )
+    tick_labels = _tick_texts(svg)
+    # Expect plain integer-style labels (no commas, no percent, no SI suffix).
+    numeric_labels = [t for t in tick_labels if re.match(r"^\d+$", t)]
+    assert numeric_labels, (
+        f"default quantitative axis should produce plain numeric labels; got {tick_labels}"
+    )
