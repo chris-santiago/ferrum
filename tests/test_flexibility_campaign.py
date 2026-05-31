@@ -1540,12 +1540,7 @@ def test_t9_size_legend_title_and_labels_present(_t9_df: pl.DataFrame) -> None:
     numeric labels at round values (e.g. ``1e8``, ``2e8``, …). Both must appear
     in the SVG text elements.
     """
-    svg = (
-        fm.Chart(_t9_df)
-        .mark_point()
-        .encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q"))
-        .show_svg()
-    )
+    svg = fm.Chart(_t9_df).mark_point().encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q")).show_svg()
     texts = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
 
     assert "pop" in texts, f"size legend title 'pop' must appear in SVG texts; got {texts}"
@@ -1564,12 +1559,7 @@ def test_t9_size_legend_circles_exceed_data_points(_t9_df: pl.DataFrame) -> None
     The data layer renders 30 circles (one per row). The size legend adds ~5
     additional graduated circles. The total circle count must therefore exceed 30.
     """
-    svg = (
-        fm.Chart(_t9_df)
-        .mark_point()
-        .encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q"))
-        .show_svg()
-    )
+    svg = fm.Chart(_t9_df).mark_point().encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q")).show_svg()
     circle_count = svg.count("<circle")
     n_rows = len(_t9_df)
     assert circle_count > n_rows, (
@@ -1641,10 +1631,7 @@ def test_t9_size_legend_none_suppresses_legend(_t9_df: pl.DataFrame) -> None:
     more circles than the number of data rows.
     """
     svg_default = (
-        fm.Chart(_t9_df)
-        .mark_point()
-        .encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q"))
-        .show_svg()
+        fm.Chart(_t9_df).mark_point().encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q")).show_svg()
     )
     svg_suppressed = (
         fm.Chart(_t9_df)
@@ -1727,4 +1714,206 @@ def test_t9_color_only_legend_unchanged(_t9_df: pl.DataFrame) -> None:
     numeric_labels = [t for t in texts if re.match(r"^\d+(?:\.\d+)?e\d+$", t)]
     assert not numeric_labels, (
         f"color-only chart must not produce size-legend numeric labels; found {numeric_labels}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 2b — temporal auto-type inference from column dtype
+#
+# A polars Datetime/Date column used on a positional channel WITHOUT an
+# explicit `:T` annotation must auto-infer temporal type, matching Vega-Lite/
+# Altair behaviour.  Explicit annotations (:Q, :N, type_=...) always win.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _t2b_monthly_df() -> pl.DataFrame:
+    """18-month line-series with a polars Date x-axis."""
+    from datetime import date as _date
+
+    return pl.DataFrame(
+        {
+            "date": pl.date_range(_date(2020, 1, 1), _date(2021, 6, 1), "1mo", eager=True),
+            "val": list(range(18)),
+        }
+    )
+
+
+@pytest.fixture
+def _t2b_datetime_us_df() -> pl.DataFrame:
+    """4-quarter line-series with a polars Datetime(us) x-axis.
+
+    Datetime(us) is the default Polars Datetime dtype and was previously
+    untouched by _coerce.py, producing raw epoch-level tick values instead
+    of date-formatted labels.
+    """
+    from datetime import datetime as _dt
+
+    return pl.DataFrame(
+        {
+            "ts": [_dt(2020, 1, 1), _dt(2020, 4, 1), _dt(2020, 7, 1), _dt(2020, 10, 1)],
+            "val": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+
+
+def _is_date_formatted(texts: list[str]) -> bool:
+    """Return True if any tick label looks like a formatted date (contains a year or month name)."""
+    month_abbrevs = {
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+    }
+    for t in texts:
+        # YYYY-MM-DD style (e.g. "2020-01-02")
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", t):
+            return True
+        # "Jan 2020" / "Mar 2020" style
+        if re.match(r"^[A-Z][a-z]{2} 20\d{2}$", t):
+            return True
+        # Month abbreviation alone (e.g. "Jan") paired with year in another tick
+        if any(t.startswith(m) for m in month_abbrevs):
+            return True
+    return False
+
+
+def _is_epoch_integer(texts: list[str]) -> bool:
+    """Return True if any tick looks like a raw epoch integer (large integer, no date format)."""
+    for t in texts:
+        try:
+            v = int(t)
+            # Epoch-ms values for 2020 are around 1.578e12. Epoch-days are ~18000.
+            # Filter out small axis values that are just data values (e.g. 0–30).
+            if v > 1000:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+def test_t2b_date_column_without_annotation_gets_temporal_ticks(
+    _t2b_monthly_df: pl.DataFrame,
+) -> None:
+    """A polars Date column on x WITHOUT ':T' produces date-formatted axis ticks.
+
+    Before the fix, the unannotated Date column fell through to a linear scale
+    and rendered raw epoch-integer tick values. After the fix, the type is
+    inferred as temporal and the D3 chrono formatter emits human-readable dates.
+    """
+    svg = fm.Chart(_t2b_monthly_df).mark_line().encode(x="date", y="val:Q").show_svg()
+    texts = _tick_texts(svg)
+    assert _is_date_formatted(texts), (
+        f"unannotated Date column on x must produce date-formatted ticks; got: {texts}"
+    )
+    assert not _is_epoch_integer(texts), (
+        f"unannotated Date column on x must not produce raw epoch integers; got: {texts}"
+    )
+
+
+def test_t2b_datetime_us_column_without_annotation_gets_temporal_ticks(
+    _t2b_datetime_us_df: pl.DataFrame,
+) -> None:
+    """A polars Datetime(us) column on x WITHOUT ':T' produces date-formatted axis ticks.
+
+    Datetime(us) is the default polars Datetime dtype. Previously it was not
+    cast to ms by _coerce.py and the temporal scale produced wrong tick values.
+    After the fix, _coerce.py normalizes it to Datetime(ms) and type inference
+    infers temporal, so the D3 chrono formatter produces readable dates.
+    """
+    svg = fm.Chart(_t2b_datetime_us_df).mark_line().encode(x="ts", y="val:Q").show_svg()
+    texts = _tick_texts(svg)
+    assert _is_date_formatted(texts), (
+        f"unannotated Datetime(us) column on x must produce date-formatted ticks; got: {texts}"
+    )
+    assert not _is_epoch_integer(texts), (
+        f"unannotated Datetime(us) column on x must not produce raw epoch integers; got: {texts}"
+    )
+
+
+def test_t2b_unannotated_matches_explicit_temporal_annotation(
+    _t2b_monthly_df: pl.DataFrame,
+) -> None:
+    """An unannotated Date column produces the same SVG as the explicit ':T' form.
+
+    This is the core contract of auto-type inference: the unannotated shorthand
+    must behave identically to the explicit ':T' annotation when the column is
+    temporal.
+    """
+    svg_inferred = fm.Chart(_t2b_monthly_df).mark_line().encode(x="date", y="val:Q").show_svg()
+    svg_explicit = fm.Chart(_t2b_monthly_df).mark_line().encode(x="date:T", y="val:Q").show_svg()
+    assert svg_inferred == svg_explicit, (
+        "unannotated Date column must produce identical SVG to explicit ':T' annotation"
+    )
+
+
+def test_t2b_explicit_q_on_date_column_overrides_inference(
+    _t2b_monthly_df: pl.DataFrame,
+) -> None:
+    """Explicit ':Q' on a Date column still forces quantitative scale.
+
+    User-supplied annotations always win over auto-inference.  An explicit
+    ':Q' must produce a numeric (non-date) tick pattern even though the column
+    holds date values.
+    """
+    svg_q = fm.Chart(_t2b_monthly_df).mark_line().encode(x="date:Q", y="val:Q").show_svg()
+    texts_q = _tick_texts(svg_q)
+    # With :Q the tick labels are epoch-ms numbers (large integers), not formatted dates.
+    assert not _is_date_formatted(texts_q) or _is_epoch_integer(texts_q), (
+        f"explicit ':Q' must force quantitative ticks (not date-formatted); got: {texts_q}"
+    )
+
+
+def test_t2b_numeric_column_still_quantitative() -> None:
+    """An ordinary numeric column without type annotation still infers quantitative.
+
+    Regression guard: the temporal inference must not affect numeric columns.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
+    svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    texts = _tick_texts(svg)
+    numeric_ticks = [t for t in texts if re.match(r"^\d+(?:\.\d+)?$", t)]
+    assert numeric_ticks, (
+        f"numeric column without annotation must produce plain numeric ticks; got: {texts}"
+    )
+    assert not _is_date_formatted(texts), (
+        f"numeric column must not produce date-formatted ticks; got: {texts}"
+    )
+
+
+def test_t2b_spec_type_is_temporal_for_unannotated_date(
+    _t2b_monthly_df: pl.DataFrame,
+) -> None:
+    """The chart spec emits type='temporal' for an unannotated Date x column.
+
+    Tests the Python-layer spec output (not SVG rendering) so the contract
+    is verifiable at spec-build time without depending on SVG formatting.
+    """
+    import json
+
+    spec = json.loads(fm.Chart(_t2b_monthly_df).mark_line().encode(x="date", y="val:Q").to_json())
+    x_enc = spec.get("encoding", {}).get("x", {})
+    assert x_enc.get("type") == "temporal", (
+        f"unannotated Date column must produce type='temporal' in spec; got x={x_enc!r}"
+    )
+
+
+def test_t2b_spec_type_is_temporal_for_unannotated_datetime_us(
+    _t2b_datetime_us_df: pl.DataFrame,
+) -> None:
+    """The chart spec emits type='temporal' for an unannotated Datetime(us) x column."""
+    import json
+
+    spec = json.loads(fm.Chart(_t2b_datetime_us_df).mark_line().encode(x="ts", y="val:Q").to_json())
+    x_enc = spec.get("encoding", {}).get("x", {})
+    assert x_enc.get("type") == "temporal", (
+        f"unannotated Datetime(us) column must produce type='temporal' in spec; got x={x_enc!r}"
     )

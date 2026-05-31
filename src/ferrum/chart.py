@@ -364,6 +364,61 @@ def _to_polars(data):
     return pl.from_arrow(to_arrow_table(data))
 
 
+def _infer_type_from_data(field: str | None, data: Any) -> str | None:
+    """Return ``"T"`` when *field* is a temporal column in *data*, else ``None``.
+
+    Checks polars Datetime/Date/Time/Duration dtypes first (fast path), then
+    falls back to PyArrow timestamp/date32/date64 types.  Returns ``None``
+    when *data* is ``None``, *field* is ``None``, the column is absent, or the
+    dtype is not temporal.
+
+    This is the sole dtype-to-type inference path used by ``_build_encoding_specs``
+    and ``_build_layers_list``.  Explicit user-supplied type annotations always
+    win over this inference at the call sites.
+    """
+    if field is None or data is None:
+        return None
+
+    # Polars fast path — covers the most common case without round-tripping
+    # through Arrow.  Duration maps to epoch-ms integers via _coerce.py (cast
+    # to Int64), so it is intentionally excluded here: it should keep the
+    # default quantitative type, not get a temporal scale.
+    try:
+        import polars as pl
+
+        if isinstance(data, pl.DataFrame):
+            if field not in data.columns:
+                return None
+            dtype = data[field].dtype
+            if isinstance(dtype, (pl.Datetime, pl.Date, pl.Time)):
+                return "T"
+            return None
+    except ImportError:
+        pass
+
+    # PyArrow fallback — covers PyArrow Table inputs and narwhals-coerced paths.
+    try:
+        import pyarrow as pa
+
+        if isinstance(data, pa.Table):
+            if field not in data.schema.names:
+                return None
+            field_type = data.schema.field(field).type
+            if (
+                pa.types.is_timestamp(field_type)
+                or pa.types.is_date32(field_type)
+                or pa.types.is_date64(field_type)
+            ):
+                return "T"
+            if pa.types.is_time32(field_type) or pa.types.is_time64(field_type):
+                return "T"
+            return None
+    except ImportError:
+        pass
+
+    return None
+
+
 class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _RenderMixin):
     """Top-level chart value class.
 
@@ -2205,6 +2260,12 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                     field = d.get("field")
                     if not field:
                         continue
+                    # Auto-infer temporal type from column dtype when no explicit type
+                    # annotation was given (same logic as _build_encoding_specs).
+                    if "type_" not in d:
+                        inferred = _infer_type_from_data(field, self._data)
+                        if inferred is not None:
+                            d = {**d, "type_": inferred}
                     # Build a JSON-safe dict matching EncodingSpec's JSON shape.
                     # Note: to_encoding_spec_dict() emits the data-type under
                     # "type_" (Python convention to avoid shadowing the builtin),
@@ -2573,6 +2634,13 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             if isinstance(ch.field, _RepeatPlaceholder):
                 continue
             d = ch.to_encoding_spec_dict()
+            # Auto-infer temporal type from column dtype when no explicit type
+            # annotation was given.  Explicit ":T" / ":Q" / type_= / type= always
+            # win; only the unannotated case is changed here.
+            if "type_" not in d:
+                inferred = _infer_type_from_data(d.get("field"), resolved._data)
+                if inferred is not None:
+                    d = {**d, "type_": inferred}
             # Bar y-axis zero-anchor (gallery defaults A3): inject
             # scale.zero=True on the y-encoding so bar charts always
             # start at zero unless the caller explicitly sets domain or

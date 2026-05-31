@@ -76,6 +76,11 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
                 dt = data[c].dtype
                 if dt == pl.Date:
                     casts.append(pl.col(c).cast(pl.Datetime("ms")))
+                elif isinstance(dt, pl.Datetime) and dt.time_unit != "ms":
+                    # Normalize Datetime(us) and Datetime(ns) to Datetime(ms) so the
+                    # Rust temporal scale produces correct epoch-millisecond tick values.
+                    # Datetime(ms) is the canonical temporal unit for the renderer.
+                    casts.append(pl.col(c).cast(pl.Datetime("ms")))
                 elif dt == pl.Categorical or isinstance(dt, pl.Enum):
                     casts.append(pl.col(c).cast(pl.Utf8))
                 # K6: Duration columns → Int64 (nanoseconds) for Rust compat.
@@ -104,12 +109,17 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
 
     if isinstance(data, pa.Table):
         # K7: cast date32/date64 columns to timestamp[ms] for Rust compat.
+        # Also normalize timestamp[us] and timestamp[ns] to timestamp[ms] so the
+        # Rust temporal scale produces correct epoch-millisecond tick values.
         new_cols = []
         needs_cast = False
         for i in range(len(data.schema)):
             col = data.column(i)
             field_type = data.schema.field(i).type
             if pa.types.is_date32(field_type) or pa.types.is_date64(field_type):
+                col = col.cast(pa.timestamp("ms"))
+                needs_cast = True
+            elif pa.types.is_timestamp(field_type) and field_type.unit != "ms":
                 col = col.cast(pa.timestamp("ms"))
                 needs_cast = True
             new_cols.append(col)
@@ -169,7 +179,10 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
 
     try:
         nw_df = nw.from_native(data, eager_only=True)
-        return nw_df.to_arrow()
+        # Route the narwhals-produced Arrow table back through to_arrow_table so
+        # that timestamp normalization (timestamp[us/ns] → timestamp[ms]) is applied
+        # consistently for pandas/modin/cuDF/dask inputs.
+        return to_arrow_table(nw_df.to_arrow())
     except (TypeError, NotImplementedError) as e:
         raise TypeError(
             f"Unsupported data type: {type(data).__name__}. "

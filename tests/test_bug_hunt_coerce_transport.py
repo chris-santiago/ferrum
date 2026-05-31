@@ -96,36 +96,48 @@ def test_recordbatch_date32_renders_without_error():  # BUG: RecordBatch date32 
 
 
 def test_pyarrow_timestamp_ns():
-    """PyArrow table with timestamp[ns] column should pass through unchanged.
-    The code only casts date32/date64, not timestamps.
-    Targets lines 105-118: timestamp columns are NOT date types.
+    """PyArrow table with timestamp[ns] column is normalized to timestamp[ms].
+
+    Task 2b temporal inference: non-ms timestamps are cast to timestamp[ms] so
+    the Rust temporal scale produces correct epoch-millisecond tick values.
     """
     arr = pa.array([1_000_000_000, 2_000_000_000, 3_000_000_000], type=pa.timestamp("ns"))
     tbl_in = pa.table({"ts": arr, "y": [1.0, 2.0, 3.0]})
     tbl_out = to_arrow_table(tbl_in)
-    # No date columns, should be same object
-    assert tbl_out is tbl_in
     assert pa.types.is_timestamp(tbl_out.schema.field("ts").type)
+    assert tbl_out.schema.field("ts").type.unit == "ms", (
+        "timestamp[ns] must be normalized to timestamp[ms] for Rust compat"
+    )
 
 
 def test_pyarrow_timestamp_us():
-    """PyArrow table with timestamp[us] column passes through unchanged.
-    Targets lines 105-118.
+    """PyArrow table with timestamp[us] column is normalized to timestamp[ms].
+
+    Task 2b temporal inference: non-ms timestamps are cast to timestamp[ms] so
+    the Rust temporal scale produces correct epoch-millisecond tick values.
     """
     arr = pa.array([1_000_000, 2_000_000], type=pa.timestamp("us"))
     tbl_in = pa.table({"ts": arr, "y": [1.0, 2.0]})
     tbl_out = to_arrow_table(tbl_in)
-    assert tbl_out is tbl_in
+    assert pa.types.is_timestamp(tbl_out.schema.field("ts").type)
+    assert tbl_out.schema.field("ts").type.unit == "ms", (
+        "timestamp[us] must be normalized to timestamp[ms] for Rust compat"
+    )
 
 
 def test_pyarrow_timestamp_s():
-    """PyArrow table with timestamp[s] column passes through unchanged.
-    Targets lines 105-118.
+    """PyArrow table with timestamp[s] column is normalized to timestamp[ms].
+
+    Task 2b temporal inference: non-ms timestamps are cast to timestamp[ms] so
+    the Rust temporal scale produces correct epoch-millisecond tick values.
     """
     arr = pa.array([1000, 2000], type=pa.timestamp("s"))
     tbl_in = pa.table({"ts": arr, "y": [1.0, 2.0]})
     tbl_out = to_arrow_table(tbl_in)
-    assert tbl_out is tbl_in
+    assert pa.types.is_timestamp(tbl_out.schema.field("ts").type)
+    assert tbl_out.schema.field("ts").type.unit == "ms", (
+        "timestamp[s] must be normalized to timestamp[ms] for Rust compat"
+    )
 
 
 def test_pyarrow_dictionary_encoded_column():
