@@ -204,7 +204,6 @@ def desugar_errorbar(
     extent: str = "ci",
     ticks: bool = True,
     x_sort: Any = None,
-    y_sort: Any = None,
     **mark_kwargs: Any,
 ) -> "MarkDesugarResult":
     """Error-bar composite mark desugar.

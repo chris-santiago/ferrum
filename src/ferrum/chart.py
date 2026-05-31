@@ -197,6 +197,41 @@ def _resolve_boxen_cat_sort(
         return sort
 
 
+def _resolve_cat_axis(
+    transform_kwargs: dict,
+    x_field: str | None,
+    y_field: str | None,
+    x_sort: Any,
+    y_sort: Any,
+) -> tuple[str | None, Any, str | None]:
+    """Return ``(cat_field, cat_sort, val_field)`` for a composite mark.
+
+    Composite marks that build a categorical positional axis declare their
+    orientation with one of two historically divergent conventions:
+
+    - ``horizontal: bool`` (boxplot, boxen) — ``True`` puts the categorical
+      axis on **y** and the value axis on **x**.
+    - ``orient: "vertical" | "horizontal"`` (swarm) — ``"horizontal"`` puts the
+      value axis on **x**, hence the categorical axis on **y**.
+
+    Both reduce to a single question: *is the categorical axis y?*  This helper
+    normalizes them into one boolean and returns the categorical field, the
+    sort that applies to that categorical axis, and the value field.
+
+    Precedence: the two keys are set by disjoint marks today (no mark passes
+    both), so they never conflict in practice.  Should both ever be present,
+    ``horizontal=True`` and ``orient="horizontal"`` agree (cat axis is y); a
+    truthy ``horizontal`` therefore wins, and ``orient`` is consulted only when
+    ``horizontal`` is falsy.  This preserves each mark's existing result.
+    """
+    horizontal = bool(transform_kwargs.get("horizontal", False))
+    orient = transform_kwargs.get("orient", "vertical")
+    cat_is_y = horizontal or orient == "horizontal"
+    if cat_is_y:
+        return y_field, y_sort, x_field
+    return x_field, x_sort, y_field
+
+
 def _split_style_kwargs(desugar_fn, user_kwargs: dict) -> tuple[dict, dict]:
     """Partition a composite mark's user kwargs into transform vs. style keys.
 
@@ -649,21 +684,27 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         # bypasses the missing-field problem because list sorts specify domain order
         # directly without referencing any data column.
         if kind == "boxen" and self._data is not None:
-            horizontal = transform_kwargs.get("horizontal", False)
-            cat_f = y_field if horizontal else x_field
-            val_f = x_field if horizontal else y_field
-            if cat_f and val_f:
-                if x_sort is not None and not horizontal:
-                    x_sort = _resolve_boxen_cat_sort(x_sort, cat_f, val_f, self._data)
-                if y_sort is not None and horizontal:
-                    y_sort = _resolve_boxen_cat_sort(y_sort, cat_f, val_f, self._data)
+            cat_f, cat_sort, val_f = _resolve_cat_axis(
+                transform_kwargs, x_field, y_field, x_sort, y_sort
+            )
+            cat_is_y = bool(transform_kwargs.get("horizontal", False))
+            if cat_f and val_f and cat_sort is not None:
+                resolved = _resolve_boxen_cat_sort(cat_sort, cat_f, val_f, self._data)
+                if cat_is_y:
+                    y_sort = resolved
+                else:
+                    x_sort = resolved
         # Composites with a categorical positional axis: inject x_sort and y_sort
         # so the desugar function can forward sort to the categorical channel
         # encoding, enabling e.g. X("c:N", sort="-y") on mark_boxplot/violin/etc.
+        #
+        # errorbar always treats x as the categorical grouping axis (see
+        # desugar_errorbar), so it only consumes x_sort; y_sort is never read
+        # there and is deliberately not injected (R4: dead-param removal).
         if kind in ("boxplot", "boxen", "errorbar", "violin", "swarm"):
             if x_sort is not None:
                 transform_kwargs = {**transform_kwargs, "x_sort": x_sort}
-            if y_sort is not None:
+            if y_sort is not None and kind != "errorbar":
                 transform_kwargs = {**transform_kwargs, "y_sort": y_sort}
         # density/histogram: auto-set groupby from color encoding when not explicit.
         if kind in ("density", "histogram") and "groupby" not in transform_kwargs:
@@ -700,8 +741,9 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             try:
                 import polars as pl
 
-                orient = transform_kwargs.get("orient", "vertical")
-                value_field = y_field if orient != "horizontal" else x_field
+                _, _, value_field = _resolve_cat_axis(
+                    transform_kwargs, x_field, y_field, x_sort, y_sort
+                )
                 if (
                     value_field
                     and new._data is not None

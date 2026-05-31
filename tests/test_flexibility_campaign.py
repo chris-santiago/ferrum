@@ -2711,3 +2711,123 @@ def test_r5_axis_none_suppression_unchanged() -> None:
     assert len(svg_no_axis) < len(svg_with_axis), (
         "axis=None should produce a smaller SVG (no x-axis tick labels/lines)"
     )
+
+
+# ---------------------------------------------------------------------------
+# R1 — unified categorical-axis resolution
+# ---------------------------------------------------------------------------
+# _resolve_cat_axis normalizes the two divergent orientation conventions
+# (horizontal=bool used by boxplot/boxen; orient="vertical"|"horizontal" used
+# by swarm) into a single "is the categorical axis y?" decision and returns
+# (cat_field, cat_sort, val_field).  These tests pin its behavior and confirm
+# the composite-mark expansion stays byte-stable through the refactor.
+
+
+from ferrum.chart import _resolve_cat_axis
+
+
+def test_r1_resolve_cat_axis_vertical_boxplot() -> None:
+    """Vertical boxplot (horizontal=False): cat=x, val=y, cat_sort=x_sort."""
+    cat_f, cat_sort, val_f = _resolve_cat_axis(
+        {"horizontal": False}, "cat", "val", "xsort", "ysort"
+    )
+    assert (cat_f, cat_sort, val_f) == ("cat", "xsort", "val")
+
+
+def test_r1_resolve_cat_axis_horizontal_boxplot() -> None:
+    """Horizontal boxplot (horizontal=True): cat=y, val=x, cat_sort=y_sort."""
+    cat_f, cat_sort, val_f = _resolve_cat_axis({"horizontal": True}, "cat", "val", "xsort", "ysort")
+    assert (cat_f, cat_sort, val_f) == ("val", "ysort", "cat")
+
+
+def test_r1_resolve_cat_axis_swarm_vertical() -> None:
+    """Swarm orient='vertical': value spreads along x → cat=x, val=y."""
+    cat_f, cat_sort, val_f = _resolve_cat_axis(
+        {"orient": "vertical"}, "cat", "val", "xsort", "ysort"
+    )
+    assert (cat_f, cat_sort, val_f) == ("cat", "xsort", "val")
+
+
+def test_r1_resolve_cat_axis_swarm_horizontal() -> None:
+    """Swarm orient='horizontal': value spreads along y → cat=y, val=x."""
+    cat_f, cat_sort, val_f = _resolve_cat_axis(
+        {"orient": "horizontal"}, "cat", "val", "xsort", "ysort"
+    )
+    assert (cat_f, cat_sort, val_f) == ("val", "ysort", "cat")
+
+
+def test_r1_resolve_cat_axis_default_is_vertical() -> None:
+    """No orientation kwargs: defaults to vertical (cat=x)."""
+    cat_f, cat_sort, val_f = _resolve_cat_axis({}, "cat", "val", None, None)
+    assert (cat_f, cat_sort, val_f) == ("cat", None, "val")
+
+
+def _category_order_in_svg(svg: str, labels: list[str]) -> list[str]:
+    """Return *labels* sorted by first appearance position in *svg*."""
+    positions = {lab: svg.find(f">{lab}<") for lab in labels}
+    assert all(p != -1 for p in positions.values()), (
+        f"all category labels must appear in SVG; positions={positions}"
+    )
+    return sorted(labels, key=positions.__getitem__)
+
+
+@pytest.fixture
+def boxen_sort_df() -> pl.DataFrame:
+    # Group C has highest sum, B middle, A lowest — exercises aggregate sort.
+    return pl.DataFrame(
+        {
+            "cat": ["A"] * 6 + ["B"] * 6 + ["C"] * 6,
+            "val": (
+                [1.0, 2.0, 3.0, 2.0, 1.0, 3.0]
+                + [10.0, 12.0, 11.0, 13.0, 9.0, 12.0]
+                + [20.0, 22.0, 19.0, 24.0, 21.0, 23.0]
+            ),
+        }
+    )
+
+
+def test_r1_boxen_vertical_sort_descending_order(boxen_sort_df: pl.DataFrame) -> None:
+    """Vertical boxen with sort='-y' orders categories C, B, A (highest sum first)."""
+    svg = (
+        fm.Chart(boxen_sort_df)
+        .mark_boxen()
+        .encode(x=fm.X("cat", type="N", sort="-y"), y=fm.Y("val", type="Q"))
+        .show_svg()
+    )
+    order = _category_order_in_svg(svg, ["A", "B", "C"])
+    assert order == ["C", "B", "A"], f"expected descending-sum order C,B,A; got {order}"
+
+
+def test_r1_boxen_horizontal_sort_order(boxen_sort_df: pl.DataFrame) -> None:
+    """Horizontal boxen with sort on its categorical (y) axis stays well-ordered."""
+    svg = (
+        fm.Chart(boxen_sort_df)
+        .mark_boxen(horizontal=True)
+        .encode(x=fm.X("val", type="Q"), y=fm.Y("cat", type="N", sort="-x"))
+        .show_svg()
+    )
+    # All three categories must render; the chart must not collapse.
+    order = _category_order_in_svg(svg, ["A", "B", "C"])
+    assert set(order) == {"A", "B", "C"}
+
+
+def test_r1_errorbar_with_categorical_sort_renders() -> None:
+    """errorbar with a sort on its categorical (x) axis still renders after the
+    y_sort injection removal (R4)."""
+    df = pl.DataFrame(
+        {
+            "cat": ["A"] * 5 + ["B"] * 5 + ["C"] * 5,
+            "val": [1.0, 2.0, 3.0, 2.0, 1.0]
+            + [30.0, 31.0, 29.0, 32.0, 28.0]
+            + [15.0, 16.0, 14.0, 17.0, 13.0],
+        }
+    )
+    svg = (
+        fm.Chart(df)
+        .mark_errorbar(extent="stdev")
+        .encode(x=fm.X("cat", type="N", sort="-y"), y=fm.Y("val", type="Q"))
+        .show_svg()
+    )
+    order = _category_order_in_svg(svg, ["A", "B", "C"])
+    # B has highest mean, C middle, A lowest → descending order B, C, A.
+    assert order == ["B", "C", "A"], f"expected B,C,A; got {order}"
