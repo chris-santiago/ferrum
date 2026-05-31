@@ -522,6 +522,23 @@ pub enum ShapeKind {
     HLine,
 }
 
+impl ShapeKind {
+    /// Canonical shape name, the inverse of `point::shape_from_str`. Used by the
+    /// shape legend so each entry's glyph matches what the mark draws.
+    pub fn name(self) -> &'static str {
+        match self {
+            ShapeKind::Circle => "circle",
+            ShapeKind::Square => "square",
+            ShapeKind::Cross => "cross",
+            ShapeKind::Diamond => "diamond",
+            ShapeKind::TriangleUp => "triangle-up",
+            ShapeKind::TriangleDown => "triangle-down",
+            ShapeKind::VLine => "vline",
+            ShapeKind::HLine => "hline",
+        }
+    }
+}
+
 /// Fixed 8-shape palette used by `build_shape_scale`. Wraps on overflow.
 pub const SHAPE_PALETTE: [ShapeKind; 8] = [
     ShapeKind::Circle,

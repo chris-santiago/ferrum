@@ -1505,3 +1505,226 @@ def test_d9c_inset_adds_extra_marks(inset_df: pl.DataFrame) -> None:
         f"parent + Inset must render more polylines than parent alone; "
         f"main={main_count}, composed={composed_count}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 9 — size/shape legends
+#
+# Tests that size and shape encodings now produce rendered legends, that
+# legend=None suppresses them, and that same-field merging collapses two
+# legend blocks into one.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _t9_df() -> pl.DataFrame:
+    """30-row scatter DataFrame with continuous pop and nominal region columns."""
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    n = 30
+    return pl.DataFrame(
+        {
+            "x": rng.uniform(1, 10, n).tolist(),
+            "y": rng.uniform(1, 10, n).tolist(),
+            "pop": rng.uniform(1e7, 5e8, n).tolist(),
+            "region": rng.choice(["Asia", "Europe", "Americas", "Africa"], n).tolist(),
+        }
+    )
+
+
+def test_t9_size_legend_title_and_labels_present(_t9_df: pl.DataFrame) -> None:
+    """mark_point with Size('pop:Q') renders a size legend with title and numeric labels.
+
+    The size legend consists of the field title (``pop``) and ~5 graduated
+    numeric labels at round values (e.g. ``1e8``, ``2e8``, …). Both must appear
+    in the SVG text elements.
+    """
+    svg = (
+        fm.Chart(_t9_df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q"))
+        .show_svg()
+    )
+    texts = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
+
+    assert "pop" in texts, f"size legend title 'pop' must appear in SVG texts; got {texts}"
+
+    # The size legend renders graduated numeric labels at round values.
+    # With a 1e7–5e8 domain the Rust renderer picks values like 1e8, 2e8, 3e8, …
+    numeric_labels = [t for t in texts if re.match(r"^\d+(?:\.\d+)?e\d+$", t)]
+    assert len(numeric_labels) >= 2, (
+        f"size legend must produce at least 2 numeric value labels; got {numeric_labels}"
+    )
+
+
+def test_t9_size_legend_circles_exceed_data_points(_t9_df: pl.DataFrame) -> None:
+    """mark_point with Size('pop:Q') has more <circle> elements than data rows.
+
+    The data layer renders 30 circles (one per row). The size legend adds ~5
+    additional graduated circles. The total circle count must therefore exceed 30.
+    """
+    svg = (
+        fm.Chart(_t9_df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q"))
+        .show_svg()
+    )
+    circle_count = svg.count("<circle")
+    n_rows = len(_t9_df)
+    assert circle_count > n_rows, (
+        f"SVG must have more circles than data rows ({n_rows}); "
+        f"got {circle_count} (legend circles are missing)"
+    )
+
+
+def test_t9_color_and_size_both_produce_legends(_t9_df: pl.DataFrame) -> None:
+    """Color('region:N') + Size('pop:Q') produces both a color legend and a size legend.
+
+    The color legend shows the category label ``region`` with per-category labels
+    (Asia, Europe, …). The size legend shows ``pop`` with numeric labels.
+    Both must appear in the SVG.
+    """
+    svg = (
+        fm.Chart(_t9_df)
+        .mark_point()
+        .encode(
+            x="x:Q",
+            y="y:Q",
+            size=fm.Size("pop:Q"),
+            color=fm.Color("region:N"),
+        )
+        .show_svg()
+    )
+    texts = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
+
+    # Color legend: title and at least one category label must be present.
+    assert "region" in texts, f"color legend title 'region' must appear; got {texts}"
+    region_labels = [t for t in texts if t in {"Asia", "Europe", "Americas", "Africa"}]
+    assert region_labels, f"color legend must show category labels; got {texts}"
+
+    # Size legend: title and numeric labels must be present.
+    assert "pop" in texts, f"size legend title 'pop' must appear; got {texts}"
+    numeric_labels = [t for t in texts if re.match(r"^\d+(?:\.\d+)?e\d+$", t)]
+    assert numeric_labels, f"size legend must show numeric labels; got {texts}"
+
+
+def test_t9_shape_legend_title_and_category_labels_present(_t9_df: pl.DataFrame) -> None:
+    """mark_point with Shape('region:N') renders a shape legend with per-category entries.
+
+    The shape legend must contain the field title (``region``) and labels for
+    every distinct category in the data.
+    """
+    svg = (
+        fm.Chart(_t9_df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", shape=fm.Shape("region:N"))
+        .show_svg()
+    )
+    texts = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
+
+    assert "region" in texts, f"shape legend title 'region' must appear in SVG texts; got {texts}"
+
+    expected_categories = {"Asia", "Europe", "Americas", "Africa"}
+    found_categories = expected_categories & set(texts)
+    assert found_categories == expected_categories, (
+        f"shape legend must show all category labels; "
+        f"missing: {expected_categories - found_categories}, got: {texts}"
+    )
+
+
+def test_t9_size_legend_none_suppresses_legend(_t9_df: pl.DataFrame) -> None:
+    """Size('pop:Q', legend=None) suppresses the size legend entirely.
+
+    Compared to the default (legend present), the suppressed SVG must lack the
+    size legend title ``pop`` and the numeric value labels, and must have no
+    more circles than the number of data rows.
+    """
+    svg_default = (
+        fm.Chart(_t9_df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q"))
+        .show_svg()
+    )
+    svg_suppressed = (
+        fm.Chart(_t9_df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q", legend=None))
+        .show_svg()
+    )
+
+    # The default chart must have the legend.
+    texts_default = re.findall(r"<text[^>]*>([^<]+)</text>", svg_default)
+    assert "pop" in texts_default, "baseline: default chart must have 'pop' legend title"
+
+    # The suppressed chart must not.
+    texts_suppressed = re.findall(r"<text[^>]*>([^<]+)</text>", svg_suppressed)
+    assert "pop" not in texts_suppressed, (
+        f"legend=None must suppress 'pop' legend title; got texts: {texts_suppressed}"
+    )
+
+    # No numeric legend labels either.
+    numeric_labels = [t for t in texts_suppressed if re.match(r"^\d+(?:\.\d+)?e\d+$", t)]
+    assert not numeric_labels, (
+        f"legend=None must suppress numeric legend labels; found: {numeric_labels}"
+    )
+
+    # No extra circles beyond the data rows.
+    n_rows = len(_t9_df)
+    circle_count = svg_suppressed.count("<circle")
+    assert circle_count <= n_rows, (
+        f"legend=None must not add legend circles; expected <={n_rows} circles, got {circle_count}"
+    )
+
+
+def test_t9_same_field_size_color_merges_into_single_legend(_t9_df: pl.DataFrame) -> None:
+    """Size('pop:Q') + Color('pop:Q') on the same field produces one merged legend block.
+
+    Ferrum merges channels on the same field into a single combined legend.
+    The SVG must contain exactly one occurrence of the legend title ``pop``,
+    not two separate ``pop`` blocks.
+    """
+    svg = (
+        fm.Chart(_t9_df)
+        .mark_point()
+        .encode(
+            x="x:Q",
+            y="y:Q",
+            size=fm.Size("pop:Q"),
+            color=fm.Color("pop:Q"),
+        )
+        .show_svg()
+    )
+    texts = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
+    pop_count = texts.count("pop")
+    assert pop_count == 1, (
+        f"same-field size+color must produce exactly one 'pop' legend title; "
+        f"got {pop_count} occurrences in texts: {texts}"
+    )
+
+
+def test_t9_color_only_legend_unchanged(_t9_df: pl.DataFrame) -> None:
+    """Color('region:N') alone still renders the categorical color legend correctly.
+
+    Regression guard: adding size/shape legend support must not break the existing
+    color legend rendering path.
+    """
+    svg = (
+        fm.Chart(_t9_df)
+        .mark_point()
+        .encode(x="x:Q", y="y:Q", color=fm.Color("region:N"))
+        .show_svg()
+    )
+    texts = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
+
+    assert "region" in texts, f"color legend title 'region' must appear; got {texts}"
+    region_labels = [t for t in texts if t in {"Asia", "Europe", "Americas", "Africa"}]
+    assert len(region_labels) == 4, (
+        f"color legend must show all 4 region labels; got {region_labels}"
+    )
+
+    # No size-legend artifacts (numeric e-notation labels) should appear.
+    numeric_labels = [t for t in texts if re.match(r"^\d+(?:\.\d+)?e\d+$", t)]
+    assert not numeric_labels, (
+        f"color-only chart must not produce size-legend numeric labels; found {numeric_labels}"
+    )

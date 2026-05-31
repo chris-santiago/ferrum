@@ -721,6 +721,7 @@ fn prepare_and_layout(
         prep.colorbar.as_ref(),
         &metrics,
         &legend_overrides,
+        &prep.aux_legends,
     )
     .map_err(|e| RenderError::LayoutFailed(e.to_string()))?;
     for w in &layout.warnings {
@@ -1034,6 +1035,7 @@ mod orchestration_tests {
             &prep.axes, &prep.facet_groups, &prep.legend_entries,
             effective_legend_title, prep.colorbar.as_ref(), &metrics,
             &legend_overrides,
+            &prep.aux_legends,
         ).unwrap();
         for w in &layout.warnings {
             warnings.push(RenderWarning::Layout(w.clone()));

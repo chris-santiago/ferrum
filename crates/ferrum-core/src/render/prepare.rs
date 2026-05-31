@@ -14,8 +14,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
 use crate::layout::{
-    AxesInput, AxisInput, AxisOrient, ColorbarInput, FacetGroup, FacetKey, LegendEntry,
-    LegendOrient, SymbolKind, TickProjection,
+    AuxLegendInput, AxesInput, AxisInput, AxisOrient, ColorbarInput, FacetGroup, FacetKey,
+    LegendEntry, LegendOrient, ShapeLegendEntry, SizeLegendEntry, SymbolKind, TickProjection,
 };
 use crate::spec::chart::ChartSpec;
 use crate::transform::context::TransformContext;
@@ -177,6 +177,13 @@ pub struct PreparedInputs {
     /// `encoding.color.legend.*`. Grouped here to keep `PreparedInputs`
     /// flat and to make adding new override fields a one-location change.
     pub legend_overrides: LegendPreparedOverrides,
+    /// Multivariate B1: auxiliary (size / shape) legend blocks. Built from the
+    /// resolved size/shape scales, stacked beneath the color legend by
+    /// `compute_layout`. Empty when neither size nor shape is encoded (or both
+    /// suppressed via `legend=None`). A size/shape channel that shares its
+    /// field with the color channel is merged into the color legend rather than
+    /// emitted here (Vega-Lite same-field merge).
+    pub aux_legends: Vec<crate::layout::AuxLegendInput>,
 }
 
 /// Per-encoding legend style overrides extracted from `encoding.color.legend.*`.
@@ -761,6 +768,29 @@ pub fn prepare_render_inputs(
             .map(str::to_owned),
     };
 
+    // Multivariate B1: build size/shape auxiliary legends from the resolved
+    // scales. A size/shape channel that shares its field with the color channel
+    // is merged into the color legend rather than emitted as a separate block.
+    let aux_legends = build_aux_legends(spec, &provisional_scales);
+
+    // Same-field merge: when color (continuous) and size share a field, the
+    // combined block is the size legend whose symbols also carry color
+    // (`color_hex`). Suppress the now-redundant colorbar so a single combined
+    // legend renders rather than a colorbar plus a size legend.
+    let colorbar = {
+        let merged_color_size = aux_legends.iter().any(|a| matches!(
+            a,
+            AuxLegendInput::Size { entries, .. }
+                if entries.iter().any(|e| e.color_hex.is_some())
+        ));
+        if merged_color_size { None } else { colorbar }
+    };
+    let legend_title = if colorbar.is_none() && legend_entries.is_empty() {
+        None
+    } else {
+        legend_title
+    };
+
     Ok(PreparedInputs {
         transform_outputs,
         provisional_scales,
@@ -773,7 +803,139 @@ pub fn prepare_render_inputs(
         layers,
         coord_flipped,
         legend_overrides,
+        aux_legends,
     })
+}
+
+/// Read whether a channel's `legend` extra carries `disabled: true`
+/// (`legend=None` / `legend=False` from the Python `Size`/`Shape` classes).
+fn legend_channel_disabled(enc: Option<&crate::spec::encoding::EncodingSpec>) -> bool {
+    enc.and_then(|e| e.legend.as_ref())
+        .and_then(|l| l.extra.get("disabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Optional explicit legend title from a channel's `legend.title` extra,
+/// falling back to the channel's field name.
+fn aux_legend_title(enc: &crate::spec::encoding::EncodingSpec) -> Option<String> {
+    let explicit = enc
+        .legend
+        .as_ref()
+        .and_then(|l| l.extra.get("title"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    explicit.or_else(|| Some(enc.field.clone()))
+}
+
+/// Build the size/shape auxiliary legend blocks.
+///
+/// Size: graduated symbols at ~5 nice round values spanning the size domain
+/// (`nice_ticks`), each scaled to the size scale's pixel radius and labeled
+/// with the value. Shape: one glyph per category in the shape scale.
+///
+/// Same-field merge (Vega-Lite behavior): when the size channel shares its
+/// field with a *continuous* color encoding, the size legend's symbols also
+/// carry the color the shared field maps to (`color_hex`), and the colorbar is
+/// expected to be suppressed by the caller — a single combined block. A size or
+/// shape channel that shares its field with a categorical color encoding is
+/// suppressed entirely (the color legend already labels that field).
+fn build_aux_legends(
+    spec: &ChartSpec,
+    scales: &ResolvedScales,
+) -> Vec<AuxLegendInput> {
+    use crate::render::format::format_with_spec;
+    use crate::scale::ticks::nice_ticks;
+
+    let color_field = spec.encoding.color.as_ref().map(|c| c.field.as_str());
+    let color_is_continuous = matches!(
+        scales.color,
+        Some(crate::render::scale_resolve::ColorScale::Continuous { .. })
+    );
+
+    let mut out = Vec::new();
+
+    // ── Size legend ──────────────────────────────────────────────────────
+    if let (Some(size_scale), Some(size_enc)) = (&scales.size, &spec.encoding.size) {
+        let disabled = legend_channel_disabled(spec.encoding.size.as_ref());
+        let same_field_as_color = color_field == Some(size_enc.field.as_str());
+        // Merge into a categorical color legend → suppress (color labels it).
+        let suppressed = disabled || (same_field_as_color && !color_is_continuous);
+        if !suppressed {
+            let format_spec = size_enc
+                .legend
+                .as_ref()
+                .and_then(|l| l.extra.get("format"))
+                .and_then(|v| v.as_str());
+            if let Some((lo, hi)) = size_scale.inner.data_domain() {
+                let values = nice_ticks(lo, hi, 5);
+                let entries: Vec<SizeLegendEntry> = values
+                    .iter()
+                    .filter_map(|&v| {
+                        // The size scale maps a value to a mark *area* (square
+                        // pixels); the point mark draws radius = sqrt(area/π).
+                        // Match that exactly so legend symbols equal the marks.
+                        let area = size_scale.inner.to_pixel_f64(v)?;
+                        let radius = (area / std::f64::consts::PI).sqrt();
+                        if !(radius.is_finite() && radius > 0.0) {
+                            return None;
+                        }
+                        // Merge color+size on the same continuous field: sample
+                        // the color scale at the value so the symbol varies in
+                        // both radius and color.
+                        let color_hex = if same_field_as_color && color_is_continuous {
+                            scales
+                                .color
+                                .as_ref()
+                                .and_then(|c| c.lookup_f64(v))
+                                .map(crate::render::color::fmt_svg)
+                        } else {
+                            None
+                        };
+                        Some(SizeLegendEntry {
+                            label: format_with_spec(v, format_spec),
+                            radius,
+                            color_hex,
+                        })
+                    })
+                    .collect();
+                if !entries.is_empty() {
+                    out.push(AuxLegendInput::Size {
+                        title: aux_legend_title(size_enc),
+                        entries,
+                    });
+                }
+            }
+        }
+    }
+
+    // ── Shape legend ─────────────────────────────────────────────────────
+    if let (Some(shape_scale), Some(shape_enc)) = (&scales.shape, &spec.encoding.shape) {
+        let disabled = legend_channel_disabled(spec.encoding.shape.as_ref());
+        let same_field_as_color = color_field == Some(shape_enc.field.as_str());
+        // Shape always maps a categorical field; if color encodes the same
+        // categorical field, the color legend already enumerates it — suppress.
+        let suppressed = disabled || same_field_as_color;
+        if !suppressed {
+            let entries: Vec<ShapeLegendEntry> = shape_scale
+                .domain
+                .iter()
+                .zip(shape_scale.shapes.iter())
+                .map(|(label, kind)| ShapeLegendEntry {
+                    label: label.clone(),
+                    shape_name: kind.name().to_string(),
+                })
+                .collect();
+            if !entries.is_empty() {
+                out.push(AuxLegendInput::Shape {
+                    title: aux_legend_title(shape_enc),
+                    entries,
+                });
+            }
+        }
+    }
+
+    out
 }
 
 /// Apply a Python-style format spec string to a numeric value.
@@ -1370,6 +1532,174 @@ mod tests {
         assert_eq!(prep.facet_groups[1].n_rows, 1);
         assert_eq!(prep.legend_entries.len(), 2);
         assert_eq!(prep.legend_entries[0].label, "a");
+    }
+
+    // ── Multivariate B1: size / shape / merged legends ───────────────────
+
+    fn batch_pop() -> RecordBatch {
+        // x, y, a numeric "pop" field (size/color domain ≈ [10, 100]), and a
+        // categorical "region" field for color/shape.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("pop", DataType::Float64, false),
+            Field::new("region", DataType::Utf8, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(Float64Array::from(vec![10.0, 40.0, 70.0, 100.0])),
+                Arc::new(StringArray::from(vec!["AS", "EU", "AS", "AF"])),
+                Arc::new(StringArray::from(vec!["lo", "hi", "lo", "hi"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn base_spec() -> ChartSpec {
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        }
+    }
+
+    fn prep(spec: &ChartSpec, batch: &RecordBatch) -> PreparedInputs {
+        prepare_render_inputs(spec, batch, &crate::layout::ThemeInputs::default()).unwrap()
+    }
+
+    #[test]
+    fn size_encoding_produces_graduated_size_legend() {
+        let mut spec = base_spec();
+        spec.encoding.size = Some(EncodingSpec { field: "pop".into(), type_: None, ..Default::default() });
+        let p = prep(&spec, &batch_pop());
+        assert_eq!(p.aux_legends.len(), 1, "expected exactly one (size) aux legend");
+        let AuxLegendInput::Size { entries, title } = &p.aux_legends[0] else {
+            panic!("expected a Size aux legend, got {:?}", p.aux_legends[0]);
+        };
+        assert_eq!(title.as_deref(), Some("pop"));
+        // ~5 nice round values across the [10, 100] domain. nice_ticks(10,100,5)
+        // yields 20,40,60,80,100 — labels are the round values, not raw quantiles.
+        assert!(
+            (4..=6).contains(&entries.len()),
+            "expected ~5 graduated entries, got {}: {:?}",
+            entries.len(), entries
+        );
+        // Labels are human-friendly round numbers.
+        for e in entries {
+            assert!(e.radius > 0.0, "size symbol radius must be positive");
+            let v: f64 = e.label.parse().expect("size legend label must be numeric");
+            assert_eq!(v.fract(), 0.0, "expected round value label, got {}", e.label);
+        }
+        // Radii increase with value (larger pop → bigger symbol).
+        assert!(
+            entries.first().unwrap().radius < entries.last().unwrap().radius,
+            "radii should grow across the size domain"
+        );
+    }
+
+    #[test]
+    fn shape_encoding_produces_shape_legend_one_per_category() {
+        let mut spec = base_spec();
+        spec.encoding.shape = Some(EncodingSpec { field: "region".into(), type_: None, ..Default::default() });
+        let p = prep(&spec, &batch_pop());
+        assert_eq!(p.aux_legends.len(), 1);
+        let AuxLegendInput::Shape { entries, title } = &p.aux_legends[0] else {
+            panic!("expected a Shape aux legend");
+        };
+        assert_eq!(title.as_deref(), Some("region"));
+        // Distinct regions in encounter order: AS, EU, AF.
+        let labels: Vec<&str> = entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, vec!["AS", "EU", "AF"]);
+        // First three palette shapes: circle, square, cross.
+        assert_eq!(entries[0].shape_name, "circle");
+        assert_eq!(entries[1].shape_name, "square");
+        assert_eq!(entries[2].shape_name, "cross");
+    }
+
+    #[test]
+    fn color_size_shape_together_produce_two_aux_blocks_plus_color() {
+        // color on region (categorical → color legend), size on pop, shape on a
+        // 4th distinct field. Color legend is separate (legend_entries); size +
+        // shape are two stacked aux blocks.
+        let mut spec = base_spec();
+        spec.encoding.color = Some(EncodingSpec { field: "region".into(), type_: None, ..Default::default() });
+        spec.encoding.size = Some(EncodingSpec { field: "pop".into(), type_: None, ..Default::default() });
+        spec.encoding.shape = Some(EncodingSpec { field: "grp".into(), type_: None, ..Default::default() });
+        let p = prep(&spec, &batch_pop());
+        // Color drives a categorical legend (legend_entries), not an aux block.
+        assert!(!p.legend_entries.is_empty(), "color legend entries expected");
+        // Two aux blocks: size then shape, stable order.
+        assert_eq!(p.aux_legends.len(), 2, "expected size + shape aux blocks");
+        assert!(matches!(p.aux_legends[0], AuxLegendInput::Size { .. }), "size first");
+        assert!(matches!(p.aux_legends[1], AuxLegendInput::Shape { .. }), "shape second");
+    }
+
+    #[test]
+    fn color_and_size_on_same_field_merge_into_one_block() {
+        // color (continuous) AND size both on "pop" → a single combined block:
+        // a size legend whose symbols also carry color (color_hex), and NO
+        // colorbar (it would be the second, redundant legend).
+        let mut spec = base_spec();
+        spec.encoding.color = Some(EncodingSpec {
+            field: "pop".into(),
+            type_: Some(crate::spec::encoding::DataType::Quantitative),
+            ..Default::default()
+        });
+        spec.encoding.size = Some(EncodingSpec { field: "pop".into(), type_: None, ..Default::default() });
+        let p = prep(&spec, &batch_pop());
+        // Exactly one merged block, and the colorbar is suppressed.
+        assert_eq!(p.aux_legends.len(), 1, "merge → single block, not two");
+        assert!(p.colorbar.is_none(), "colorbar must be suppressed in the merged case");
+        let AuxLegendInput::Size { entries, .. } = &p.aux_legends[0] else {
+            panic!("merged block should be a Size legend carrying color");
+        };
+        assert!(
+            entries.iter().all(|e| e.color_hex.is_some()),
+            "merged size entries must carry per-entry color"
+        );
+    }
+
+    #[test]
+    fn size_legend_disabled_suppresses_block() {
+        let mut spec = base_spec();
+        let mut extra = serde_json::Map::new();
+        extra.insert("disabled".into(), serde_json::Value::Bool(true));
+        spec.encoding.size = Some(EncodingSpec {
+            field: "pop".into(),
+            legend: Some(crate::spec::encoding::LegendSpec { extra }),
+            ..Default::default()
+        });
+        let p = prep(&spec, &batch_pop());
+        assert!(p.aux_legends.is_empty(), "legend=None on size must suppress the block");
+    }
+
+    #[test]
+    fn color_only_chart_has_no_aux_legends() {
+        // Regression: a color-only chart produces zero aux legends (the color
+        // legend / colorbar path is untouched).
+        let mut spec = base_spec();
+        spec.encoding.color = Some(EncodingSpec { field: "region".into(), type_: None, ..Default::default() });
+        let p = prep(&spec, &batch_pop());
+        assert!(p.aux_legends.is_empty());
+        assert!(!p.legend_entries.is_empty(), "color legend still present");
     }
 
     #[test]

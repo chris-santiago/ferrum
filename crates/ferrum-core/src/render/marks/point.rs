@@ -7,7 +7,7 @@ use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, c
 use crate::render::scale_resolve::{ColorScale, ScaleKind, ShapeKind};
 
 /// Parse a shape name string to a `ShapeKind`. Unknown values fall back to `Circle`.
-fn shape_from_str(s: &str) -> ShapeKind {
+pub(crate) fn shape_from_str(s: &str) -> ShapeKind {
     match s {
         "square" => ShapeKind::Square,
         "cross" => ShapeKind::Cross,
@@ -28,18 +28,18 @@ fn shape_from_str(s: &str) -> ShapeKind {
 ///
 /// `stroke_opacity`, `fill_opacity`, and `angle` flow directly from encoding
 /// columns into the emitted `FillStroke` style — no scale transform.
-struct ShapeStyle {
-    fill: Option<crate::render::color::Color>,
-    stroke: Option<crate::render::color::Color>,
-    stroke_width: f64,
-    opacity: f64,
-    stroke_opacity: f64,
-    fill_opacity: f64,
-    stroke_dash_idx: Option<f64>,
-    angle: f64,
+pub(crate) struct ShapeStyle {
+    pub fill: Option<crate::render::color::Color>,
+    pub stroke: Option<crate::render::color::Color>,
+    pub stroke_width: f64,
+    pub opacity: f64,
+    pub stroke_opacity: f64,
+    pub fill_opacity: f64,
+    pub stroke_dash_idx: Option<f64>,
+    pub angle: f64,
 }
 
-fn emit_shape_nodes(
+pub(crate) fn emit_shape_nodes(
     kind: ShapeKind,
     cx: f64,
     cy: f64,
