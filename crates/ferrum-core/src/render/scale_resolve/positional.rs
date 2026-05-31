@@ -168,10 +168,10 @@ pub(in crate::render) fn build_from_scale_spec(
                 None => distinct_values_in_order(batch, &enc.field)?,
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
-            // Extract numeric pixel range from the polymorphic `range` field.
+            // Extract numeric pixel range from the typed polymorphic `range`.
             // String values (color ranges) are handled by `build_color_scale` —
-            // fall back to the pixel-range default when the range is not numeric.
-            let pixel_range: Vec<f64> = ordinal_range_as_f64(range, pr);
+            // fall back to the pixel-range default when the range has no numbers.
+            let pixel_range = ordinal_pixel_range(range.as_deref(), pr);
             ScaleKind::Ordinal(OrdinalScale::new_internal(d, pixel_range, *padding))
         }
         ScaleSpec::Pow { exponent, common } => {
@@ -224,56 +224,23 @@ pub(in crate::render) fn build_from_scale_spec(
     })
 }
 
-/// Extract numeric pixel coordinates from the polymorphic `range` field of
-/// `ScaleSpec::Ordinal`.
+/// Resolve the pixel-coordinate range for a `ScaleSpec::Ordinal`.
 ///
-/// `range` stores `serde_json::Value` to support both numeric pixel ranges
-/// (`[0, 300]`) and string color ranges (`["#ccc", "#e4572e"]`).  This helper
-/// returns the numeric values for the positional scale resolver.  When `range`
-/// is absent, contains non-numeric values (i.e. a color-string range intended
-/// for `build_color_scale`), or is otherwise malformed, the pixel-range default
+/// The typed `range` carries `Number` entries (pixel coordinates) and/or `Str`
+/// entries (color strings, handled by `build_color_scale`). This helper pulls
+/// the numbers for the positional resolver. When `range` is absent or carries
+/// no numbers (i.e. an all-string color range), the plot-area extent
 /// `[pr.0, pr.1]` is returned so the positional scale still functions.
-pub(in crate::render) fn ordinal_range_as_f64(
-    range: &Option<serde_json::Value>,
+fn ordinal_pixel_range(
+    range: Option<&[crate::scale::ordinal::OrdinalRangeValue]>,
     pr: (f64, f64),
 ) -> Vec<f64> {
     match range {
+        Some(values) => {
+            let nums = crate::scale::ordinal::OrdinalRangeValue::numbers(values);
+            if nums.is_empty() { vec![pr.0, pr.1] } else { nums }
+        }
         None => vec![pr.0, pr.1],
-        Some(serde_json::Value::Array(arr)) => {
-            let nums: Vec<f64> = arr
-                .iter()
-                .filter_map(|v| v.as_f64())
-                .collect();
-            if nums.is_empty() {
-                // Range contains strings (color range) — not for positional use.
-                vec![pr.0, pr.1]
-            } else {
-                nums
-            }
-        }
-        _ => vec![pr.0, pr.1],
-    }
-}
-
-/// Extract color strings from the polymorphic `range` field of
-/// `ScaleSpec::Ordinal`.
-///
-/// Returns `Some(Vec<String>)` when the range is an array of JSON strings;
-/// `None` when the range is absent or contains numeric values (a pixel range
-/// intended for the positional resolver).
-pub(in crate::render) fn ordinal_range_as_strings(
-    range: &Option<serde_json::Value>,
-) -> Option<Vec<String>> {
-    match range {
-        Some(serde_json::Value::Array(arr)) if !arr.is_empty() => {
-            // Return Some only when ALL values are strings.
-            let strings: Vec<String> = arr
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect();
-            if strings.len() == arr.len() { Some(strings) } else { None }
-        }
-        _ => None,
     }
 }
 

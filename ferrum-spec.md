@@ -689,6 +689,17 @@ Scales map data domain values to visual range values. Attached to encoding chann
 > matching Altair's `Scale(domain=..., range=[...])`. `ScaleQuantize` string
 > ranges are the existing precedent. No new value-class is introduced.
 
+> **2026-05-31 (F2, internal wire-format typing):** The ordinal `scale.range`
+> wire representation is now a typed array of `Number | String` entries
+> internally (Rust `Vec<OrdinalRangeValue>`, serialized `untagged`), replacing
+> the prior untyped `serde_json::Value` that was re-discriminated by JSON
+> sniffing at three call sites. The **user-facing contract is unchanged**:
+> Python still constructs `Scale(range=[...])` / `OrdinalScale(range=[...])`
+> with a plain `list[float | str]`, and the emitted JSON is still a flat array
+> (e.g. `[0, 300]` or `["#ccc", "#e4572e"]`). Only the Rust-side type and the
+> single typed accessor that replaced the sniffers changed; positional and
+> color scale resolution are byte-identical.
+
 > **Design decision (2026-05-31, flexibility-campaign D2):** Layering with `+`
 > resolves color scales by **unioning their domains** across layers, so the
 > result is order-independent (`base + highlight == highlight + base`). On a
@@ -1108,7 +1119,9 @@ ferrum.catplot(data, *, x=None, y=None, hue=None, col=None, row=None,
                                      # "boxen" | "point" | "bar" | "count"
                order=None, hue_order=None, orient=None,
                dodge=False, jitter=True, native_scale=False,
-               ci=95, n_boot=1000, seed=None, theme=None)
+               ci=95, n_boot=1000, seed=None,
+               height=None, aspect=None,   # > **2026-05-31:** added; same semantics as displot
+               theme=None)
 ```
 
 #### Relational

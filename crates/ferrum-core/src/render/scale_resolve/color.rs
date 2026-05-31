@@ -13,7 +13,6 @@ use crate::render::palette;
 use crate::render::RenderError;
 
 use super::domain::{apply_sort_to_domain, locate_field, SortContext};
-use super::positional::ordinal_range_as_strings;
 use super::{distinct_values_in_order, infer_spec_type, numeric_extent, ColorScale};
 
 /// Resolve the color encoding into a `ColorScale`.
@@ -227,7 +226,9 @@ fn scale_common_scheme(enc: &crate::spec::encoding::EncodingSpec) -> Option<&str
 fn explicit_string_range(enc: &crate::spec::encoding::EncodingSpec) -> Option<Vec<String>> {
     use crate::spec::encoding::ScaleSpec;
     match enc.scale.as_ref()? {
-        ScaleSpec::Ordinal { range, .. } => ordinal_range_as_strings(range),
+        ScaleSpec::Ordinal { range, .. } => {
+            crate::scale::ordinal::OrdinalRangeValue::all_strings(range.as_deref()?)
+        }
         _ => None,
     }
 }
