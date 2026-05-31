@@ -394,11 +394,17 @@ def desugar_smooth(
         Optional number of x bins for aggregated scatter smoothing.
     x_estimator : str or None, default None
         Aggregation function per x bin (e.g. ``"mean"``).
+    show_metrics : bool, default False
+        When ``True``, emit a ``"metrics"`` layer annotating the fit with
+        regression statistics (e.g. R²).
     groupby : str or None, default None
         Optional grouping column forwarded to the ``Smooth`` transform.
         When set, the smoothing is computed per group and the output
         retains the group column so a downstream ``color=`` encoding
         can map to it.
+    name : str or None, default None
+        Optional name for the ``Smooth`` transform output, used to wire
+        downstream layers to its emitted columns.
     x_range : [float, float] or None, default None
         Explicit evaluation domain ``[x_min, x_max]`` forwarded to the
         ``Smooth`` transform.  When set, the fit line is evaluated over

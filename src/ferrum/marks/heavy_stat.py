@@ -198,6 +198,9 @@ def desugar_violin(
         KDE bandwidth rule or numeric value.
     inner : {"box", "quartile", "point", None}, default "box"
         Style of inner mark drawn inside the violin body.
+    x_sort, y_sort : optional
+        Sort order applied to the categorical positional axis, injected by
+        the composite-mark expansion from ``sort=`` on the encoding.
 
     Returns
     -------
@@ -704,6 +707,9 @@ def desugar_swarm(
     dodge : str or None, default None
         Column name to sub-group by within each category band.  Each
         dodge group is offset side-by-side so groups do not overlap.
+    x_sort, y_sort : optional
+        Sort order applied to the categorical positional axis, injected by
+        the composite-mark expansion from ``sort=`` on the encoding.
 
     Returns
     -------

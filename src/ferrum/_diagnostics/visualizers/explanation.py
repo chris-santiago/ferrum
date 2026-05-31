@@ -268,6 +268,8 @@ class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
     background : Any, optional
         Background dataset passed to the SHAP explainer for kernel-
         SHAP models.  Tree SHAP ignores this.
+    per_class : bool, default False
+        Facet by class on multi-class classifiers.
     random_state, theme : forwarded to ``FerrumVisualizer``.
 
     Examples
@@ -379,6 +381,8 @@ class SHAPWaterfallVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         selection and the bar order).
     background : Any, optional
         Background dataset passed to the SHAP explainer.
+    per_class : bool, default False
+        Facet by class on multi-class classifiers.
     random_state, theme : forwarded to ``FerrumVisualizer``.
 
     Raises
