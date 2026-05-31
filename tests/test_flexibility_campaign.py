@@ -4,11 +4,14 @@ Each section is labeled by its campaign defect ID so new defects can be
 appended here without disrupting earlier sections.
 """
 
+from datetime import date, datetime as dt
+
 import polars as pl
 import pytest
 
 import ferrum as fm
 from ferrum import OrdinalScale
+from ferrum.annotation.coords import temporal_coord_to_epoch_ms
 from ferrum.encoding import Color
 
 
@@ -905,3 +908,155 @@ def test_d6_area_color_resolves_to_fill_in_mark_kwargs(line_df: pl.DataFrame) ->
         f"mark_area(color='#e4572e') must not store stroke in mark_kwargs; "
         f"got: {chart._mark_kwargs}"
     )
+
+
+# ---------------------------------------------------------------------------
+# D7 — datetime annotation coordinates accepted on temporal axes
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def temporal_df() -> pl.DataFrame:
+    """12-month time-series for temporal annotation tests."""
+    return pl.DataFrame(
+        {
+            "date": pl.date_range(date(2020, 1, 1), date(2020, 12, 1), "1mo", eager=True),
+            "val": list(range(12)),
+        }
+    )
+
+
+def _date_epoch_ms(d: date) -> float:
+    """Expected epoch-ms for a calendar date at midnight UTC.
+
+    Uses the same arithmetic as temporal_coord_to_epoch_ms so the test can
+    assert that annotation coordinates and data columns agree exactly.
+    """
+    return float((d - date(1970, 1, 1)).days * 86_400_000)
+
+
+def test_d7_vline_date_renders_without_error(temporal_df: pl.DataFrame) -> None:
+    """annotate_vline(x=date(...)) on a temporal chart renders without TypeError."""
+    chart = fm.Chart(temporal_df).mark_line().encode(x="date:T", y="val:Q")
+    vline = fm.annotate_vline(x=date(2020, 6, 1), stroke="red")
+    svg = (chart + vline).show_svg()
+    assert len(svg) > 0, "composed chart with date vline must produce non-empty SVG"
+
+
+def test_d7_vline_date_epoch_ms_correct() -> None:
+    """annotate_vline(x=date(...)) stores the correct epoch-ms in the annotation primitive.
+
+    The annotation chart's internal _x column must be a plain float equal to
+    the epoch-ms of the date at midnight UTC.  This guarantees alignment with
+    data columns that go through _coerce.py's date→timestamp[ms] path.
+    """
+    expected_ms = _date_epoch_ms(date(2020, 6, 1))
+    vline = fm.annotate_vline(x=date(2020, 6, 1))
+    # The primitive is stored on _annotation_primitive; verify its x1 value.
+    prim = vline._annotation_primitive
+    assert prim is not None, "annotation_primitive must be set"
+    # x1 is the data-space coordinate (y1 and y2 are NormCoord wrappers).
+    assert prim.x1 == expected_ms, (
+        f"vline x1 must equal epoch-ms for date(2020,6,1); expected {expected_ms}, got {prim.x1}"
+    )
+
+
+def test_d7_vline_iso_string_matches_date(temporal_df: pl.DataFrame) -> None:
+    """annotate_vline(x='2020-06-01') renders and places the line at the same
+    epoch-ms as annotate_vline(x=date(2020,6,1))."""
+    expected_ms = _date_epoch_ms(date(2020, 6, 1))
+
+    vline_date = fm.annotate_vline(x=date(2020, 6, 1))
+    vline_str = fm.annotate_vline(x="2020-06-01")
+
+    prim_date = vline_date._annotation_primitive
+    prim_str = vline_str._annotation_primitive
+    assert prim_date.x1 == expected_ms, f"date vline x1={prim_date.x1}, expected {expected_ms}"
+    assert prim_str.x1 == expected_ms, f"string vline x1={prim_str.x1}, expected {expected_ms}"
+    assert prim_date.x1 == prim_str.x1, "ISO string and date(…) must produce identical epoch-ms"
+
+
+def test_d7_rect_with_date_boundaries(temporal_df: pl.DataFrame) -> None:
+    """annotate_rect(x1=date(...), x2=date(...), y1=..., y2=...) renders without error."""
+    chart = fm.Chart(temporal_df).mark_line().encode(x="date:T", y="val:Q")
+    rect = fm.annotate_rect(
+        x1=date(2020, 3, 1),
+        x2=date(2020, 9, 1),
+        y1=0.0,
+        y2=10.0,
+        fill="#ffcc00",
+        opacity=0.2,
+    )
+    svg = (chart + rect).show_svg()
+    assert len(svg) > 0, "composed chart with date rect must produce non-empty SVG"
+
+    # Verify the primitive corners store epoch-ms values.
+    prim = rect._annotation_primitive
+    assert prim.x1 == _date_epoch_ms(date(2020, 3, 1)), "rect x1 must be epoch-ms"
+    assert prim.x2 == _date_epoch_ms(date(2020, 9, 1)), "rect x2 must be epoch-ms"
+
+
+def test_d7_text_with_datetime_renders(temporal_df: pl.DataFrame) -> None:
+    """annotate_text(x=datetime(...), y=..., text=...) renders without error."""
+    chart = fm.Chart(temporal_df).mark_line().encode(x="date:T", y="val:Q")
+    label = fm.annotate_text(x=dt(2020, 1, 1, 12, 0), y=5.0, text="noon event")
+    svg = (chart + label).show_svg()
+    assert len(svg) > 0, "annotate_text with datetime x must produce non-empty SVG"
+
+    prim = label._annotation_primitive
+    expected_ms = temporal_coord_to_epoch_ms(dt(2020, 1, 1, 12, 0))
+    assert prim.x == expected_ms, (
+        f"text annotation x must equal epoch-ms of datetime(2020,1,1,12,0); "
+        f"expected {expected_ms}, got {prim.x}"
+    )
+
+
+def test_d7_temporal_coord_to_epoch_ms_matches_polars_coerce() -> None:
+    """temporal_coord_to_epoch_ms(date) must produce the same epoch-ms that
+    _coerce.py produces for a polars Date column on the same date.
+
+    This is the alignment guarantee: annotations placed at date(2020,6,1) land
+    exactly on the data point that has date(2020,6,1) in a temporal column.
+    """
+    import pyarrow as pa
+
+    d = date(2020, 6, 1)
+    # Polars path: Date column → _coerce.py → timestamp[ms] Arrow column.
+    df = pl.DataFrame({"d": [d]})
+    # _coerce.py casts pl.Date → pl.Datetime("ms") via with_columns.
+    arr = df.with_columns(pl.col("d").cast(pl.Datetime("ms"))).to_arrow()
+    polars_ms = arr.column("d").cast(pa.int64())[0].as_py()
+
+    annotation_ms = temporal_coord_to_epoch_ms(d)
+    assert annotation_ms == polars_ms, (
+        f"annotation epoch-ms ({annotation_ms}) must match polars coerce epoch-ms ({polars_ms}) "
+        f"for date(2020,6,1)"
+    )
+
+
+def test_d7_numeric_coordinates_unchanged() -> None:
+    """Plain numeric coordinates still work and are stored as-is (regression guard)."""
+    vline = fm.annotate_vline(x=42.0)
+    prim = vline._annotation_primitive
+    assert prim.x1 == 42.0, f"numeric vline x1 must be 42.0, got {prim.x1}"
+
+    hline = fm.annotate_hline(y=100)
+    hprim = hline._annotation_primitive
+    assert hprim.y1 == 100.0, f"numeric hline y1 must be 100.0, got {hprim.y1}"
+
+
+def test_d7_px_norm_wrappers_unaffected() -> None:
+    """px() and norm() coordinate wrappers are not affected by the temporal fix."""
+    from ferrum.annotation.coords import px, norm
+    from ferrum.annotation.primitives import _coord
+
+    assert _coord(px(50)) == {"px": 50}, f"px(50) must serialize to {{px: 50}}"
+    assert _coord(norm(0.5)) == {"norm": 0.5}, f"norm(0.5) must serialize to {{norm: 0.5}}"
+    # Numeric float passes through unchanged.
+    assert _coord(3.14) == 3.14, f"float 3.14 must pass through unchanged"
+
+
+def test_d7_invalid_iso_string_raises_value_error() -> None:
+    """An unparseable string raises ValueError with a clear message."""
+    with pytest.raises(ValueError, match="Cannot parse annotation coordinate"):
+        fm.annotate_vline(x="not-a-date")

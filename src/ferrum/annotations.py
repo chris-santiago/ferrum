@@ -7,12 +7,37 @@ for backward compatibility.
 
 from __future__ import annotations
 
-from typing import Optional
+import datetime as _dt
+from typing import Optional, Union
 
 import polars as pl
 
+from ferrum.annotation.coords import CoordValue, temporal_coord_to_epoch_ms
 from ferrum.chart import Chart
 from ferrum._metric_labels import AUCLabel, APLabel, BrierLabel, OutlierLabel  # noqa: F401
+
+# Type accepted by positional annotation parameters: numeric (data-space),
+# temporal Python types, or ISO-8601 strings (all converted to epoch-ms).
+_AnnotationCoord = Union[float, int, _dt.date, _dt.datetime, str]
+
+
+def _coerce_temporal(v: _AnnotationCoord) -> float:
+    """Convert an annotation positional coordinate to a plain number.
+
+    - Numeric values pass through unchanged.
+    - ``datetime.date``, ``datetime.datetime``, and ISO-8601 strings are
+      converted to epoch-milliseconds (UTC) via the canonical
+      ``temporal_coord_to_epoch_ms`` helper, producing the same units that
+      ``_coerce.py`` produces for temporal data columns.
+
+    This coercion is applied before constructing the intermediate polars
+    DataFrame so that polars always receives a plain Python number rather than
+    a date type, keeping the annotation's internal column type consistent with
+    how the annotation primitive serializes the same value.
+    """
+    if isinstance(v, (_dt.datetime, _dt.date, str)):
+        return temporal_coord_to_epoch_ms(v)
+    return float(v)
 
 
 def _attach_annotation_primitive(chart: Chart, primitive: object) -> Chart:
@@ -22,7 +47,11 @@ def _attach_annotation_primitive(chart: Chart, primitive: object) -> Chart:
 
 
 def annotate_hline(
-    y: float, *, label: Optional[str] = None, stroke: Optional[str] = None, stroke_dash=None
+    y: _AnnotationCoord,
+    *,
+    label: Optional[str] = None,
+    stroke: Optional[str] = None,
+    stroke_dash=None,
 ) -> Chart:
     """Horizontal reference line at a fixed y position.
 
@@ -32,8 +61,10 @@ def annotate_hline(
 
     Parameters
     ----------
-    y : float
-        Y position of the line in data coordinates.
+    y : float, datetime.date, datetime.datetime, or str
+        Y position of the line in data coordinates.  Temporal values
+        (``date``, ``datetime``, ISO-8601 strings) are converted to
+        epoch-milliseconds (UTC) to align with ferrum's temporal axis scale.
     label : str, optional
         Reserved for future use (no-op today).
     stroke : str, optional
@@ -56,7 +87,8 @@ def annotate_hline(
     from ferrum.annotation.coords import norm
     from ferrum.annotation.primitives import AnnotationLine
 
-    df = pl.DataFrame({"_y": [y]})
+    y_num = _coerce_temporal(y)
+    df = pl.DataFrame({"_y": [y_num]})
     kwargs: dict = {}
     if stroke is not None:
         kwargs["stroke"] = stroke
@@ -66,9 +98,9 @@ def annotate_hline(
     # Attach annotation primitive: horizontal line spanning the full x-axis
     prim = AnnotationLine(
         x1=norm(0),
-        y1=y,
+        y1=y_num,
         x2=norm(1),
-        y2=y,
+        y2=y_num,
         stroke=stroke or "#333",
         stroke_width=1,
         dash=stroke_dash,
@@ -77,7 +109,11 @@ def annotate_hline(
 
 
 def annotate_vline(
-    x: float, *, label: Optional[str] = None, stroke: Optional[str] = None, stroke_dash=None
+    x: _AnnotationCoord,
+    *,
+    label: Optional[str] = None,
+    stroke: Optional[str] = None,
+    stroke_dash=None,
 ) -> Chart:
     """Vertical reference line at a fixed x position.
 
@@ -87,8 +123,10 @@ def annotate_vline(
 
     Parameters
     ----------
-    x : float
-        X position of the line in data coordinates.
+    x : float, datetime.date, datetime.datetime, or str
+        X position of the line in data coordinates.  Temporal values
+        (``date``, ``datetime``, ISO-8601 strings) are converted to
+        epoch-milliseconds (UTC) to align with ferrum's temporal axis scale.
     label : str, optional
         Reserved for future use (no-op today).
     stroke : str, optional
@@ -110,7 +148,8 @@ def annotate_vline(
     from ferrum.annotation.coords import norm
     from ferrum.annotation.primitives import AnnotationLine
 
-    df = pl.DataFrame({"_x": [x]})
+    x_num = _coerce_temporal(x)
+    df = pl.DataFrame({"_x": [x_num]})
     kwargs: dict = {}
     if stroke is not None:
         kwargs["stroke"] = stroke
@@ -119,9 +158,9 @@ def annotate_vline(
     chart = Chart(df).mark_rule(**kwargs).encode(x="_x")
     # Attach annotation primitive: vertical line spanning the full y-axis
     prim = AnnotationLine(
-        x1=x,
+        x1=x_num,
         y1=norm(0),
-        x2=x,
+        x2=x_num,
         y2=norm(1),
         stroke=stroke or "#333",
         stroke_width=1,
@@ -131,10 +170,10 @@ def annotate_vline(
 
 
 def annotate_rect(
-    x1: float,
-    x2: float,
-    y1: float,
-    y2: float,
+    x1: _AnnotationCoord,
+    x2: _AnnotationCoord,
+    y1: _AnnotationCoord,
+    y2: _AnnotationCoord,
     *,
     fill: Optional[str] = None,
     opacity: float = 0.1,
@@ -148,13 +187,13 @@ def annotate_rect(
 
     Parameters
     ----------
-    x1 : float
+    x1 : float, datetime.date, datetime.datetime, or str
         Left x boundary in data coordinates.
-    x2 : float
+    x2 : float, datetime.date, datetime.datetime, or str
         Right x boundary in data coordinates.
-    y1 : float
+    y1 : float, datetime.date, datetime.datetime, or str
         Bottom y boundary in data coordinates.
-    y2 : float
+    y2 : float, datetime.date, datetime.datetime, or str
         Top y boundary in data coordinates.
     fill : str, optional
         Fill color as a CSS color string.
@@ -177,17 +216,19 @@ def annotate_rect(
     """
     from ferrum.annotation.primitives import AnnotationRect
 
-    df = pl.DataFrame({"_x1": [x1], "_x2": [x2], "_y1": [y1], "_y2": [y2]})
+    x1_num, x2_num = _coerce_temporal(x1), _coerce_temporal(x2)
+    y1_num, y2_num = _coerce_temporal(y1), _coerce_temporal(y2)
+    df = pl.DataFrame({"_x1": [x1_num], "_x2": [x2_num], "_y1": [y1_num], "_y2": [y2_num]})
     kwargs: dict = {"opacity": opacity}
     if fill is not None:
         kwargs["fill"] = fill
     chart = Chart(df).mark_rect(**kwargs).encode(x="_x1", y="_y1", x2="_x2", y2="_y2")
     # Attach annotation primitive
     prim = AnnotationRect(
-        x1=x1,
-        y1=y1,
-        x2=x2,
-        y2=y2,
+        x1=x1_num,
+        y1=y1_num,
+        x2=x2_num,
+        y2=y2_num,
         fill=fill or "#cccccc",
         opacity=opacity,
         stroke=None,
@@ -197,8 +238,8 @@ def annotate_rect(
 
 
 def annotate_text(
-    x: float,
-    y: float,
+    x: _AnnotationCoord,
+    y: _AnnotationCoord,
     text: str,
     *,
     dx: float = 0,
@@ -217,10 +258,12 @@ def annotate_text(
 
     Parameters
     ----------
-    x : float
-        X position in data coordinates.
-    y : float
-        Y position in data coordinates.
+    x : float, datetime.date, datetime.datetime, or str
+        X position in data coordinates.  Temporal values are converted to
+        epoch-milliseconds (UTC).
+    y : float, datetime.date, datetime.datetime, or str
+        Y position in data coordinates.  Temporal values are converted to
+        epoch-milliseconds (UTC).
     text : str
         Text string to display.
     dx : float, default 0
@@ -253,7 +296,8 @@ def annotate_text(
     """
     from ferrum.annotation.primitives import AnnotationText
 
-    df = pl.DataFrame({"_x": [x], "_y": [y], "_text": [text]})
+    x_num, y_num = _coerce_temporal(x), _coerce_temporal(y)
+    df = pl.DataFrame({"_x": [x_num], "_y": [y_num], "_text": [text]})
     kwargs: dict = {"dx": dx, "dy": dy, "align": align, "baseline": baseline}
     if font_size is not None:
         kwargs["font_size"] = font_size
@@ -265,8 +309,8 @@ def annotate_text(
     # Map align to annotation anchor
     anchor_map = {"left": "start", "center": "middle", "right": "end"}
     prim = AnnotationText(
-        x=x,
-        y=y,
+        x=x_num,
+        y=y_num,
         text=text,
         font_size=font_size or 12,
         color=color or "#333",
@@ -353,10 +397,10 @@ def annotate_abline(
 
 
 def annotate_arrow(
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
+    x1: _AnnotationCoord,
+    y1: _AnnotationCoord,
+    x2: _AnnotationCoord,
+    y2: _AnnotationCoord,
     *,
     label: Optional[str] = None,
     label_side: str = "start",
@@ -369,13 +413,13 @@ def annotate_arrow(
 
     Parameters
     ----------
-    x1 : float
+    x1 : float, datetime.date, datetime.datetime, or str
         Horizontal data coordinate of the arrow start.
-    y1 : float
+    y1 : float, datetime.date, datetime.datetime, or str
         Vertical data coordinate of the arrow start.
-    x2 : float
+    x2 : float, datetime.date, datetime.datetime, or str
         Horizontal data coordinate of the arrow end (tip).
-    y2 : float
+    y2 : float, datetime.date, datetime.datetime, or str
         Vertical data coordinate of the arrow end (tip).
     label : str, optional
         Text to display alongside the arrow.  When omitted, no text is
@@ -406,7 +450,9 @@ def annotate_arrow(
     """
     # Spec §3.3 lists `arrow=True` for mark_segment but the validator does
     # not yet accept it; emit a plain segment for now.
-    df = pl.DataFrame({"_x1": [x1], "_y1": [y1], "_x2": [x2], "_y2": [y2]})
+    x1_num, y1_num = _coerce_temporal(x1), _coerce_temporal(y1)
+    x2_num, y2_num = _coerce_temporal(x2), _coerce_temporal(y2)
+    df = pl.DataFrame({"_x1": [x1_num], "_y1": [y1_num], "_x2": [x2_num], "_y2": [y2_num]})
     seg_kwargs: dict = {}
     if stroke is not None:
         seg_kwargs["stroke"] = stroke
@@ -422,7 +468,7 @@ def annotate_arrow(
     )
     if label is None:
         return arrow_chart
-    lx, ly = (x1, y1) if label_side == "start" else (x2, y2)
+    lx, ly = (x1_num, y1_num) if label_side == "start" else (x2_num, y2_num)
     dx = -6 if label_side == "start" else 6
     align = "right" if label_side == "start" else "left"
     return arrow_chart & annotate_text(lx, ly, label, dx=dx, align=align)

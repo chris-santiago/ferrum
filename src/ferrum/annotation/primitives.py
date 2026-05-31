@@ -4,12 +4,19 @@ Each factory function returns a frozen dataclass instance that can be
 collected into an :class:`~ferrum.annotation.container.Annotate` container
 and attached to a chart.
 
-All coordinate arguments accept ``float`` (data-space), :class:`~ferrum.annotation.coords.PixelCoord`
-(absolute pixels), or :class:`~ferrum.annotation.coords.NormCoord` (normalized [0, 1]).
+All coordinate arguments accept:
+
+- ``float`` / ``int`` — data-space numeric coordinates
+- ``datetime.date`` / ``datetime.datetime`` — temporal data-space coordinates
+  (converted to epoch-milliseconds UTC at serialization time)
+- ISO-8601 date/datetime strings — parsed and converted to epoch-milliseconds
+- :class:`~ferrum.annotation.coords.PixelCoord` — absolute pixel offset
+- :class:`~ferrum.annotation.coords.NormCoord` — normalized [0, 1] fraction
 """
 
 from __future__ import annotations
 
+import datetime as _dt
 import math
 from dataclasses import dataclass
 from typing import Any
@@ -270,14 +277,25 @@ def _sanitize_coord(v: Any) -> Any:
 
 
 def _coord(v: CoordValue) -> Any:
-    """Normalize a CoordValue to a renderer-serializable form."""
-    from ferrum.annotation.coords import PixelCoord, NormCoord
+    """Normalize a CoordValue to a renderer-serializable form.
+
+    Temporal values (``date``, ``datetime``, ISO strings) are converted to
+    epoch-milliseconds (UTC) so they align with the Rust renderer's temporal
+    scale — the same units that ``_coerce.py`` produces for temporal data
+    columns.  Numeric values and coordinate wrappers pass through unchanged.
+    """
+    from ferrum.annotation.coords import PixelCoord, NormCoord, temporal_coord_to_epoch_ms
 
     if isinstance(v, PixelCoord):
         return {"px": _sanitize_coord(v.value)}
     if isinstance(v, NormCoord):
         return {"norm": _sanitize_coord(v.value)}
-    return _sanitize_coord(v)  # plain float — data-space
+    # datetime must be checked before date (datetime is a subclass of date).
+    if isinstance(v, (_dt.datetime, _dt.date)):
+        return temporal_coord_to_epoch_ms(v)
+    if isinstance(v, str):
+        return temporal_coord_to_epoch_ms(v)
+    return _sanitize_coord(v)  # plain numeric — data-space
 
 
 # ---------------------------------------------------------------------------
