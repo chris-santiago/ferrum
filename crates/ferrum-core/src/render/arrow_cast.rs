@@ -186,26 +186,14 @@ pub(crate) fn col_as_ordinal_category_str(
     collect_int_as_str!(UInt16Array);
     collect_int_as_str!(UInt8Array);
 
-    // Float types — format as integer when the value is whole, otherwise as float.
-    // This ensures that a column of [2000.0, 2001.0, ...] produces ["2000", "2001", ...]
-    // matching an Int64 ordinal domain built by distinct_values_in_order.
+    // Float types — delegate to the shared helper so this function and
+    // `distinct_values_in_order` always produce matching strings.
     if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
-        return Ok(a.iter().map(|v| v.map(|x| {
-            if x.fract() == 0.0 && x.is_finite() {
-                format!("{}", x as i64)
-            } else {
-                format!("{x}")
-            }
-        })).collect());
+        return Ok(a.iter().map(|v| v.map(float_as_ordinal_str)).collect());
     }
     if let Some(a) = col.as_any().downcast_ref::<Float32Array>() {
-        return Ok(a.iter().map(|v| v.map(|x| {
-            if x.fract() == 0.0 && x.is_finite() {
-                format!("{}", x as i64)
-            } else {
-                format!("{x}")
-            }
-        })).collect());
+        // Widen to f64 before formatting to reuse the same helper.
+        return Ok(a.iter().map(|v| v.map(|x| float_as_ordinal_str(x as f64))).collect());
     }
 
     // Boolean — "true" / "false".
@@ -283,11 +271,36 @@ pub(crate) fn finite_min_max_f64(col: &dyn Array) -> Option<(f64, f64)> {
     }
 }
 
-/// Enumerate distinct values in encounter order, stringified, from a
-/// column whose dtype is one of `Utf8`, `LargeUtf8`, `Int64`, or
-/// `Boolean`. Returns `Err(ScaleResolutionFailed)` for any other dtype.
+/// Format a float value as an ordinal category string.
 ///
-/// Matches the prior `scale_resolve::distinct_values_in_order` semantics.
+/// Whole-number floats (e.g. `2000.0`) are formatted as integers (`"2000"`)
+/// so that an integer-valued Float64 ordinal column produces the same domain
+/// strings as an equivalent Int64 column. Fractional values (e.g. `1.5`)
+/// keep their decimal representation (`"1.5"`). Non-finite values fall back
+/// to `format!("{v}")` (i.e. `"inf"`, `"-inf"`, `"NaN"`).
+///
+/// This helper is the single source of truth for float-ordinal stringification
+/// and is shared between `distinct_values_in_order` (domain building) and
+/// `col_as_ordinal_category_str` (per-row lookup), so the two can never drift.
+#[inline]
+fn float_as_ordinal_str(v: f64) -> String {
+    if v.fract() == 0.0 && v.is_finite() {
+        format!("{}", v as i64)
+    } else {
+        format!("{v}")
+    }
+}
+
+/// Enumerate distinct values in encounter order, stringified, from a column
+/// whose dtype is one of `Utf8`, `LargeUtf8`, `Int*`, `UInt*`, `Float32`,
+/// `Float64`, or `Boolean`. Returns `Err(UnsupportedDtype)` for any other
+/// dtype.
+///
+/// Stringification rules (must agree exactly with `col_as_ordinal_category_str`):
+/// - Utf8 / LargeUtf8 → identity
+/// - Int*/UInt* → `.to_string()`
+/// - Float64/32 → `float_as_ordinal_str` (integer-formatted for whole values)
+/// - Boolean → `"true"` / `"false"`
 pub(crate) fn distinct_values_in_order(batch: &RecordBatch, field: &str) -> Result<Vec<String>, RenderError> {
     let col = batch.column_by_name(field)
         .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
@@ -316,6 +329,14 @@ pub(crate) fn distinct_values_in_order(batch: &RecordBatch, field: &str) -> Resu
         for v in a.iter().flatten() { push(v.to_string()); }
     } else if let Some(a) = col.as_any().downcast_ref::<BooleanArray>() {
         for v in a.iter().flatten() { push(v.to_string()); }
+    } else if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
+        // Float64 ordinal columns: integer-valued floats format as integers
+        // (e.g. 2000.0 → "2000") to match Int64 domain strings. Fractional
+        // values keep their decimal form (e.g. 1.5 → "1.5").
+        for v in a.iter().flatten() { push(float_as_ordinal_str(v)); }
+    } else if let Some(a) = col.as_any().downcast_ref::<Float32Array>() {
+        // Same rule for Float32; widen to f64 first to reuse the same helper.
+        for v in a.iter().flatten() { push(float_as_ordinal_str(v as f64)); }
     } else {
         // Non-Int64 integer variants — pandas/pyarrow users commonly have Int32, UInt8, etc.
         // Each arm stringifies the native value so downstream encoding treats them as nominal.
@@ -573,6 +594,108 @@ mod tests {
     }
 
     // ── col_as_ordinal_category_str ──────────────────────────────────────────
+
+    // ── distinct_values_in_order: Float32 / Float64 columns ─────────────────
+
+    /// F1 regression: Float64 ordinal columns with integer-valued data must be
+    /// supported by `distinct_values_in_order` (previously failed with
+    /// `UnsupportedDtype`), and must produce the same strings as
+    /// `col_as_ordinal_category_str` for the same data.
+    #[test]
+    fn distinct_values_in_order_float64_whole_values_format_as_integer() {
+        // [2000.0, 2001.0, 2000.0] → ["2000", "2001"] (dedup, order-preserving)
+        let schema = Arc::new(Schema::new(vec![Field::new("yr", DataType::Float64, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![
+                Some(2000.0), Some(2001.0), Some(2000.0),
+            ]))],
+        )
+        .unwrap();
+        let out = distinct_values_in_order(&b, "yr").unwrap();
+        assert_eq!(out, vec!["2000", "2001"]);
+    }
+
+    #[test]
+    fn distinct_values_in_order_float64_fractional_preserves_decimal() {
+        // [1.5, 2.5] → ["1.5", "2.5"]
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![Some(1.5), Some(2.5)]))],
+        )
+        .unwrap();
+        let out = distinct_values_in_order(&b, "v").unwrap();
+        assert_eq!(out, vec!["1.5", "2.5"]);
+    }
+
+    #[test]
+    fn distinct_values_in_order_float64_mixed_whole_and_fractional() {
+        // [2.0, 1.5] → ["2", "1.5"]: whole values integer-formatted, fractional kept.
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![Some(2.0), Some(1.5)]))],
+        )
+        .unwrap();
+        let out = distinct_values_in_order(&b, "v").unwrap();
+        assert_eq!(out, vec!["2", "1.5"]);
+    }
+
+    /// Invariant: domain strings produced by `distinct_values_in_order` and
+    /// per-row strings produced by `col_as_ordinal_category_str` must agree
+    /// for Float64 columns. A value present in the domain must always hit a
+    /// domain entry when looked up — this is the prerequisite for correct
+    /// ordinal scale resolution and mark drawing.
+    #[test]
+    fn float64_distinct_values_and_category_str_agree() {
+        let values = vec![Some(2000.0), Some(2001.0), Some(1.5), Some(2000.0), None];
+        let schema = Arc::new(Schema::new(vec![Field::new("yr", DataType::Float64, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(values))],
+        )
+        .unwrap();
+
+        let domain = distinct_values_in_order(&b, "yr").unwrap();
+        let per_row = col_as_ordinal_category_str(&b, "yr").unwrap();
+
+        // Every non-null per-row string must be in the domain.
+        for s in per_row.iter().flatten() {
+            assert!(
+                domain.contains(s),
+                "per-row string {s:?} not found in domain {domain:?}; domain/drawer mismatch"
+            );
+        }
+        // Domain must be ["2000", "2001", "1.5"] (encounter order, deduped).
+        assert_eq!(domain, vec!["2000", "2001", "1.5"]);
+    }
+
+    #[test]
+    fn distinct_values_in_order_float32_whole_values_format_as_integer() {
+        use arrow::array::Float32Array;
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float32, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float32Array::from(vec![Some(10.0f32), Some(20.0f32), Some(10.0f32)]))],
+        )
+        .unwrap();
+        let out = distinct_values_in_order(&b, "v").unwrap();
+        assert_eq!(out, vec!["10", "20"]);
+    }
+
+    #[test]
+    fn distinct_values_in_order_float32_fractional() {
+        use arrow::array::Float32Array;
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float32, true)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float32Array::from(vec![Some(1.5f32), Some(2.5f32)]))],
+        )
+        .unwrap();
+        let out = distinct_values_in_order(&b, "v").unwrap();
+        assert_eq!(out, vec!["1.5", "2.5"]);
+    }
 
     #[test]
     fn col_as_ordinal_category_str_utf8_passthrough() {

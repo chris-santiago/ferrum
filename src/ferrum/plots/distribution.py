@@ -427,13 +427,17 @@ def displot(
     # _FACET_DEFAULT_PANEL_HEIGHT_PX tall.
     if row is not None:
         n_row_panels = _count_facet_levels(data, str(row))
+        per_panel_h = height if height is not None else _FACET_DEFAULT_PANEL_HEIGHT_PX
         if height is not None:
             # height= is per-panel: total = height × n_panels
             total_h = height * n_row_panels
         else:
             # No explicit height: ensure each panel meets the minimum.
             total_h = _FACET_DEFAULT_PANEL_HEIGHT_PX * n_row_panels
-        w = total_h * aspect if aspect is not None else None
+        # Width is per-panel height × aspect (independent of panel count).
+        # Using total_h here would make width grow linearly with n_panels, which
+        # violates seaborn semantics where aspect governs per-panel width.
+        w = per_panel_h * aspect if aspect is not None else None
         props: dict = {"height": total_h}
         if w is not None:
             props["width"] = w

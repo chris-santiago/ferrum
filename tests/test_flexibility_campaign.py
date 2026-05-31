@@ -2253,3 +2253,175 @@ def test_cleanup_raster_y_orientation(_positive_corr_df: pl.DataFrame) -> None:
         f"diagonal={diagonal_mass}, anti-diagonal={anti_diagonal_mass}. "
         f"Quadrant breakdown: TL={tl}, TR={tr}, BL={bl}, BR={br}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Review fixes — heavyweight review findings (2026-05-31)
+# ---------------------------------------------------------------------------
+
+
+import re as _re
+
+
+def _extract_svg_width(svg: str) -> float:
+    """Return the canvas width from an SVG string's ``width`` attribute or viewBox."""
+    # Try width="NNN" first.
+    m = _re.search(r'<svg[^>]+\bwidth="([0-9.]+)"', svg)
+    if m:
+        return float(m.group(1))
+    # Fall back to viewBox="minX minY width height".
+    m = _re.search(r'<svg[^>]+\bviewBox="[0-9.]+ [0-9.]+ ([0-9.]+) [0-9.]+"', svg)
+    if m:
+        return float(m.group(1))
+    raise ValueError("Could not extract width from SVG")
+
+
+# -- RF1: displot facet width must not scale with panel count -----------------
+
+
+def test_rf1_displot_facet_width_constant_across_row_counts() -> None:
+    """displot with row= and a fixed aspect produces the same canvas width
+    regardless of how many row-facet levels the data has.
+
+    The bug was: w = total_h * aspect, where total_h = per_panel_height * n_panels.
+    So width grew linearly with panel count.  The fix computes width from
+    per_panel_height alone: w = per_panel_height * aspect.
+    """
+    import polars as pl
+    from ferrum.plots.distribution import displot
+
+    rng_seed = 0
+    import numpy as np
+
+    rng = np.random.default_rng(rng_seed)
+
+    # 1-level facet
+    df_1 = pl.DataFrame({"x": rng.normal(0, 1, 100).tolist(), "cat": ["A"] * 100})
+    # 6-level facet
+    cats_6 = [c for c in "ABCDEF" for _ in range(100)]
+    df_6 = pl.DataFrame({"x": rng.normal(0, 1, 600).tolist(), "cat": cats_6})
+
+    per_panel_h = 200.0
+    asp = 1.0
+
+    svg_1 = displot(df_1, x="x", row="cat", height=per_panel_h, aspect=asp).show_svg()
+    svg_6 = displot(df_6, x="x", row="cat", height=per_panel_h, aspect=asp).show_svg()
+
+    w1 = _extract_svg_width(svg_1)
+    w6 = _extract_svg_width(svg_6)
+
+    expected_w = per_panel_h * asp
+    assert w1 == pytest.approx(expected_w, rel=0.05), (
+        f"1-panel displot width {w1} should be ~{expected_w} (per_panel_h * aspect)"
+    )
+    assert w6 == pytest.approx(expected_w, rel=0.05), (
+        f"6-panel displot width {w6} should be ~{expected_w} (per_panel_h * aspect), "
+        f"but was {w6} — suggests width still scales with panel count"
+    )
+    assert w1 == pytest.approx(w6, rel=0.05), (
+        f"displot canvas width must be the same for 1-row-panel ({w1}) "
+        f"and 6-row-panel ({w6}) charts with the same aspect"
+    )
+
+
+# -- RF2: boxen sort must work on pandas DataFrame input ----------------------
+
+
+@pytest.fixture
+def sort_boxen_pandas_df():
+    """Pandas DataFrame with categories Z (highest), B (medium), A (lowest).
+
+    Same distribution as sort_boxen_df but as a pandas DataFrame so we can
+    confirm mark_boxen sort pre-resolution works for non-polars input.
+    """
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(42)
+    rows = []
+    for cat, loc in [("A", 20.0), ("Z", 80.0), ("B", 50.0)]:
+        for v in rng.normal(loc, 15.0, 300).tolist():
+            rows.append({"cat": cat, "val": v})
+    return pd.DataFrame(rows)
+
+
+def test_rf2_boxen_sort_descending_pandas(sort_boxen_pandas_df) -> None:
+    """mark_boxen with X(sort='-y') pre-resolves sort correctly for pandas input.
+
+    Regression guard for the bug where _resolve_boxen_cat_sort returned the sort
+    dict unchanged for non-polars data, causing Rust to emit SortSpecIgnored.
+    The fix converts the data to polars via _to_polars (which routes through
+    to_arrow_table) before computing the aggregate order.
+    """
+    import warnings
+
+    # Check 1: no SortSpecIgnored warning.
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        svg_desc = (
+            fm.Chart(sort_boxen_pandas_df)
+            .mark_boxen()
+            .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
+            .show_svg()
+        )
+    sort_ignored = any("SortSpecIgnored" in str(ww.message) for ww in w)
+    assert not sort_ignored, (
+        "sort='-y' on mark_boxen with pandas input must not emit SortSpecIgnored"
+    )
+
+    # Check 2: Python-level sort pre-resolution produces the explicit ordered list.
+    # Z≈80 > B≈50 > A≈20, so descending by mean gives ['Z', 'B', 'A'].
+    chart_resolved = (
+        fm.Chart(sort_boxen_pandas_df).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
+    )._resolve_pending()
+    x_enc = chart_resolved._layers[0].encoding["x"]
+    resolved_sort = x_enc._kwargs.get("sort") if hasattr(x_enc, "_kwargs") else None
+    assert resolved_sort == ["Z", "B", "A"], (
+        f"boxen sort='-y' on pandas input must resolve to explicit list "
+        f"['Z','B','A']; got {resolved_sort!r}"
+    )
+
+    # Check 3: sorted SVG differs from unsorted.
+    svg_no_sort = (
+        fm.Chart(sort_boxen_pandas_df).mark_boxen().encode(x="cat:N", y="val:Q").show_svg()
+    )
+    assert svg_desc != svg_no_sort, (
+        "boxen sort='-y' on pandas input must produce a different SVG than no-sort"
+    )
+
+
+def test_rf2_boxen_sort_descending_pyarrow() -> None:
+    """mark_boxen with X(sort='-y') pre-resolves sort correctly for PyArrow Table input."""
+    import numpy as np
+    import pyarrow as pa
+    import warnings
+
+    rng = np.random.default_rng(42)
+    rows = []
+    for cat, loc in [("A", 20.0), ("Z", 80.0), ("B", 50.0)]:
+        for v in rng.normal(loc, 15.0, 300).tolist():
+            rows.append({"cat": cat, "val": v})
+
+    table = pa.table(
+        {
+            "cat": pa.array([r["cat"] for r in rows], type=pa.string()),
+            "val": pa.array([r["val"] for r in rows], type=pa.float64()),
+        }
+    )
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        (fm.Chart(table).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q").show_svg())
+    sort_ignored = any("SortSpecIgnored" in str(ww.message) for ww in w)
+    assert not sort_ignored, (
+        "sort='-y' on mark_boxen with PyArrow Table input must not emit SortSpecIgnored"
+    )
+
+    chart_resolved = (
+        fm.Chart(table).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
+    )._resolve_pending()
+    x_enc = chart_resolved._layers[0].encoding["x"]
+    resolved_sort = x_enc._kwargs.get("sort") if hasattr(x_enc, "_kwargs") else None
+    assert resolved_sort == ["Z", "B", "A"], (
+        f"boxen sort='-y' on PyArrow input must resolve to ['Z','B','A']; got {resolved_sort!r}"
+    )
