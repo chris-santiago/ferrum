@@ -8,8 +8,40 @@
 #[cfg(test)]
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
-use crate::render::scale_resolve::{ColorScale, ScaleKind};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, resolve_fill_color, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::scale_resolve::ScaleKind;
+
+/// Load the per-row color-encoding columns for fill resolution, mirroring the
+/// point renderer: the categorical string column is read for `Categorical`
+/// (and scale-less) charts, the numeric column for `Continuous` charts. The
+/// continuous branch reads `col_as_f64` so `resolve_fill_color` can sample via
+/// `lookup_f64` without an `f64 → String → f64` round-trip.
+type ColorColumns = (Option<Vec<Option<String>>>, Option<Vec<Option<f64>>>);
+
+fn load_color_columns(ctx: &DrawCtx) -> ColorColumns {
+    use crate::render::scale_resolve::ColorScale;
+    let field = color_field(ctx, ctx.spec);
+    let cat = match (&ctx.scales.color, field) {
+        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
+        (None, Some(f)) => col_as_str(ctx.batch, f).ok(),
+        _ => None,
+    };
+    let num = match (&ctx.scales.color, field) {
+        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
+        _ => None,
+    };
+    (cat, num)
+}
+
+#[inline]
+fn row_cat(col: &Option<Vec<Option<String>>>, i: usize) -> Option<&str> {
+    col.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref())
+}
+
+#[inline]
+fn row_num(col: &Option<Vec<Option<f64>>>, i: usize) -> Option<f64> {
+    col.as_ref().and_then(|v| v.get(i).copied().flatten())
+}
 
 struct BarBaseStyle<'a> {
     stroke_width: f64,
@@ -179,7 +211,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         (panel.w / n_categories as f64) * 0.8
     };
 
-    let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
+    let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
@@ -202,17 +234,12 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let cx = cx + x_offsets[i];
         let top_y = top_y + y_offsets[i];
 
-        let fill_color = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
-            match values[i].as_deref() {
-                Some(v) => match scale {
-                    ColorScale::Categorical { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-                    ColorScale::Continuous { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-                },
-                None => ctx.mark_style.fill,
-            }
-        } else {
-            ctx.mark_style.fill
-        };
+        let fill_color = resolve_fill_color(
+            ctx.scales.color.as_ref(),
+            row_cat(&color_values, i),
+            row_num(&color_values_f64, i),
+            ctx.mark_style.fill,
+        );
         let fill = with_opacity(fill_color, ctx.mark_style.opacity);
 
         let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
@@ -275,7 +302,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let bar_height = (panel.h / n_categories as f64) * 0.8;
 
-    let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
+    let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
@@ -301,17 +328,12 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             (baseline_x, (px - baseline_x).max(0.0))
         };
 
-        let fill_color = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
-            match values[i].as_deref() {
-                Some(v) => match scale {
-                    ColorScale::Categorical { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-                    ColorScale::Continuous { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-                },
-                None => ctx.mark_style.fill,
-            }
-        } else {
-            ctx.mark_style.fill
-        };
+        let fill_color = resolve_fill_color(
+            ctx.scales.color.as_ref(),
+            row_cat(&color_values, i),
+            row_num(&color_values_f64, i),
+            ctx.mark_style.fill,
+        );
         let fill = with_opacity(fill_color, ctx.mark_style.opacity);
 
         let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
@@ -402,7 +424,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
-    let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
+    let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
@@ -433,17 +455,12 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             (cx - bw / 2.0, bw)
         };
 
-        let fill_color = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
-            match values[i].as_deref() {
-                Some(v) => match scale {
-                    ColorScale::Categorical { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-                    ColorScale::Continuous { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-                },
-                None => ctx.mark_style.fill,
-            }
-        } else {
-            ctx.mark_style.fill
-        };
+        let fill_color = resolve_fill_color(
+            ctx.scales.color.as_ref(),
+            row_cat(&color_values, i),
+            row_num(&color_values_f64, i),
+            ctx.mark_style.fill,
+        );
         let fill = with_opacity(fill_color, ctx.mark_style.opacity);
 
         let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
@@ -498,7 +515,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
-    let color_values = color_field(ctx, spec).and_then(|f| col_as_str(ctx.batch, f).ok());
+    let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
@@ -520,17 +537,12 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
         let width  = (px_right - baseline_x).max(0.0);
         let height = (py_top - py_bottom).abs().max(1.0);
 
-        let fill_color = if let (Some(scale), Some(values)) = (&ctx.scales.color, &color_values) {
-            match values[i].as_deref() {
-                Some(v) => match scale {
-                    ColorScale::Categorical { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-                    ColorScale::Continuous { .. } => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-                },
-                None => ctx.mark_style.fill,
-            }
-        } else {
-            ctx.mark_style.fill
-        };
+        let fill_color = resolve_fill_color(
+            ctx.scales.color.as_ref(),
+            row_cat(&color_values, i),
+            row_num(&color_values_f64, i),
+            ctx.mark_style.fill,
+        );
         let fill = with_opacity(fill_color, ctx.mark_style.opacity);
 
         let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);

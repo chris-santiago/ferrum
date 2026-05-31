@@ -12,7 +12,7 @@ use ferrum_scene::{
 };
 
 use super::color::{from_hex_str, with_opacity, Color};
-use super::scale_resolve::ResolvedScales;
+use super::scale_resolve::{ColorScale, ResolvedScales};
 
 pub struct DrawCtx<'a> {
     pub spec: &'a crate::spec::chart::ChartSpec,
@@ -459,6 +459,52 @@ pub fn to_scene_stroke(
     }
 }
 
+/// Resolve a single row's per-row stroke color from the constant mark style and
+/// an optional color-encoding color for that row.
+///
+/// Precedence (preserved byte-for-byte from commit a450ef1 — explicit constant
+/// stroke beats inherited color encoding):
+/// - `stroke_is_user_set` → the explicit user `stroke=` wins; fall back to fill
+///   when `stroke` is somehow `None`.
+/// - otherwise → per-row color encoding wins, then the theme stroke, then fill.
+///
+/// Used by rule/segment (and any axis-aligned/diagonal line mark) so the
+/// precedence lives in one place instead of being copy-pasted per renderer.
+pub(crate) fn resolve_stroke_color(ms: &MarkStyle, row_color: Option<Color>) -> Color {
+    if ms.stroke_is_user_set {
+        ms.stroke.unwrap_or(ms.fill)
+    } else {
+        row_color.or(ms.stroke).unwrap_or(ms.fill)
+    }
+}
+
+/// Resolve a single row's fill color from the color scale + that row's encoded
+/// value, falling back to the constant mark-style `fill` when no color encoding
+/// applies.
+///
+/// The continuous branch consumes the numeric value directly via `lookup_f64`
+/// (correct-by-construction: no `f64 → String → f64` round-trip), matching the
+/// point renderer. The categorical branch maps the row's category string via
+/// `lookup`. `scale` is `None` when the chart has no color scale.
+pub(crate) fn resolve_fill_color(
+    scale: Option<&ColorScale>,
+    cat_value: Option<&str>,
+    num_value: Option<f64>,
+    fallback: Color,
+) -> Color {
+    match scale {
+        Some(s @ ColorScale::Continuous { .. }) => match num_value {
+            Some(v) if v.is_finite() => s.lookup_f64(v).unwrap_or(fallback),
+            _ => fallback,
+        },
+        Some(s @ ColorScale::Categorical { .. }) => match cat_value {
+            Some(v) => s.lookup(v).unwrap_or(fallback),
+            None => fallback,
+        },
+        None => fallback,
+    }
+}
+
 pub fn to_scene_text_style(
     color: Color,
     font_size: f64,
@@ -723,6 +769,114 @@ mod tests {
             formatted_e, "2.72",
             "tooltip format '.2f' must produce 2 decimal places; got: '{formatted_e}'"
         );
+    }
+
+    // --- F4: resolve_stroke_color precedence truth table ---
+
+    #[test]
+    fn resolve_stroke_color_user_set_ignores_row_color() {
+        // stroke_is_user_set = true → explicit stroke wins regardless of row color.
+        let mut ms = resolve_mark_style(None, &ThemeInputs::default(), &Mark::Rule);
+        ms.stroke = Some(crate::render::color::from_rgb(0x11, 0x22, 0x33));
+        ms.stroke_is_user_set = true;
+        let row_color = Some(crate::render::color::from_rgb(0xAA, 0xBB, 0xCC));
+        // Present row color is ignored.
+        let c = resolve_stroke_color(&ms, row_color);
+        assert_eq!((c.red, c.green, c.blue), (0x11, 0x22, 0x33));
+        // Absent row color → still the explicit stroke.
+        let c2 = resolve_stroke_color(&ms, None);
+        assert_eq!((c2.red, c2.green, c2.blue), (0x11, 0x22, 0x33));
+    }
+
+    #[test]
+    fn resolve_stroke_color_user_set_falls_back_to_fill_when_stroke_none() {
+        let mut ms = resolve_mark_style(None, &ThemeInputs::default(), &Mark::Rule);
+        ms.stroke = None;
+        ms.fill = crate::render::color::from_rgb(0x44, 0x55, 0x66);
+        ms.stroke_is_user_set = true;
+        let c = resolve_stroke_color(&ms, Some(crate::render::color::from_rgb(0xAA, 0xBB, 0xCC)));
+        assert_eq!((c.red, c.green, c.blue), (0x44, 0x55, 0x66),
+            "user-set stroke with None stroke must fall back to fill");
+    }
+
+    #[test]
+    fn resolve_stroke_color_not_user_set_prefers_row_color() {
+        let mut ms = resolve_mark_style(None, &ThemeInputs::default(), &Mark::Rule);
+        ms.stroke = Some(crate::render::color::from_rgb(0x11, 0x22, 0x33));
+        ms.fill = crate::render::color::from_rgb(0x44, 0x55, 0x66);
+        ms.stroke_is_user_set = false;
+        // Row color present → it wins over theme stroke and fill.
+        let row = crate::render::color::from_rgb(0xAA, 0xBB, 0xCC);
+        let c = resolve_stroke_color(&ms, Some(row));
+        assert_eq!((c.red, c.green, c.blue), (0xAA, 0xBB, 0xCC));
+    }
+
+    #[test]
+    fn resolve_stroke_color_not_user_set_no_row_color_uses_stroke_then_fill() {
+        let mut ms = resolve_mark_style(None, &ThemeInputs::default(), &Mark::Rule);
+        ms.stroke = Some(crate::render::color::from_rgb(0x11, 0x22, 0x33));
+        ms.fill = crate::render::color::from_rgb(0x44, 0x55, 0x66);
+        ms.stroke_is_user_set = false;
+        // No row color → theme stroke wins.
+        let c = resolve_stroke_color(&ms, None);
+        assert_eq!((c.red, c.green, c.blue), (0x11, 0x22, 0x33));
+        // No row color, no theme stroke → fill.
+        ms.stroke = None;
+        let c2 = resolve_stroke_color(&ms, None);
+        assert_eq!((c2.red, c2.green, c2.blue), (0x44, 0x55, 0x66));
+    }
+
+    // --- F3: resolve_fill_color categorical + continuous ---
+
+    #[test]
+    fn resolve_fill_color_categorical_lookup() {
+        use crate::render::scale_resolve::ColorScale;
+        let red = crate::render::color::from_rgb(0xFF, 0x00, 0x00);
+        let blue = crate::render::color::from_rgb(0x00, 0x00, 0xFF);
+        let scale = ColorScale::Categorical {
+            domain: vec!["a".into(), "b".into()],
+            palette: std::borrow::Cow::Owned(vec![red, blue]),
+        };
+        let fallback = crate::render::color::from_rgb(0x77, 0x77, 0x77);
+        // "a" → palette[0] = red; num_value is ignored for categorical.
+        let c = resolve_fill_color(Some(&scale), Some("a"), Some(99.0), fallback);
+        assert_eq!((c.red, c.green, c.blue), (0xFF, 0x00, 0x00));
+        // "b" → palette[1] = blue.
+        let c2 = resolve_fill_color(Some(&scale), Some("b"), None, fallback);
+        assert_eq!((c2.red, c2.green, c2.blue), (0x00, 0x00, 0xFF));
+        // Unknown category → fallback.
+        let c3 = resolve_fill_color(Some(&scale), Some("z"), None, fallback);
+        assert_eq!((c3.red, c3.green, c3.blue), (0x77, 0x77, 0x77));
+        // No category string → fallback.
+        let c4 = resolve_fill_color(Some(&scale), None, None, fallback);
+        assert_eq!((c4.red, c4.green, c4.blue), (0x77, 0x77, 0x77));
+    }
+
+    #[test]
+    fn resolve_fill_color_continuous_uses_lookup_f64() {
+        use crate::render::color::{ContinuousScheme, NamedContinuous};
+        use crate::render::scale_resolve::ColorScale;
+        let scheme = ContinuousScheme::Named(NamedContinuous::Viridis);
+        let scale = ColorScale::Continuous { domain: (0.0, 10.0), scheme };
+        let fallback = crate::render::color::from_rgb(0x77, 0x77, 0x77);
+        // The continuous branch must consume the f64 directly (no round-trip):
+        // the resolved color equals scale.lookup_f64(value).
+        let v = 3.0;
+        let c = resolve_fill_color(Some(&scale), Some("ignored"), Some(v), fallback);
+        let expected = scale.lookup_f64(v).unwrap();
+        assert_eq!((c.red, c.green, c.blue), (expected.red, expected.green, expected.blue));
+        // Non-finite / absent numeric → fallback.
+        let c2 = resolve_fill_color(Some(&scale), None, Some(f64::NAN), fallback);
+        assert_eq!((c2.red, c2.green, c2.blue), (0x77, 0x77, 0x77));
+        let c3 = resolve_fill_color(Some(&scale), None, None, fallback);
+        assert_eq!((c3.red, c3.green, c3.blue), (0x77, 0x77, 0x77));
+    }
+
+    #[test]
+    fn resolve_fill_color_no_scale_returns_fallback() {
+        let fallback = crate::render::color::from_rgb(0x12, 0x34, 0x56);
+        let c = resolve_fill_color(None, Some("a"), Some(1.0), fallback);
+        assert_eq!((c.red, c.green, c.blue), (0x12, 0x34, 0x56));
     }
 
     /// B6: When no format is specified, the existing default behavior (trim trailing zeros)

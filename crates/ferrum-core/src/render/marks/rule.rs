@@ -6,7 +6,8 @@
 
 use crate::render::color::Color;
 use crate::render::draw::{
-    col_as_f64, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx,
+    col_as_f64, col_as_str, color_field, resolve_stroke_color, resolve_stroke_dash, x_field,
+    y_field, DrawCtx,
 };
 
 /// Resolve a per-row stroke color from the color encoding + color scale, if both
@@ -56,19 +57,14 @@ fn rule_stroke_style(
         .filter(|v| v.is_finite())
         .and_then(resolve_stroke_dash);
     let effective_dash = dash_vec.as_deref().or(ctx.mark_style.stroke_dash.as_deref());
-    // Precedence: explicit constant stroke (user mark_kwargs) > per-row color
-    // encoding > theme stroke > fill fallback.
-    // An explicit `stroke=` in mark_kwargs must not be overridden by a color
-    // encoding inherited from a parent chart (e.g. boxplot whiskers keep their
-    // neutral gray even when the chart encodes `hue` via color).
+    // Precedence (explicit constant stroke > per-row color > theme > fill) lives
+    // in `resolve_stroke_color`. An explicit `stroke=` in mark_kwargs must not be
+    // overridden by a color encoding inherited from a parent chart (e.g. boxplot
+    // whiskers keep their neutral gray even when the chart encodes `hue`).
     let row_color = color_vals
         .as_ref()
         .and_then(|v| v.get(i).copied().flatten());
-    let base_color = if ctx.mark_style.stroke_is_user_set {
-        ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill)
-    } else {
-        row_color.or(ctx.mark_style.stroke).unwrap_or(ctx.mark_style.fill)
-    };
+    let base_color = resolve_stroke_color(ctx.mark_style, row_color);
     let stroke_color = with_opacity(base_color, opacity);
     let mut style = to_scene_stroke(stroke_color, stroke_width, 1.0, effective_dash, None, None);
     style.stroke_opacity = stroke_opacity;

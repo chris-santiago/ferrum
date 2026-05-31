@@ -1,7 +1,9 @@
 //! Segment mark — diagonal line from (x, y) to (x2, y2).
 //! Distinct from rule (axis-aligned only): segments may go in any direction.
 
-use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::draw::{
+    col_as_f64, col_as_str, color_field, resolve_stroke_color, x_field, y_field, DrawCtx,
+};
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{to_scene_stroke, MarkBuildResult, MetadataColumns};
@@ -77,16 +79,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .and_then(|v| v.get(i).copied().flatten())
             .unwrap_or(ctx.mark_style.stroke_width);
 
-        // Precedence: explicit constant stroke (user mark_kwargs) > per-row color
-        // encoding > theme stroke > fill fallback.
+        // Precedence (explicit constant stroke > per-row color > theme > fill)
+        // lives in `resolve_stroke_color`.
         let row_color_opt = color_values
             .as_ref()
             .and_then(|v| v.get(i).copied().flatten());
-        let row_color = if ctx.mark_style.stroke_is_user_set {
-            ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill)
-        } else {
-            row_color_opt.or(ctx.mark_style.stroke).unwrap_or(ctx.mark_style.fill)
-        };
+        let row_color = resolve_stroke_color(ctx.mark_style, row_color_opt);
         let row_style = to_scene_stroke(
             row_color,
             row_stroke_width,
