@@ -203,3 +203,15 @@ Surfaced by 4 parallel auditors (scene-pipeline, theme-wiring, pyo3-binding, int
 | R5 | S3 | **WASM colorbar-in-inset id collision** — JS `_buildIdMap` namespaces by literal id per loadScene, so an outer colorbar gradient (`ferrum-colorbar-0`, hardcoded in `legend.rs:58`) and an inset chart that *also* has a colorbar collapse to one namespaced id → the inset's (or outer's) colorbar renders with the wrong gradient. Narrow trigger (continuous-color chart + `.inset()` of another continuous-color chart) but a genuine wrong-render. The only confirmed correctness issue across all reviews. | ✅ **Fixed `0b57b61`** — `legend.rs` merges the colorbar `<defs>`+`<rect>` into one self-contained Raw fragment (removing the only cross-fragment id ref; static SVG byte-identical); `ferrum-anywidget.js` switches to per-fragment id namespacing (`ferrum-raw-{loadIdx}-{fragIdx}-{id}`), now collision-free + reference-complete. Regression test pins old-collapses-to-1 vs new-2-distinct. |
 | R6 | S2 | Interactive text-vs-raw z-order flips on the first zoom tick (`_placeTextSvg` re-append moves labels above the raw overlay groups). Cosmetic; rarely-overlapping content. `ferrum-anywidget.js`. | Deferred — follow-up |
 | R7 | S2 | Discretizing *positional* scales (`Quantize`/`BinOrdinal`/`Sequential`/`Diverging` declared on an x/y axis) resolve to `ScaleKind::Linear` in `positional.rs` before `minor_ticks_internal` is reached, so they would get *linear-subdivided* minors rather than empty. Unreachable in practice (these are color/size specs); semantic corner only. | Deferred — add a clarifying comment when next touching `positional.rs` |
+
+---
+
+## D6 reactive-parameter runtime (2026-06-01, `feat/flexibility-new-capabilities`)
+
+D6 (reactive parameters) shipped complete (sub-tasks 5a–5e-2b). One pre-existing render-layer limitation surfaced and is recorded here; it is **not** a D6 regression.
+
+| ID | Severity | Item | Disposition |
+|---|---|---|---|
+| D6-1 | S3 | **Multi-panel simultaneous reactive rescale** is bounded by the single-transform-uniform render path: `render::upload_transform_and_render` uploads one transform uniform per frame and renders the whole frame, so when a brush drives reactive rescale, only one bound target panel's affine takes visible effect at a time (the same constraint that limits `setTransform` to panel 0). Single-panel overview→detail rescale works. A strict multi-panel rescale needs per-panel transform uniforms in the GPU render layer. | Deferred — render-layer change; out of D6 scope. Reactive rescale, crossfilter, and legend toggle all work for the single-target case validated by the audit's blocked designs. |
+
+Note: the packed-batch field-value-point-selection gap (legend toggle on ≥1000-mark batches) that a review flagged was **closed** in 5e-2b (`09ba4f7`) via `scene_load::tooltip_field_value` — packed batches carry `tooltip_bytes`, so field-projected point selections now match on packed marks. No follow-up needed there.
