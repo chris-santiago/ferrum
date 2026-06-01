@@ -49,6 +49,8 @@
 
 > **Open (noted 2026-06-01, flexibility D10):** figure-level `.properties(title=/subtitle=/caption=)` chrome (rendered once around a composed figure) is wired for `_CompositeBase` (`VConcatChart`/`HConcatChart`/`ConcatChart`) and faceted `Chart`. `JointChart` (`composition.py:619`) and `ClusterMapChart` (`composition.py:1268`) override `properties` to route all kwargs into their inner panel, so `joint.properties(title=...)` lands the title on the center panel rather than wrapping the figure. Out of D10's stated scope (vconcat/hconcat/facet); wire figure chrome into those two composites when next touched.
 
+> **Open (noted 2026-06-01, flexibility D7):** `build_polar` in `render/marks/bar.rs` (polar/coxcomb bars) emits `tooltips: None`/`hrefs: None` and applies only flat `mark_style.opacity`, whereas the arc annular path (`build_annular`) wires per-row tooltips and per-row opacity. So a polar `mark_bar` with `tooltip=`/per-row `opacity=` silently loses them. Out of D7's geometry scope; wire to match `build_annular` when polar bars are next touched. Also: the polar channel-mapping convention (theta="x"→radius=y etc.) is duplicated between `arc.rs` and `bar.rs` — extract a shared `polar_channels(ctx)` helper if a third polar mark lands.
+
 ---
 
 ## Python Silent Drops (accepted by Python API, never reach Rust)

@@ -367,3 +367,83 @@ class Radius(ChannelBase):
     _channel_name = "radius"
 
     _honored_kwargs = frozenset(["type"])
+
+
+class Theta2(ChannelBase):
+    """Polar second-extent angle channel — maps a field to the angular end position.
+
+    Used with ``Theta`` to define an explicit angular span for each arc segment
+    (annular wedge marks).  When both ``theta`` and ``theta2`` are encoded, the
+    arc sweeps from the ``theta`` value to the ``theta2`` value directly from
+    data, rather than computing a proportional sweep from column sums.
+
+    Parameters
+    ----------
+    field : str
+        Column name in the input DataFrame.
+    type_ : {"Q", "N", "O", "T"}, optional
+        Data type. Inferred from the column dtype when omitted.
+
+    Notes
+    -----
+    Requires ``CoordPolar()`` on the chart to activate polar rendering.
+    Remapped to ``x2`` (when ``CoordPolar(theta="x")``) or ``y2``
+    (when ``CoordPolar(theta="y")``) before the spec reaches Rust.
+
+    Other kwargs are accepted but are reserved for future use (no-op today)
+    — they trigger a one-time deprecation warning.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.Chart(df).encode(
+    ...     theta=fm.Theta("t_start"),
+    ...     theta2=fm.Theta2("t_end"),
+    ...     radius=fm.Radius("r_inner"),
+    ...     radius2=fm.Radius2("r_outer"),
+    ... )
+    """
+
+    _channel_name = "theta2"
+
+    _honored_kwargs = frozenset(["type"])
+
+
+class Radius2(ChannelBase):
+    """Polar second-extent radius channel — maps a field to the outer radial boundary.
+
+    Used with ``Radius`` to define an explicit inner/outer radial span for each
+    arc segment (annular wedge marks).  When both ``radius`` and ``radius2`` are
+    encoded, the arc spans from the ``radius`` column value (inner boundary) to
+    the ``radius2`` column value (outer boundary) per row.
+
+    Parameters
+    ----------
+    field : str
+        Column name in the input DataFrame.
+    type_ : {"Q", "N", "O", "T"}, optional
+        Data type. Inferred from the column dtype when omitted.
+
+    Notes
+    -----
+    Requires ``CoordPolar()`` on the chart to activate polar rendering.
+    Remapped to ``y2`` (when ``CoordPolar(theta="x")``) or ``x2``
+    (when ``CoordPolar(theta="y")``) before the spec reaches Rust.
+
+    Other kwargs are accepted but are reserved for future use (no-op today)
+    — they trigger a one-time deprecation warning.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.Chart(df).encode(
+    ...     theta=fm.Theta("t_start"),
+    ...     theta2=fm.Theta2("t_end"),
+    ...     radius=fm.Radius("r_inner"),
+    ...     radius2=fm.Radius2("r_outer"),
+    ... )
+    """
+
+    _channel_name = "radius2"
+
+    _honored_kwargs = frozenset(["type"])

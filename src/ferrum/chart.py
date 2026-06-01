@@ -108,7 +108,7 @@ _SILENT_CHANNELS = frozenset(
 )
 # Polar channels raise NotImplementedError when a chart is actually rendered
 # with them, rather than emitting a misleading "not yet rendered" warning.
-_POLAR_CHANNELS = frozenset(("theta", "radius"))
+_POLAR_CHANNELS = frozenset(("theta", "radius", "theta2", "radius2"))
 # Facet channels have a separate code path through resolved._facet — no
 # silent-drop, no warn.
 _FACET_CHANNELS = frozenset(("facet", "facet_row", "facet_col"))
@@ -2769,10 +2769,18 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
 
         theta_ch = resolved._coord.theta  # "x" or "y"
         radius_ch = "y" if theta_ch == "x" else "x"
+        # Second-extent channels mirror the primary axis assignment:
+        # theta2 -> x2 when theta->x, else y2; radius2 -> y2 when radius->y, else x2.
+        theta2_ch = f"{theta_ch}2"
+        radius2_ch = f"{radius_ch}2"
         if "theta" in enc:
             enc[theta_ch] = enc.pop("theta")
+        if "theta2" in enc:
+            enc[theta2_ch] = enc.pop("theta2")
         if "radius" in enc:
             enc[radius_ch] = enc.pop("radius")
+        if "radius2" in enc:
+            enc[radius2_ch] = enc.pop("radius2")
         # Arc marks need a dummy y (or x) so scale_resolve doesn't fail when
         # only one axis is encoded.  The arc builder ignores the dummy scale.
         if resolved._mark == "arc":

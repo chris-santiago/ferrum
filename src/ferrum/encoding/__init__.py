@@ -15,6 +15,8 @@ from ferrum.encoding.positional import (
     YError2,
     Theta,
     Radius,
+    Theta2,
+    Radius2,
 )
 from ferrum.encoding.appearance import (
     Color,
@@ -52,6 +54,8 @@ __all__ = [
     "YError2",
     "Theta",
     "Radius",
+    "Theta2",
+    "Radius2",
     "Color",
     "Fill",
     "Stroke",
@@ -96,6 +100,8 @@ def _channel_class_map() -> dict:
         "y_error2": YError2,
         "theta": Theta,
         "radius": Radius,
+        "theta2": Theta2,
+        "radius2": Radius2,
         "color": Color,
         "fill": Fill,
         "stroke": Stroke,

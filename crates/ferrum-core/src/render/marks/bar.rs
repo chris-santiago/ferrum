@@ -149,6 +149,12 @@ impl StrokeChannels {
 // ── Scene-graph build path (11a) ────────────────────────────────────
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    // CoordPolar: bars become arc wedges (wind-rose / coxcomb). The angular
+    // position/width comes from the angle channel; the radial span is the
+    // stacked [base, top] mapped through the radial scale.
+    if matches!(ctx.spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. })) {
+        return build_polar(ctx);
+    }
     let has_x2 = ctx.spec.encoding.x2.is_some();
     let has_y2 = ctx.spec.encoding.y2.is_some();
     match (&ctx.scales.x, &ctx.scales.y) {
@@ -158,6 +164,132 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         (ScaleKind::Linear(_) | ScaleKind::Log(_) | ScaleKind::Symlog(_) | ScaleKind::Pow(_) | ScaleKind::Time(_), _) => {
             build_quantitative(ctx)
         }
+    }
+}
+
+/// CoordPolar bar → arc-wedge renderer (wind-rose / coxcomb).
+///
+/// Under the Python polar remapping `theta="x"` puts the angular channel in
+/// `encoding.x` and the radial (value) channel in `encoding.y`; `theta="y"`
+/// mirrors. Each distinct angular category occupies an equal slice of the
+/// circle (`tau / n`). A bar's radial span is `[base, top]` where `top` is the
+/// y value and `base` is the stacking base (`__stack_y_base__`, 0 when
+/// unstacked) — both mapped through the radial scale. Stacked segments thus
+/// accumulate outward: segment B's inner radius equals segment A's outer
+/// radius, with no overlap at r=0.
+fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
+    use crate::render::draw::MarkBuildResult;
+    use crate::render::marks::arc::{polar_geom, radius_to_pixel, wedge_path};
+    use crate::spec::coord::PolarThetaChannel;
+    use ferrum_scene::{MarkBatchKind, SceneNode};
+
+    let theta_ch = match &ctx.spec.coord {
+        Some(crate::spec::coord::CoordKind::Polar { theta, .. }) => *theta,
+        _ => return empty_result(),
+    };
+    let Some(geom) = polar_geom(ctx) else { return empty_result() };
+
+    // Angular channel = theta-mapped axis; radial (value) channel = the other.
+    let (angle_field, value_field, radius_scale) = match theta_ch {
+        PolarThetaChannel::X => (
+            x_field(ctx, ctx.spec),
+            y_field(ctx, ctx.spec),
+            &ctx.scales.y,
+        ),
+        PolarThetaChannel::Y => (
+            y_field(ctx, ctx.spec),
+            x_field(ctx, ctx.spec),
+            &ctx.scales.x,
+        ),
+    };
+    let (Some(af), Some(vf)) = (angle_field, value_field) else { return empty_result() };
+
+    // Angular categories: stringify so ordinal and integer-coded angle columns
+    // group consistently. Each distinct value (first-appearance order) gets an
+    // equal angular band.
+    let angle_strs = match col_as_ordinal_category_str(ctx.batch, af) {
+        Ok(v) => v,
+        Err(_) => return empty_result(),
+    };
+    let tops = match col_as_f64(ctx.batch, vf) { Ok(v) => v, Err(_) => return empty_result() };
+    if angle_strs.len() != tops.len() { return empty_result(); }
+
+    // Stacking base (segment bottoms). Absent when unstacked → base = 0.
+    let bases: Option<Vec<Option<f64>>> = col_as_f64(ctx.batch, "__stack_y_base__").ok();
+
+    // Distinct angular categories in first-appearance order.
+    let mut cat_index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut cat_order: Vec<&str> = Vec::new();
+    for s in angle_strs.iter().flatten() {
+        if !cat_index.contains_key(s.as_str()) {
+            cat_index.insert(s.as_str(), cat_order.len());
+            cat_order.push(s.as_str());
+        }
+    }
+    let n_cats = cat_order.len().max(1);
+    let tau = std::f64::consts::TAU;
+    let band = tau / n_cats as f64;
+    // A single angular category would span the full circle. SVG cannot draw a
+    // 360° arc in one command (start==end is degenerate), so `wedge_path`
+    // splits it into two semicircle arcs. Leave a hairline gap when no explicit
+    // pad is set so each ring renders as a single arc (coxcomb convention) and
+    // concentric stacked rings stay individually identifiable.
+    let pad_angle = if geom.pad_angle > 0.0 {
+        geom.pad_angle
+    } else if n_cats == 1 {
+        1e-3
+    } else {
+        0.0
+    };
+
+    let (color_values, color_values_f64) = load_color_columns(ctx);
+
+    let mut nodes = Vec::new();
+    let mut indices = Vec::new();
+
+    for i in 0..angle_strs.len() {
+        let cat = match &angle_strs[i] { Some(s) => s.as_str(), None => continue };
+        let top = match tops[i] { Some(v) if v.is_finite() => v, _ => continue };
+        let base = bases.as_ref().and_then(|v| v[i]).filter(|v| v.is_finite()).unwrap_or(0.0);
+
+        let k = *cat_index.get(cat).unwrap_or(&0);
+        let angle_start = geom.start_angle + k as f64 * band + pad_angle / 2.0;
+        let angle_end = geom.start_angle + (k as f64 + 1.0) * band - pad_angle / 2.0;
+        if angle_end <= angle_start { continue; }
+
+        let inner_r = radius_to_pixel(radius_scale, geom.inner_radius, geom.outer_radius, base);
+        let outer_r = radius_to_pixel(radius_scale, geom.inner_radius, geom.outer_radius, top);
+
+        let fill_color = resolve_fill_color(
+            ctx.scales.color.as_ref(),
+            row_cat(&color_values, i),
+            row_num(&color_values_f64, i),
+            ctx.mark_style.fill,
+        );
+        let fill = with_opacity(fill_color, ctx.mark_style.opacity);
+
+        let commands = wedge_path(geom.cx, geom.cy, inner_r, outer_r, angle_start, angle_end);
+        nodes.push(SceneNode::Path {
+            commands,
+            style: crate::render::draw::to_scene_fill_stroke(
+                Some(fill),
+                ctx.mark_style.stroke,
+                ctx.mark_style.stroke_width,
+                ctx.mark_style.opacity,
+                ctx.mark_style.stroke_dash.as_deref(),
+            ),
+            closed: true,
+        });
+        indices.push(i);
+    }
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Arc,
+        nodes,
+        data_indices: Some(indices),
+        tooltips: None,
+        hrefs: None,
+        descriptions: None,
     }
 }
 
@@ -1033,5 +1165,99 @@ mod tests {
             "rect top {rect_y:.3} should be above baseline {baseline_pixel:.3} (hi=2 side)");
         assert!(rect_bottom > baseline_pixel + 1.0,
             "rect bottom {rect_bottom:.3} should be below baseline {baseline_pixel:.3} (lo=-3 side)");
+    }
+
+    /// D7: a stacked bar under CoordPolar renders arc wedges (not rects), and
+    /// stacked segments accumulate outward — each segment's inner radius equals
+    /// the previous segment's outer radius, with no overlap at r=0.
+    #[test]
+    fn polar_stacked_bar_emits_contiguous_wedges() {
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
+        use ferrum_scene::{PathCmd, PolarDirection};
+
+        // Single direction, three stacked categories A/B/C with values
+        // 10/20/30 → segment tops 10/30/60, bases 0/10/30 (as apply_stack
+        // would produce). The __stack_y_base__ column is supplied directly so
+        // this test exercises the wedge geometry in isolation.
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "dir".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                color: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: Some(SpecCoord::Polar {
+                theta: PolarThetaChannel::X,
+                start_angle: 0.0,
+                inner_radius: 0.0,
+                outer_radius: Some(120.0),
+                pad_angle: 0.0,
+                direction: PolarDirection::Clockwise,
+            }),
+            mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("dir", DataType::Utf8, false),
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("__stack_y_base__", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["N", "N", "N"])),
+            Arc::new(StringArray::from(vec!["A", "B", "C"])),
+            Arc::new(Float64Array::from(vec![10.0, 30.0, 60.0])), // segment tops
+            Arc::new(Float64Array::from(vec![0.0, 10.0, 30.0])),  // segment bases
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        // Radial scale (y): domain [0, 60] anchored at 0.
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 60.0], vec![300.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        // Polar bars render as Path wedges, never Rect.
+        assert!(result.nodes.iter().all(|n| !matches!(n, SceneNode::Rect { .. })),
+            "polar bars must not emit Rect nodes");
+        let paths: Vec<&SceneNode> = result.nodes.iter()
+            .filter(|n| matches!(n, SceneNode::Path { .. })).collect();
+        assert_eq!(paths.len(), 3, "expected one wedge per stacked segment");
+
+        // Extract (inner_r, outer_r) per wedge from the first/last arc radii.
+        // Solid wedge (inner_r=0): one arc. Annular: outer arc then inner arc.
+        let radii: Vec<(f64, f64)> = paths.iter().map(|n| {
+            let cmds = if let SceneNode::Path { commands, .. } = n { commands } else { unreachable!() };
+            let arcs: Vec<f64> = cmds.iter().filter_map(|c| {
+                if let PathCmd::ArcTo { rx, .. } = c { Some(*rx) } else { None }
+            }).collect();
+            if arcs.len() == 1 { (0.0, arcs[0]) } else { (arcs[arcs.len()-1], arcs[0]) }
+        }).collect();
+
+        // Expected pixel radii: top/60 * 120. A: 0..20, B: 20..60, C: 60..120.
+        let mut sorted = radii.clone();
+        sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        assert!((sorted[0].0 - 0.0).abs() < 1e-6, "first segment inner_r should be 0");
+        // Contiguity: each segment's outer == next segment's inner.
+        for i in 0..sorted.len() - 1 {
+            assert!((sorted[i].1 - sorted[i + 1].0).abs() < 1e-6,
+                "segment {i} outer_r={} != segment {} inner_r={}", sorted[i].1, i + 1, sorted[i + 1].0);
+        }
+        // At least one segment has a non-zero inner radius (no r=0 overlap).
+        assert!(sorted.iter().any(|(inner, _)| *inner > 1.0),
+            "stacked segments must accumulate outward (non-zero inner radii)");
     }
 }
