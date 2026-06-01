@@ -14,6 +14,7 @@ Scratch convention: each agent works in `/tmp/ferrum-ux-audit/<slug>/` and write
 - Raincloud plot (half-violin + boxplot + jittered strip, per category).
 - Ridgeline / joyplot (stacked, slightly overlapping KDEs across many categories).
 - Violin + inner box + strip overlay, split by a hue.
+- Beeswarm / swarm plot: non-overlapping points placed by a force/swarm layout against a categorical axis (not random jitter), plus a sina plot where jitter width tracks local density. Tests whether a layout can move points to avoid collisions, not just encode them.
 - Layered ECDF curves comparing groups, with a reference band.
 - Joint distribution: scatter + marginal histograms/KDEs (jointplot), plus a bivariate KDE/contour with rug marks.
 **Push:** per-group colors, custom bandwidths, category ordering, faceting by a second variable, direct labels on distributions.
@@ -35,8 +36,10 @@ Scratch convention: each agent works in `/tmp/ferrum-ux-audit/<slug>/` and write
 - Price + volume panel: shared x-axis, price on top, volume bars below, aligned.
 - Dual-axis chart: two series, very different units, left/right y-axes (`fm.SecondaryY`).
 - Time series with rolling-mean overlay (window transform), confidence band (area between columns), region shading, event annotations.
+- Horizon chart: layered banded areas where each band recycles one shared color scale at stacked value offsets (cubism.js). The densest small-multiple time-series form; tests whether a fill can reuse a scale across offset bands.
+- Streamgraph / ThemeRiver: many series as stacked areas around a centered "wiggle" baseline instead of a zero baseline. Tests whether the stack position-adjustment supports a non-zero, data-driven baseline.
 - Log-scale returns; a broken axis (`fm.BreakAxis`) or inset zoom (`fm.Inset`).
-**Push:** temporal axis tick formatting (month/year), multi-panel alignment, secondary axes, log scales, band/ribbon fills, weekend gaps, real datetime parsing.
+**Push:** temporal axis tick formatting (month/year), multi-panel alignment, secondary axes, log scales, band/ribbon fills, wiggle/centered baselines, layered banded fills, weekend gaps, real datetime parsing.
 
 ## 4. faceting — Small multiples / composed dashboards
 **Compare against:** seaborn (FacetGrid/PairGrid), Altair.
@@ -46,7 +49,8 @@ Scratch convention: each agent works in `/tmp/ferrum-ux-audit/<slug>/` and write
 - Scatter with marginal histograms (jointplot), marginals sized/aligned to the joint panel.
 - Correlation heatmap with annotated cell values; a dendrogram-clustered version (clustermap).
 - Heterogeneous dashboard: vconcat/hconcat of **different** chart types into one figure with a shared super-title.
-**Push:** independent vs shared scales, per-facet layers, facet headers/spacing/sorting, mixing chart types, controlling panel sizes, column wrapping.
+- **Grand challenge — Minard's Napoleon march:** a flow ribbon whose width encodes army size positioned over geographic x/y, with a temperature line panel below sharing the same x-axis. The hardest cross-coordinate composition test in the suite: flow geometry, spatial positioning, and aligned multi-panel layout all at once. Report exactly which of the three breaks first.
+**Push:** independent vs shared scales, per-facet layers, facet headers/spacing/sorting, mixing chart types, cross-coordinate composition, shared-x panel alignment, controlling panel sizes, column wrapping.
 
 ## 5. multivariate — Encoding-rich multivariate plots
 **Compare against:** Altair, d3.
@@ -54,7 +58,7 @@ Scratch convention: each agent works in `/tmp/ferrum-ux-audit/<slug>/` and write
 - Gapminder-style bubble chart: x, y, size (area scale + size legend), color, maybe shape — 4–5 simultaneous encodings, **a legend for each**.
 - Connected scatterplot (path through time over 2D space) with directional ordering and point labels.
 - Slope graph and a bump/rank chart over time (many categories, ranked lines).
-- Parallel coordinates over 5+ dimensions, colored by class, per-axis scaling.
+- Parallel coordinates over 5+ dimensions, colored by class, per-axis scaling. As a stretch, make it interactive: brush a range on one axis and have it filter/highlight polylines across all N axes (N-axis linked brushing — the canonical high-dim linked view).
 - Diverging/sequential continuous color encoding with a custom domain, custom palette, and a formatted continuous colorbar.
 **Push:** multiple simultaneous legends, continuous color domains/clamping, custom size ranges, shape palettes, legend placement/merging, ordinal vs nominal handling, custom color scales.
 
@@ -73,10 +77,12 @@ Scratch convention: each agent works in `/tmp/ferrum-ux-audit/<slug>/` and write
 **Targets:**
 - 100% (normalized) stacked bar with segment value labels; grouped (dodged) bars with value labels above bars — verify normalization and dodging.
 - Diverging stacked bar (Likert: agree/disagree from a center baseline).
+- Marimekko / mosaic plot: stacked bars whose column widths are proportional to each category's total (2D variable-width position adjustment), with a value label per tile. Tests whether bar width can be data-driven, not uniform.
+- Sankey / alluvial flow: weighted ribbons between stages, node boxes sized by throughput, ribbon thickness encoding flow volume. Tests whether the engine can express flow geometry at all.
 - Horizontal lollipop or Cleveland dot plot, sorted descending, with value labels.
 - Dumbbell / connected-dot chart comparing two time points per category, sorted by gap.
 - Pie or donut (`CoordPolar`) and a radial/polar bar — note whether you'd actually recommend them.
-**Push:** stack normalization to percent, sorting by value/aggregate, value labels on/above/inside bars, horizontal orientation, diverging baselines, category ordering, top-k filtering.
+**Push:** stack normalization to percent, sorting by value/aggregate, value labels on/above/inside bars, horizontal orientation, diverging baselines, variable-width columns, flow geometry, category ordering, top-k filtering.
 
 ## 8. interactive — Interactive & linked views
 **Compare against:** Altair/Vega-Lite, d3/Observable, Plotly, Bokeh.
