@@ -245,11 +245,17 @@ class _ChartLike(ConfigureMixin):
     def properties(self, **kwargs):
         """Forward ``properties(**kwargs)`` to every sub-chart.
 
+        This base implementation is used by non-composite subclasses
+        (``LayerChart``, ``RepeatChart``, ``JointChart``, ``ClusterMapChart``).
+        ``_CompositeBase`` overrides this with a version that intercepts
+        figure-level chrome (``title``, ``subtitle``, ``caption``) and stores
+        it at the composition level rather than fanning it to every child.
+
         Parameters
         ----------
         **kwargs
             Keyword arguments accepted by ``Chart.properties`` (e.g.
-            ``width``, ``height``, ``title``, ``background``).
+            ``width``, ``height``, ``title``).
 
         Returns
         -------
@@ -312,12 +318,18 @@ class _CompositeBase(_ChartLike):
 
     Holds an ordered ``charts`` list and a pixel ``spacing`` between cells.
     ``__or__`` and ``__and__`` chain further compositions; ``theme`` and
-    ``properties`` fan out to every child.
+    ``properties`` fan out to every child.  Figure-level chrome
+    (``title``, ``subtitle``, ``caption``) is stored at the composition
+    level and rendered once around the whole figure — it is never fanned
+    to individual child panels.
     """
 
     def __init__(self, charts: List, *, spacing: float = 10.0) -> None:
         self.charts = list(charts)
         self.spacing = spacing
+        self._figure_title: Optional[str] = None
+        self._figure_subtitle: Optional[str] = None
+        self._figure_caption: Optional[str] = None
 
     def __copy__(self):
         """Shallow copy that duplicates mutable list attributes."""
@@ -344,8 +356,72 @@ class _CompositeBase(_ChartLike):
     def __and__(self, other):
         return VConcatChart([self, other])
 
+    def properties(self, **kwargs):
+        """Set figure-level or per-child chart properties.
+
+        The keyword arguments ``title``, ``subtitle``, and ``caption`` are
+        intercepted and stored at the figure level — they render once around
+        the whole composed figure and are never fanned to individual child
+        panels.  All other keyword arguments (e.g. ``width``, ``height``)
+        are forwarded to each child via ``Chart.properties``.
+
+        Parameters
+        ----------
+        title : str, optional
+            Figure-level title rendered above all panels.
+        subtitle : str, optional
+            Figure-level subtitle rendered below the title, above all panels.
+        caption : str, optional
+            Figure-level caption rendered below all panels.
+        **kwargs
+            Additional keyword arguments forwarded to ``Chart.properties``
+            for every child chart (e.g. ``width``, ``height``).
+
+        Returns
+        -------
+        _CompositeBase
+            A new instance of the same composition class with the figure
+            chrome stored and / or child properties updated.
+        """
+        # Separate figure-level chrome from per-child kwargs.
+        figure_title = kwargs.pop("title", None)
+        figure_subtitle = kwargs.pop("subtitle", None)
+        figure_caption = kwargs.pop("caption", None)
+
+        if kwargs:
+            # Forward remaining kwargs to children as before.
+            result = self._rebuild_with_charts(lambda c: c.properties(**kwargs))
+        else:
+            # Nothing to fan — rebuild preserving charts unchanged.
+            result = self._rebuild_with_charts(lambda c: c)
+
+        _copy_configure_layers(self, result)
+
+        # Apply figure-level chrome (only update when a value was provided).
+        if figure_title is not None:
+            result._figure_title = figure_title
+        elif self._figure_title is not None:
+            result._figure_title = self._figure_title
+
+        if figure_subtitle is not None:
+            result._figure_subtitle = figure_subtitle
+        elif self._figure_subtitle is not None:
+            result._figure_subtitle = self._figure_subtitle
+
+        if figure_caption is not None:
+            result._figure_caption = figure_caption
+        elif self._figure_caption is not None:
+            result._figure_caption = self._figure_caption
+
+        return result
+
     def _rebuild_with_charts(self, fn):
-        return type(self)([fn(c) for c in self.charts], spacing=self.spacing)
+        new = type(self)([fn(c) for c in self.charts], spacing=self.spacing)
+        # Carry figure-level chrome through rebuilds.
+        new._figure_title = self._figure_title
+        new._figure_subtitle = self._figure_subtitle
+        new._figure_caption = self._figure_caption
+        return new
 
 
 class HConcatChart(_CompositeBase):
@@ -385,7 +461,14 @@ class HConcatChart(_CompositeBase):
 
         charts = [self._inject_parent_config(c) for c in self.charts]
         svgs = [c.show_svg() for c in charts]
-        return compose_svg_horizontal(svgs, spacing=self.spacing, align="top")
+        return compose_svg_horizontal(
+            svgs,
+            spacing=self.spacing,
+            align="top",
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
+        )
 
     def __repr__(self) -> str:
         """Return a short developer-readable description."""
@@ -429,7 +512,14 @@ class VConcatChart(_CompositeBase):
 
         charts = [self._inject_parent_config(c) for c in self.charts]
         svgs = [c.show_svg() for c in charts]
-        return compose_svg_vertical(svgs, spacing=self.spacing, align="left")
+        return compose_svg_vertical(
+            svgs,
+            spacing=self.spacing,
+            align="left",
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
+        )
 
     def __repr__(self) -> str:
         """Return a short developer-readable description."""
@@ -1563,6 +1653,9 @@ class ConcatChart(_CompositeBase):
             row_ratios=[1.0] * n_rows,
             col_ratios=[1.0] * n_cols,
             spacing=self.spacing,
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
         )
 
     def _resolved_charts(self) -> list:
@@ -1583,12 +1676,17 @@ class ConcatChart(_CompositeBase):
         return result
 
     def _rebuild_with_charts(self, fn):
-        return ConcatChart(
+        new = ConcatChart(
             *[fn(c) for c in self.charts],
             columns=self._columns,
             spacing=self.spacing,
             resolve=self._resolve,
         )
+        # Carry figure-level chrome through rebuilds (mirrors _CompositeBase._rebuild_with_charts).
+        new._figure_title = self._figure_title
+        new._figure_subtitle = self._figure_subtitle
+        new._figure_caption = self._figure_caption
+        return new
 
     def __repr__(self) -> str:
         """Return a short developer-readable description."""

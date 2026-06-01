@@ -721,9 +721,15 @@ def compose_svg_horizontal(
     *,
     spacing: float = 10.0,
     align: Literal["top", "center", "bottom"] = "top",
+    title: str | None = None,
+    subtitle: str | None = None,
+    caption: str | None = None,
 ) -> str:
     """
     Lay out SVG panels side-by-side.
+
+    When *title*, *subtitle*, and *caption* are all ``None`` (default) the
+    output is byte-identical to the previous behavior.
 
     Examples
     --------
@@ -737,9 +743,15 @@ def compose_svg_vertical(
     *,
     spacing: float = 10.0,
     align: Literal["left", "center", "right"] = "left",
+    title: str | None = None,
+    subtitle: str | None = None,
+    caption: str | None = None,
 ) -> str:
     """
     Stack SVG panels top-to-bottom.
+
+    When *title*, *subtitle*, and *caption* are all ``None`` (default) the
+    output is byte-identical to the previous behavior.
 
     Examples
     --------
@@ -756,11 +768,15 @@ def compose_svg_grid(
     row_ratios: list[float],
     col_ratios: list[float],
     spacing: float = 10.0,
-    share_x: list[list[int]] = ...,
-    share_y: list[list[int]] = ...,
+    title: str | None = None,
+    subtitle: str | None = None,
+    caption: str | None = None,
 ) -> str:
     """
     Arrange SVG panels in a grid.
+
+    When *title*, *subtitle*, and *caption* are all ``None`` (default) the
+    output is byte-identical to the previous behavior.
 
     Examples
     --------

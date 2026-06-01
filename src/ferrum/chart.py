@@ -551,6 +551,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         "_overrides",  # dict — spec-path override kwargs
         "_annotation_primitive",  # optional annotation primitive for annotate_* helpers
         "_mark_zero",  # bool — False when mark_bar(zero=False) suppresses the y zero-anchor
+        "_figure_caption",  # str or None — figure-level caption rendered below the SVG
     )
 
     def __init__(
@@ -597,6 +598,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         self._overrides: dict = {}
         self._annotation_primitive = None
         self._mark_zero: bool = True
+        self._figure_caption: Optional[str] = None
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -2562,7 +2564,15 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
     # ---- Properties ----
 
     def properties(
-        self, *, width=None, height=None, title=None, description=None, render_config=None
+        self,
+        *,
+        width=None,
+        height=None,
+        title=None,
+        subtitle=None,
+        caption=None,
+        description=None,
+        render_config=None,
     ) -> "Chart":
         """Set chart-level display properties.
 
@@ -2577,6 +2587,15 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             Chart height in pixels.
         title : str or None, optional
             Chart title rendered above the plot area.
+        subtitle : str or None, optional
+            Chart subtitle rendered below the title.  On a faceted chart this
+            renders inside the facet grid via the ``Title`` spec.  On a plain
+            single-panel chart it behaves identically to
+            ``.labs(subtitle=...)``.
+        caption : str or None, optional
+            Figure-level caption rendered below the chart.  Applied as a
+            post-render chrome band so that it appears beneath the plot area
+            regardless of chart type.
         description : str or None, optional
             Accessible description attached to the SVG root.
         render_config : RenderConfig or None, optional
@@ -2599,6 +2618,10 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         ... )
         Chart(mark='point', encoding=['x', 'y'])
         """
+        import dataclasses
+
+        from ferrum.title import Title as _TitleCls
+
         new = self._clone()
         if width is not None:
             new._width = width
@@ -2606,9 +2629,17 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             new._height = height
         if title is not None:
             # Schwabish SB1: accept Title value class or plain str.
-            from ferrum.title import Title as _TitleCls
-
             new._title = title if isinstance(title, _TitleCls) else _TitleCls(text=str(title))
+        if subtitle is not None:
+            # Route subtitle into the Title value class, preserving any
+            # existing title text (same logic as labs(subtitle=...)).
+            existing = new._title
+            if isinstance(existing, _TitleCls):
+                new._title = dataclasses.replace(existing, subtitle=subtitle)
+            else:
+                new._title = _TitleCls(text="", subtitle=subtitle)
+        if caption is not None:
+            new._figure_caption = caption
         if description is not None:
             new._description = description
         if render_config is not None:

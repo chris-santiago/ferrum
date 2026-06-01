@@ -47,6 +47,8 @@
 
 > **Open (noted 2026-06-01, flexibility D2):** `fix_kde_extents_for_facet` in `render/prepare.rs` pins the global x-extent for a single-group faceted KDE so per-panel curves share a comparable axis. It is **KDE-only**: faceting-before-transform drops cross-partition extent unification in general, and `Bin`/`Violin` carry the same `extent`/`shared_extent` field pair. A faceted histogram or violin with auto extent has the same per-panel-drift and is NOT fixed by this helper. Generalize the extent-pin across transforms when faceted `Bin`/`Violin` is next touched — do not file it as a new regression.
 
+> **Open (noted 2026-06-01, flexibility D10):** figure-level `.properties(title=/subtitle=/caption=)` chrome (rendered once around a composed figure) is wired for `_CompositeBase` (`VConcatChart`/`HConcatChart`/`ConcatChart`) and faceted `Chart`. `JointChart` (`composition.py:619`) and `ClusterMapChart` (`composition.py:1268`) override `properties` to route all kwargs into their inner panel, so `joint.properties(title=...)` lands the title on the center panel rather than wrapping the figure. Out of D10's stated scope (vconcat/hconcat/facet); wire figure chrome into those two composites when next touched.
+
 ---
 
 ## Python Silent Drops (accepted by Python API, never reach Rust)

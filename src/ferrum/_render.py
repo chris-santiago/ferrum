@@ -462,17 +462,33 @@ class _RenderMixin:
         spec, data, viewport, theme_dict, chart_config_dict = chart._render_inputs()
         if data.num_rows == 0:
             w, h = viewport
-            return (
+            empty_svg = (
                 f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">'
                 f"<!-- empty dataset --></svg>"
             )
-        return render_svg(
+            figure_caption = getattr(chart, "_figure_caption", None)
+            if figure_caption is not None:
+                from ferrum._core import compose_svg_vertical
+
+                return compose_svg_vertical([empty_svg], spacing=0.0, caption=figure_caption)
+            return empty_svg
+        svg = render_svg(
             spec,
             data,
             viewport=viewport,
             theme=theme_dict,
             chart_config=chart_config_dict or None,
         )
+        # Post-wrap with a caption band when one has been set via
+        # .properties(caption=...).  Using compose_svg_vertical with a single
+        # SVG is byte-identical to the plain SVG when no chrome is given, so
+        # this branch is only reached when a caption is actually present.
+        figure_caption = getattr(chart, "_figure_caption", None)
+        if figure_caption is not None:
+            from ferrum._core import compose_svg_vertical
+
+            svg = compose_svg_vertical([svg], spacing=0.0, caption=figure_caption)
+        return svg
 
     def show_png(self, *, raster: bool | None = None, scale: float = 2.0) -> bytes:
         """Render the chart to PNG bytes.
