@@ -98,6 +98,8 @@ def desugar_contour(
         Kde2D(x=x_field, y=y_field, bandwidth=bandwidth, n=128),
         Contour(thresholds=thresholds, fill=fill, smooth=smooth, name="contour"),
     ]
+    from ferrum.encoding import X, Y
+
     if fill:
         # Isoband mode: Contour emits polygon vertex rows (x, y per vertex).
         # Use polygon mark grouped by level_id; color by level_value so each
@@ -109,7 +111,11 @@ def desugar_contour(
             _Layer(
                 name="polygon",
                 mark="polygon",
-                encoding={"x": "contour_x", "y": "contour_y", "color": "level_value"},
+                encoding={
+                    "x": X("contour_x", title=x_field),
+                    "y": Y("contour_y", title=y_field),
+                    "color": "level_value",
+                },
                 mark_kwargs=mk,
                 data_source="contour",
             )
@@ -126,8 +132,8 @@ def desugar_contour(
                 name="segment",
                 mark="segment",
                 encoding={
-                    "x": "contour_x",
-                    "y": "contour_y",
+                    "x": X("contour_x", title=x_field),
+                    "y": Y("contour_y", title=y_field),
                     "x2": "contour_x2",
                     "y2": "contour_y2",
                 },
@@ -618,6 +624,8 @@ def desugar_hex(
         raise ValueError(f"mark_hex aggregate={aggregate!r} must be one of {_VALID_AGGREGATES}")
     if aggregate != "count" and field is None:
         raise ValueError(f"mark_hex aggregate={aggregate!r} requires field=...")
+    from ferrum.encoding import X, Y
+
     transforms = [
         Hex(x=x_field, y=y_field, bin_size=bin_size, aggregate=aggregate, field=field, name="hex")
     ]
@@ -632,7 +640,11 @@ def desugar_hex(
         _Layer(
             name="polygon",
             mark="polygon",
-            encoding={"x": "hex_x", "y": "hex_y", "color": "value"},
+            encoding={
+                "x": X("hex_x", title=x_field),
+                "y": Y("hex_y", title=y_field),
+                "color": "value",
+            },
             mark_kwargs=mk,
             data_source="hex",
         )
