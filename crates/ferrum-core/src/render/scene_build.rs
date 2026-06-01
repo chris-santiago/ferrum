@@ -528,6 +528,7 @@ pub fn build_scene(
         linked_panels: Vec::new(),
         tick_levels,
         toolbar: true,
+        params: spec.params.clone(),
     };
 
     Ok(SceneGraph {
@@ -1579,7 +1580,7 @@ mod tests {
 
     use crate::spec::encoding::{ContinuousScaleCommon, EncodingSpec, ScaleSpec};
     use crate::spec::mark::Mark;
-    use crate::spec::parameter::{ParamKind, ParameterSpec};
+    use ferrum_scene::{ParamKind, ParameterSpec};
 
     fn linear_domain_param(name: &str) -> ScaleSpec {
         ScaleSpec::Linear {

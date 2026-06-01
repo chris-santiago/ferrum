@@ -315,6 +315,7 @@ def _render_scene(chart: "Chart") -> tuple[str, bytes]:
                     "conditionals": [],
                     "linked_panels": [],
                     "tick_levels": [],
+                    "params": [],
                 },
             }
         ), b""

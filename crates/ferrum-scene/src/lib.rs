@@ -1,10 +1,12 @@
 pub mod error;
 pub mod types;
 pub mod selection;
+pub mod parameter;
 
 pub use error::*;
 pub use types::*;
 pub use selection::*;
+pub use parameter::*;
 
 #[cfg(test)]
 mod tests {

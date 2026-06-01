@@ -2014,6 +2014,11 @@ def _merge_one_child(
         merged["interaction"]["zoom_enabled"] = False
     if not child_interaction.get("pan_enabled", True):
         merged["interaction"]["pan_enabled"] = False
+    existing_param_names = {p["name"] for p in merged["interaction"]["params"]}
+    for param in child_interaction.get("params", []):
+        if param["name"] not in existing_param_names:
+            merged["interaction"]["params"].append(param)
+            existing_param_names.add(param["name"])
     if merged["background"] is None and scene.get("background"):
         merged["background"] = scene["background"]
 
@@ -2044,6 +2049,7 @@ def _empty_scene() -> dict:
             "conditionals": [],
             "linked_panels": [],
             "tick_levels": [],
+            "params": [],
         },
     }
 

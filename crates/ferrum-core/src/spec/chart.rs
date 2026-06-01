@@ -94,7 +94,7 @@ pub struct ChartSpec {
     /// (for live reactive wiring). Additive — empty by default, omitted from
     /// canonical JSON so param-free specs stay byte-identical.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub params: Vec<crate::spec::parameter::ParameterSpec>,
+    pub params: Vec<ferrum_scene::ParameterSpec>,
     /// Chart-level accessibility description. When `Some`, emitted as `<desc>`
     /// in the root SVG element. Distinct from the per-mark `description`
     /// encoding channel.
@@ -883,7 +883,7 @@ mod tests {
 
     #[test]
     fn test_chart_spec_params_round_trip() {
-        use crate::spec::parameter::{ParamKind, ParameterSpec};
+        use ferrum_scene::{ParamKind, ParameterSpec};
         let mut spec = minimal_scatter();
         spec.params = vec![
             ParameterSpec {
