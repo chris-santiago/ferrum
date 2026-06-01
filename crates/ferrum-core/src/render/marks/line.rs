@@ -118,7 +118,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let cf = color_field(ctx, spec);
     let color_values = cf.and_then(|f| col_as_str(ctx.batch, f).ok());
     let detail_values = ctx.mark_style.detail.as_deref()
-        .and_then(|f| col_as_str(ctx.batch, f).ok());
+        .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
 
     let groups: Vec<(Option<String>, Vec<usize>)> = match (
         color_values.as_ref(),
@@ -488,5 +488,47 @@ mod tests {
             .count();
         assert_eq!(polyline_count, 3,
             "Int64 ordinal x must emit one polyline per color series; got {polyline_count}");
+    }
+
+    /// D8 regression: Int64 detail column must split line into one polyline per
+    /// distinct integer group value.  Previously col_as_str rejected Int64 and
+    /// detail_values became None, causing the renderer to fall through to the
+    /// single-polyline path and producing one tangled polyline instead of N.
+    #[test]
+    fn line_int_detail_emits_one_polyline_per_group() {
+        use arrow::array::Int64Array;
+        let spec = line_spec();
+        // 3 groups × 3 x positions = 9 rows, interleaved (group 1, 2, 3, 1, 2, 3, ...)
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Int64, false),
+        ]));
+        let xs: Vec<f64> = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
+        let ys: Vec<f64> = vec![0.0, 100.0, 200.0, 1.0, 101.0, 201.0, 2.0, 102.0, 202.0];
+        let gs: Vec<i64> = vec![1, 2, 3, 1, 2, 3, 1, 2, 3];
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(Int64Array::from(gs)),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let overrides = MarkKwargsSpec {
+            detail: Some("g".into()),
+            ..Default::default()
+        };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let polyline_count = result.nodes.iter()
+            .filter(|n| matches!(n, SceneNode::Polyline { .. }))
+            .count();
+        assert_eq!(polyline_count, 3,
+            "Int64 detail column must emit one polyline per group (3 groups); got {polyline_count}");
     }
 }
