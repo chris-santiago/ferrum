@@ -39,6 +39,8 @@ _DOC_ALLOWLIST: set[str] = {
     "YError2",
     "Theta",
     "Radius",
+    "Theta2",
+    "Radius2",
     "Color",
     "Fill",
     "Stroke",
