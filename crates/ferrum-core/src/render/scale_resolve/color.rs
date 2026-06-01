@@ -80,13 +80,19 @@ pub fn build_color_scale(
                 got: format!("{:?}", located.col.data_type()),
             });
         }
-        let (lo, hi) = numeric_extent(located.col);
+        let data_extent = numeric_extent(located.col);
+        // D1: honor explicit domain from Sequential/Diverging scale specs.
+        // When the spec carries domain=[lo, hi] or domain=[lo, mid, hi], use
+        // those bounds instead of auto-inferring from the data column. When the
+        // spec domain is absent, fall back to the data extent.
+        let (lo, hi) = scale_explicit_domain(c_enc).unwrap_or(data_extent);
         use crate::render::color::{ContinuousScheme, NamedContinuous};
 
-        // D4: resolve scheme from (1) encoding.scheme, (2) encoding.scale.common.scheme,
+        // D1/D4: resolve scheme from (1) encoding.scheme, (2) encoding.scale
+        // Sequential/Diverging scheme field OR common.scheme on other variants,
         // (3) theme, (4) Viridis fallback.
         let scale_scheme: Option<&str> = scale_common_scheme(c_enc);
-        let scheme = c_enc
+        let mut scheme = c_enc
             .scheme
             .as_deref()
             .or(scale_scheme)
@@ -102,7 +108,17 @@ pub fn build_color_scale(
                     .map(ContinuousScheme::Named)
                     .unwrap_or(ContinuousScheme::Named(NamedContinuous::Viridis))
             });
-        Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme }), Vec::new()))
+        // D1: honor the `reverse` flag on Sequential scale specs.
+        if scale_spec_is_reversed(c_enc) {
+            scheme = ContinuousScheme::Reverse(Box::new(scheme));
+        }
+        // Gap 2: resolve the diverging midpoint.  Priority:
+        //   1. explicit `domain_mid`/`domainMid` field on DivergingScale spec
+        //   2. middle element of a 3-tuple domain=[lo, mid, hi]
+        //   3. None — geometric center falls out from pure-linear normalization
+        // Sequential scales always get None (pure-linear).
+        let midpoint = scale_diverging_midpoint(c_enc);
+        Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme, midpoint }), Vec::new()))
     } else {
         // Data-aware sort (channel shorthand `"-y"`, sort-field objects) reorders
         // the legend domain by an aggregate, mirroring the positional-axis path.
@@ -199,14 +215,19 @@ fn build_default_categorical_scale(
     ColorScale::Categorical { domain, palette }
 }
 
-/// Extract the `scheme` string from a continuous `ScaleSpec`'s `common` field.
+/// Extract the `scheme` string from a `ScaleSpec`.
 ///
-/// Returns the first `Some(scheme)` found across the continuous scale variants
-/// that embed `ContinuousScaleCommon`, or `None` for ordinal/categorical variants
-/// and when no scheme is set.
+/// Covers both the `Sequential`/`Diverging` variants (which carry their own
+/// `scheme` field) and the `ContinuousScaleCommon`-bearing variants (Linear,
+/// Log, Time, Symlog, Pow, Sqrt, Utc). Returns `None` for ordinal/categorical
+/// variants and when no scheme is set.
 fn scale_common_scheme(enc: &crate::spec::encoding::EncodingSpec) -> Option<&str> {
     use crate::spec::encoding::ScaleSpec;
     match enc.scale.as_ref()? {
+        // D1: Sequential and Diverging carry their own scheme field.
+        ScaleSpec::Sequential { scheme, .. }
+        | ScaleSpec::Diverging { scheme, .. } => scheme.as_deref(),
+        // D4 (pre-existing): Linear and friends embed scheme in ContinuousScaleCommon.
         ScaleSpec::Linear   { common, .. }
         | ScaleSpec::Log    { common, .. }
         | ScaleSpec::Time   { common, .. }
@@ -216,6 +237,64 @@ fn scale_common_scheme(enc: &crate::spec::encoding::EncodingSpec) -> Option<&str
         | ScaleSpec::Utc    { common, .. } => common.scheme.as_deref(),
         _ => None,
     }
+}
+
+/// Extract the explicit numeric domain from a `Sequential` or `Diverging`
+/// scale spec.
+///
+/// For `Sequential`: returns `Some((domain[0], domain[1]))` when a 2-element
+/// (or longer) domain is declared.
+///
+/// For `Diverging`: accepts both 2-element `[lo, hi]` and 3-element
+/// `[lo, mid, hi]` domains; always returns the outer bounds `(lo, hi)`.
+/// The midpoint is carried separately by `scale_diverging_midpoint` and
+/// threaded into `ColorScale::Continuous { midpoint }` for piecewise-linear
+/// normalization.
+///
+/// Returns `None` for all other scale types and when no domain is declared,
+/// allowing the caller to fall back to the auto-inferred data extent.
+fn scale_explicit_domain(enc: &crate::spec::encoding::EncodingSpec) -> Option<(f64, f64)> {
+    use crate::spec::encoding::ScaleSpec;
+    match enc.scale.as_ref()? {
+        ScaleSpec::Sequential { domain: Some(d), .. } if d.len() >= 2 => {
+            Some((d[0], d[d.len() - 1]))
+        }
+        ScaleSpec::Diverging { domain: Some(d), .. } if d.len() >= 2 => {
+            // 3-element [lo, mid, hi]: take the outer bounds.
+            // 2-element [lo, hi]: use directly.
+            Some((d[0], d[d.len() - 1]))
+        }
+        _ => None,
+    }
+}
+
+/// Extract the diverging midpoint from a `Diverging` scale spec.
+///
+/// Midpoint resolution priority:
+///   1. `domain_mid` field (`"domainMid"` in JSON) when explicitly set.
+///   2. Middle element of a 3-tuple `domain = [lo, mid, hi]`.
+///   3. `None` — the caller uses the geometric center implicitly via
+///      pure-linear normalization (unchanged behavior for symmetric domains).
+///
+/// Always returns `None` for non-`Diverging` scale variants and when
+/// neither `domain_mid` nor a 3-element domain is present.
+fn scale_diverging_midpoint(enc: &crate::spec::encoding::EncodingSpec) -> Option<f64> {
+    use crate::spec::encoding::ScaleSpec;
+    match enc.scale.as_ref()? {
+        ScaleSpec::Diverging { domain_mid: Some(mid), .. } => Some(*mid),
+        ScaleSpec::Diverging { domain: Some(d), .. } if d.len() == 3 => Some(d[1]),
+        _ => None,
+    }
+}
+
+/// Returns `true` when the scale spec is `Sequential { reverse: true }`.
+///
+/// Used by `build_color_scale` to wrap the resolved scheme in
+/// `ContinuousScheme::Reverse` without cluttering the main resolution logic.
+/// `Diverging` does not currently expose a `reverse` field in the spec.
+fn scale_spec_is_reversed(enc: &crate::spec::encoding::EncodingSpec) -> bool {
+    use crate::spec::encoding::ScaleSpec;
+    matches!(enc.scale.as_ref(), Some(ScaleSpec::Sequential { reverse: true, .. }))
 }
 
 /// Extract an explicit color-string range from a color `EncodingSpec`.

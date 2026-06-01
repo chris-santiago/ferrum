@@ -857,7 +857,7 @@ mod tests {
         use crate::render::color::{ContinuousScheme, NamedContinuous};
         use crate::render::scale_resolve::ColorScale;
         let scheme = ContinuousScheme::Named(NamedContinuous::Viridis);
-        let scale = ColorScale::Continuous { domain: (0.0, 10.0), scheme };
+        let scale = ColorScale::Continuous { domain: (0.0, 10.0), scheme, midpoint: None };
         let fallback = crate::render::color::from_rgb(0x77, 0x77, 0x77);
         // The continuous branch must consume the f64 directly (no round-trip):
         // the resolved color equals scale.lookup_f64(value).

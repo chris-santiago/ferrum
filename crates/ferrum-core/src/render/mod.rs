@@ -558,7 +558,7 @@ pub(crate) fn apply_color_config_to_color_scale(
 ) {
     let Some(ref mut scale) = color_scale else { return };
     match scale {
-        scale_resolve::ColorScale::Continuous { ref mut domain, ref mut scheme } => {
+        scale_resolve::ColorScale::Continuous { ref mut domain, ref mut scheme, .. } => {
             if let Some(ref d) = cfg.domain {
                 let floats: Vec<f64> = d.iter().filter_map(|v| v.as_f64()).collect();
                 if floats.len() == 2 {
@@ -1842,6 +1842,7 @@ mod chart_config_application_tests {
         let mut color_scale: Option<ColorScale> = Some(ColorScale::Continuous {
             domain: (0.0, 1.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
         });
         let cfg = ColorConfigSpec { domain: Some(vec![serde_json::json!(10.0), serde_json::json!(90.0)]), ..Default::default() };
         apply_color_config_to_color_scale(&mut color_scale, &cfg);
@@ -1859,6 +1860,7 @@ mod chart_config_application_tests {
         let mut color_scale: Option<ColorScale> = Some(ColorScale::Continuous {
             domain: (0.0, 1.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
         });
         let cfg = ColorConfigSpec {
             range: Some(vec!["#ffffff".to_string(), "#000000".to_string()]),

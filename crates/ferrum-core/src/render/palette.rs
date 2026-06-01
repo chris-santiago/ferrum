@@ -100,6 +100,7 @@ pub const CATEGORICAL_SCHEMES: &[&str] = &[
 /// sequential single-hue ramp; "rdbu" is a diverging red-blue scheme.
 pub const SEQUENTIAL_SCHEMES: &[&str] = &[
     "viridis", "plasma", "magma", "inferno", "cividis", "blues", "rdbu",
+    "reds", "greens", "oranges", "purples",
     "cool_blue", "warm_ochre", "blue_to_red",
     "night_blue", "electric_lime", "cyan_to_amber",
     "signal_blue", "ember_orange", "blue_to_violet",

@@ -633,7 +633,7 @@ pub fn prepare_render_inputs(
                     .collect();
                 (entries, None)
             }
-            Some(super::scale_resolve::ColorScale::Continuous { domain, scheme }) => {
+            Some(super::scale_resolve::ColorScale::Continuous { domain, scheme, .. }) => {
                 // Sample the scheme at 11 evenly-spaced positions so the
                 // gradient looks smooth without bloating the SVG. The
                 // renderer emits these as `linearGradient` stops.

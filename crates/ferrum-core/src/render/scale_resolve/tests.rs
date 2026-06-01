@@ -2035,3 +2035,69 @@ fn f5_parse_failure_fallback_palette_matches_default_palette() {
         _ => panic!("expected both to be Categorical"),
     }
 }
+
+// ── Gap 2: piecewise diverging midpoint normalization ─────────────────────────
+
+#[test]
+fn normalize_continuous_sequential_is_pure_linear() {
+    // None midpoint → pure-linear (v - lo) / (hi - lo)
+    assert!((super::normalize_continuous((0.0, 1.0), None, 0.0) - 0.0).abs() < 1e-9);
+    assert!((super::normalize_continuous((0.0, 1.0), None, 0.5) - 0.5).abs() < 1e-9);
+    assert!((super::normalize_continuous((0.0, 1.0), None, 1.0) - 1.0).abs() < 1e-9);
+    // Clamping: out-of-range values clamp to [0, 1]
+    assert!((super::normalize_continuous((0.0, 1.0), None, -1.0) - 0.0).abs() < 1e-9);
+    assert!((super::normalize_continuous((0.0, 1.0), None, 2.0) - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn normalize_continuous_diverging_symmetric_midpoint_equals_linear() {
+    // mid = (lo + hi) / 2 → piecewise result must match pure-linear
+    let lo = -1.0_f64;
+    let hi = 1.0_f64;
+    let mid = 0.0_f64; // geometric center
+    for &v in &[-1.0, -0.5, 0.0, 0.5, 1.0_f64] {
+        let piecewise = super::normalize_continuous((lo, hi), Some(mid), v);
+        let linear = super::normalize_continuous((lo, hi), None, v);
+        assert!(
+            (piecewise - linear).abs() < 1e-9,
+            "symmetric mid={mid}: v={v}, piecewise={piecewise}, linear={linear}"
+        );
+    }
+}
+
+#[test]
+fn normalize_continuous_diverging_noncentral_midpoint() {
+    // domain=[-1, 1], mid=0.5 (non-central)
+    // lo → t=0, mid → t=0.5, hi → t=1
+    let domain = (-1.0_f64, 1.0_f64);
+    let mid = 0.5_f64;
+    assert!((super::normalize_continuous(domain, Some(mid), -1.0) - 0.0).abs() < 1e-9,
+        "lo must map to 0");
+    assert!((super::normalize_continuous(domain, Some(mid), 0.5) - 0.5).abs() < 1e-9,
+        "mid must map to 0.5");
+    assert!((super::normalize_continuous(domain, Some(mid), 1.0) - 1.0).abs() < 1e-9,
+        "hi must map to 1.0");
+    // val=0.0 < mid=0.5 → left half: t = 0.5 * (0.0 - (-1.0)) / (0.5 - (-1.0)) = 0.5 * 1/1.5 ≈ 0.333
+    let t_at_geom_center = super::normalize_continuous(domain, Some(mid), 0.0);
+    assert!(t_at_geom_center > 0.0 && t_at_geom_center < 0.5,
+        "val=0.0 < mid=0.5 must map to left half (0, 0.5), got {t_at_geom_center}");
+    // val=0.0 must be less than 0.5 (reddish, left of neutral)
+    assert!(t_at_geom_center < 0.5,
+        "geometric center 0.0 must be left of neutral when mid=0.5, got {t_at_geom_center}");
+}
+
+#[test]
+fn normalize_continuous_diverging_clamping() {
+    let domain = (-1.0_f64, 1.0_f64);
+    let mid = 0.0_f64;
+    // Values outside domain clamp to [0, 1]
+    assert!((super::normalize_continuous(domain, Some(mid), -2.0) - 0.0).abs() < 1e-9);
+    assert!((super::normalize_continuous(domain, Some(mid), 2.0) - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn normalize_continuous_degenerate_domain_returns_half() {
+    // Zero-span domain returns 0.5
+    assert!((super::normalize_continuous((1.0, 1.0), None, 1.0) - 0.5).abs() < 1e-9);
+    assert!((super::normalize_continuous((1.0, 1.0), Some(1.0), 1.0) - 0.5).abs() < 1e-9);
+}

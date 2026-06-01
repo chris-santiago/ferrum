@@ -433,9 +433,18 @@ pub enum ColorScale {
     /// Continuous color scale: maps a numeric value to a color via a
     /// ContinuousScheme. Used by heatmap, raster, and any chart with an
     /// explicit linear color scale spec.
+    ///
+    /// `midpoint` is `Some(mid)` only for diverging scales with a non-geometric
+    /// center.  When present, the normalization is piecewise-linear:
+    ///   t = 0.5 * (v - lo) / (mid - lo)   for v <= mid
+    ///   t = 0.5 + 0.5 * (v - mid) / (hi - mid)  for v > mid
+    /// Sequential scales always have `midpoint = None` and use the existing
+    /// pure-linear `(v - lo) / (hi - lo)` normalization.
     Continuous {
         domain: (f64, f64),
         scheme: crate::render::color::ContinuousScheme,
+        /// Explicit diverging midpoint. `None` → pure-linear (sequential).
+        midpoint: Option<f64>,
     },
 }
 
@@ -446,11 +455,10 @@ impl ColorScale {
                 .iter()
                 .position(|v| v == value)
                 .map(|i| palette[i % palette.len()]),
-            Self::Continuous { domain, scheme } => {
+            Self::Continuous { domain, scheme, midpoint } => {
                 let v: f64 = value.parse().ok()?;
-                let (lo, hi) = *domain;
-                let t = if hi > lo { (v - lo) / (hi - lo) } else { 0.5 };
-                Some(scheme.sample(t.clamp(0.0, 1.0)))
+                let t = normalize_continuous(*domain, *midpoint, v);
+                Some(scheme.sample(t))
             }
         }
     }
@@ -459,12 +467,44 @@ impl ColorScale {
     /// Categorical scales.
     pub fn lookup_f64(&self, value: f64) -> Option<Color> {
         match self {
-            Self::Continuous { domain, scheme } => {
-                let (lo, hi) = *domain;
-                let t = if hi > lo { (value - lo) / (hi - lo) } else { 0.5 };
-                Some(scheme.sample(t.clamp(0.0, 1.0)))
+            Self::Continuous { domain, scheme, midpoint } => {
+                let t = normalize_continuous(*domain, *midpoint, value);
+                Some(scheme.sample(t))
             }
             _ => None,
+        }
+    }
+}
+
+/// Normalize a data value to `t ∈ [0, 1]` for color lookup.
+///
+/// Sequential scales (midpoint = None): pure-linear `(v - lo) / (hi - lo)`.
+/// Diverging scales with an explicit midpoint: piecewise-linear so that
+/// `lo → 0`, `mid → 0.5`, `hi → 1`, placing the scheme's neutral center at
+/// the user-supplied `mid` rather than the geometric center.
+///
+/// The result is clamped to `[0, 1]` in both branches.
+pub(super) fn normalize_continuous(domain: (f64, f64), midpoint: Option<f64>, v: f64) -> f64 {
+    let (lo, hi) = domain;
+    if hi <= lo {
+        return 0.5;
+    }
+    match midpoint {
+        None => {
+            // Sequential: pure-linear normalization.
+            ((v - lo) / (hi - lo)).clamp(0.0, 1.0)
+        }
+        Some(mid) => {
+            // Diverging: piecewise-linear around the midpoint.
+            if v <= mid {
+                let denom = mid - lo;
+                if denom == 0.0 { return 0.5; }
+                (0.5 * (v - lo) / denom).clamp(0.0, 0.5)
+            } else {
+                let denom = hi - mid;
+                if denom == 0.0 { return 0.5; }
+                (0.5 + 0.5 * (v - mid) / denom).clamp(0.5, 1.0)
+            }
         }
     }
 }
