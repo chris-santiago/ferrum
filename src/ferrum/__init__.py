@@ -99,6 +99,7 @@ from ferrum.axis import Axis
 from ferrum.grid import Grid
 from ferrum.legend import Legend
 from ferrum.title import Title
+from ferrum.parameter import Parameter, VariableParameter, param
 from ferrum.selection import (
     Selection,
     SelectionMark,
@@ -108,6 +109,7 @@ from ferrum.selection import (
     selection_single,
     selection_multi,
     value,
+    when,
 )
 
 # Phase 12 — data transforms
@@ -521,6 +523,11 @@ __all__ = [
     "selection_single",
     "selection_multi",
     "value",
+    # D6 — reactive parameters
+    "Parameter",
+    "VariableParameter",
+    "param",
+    "when",
     # Phase 8b
     "ContinuousScheme",
     "continuous_palette",
