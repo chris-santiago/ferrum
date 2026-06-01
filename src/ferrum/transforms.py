@@ -7,7 +7,10 @@ is passed through the ``transforms_json`` path at render time.
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
+
+if TYPE_CHECKING:
+    from ferrum.parameter import Parameter
 
 __all__ = [
     "transform_filter",
@@ -30,14 +33,18 @@ __all__ = [
 ]
 
 
-def transform_filter(predicate: "str | dict") -> dict:
-    """Filter rows by a predicate expression.
+def transform_filter(predicate: "str | dict | Parameter") -> dict:
+    """Filter rows by a predicate expression or a reactive parameter.
 
     Parameters
     ----------
-    predicate : str or dict
-        Vega-style expression string (e.g. ``"datum.x > 5"``) or a dict
-        filter specification.
+    predicate : str, dict, or Parameter
+        Vega-style expression string (e.g. ``"datum.x > 5"``), a dict filter
+        specification, or a :class:`~ferrum.parameter.Parameter` (a selection
+        or variable parameter).  A ``Parameter`` predicate emits a pass-through
+        ``"true"`` predicate plus a ``param`` marker: the static render keeps
+        all rows while the WASM runtime crossfilters live against the linked
+        parameter.
 
     Returns
     -------
@@ -50,7 +57,15 @@ def transform_filter(predicate: "str | dict") -> dict:
     >>> t = fm.transform_filter("datum.age >= 18")
     >>> t["type"]
     'filter'
+
+    >>> brush = fm.selection_interval(name="brush")
+    >>> fm.transform_filter(brush)
+    {'type': 'filter', 'predicate': 'true', 'param': 'brush'}
     """
+    from ferrum.parameter import Parameter
+
+    if isinstance(predicate, Parameter):
+        return {"type": "filter", "predicate": "true", "param": predicate.name}
     if isinstance(predicate, dict):
         # Dict predicates are serialized as the expression string representation.
         # Convert common dict shapes to an expression string.

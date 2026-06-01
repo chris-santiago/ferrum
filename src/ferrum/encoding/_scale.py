@@ -16,10 +16,25 @@ def _scale_to_dict(scale: Any) -> Any:
     If ``scale`` is already a dict, ensure it has a ``type`` key (defaulting to
     ``"linear"`` when absent) so Rust's tagged-enum deserialiser can match the
     correct variant.  ``None`` is returned unchanged.
+
+    When the dict's ``domain`` is a :class:`~ferrum.parameter.Parameter` (a
+    reactive scale domain), the literal ``domain`` is dropped and a sibling
+    ``domainParam`` carrying the parameter's name is emitted instead (D6
+    reactive rescale).  The static renderer falls back to data-inferred domains
+    for empty selections; variable parameters supply their initial value via
+    the params section.  The caller's dict is never mutated.
     """
     if scale is None:
         return scale
     if isinstance(scale, dict):
+        from ferrum.parameter import Parameter
+
+        domain = scale.get("domain")
+        if isinstance(domain, Parameter):
+            out = {k: v for k, v in scale.items() if k != "domain"}
+            out.setdefault("type", "linear")
+            out["domainParam"] = domain.name
+            return out
         if "type" not in scale:
             return {"type": "linear", **scale}
         return scale

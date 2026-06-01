@@ -544,6 +544,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         "_composite_kind",
         "_selections",
         "_conditionals",
+        "_params",  # list[Parameter] — D6 reactive parameters (fm.param / selections)
         "_render_config",
         "_configure",  # list[Configure] — accumulated configure layers
         "_annotations",  # list[Annotate] — accumulated annotation layers
@@ -591,6 +592,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         self._composite_kind: Optional[str] = None
         self._selections: list = []
         self._conditionals: list = []
+        self._params: list = []
         self._render_config = None
         self._configure: list = []
         self._annotations: list = []
@@ -1855,6 +1857,11 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                     new._selections.append(s)
         if rhs._conditionals:
             new._conditionals.extend(rhs._conditionals)
+        if rhs._params:
+            existing_param_names = {p.name for p in new._params}
+            for p in rhs._params:
+                if p.name not in existing_param_names:
+                    new._params.append(p)
         # Merge RHS configure/annotation/structural/override slots.
         if rhs._configure:
             new._configure = new._configure + rhs._configure
@@ -3141,7 +3148,46 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         if resolved._conditionals:
             kw["conditionals"] = json.dumps([c.to_spec_dict() for c in resolved._conditionals])
 
+        # --- Reactive-parameter (D6) params section ---
+        # Unified declaration: registered selections (auto-promoted),
+        # explicit fm.param() variables, and any Parameter referenced as a
+        # scale domain. Deduped by name (first-seen wins); omitted entirely
+        # when empty so param-free specs stay byte-identical to before.
+        params_list = self._collect_params(resolved, enc)
+        if params_list:
+            kw["params"] = json.dumps([p.to_param_spec_dict() for p in params_list])
+
         return ChartSpec(**kw)
+
+    @staticmethod
+    def _collect_params(resolved, enc: dict) -> list:
+        """Collect the unified, de-duplicated reactive-parameter list (D6).
+
+        Order: registered selections, explicit ``add_params`` variables, then
+        any ``Parameter`` referenced as a scale domain.  Deduplicated by
+        ``.name`` preserving first-seen order.
+        """
+        from ferrum.parameter import Parameter
+
+        ordered: list = []
+        seen: set[str] = set()
+
+        def _add(p) -> None:
+            if isinstance(p, Parameter) and p.name not in seen:
+                seen.add(p.name)
+                ordered.append(p)
+
+        for sel in resolved._selections:
+            _add(sel)
+        for p in resolved._params:
+            _add(p)
+        for ch in enc.values():
+            scale = ch.option("scale") if isinstance(ch, ChannelBase) else None
+            if isinstance(scale, dict):
+                domain = scale.get("domain")
+                if isinstance(domain, Parameter):
+                    _add(domain)
+        return ordered
 
     def _inject_auto_tooltips(self, kw: dict) -> dict:
         """Inject auto-generated tooltip fields into a serialised spec dict.
@@ -3293,6 +3339,42 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         """
         new = self._clone()
         new._selections.extend(selections)
+        return new
+
+    def add_params(self, *params) -> "Chart":
+        """Attach reactive variable parameter(s) to this chart.
+
+        Records one or more :class:`~ferrum.parameter.Parameter` objects (built
+        via ``fm.param()``) so they are emitted into the spec's ``params``
+        section.  Parameters drive reactive scale domains (``scale={"domain":
+        param}``) and crossfilters (``transform_filter(param)``) in the WASM
+        runtime; at static render time their initial ``value`` is used.
+
+        Selections referenced as scale domains or registered via
+        ``add_selection`` are auto-promoted into the params section at
+        serialization, so they do not need to be passed here.  Duplicate names
+        are de-duplicated (first-seen wins) when the spec is built.
+
+        Parameters
+        ----------
+        *params : Parameter
+            Any number of parameter objects (typically ``fm.param(...)``).
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` (clone) with the parameters recorded.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> k = fm.param("k", value=3)
+        >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y").add_params(k)
+        """
+        new = self._clone()
+        new._params.extend(params)
         return new
 
     def interactive(self, *, toolbar: bool = True) -> "Chart":
