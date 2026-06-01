@@ -28,6 +28,38 @@ from ferrum.marks.statistical import _build_prior_layer
 
 _PRIMITIVE_MARKS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
 
+# Marks whose Rust renderers consume the ``__stack_y_base__`` column produced
+# by ``apply_stack`` (see ``crates/ferrum-core/src/render/marks/bar.rs`` and
+# ``area.rs``).  Every other mark type silently drops stacked data, so when
+# ``stack=`` is set on a non-stackable mark we warn and strip it before
+# forwarding to the Rust layer.
+_STACKABLE_MARKS = frozenset(["bar", "area"])
+
+
+def _strip_unstackable(d: dict, mark: str | None) -> None:
+    """Strip an unsupported ``stack=`` from a non-stackable mark's encoding dict.
+
+    Only ``bar``/``area`` consume the ``__stack_y_base__`` column emitted by
+    ``apply_stack``; every other mark silently drops its marks when the stacking
+    path runs. When ``stack=`` is requested on such a mark we pop it (so the mark
+    renders unstacked) and emit a one-time ``UserWarning`` naming the dropped
+    field. A falsy ``stack`` (``None``/``False``) means "do not stack" and is a
+    no-op, so it is left untouched. Shared by the single-chart and layered paths.
+    """
+    if d.get("stack") and mark not in _STACKABLE_MARKS:
+        from ferrum._warn import warn_once
+
+        stack_val = d.pop("stack")
+        mark_label = f"mark_{mark}" if mark else "this mark"
+        warn_once(
+            "encoding",
+            f"stack_on_{mark}",
+            message=(
+                f"stack={stack_val!r} is not supported by {mark_label} and was ignored. "
+                "Stacking is only honored by mark_bar and mark_area."
+            ),
+        )
+
 # Channels honored by the renderer at to_spec() time. Other channels in
 # resolved._encoding (Stroke, Fill, Tooltip, etc.) are stored on the spec
 # but ignored at render time; ferrum-spec.md §3.2 promises a one-time
@@ -2280,6 +2312,10 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                     enc_json_dict: dict = {"field": field}
                     if raw_type := d.get("type_"):
                         enc_json_dict["type"] = _TYPE_EXPAND.get(raw_type, raw_type)
+                    # D5b (layered path): strip ``stack=`` on marks that cannot
+                    # honor stacking and warn. Shares ``_strip_unstackable`` with
+                    # the single-chart path in ``_build_encoding_specs``.
+                    _strip_unstackable(d, layer.mark or "point")
                     for opt_key in (
                         "title",
                         "aggregate",
@@ -2665,6 +2701,13 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 scale = d.get("scale") or {}
                 if "domain" not in scale and "zero" not in scale:
                     d["scale"] = {"type": scale.get("type", "linear"), **scale, "zero": True}
+            # D5b: strip ``stack=`` on marks that cannot honor stacking and emit
+            # a one-time UserWarning.  Only ``bar`` and ``area`` consume the
+            # ``__stack_y_base__`` column emitted by ``apply_stack``; every other
+            # mark type silently drops marks when the stacking path executes.
+            # Apply the guard only on the positional value channel (``y`` for
+            # normal orientation, ``x`` when coord-flipped).
+            _strip_unstackable(d, resolved._mark)
             # `field` is positional; rest are keyword-only on EncodingSpec.__new__.
             # The Python-visible param name is `type_` (Rust signature `type_: Option<&str>`).
             field = d.pop("field")

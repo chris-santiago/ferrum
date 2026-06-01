@@ -84,7 +84,11 @@ pub enum LayoutWarning {
     PanelCollapsed { panel_index: usize },
     LabelsElided { axis: usize, count: u32 },
     LegendOverflowed { entries_dropped: u32 },
-    PanelsDropped { count: u32 },
+    /// One or more facet panels were dropped because the explicit grid
+    /// `nrows × ncols` is smaller than the number of facet groups.
+    /// `count` is the number of dropped panels; `keys` identifies them by
+    /// their facet-group key string (e.g. `"col_cat=c2"`).
+    PanelsDropped { count: u32, keys: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -696,7 +700,16 @@ pub fn compute_layout(
             }
         };
         if grid.dropped_count() > 0 {
-            warnings.push(LayoutWarning::PanelsDropped { count: grid.dropped_count() });
+            let dropped = grid.dropped_count();
+            // Collect the key strings for the panels that were cut off.
+            // `panel_positions()` returns only the first `nrows*ncols` panels;
+            // the remaining `facet_groups` entries (beyond that cap) are dropped.
+            let cap = facet_groups.len().saturating_sub(dropped as usize);
+            let dropped_keys: Vec<String> = facet_groups[cap..]
+                .iter()
+                .map(|g| format!("{}={}", g.key.field, g.key.value))
+                .collect();
+            warnings.push(LayoutWarning::PanelsDropped { count: dropped, keys: dropped_keys });
         }
         grid.panel_positions()
             .into_iter()
@@ -890,7 +903,7 @@ mod tests {
             LayoutWarning::PanelCollapsed { panel_index: 2 },
             LayoutWarning::LabelsElided { axis: 0, count: 5 },
             LayoutWarning::LegendOverflowed { entries_dropped: 3 },
-            LayoutWarning::PanelsDropped { count: 1 },
+            LayoutWarning::PanelsDropped { count: 1, keys: vec!["col_cat=c2".into()] },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: LayoutWarning = serde_json::from_str(&json).unwrap();
@@ -1157,7 +1170,7 @@ mod tests {
         assert_eq!(result.panels.len(), 2);
         let dropped = result.warnings.iter().any(|w| matches!(
             w,
-            LayoutWarning::PanelsDropped { count: 1 }
+            LayoutWarning::PanelsDropped { count: 1, .. }
         ));
         assert!(dropped, "expected PanelsDropped(1); got {:?}", result.warnings);
     }
