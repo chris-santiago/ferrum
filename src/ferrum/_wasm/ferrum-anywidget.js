@@ -128,6 +128,62 @@ function _placeTextSvg(svgEl, texts) {
   }
 }
 
+// ── D6 legend toggle (BindingRole::Legend) ────────────────────────────────
+// Collect the category labels from scene.legend Text nodes. The first Text
+// node in a legend block is the legend title (the field name); the remaining
+// Text nodes are the per-category entry labels. We return only the entry
+// labels — those are the clickable categories a bind="legend" point selection
+// toggles. Walks nested Group children so grouped legend layouts are covered.
+function _collectLegendCategories(legendNodes) {
+  if (!Array.isArray(legendNodes)) return [];
+  const texts = [];
+  const walk = (nodes) => {
+    for (const n of nodes) {
+      if (!n || typeof n !== 'object') continue;
+      if (n.type === 'text' && typeof n.content === 'string') {
+        texts.push(n.content);
+      } else if (n.type === 'group' && Array.isArray(n.children)) {
+        walk(n.children);
+      }
+    }
+  };
+  walk(legendNodes);
+  // Drop the first text (legend title); the rest are entry labels. A legend
+  // with only a title (continuous colorbar) yields no clickable categories.
+  return texts.length > 1 ? texts.slice(1) : [];
+}
+
+// Bounding box (in scene pixel space) enclosing all legend nodes, used to
+// scope legend-toggle click wiring to the legend region. Without this, an axis
+// tick or annotation label that happens to share a category string would
+// wrongly become a toggle. Walks Text/Group nodes (the only legend node kinds
+// that carry positions); returns null when the legend is empty.
+function _legendBounds(legendNodes) {
+  if (!Array.isArray(legendNodes)) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let found = false;
+  const walk = (nodes) => {
+    for (const n of nodes) {
+      if (!n || typeof n !== 'object') continue;
+      if (typeof n.x === 'number' && typeof n.y === 'number') {
+        found = true;
+        if (n.x < minX) minX = n.x;
+        if (n.y < minY) minY = n.y;
+        if (n.x > maxX) maxX = n.x;
+        if (n.y > maxY) maxY = n.y;
+      }
+      if (n.type === 'group' && Array.isArray(n.children)) walk(n.children);
+    }
+  };
+  walk(legendNodes);
+  if (!found) return null;
+  // Pad generously: legend entry text is placed to the right of its swatch and
+  // baselines vary, so the placed label position can sit a little outside the
+  // raw node coordinates.
+  const pad = 40;
+  return { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad };
+}
+
 // ── Raw SVG fragment injection ────────────────────────────────────────────
 // Injects verbatim SVG fragments from SceneNode::Raw into the text-overlay
 // <svg>.  Two groups are maintained:
@@ -515,6 +571,8 @@ async function _render(container, sceneJson, adapter) {
         if (_rawOverlay) {
           _rawOverlay.dataG.setAttribute('transform', _zoomMatrix(k, x, y));
         }
+        // Re-wire legend toggles: _placeTextSvg rebuilt the text elements.
+        if (container._ferrumWireLegend) container._ferrumWireLegend();
       } catch (err) { /* GPU not ready */ }
       // Debounced adapter callback for Jupyter zoom rebuild.
       clearTimeout(_zoomDebounceId);
@@ -680,16 +738,35 @@ async function _render(container, sceneJson, adapter) {
         } else if (currentMode === 'select') {
           // Interval selection via WASM.
           try {
-            const resultJson = renderer.handleDrag(panelIdx, x0, y0, x1, y1);
-            adapter.onSelectionChange(JSON.parse(resultJson));
-            // Re-render text with current zoom preserved.
-            const t = zoomTransform(chartWrapper);
-            const textJson = renderer.setTransform(t.k, t.x, t.y);
-            _placeTextSvg(svgEl, JSON.parse(textJson));
-            // Raw overlay already injected; only update data group transform.
-            if (_rawOverlay) {
-              _rawOverlay.dataG.setAttribute('transform', _zoomMatrix(t.k, t.x, t.y));
+            // handleDrag returns an envelope:
+            //   {selection: <state-map>, rescaled: <panel|null>, rescaled_text: <text|null>}
+            // `rescaled` is set when a D6 Domain binding rescaled a target
+            // panel (reactive rescale). In that case we must NOT call
+            // setTransform — that resets panel 0 to identity (no active global
+            // d3-zoom) and re-renders, discarding the rescale the Rust side just
+            // applied. We instead place the rescaled panel's own text JSON.
+            const result = JSON.parse(renderer.handleDrag(panelIdx, x0, y0, x1, y1));
+            adapter.onSelectionChange(result.selection);
+            if (result.rescaled != null) {
+              // Reactive rescale fired: the affine is live on the target panel.
+              // Reposition that panel's labels from the text the rescale path
+              // returned; leave the GPU transform untouched.
+              if (result.rescaled_text) {
+                _placeTextSvg(svgEl, result.rescaled_text);
+              }
+            } else {
+              // Plain crossfilter/selection drag: preserve the current zoom by
+              // re-asserting it (unchanged behavior for non-rescale charts).
+              const t = zoomTransform(chartWrapper);
+              const textJson = renderer.setTransform(t.k, t.x, t.y);
+              _placeTextSvg(svgEl, JSON.parse(textJson));
+              // Raw overlay already injected; only update data group transform.
+              if (_rawOverlay) {
+                _rawOverlay.dataG.setAttribute('transform', _zoomMatrix(t.k, t.x, t.y));
+              }
             }
+            // Re-wire legend toggles after text re-placement.
+            if (container._ferrumWireLegend) container._ferrumWireLegend();
           } catch (err) {
             console.warn('[ferrum] handleDrag error:', err);
           }
@@ -708,6 +785,58 @@ async function _render(container, sceneJson, adapter) {
         .style('fill', brushFill)
         .style('stroke', brushStroke);
     }
+  }
+
+  // ── D6 legend toggle wiring (BindingRole::Legend) ─────────────────
+  // A bind="legend" point selection emits a Legend param binding. When one is
+  // present, legend entry labels become clickable: each click toggles that
+  // category in the bound point selection via renderer.toggleLegend, then the
+  // existing conditional path dims/highlights the matching series.
+  // No bindings → this block is a no-op and legend text stays inert (unchanged
+  // behavior for non-param interactive charts).
+  const _paramBindings = cfg.param_bindings || [];
+  const _legendBinding = _paramBindings.find(b => b.role === 'legend');
+  if (_legendBinding && renderer) {
+    const _legendCategories = new Set(_collectLegendCategories(scene.legend));
+    const _legendSelName = _legendBinding.param;
+    // Scope wiring to the legend region so a same-named axis tick or annotation
+    // label outside the legend does not become a toggle (Fix 4).
+    const _legendBox = _legendBounds(scene.legend);
+    const _inLegendRegion = (el) => {
+      if (!_legendBox) return true; // no bounds → fall back to text-only match
+      const x = parseFloat(el.getAttribute('x'));
+      const y = parseFloat(el.getAttribute('y'));
+      if (Number.isNaN(x) || Number.isNaN(y)) return false;
+      return x >= _legendBox.minX && x <= _legendBox.maxX
+        && y >= _legendBox.minY && y <= _legendBox.maxY;
+    };
+    // (Re)attach click handlers to legend entry labels. Called after every
+    // _placeTextSvg pass because that helper rebuilds the text elements.
+    const _wireLegendToggles = () => {
+      if (_legendCategories.size === 0) return;
+      svgEl.querySelectorAll('text.ferrum-label').forEach(el => {
+        const content = el.textContent;
+        if (!_legendCategories.has(content)) return;
+        if (!_inLegendRegion(el)) return;
+        el.style.cursor = 'pointer';
+        el.style.pointerEvents = 'all';
+        el.setAttribute('data-legend-category', content);
+        if (el._ferrumLegendWired) return;
+        el._ferrumLegendWired = true;
+        el.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          try {
+            const stateJson = renderer.toggleLegend(_legendSelName, content);
+            adapter.onSelectionChange(JSON.parse(stateJson));
+          } catch (err) {
+            console.warn('[ferrum] toggleLegend error:', err);
+          }
+        });
+      });
+    };
+    _wireLegendToggles();
+    // Expose for re-wiring after zoom/pan text re-placement.
+    container._ferrumWireLegend = _wireLegendToggles;
   }
 
   // Apply initial mode — sets container.dataset.mode and SVG pointer-events.

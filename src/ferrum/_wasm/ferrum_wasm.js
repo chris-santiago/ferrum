@@ -407,6 +407,44 @@ export class WasmRenderer {
             throw takeFromExternrefTable0(ret[0]);
         }
     }
+    /**
+     * Toggle a legend-bound point selection's membership for one category
+     * (D6 `BindingRole::Legend`).
+     *
+     * `selection_name` is the legend-bound point selection (from the `Legend`
+     * param binding); `category` is the legend entry's label. Toggling mirrors
+     * `handle_click`'s field-value point-selection update: the category is
+     * stored as a `FieldValue::String` so the existing conditional path dims
+     * or highlights every mark whose tooltip carries that value. Calling again
+     * with the same category removes it. After updating selection state this
+     * re-runs `apply_conditionals_and_render` (the same machinery legend-less
+     * point selections use).
+     * @param {string} selection_name
+     * @param {string} category
+     * @returns {string}
+     */
+    toggleLegend(selection_name, category) {
+        let deferred4_0;
+        let deferred4_1;
+        try {
+            const ptr0 = passStringToWasm0(selection_name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(category, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len1 = WASM_VECTOR_LEN;
+            const ret = wasm.wasmrenderer_toggleLegend(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var ptr3 = ret[0];
+            var len3 = ret[1];
+            if (ret[3]) {
+                ptr3 = 0; len3 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred4_0 = ptr3;
+            deferred4_1 = len3;
+            return getStringFromWasm0(ptr3, len3);
+        } finally {
+            wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+        }
+    }
 }
 if (Symbol.dispose) WasmRenderer.prototype[Symbol.dispose] = WasmRenderer.prototype.free;
 function __wbg_get_imports() {
@@ -1421,7 +1459,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 184, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 186, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h4eb714a55877aa02);
             return ret;
         },

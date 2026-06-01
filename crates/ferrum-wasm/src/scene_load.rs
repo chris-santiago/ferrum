@@ -867,6 +867,80 @@ pub fn parse_tooltip_json(tooltip_bytes: &[u8], row_idx: usize) -> String {
     format!(r#"{{"fields":[{}]}}"#, fields_json.join(","))
 }
 
+/// Read a single tooltip field value (as a string) for one row of a packed
+/// batch's tooltip string table.
+///
+/// The layout matches [`parse_tooltip_json`]: `[num_fields: u32]`, then
+/// `num_fields` length-prefixed field-name strings, then `total_rows ×
+/// num_fields` length-prefixed value strings (row-major). This walks the table
+/// for `row_idx` and returns the value owned by the named field.
+///
+/// Returns `None` when the field is absent, the row is out of range, or the
+/// data is malformed — packed legend/field-value matching uses this to mirror
+/// the unpacked tooltip-field path on `< 1000`-mark batches.
+pub fn tooltip_field_value(tooltip_bytes: &[u8], row_idx: usize, field: &str) -> Option<String> {
+    let mut offset = 0usize;
+
+    if offset + 4 > tooltip_bytes.len() {
+        return None;
+    }
+    let num_fields = read_u32_le(tooltip_bytes, offset) as usize;
+    offset += 4;
+    if num_fields == 0 {
+        return None;
+    }
+
+    // Read field names, tracking which column holds the requested field.
+    let mut field_col = None;
+    for col in 0..num_fields {
+        if offset + 4 > tooltip_bytes.len() {
+            return None;
+        }
+        let slen = read_u32_le(tooltip_bytes, offset) as usize;
+        offset += 4;
+        if offset + slen > tooltip_bytes.len() {
+            return None;
+        }
+        let name = std::str::from_utf8(&tooltip_bytes[offset..offset + slen]).unwrap_or("");
+        if name == field {
+            field_col = Some(col);
+        }
+        offset += slen;
+    }
+    let field_col = field_col?;
+
+    // Skip whole rows before `row_idx`.
+    for _ in 0..row_idx * num_fields {
+        if offset + 4 > tooltip_bytes.len() {
+            return None;
+        }
+        let slen = read_u32_le(tooltip_bytes, offset) as usize;
+        offset += 4 + slen;
+        if offset > tooltip_bytes.len() {
+            return None;
+        }
+    }
+
+    // Walk this row's columns up to and including the target column.
+    for col in 0..num_fields {
+        if offset + 4 > tooltip_bytes.len() {
+            return None;
+        }
+        let slen = read_u32_le(tooltip_bytes, offset) as usize;
+        offset += 4;
+        if offset + slen > tooltip_bytes.len() {
+            return None;
+        }
+        if col == field_col {
+            let value = std::str::from_utf8(&tooltip_bytes[offset..offset + slen]).ok()?;
+            return Some(value.to_string());
+        }
+        offset += slen;
+    }
+
+    None
+}
+
 /// Returns `true` when a mark batch should use the additive blend pipeline.
 ///
 /// Only `BlendMode::Additive` raster batches use additive compositing; all
@@ -2600,6 +2674,43 @@ mod tests {
         );
         let result = parse_tooltip_json(&bytes, 0);
         assert!(result.contains("hello world"), "ASCII content must appear in JSON");
+    }
+
+    // ── tooltip_field_value: single-field lookup for packed legend matching ──
+
+    #[test]
+    fn tooltip_field_value_reads_named_column() {
+        // Two fields, three rows; pick the second column on each row.
+        let bytes = build_tooltip_bytes(
+            &["x", "cat"],
+            &[
+                vec!["1", "a"],
+                vec!["2", "b"],
+                vec!["3", "a"],
+            ],
+        );
+        assert_eq!(tooltip_field_value(&bytes, 0, "cat").as_deref(), Some("a"));
+        assert_eq!(tooltip_field_value(&bytes, 1, "cat").as_deref(), Some("b"));
+        assert_eq!(tooltip_field_value(&bytes, 2, "cat").as_deref(), Some("a"));
+        // First column still reachable.
+        assert_eq!(tooltip_field_value(&bytes, 1, "x").as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn tooltip_field_value_missing_field_is_none() {
+        let bytes = build_tooltip_bytes(&["x"], &[vec!["1"]]);
+        assert_eq!(tooltip_field_value(&bytes, 0, "cat"), None);
+    }
+
+    #[test]
+    fn tooltip_field_value_out_of_range_row_is_none() {
+        let bytes = build_tooltip_bytes(&["cat"], &[vec!["a"]]);
+        assert_eq!(tooltip_field_value(&bytes, 5, "cat"), None);
+    }
+
+    #[test]
+    fn tooltip_field_value_empty_bytes_is_none() {
+        assert_eq!(tooltip_field_value(&[], 0, "cat"), None);
     }
 
     // ── bug_hunt: unpack_binary_instances edge cases ─────────────────────────
