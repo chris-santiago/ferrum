@@ -9,7 +9,7 @@
 
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::{ColorScale, ScaleKind};
 
 fn count_distinct(values: &[Option<String>]) -> usize {
@@ -195,10 +195,10 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             Some(f) => f, None => return empty_result(),
         };
         let n_categories = {
-            let xs_probe = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+            let xs_probe = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
             count_distinct(&xs_probe).max(1)
         };
-        let xs = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+        let xs = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
         let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
         let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty_result() };
         if xs.len() != ys.len() || y2s.len() != ys.len() { return empty_result(); }
@@ -256,10 +256,10 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             Some(f) => f, None => return empty_result(),
         };
         let n_categories = {
-            let ys_probe = match col_as_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+            let ys_probe = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
             count_distinct(&ys_probe).max(1)
         };
-        let ys = match col_as_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+        let ys = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
         let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
         let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty_result() };
         if ys.len() != xs.len() || x2s.len() != xs.len() { return empty_result(); }
@@ -333,8 +333,8 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
         (Some(a), Some(b)) => (a, b), _ => return empty_result(),
     };
-    let xs = match col_as_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
-    let ys = match col_as_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+    let xs = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+    let ys = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
     if xs.len() != ys.len() { return empty_result(); }
 
     let panel = ctx.panel.plot_area;
@@ -836,6 +836,53 @@ mod tests {
         assert_ne!(
             alpha0, alpha1,
             "ordinal-range opacity encoding must produce different alphas; both were {alpha0}"
+        );
+    }
+
+    /// D4 regression: Int64-keyed heatmap must render the same number of cells
+    /// as a string-keyed heatmap with identical structure. Previously `col_as_str`
+    /// rejected Int64 columns and returned an empty result.
+    #[test]
+    fn rect_int64_keyed_heatmap_renders_cells() {
+        use arrow::array::Int64Array;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "row".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "col".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                color: None,
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("row", DataType::Int64, false),
+            Field::new("col", DataType::Int64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Int64Array::from(vec![2000i64, 2000i64, 2001i64, 2001i64])),
+            Arc::new(Int64Array::from(vec![1i64, 2i64, 1i64, 2i64])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None,
+        };
+        let (scales, _) = resolve_scales(
+            &spec, &batch, (0.0, 100.0), (0.0, 100.0),
+            &crate::layout::ThemeInputs::default(),
+        ).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        assert_eq!(
+            result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(),
+            4,
+            "Int64-keyed heatmap must render 4 cells (was returning 0 before D4 fix)",
         );
     }
 

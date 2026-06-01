@@ -2648,7 +2648,20 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             # NOT suppress the y zero-anchor.
             _y2_bound = "y2" in enc
             _zero_anchor_wanted = getattr(resolved, "_mark_zero", True) and not _y2_bound
-            if axis == "y" and resolved._mark == "bar" and _zero_anchor_wanted:
+            # D4-C: only inject the linear+zero scale when the y encoding is
+            # quantitative.  Ordinal/nominal y (e.g. string category on a
+            # horizontal bar) requires a band scale — forcing linear here raises
+            # "unsupported dtype: Utf8" in the Rust scale resolver.  When type_
+            # is absent the encoding defaults to quantitative (Altair convention),
+            # so we only suppress when an explicit categorical type is set.
+            _y_enc_type = d.get("type_")
+            _y_is_categorical = _y_enc_type in ("O", "N", "ordinal", "nominal")
+            if (
+                axis == "y"
+                and resolved._mark == "bar"
+                and _zero_anchor_wanted
+                and not _y_is_categorical
+            ):
                 scale = d.get("scale") or {}
                 if "domain" not in scale and "zero" not in scale:
                     d["scale"] = {"type": scale.get("type", "linear"), **scale, "zero": True}
