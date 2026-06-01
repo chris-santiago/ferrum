@@ -1,6 +1,6 @@
 # Showcase: What You Can Build
 
-Well-known chart designs from the matplotlib, seaborn, Altair, and D3 traditions — built in Ferrum's Rust engine. Every image below was produced entirely in Python using Ferrum's grammar-of-graphics API; no matplotlib, no browser, no external renderer. These designs were unlocked by the flexibility campaign: categorical color ranges, temporal axis auto-inference, size and shape legends, stroke routing on line marks, sort specs, and annotation date coordinates.
+Well-known chart designs from the matplotlib, seaborn, Altair, and D3 traditions — built in Ferrum's Rust engine. Every image below was produced entirely in Python using Ferrum's grammar-of-graphics API; no matplotlib, no browser, no external renderer. These designs lean on Ferrum features like categorical color ranges, temporal axis auto-inference, size and shape legends, stroke routing on line marks, sort specs, and annotation date coordinates.
 
 Each card shows the concise API call alongside the rendered output.
 
@@ -50,7 +50,7 @@ Charts built for the "story in the data" — where one series, one event, or one
 
     `rule = fm.Chart(df).mark_rule(stroke="#cccccc").encode(x="score_before", x2=fm.X2("score_after"), y="category")` + `fm.Chart(df_pts).mark_point().encode(x="score", color="period")`
 
-    Before-and-after per category. Connecting rules use `x` + `x2` encoding; a categorical color range (`D1`) pins "Before" and "After" to consistent hues.
+    Before-and-after per category. Connecting rules use `x` + `x2` encoding; a categorical color range pins "Before" and "After" to consistent hues.
 
 -   **Time Series with Events**
 
@@ -60,7 +60,7 @@ Charts built for the "story in the data" — where one series, one event, or one
 
     `fm.annotate_rect(x1="2023-06-01", x2="2023-09-01", y1=70, y2=125, fill="#fbbf24")` + `fm.Chart(df).mark_line().encode(x=fm.X("date", axis=fm.Axis(label_format="%b")))` + `fm.annotate_vline(x="2023-09-01")`
 
-    Temporal columns auto-infer their scale (`D3b`). Annotation coordinates accept ISO date strings (`D7`). The yellow band is `annotate_rect`; the rule is `annotate_vline`.
+    Temporal columns auto-infer their scale. Annotation coordinates accept ISO date strings. The yellow band is `annotate_rect`; the rule is `annotate_vline`.
 
 </div>
 
@@ -90,7 +90,7 @@ Sorted layouts for ranked comparisons — sorted along the axis, not alphabetica
 
     `fm.Chart(df).mark_bar(position=fm.Stack()).encode(x="quarter", y="share", color=fm.Color("segment", scale=fm.OrdinalScale(domain=segments, range=colors)))`
 
-    A four-color categorical range (`D1`) maps segment names to a monochromatic blue progression. `position=fm.Stack()` handles the cumulative offset.
+    A four-color categorical range maps segment names to a monochromatic blue progression. `position=fm.Stack()` handles the cumulative offset.
 
 </div>
 
