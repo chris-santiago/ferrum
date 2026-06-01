@@ -24,6 +24,10 @@ use crate::transform::core::{apply_transforms_named, FINAL_OUTPUT_KEY};
 use super::scale_resolve::ResolvedScales;
 use super::{RenderError, RenderWarning};
 
+/// Key used when unifying wrap-mode and grid-mode partitions: (col_val, Option<row_val>).
+/// `None` row value = wrap mode (single-field facet).
+type FacetPartitionKey = (String, Option<String>);
+
 /// Per-layer prepared rendering data. When ChartSpec.layers.is_none(), exactly one
 /// LayerPrepared is constructed from the chart-level mark + encoding.
 #[derive(Debug, Clone)]
@@ -252,11 +256,40 @@ pub fn prepare_render_inputs(
     // When there is no facet, the pipeline is unchanged (single partition = full batch).
     let ctx = TransformContext::default();
     let transform_outputs = if let Some(fspec) = &spec.facet {
-        // Facet-before-transform: partition → per-panel transforms → inject facet column → concat
-        let partitions = partition_batch_by_field(&normalized, &fspec.field)?;
+        // Facet-before-transform: partition → per-panel transforms → inject facet column(s) → concat.
+        //
+        // Grid mode (fspec.row is set): partition on the composite (col_val, row_val) key so each
+        // (row, col) cell is a distinct partition. Both the col field and the row field are injected
+        // back into every transform output so per-panel filtering can use either.
+        //
+        // Wrap mode (fspec.row is None): partition on fspec.field only — behavior unchanged.
+        // Each partition carries (col_val, optional_row_val) → RecordBatch.
+        // Grid mode populates the row value; wrap mode leaves it None.
+        let partitions: Vec<(FacetPartitionKey, RecordBatch)> =
+            if let Some(row_field) = &fspec.row {
+                partition_batch_by_two_fields(&normalized, &fspec.field, row_field)?
+                    .into_iter()
+                    .map(|((col_val, row_val), batch)| ((col_val, Some(row_val)), batch))
+                    .collect()
+            } else {
+                partition_batch_by_field(&normalized, &fspec.field)?
+                    .into_iter()
+                    .map(|(col_val, batch)| ((col_val, None), batch))
+                    .collect()
+            };
+
+        // Pre-compute the global KDE extent from the full (pre-partition) batch.
+        // When a KDE transform has `shared_extent=false` and `extent=None`, each
+        // partition would use its own range, causing panels to render on different
+        // x-scales and making peak positions non-comparable. By fixing the extent
+        // to the global range before partitioning, all panels evaluate the KDE on
+        // the same x-range, so marks land at comparable pixel positions on the
+        // shared axis. This is the correct default for faceted density charts.
+        let effective_transforms = fix_kde_extents_for_facet(&spec.transforms, &normalized);
+
         let mut merged: HashMap<String, Vec<RecordBatch>> = HashMap::new();
-        for (facet_value, partition_batch) in &partitions {
-            let mut panel_outputs = apply_transforms_named(&spec.transforms, partition_batch, &ctx)
+        for ((col_value, row_value), partition_batch) in &partitions {
+            let mut panel_outputs = apply_transforms_named(&effective_transforms, partition_batch, &ctx)
                 .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
             // D10: per-panel imputation
             {
@@ -268,10 +301,14 @@ pub fn prepare_render_inputs(
                     panel_outputs.insert(FINAL_OUTPUT_KEY.to_string(), imputed);
                 }
             }
-            // Ensure every output batch has the facet column (transforms like
-            // Smooth replace the batch entirely, losing the facet column).
+            // Re-inject the col field (and row field when in grid mode) into every
+            // output batch. Transforms like Smooth replace the batch entirely, losing
+            // any facet columns that were present on the input partition.
             for batch in panel_outputs.values_mut() {
-                *batch = inject_facet_column(batch, &fspec.field, facet_value);
+                *batch = inject_facet_column(batch, &fspec.field, col_value);
+                if let (Some(row_field), Some(row_val)) = (&fspec.row, row_value) {
+                    *batch = inject_facet_column(batch, row_field, row_val);
+                }
             }
             for (key, batch) in panel_outputs {
                 merged.entry(key).or_default().push(batch);
@@ -604,7 +641,16 @@ pub fn prepare_render_inputs(
     };
 
     let facet_groups = if let Some(fspec) = &spec.facet {
-        group_rows_by_field(&transformed, &fspec.field)?
+        if let Some(row_field) = &fspec.row {
+            // Grid mode: produce one FacetGroup per (row_val, col_val) pair in
+            // row-major order. Each group's `key` is the col dimension (drives the
+            // column-header strip title); `row_key` is the row dimension (drives the
+            // row-header strip title and secondary batch filter).
+            group_rows_by_two_fields(&transformed, &fspec.field, row_field)?
+        } else {
+            // Wrap mode: single-field grouping — behavior unchanged.
+            group_rows_by_field(&transformed, &fspec.field)?
+        }
     } else {
         Vec::new()
     };
@@ -1124,7 +1170,11 @@ fn encoding_axis_tick_count(enc: Option<&crate::spec::encoding::EncodingSpec>) -
 /// Precedence: a per-channel `Axis(label_format=, label_format_type=)` (in the
 /// `encoding.axis` map) wins over the shorthand `encoding.format`/`format_type`.
 /// Returns `(None, None)` when neither is set so default formatting is preserved.
-fn resolve_axis_label_format(
+///
+/// `pub(crate)` so `scene_build.rs` can re-derive the format spec for
+/// independent-axis per-panel label formatting without duplicating the
+/// precedence logic.
+pub(crate) fn resolve_axis_label_format(
     enc: Option<&crate::spec::encoding::EncodingSpec>,
 ) -> (Option<String>, Option<String>) {
     let Some(e) = enc else { return (None, None) };
@@ -1250,6 +1300,18 @@ pub(crate) fn apply_tick_format(
 mod tick_format_tests {
     use super::*;
 
+    /// Regression: apply_tick_format with a d3 percent spec must format numerics.
+    /// This exercises the code path used by scene_build.rs independent-axis label
+    /// formatting — where apply_tick_format is called directly with the raw format
+    /// spec from resolve_axis_label_format.
+    #[test]
+    fn tick_format_percent_spec_applied_to_numerics() {
+        let labels = vec!["0".to_string(), "0.5".to_string(), "1".to_string()];
+        let out = apply_tick_format(labels, Some(".0%"), None);
+        // ".0%" of 0.5 = "50%"
+        assert_eq!(out, vec!["0%", "50%", "100%"]);
+    }
+
     fn fmt_labels(labels: &[&str], format: &str) -> Vec<String> {
         apply_tick_format(
             labels.iter().map(|s| s.to_string()).collect(),
@@ -1335,6 +1397,57 @@ mod tick_format_tests {
 }
 
 /// Partition a RecordBatch by a Utf8 field, returning `(value, filtered_batch)`
+/// For each KDE transform in `transforms` that has `extent=None` and
+/// `groupby=None` (single-group path), pre-compute the global extent from
+/// the full `batch` and return a new transform list where those KDE specs
+/// carry an explicit `extent`. This ensures that all facet partitions evaluate
+/// the KDE on the same x-range so mark positions are comparable across panels.
+///
+/// KDE transforms that already have an explicit `extent`, or that use a
+/// `groupby` (multi-group path), or that have `shared_extent=true`, are left
+/// unchanged.
+///
+/// All non-KDE transforms are passed through unchanged.
+fn fix_kde_extents_for_facet(
+    transforms: &[crate::transform::core::TransformSpec],
+    batch: &RecordBatch,
+) -> Vec<crate::transform::core::TransformSpec> {
+    use arrow::array::Float64Array;
+    use crate::transform::core::TransformSpec;
+
+    transforms.iter().map(|t| {
+        let TransformSpec::Kde(kde_spec) = t else { return t.clone(); };
+        // Only fill-in extent when the spec doesn't already have one, has no
+        // groupby (the grouped path manages its own shared_extent logic), and
+        // shared_extent is false (shared_extent=true already handles this).
+        if kde_spec.extent.is_some() || kde_spec.groupby.is_some() {
+            return t.clone();
+        }
+        // Compute global [lo, hi] from the full batch's KDE field.
+        let extent = batch.column_by_name(&kde_spec.field)
+            .and_then(|col| col.as_any().downcast_ref::<Float64Array>())
+            .and_then(|arr| {
+                let (lo, hi) = (0..arr.len()).fold(
+                    (f64::INFINITY, f64::NEG_INFINITY),
+                    |(lo, hi), i| {
+                        if arr.is_null(i) { return (lo, hi); }
+                        let v = arr.value(i);
+                        if v.is_nan() { return (lo, hi); }
+                        (lo.min(v), hi.max(v))
+                    },
+                );
+                if lo.is_finite() && hi.is_finite() && lo < hi { Some((lo, hi)) } else { None }
+            });
+        match extent {
+            Some((lo, hi)) => TransformSpec::Kde(crate::transform::kde::KdeSpec {
+                extent: Some((lo, hi)),
+                ..kde_spec.clone()
+            }),
+            None => t.clone(),
+        }
+    }).collect()
+}
+
 /// pairs in first-appearance order. Used by facet-before-transform to split the
 /// input into per-panel subsets before running transforms.
 fn partition_batch_by_field(
@@ -1425,8 +1538,133 @@ fn group_rows_by_field(batch: &RecordBatch, field: &str) -> Result<Vec<FacetGrou
         .map(|v| FacetGroup {
             key: FacetKey { field: field.to_string(), value: v.clone() },
             n_rows: counts[&v],
+            row_key: None,
         })
         .collect())
+}
+
+/// Grid-mode two-field grouping: one `FacetGroup` per `(row_val, col_val)` pair
+/// in row-major order.
+///
+/// Distinct row values appear in first-appearance order from the data; within
+/// each row the col values appear in first-appearance order. `key` carries the
+/// col dimension (drives the column-header strip); `row_key` carries the row
+/// dimension (drives the row-header strip and secondary batch filter).
+fn group_rows_by_two_fields(
+    batch: &RecordBatch,
+    col_field: &str,
+    row_field: &str,
+) -> Result<Vec<FacetGroup>, RenderError> {
+    use arrow::array::StringArray;
+
+    let get_str_arr = |field: &str| -> Result<&StringArray, RenderError> {
+        let col = batch.column_by_name(field)
+            .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+        col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+            RenderError::ScaleResolutionFailed(format!(
+                "facet field '{field}' must be Utf8 (Phase 7 limitation)"
+            ))
+        })
+    };
+
+    let col_arr = get_str_arr(col_field)?;
+    let row_arr = get_str_arr(row_field)?;
+
+    // Collect distinct row values and col values (first-appearance order).
+    let mut row_order: Vec<String> = Vec::new();
+    let mut row_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut col_order: Vec<String> = Vec::new();
+    let mut col_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Count rows per (row_val, col_val) pair.
+    let mut counts: std::collections::HashMap<(String, String), u64> = std::collections::HashMap::new();
+
+    for i in 0..batch.num_rows() {
+        let row_v = match row_arr.is_null(i) { true => continue, false => row_arr.value(i).to_string() };
+        let col_v = match col_arr.is_null(i) { true => continue, false => col_arr.value(i).to_string() };
+        if row_seen.insert(row_v.clone()) {
+            row_order.push(row_v.clone());
+        }
+        if col_seen.insert(col_v.clone()) {
+            col_order.push(col_v.clone());
+        }
+        *counts.entry((row_v, col_v)).or_insert(0) += 1;
+    }
+
+    // Emit groups in row-major order: (r0,c0), (r0,c1), ..., (r1,c0), ...
+    let mut groups = Vec::with_capacity(row_order.len() * col_order.len());
+    for row_v in &row_order {
+        for col_v in &col_order {
+            let n_rows = counts.get(&(row_v.clone(), col_v.clone())).copied().unwrap_or(0);
+            groups.push(FacetGroup {
+                key: FacetKey { field: col_field.to_string(), value: col_v.clone() },
+                n_rows,
+                row_key: Some(FacetKey { field: row_field.to_string(), value: row_v.clone() }),
+            });
+        }
+    }
+    Ok(groups)
+}
+
+/// `(col_val, row_val)` composite key for a single grid-mode partition.
+type GridPartitionKey = (String, String);
+
+/// Partition a RecordBatch by two Utf8 fields (col_field, row_field), returning
+/// `((col_val, row_val), filtered_batch)` pairs in row-major first-appearance
+/// order. Used by facet-before-transform in grid mode.
+fn partition_batch_by_two_fields(
+    batch: &RecordBatch,
+    col_field: &str,
+    row_field: &str,
+) -> Result<Vec<(GridPartitionKey, RecordBatch)>, RenderError> {
+    use arrow::array::{Array, BooleanArray, StringArray};
+    use arrow::compute::filter_record_batch;
+
+    let get_str_arr = |field: &str| -> Result<&StringArray, RenderError> {
+        let col = batch.column_by_name(field)
+            .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+        col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+            RenderError::ScaleResolutionFailed(format!(
+                "facet field '{field}' must be Utf8 (Phase 7 limitation)"
+            ))
+        })
+    };
+
+    let col_arr = get_str_arr(col_field)?;
+    let row_arr = get_str_arr(row_field)?;
+
+    // Collect distinct (row_val, col_val) pairs in row-major first-appearance order.
+    let mut row_order: Vec<String> = Vec::new();
+    let mut row_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut col_order: Vec<String> = Vec::new();
+    let mut col_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for i in 0..batch.num_rows() {
+        if row_arr.is_null(i) || col_arr.is_null(i) { continue; }
+        let rv = row_arr.value(i).to_string();
+        let cv = col_arr.value(i).to_string();
+        if row_seen.insert(rv.clone()) { row_order.push(rv); }
+        if col_seen.insert(cv.clone()) { col_order.push(cv); }
+    }
+
+    let mut result = Vec::with_capacity(row_order.len() * col_order.len());
+    for row_v in &row_order {
+        for col_v in &col_order {
+            let mask: BooleanArray = (0..batch.num_rows())
+                .map(|i| {
+                    if col_arr.is_null(i) || row_arr.is_null(i) { return Some(false); }
+                    Some(col_arr.value(i) == col_v.as_str() && row_arr.value(i) == row_v.as_str())
+                })
+                .collect();
+            // Skip (row_v, col_v) pairs that have no rows in this batch (sparse cross-products).
+            if !mask.iter().any(|v| v == Some(true)) {
+                continue;
+            }
+            let filtered = filter_record_batch(batch, &mask)
+                .map_err(|e| RenderError::ScaleResolutionFailed(format!("partition filter: {e}")))?;
+            result.push(((col_v.clone(), row_v.clone()), filtered));
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1472,6 +1710,7 @@ mod tests {
                 row: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 2 },
                 spacing: None,
+                resolve: crate::layout::facet::FacetResolve::default(),
             }),
             layers: None,
             coord: None,
@@ -2234,5 +2473,118 @@ mod tests {
             "`~s` must format 1_000_000 as '1M'; got {:?}",
             colorbar.tick_labels
         );
+    }
+}
+
+// ── Grid-mode composite-key partitioning unit tests ──────────────────────────
+
+#[cfg(test)]
+mod grid_partition_tests {
+    use super::*;
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    /// Build a 3×3 grid batch: 3 row categories × 3 col categories, 2 data rows each.
+    fn grid_3x3_batch() -> RecordBatch {
+        let mut col_vals: Vec<&str> = Vec::new();
+        let mut row_vals: Vec<&str> = Vec::new();
+        let cols = ["c1", "c2", "c3"];
+        let rows = ["r1", "r2", "r3"];
+        for &r in &rows {
+            for &c in &cols {
+                // 2 data rows per (row, col) cell.
+                col_vals.push(c); row_vals.push(r);
+                col_vals.push(c); row_vals.push(r);
+            }
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("col_cat", DataType::Utf8, false),
+            Field::new("row_cat", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(col_vals)),
+            Arc::new(StringArray::from(row_vals)),
+        ]).unwrap()
+    }
+
+    #[test]
+    fn partition_by_two_fields_produces_correct_count() {
+        let batch = grid_3x3_batch();
+        let partitions = partition_batch_by_two_fields(&batch, "col_cat", "row_cat").unwrap();
+        // 3 row values × 3 col values = 9 partitions.
+        assert_eq!(
+            partitions.len(), 9,
+            "Expected 9 composite partitions for a 3×3 grid; got {}",
+            partitions.len()
+        );
+    }
+
+    #[test]
+    fn partition_by_two_fields_each_partition_has_correct_row_count() {
+        let batch = grid_3x3_batch();
+        let partitions = partition_batch_by_two_fields(&batch, "col_cat", "row_cat").unwrap();
+        for ((col_v, row_v), part_batch) in &partitions {
+            assert_eq!(
+                part_batch.num_rows(), 2,
+                "Partition ({col_v}, {row_v}) must have 2 rows; got {}",
+                part_batch.num_rows()
+            );
+        }
+    }
+
+    #[test]
+    fn partition_by_two_fields_row_major_order() {
+        let batch = grid_3x3_batch();
+        let partitions = partition_batch_by_two_fields(&batch, "col_cat", "row_cat").unwrap();
+        // Row-major: (r1,c1), (r1,c2), (r1,c3), (r2,c1), ...
+        let keys: Vec<(&str, &str)> = partitions.iter()
+            .map(|((cv, rv), _)| (cv.as_str(), rv.as_str()))
+            .collect();
+        assert_eq!(keys[0], ("c1", "r1"), "First partition should be (c1, r1)");
+        assert_eq!(keys[1], ("c2", "r1"), "Second partition should be (c2, r1)");
+        assert_eq!(keys[2], ("c3", "r1"), "Third partition should be (c3, r1)");
+        assert_eq!(keys[3], ("c1", "r2"), "Fourth partition should be (c1, r2)");
+        assert_eq!(keys[8], ("c3", "r3"), "Last partition should be (c3, r3)");
+    }
+
+    #[test]
+    fn group_rows_by_two_fields_produces_correct_count_and_row_keys() {
+        let batch = grid_3x3_batch();
+        let groups = group_rows_by_two_fields(&batch, "col_cat", "row_cat").unwrap();
+        assert_eq!(groups.len(), 9, "Expected 9 groups for a 3×3 grid; got {}", groups.len());
+
+        for group in &groups {
+            assert!(
+                group.row_key.is_some(),
+                "Every grid-mode group must have a row_key; got None for col={}",
+                group.key.value
+            );
+        }
+
+        // First group: col="c1", row="r1".
+        assert_eq!(groups[0].key.value, "c1");
+        assert_eq!(groups[0].row_key.as_ref().unwrap().value, "r1");
+        // Last group: col="c3", row="r3".
+        assert_eq!(groups[8].key.value, "c3");
+        assert_eq!(groups[8].row_key.as_ref().unwrap().value, "r3");
+        // All groups have 2 rows each (from the fixture).
+        for g in &groups {
+            assert_eq!(g.n_rows, 2, "Expected 2 rows per group; got {}", g.n_rows);
+        }
+    }
+
+    #[test]
+    fn wrap_mode_groups_have_no_row_key() {
+        // Single-field (wrap mode) grouping must leave row_key = None.
+        let batch = grid_3x3_batch();
+        let groups = group_rows_by_field(&batch, "col_cat").unwrap();
+        for g in &groups {
+            assert!(
+                g.row_key.is_none(),
+                "Wrap-mode groups must have row_key = None; got {:?}",
+                g.row_key
+            );
+        }
     }
 }

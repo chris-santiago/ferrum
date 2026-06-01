@@ -60,6 +60,7 @@ def _strip_unstackable(d: dict, mark: str | None) -> None:
             ),
         )
 
+
 # Channels honored by the renderer at to_spec() time. Other channels in
 # resolved._encoding (Stroke, Fill, Tooltip, etc.) are stored on the spec
 # but ignored at render time; ferrum-spec.md §3.2 promises a one-time
@@ -237,6 +238,11 @@ class _Facet:
     ``mode_kind`` is the tagged-union discriminator: ``"wrap"`` uses ``field``;
     ``"grid"`` uses ``row`` and ``col``. Other fields are sizing hints honored
     by ``_build_facet_dict()`` when serialising to the Rust ``FacetSpec``.
+
+    ``resolve`` carries per-channel scale-resolution modes set via
+    ``Chart.share_scale()``.  Keys are channel names (``"x"``, ``"y"``);
+    values are ``"shared"`` or ``"independent"``.  Absent keys default to
+    ``"shared"`` in the Rust layer.
     """
 
     mode_kind: str
@@ -245,6 +251,7 @@ class _Facet:
     col: Optional[str] = None
     ncols: Optional[int] = None
     nrows: Optional[int] = None
+    resolve: Optional[dict] = None
 
 
 from ferrum.encoding import _channel_class_map, _channel_class_for, _apply_channel_aliases
@@ -353,6 +360,58 @@ def _to_polars(data):
     if isinstance(data, pl.DataFrame):
         return data
     return pl.from_arrow(to_arrow_table(data))
+
+
+def _coalesce_facet_rhs_columns(chart: "Chart") -> "Chart":
+    """Coalesce renamed RHS copies of facet fields back into the primary column.
+
+    When ``Chart.__add__`` merges two DataFrames with overlapping column names,
+    it renames the RHS columns to ``"{col}__rhs_{hex}"``.  If one of those
+    columns is a facet field, the RHS layer rows end up with ``null`` in the
+    facet column and are dropped by the facet partitioner.
+
+    This function detects such renamed copies and coalesces them so the facet
+    column is populated for all layers' rows.  Only columns that are facet
+    fields are coalesced; other renamed columns are left alone so genuinely
+    different columns (with different semantics) are not silently merged.
+
+    Returns the (possibly mutated) chart.  The chart's data is updated in-place
+    on the clone.
+    """
+    if chart._facet is None or chart._data is None:
+        return chart
+
+    import polars as pl
+
+    if not isinstance(chart._data, pl.DataFrame):
+        return chart
+
+    f = chart._facet
+    # Collect facet fields that are used for partitioning.
+    facet_fields = [ff for ff in (f.field, f.col, f.row) if ff is not None]
+
+    df = chart._data
+    modified = False
+    for facet_col in facet_fields:
+        if facet_col not in df.columns:
+            continue
+        # Find any "__rhs_" renamed copies of this facet column.
+        rhs_prefix = f"{facet_col}__rhs_"
+        rhs_copies = [c for c in df.columns if c.startswith(rhs_prefix)]
+        if not rhs_copies:
+            continue
+        # Coalesce: fill nulls in the primary facet column from RHS copies.
+        # The primary column has the LHS values; RHS rows have null there.
+        expr = pl.col(facet_col)
+        for rhs_col in rhs_copies:
+            expr = pl.coalesce([expr, pl.col(rhs_col)])
+        df = df.with_columns(expr.alias(facet_col))
+        modified = True
+
+    if modified:
+        chart._data = df
+
+    return chart
 
 
 def _infer_type_from_data(field: str | None, data: Any) -> str | None:
@@ -1965,6 +2024,74 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             )
         else:
             raise ValueError("facet() requires either `field=`, or `row=`/`col=`")
+        # 2c fix: coalesce any renamed RHS copies of the facet field(s) back
+        # into the primary column.  When Chart.__add__ merges two DataFrames
+        # with overlapping column names, it renames the RHS columns to
+        # "{col}__rhs_{hex}".  If one of those columns is the facet field,
+        # the RHS layer's rows end up with null in the facet column and are
+        # dropped by the facet partitioner.  We detect and coalesce here so
+        # all layers' rows carry the facet field value.
+        new = _coalesce_facet_rhs_columns(new)
+        return new
+
+    def share_scale(
+        self,
+        *,
+        x: Optional[str] = None,
+        y: Optional[str] = None,
+    ) -> "Chart":
+        """Set per-channel facet scale resolution for this faceted chart.
+
+        Each panel can either lock to the union domain across all partitions
+        (``"shared"``, the default) or compute its own domain from its
+        partition's data (``"independent"``).
+
+        Parameters
+        ----------
+        x : str or None, optional
+            Scale resolution for the x channel.  ``"shared"`` or
+            ``"independent"``.  ``None`` leaves the current setting unchanged.
+        y : str or None, optional
+            Scale resolution for the y channel.  ``"shared"`` or
+            ``"independent"``.  ``None`` leaves the current setting unchanged.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with the scale resolution updated.
+
+        Raises
+        ------
+        ValueError
+            If called before ``facet()``, or if a value is not ``"shared"``
+            or ``"independent"``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"g": ["a","a","b","b"], "x": [1,2,1,2],
+        ...                    "y": [1.0,2.0,100.0,101.0]})
+        >>> (fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+        ...  .facet(col="g").share_scale(y="independent"))
+        Chart(mark='point', encoding=['x', 'y'])
+        """
+        if self._facet is None:
+            raise ValueError("share_scale() requires a faceted chart; call facet() first")
+        _valid = ("shared", "independent")
+        if x is not None and x not in _valid:
+            raise ValueError(f"share_scale: x={x!r}; expected 'shared' or 'independent'")
+        if y is not None and y not in _valid:
+            raise ValueError(f"share_scale: y={y!r}; expected 'shared' or 'independent'")
+        # Build updated resolve dict from existing + new values.
+        existing_resolve = self._facet.resolve or {}
+        new_resolve = dict(existing_resolve)
+        if x is not None:
+            new_resolve["x"] = x
+        if y is not None:
+            new_resolve["y"] = y
+        new = self._clone()
+        new._facet = replace(self._facet, resolve=new_resolve if new_resolve else None)
         return new
 
     def theme(self, theme: Any) -> "Chart":
@@ -2365,22 +2492,72 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         return out
 
     def _build_facet_dict(self) -> dict:
-        """Convert internal _facet to the JSON dict Rust's FacetSpec expects."""
+        """Convert internal _facet to the JSON dict Rust's FacetSpec expects.
+
+        The ``"resolve"`` key is emitted only when at least one channel is set
+        to ``"independent"``.  Absent keys default to ``"shared"`` in Rust, so
+        omitting the key entirely when all channels are shared keeps the output
+        byte-stable with existing goldens.
+        """
         f = self._facet
+        # Build the resolve sub-dict only when there is at least one
+        # non-default (independent) resolution; omit entirely otherwise.
+        resolve_dict: dict | None = None
+        if f.resolve:
+            non_default = {ch: mode for ch, mode in f.resolve.items() if mode == "independent"}
+            if non_default:
+                resolve_dict = dict(f.resolve)
+
         if f.mode_kind == "wrap":
             ncols = f.ncols or 1  # u32 required; default 1
-            return {"field": f.field, "mode": {"kind": "wrap", "ncols": int(ncols)}}
+            d: dict = {"field": f.field, "mode": {"kind": "wrap", "ncols": int(ncols)}}
+            if resolve_dict is not None:
+                d["resolve"] = resolve_dict
+            return d
         # grid: col is the primary (column) field; row is the secondary (row) field.
         field = f.col if f.col is not None else (f.field or "")
-        nrows = f.nrows or 1
-        ncols = f.ncols or 1
-        d: dict = {
+        # Infer nrows/ncols from the data when the user did not supply them.
+        # This is the common case: facet(row="a", col="b") without explicit
+        # nrows/ncols.  Without inference the geometry defaults to 1×1, dropping
+        # all but one panel.
+        nrows = f.nrows if f.nrows is not None else self._infer_facet_cardinality(f.row)
+        ncols = f.ncols if f.ncols is not None else self._infer_facet_cardinality(f.col)
+        d = {
             "field": field,
             "mode": {"kind": "grid", "nrows": int(nrows), "ncols": int(ncols)},
         }
         if f.row is not None:
             d["row"] = f.row
+        if resolve_dict is not None:
+            d["resolve"] = resolve_dict
         return d
+
+    def _infer_facet_cardinality(self, col_name: Optional[str]) -> int:
+        """Return the number of distinct values in *col_name* from self._data.
+
+        Falls back to 1 when *col_name* is None, the data is absent, or the
+        column is not found — so the existing behaviour is preserved for cases
+        where inference is not possible.
+        """
+        if col_name is None or self._data is None:
+            return 1
+        try:
+            import polars as pl
+
+            if isinstance(self._data, pl.DataFrame):
+                if col_name in self._data.columns:
+                    return self._data[col_name].n_unique()
+                return 1
+            # PyArrow fallback
+            import pyarrow as pa
+
+            tbl = self._data if isinstance(self._data, pa.Table) else to_arrow_table(self._data)
+            if col_name in tbl.schema.names:
+                col = tbl.column(col_name)
+                return len(col.unique())
+            return 1
+        except Exception:
+            return 1
 
     # ---- Properties ----
 

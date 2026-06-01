@@ -293,7 +293,7 @@ mod tests {
             facet_key: None,
             row: 0,
             col: 0,
-            strip_title: None,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
         }
     }
 

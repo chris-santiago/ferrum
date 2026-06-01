@@ -311,7 +311,7 @@ mod tests {
             Arc::new(Float64Array::from(vec![3.0, 5.0, 7.0])),
         ]).unwrap();
         let theme = ThemeInputs::default();
-        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -353,7 +353,7 @@ mod tests {
             Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
         ]).unwrap();
         let theme = ThemeInputs::default();
-        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -391,7 +391,7 @@ mod tests {
             Arc::new(Float64Array::from(vec![5.0])),
         ]).unwrap();
         let theme = ThemeInputs::default();
-        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
 
         // Stroke = #aabbcc (distinctive; different from mark_color and fill)
@@ -441,7 +441,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout {
             plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
-            facet_key: None, row: 0, col: 0, strip_title: None,
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
@@ -505,7 +505,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout {
             plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
-            facet_key: None, row: 0, col: 0, strip_title: None,
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);

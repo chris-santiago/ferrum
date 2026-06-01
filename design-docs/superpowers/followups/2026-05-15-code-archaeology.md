@@ -45,6 +45,8 @@
 
 > **Regression tests added `aab2b0d`:** 16 new `#[cfg(test)]` tests across all four previously untested fix paths. Each test was verified to fail on the reverted code: geoshape `polygon_with_hole_has_two_rings` fails if holes are dropped; polar transform tests assert coordinate changes and Rect→Polygon conversion; leader-line tests assert `SceneNode::Line` presence/absence by flag.
 
+> **Open (noted 2026-06-01, flexibility D2):** `fix_kde_extents_for_facet` in `render/prepare.rs` pins the global x-extent for a single-group faceted KDE so per-panel curves share a comparable axis. It is **KDE-only**: faceting-before-transform drops cross-partition extent unification in general, and `Bin`/`Violin` carry the same `extent`/`shared_extent` field pair. A faceted histogram or violin with auto extent has the same per-panel-drift and is NOT fixed by this helper. Generalize the extent-pin across transforms when faceted `Bin`/`Violin` is next touched — do not file it as a new regression.
+
 ---
 
 ## Python Silent Drops (accepted by Python API, never reach Rust)

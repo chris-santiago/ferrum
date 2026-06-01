@@ -2101,3 +2101,131 @@ fn normalize_continuous_degenerate_domain_returns_half() {
     assert!((super::normalize_continuous((1.0, 1.0), None, 1.0) - 0.5).abs() < 1e-9);
     assert!((super::normalize_continuous((1.0, 1.0), Some(1.0), 1.0) - 0.5).abs() < 1e-9);
 }
+
+// ── D2d: per-channel independent vs shared facet scale resolution ─────────────
+//
+// Validates that resolving scales from a per-panel partition (independent mode)
+// yields a panel-specific domain, while resolving from the merged batch (shared
+// mode) yields a unified domain across all panels. This is the behavioral
+// invariant that FacetSpec.resolve.y = Independent vs Shared must satisfy.
+//
+// The test uses `resolve_scales_with_outputs` directly — the function that both
+// `prepare.rs` (shared path, called on the full batch) and `scene_build.rs`
+// (per-panel path, called on the filtered panel batch) call. The resolution
+// itself is the same function; independent vs shared is determined by which
+// batch is passed.
+
+/// D2d: resolving from a per-panel partition with disjoint y ranges must yield
+/// per-panel domains that differ from each other and from the global domain.
+///
+/// Partition A: y ∈ [0, 5]     (low range)
+/// Partition B: y ∈ [100, 200] (high range)
+/// Global merged: y ∈ [0, 200]
+///
+/// Independent path: each partition → its own y-domain.
+/// Shared path: merged batch → single y-domain [0, 200] for all panels.
+#[test]
+fn d2d_independent_resolve_yields_per_panel_domains() {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use std::collections::HashMap;
+
+    // Build the two panel batches with disjoint y ranges.
+    let make_panel_batch = |x_vals: Vec<f64>, y_vals: Vec<f64>| -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDataType::Float64, false),
+            Field::new("y", ArrowDataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(x_vals)),
+                Arc::new(Float64Array::from(y_vals)),
+            ],
+        )
+        .unwrap()
+    };
+
+    let panel_a = make_panel_batch(vec![1.0, 2.0, 3.0], vec![0.0, 2.5, 5.0]);
+    let panel_b = make_panel_batch(vec![1.0, 2.0, 3.0], vec![100.0, 150.0, 200.0]);
+
+    // Merged batch simulating the shared (global) path.
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+    ]));
+    let merged = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.0, 2.5, 5.0, 100.0, 150.0, 200.0])),
+        ],
+    )
+    .unwrap();
+
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
+    };
+    let theme = ThemeInputs::default();
+    let empty_outputs: HashMap<String, RecordBatch> = HashMap::new();
+    let pixel_range = (0.0, 200.0);
+
+    // Independent path: each panel resolves from its own partition.
+    let (scales_a, _) = resolve_scales_with_outputs(
+        &spec, &panel_a, &empty_outputs, pixel_range, pixel_range, &theme,
+    ).unwrap();
+    let (scales_b, _) = resolve_scales_with_outputs(
+        &spec, &panel_b, &empty_outputs, pixel_range, pixel_range, &theme,
+    ).unwrap();
+
+    // Shared path: both panels resolve from the global merged batch.
+    let (scales_global, _) = resolve_scales_with_outputs(
+        &spec, &merged, &empty_outputs, pixel_range, pixel_range, &theme,
+    ).unwrap();
+
+    // Independent: domains must differ between panels A and B.
+    let (a_lo, a_hi) = scales_a.y.data_domain().expect("panel A y must have a domain");
+    let (b_lo, b_hi) = scales_b.y.data_domain().expect("panel B y must have a domain");
+    assert!(
+        (a_hi - b_hi).abs() > 50.0,
+        "independent panels must have different y domains: A=[{a_lo},{a_hi}], B=[{b_lo},{b_hi}]"
+    );
+    assert!(
+        a_hi < 20.0,
+        "panel A y-max must be near 5.0 (from its partition), got {a_hi}"
+    );
+    assert!(
+        b_lo > 50.0,
+        "panel B y-min must be near 100.0 (from its partition), got {b_lo}"
+    );
+
+    // Shared: global domain must cover both ranges.
+    let (g_lo, g_hi) = scales_global.y.data_domain().expect("global y must have a domain");
+    assert!(
+        g_lo <= 1.0 && g_hi >= 199.0,
+        "shared global y must span both partitions: [{g_lo},{g_hi}]"
+    );
+
+    // The per-panel (independent) domains must be subsets of the global domain.
+    assert!(a_lo >= g_lo - 0.1 && a_hi <= g_hi + 0.1,
+        "panel A domain [{a_lo},{a_hi}] must be contained in global [{g_lo},{g_hi}]");
+    assert!(b_lo >= g_lo - 0.1 && b_hi <= g_hi + 0.1,
+        "panel B domain [{b_lo},{b_hi}] must be contained in global [{g_lo},{g_hi}]");
+}

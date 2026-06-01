@@ -744,6 +744,7 @@ mod tests {
             row: None,
             mode: FacetMode::Wrap { ncols: 3 },
             spacing: None,
+            resolve: crate::layout::facet::FacetResolve::default(),
         });
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""facet":{"#));

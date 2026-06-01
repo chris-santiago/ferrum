@@ -541,7 +541,7 @@ mod tests {
             Arc::new(Float64Array::from(vec![6.0, 8.0])),
         ]).unwrap();
         let theme = ThemeInputs::default();
-        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -577,7 +577,7 @@ mod tests {
             Arc::new(StringArray::from(vec!["x","y","x","y"])),
         ]).unwrap();
         let theme = ThemeInputs::default();
-        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -621,7 +621,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout {
             plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
-            facet_key: None, row: 0, col: 0, strip_title: None,
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(
             &spec, &batch, (0.0, 100.0), (0.0, 100.0),
@@ -684,7 +684,7 @@ mod tests {
             Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
         ]).unwrap();
         let theme = ThemeInputs::default();
-        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -738,7 +738,7 @@ mod tests {
         ]).unwrap();
 
         let theme = ThemeInputs::default();
-        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
 
         // Build scales manually with an opacity scale so it maps [0,1] → [0,1].
         use crate::render::scale_resolve::OpacityScale;
@@ -810,7 +810,7 @@ mod tests {
         ]).unwrap();
 
         let theme = ThemeInputs::default();
-        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let scales_default = ResolvedScales {
             x: ScaleKind::Ordinal(crate::scale::ordinal::OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![25.0, 75.0], 0.0)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![1.0, 4.0], vec![100.0, 0.0], false, false)),
@@ -870,7 +870,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let panel = PanelLayout {
             plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
-            facet_key: None, row: 0, col: 0, strip_title: None,
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
         };
         let (scales, _) = resolve_scales(
             &spec, &batch, (0.0, 100.0), (0.0, 100.0),
@@ -915,7 +915,7 @@ mod tests {
             Arc::new(Float64Array::from(vec![0.0, 1.0])),
         ]).unwrap();
         let theme = ThemeInputs::default();
-        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
