@@ -39,6 +39,36 @@ pub struct ParameterSpec {
     pub select: Option<serde_json::Value>,
 }
 
+/// What aspect of the scene a parameter drives. Read by the WASM runtime to
+/// route a parameter's live updates to the right reactive machinery.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingRole {
+    /// Reactive rescale: the param feeds a scale's domain on the target panel.
+    Domain,
+    /// Crossfilter: the param drives a `filter` transform on the target panel.
+    Filter,
+    /// Legend toggle: a `bind="legend"` point selection.
+    Legend,
+}
+
+/// A single param→scene binding, emitted into `InteractionConfig` so the WASM
+/// runtime knows which panel/scale a declared parameter drives. The static
+/// resolver substitutes `domainParam` into a concrete domain (and clears the
+/// reference) before the scene exists, so this is the only record the runtime
+/// has of the connection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ParamBinding {
+    pub param: String,
+    pub role: BindingRole,
+    /// Target panel for `Domain`/`Filter` bindings; `None` for `Legend`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel: Option<usize>,
+    /// Channel wire name ("x"/"y"/"color"/…) for `Domain` bindings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,5 +113,50 @@ mod tests {
         assert_eq!(parsed.value, Some(serde_json::json!([0, 100])));
         assert_eq!(parsed.bind, None);
         assert_eq!(parsed.select, None);
+    }
+
+    #[test]
+    fn domain_binding_round_trips() {
+        let binding = ParamBinding {
+            param: "d".into(),
+            role: BindingRole::Domain,
+            panel: Some(0),
+            channel: Some("x".into()),
+        };
+        let json = serde_json::to_string(&binding).unwrap();
+        assert_eq!(
+            json,
+            r#"{"param":"d","role":"domain","panel":0,"channel":"x"}"#
+        );
+        let parsed: ParamBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, binding);
+    }
+
+    #[test]
+    fn filter_binding_omits_channel() {
+        let binding = ParamBinding {
+            param: "brush".into(),
+            role: BindingRole::Filter,
+            panel: Some(2),
+            channel: None,
+        };
+        let json = serde_json::to_string(&binding).unwrap();
+        assert_eq!(json, r#"{"param":"brush","role":"filter","panel":2}"#);
+        let parsed: ParamBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, binding);
+    }
+
+    #[test]
+    fn legend_binding_omits_panel_and_channel() {
+        let binding = ParamBinding {
+            param: "sel".into(),
+            role: BindingRole::Legend,
+            panel: None,
+            channel: None,
+        };
+        let json = serde_json::to_string(&binding).unwrap();
+        assert_eq!(json, r#"{"param":"sel","role":"legend"}"#);
+        let parsed: ParamBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, binding);
     }
 }

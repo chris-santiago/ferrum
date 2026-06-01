@@ -1,7 +1,7 @@
 use arrow::record_batch::RecordBatch;
 use ferrum_scene::{
-    BlendMode, CoordKind, InteractionConfig, MarkBatch, Panel, PanelTickLevels, SceneGraph,
-    SceneNode, TickLevel,
+    BindingRole, BlendMode, CoordKind, InteractionConfig, MarkBatch, Panel, ParamBinding,
+    PanelTickLevels, SceneGraph, SceneNode, TickLevel,
 };
 use crate::spec::coord::to_scene_coord;
 
@@ -521,6 +521,11 @@ pub fn build_scene(
     // Legend
     build_legend_decorations(layout, spec, prep, theme, chart_config, &mut legend_nodes)?;
 
+    // Param→scene bindings (D6, 5e-2a). Computed from the ORIGINAL `spec`,
+    // which still carries `domainParam`/transform `param`/selection `bind`:
+    // the static resolver only mutated per-panel clones.
+    let param_bindings = collect_param_bindings(spec, layout.panels.len());
+
     let interaction = InteractionConfig {
         zoom_enabled: !spec.selections.is_empty(),
         pan_enabled: !spec.selections.is_empty(),
@@ -529,6 +534,7 @@ pub fn build_scene(
         tick_levels,
         toolbar: true,
         params: spec.params.clone(),
+        param_bindings,
     };
 
     Ok(SceneGraph {
@@ -582,6 +588,82 @@ fn resolve_param_domains(spec: &mut ChartSpec) {
         }
         // else: leave domain = None → auto-infer (empty-selection semantics).
     }
+}
+
+/// Collect param→scene bindings (D6, 5e-2a) from the original spec.
+///
+/// The static resolver substitutes `domainParam` into a concrete domain and
+/// clears the reference before the scene exists, so the emitted scene has no
+/// record of which panel/scale a param drives. This walks the original spec
+/// (which still carries the markers) and emits one binding per (param, panel,
+/// channel) connection:
+///
+/// - **Domain:** each `{x,y,color,size,opacity}` encoding scale with a
+///   `domainParam` → one binding per panel, with the channel wire name.
+/// - **Filter:** each `filter` transform carrying a `param` → one binding per
+///   panel (channel `None`).
+/// - **Legend:** each declared parameter whose `bind` is the string `"legend"`
+///   → one panel-free binding (the selection name).
+///
+/// Returns an empty vec when no markers apply, preserving param-free
+/// byte-stability.
+fn collect_param_bindings(spec: &ChartSpec, n_panels: usize) -> Vec<ParamBinding> {
+    use crate::transform::core::TransformSpec;
+
+    let mut bindings: Vec<ParamBinding> = Vec::new();
+    let panel_count = n_panels.max(1);
+
+    // Domain bindings: walk the positional/visual continuous channels.
+    let enc = &spec.encoding;
+    let channels: [(&str, Option<&crate::spec::encoding::EncodingSpec>); 5] = [
+        ("x", enc.x.as_ref()),
+        ("y", enc.y.as_ref()),
+        ("color", enc.color.as_ref()),
+        ("size", enc.size.as_ref()),
+        ("opacity", enc.opacity.as_ref()),
+    ];
+    for (wire_name, channel) in channels {
+        let Some(channel) = channel else { continue };
+        let Some(scale) = channel.scale.as_ref() else { continue };
+        let Some(param) = scale.domain_param() else { continue };
+        for panel in 0..panel_count {
+            bindings.push(ParamBinding {
+                param: param.to_owned(),
+                role: BindingRole::Domain,
+                panel: Some(panel),
+                channel: Some(wire_name.to_owned()),
+            });
+        }
+    }
+
+    // Filter bindings: each filter transform carrying a `param` marker.
+    for transform in &spec.transforms {
+        if let TransformSpec::Filter(filter) = transform {
+            let Some(param) = filter.param.as_ref() else { continue };
+            for panel in 0..panel_count {
+                bindings.push(ParamBinding {
+                    param: param.clone(),
+                    role: BindingRole::Filter,
+                    panel: Some(panel),
+                    channel: None,
+                });
+            }
+        }
+    }
+
+    // Legend bindings: a selection declared with `bind="legend"`.
+    for param in &spec.params {
+        if matches!(&param.bind, Some(serde_json::Value::String(s)) if s == "legend") {
+            bindings.push(ParamBinding {
+                param: param.name.clone(),
+                role: BindingRole::Legend,
+                panel: None,
+                channel: None,
+            });
+        }
+    }
+
+    bindings
 }
 
 fn build_title(
@@ -1686,5 +1768,99 @@ mod tests {
         resolve_param_domains(&mut spec);
         let after = serde_json::to_string(&spec).unwrap();
         assert_eq!(before, after);
+    }
+
+    // ── D6 param→scene bindings (5e-2a) ──────────────────────────────────
+
+    use ferrum_scene::BindingRole;
+
+    #[test]
+    fn collect_param_bindings_emits_domain_binding() {
+        // An x-scale domainParam → a Domain binding on panel 0, channel "x".
+        let spec = spec_with_x_domain_param(vec![ParameterSpec {
+            name: "d".into(),
+            kind: ParamKind::Variable,
+            value: Some(serde_json::json!([0, 100])),
+            bind: None,
+            select: None,
+        }]);
+        let bindings = collect_param_bindings(&spec, 1);
+        assert_eq!(bindings.len(), 1);
+        let b = &bindings[0];
+        assert_eq!(b.param, "d");
+        assert_eq!(b.role, BindingRole::Domain);
+        assert_eq!(b.panel, Some(0));
+        assert_eq!(b.channel.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn collect_param_bindings_domain_per_panel_for_facets() {
+        let spec = spec_with_x_domain_param(vec![ParameterSpec {
+            name: "d".into(),
+            kind: ParamKind::Variable,
+            value: Some(serde_json::json!([0, 100])),
+            bind: None,
+            select: None,
+        }]);
+        let bindings = collect_param_bindings(&spec, 3);
+        assert_eq!(bindings.len(), 3);
+        assert_eq!(
+            bindings.iter().filter_map(|b| b.panel).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(bindings
+            .iter()
+            .all(|b| b.role == BindingRole::Domain && b.channel.as_deref() == Some("x")));
+    }
+
+    #[test]
+    fn collect_param_bindings_emits_filter_binding() {
+        let mut spec = spec_with_x_domain_param(Vec::new());
+        // Drop the domainParam so only the filter contributes.
+        spec.encoding.x = None;
+        spec.transforms = vec![crate::transform::core::TransformSpec::Filter(
+            crate::transform::filter::FilterSpec {
+                predicate: "true".into(),
+                name: None,
+                param: Some("brush".into()),
+            },
+        )];
+        let bindings = collect_param_bindings(&spec, 1);
+        assert_eq!(bindings.len(), 1);
+        let b = &bindings[0];
+        assert_eq!(b.param, "brush");
+        assert_eq!(b.role, BindingRole::Filter);
+        assert_eq!(b.panel, Some(0));
+        assert_eq!(b.channel, None);
+    }
+
+    #[test]
+    fn collect_param_bindings_emits_legend_binding() {
+        let mut spec = spec_with_x_domain_param(vec![ParameterSpec {
+            name: "sel".into(),
+            kind: ParamKind::Point,
+            value: None,
+            bind: Some(serde_json::json!("legend")),
+            select: None,
+        }]);
+        spec.encoding.x = None;
+        let bindings = collect_param_bindings(&spec, 1);
+        assert_eq!(bindings.len(), 1);
+        let b = &bindings[0];
+        assert_eq!(b.param, "sel");
+        assert_eq!(b.role, BindingRole::Legend);
+        assert_eq!(b.panel, None);
+        assert_eq!(b.channel, None);
+    }
+
+    #[test]
+    fn collect_param_bindings_empty_for_param_free_spec() {
+        let spec = spec_with_x_domain_param(Vec::new());
+        // spec_with_x_domain_param sets an x domainParam "d", but param-free
+        // here means no params declared; the marker still produces a Domain
+        // binding because the reference exists. Strip it to assert true emptiness.
+        let mut bare = spec;
+        bare.encoding.x = None;
+        assert!(collect_param_bindings(&bare, 1).is_empty());
     }
 }

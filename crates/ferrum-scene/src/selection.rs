@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::parameter::ParameterSpec;
+use crate::parameter::{ParamBinding, ParameterSpec};
 use crate::types::Color;
 
 // ── 3.7 SelectionSpec ───────────────────────────────────────────────
@@ -129,6 +129,11 @@ pub struct InteractionConfig {
     /// byte-identical to their pre-D6 form.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub params: Vec<ParameterSpec>,
+    /// Param→scene bindings (D6): which panel/scale each declared parameter
+    /// drives, so the WASM runtime can route live updates. Omitted from JSON
+    /// when empty to keep param-free interaction configs byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_bindings: Vec<ParamBinding>,
 }
 
 impl Default for InteractionConfig {
@@ -141,6 +146,7 @@ impl Default for InteractionConfig {
             tick_levels: Vec::new(),
             toolbar: true,
             params: Vec::new(),
+            param_bindings: Vec::new(),
         }
     }
 }
@@ -226,7 +232,7 @@ pub struct Tick {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parameter::ParamKind;
+    use crate::parameter::{BindingRole, ParamBinding, ParamKind};
 
     #[test]
     fn interaction_config_round_trips_with_params() {
@@ -263,5 +269,36 @@ mod tests {
         let json = r#"{"zoom_enabled":false,"pan_enabled":false,"conditionals":[],"linked_panels":[],"tick_levels":[],"toolbar":true}"#;
         let parsed: InteractionConfig = serde_json::from_str(json).unwrap();
         assert!(parsed.params.is_empty());
+        assert!(parsed.param_bindings.is_empty());
+    }
+
+    #[test]
+    fn interaction_config_round_trips_with_param_bindings() {
+        let config = InteractionConfig {
+            param_bindings: vec![ParamBinding {
+                param: "d".into(),
+                role: BindingRole::Domain,
+                panel: Some(0),
+                channel: Some("x".into()),
+            }],
+            ..InteractionConfig::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(
+            json.contains("\"param_bindings\""),
+            "non-empty param_bindings must serialize"
+        );
+        let parsed: InteractionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, config);
+    }
+
+    /// Byte-stability gate: a param-free config must omit `param_bindings`.
+    #[test]
+    fn interaction_config_omits_empty_param_bindings() {
+        let json = serde_json::to_string(&InteractionConfig::default()).unwrap();
+        assert!(
+            !json.contains("param_bindings"),
+            "empty param_bindings must be skipped: {json}"
+        );
     }
 }

@@ -132,6 +132,25 @@ Validated by inspecting emitted HTML/JS + scene JSON (no browser in CI). The int
 
 Tests assert the param, its references, and its event bindings are present and correct in the emitted artifacts — not merely that export succeeded. `cargo clippy -p ferrum-wasm --target wasm32-unknown-unknown -- -D warnings` clean; WASM rebuilt via the documented `wasm-pack` command.
 
+### 6a. Param bindings (5e-2a — the missing runtime wiring)
+The static resolver substitutes `domainParam` into a concrete domain and clears the reference before the scene exists, so the emitted scene has no record of *which* panel/scale a param drives. The runtime needs that, so `InteractionConfig` carries a `param_bindings` list (serde default, skip when empty → param-free byte-stable):
+
+```rust
+#[serde(rename_all = "snake_case")] pub enum BindingRole { Domain, Filter, Legend }
+pub struct ParamBinding {
+    pub param: String,
+    pub role: BindingRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub panel: Option<usize>,   // target panel (domain/filter)
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub channel: Option<String>, // "x"/"y"/… (domain)
+}
+```
+
+- **Domain** bindings are captured per-panel in `scene_build` from each channel's `domain_param` *before* `resolve_param_domains` clears it (panel index + channel name + param name).
+- **Filter** bindings: a `transform_filter` carrying a `param` records `{param, role: filter, panel}`. Single chart → panel 0; composition assigns the child's panel(s) with the panel offset during merge.
+- **Legend** bindings: a selection with `bind="legend"` records `{param: <selection name>, role: legend}`.
+
+Composition merge offsets `panel` by the child panel offset (mirroring `linked_panels`/`tick_levels`). Legend toggle (5e-2b) reuses the existing point-selection + conditional machinery; crossfilter and reactive rescale reuse the existing conditional-containment and zoom-transform machinery respectively. Browser-only behavior is out of CI scope; the CI bar is that the bindings + JS/WASM event handlers are present and correct in the emitted artifacts.
+
 ## 7. Public API additions (exports)
 
 `fm.param`, `fm.when` (module-level), `Parameter`, `VariableParameter` added to `ferrum/__init__.py` `__all__` and to `tests/test_docstring_coverage.py` `_DOC_ALLOWLIST` (docstrings required). `value`/`selection_*` unchanged.

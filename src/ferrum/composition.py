@@ -2019,6 +2019,18 @@ def _merge_one_child(
         if param["name"] not in existing_param_names:
             merged["interaction"]["params"].append(param)
             existing_param_names.add(param["name"])
+    existing_binding_keys = {
+        (b["param"], b["role"], b.get("panel"), b.get("channel"))
+        for b in merged["interaction"]["param_bindings"]
+    }
+    for binding in child_interaction.get("param_bindings", []):
+        b = dict(binding)
+        if b.get("panel") is not None:
+            b["panel"] = b["panel"] + panel_id_offset
+        key = (b["param"], b["role"], b.get("panel"), b.get("channel"))
+        if key not in existing_binding_keys:
+            merged["interaction"]["param_bindings"].append(b)
+            existing_binding_keys.add(key)
     if merged["background"] is None and scene.get("background"):
         merged["background"] = scene["background"]
 
@@ -2050,6 +2062,7 @@ def _empty_scene() -> dict:
             "linked_panels": [],
             "tick_levels": [],
             "params": [],
+            "param_bindings": [],
         },
     }
 
