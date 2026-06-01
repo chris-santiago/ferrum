@@ -38,8 +38,9 @@ Scratch convention: each agent works in `/tmp/ferrum-ux-audit/<slug>/` and write
 - Time series with rolling-mean overlay (window transform), confidence band (area between columns), region shading, event annotations.
 - Horizon chart: layered banded areas where each band recycles one shared color scale at stacked value offsets (cubism.js). The densest small-multiple time-series form; tests whether a fill can reuse a scale across offset bands.
 - Streamgraph / ThemeRiver: many series as stacked areas around a centered "wiggle" baseline instead of a zero baseline. Tests whether the stack position-adjustment supports a non-zero, data-driven baseline.
+- Calendar heatmap (GitHub-contributions style): derive a week×weekday grid from a date column and color each cell by value. Tests deriving a 2D categorical grid from a datetime and laying out one cell per day.
 - Log-scale returns; a broken axis (`fm.BreakAxis`) or inset zoom (`fm.Inset`).
-**Push:** temporal axis tick formatting (month/year), multi-panel alignment, secondary axes, log scales, band/ribbon fills, wiggle/centered baselines, layered banded fills, weekend gaps, real datetime parsing.
+**Push:** temporal axis tick formatting (month/year), multi-panel alignment, secondary axes, log scales, band/ribbon fills, wiggle/centered baselines, layered banded fills, date-derived day/week grids, weekend gaps, real datetime parsing.
 
 ## 4. faceting — Small multiples / composed dashboards
 **Compare against:** seaborn (FacetGrid/PairGrid), Altair.
@@ -70,7 +71,8 @@ Scratch convention: each agent works in `/tmp/ferrum-ux-audit/<slug>/` and write
 - Error-band figure: line + shaded CI (mean ± CI), plus discrete error bars on points.
 - Vector/quiver field or streamplot; if no quiver mark, attempt via `mark_segment`/annotate and report the gap.
 - Log-log / semilog with proper log ticks; a polar plot (`CoordPolar`) of a radial function; scientific/SI tick formatting.
-**Push:** continuous colorbars, contour level control, log scales & tick formatting, error/band marks, polar coords, large-N density.
+- Wind rose / Nightingale coxcomb: stacked bars under a polar coordinate transform (angular axis = direction or category, radius = value). Tests whether bar geometry and stacking survive a polar transform, not just the radial line above.
+**Push:** continuous colorbars, contour level control, log scales & tick formatting, error/band marks, polar coords, stacked bars in polar, large-N density.
 
 ## 7. categorical — Categorical / part-to-whole / ranking
 **Compare against:** Altair, matplotlib (Economist/FT/Datawrapper register).
@@ -79,10 +81,11 @@ Scratch convention: each agent works in `/tmp/ferrum-ux-audit/<slug>/` and write
 - Diverging stacked bar (Likert: agree/disagree from a center baseline).
 - Marimekko / mosaic plot: stacked bars whose column widths are proportional to each category's total (2D variable-width position adjustment), with a value label per tile. Tests whether bar width can be data-driven, not uniform.
 - Sankey / alluvial flow: weighted ribbons between stages, node boxes sized by throughput, ribbon thickness encoding flow volume. Tests whether the engine can express flow geometry at all.
+- Sunburst / icicle / treemap: a hierarchical part-to-whole layout where nested categories subdivide a parent's area (rectangles for treemap and icicle, radial wedges for sunburst). Tests whether the engine can express a recursive hierarchical layout at all, not just flat categories.
 - Horizontal lollipop or Cleveland dot plot, sorted descending, with value labels.
 - Dumbbell / connected-dot chart comparing two time points per category, sorted by gap.
 - Pie or donut (`CoordPolar`) and a radial/polar bar — note whether you'd actually recommend them.
-**Push:** stack normalization to percent, sorting by value/aggregate, value labels on/above/inside bars, horizontal orientation, diverging baselines, variable-width columns, flow geometry, category ordering, top-k filtering.
+**Push:** stack normalization to percent, sorting by value/aggregate, value labels on/above/inside bars, horizontal orientation, diverging baselines, variable-width columns, flow geometry, hierarchical/recursive layout, category ordering, top-k filtering.
 
 ## 8. interactive — Interactive & linked views
 **Compare against:** Altair/Vega-Lite, d3/Observable, Plotly, Bokeh.
