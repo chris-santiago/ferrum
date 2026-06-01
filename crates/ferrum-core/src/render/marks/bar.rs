@@ -187,6 +187,11 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
     if x_strs.len() != ys.len() { return empty_result(); }
 
+    // y2 column: when bound, the rect spans [y, y2] rather than [y, baseline].
+    let y2f_opt = spec.encoding.y2.as_ref().map(|e| e.field.as_str());
+    let y2s_opt: Option<Vec<Option<f64>>> = y2f_opt
+        .and_then(|f| col_as_f64(ctx.batch, f).ok());
+
     let y_bases: Option<Vec<Option<f64>>> =
         col_as_f64(ctx.batch, "__stack_y_base__").ok();
 
@@ -224,15 +229,28 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
         let cx = match ctx.scales.x.to_pixel_str(xs) { Some(p) => p, None => continue };
         let top_y = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
-        let bottom_y = match y_bases.as_ref().and_then(|v| v[i]) {
-            Some(b) if b.is_finite() => {
-                ctx.scales.y.to_pixel_f64(b).unwrap_or(baseline_y)
+        // Priority: explicit y2 column > stacking baseline > axis baseline.
+        let bottom_y = if let Some(ref y2s) = y2s_opt {
+            // y2 present: use the y2 data value mapped through the y-scale.
+            // Handle mixed-sign (y2 may be above or below y in data space):
+            // the rect always spans [min_pixel, max_pixel] in screen coords.
+            match y2s.get(i).and_then(|v| *v).filter(|v| v.is_finite()) {
+                Some(y2v) => ctx.scales.y.to_pixel_f64(y2v).unwrap_or(baseline_y),
+                None => baseline_y,
             }
-            _ => baseline_y,
+        } else {
+            match y_bases.as_ref().and_then(|v| v[i]) {
+                Some(b) if b.is_finite() => {
+                    ctx.scales.y.to_pixel_f64(b).unwrap_or(baseline_y)
+                }
+                _ => baseline_y,
+            }
         };
-        let height = (bottom_y - top_y).max(0.0);
+        // Use abs so the rect height is positive regardless of y/y2 ordering.
+        let height = (bottom_y - top_y).abs().max(0.0);
+        let rect_top_y = top_y.min(bottom_y);
         let cx = cx + x_offsets[i];
-        let top_y = top_y + y_offsets[i];
+        let top_y = rect_top_y + y_offsets[i];
 
         let fill_color = resolve_fill_color(
             ctx.scales.color.as_ref(),
@@ -901,5 +919,119 @@ mod tests {
             .count();
         assert_eq!(rect_count, 4,
             "Int64 ordinal x must emit one rect per row; got {rect_count}");
+    }
+
+    /// D3: ordinal x + y + y2 — bar spans [y, y2], not [y, baseline].
+    #[test]
+    fn bar_ordinal_x_y2_spans_y_to_y2_not_baseline() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "lo".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "hi".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        // lo=[5,7], hi=[10,12]: bars should float entirely above the baseline.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8,    false),
+            Field::new("lo",  DataType::Float64, false),
+            Field::new("hi",  DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(Float64Array::from(vec![5.0, 7.0])),
+            Arc::new(Float64Array::from(vec![10.0, 12.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { y, h, .. } = n { Some((*y, *h)) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 2, "expected 2 bars");
+
+        // The baseline (y=0 in data) maps to y_pixel = panel.h = 100.0.
+        // With lo=5..10 and hi=7..12 strictly above 0, no bar should bottom out at 100.0.
+        let baseline_pixel = 100.0_f64;
+        for (y, h) in &rects {
+            let bar_bottom = y + h;
+            assert!(
+                (bar_bottom - baseline_pixel).abs() > 2.0,
+                "bar bottom {bar_bottom:.3} is at the baseline {baseline_pixel:.3}: y2 is being ignored"
+            );
+        }
+    }
+
+    /// D3: ordinal x + y + y2 with mixed-sign values — bar crosses zero.
+    #[test]
+    fn bar_ordinal_x_y2_mixed_sign_crosses_baseline() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "lo".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "hi".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        // lo=-3, hi=2: bar must span across zero (both sides of baseline).
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8,    false),
+            Field::new("lo",  DataType::Float64, false),
+            Field::new("hi",  DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a"])),
+            Arc::new(Float64Array::from(vec![-3.0])),
+            Arc::new(Float64Array::from(vec![2.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let rects: Vec<_> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { y, h, .. } = n { Some((*y, *h)) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 1, "expected 1 bar for diverging range");
+
+        // With range [-3, 2], scale spans 5 data units across 100px.
+        // Baseline (0) is at 3/5 * 100 = 60px from top.
+        // hi=2 maps to 3/5 * 100 - 2/5 * 100 = 40px from top (above baseline).
+        // lo=-3 maps to 3/5 * 100 + 3/5 * 100 = ... let the scale decide.
+        // Just assert the rect top is above the baseline and bottom is below.
+        let (rect_y, rect_h) = rects[0];
+        let rect_bottom = rect_y + rect_h;
+
+        // The scale anchors at the data range min/max; baseline pixel is where 0 maps.
+        let baseline_pixel = scales.y.to_pixel_f64(0.0).expect("0 must map through y scale");
+        assert!(rect_y < baseline_pixel - 1.0,
+            "rect top {rect_y:.3} should be above baseline {baseline_pixel:.3} (hi=2 side)");
+        assert!(rect_bottom > baseline_pixel + 1.0,
+            "rect bottom {rect_bottom:.3} should be below baseline {baseline_pixel:.3} (lo=-3 side)");
     }
 }

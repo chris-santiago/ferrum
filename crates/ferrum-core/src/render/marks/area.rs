@@ -84,6 +84,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
     let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
 
+    // y2 column: when bound, the area fills the band between y and y2.
+    let y2f_opt = spec.encoding.y2.as_ref().map(|e| e.field.as_str());
+    let y2s_opt: Option<Vec<Option<f64>>> = y2f_opt
+        .and_then(|f| col_as_f64(ctx.batch, f).ok());
+    let has_y2 = y2s_opt.is_some();
+
     let baseline_y = ctx.panel.plot_area.y + ctx.panel.plot_area.h;
 
     let cf = color_field(ctx, spec);
@@ -152,7 +158,15 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let cy_top = cy + yo;
             top.push((cx, cy_top));
             row_indices.push(i);
-            if let Some(ref bases) = stack_bases {
+            if let Some(ref y2s) = y2s_opt {
+                // y2 band: bottom edge comes from the y2 column.
+                let by = y2s.get(i)
+                    .and_then(|v| *v)
+                    .filter(|v| v.is_finite())
+                    .and_then(|v| ctx.scales.y.to_pixel_f64(v))
+                    .unwrap_or(baseline_y);
+                bottom.push((cx, by + yo));
+            } else if let Some(ref bases) = stack_bases {
                 let base_y = bases.get(i)
                     .and_then(|v| *v)
                     .and_then(|b| ctx.scales.y.to_pixel_f64(b))
@@ -175,7 +189,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .map(|v| v.clamp(0.0, 1.0))
             .unwrap_or(1.0);
 
-        let cmds = if is_stacked {
+        let cmds = if is_stacked || has_y2 {
             build_stacked_area_cmds(&top, &bottom, interpolate)
         } else {
             build_area_cmds(&top, baseline_y, interpolate)
@@ -239,13 +253,17 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 closed: false,
             });
 
-            // Bottom edge: horizontal line at baseline level.
-            let x0 = top[0].0;
-            let x_last = top[top.len() - 1].0;
-            let bottom_cmds = vec![
-                ferrum_scene::PathCmd::MoveTo { x: x0, y: baseline_y },
-                ferrum_scene::PathCmd::LineTo { x: x_last, y: baseline_y },
-            ];
+            // Bottom edge: trace the y2 edge when bound, else flat baseline.
+            let bottom_cmds = if has_y2 && !bottom.is_empty() {
+                build_top_line_cmds(&bottom, interpolate)
+            } else {
+                let x0 = top[0].0;
+                let x_last = top[top.len() - 1].0;
+                vec![
+                    ferrum_scene::PathCmd::MoveTo { x: x0, y: baseline_y },
+                    ferrum_scene::PathCmd::LineTo { x: x_last, y: baseline_y },
+                ]
+            };
             nodes.push(ferrum_scene::SceneNode::Path {
                 commands: bottom_cmds,
                 style: border_style,
@@ -348,5 +366,95 @@ mod tests {
             }
         });
         assert!(has_translucent, "expected area path with translucent fill");
+    }
+
+    /// D3: mark_area with y + y2 must produce a band polygon, not a baseline fill.
+    #[test]
+    fn area_y2_forms_band_not_baseline_fill() {
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+
+        let spec_with_y2 = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "lo".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "hi".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                color: None,
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None,
+            position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+        };
+        let spec_no_y2 = ChartSpec {
+            encoding: Encoding {
+                y2: None,
+                ..spec_with_y2.encoding.clone()
+            },
+            ..spec_with_y2.clone()
+        };
+
+        // lo=[2,3,4,3], hi=[5,6,7,6]: band area.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",  DataType::Float64, false),
+            Field::new("lo", DataType::Float64, false),
+            Field::new("hi", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![2.0, 3.0, 4.0, 3.0])),
+            Arc::new(Float64Array::from(vec![5.0, 6.0, 7.0, 6.0])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None,
+        };
+
+        let (scales_y2, _) = resolve_scales(&spec_with_y2, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Area);
+
+        let ctx_y2 = DrawCtx {
+            spec: &spec_with_y2, panel: &panel, theme: &theme,
+            scales: &scales_y2, batch: &batch, mark_style: &mark_style,
+        };
+        let result_y2 = super::build(&ctx_y2);
+
+        let (scales_no_y2, _) = resolve_scales(&spec_no_y2, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let ctx_no_y2 = DrawCtx {
+            spec: &spec_no_y2, panel: &panel, theme: &theme,
+            scales: &scales_no_y2, batch: &batch, mark_style: &mark_style,
+        };
+        let result_no_y2 = super::build(&ctx_no_y2);
+
+        // Both renders must produce at least one closed path.
+        let path_y2 = result_y2.nodes.iter().find_map(|n| {
+            if let SceneNode::Path { commands, closed: true, .. } = n { Some(commands.clone()) } else { None }
+        }).expect("y2 area must emit a closed path");
+        let path_no_y2 = result_no_y2.nodes.iter().find_map(|n| {
+            if let SceneNode::Path { commands, closed: true, .. } = n { Some(commands.clone()) } else { None }
+        }).expect("no-y2 area must emit a closed path");
+
+        // The two paths must differ: y2 changes the shape structurally.
+        assert_ne!(path_y2, path_no_y2,
+            "mark_area with y2 must produce a different path than without y2");
+
+        // The band area path should NOT contain the axis baseline (y=100.0) as a
+        // coordinate — it closes along the hi edge, not the baseline.
+        let baseline_pixel = 100.0_f64;
+        let has_baseline = path_y2.iter().any(|cmd| {
+            let y = match cmd {
+                ferrum_scene::PathCmd::MoveTo { y, .. } => *y,
+                ferrum_scene::PathCmd::LineTo { y, .. } => *y,
+                _ => return false,
+            };
+            (y - baseline_pixel).abs() <= 2.0
+        });
+        assert!(!has_baseline,
+            "area band path must not include the axis baseline pixel {baseline_pixel}; path={path_y2:?}");
     }
 }

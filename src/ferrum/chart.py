@@ -459,6 +459,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         "_structural",  # list — accumulated structural features (SecondaryY, BreakAxis, Inset)
         "_overrides",  # dict — spec-path override kwargs
         "_annotation_primitive",  # optional annotation primitive for annotate_* helpers
+        "_mark_zero",  # bool — False when mark_bar(zero=False) suppresses the y zero-anchor
     )
 
     def __init__(
@@ -504,6 +505,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         self._structural: list = []
         self._overrides: dict = {}
         self._annotation_primitive = None
+        self._mark_zero: bool = True
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -790,6 +792,9 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         # S4: orient="horizontal" → coord flip (consumed Python-side).
         if m.orient_coord_flip():
             new._coord = "flip"
+        # D3: zero=False suppresses the bar y-scale zero-anchor injection.
+        # Consumed Python-side; not forwarded to the Rust renderer.
+        new._mark_zero = m.zero_anchor()
         return new
 
     def _set_composite_mark(
@@ -2635,7 +2640,15 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             # start at zero unless the caller explicitly sets domain or
             # zero on their Y() channel.  The injected scale must carry
             # `type` because Rust's ScaleSpec is a tagged enum.
-            if axis == "y" and resolved._mark == "bar":
+            #
+            # D3: suppress the injection when the caller passed zero=False OR
+            # when y2 is bound (the bar extent is taken literally from [y, y2]
+            # and force-anchoring to zero would distort the domain).
+            # x2 only affects the horizontal bin width of histograms; it must
+            # NOT suppress the y zero-anchor.
+            _y2_bound = "y2" in enc
+            _zero_anchor_wanted = getattr(resolved, "_mark_zero", True) and not _y2_bound
+            if axis == "y" and resolved._mark == "bar" and _zero_anchor_wanted:
                 scale = d.get("scale") or {}
                 if "domain" not in scale and "zero" not in scale:
                     d["scale"] = {"type": scale.get("type", "linear"), **scale, "zero": True}

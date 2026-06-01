@@ -76,6 +76,7 @@ _VALID_MARK_KWARGS = frozenset(
         "multiple",  # density/histogram
         "blend",  # layer blend mode ("normal", "additive")
         "leader_line",  # label: draw thin leader line from data point to label
+        "zero",  # mark_bar: suppress the y-scale zero-anchor (zero=False)
     ]
 )
 
@@ -214,6 +215,27 @@ class MarkBase:
         # S4: orient="horizontal" → consumed Python-side; set coord flip flag.
         # The caller (_set_mark) reads this via orient_coord_flip().
         return out
+
+    def zero_anchor(self) -> bool:
+        """Return the effective value of the ``zero=`` parameter (default ``True``).
+
+        Used by ``Chart._set_mark`` to store the zero-anchor preference on the
+        chart so ``_build_encoding_specs`` can suppress the ``scale.zero=True``
+        injection when the caller passes ``zero=False``.
+
+        Returns
+        -------
+        bool
+            ``False`` when ``zero=False`` was explicitly passed; ``True`` otherwise.
+
+        Examples
+        --------
+        >>> MarkBase("bar", zero=False).zero_anchor()
+        False
+        >>> MarkBase("bar").zero_anchor()
+        True
+        """
+        return bool(self._kwargs.get("zero", True))
 
     def orient_coord_flip(self) -> bool:
         """Return True if ``orient="horizontal"`` was passed, indicating coord flip.
