@@ -89,6 +89,7 @@ Scratch convention: each agent works in `/tmp/ferrum-ux-audit/<slug>/` and write
 **Targets:**
 - Tooltips on a scatter showing multiple fields on hover — verify the tooltip data is actually in the export.
 - Interval brush on one panel that filters/highlights a second linked panel (linked brushing / crossfilter): `selection_interval` + `transform_filter`.
+- Range selector / overview+detail (focus+context): a small overview panel showing the full series with a draggable, resizable brush window, plus a large detail panel that zooms to the brushed range. Tests whether a selection can drive another panel's *scale domain* (reactive rescaling), not just filter or highlight rows — distinct from the crossfilter target above. Verify the emitted HTML actually wires the brush extent to the detail panel's domain.
 - Interactive legend toggling series visibility on click (`selection_point` bound to a legend).
 - Pan/zoom on a scatter (`.interactive()`); a conditional encoding that grays out unselected points.
 - Dashboard combining 2+ linked interactive charts exported to a single self-contained HTML file; inspect file size and whether data/WASM embed correctly.
