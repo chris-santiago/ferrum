@@ -2,7 +2,7 @@
 
 Well-known chart designs from the matplotlib, seaborn, Altair, and D3 traditions — built in Ferrum's Rust engine. Every image below was produced entirely in Python using Ferrum's grammar-of-graphics API; no matplotlib, no browser, no external renderer. These designs lean on Ferrum features like categorical color ranges, temporal axis auto-inference, size and shape legends, stroke routing on line marks, sort specs, and annotation date coordinates.
 
-Each card shows the concise API call alongside the rendered output.
+Where the [Gallery](index.md) catalogs each individual mark and helper, the Showcase assembles those primitives into complete, recognizable chart designs. Each card shows the concise API call alongside the rendered output.
 
 ---
 
@@ -82,65 +82,15 @@ Sorted layouts for ranked comparisons — sorted along the axis, not alphabetica
 
     Lollipop composition: a `mark_rule` stem anchored to zero plus a `mark_point` dot. Category order is explicit via `OrdinalScale(domain=sorted_domain)`.
 
--   **Stacked Bar**
-
-    ---
-
-    ![showcase_stacked_bar](showcase_img/showcase_stacked_bar.png)
-
-    `fm.Chart(df).mark_bar(position=fm.Stack()).encode(x="quarter", y="share", color=fm.Color("segment", scale=fm.OrdinalScale(domain=segments, range=colors)))`
-
-    A four-color categorical range maps segment names to a monochromatic blue progression. `position=fm.Stack()` handles the cumulative offset.
-
 </div>
 
 ---
 
-## Matrix and field
+## Small multiples
 
-Dense data structures — correlations, bivariate density — rendered as color-mapped fields.
-
-<div class="grid cards" markdown>
-
--   **Correlation Heatmap**
-
-    ---
-
-    ![showcase_correlation_heatmap](showcase_img/showcase_correlation_heatmap.png)
-
-    `fm.heatmap(df_wide, cmap="rdbu", center=0, annot=True)`
-
-    The `fm.heatmap()` helper accepts wide-format DataFrames, unpivots them internally, and applies a diverging color scheme. `center=0` anchors the midpoint; values are annotated in each cell.
-
--   **Bivariate Density (Hexbin)**
-
-    ---
-
-    ![showcase_hexbin](showcase_img/showcase_hexbin.png)
-
-    `fm.Chart(df).mark_hex().encode(x="x", y="y")`
-
-    800 bivariate observations collapsed into hex bins. The count-based sequential colormap reveals the correlation structure without overplotting.
-
-</div>
-
----
-
-## Distributions
-
-Shape-first views of one or more distributions.
+Faceted panels with shared scales and consistent encodings across categories.
 
 <div class="grid cards" markdown>
-
--   **Grouped KDE Density**
-
-    ---
-
-    ![showcase_ridgeline](showcase_img/showcase_ridgeline.png)
-
-    `fm.Chart(df).mark_density(groupby="group").encode(x="value", color=fm.Color("group"))`
-
-    `groupby=` on `mark_density` computes a per-group KDE. Four conditions with different means and spreads are directly comparable as overlapping filled areas.
 
 -   **Faceted Small Multiples**
 

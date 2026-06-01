@@ -1,6 +1,6 @@
 # Gallery
 
-A visual tour of Ferrum's chart surface. Every image below was rendered by Ferrum's Rust engine — no matplotlib, no browser, no external renderer. Each card includes the API call so you can reproduce it with your own data. Where both exist, *helper* shows the one-line shortcut and *grammar* shows the underlying mark + encode call — both produce the same chart.
+A visual tour of Ferrum's chart surface. Every image below was rendered by Ferrum's Rust engine — no matplotlib, no browser, no external renderer. Each card includes the API call so you can reproduce it with your own data. Where both exist, *helper* shows the one-line shortcut and *grammar* shows the underlying mark + encode call — both produce the same chart. Each card here is a single mark, helper, or diagnostic; for complete chart designs that compose several of them, see the [Showcase](showcase.md).
 
 ## Primitive marks
 
