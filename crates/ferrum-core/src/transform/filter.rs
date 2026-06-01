@@ -17,6 +17,12 @@ pub(crate) struct FilterSpec {
     pub predicate: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
+    /// Crossfilter reference (D6): names a selection parameter whose live extent
+    /// filters this layer's rows in WASM. Inert in the static renderer — a param
+    /// filter carries `predicate: "true"`, so `apply()` keeps every row (the
+    /// correct static semantics for an empty selection).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub param: Option<String>,
 }
 
 pub(crate) fn apply(spec: &FilterSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -144,7 +150,7 @@ impl PyDataFilter {
         if predicate.is_empty() {
             return Err(PyValueError::new_err("DataFilter: predicate must be non-empty"));
         }
-        Ok(PyDataFilter(TransformSpec::Filter(FilterSpec { predicate, name })))
+        Ok(PyDataFilter(TransformSpec::Filter(FilterSpec { predicate, name, param: None })))
     }
 
     fn __repr__(&self) -> String {
@@ -183,6 +189,7 @@ mod tests {
         let spec = FilterSpec {
             predicate: "datum.x > 3".into(),
             name: None,
+            param: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 2);
@@ -197,6 +204,7 @@ mod tests {
         let spec = FilterSpec {
             predicate: "datum.x >= 2 && datum.y <= 30".into(),
             name: None,
+            param: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 2);
@@ -211,9 +219,48 @@ mod tests {
         let spec = FilterSpec {
             predicate: "datum.x > 100".into(),
             name: None,
+            param: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 0);
+    }
+
+    #[test]
+    fn filter_with_param_round_trips() {
+        let spec = FilterSpec {
+            predicate: "true".into(),
+            name: None,
+            param: Some("brush".into()),
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert_eq!(json, r#"{"predicate":"true","param":"brush"}"#);
+        let parsed: FilterSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn filter_without_param_omits_key() {
+        let spec = FilterSpec {
+            predicate: "datum.x > 3".into(),
+            name: None,
+            param: None,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert_eq!(json, r#"{"predicate":"datum.x > 3"}"#);
+        assert!(!json.contains("param"));
+    }
+
+    #[test]
+    fn filter_param_is_inert_statically() {
+        // A param filter carries `predicate: "true"` → apply keeps all rows.
+        let batch = make_batch();
+        let spec = FilterSpec {
+            predicate: "true".into(),
+            name: None,
+            param: Some("brush".into()),
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), batch.num_rows());
     }
 
     #[test]
@@ -222,6 +269,7 @@ mod tests {
         let spec = FilterSpec {
             predicate: "invalid!!!".into(),
             name: None,
+            param: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
         assert!(err.to_string().contains("data_filter"));

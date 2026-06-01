@@ -928,6 +928,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            params: Vec::new(),
         };
 
         let result = axis_batch_for_y(&spec, "y", &batch);

@@ -83,7 +83,8 @@ Carried as a **sibling** of `domain` inside the scale dict, NOT by retyping `dom
 ```
 
 - **Python:** when `scale={"domain": <Parameter>}`, emit `domainParam: param.name`, drop the literal `domain`. (`_scale_to_dict` / encoding scale build.)
-- **Rust:** add `#[serde(rename = "domainParam", default, skip_serializing_if = "Option::is_none")] pub domain_param: Option<String>` to `ContinuousScaleCommon` and the ordinal/band/point common. Static resolver: before scale resolution (scene_build.rs), if `domain_param` set and the `ParamStore` yields an array value → set `domain = Some(value)`; else leave `domain = None` (auto-infer from data — the correct static semantics for an empty selection).
+- **Rust:** add `#[serde(rename = "domainParam", default, skip_serializing_if = "Option::is_none")] pub domain_param: Option<String>` to `ContinuousScaleCommon` (the 7 continuous variants Linear/Log/Time/Symlog/Pow/Sqrt/Utc — these are the overview+detail reactive-rescale case in §9). Static resolver: before scale resolution (scene_build.rs), if `domain_param` set and the `ParamStore` yields a numeric array value → set `domain = Some(value)`; else leave `domain = None` (auto-infer from data — the correct static semantics for an empty selection).
+- **Scope note:** ordinal/band/point/sequential/diverging domain-params (categorical reactive rescale) are NOT a §9 acceptance item and are a recorded follow-up, not part of D6. The `ScaleSpec` enum has no shared ordinal common; adding `domainParam` to each categorical variant is deferred.
 
 ### 4b. `transform_filter(param)` → crossfilter
 Keep `predicate` **required** (no Optional ripple). A param filter emits a pass-through predicate plus a marker:
@@ -95,14 +96,8 @@ Keep `predicate` **required** (no Optional ripple). A param filter emits a pass-
 - **Python:** `transform_filter` accepts a `Parameter`; emits `{"type":"filter","predicate":"true","param":param.name}`.
 - **Rust:** `FilterSpec` gains `#[serde(default, skip_serializing_if = "Option::is_none")] pub param: Option<String>`. Static `apply()` ignores `param` and runs `predicate` ("true" → keeps all rows: correct static semantics). WASM reads `param` to crossfilter live.
 
-### 4c. `value = param` / conditional value → `{"kind":"param","name":"…"}`
-`fm.value(param)` and conditional then/otherwise values that are parameters serialize as a new EncodingValue wire variant:
-
-```json
-{"kind": "param", "name": "thresh"}
-```
-
-- **Rust (`ferrum-scene` `EncodingValue`):** add `Param { name: String }` variant. Static resolver substitutes the param's initial value (variable → its `value`, coerced to the channel's value kind; selection → inert/default). WASM evaluates live.
+### 4c. `value = param` — DEFERRED follow-up (NOT in D6)
+A parameter bound to a standalone constant encoding (`encode(size=fm.value(param))`) would require a value-only (datum-free constant) encoding channel, which ferrum has never had — `fm.value(...)` is consumed only inside conditionals today. No §9 acceptance criterion needs it: "a variable parameter drives an encoding" (§9 #4) is satisfied by `scale.domainParam` with a variable array value (the slider sets the domain → drives the mapping → static uses the initial value). Building a constant-value channel + an `EncodingValue::Param` wire variant (which would force non-exhaustive-match churn across ferrum-core and ferrum-wasm) is out of D6 scope and is recorded in the code-archaeology doc as a follow-up. `fm.value(...)` keeps its current literal-only behavior.
 
 ### 4d. conditional test on a parameter — `fm.when(...).then(...).otherwise(...)`
 New module-level builder in `selection.py` (or `parameter.py`), additive to the existing `Selection.when(if_encoding).otherwise(else_encoding)`:
@@ -120,11 +115,11 @@ Produces a `ConditionalSpec(selection_name=param.name, if_selected=value(v_if), 
 
 | Reference | Static resolution |
 |---|---|
-| `domainParam` → variable (array value) | use the array as the scale domain |
+| `domainParam` → variable (numeric array value) | use the array as the scale domain |
 | `domainParam` → selection (empty) | `domain = None` → auto-infer from data |
 | `filter` `param` | ignore marker; run `predicate:"true"` → keep all rows |
-| `EncodingValue::Param` → variable | substitute the variable's initial value |
-| `EncodingValue::Param` → selection | inert (default channel value) |
+
+Conditionals are interactive-only (the static SVG path does not apply them), so the static resolver's sole job is `domainParam` substitution; the filter `param` marker is inert statically because its predicate is already `"true"`.
 
 A spec with empty `params` and no markers takes every existing code path unchanged → byte-identical output. **This is the gate**: param-free goldens must not move.
 

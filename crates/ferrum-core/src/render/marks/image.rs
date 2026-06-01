@@ -322,6 +322,7 @@ mod tests {
             common: crate::spec::encoding::ContinuousScaleCommon {
                 domain: Some(vec![x_domain.0, x_domain.1]),
                 range: None, clamp: false, padding: None, scheme: None,
+                domain_param: None,
             },
             nice: false, zero: false,
         };
@@ -329,6 +330,7 @@ mod tests {
             common: crate::spec::encoding::ContinuousScaleCommon {
                 domain: Some(vec![y_domain.0, y_domain.1]),
                 range: None, clamp: false, padding: None, scheme: None,
+                domain_param: None,
             },
             nice: false, zero: false,
         };
@@ -357,6 +359,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         }
     }
 
@@ -366,6 +369,7 @@ mod tests {
             common: crate::spec::encoding::ContinuousScaleCommon {
                 domain: Some(vec![x_domain.0, x_domain.1]),
                 range: None, clamp: false, padding: None, scheme: None,
+                domain_param: None,
             },
             nice: false, zero: false,
         };
@@ -373,6 +377,7 @@ mod tests {
             common: crate::spec::encoding::ContinuousScaleCommon {
                 domain: Some(vec![y_domain.0, y_domain.1]),
                 range: None, clamp: false, padding: None, scheme: None,
+                domain_param: None,
             },
             nice: false, zero: false,
         };
@@ -405,6 +410,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         }
     }
 

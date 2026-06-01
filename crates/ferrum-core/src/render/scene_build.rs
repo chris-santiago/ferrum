@@ -106,10 +106,13 @@ pub fn build_scene(
         // Encoding merge
         let mut merged_encoding = spec.encoding.clone();
         merged_encoding.overlay_from(&prep.layers[0].encoding);
-        let rendering_spec_for_panel = ChartSpec {
+        let mut rendering_spec_for_panel = ChartSpec {
             encoding: merged_encoding,
             ..spec.clone()
         };
+        // Reactive-rescale substitution (D6): turn `domainParam` references into
+        // concrete domains before scale resolution. No-op when `params` is empty.
+        resolve_param_domains(&mut rendering_spec_for_panel);
 
         // Scale resolution
         let (mut scales, scale_warnings) = scale_resolve::resolve_scales_with_outputs(
@@ -541,6 +544,45 @@ pub fn build_scene(
     })
 }
 
+/// Static reactive-rescale substitution (D6).
+///
+/// Walks the spec's continuous positional/color/size/opacity scales; for each
+/// one carrying a `domainParam` reference, substitutes the named variable's
+/// static numeric-array value as the concrete `domain` (and clears the
+/// reference). A reference to a selection (or a non-numeric variable) leaves
+/// `domain = None`, so the renderer auto-infers from data — the correct static
+/// semantics for an empty selection.
+///
+/// No-op when `spec.params` is empty (the byte-stability gate): the early return
+/// keeps param-free specs on the exact pre-D6 code path.
+fn resolve_param_domains(spec: &mut ChartSpec) {
+    if spec.params.is_empty() {
+        return;
+    }
+    let store = crate::spec::parameter::ParamStore::new(&spec.params);
+    if store.is_empty() {
+        return;
+    }
+    let enc = &mut spec.encoding;
+    for channel in [
+        enc.x.as_mut(),
+        enc.y.as_mut(),
+        enc.color.as_mut(),
+        enc.size.as_mut(),
+        enc.opacity.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let Some(scale) = channel.scale.as_mut() else { continue };
+        let Some(name) = scale.domain_param().map(str::to_owned) else { continue };
+        if let Some(domain) = store.numeric_domain(&name) {
+            scale.set_domain(domain);
+        }
+        // else: leave domain = None → auto-infer (empty-selection semantics).
+    }
+}
+
 fn build_title(
     layout: &LayoutResult,
     spec: &ChartSpec,
@@ -602,10 +644,11 @@ fn build_legend_decorations(
     if layout.legend.is_none() && layout.aux_legends.is_empty() {
         return Ok(());
     }
-    let rendering_spec_for_legend = ChartSpec {
+    let mut rendering_spec_for_legend = ChartSpec {
         encoding: prep.layers[0].encoding.clone(),
         ..spec.clone()
     };
+    resolve_param_domains(&mut rendering_spec_for_legend);
     let mut color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
         let (gs, _) = scale_resolve::resolve_scales_with_outputs(
             &rendering_spec_for_legend,
@@ -1530,5 +1573,117 @@ mod tests {
             }
             other => panic!("expected Path node, got {other:?}"),
         }
+    }
+
+    // ── D6 reactive-rescale static resolver ──────────────────────────────
+
+    use crate::spec::encoding::{ContinuousScaleCommon, EncodingSpec, ScaleSpec};
+    use crate::spec::mark::Mark;
+    use crate::spec::parameter::{ParamKind, ParameterSpec};
+
+    fn linear_domain_param(name: &str) -> ScaleSpec {
+        ScaleSpec::Linear {
+            common: ContinuousScaleCommon {
+                domain: None,
+                range: None,
+                clamp: false,
+                padding: None,
+                scheme: None,
+                domain_param: Some(name.to_string()),
+            },
+            nice: false,
+            zero: false,
+        }
+    }
+
+    fn spec_with_x_domain_param(params: Vec<ParameterSpec>) -> ChartSpec {
+        let mut spec = ChartSpec {
+            data: crate::spec::data_ref::DataRef::default(),
+            mark: Mark::Point,
+            encoding: crate::spec::encoding::Encoding {
+                x: Some(EncodingSpec {
+                    field: "v".into(),
+                    scale: Some(linear_domain_param("d")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        spec.params = params;
+        spec
+    }
+
+    fn x_domain(spec: &ChartSpec) -> Option<Vec<f64>> {
+        match spec.encoding.x.as_ref()?.scale.as_ref()? {
+            ScaleSpec::Linear { common, .. } => common.domain.clone(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn resolve_param_domains_substitutes_variable_array() {
+        let mut spec = spec_with_x_domain_param(vec![ParameterSpec {
+            name: "d".into(),
+            kind: ParamKind::Variable,
+            value: Some(serde_json::json!([10, 20])),
+            bind: None,
+            select: None,
+        }]);
+        resolve_param_domains(&mut spec);
+        assert_eq!(x_domain(&spec), Some(vec![10.0, 20.0]));
+        // domain_param cleared after substitution.
+        assert_eq!(spec.encoding.x.unwrap().scale.unwrap().domain_param(), None);
+    }
+
+    #[test]
+    fn resolve_param_domains_no_matching_param_leaves_auto() {
+        // domainParam "d" referenced, but no such param declared → domain stays
+        // None (auto-infer), and the reference is left in place.
+        let mut spec = spec_with_x_domain_param(vec![ParameterSpec {
+            name: "other".into(),
+            kind: ParamKind::Variable,
+            value: Some(serde_json::json!([1, 2])),
+            bind: None,
+            select: None,
+        }]);
+        resolve_param_domains(&mut spec);
+        assert_eq!(x_domain(&spec), None);
+    }
+
+    #[test]
+    fn resolve_param_domains_selection_leaves_auto() {
+        // A selection (interval) yields no static numeric domain → auto-infer.
+        let mut spec = spec_with_x_domain_param(vec![ParameterSpec {
+            name: "d".into(),
+            kind: ParamKind::Interval,
+            value: None,
+            bind: None,
+            select: None,
+        }]);
+        resolve_param_domains(&mut spec);
+        assert_eq!(x_domain(&spec), None);
+    }
+
+    #[test]
+    fn resolve_param_domains_noop_when_no_params() {
+        // The byte-stability gate: empty params → spec unchanged.
+        let mut spec = spec_with_x_domain_param(Vec::new());
+        let before = serde_json::to_string(&spec).unwrap();
+        resolve_param_domains(&mut spec);
+        let after = serde_json::to_string(&spec).unwrap();
+        assert_eq!(before, after);
     }
 }

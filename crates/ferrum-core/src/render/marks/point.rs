@@ -495,6 +495,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         }
     }
 
@@ -594,6 +595,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         }
     }
 
@@ -658,6 +660,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         }
     }
 
@@ -716,6 +719,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         }
     }
 
@@ -792,6 +796,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         }
     }
 
@@ -957,6 +962,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("year", DataType::Int64, false),

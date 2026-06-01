@@ -314,6 +314,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         }
     }
 
@@ -388,6 +389,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            params: Vec::new(),
         };
         let spec_no_y2 = ChartSpec {
             encoding: Encoding {

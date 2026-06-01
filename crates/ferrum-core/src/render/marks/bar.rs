@@ -756,6 +756,7 @@ mod tests {
             axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("bin_start", DataType::Float64, false),
@@ -794,6 +795,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, false),
@@ -828,6 +830,7 @@ mod tests {
             axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("v", DataType::Float64, false),
@@ -864,6 +867,7 @@ mod tests {
             axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x0", DataType::Float64, false),
@@ -899,6 +903,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -943,6 +948,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -984,6 +990,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, false),
@@ -1028,6 +1035,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("year", DataType::Int64, false),
@@ -1069,6 +1077,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            params: Vec::new(),
         };
         // lo=[5,7], hi=[10,12]: bars should float entirely above the baseline.
         let schema = Arc::new(Schema::new(vec![
@@ -1124,6 +1133,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            params: Vec::new(),
         };
         // lo=-3, hi=2: bar must span across zero (both sides of baseline).
         let schema = Arc::new(Schema::new(vec![
@@ -1202,6 +1212,7 @@ mod tests {
             axis_x: None, axis_y: None,
             selections: Vec::new(), conditionals: Vec::new(),
             chart_description: None,
+            params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("dir", DataType::Utf8, false),

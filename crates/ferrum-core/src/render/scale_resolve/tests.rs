@@ -46,6 +46,7 @@ fn make_spec_with_color() -> ChartSpec {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     }
 }
 
@@ -131,6 +132,7 @@ fn color_overflow_emits_warning() {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (_, warnings) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -186,6 +188,7 @@ fn make_spec_with_size() -> ChartSpec {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     }
 }
 
@@ -212,6 +215,7 @@ fn make_spec_with_shape() -> ChartSpec {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     }
 }
 
@@ -238,6 +242,7 @@ fn make_spec_with_opacity() -> ChartSpec {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     }
 }
 
@@ -253,6 +258,7 @@ fn explicit_log_scale_overrides_auto_detection() {
             clamp: false,
             padding: None,
             scheme: None,
+            domain_param: None,
         },
         nice: false,
     });
@@ -325,6 +331,7 @@ fn y2_field_extends_y_domain_when_set() {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) =
@@ -378,6 +385,7 @@ fn x2_field_extends_x_domain_when_set() {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) =
@@ -433,6 +441,7 @@ fn resolved_scales_include_x2_y2_field_names_when_set() {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) =
@@ -476,6 +485,7 @@ fn resolved_scales_x2_y2_default_to_none_for_8a_charts() {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) =
@@ -532,6 +542,7 @@ fn single_value_domain_expands_to_symmetric_band() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -575,6 +586,7 @@ fn single_value_zero_domain_expands_to_minus_one_plus_one() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -614,6 +626,7 @@ fn child_scale_type_override_wins_over_parent_auto_detection() {
                     constant: 2.0,
                     common: crate::spec::encoding::ContinuousScaleCommon {
                         domain: None, range: None, clamp: false, padding: None, scheme: None,
+                        domain_param: None,
                     },
                     nice: false,
                 }),
@@ -632,6 +645,7 @@ fn child_scale_type_override_wins_over_parent_auto_detection() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -681,6 +695,7 @@ fn all_null_column_resolves_to_default_domain() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let result = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme);
@@ -729,6 +744,7 @@ fn empty_color_domain_produces_no_color_scale() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let result = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme);
@@ -777,6 +793,7 @@ fn pow_scale_exponent_2_compresses_low_values() {
                         clamp: false,
                         padding: None,
                         scheme: None,
+                        domain_param: None,
                     },
                 }),
                 ..Default::default()
@@ -794,6 +811,7 @@ fn pow_scale_exponent_2_compresses_low_values() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -844,6 +862,7 @@ fn sqrt_scale_expands_low_values() {
                         clamp: false,
                         padding: None,
                         scheme: None,
+                        domain_param: None,
                     },
                 }),
                 ..Default::default()
@@ -861,6 +880,7 @@ fn sqrt_scale_expands_low_values() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -996,6 +1016,7 @@ fn d1_ordinal_color_explicit_string_range_resolves_per_domain() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
 
     let theme = ThemeInputs::default();
@@ -1122,6 +1143,7 @@ fn d1_ordinal_color_named_css_colors_in_range() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
 
     let theme = ThemeInputs::default();
@@ -1219,6 +1241,7 @@ fn d1_declared_domain_overrides_data_appearance_order() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
 
     let theme = ThemeInputs::default();
@@ -1334,6 +1357,7 @@ fn d1_invalid_color_in_range_emits_warning_and_falls_through_to_default_palette(
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
 
     let theme = ThemeInputs::default();
@@ -1419,6 +1443,7 @@ fn d4_linear_scale_scheme_honored_in_continuous_color() {
                             clamp: false,
                             padding: None,
                             scheme: Some(scheme.to_string()),
+                            domain_param: None,
                         },
                         nice: false,
                         zero: false,
@@ -1439,6 +1464,7 @@ fn d4_linear_scale_scheme_honored_in_continuous_color() {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            params: Vec::new(),
         }
     }
 
@@ -1529,6 +1555,7 @@ fn d4_encoding_level_scheme_still_works_for_continuous_color() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -1625,6 +1652,7 @@ fn make_bar_spec_with_sort(sort: serde_json::Value) -> ChartSpec {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     }
 }
 
@@ -1813,6 +1841,7 @@ fn f1_float64_explicit_ordinal_type_resolves_to_ordinal_scale() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
 
     let theme = ThemeInputs::default();
@@ -1885,6 +1914,7 @@ fn f1_float64_ordinal_fractional_values_resolve() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
 
     let theme = ThemeInputs::default();
@@ -1995,6 +2025,7 @@ fn f5_parse_failure_fallback_palette_matches_default_palette() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
 
     let theme = ThemeInputs::default();
@@ -2182,6 +2213,7 @@ fn d2d_independent_resolve_yields_per_panel_domains() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let empty_outputs: HashMap<String, RecordBatch> = HashMap::new();
