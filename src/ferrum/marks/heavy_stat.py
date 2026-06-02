@@ -30,11 +30,12 @@ def desugar_contour(
     smooth: bool = True,
     fill: bool = True,
     cmap: str | None = None,
+    groupby: str | None = None,
 ) -> "MarkDesugarResult":
     """Bivariate-density contour mark desugar.
 
     Converts ``chart.mark_contour(...)`` into a ``Kde2D`` → ``Contour``
-    transform chain plus a polygon layer.  Also used by
+    transform chain plus a polygon or segment layer.  Also used by
     ``desugar_density`` when both x and y encodings are present.
 
     Data contract
@@ -42,16 +43,28 @@ def desugar_contour(
     Input: DataFrame with numeric columns ``x_field`` and ``y_field``.
 
     ``Kde2D`` (unnamed — advances the chain) estimates a 2D kernel-density
-    surface on a 128×128 grid.
+    surface on a 128×128 grid.  When ``groupby`` is set, one surface is
+    emitted per group and a trailing Utf8 group column is appended.
 
     ``Contour`` (named ``"contour"``) traces iso-density curves on that
     surface and produces:
     ``[level_id (UInt32), contour_x (Float64), contour_y (Float64)]``
+    plus the trailing group column when the input was grouped.
 
-    Layers emitted
-    --------------
+    Layers emitted (no groupby)
+    ---------------------------
     1. ``polygon`` — ``x="contour_x"``, ``y="contour_y"``,
-       ``mark_kwargs={"cmap": cmap, "detail": "level_id"}``.
+       ``color="level_value"``, ``mark_kwargs={"cmap": cmap, "detail": "level_id"}``.
+
+    Layers emitted (with groupby)
+    -----------------------------
+    1. ``segment`` — ``x="contour_x"``, ``y="contour_y"``,
+       ``x2="contour_x2"``, ``y2="contour_y2"``, ``color=groupby``.
+       Isoline segments are used for grouped contours because the isoband
+       ``level_id`` encoding is not globally unique across groups; polygon
+       grouping by ``level_id`` would merge polygons from different groups
+       into incorrect shapes.  Segment marks are per-row and color each
+       group's contour lines categorically — each group is visually distinct.
 
     Parameters
     ----------
@@ -67,14 +80,20 @@ def desugar_contour(
         Whether to smooth the KDE grid before contouring.
     fill : bool, default False
         Whether the contour polygons are filled (passed to ``Contour``).
+        Ignored when ``groupby`` is set — grouped contours always use
+        isoline (segment) mode to avoid cross-group polygon merging.
     cmap : str or None, default None
         Colormap name applied to the polygon layer.  ``None`` defers to the
-        theme's sequential scheme.
+        theme's sequential scheme.  Ignored when ``groupby`` is set.
+    groupby : str or None, default None
+        Group column (Utf8). When set, ``Kde2D`` computes one surface per
+        group and ``Contour`` propagates the group column.  The layer
+        uses segment marks and colors by the group field so each group's
+        contour lines are a distinct categorical color.
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", transforms, None, None, layers)``.
+    MarkDesugarResult
 
     Raises
     ------
@@ -84,27 +103,57 @@ def desugar_contour(
     Examples
     --------
     >>> result = desugar_contour("x", "y")
-    >>> result[0]
-    '__layered__'
-    >>> result[4][0]["mark"]
+    >>> result.layers[0].mark
     'polygon'
+    >>> result_grouped = desugar_contour("x", "y", groupby="g")
+    >>> result_grouped.layers[0].mark
+    'segment'
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_contour() requires .encode(x=..., y=...)")
     # Kde2D is UNNAMED so it advances the chain (current → Kde2D output);
     # Contour then runs on the chained Kde2D output. Contour is named so the
     # downstream layer can route through data_source="contour".
+    kde_kwargs: dict = dict(x=x_field, y=y_field, bandwidth=bandwidth, n=128)
+    if groupby is not None:
+        kde_kwargs["groupby"] = groupby
     transforms = [
-        Kde2D(x=x_field, y=y_field, bandwidth=bandwidth, n=128),
-        Contour(thresholds=thresholds, fill=fill, smooth=smooth, name="contour"),
+        Kde2D(**kde_kwargs),
+        Contour(
+            thresholds=thresholds,
+            fill=False if groupby is not None else fill,
+            smooth=smooth,
+            name="contour",
+        ),
     ]
     from ferrum.encoding import X, Y
 
-    if fill:
+    if groupby is not None:
+        # Grouped contour: use isoline (segment) mode so each row is an
+        # independent line segment — no polygon grouping needed, no cross-group
+        # level_id collision.  Color by the group column for categorical hue.
+        # The Contour transform outputs isoline columns:
+        #   level_id, level_value, contour_x, contour_y, contour_x2, contour_y2, <groupby>
+        layers = [
+            _Layer(
+                name="segment",
+                mark="segment",
+                encoding={
+                    "x": X("contour_x", title=x_field),
+                    "y": Y("contour_y", title=y_field),
+                    "x2": "contour_x2",
+                    "y2": "contour_y2",
+                    "color": groupby,
+                },
+                mark_kwargs=None,
+                data_source="contour",
+            )
+        ]
+    elif fill:
         # Isoband mode: Contour emits polygon vertex rows (x, y per vertex).
         # Use polygon mark grouped by level_id; color by level_value so each
         # density band gets a distinct fill from the sequential colormap.
-        mk: dict = {"detail": "level_id"}
+        mk = {"detail": "level_id"}
         if cmap is not None:
             mk["cmap"] = cmap
         layers = [

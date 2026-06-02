@@ -952,7 +952,14 @@ def jointplot(
     if kind == "scatter":
         center = Chart(data).mark_point(**jk).encode(**enc_center)
     elif kind == "kde":
-        center = Chart(data).mark_density(**jk).encode(**enc_center)
+        # When hue is set, thread it as groupby so the bivariate KDE splits per
+        # group. desugar_density routes groupby into desugar_contour on the 2D
+        # path, which configures Kde2D(groupby=hue) and produces per-group
+        # isoline contours colored by the group field.
+        kde_jk = dict(jk)
+        if hue is not None:
+            kde_jk["groupby"] = hue
+        center = Chart(data).mark_density(**kde_jk).encode(**enc_center)
     elif kind == "hist":
         # Use Bin2D + mark_rect for 2D histogram.
         bin2d_kwargs: dict = {}
