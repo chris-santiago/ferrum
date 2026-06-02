@@ -2230,11 +2230,23 @@ def _expand_layers(c) -> tuple[list, list]:
     Transforms are returned as plain PyO3 objects.  The named-transform path
     (routing a layer's output to a specific ``data_source``) is handled in
     ``__add__`` when the LHS chart has no transforms and the RHS does.
+
+    Encoding-implicit ``_PendingAggregate`` sentinels (added to ``c._transforms``
+    by ``encode()`` for channels like ``Y("v", aggregate="mean")``) are excluded
+    from the returned top-level transforms.  In a layered chart each layer
+    aggregates its own data independently; ``Chart.to_spec`` rebuilds these
+    aggregates per-layer from each layer's encoding via
+    ``_resolve_layer_aggregates``.  Leaving them at the chart top level would
+    aggregate the merged batch once with the wrong (single-layer) groupby.
     """
     from ferrum._layer import _Layer
+    from ferrum.encoding.base import _PendingAggregate
+
+    def _top_transforms(chart) -> list:
+        return [t for t in (chart._transforms or []) if not isinstance(t, _PendingAggregate)]
 
     if c._layers is not None:
-        return list(c._layers), list(c._transforms or [])
+        return list(c._layers), _top_transforms(c)
     return [
         _Layer(
             mark=c._mark,
@@ -2243,7 +2255,7 @@ def _expand_layers(c) -> tuple[list, list]:
             mark_kwargs=dict(c._mark_kwargs) if c._mark_kwargs else None,
             position=c._position,
         )
-    ], list(c._transforms or [])
+    ], _top_transforms(c)
 
 
 def _merge_top_transforms(new, rhs_top_xforms: list) -> None:
