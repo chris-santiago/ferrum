@@ -354,9 +354,16 @@ pub fn build_scene(
             let mut result = draw::dispatch_mark_build(&layer.mark, &ctx);
 
             // For CoordPolar, transform all mark nodes from Cartesian pixel
-            // space to polar pixel space (arc marks handle their own transform).
+            // space to polar pixel space. Arc marks (Mark::Arc) handle their
+            // own polar geometry and must not be transformed again.  Bars under
+            // CoordPolar route through `build_polar`, which also generates
+            // arc-geometry nodes (MarkBatchKind::Arc) in polar space — those
+            // must likewise be excluded from the transform, or the wedge
+            // coordinates are corrupted by a second polar projection.
+            let is_arc_geometry = matches!(result.kind, ferrum_scene::MarkBatchKind::Arc);
             if matches!(&spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. }))
                 && !matches!(layer.mark, crate::spec::mark::Mark::Arc)
+                && !is_arc_geometry
             {
                 apply_polar_node_transform(&mut result.nodes, &panel.plot_area);
             }

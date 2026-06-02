@@ -1271,4 +1271,203 @@ mod tests {
         assert!(sorted.iter().any(|(inner, _)| *inner > 1.0),
             "stacked segments must accumulate outward (non-zero inner radii)");
     }
+
+    /// FA-2: 2-category polar bar must produce 2 wedges whose angular sweeps
+    /// sum to ~2π (full circle) and each wedge spans exactly π (180°).
+    ///
+    /// The double-transform bug caused arc paths to be mispositioned (their
+    /// start/end points were NOT on the circle of the stated A-radius) and
+    /// their sweeps were ~60° instead of 180°. This test verifies the geometry
+    /// directly from the Path arc commands.
+    #[test]
+    fn polar_bar_two_cats_equal_angular_bands() {
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
+        use ferrum_scene::{PathCmd, PolarDirection};
+        use std::f64::consts::PI;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: Some(SpecCoord::Polar {
+                theta: PolarThetaChannel::X,
+                start_angle: 0.0,
+                inner_radius: 0.0,
+                outer_radius: Some(100.0),
+                pad_angle: 0.0,
+                direction: PolarDirection::Clockwise,
+            }),
+            mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["A", "B"])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 20.0], vec![300.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let paths: Vec<&SceneNode> = result.nodes.iter()
+            .filter(|n| matches!(n, SceneNode::Path { .. })).collect();
+        assert_eq!(paths.len(), 2, "2 categories must produce 2 wedge paths");
+
+        // For each wedge: extract (M start, A outer_r, A end) and verify
+        // the start and end points ARE on the outer circle (i.e. distance from
+        // cx,cy equals outer_r), proving no double-transform occurred.
+        let cx = 150.0_f64; // panel center x = 300/2
+        let cy = 150.0_f64; // panel center y = 300/2
+
+        let mut sweeps = Vec::new();
+        for node in &paths {
+            let cmds = if let SceneNode::Path { commands, .. } = node { commands } else { unreachable!() };
+
+            // Start point from MoveTo.
+            let (mx, my) = cmds.iter().find_map(|c| {
+                if let PathCmd::MoveTo { x, y } = c { Some((*x, *y)) } else { None }
+            }).expect("no MoveTo in wedge path");
+
+            // First ArcTo: outer_r and end point.
+            let (outer_r, ex, ey) = cmds.iter().find_map(|c| {
+                if let PathCmd::ArcTo { rx, x, y, .. } = c { Some((*rx, *x, *y)) } else { None }
+            }).expect("no ArcTo in wedge path");
+
+            // Both start and end must be on the outer circle.
+            let dist_start = ((mx - cx).powi(2) + (my - cy).powi(2)).sqrt();
+            let dist_end   = ((ex - cx).powi(2) + (ey - cy).powi(2)).sqrt();
+            assert!((dist_start - outer_r).abs() < 0.5,
+                "Wedge start ({mx:.3},{my:.3}) is {dist_start:.3}px from center, expected outer_r={outer_r:.3}. \
+                 Double-transform bug would make start NOT on the outer circle.");
+            assert!((dist_end - outer_r).abs() < 0.5,
+                "Wedge end ({ex:.3},{ey:.3}) is {dist_end:.3}px from center, expected outer_r={outer_r:.3}.");
+
+            // Chord and sweep angle.
+            let chord = ((ex - mx).powi(2) + (ey - my).powi(2)).sqrt();
+            let ratio = (chord / (2.0 * outer_r)).min(1.0);
+            let sweep = 2.0 * ratio.asin();
+            sweeps.push(sweep);
+        }
+
+        // Each of the 2 categories must span π (180°).
+        for (i, &sweep) in sweeps.iter().enumerate() {
+            assert!((sweep - PI).abs() < 0.05,
+                "Wedge {i} sweep = {:.1}°, expected 180°. n=2 → band=π.", sweep.to_degrees());
+        }
+        // Total must be ≈ 2π.
+        let total: f64 = sweeps.iter().sum();
+        assert!((total - std::f64::consts::TAU).abs() < 0.1,
+            "Total sweep {:.1}°, expected 360°.", total.to_degrees());
+    }
+
+    /// FA-2: 4-category polar bar — each wedge spans π/2 (90°).
+    #[test]
+    fn polar_bar_four_cats_equal_angular_bands() {
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
+        use ferrum_scene::{PathCmd, PolarDirection};
+        use std::f64::consts::PI;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: Some(SpecCoord::Polar {
+                theta: PolarThetaChannel::X,
+                start_angle: 0.0,
+                inner_radius: 0.0,
+                outer_radius: Some(100.0),
+                pad_angle: 0.0,
+                direction: PolarDirection::Clockwise,
+            }),
+            mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["N", "E", "S", "W"])),
+            Arc::new(Float64Array::from(vec![10.0, 15.0, 20.0, 8.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 20.0], vec![300.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let paths: Vec<&SceneNode> = result.nodes.iter()
+            .filter(|n| matches!(n, SceneNode::Path { .. })).collect();
+        assert_eq!(paths.len(), 4, "4 categories must produce 4 wedge paths");
+
+        let cx = 150.0_f64;
+        let cy = 150.0_f64;
+        let mut sweeps = Vec::new();
+
+        for node in &paths {
+            let cmds = if let SceneNode::Path { commands, .. } = node { commands } else { unreachable!() };
+            let (mx, my) = cmds.iter().find_map(|c| {
+                if let PathCmd::MoveTo { x, y } = c { Some((*x, *y)) } else { None }
+            }).expect("no MoveTo");
+            let (outer_r, ex, ey) = cmds.iter().find_map(|c| {
+                if let PathCmd::ArcTo { rx, x, y, .. } = c { Some((*rx, *x, *y)) } else { None }
+            }).expect("no ArcTo");
+
+            let dist_start = ((mx - cx).powi(2) + (my - cy).powi(2)).sqrt();
+            assert!((dist_start - outer_r).abs() < 0.5,
+                "Start not on outer circle: dist={dist_start:.3}, r={outer_r:.3}. Double-transform bug?");
+
+            let chord = ((ex - mx).powi(2) + (ey - my).powi(2)).sqrt();
+            let ratio = (chord / (2.0 * outer_r)).min(1.0);
+            sweeps.push(2.0 * ratio.asin());
+        }
+
+        let half_pi = PI / 2.0;
+        for (i, &sweep) in sweeps.iter().enumerate() {
+            assert!((sweep - half_pi).abs() < 0.05,
+                "Wedge {i} sweep = {:.1}°, expected 90°.", sweep.to_degrees());
+        }
+        let total: f64 = sweeps.iter().sum();
+        assert!((total - std::f64::consts::TAU).abs() < 0.1,
+            "Total sweep {:.1}°, expected 360°.", total.to_degrees());
+    }
 }
