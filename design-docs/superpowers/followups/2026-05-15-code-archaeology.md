@@ -215,3 +215,31 @@ D6 (reactive parameters) shipped complete (sub-tasks 5a–5e-2b). One pre-existi
 | D6-1 | S3 | **Multi-panel simultaneous reactive rescale** is bounded by the single-transform-uniform render path: `render::upload_transform_and_render` uploads one transform uniform per frame and renders the whole frame, so when a brush drives reactive rescale, only one bound target panel's affine takes visible effect at a time (the same constraint that limits `setTransform` to panel 0). Single-panel overview→detail rescale works. A strict multi-panel rescale needs per-panel transform uniforms in the GPU render layer. | Deferred — render-layer change; out of D6 scope. Reactive rescale, crossfilter, and legend toggle all work for the single-target case validated by the audit's blocked designs. |
 
 Note: the packed-batch field-value-point-selection gap (legend toggle on ≥1000-mark batches) that a review flagged was **closed** in 5e-2b (`09ba4f7`) via `scene_load::tooltip_field_value` — packed batches carry `tooltip_bytes`, so field-projected point selections now match on packed marks. No follow-up needed there.
+
+---
+
+## Flexibility re-audit fix campaign (2026-06-02, `feat/flexibility-new-capabilities`)
+
+Re-ran `/audit-flexibility` after D1-D10 + D6; it confirmed 6 of 10 baseline defects closed and surfaced fresh ones. Fixed this campaign (each gated + regression-tested):
+
+| Fix | Commit | What |
+|---|---|---|
+| G-D6 | a00126d | `fm.when(sel).then(num).otherwise(num)` no longer a silent no-op; channel taken from the encode key; `encode(<ch>=ConditionalSpec)` works; numeric value → opacity default |
+| G-D7 | 9aacabf | radial bars stack outward (`Radius(stack=)` honored); `_normalize_stack` shared across X/Y/Theta/Radius fixes a latent `stack=True` PyO3 crash |
+| T9 | 45e047e | `transform_top_k` aggregates integer columns instead of silently counting (was Float64-only) |
+| T10 | cccf36d | `mark_violin` honors color/hue (per-(x,hue) KDE, overlaid) instead of silently collapsing |
+| T11 | 834f126 | `mark_area` splits by `detail=` and non-nominal/ordinal color (was Utf8-color-only collapse) |
+| T12 | 8b15f74 | per-layer `aggregate=` no longer dropped when layered (named chart-level Aggregate + data_source routing; both disjoint and column-overlap `__add__` paths) |
+
+### New follow-ups surfaced by the audit (open, not yet fixed)
+
+| ID | Severity | Item | Notes |
+|---|---|---|---|
+| FA-1 | S3 | **`mark_arc(theta:N, radius:Q)` Nightingale coxcomb renders blank** | falls into the pie path which `col_as_f64`'s the nominal theta → empty. The idiomatic coxcomb path is `mark_bar`+`CoordPolar` (fixed in G-D7); `mark_arc` should either render equal-band value wedges or raise, not silently blank. `arc.rs` build gate + the Python polar dummy-y remapping. |
+| FA-2 | S2 | **Polar-bar angular layout is not equal full-circle bands** | G-D7 visual check showed 2-category coxcombs render as two narrow "petals" in the upper arc rather than equal wedges filling 360° (the "value-driven-angle" geometry the categorical agent flagged). Radial stacking is correct; the angular band-scale/extent under `CoordPolar` needs a look (`bar.rs build_polar` angular bands / polar band-scale padding/extent). |
+| FA-3 | S3 | **Rust `stat_aggregate` rejects Int64 groupby** (Float64/Utf8 only) | affects both single-chart and layered aggregate; an Int64 x/groupby column errors. `crates/ferrum-core/src/transform/` aggregate path. |
+| FA-4 | S3 | **Per-layer `bin=` has the same never-run gap T12 fixed for aggregate** | the layered path now resolves per-layer aggregates into named transforms but NOT per-layer `Bin` sentinels (`_layer_pending_aggregates` keeps only `_PendingAggregate`). A layer with `bin=` encoding silently isn't binned. Same named-transform+data_source fix pattern applies. |
+| FA-5 | S1 | **Ordinal/quantitative-color `mark_area` legend swatch ≠ fill** | T11 inspection: legend swatches show categorical colors (blue/red/gold) while area fills use a sequential-ish ramp; the areas split correctly (the T11 fix) but the legend/fill color source for ordinal area diverges. |
+| FA-6 | S1 | **violin box-inner layers don't color-encode while quartile/point do** | sibling asymmetry from `desugar_boxplot`'s layer contract (its layers never color-encode); cosmetic under the T10 overlay. |
+
+The larger remaining frontier (annotation categorical-axis anchoring, typed-Scale domain auto-inference, shared legend across Repeat/concat, 2-D `mark_density` hue, custom `fm.Gradient` palettes, gridded `contourf`, flow geometry) is catalogued in the audit synthesis (`/tmp/ferrum-ux-audit/SYNTHESIS.md`, section C-D).
