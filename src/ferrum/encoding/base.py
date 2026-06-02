@@ -152,6 +152,14 @@ class ChannelBase:
         if (v := self._kwargs.get("scale")) is not None:
             out["scale"] = _scale_to_dict(v)
         for k in ("title", "axis", "legend", "sort", "stack", "impute", "scheme", "format"):
+            if k == "title" and "title" in self._kwargs:
+                # title=None (explicitly passed) → suppress axis title by forwarding
+                # an empty string to Rust, which renders a blank title instead of
+                # falling back to the field name.  title omitted (key absent) keeps
+                # the existing field-name default.  title="Foo" passes through as-is.
+                raw_title = self._kwargs["title"]
+                out["title"] = "" if raw_title is None else raw_title
+                continue
             if k == "axis" and "axis" in self._kwargs:
                 # Accept Axis instances, False (suppression), or raw dicts.
                 normalized = _normalize_axis(self._kwargs["axis"])

@@ -430,21 +430,50 @@ pub fn prepare_render_inputs(
     // User-explicit titles always win; layer-level titles override the field
     // name for diagnostic charts whose layer-0 encoding references a column
     // with a non-semantic name (e.g. "lower_whisker" / "param_value").
+    //
+    // Empty-string suppression contract: Python forwards `out["title"] = ""`
+    // ONLY when `title=None` is explicitly passed by the caller. An absent key
+    // means "use the field name" (default); a present empty string means
+    // "suppress entirely". We resolve here at the boundary so the rest of the
+    // pipeline naturally sees `None` and emits neither a margin nor a text node.
     let x_field = rendering_encoding
         .x
         .as_ref()
-        .map(|e| {
-            spec.encoding.x.as_ref().and_then(|p| p.title.clone())
-                .or_else(|| e.title.clone())
-                .unwrap_or_else(|| e.field.clone())
+        .and_then(|e| {
+            // Explicit spec-level title takes highest priority.
+            if let Some(explicit) = spec.encoding.x.as_ref().and_then(|p| p.title.as_deref()) {
+                if explicit.trim().is_empty() {
+                    return None; // explicit suppress: title=None → ""
+                }
+                return Some(explicit.to_owned());
+            }
+            // Layer-0 title (desugar for diagnostic column names).
+            if let Some(layer_title) = e.title.as_deref() {
+                if layer_title.trim().is_empty() {
+                    return None;
+                }
+                return Some(layer_title.to_owned());
+            }
+            // Fallback: field name.
+            Some(e.field.clone())
         });
     let y_field = rendering_encoding
         .y
         .as_ref()
-        .map(|e| {
-            spec.encoding.y.as_ref().and_then(|p| p.title.clone())
-                .or_else(|| e.title.clone())
-                .unwrap_or_else(|| e.field.clone())
+        .and_then(|e| {
+            if let Some(explicit) = spec.encoding.y.as_ref().and_then(|p| p.title.as_deref()) {
+                if explicit.trim().is_empty() {
+                    return None;
+                }
+                return Some(explicit.to_owned());
+            }
+            if let Some(layer_title) = e.title.as_deref() {
+                if layer_title.trim().is_empty() {
+                    return None;
+                }
+                return Some(layer_title.to_owned());
+            }
+            Some(e.field.clone())
         });
     // D3 (flexibility campaign): per-channel `Axis(tick_count=N)` controls the
     // target tick count for continuous + temporal axes (default 10). Limiting it
@@ -503,10 +532,19 @@ pub fn prepare_render_inputs(
     let x_label_angle = x_enc_axis
         .and_then(|a| a.extra.get("labelAngle").or_else(|| a.extra.get("label_angle")))
         .and_then(|v| v.as_f64());
-    let x_axis_title = x_enc_axis
+    // Axis(title=...) resolution: the outer Option distinguishes "key absent" from
+    // "key present but empty".
+    //   - None (absent)  → fall through to x_field (field-name default)
+    //   - Some("") or Some("  ") → explicit suppress; final title is None, no fallback
+    //   - Some("Custom") → use "Custom" directly, no fallback
+    let x_axis_title: Option<String> = match x_enc_axis
         .and_then(|a| a.extra.get("title"))
         .and_then(|v| v.as_str())
-        .map(str::to_owned);
+    {
+        Some(s) if s.trim().is_empty() => None, // explicit suppress: don't fall back
+        Some(s) => Some(s.to_owned()),           // explicit non-empty title
+        None => x_field,                         // absent: fall through to field default
+    };
     let y_axis_labels = y_enc_axis
         .and_then(|a| a.extra.get("labels"))
         .and_then(|v| v.as_bool())
@@ -526,10 +564,15 @@ pub fn prepare_render_inputs(
     let y_label_angle = y_enc_axis
         .and_then(|a| a.extra.get("labelAngle").or_else(|| a.extra.get("label_angle")))
         .and_then(|v| v.as_f64());
-    let y_axis_title = y_enc_axis
+    // Same three-way resolution as x_axis_title above.
+    let y_axis_title: Option<String> = match y_enc_axis
         .and_then(|a| a.extra.get("title"))
         .and_then(|v| v.as_str())
-        .map(str::to_owned);
+    {
+        Some(s) if s.trim().is_empty() => None,
+        Some(s) => Some(s.to_owned()),
+        None => y_field,
+    };
     // D12 + D3: resolve the tick label format. A per-channel `Axis(label_format=,
     // label_format_type=)` (carried in `encoding.axis`) takes precedence over the
     // shorthand `encoding.format`/`format_type`, so an explicit `Axis(...)` always
@@ -600,7 +643,7 @@ pub fn prepare_render_inputs(
     let axes = AxesInput {
         x: AxisInput {
             orient: AxisOrient::Bottom,
-            title: x_axis_title.or(x_field),
+            title: x_axis_title,
             tick_labels: x_tick_labels,
             label_angle_override: x_label_angle,
             show_labels: x_axis_labels,
@@ -619,7 +662,7 @@ pub fn prepare_render_inputs(
         },
         y: AxisInput {
             orient: AxisOrient::Left,
-            title: y_axis_title.or(y_field),
+            title: y_axis_title,
             tick_labels: y_tick_labels,
             label_angle_override: y_label_angle,
             show_labels: y_axis_labels,
