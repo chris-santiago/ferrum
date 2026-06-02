@@ -1,16 +1,21 @@
 """Coordinate wrapper types for annotation positioning.
 
-Coordinates in annotation primitives can be expressed in three ways:
+Coordinates in annotation primitives can be expressed in these ways:
 
 - ``float`` / ``int`` — data-space coordinates (the default)
 - ``datetime.date`` / ``datetime.datetime`` — temporal data-space coordinate,
   converted to epoch-milliseconds (UTC) to match ferrum's internal temporal
   representation.  Naive ``datetime`` objects are treated as UTC.
 - ISO-8601 date or datetime string — parsed and converted to epoch-milliseconds.
+- Non-ISO-8601 string — treated as an ordinal category label, stored as
+  ``OrdinalCategoryCoord`` and resolved against the axis ordinal domain at
+  render time.
 - ``PixelCoord`` — absolute pixel offset from the plot origin
 - ``NormCoord`` — normalized [0, 1] fraction of the plot area
+- ``OrdinalCategoryCoord`` — a category label resolved to a band center at
+  render time via the chart's ordinal domain
 
-Use the :func:`px` and :func:`norm` factory functions as a readable shorthand.
+Use the :func:`px` and :func:`norm` factory functions as readable shorthands.
 """
 
 from __future__ import annotations
@@ -46,9 +51,28 @@ class NormCoord:
     value: float
 
 
-# CoordValue accepts numbers, temporal Python types, ISO strings, or coordinate
-# wrappers.  Temporal values are converted to epoch-ms at serialization time
-# by _coord() in primitives.py so they align with ferrum's internal scale.
+@dataclass(frozen=True)
+class OrdinalCategoryCoord:
+    """A category label coordinate that resolves to its band center at render time.
+
+    Use this (or rely on automatic coercion from a non-ISO-8601 string) when
+    annotating a chart whose axis is an ordinal (categorical) scale.  The
+    category string is matched against the axis ordinal domain and the
+    annotation is placed at the band center for that category.
+
+    Parameters
+    ----------
+    value : str
+        Category label as it appears in the data column.
+    """
+
+    value: str
+
+
+# CoordValue accepts numbers, temporal Python types, ISO strings, coordinate
+# wrappers, or ordinal category labels.  Temporal ISO strings are converted to
+# epoch-ms at serialization time; ordinal category labels are resolved to norm
+# coordinates against the chart's domain at render time.
 CoordValue: TypeAlias = Union[
     float,
     int,
@@ -57,11 +81,40 @@ CoordValue: TypeAlias = Union[
     str,
     PixelCoord,
     NormCoord,
+    OrdinalCategoryCoord,
 ]
 
 # Unix epoch as a date — used by temporal_coord_to_epoch_ms.
 _EPOCH_DATE = _dt.date(1970, 1, 1)
 _MS_PER_DAY = 86_400_000
+
+
+def _is_iso8601_string(s: str) -> bool:
+    """Return True if *s* can be parsed as an ISO-8601 date or datetime string.
+
+    Tests ``YYYY-MM-DD`` (date) and ``YYYY-MM-DDTHH:...`` (datetime) forms.
+    Does not validate full ISO-8601 generality — just the subset that
+    ``temporal_coord_to_epoch_ms`` accepts.
+
+    Parameters
+    ----------
+    s : str
+        Candidate string.
+
+    Returns
+    -------
+    bool
+    """
+    try:
+        _dt.date.fromisoformat(s)
+        return True
+    except ValueError:
+        pass
+    try:
+        _dt.datetime.fromisoformat(s)
+        return True
+    except ValueError:
+        return False
 
 
 def temporal_coord_to_epoch_ms(value: _dt.date | _dt.datetime | str) -> float:

@@ -8,36 +8,69 @@ for backward compatibility.
 from __future__ import annotations
 
 import datetime as _dt
-from typing import Optional, Union
+from typing import Optional
 
 import polars as pl
 
-from ferrum.annotation.coords import CoordValue, temporal_coord_to_epoch_ms
+from ferrum.annotation.coords import (
+    CoordValue,
+    OrdinalCategoryCoord,
+    PixelCoord,
+    NormCoord,
+    _is_iso8601_string,
+    temporal_coord_to_epoch_ms,
+)
 from ferrum.chart import Chart
 from ferrum._metric_labels import AUCLabel, APLabel, BrierLabel, OutlierLabel  # noqa: F401
 
-# Type accepted by positional annotation parameters: numeric (data-space),
-# temporal Python types, or ISO-8601 strings (all converted to epoch-ms).
-_AnnotationCoord = Union[float, int, _dt.date, _dt.datetime, str]
+# Type accepted by positional annotation parameters.  This is the same as
+# CoordValue: numeric, temporal, ISO-8601 string, ordinal category string,
+# or explicit PixelCoord/NormCoord wrapper.
+_AnnotationCoord = CoordValue
 
 
-def _coerce_temporal(v: _AnnotationCoord) -> float:
-    """Convert an annotation positional coordinate to a plain number.
+def _coerce_coord(v: CoordValue) -> CoordValue:
+    """Normalize an annotation positional coordinate for storage in a primitive.
 
-    - Numeric values pass through unchanged.
-    - ``datetime.date``, ``datetime.datetime``, and ISO-8601 strings are
-      converted to epoch-milliseconds (UTC) via the canonical
-      ``temporal_coord_to_epoch_ms`` helper, producing the same units that
-      ``_coerce.py`` produces for temporal data columns.
+    Rules:
+    - ``PixelCoord`` / ``NormCoord`` / ``OrdinalCategoryCoord`` pass through
+      unchanged — the caller already expressed precise intent.
+    - ``datetime.date`` / ``datetime.datetime`` → epoch-milliseconds float.
+    - String that IS an ISO-8601 date/datetime → epoch-milliseconds float.
+    - String that is NOT ISO-8601 → ``OrdinalCategoryCoord`` (resolved against
+      the chart's ordinal domain at render time).
+    - Numeric (float, int) → float (data-space value).
 
-    This coercion is applied before constructing the intermediate polars
-    DataFrame so that polars always receives a plain Python number rather than
-    a date type, keeping the annotation's internal column type consistent with
-    how the annotation primitive serializes the same value.
+    The returned value is always a type that ``_coord()`` in
+    ``annotation/primitives.py`` knows how to serialize.
     """
-    if isinstance(v, (_dt.datetime, _dt.date, str)):
+    if isinstance(v, (PixelCoord, NormCoord, OrdinalCategoryCoord)):
+        return v
+    if isinstance(v, _dt.datetime):
         return temporal_coord_to_epoch_ms(v)
+    if isinstance(v, _dt.date):
+        return temporal_coord_to_epoch_ms(v)
+    if isinstance(v, str):
+        if _is_iso8601_string(v):
+            return temporal_coord_to_epoch_ms(v)
+        return OrdinalCategoryCoord(v)
     return float(v)
+
+
+def _coerce_coord_to_numeric(v: CoordValue) -> float:
+    """Convert a coordinate to a plain float for use in a polars DataFrame column.
+
+    ``PixelCoord`` and ``NormCoord`` do not have a meaningful data-space value,
+    so they are mapped to 0.0 as a placeholder (the primitive carries the real
+    coord; the DataFrame column for the mark_rule is only used as a shape hint
+    and is not used for rendering when the primitive is present).
+
+    ``OrdinalCategoryCoord`` is mapped to 0.0 similarly — its true pixel
+    position is resolved at render time from the ordinal domain.
+    """
+    if isinstance(v, (PixelCoord, NormCoord, OrdinalCategoryCoord)):
+        return 0.0
+    return float(v)  # already a float after _coerce_coord
 
 
 def _attach_annotation_primitive(chart: Chart, primitive: object) -> Chart:
@@ -87,7 +120,8 @@ def annotate_hline(
     from ferrum.annotation.coords import norm
     from ferrum.annotation.primitives import AnnotationLine
 
-    y_num = _coerce_temporal(y)
+    y_coord = _coerce_coord(y)
+    y_num = _coerce_coord_to_numeric(y_coord)
     df = pl.DataFrame({"_y": [y_num]})
     kwargs: dict = {}
     if stroke is not None:
@@ -98,9 +132,9 @@ def annotate_hline(
     # Attach annotation primitive: horizontal line spanning the full x-axis
     prim = AnnotationLine(
         x1=norm(0),
-        y1=y_num,
+        y1=y_coord,
         x2=norm(1),
-        y2=y_num,
+        y2=y_coord,
         stroke=stroke or "#333",
         stroke_width=1,
         dash=stroke_dash,
@@ -148,7 +182,8 @@ def annotate_vline(
     from ferrum.annotation.coords import norm
     from ferrum.annotation.primitives import AnnotationLine
 
-    x_num = _coerce_temporal(x)
+    x_coord = _coerce_coord(x)
+    x_num = _coerce_coord_to_numeric(x_coord)
     df = pl.DataFrame({"_x": [x_num]})
     kwargs: dict = {}
     if stroke is not None:
@@ -158,9 +193,9 @@ def annotate_vline(
     chart = Chart(df).mark_rule(**kwargs).encode(x="_x")
     # Attach annotation primitive: vertical line spanning the full y-axis
     prim = AnnotationLine(
-        x1=x_num,
+        x1=x_coord,
         y1=norm(0),
-        x2=x_num,
+        x2=x_coord,
         y2=norm(1),
         stroke=stroke or "#333",
         stroke_width=1,
@@ -216,8 +251,10 @@ def annotate_rect(
     """
     from ferrum.annotation.primitives import AnnotationRect
 
-    x1_num, x2_num = _coerce_temporal(x1), _coerce_temporal(x2)
-    y1_num, y2_num = _coerce_temporal(y1), _coerce_temporal(y2)
+    x1_coord, x2_coord = _coerce_coord(x1), _coerce_coord(x2)
+    y1_coord, y2_coord = _coerce_coord(y1), _coerce_coord(y2)
+    x1_num, x2_num = _coerce_coord_to_numeric(x1_coord), _coerce_coord_to_numeric(x2_coord)
+    y1_num, y2_num = _coerce_coord_to_numeric(y1_coord), _coerce_coord_to_numeric(y2_coord)
     df = pl.DataFrame({"_x1": [x1_num], "_x2": [x2_num], "_y1": [y1_num], "_y2": [y2_num]})
     kwargs: dict = {"opacity": opacity}
     if fill is not None:
@@ -225,10 +262,10 @@ def annotate_rect(
     chart = Chart(df).mark_rect(**kwargs).encode(x="_x1", y="_y1", x2="_x2", y2="_y2")
     # Attach annotation primitive
     prim = AnnotationRect(
-        x1=x1_num,
-        y1=y1_num,
-        x2=x2_num,
-        y2=y2_num,
+        x1=x1_coord,
+        y1=y1_coord,
+        x2=x2_coord,
+        y2=y2_coord,
         fill=fill or "#cccccc",
         opacity=opacity,
         stroke=None,
@@ -296,7 +333,8 @@ def annotate_text(
     """
     from ferrum.annotation.primitives import AnnotationText
 
-    x_num, y_num = _coerce_temporal(x), _coerce_temporal(y)
+    x_coord, y_coord = _coerce_coord(x), _coerce_coord(y)
+    x_num, y_num = _coerce_coord_to_numeric(x_coord), _coerce_coord_to_numeric(y_coord)
     df = pl.DataFrame({"_x": [x_num], "_y": [y_num], "_text": [text]})
     kwargs: dict = {"dx": dx, "dy": dy, "align": align, "baseline": baseline}
     if font_size is not None:
@@ -309,8 +347,8 @@ def annotate_text(
     # Map align to annotation anchor
     anchor_map = {"left": "start", "center": "middle", "right": "end"}
     prim = AnnotationText(
-        x=x_num,
-        y=y_num,
+        x=x_coord,
+        y=y_coord,
         text=text,
         font_size=font_size or 12,
         color=color or "#333",
@@ -450,8 +488,12 @@ def annotate_arrow(
     """
     # Spec §3.3 lists `arrow=True` for mark_segment but the validator does
     # not yet accept it; emit a plain segment for now.
-    x1_num, y1_num = _coerce_temporal(x1), _coerce_temporal(y1)
-    x2_num, y2_num = _coerce_temporal(x2), _coerce_temporal(y2)
+    x1_coord, y1_coord = _coerce_coord(x1), _coerce_coord(y1)
+    x2_coord, y2_coord = _coerce_coord(x2), _coerce_coord(y2)
+    x1_num = _coerce_coord_to_numeric(x1_coord)
+    y1_num = _coerce_coord_to_numeric(y1_coord)
+    x2_num = _coerce_coord_to_numeric(x2_coord)
+    y2_num = _coerce_coord_to_numeric(y2_coord)
     df = pl.DataFrame({"_x1": [x1_num], "_y1": [y1_num], "_x2": [x2_num], "_y2": [y2_num]})
     seg_kwargs: dict = {}
     if stroke is not None:
@@ -468,7 +510,8 @@ def annotate_arrow(
     )
     if label is None:
         return arrow_chart
-    lx, ly = (x1_num, y1_num) if label_side == "start" else (x2_num, y2_num)
+    lx: CoordValue = x1_coord if label_side == "start" else x2_coord
+    ly: CoordValue = y1_coord if label_side == "start" else y2_coord
     dx = -6 if label_side == "start" else 6
     align = "right" if label_side == "start" else "left"
     return arrow_chart & annotate_text(lx, ly, label, dx=dx, align=align)

@@ -283,17 +283,31 @@ def _coord(v: CoordValue) -> Any:
     epoch-milliseconds (UTC) so they align with the Rust renderer's temporal
     scale — the same units that ``_coerce.py`` produces for temporal data
     columns.  Numeric values and coordinate wrappers pass through unchanged.
+    ``OrdinalCategoryCoord`` is serialized as ``{"category": value}``; this
+    dict is resolved to a ``{"norm": ...}`` entry by ``_resolve_chart_config``
+    before the annotation list is sent to the Rust renderer.
     """
-    from ferrum.annotation.coords import PixelCoord, NormCoord, temporal_coord_to_epoch_ms
+    from ferrum.annotation.coords import (
+        PixelCoord,
+        NormCoord,
+        OrdinalCategoryCoord,
+        temporal_coord_to_epoch_ms,
+    )
 
     if isinstance(v, PixelCoord):
         return {"px": _sanitize_coord(v.value)}
     if isinstance(v, NormCoord):
         return {"norm": _sanitize_coord(v.value)}
+    if isinstance(v, OrdinalCategoryCoord):
+        return {"category": v.value}
     # datetime must be checked before date (datetime is a subclass of date).
     if isinstance(v, (_dt.datetime, _dt.date)):
         return temporal_coord_to_epoch_ms(v)
     if isinstance(v, str):
+        # Plain strings reaching _coord() should already have been coerced to
+        # OrdinalCategoryCoord or epoch-ms by _coerce_coord().  Strings that
+        # arrive here are treated as ISO-8601 (legacy path / direct primitive
+        # construction); non-ISO strings raise so the caller is aware.
         return temporal_coord_to_epoch_ms(v)
     return _sanitize_coord(v)  # plain numeric — data-space
 
