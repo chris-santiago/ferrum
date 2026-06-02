@@ -21,7 +21,7 @@ from ferrum._marks_statistical import StatisticalMarksMixin
 from ferrum._render import _RenderMixin
 from ferrum._shorthand import parse_shorthand
 from ferrum._spec_view import _SpecView
-from ferrum.encoding.base import ChannelBase, _PendingAggregate
+from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
 from ferrum.marks.base import MarkBase
 from ferrum.marks.statistical import _build_prior_layer
 
@@ -346,6 +346,116 @@ def _resolve_layer_aggregates(layers: list) -> tuple[list, list]:
             new_encoding[axis] = ch
 
         new_layers.append(replace(layer, encoding=new_encoding, data_source=agg_name))
+
+    return new_layers, named_transforms
+
+
+def _layer_pending_bins(layer: _Layer) -> list[_PendingBin]:
+    """Collect the encoding-level bin sentinels carried by *layer*."""
+    pending: list[_PendingBin] = []
+    for ch in layer.encoding.values():
+        if isinstance(ch, ChannelBase):
+            for t in ch.to_implicit_transforms():
+                if isinstance(t, _PendingBin):
+                    pending.append(t)
+    return pending
+
+
+def _resolve_layer_bins(layers: list) -> tuple[list, list]:
+    """Resolve each layer's encoding bin sentinels into named chart-level transforms.
+
+    Mirrors ``_resolve_layer_aggregates`` for the bin case.  The renderer never
+    executes per-layer transforms standalone; a layer reads its input batch from
+    a *named* chart-level transform via ``data_source``.  So for every layer
+    that carries a ``bin=`` encoding kwarg this builds a named ``Bin``
+    transform — reads from the original input (fan-out semantics, does not
+    advance the unnamed chain) — points the layer's ``data_source`` at it, and
+    remaps the binned channel's field to ``bin_start`` (the Bin output column),
+    stripping the now-resolved ``bin`` kwarg.
+
+    Each binning layer gets its OWN named transform so two binning layers bin
+    independently.
+
+    A layer that already carries a ``data_source`` is handled correctly:
+    if it also has a pending bin, the bin transform is still created and the
+    layer's ``data_source`` is updated to the named bin.  Layers with a
+    pre-set ``data_source`` but no pending bin pass through unchanged.
+
+    Parameters
+    ----------
+    layers :
+        The chart's resolved ``_Layer`` list, already processed by
+        ``_resolve_layer_aggregates`` (aggregate routing is preserved).
+
+    Returns
+    -------
+    (new_layers, named_transforms)
+        ``new_layers`` is the layer list with binning layers rewritten;
+        ``named_transforms`` is the list of ``_NamedTransform`` objects to add
+        to the chart-level pipeline (empty when no layer bins).
+    """
+    from ferrum import Bin
+
+    new_layers: list = []
+    named_transforms: list = []
+    for i, layer in enumerate(layers):
+        pending = _layer_pending_bins(layer)
+        if not pending:
+            new_layers.append(layer)
+            continue
+
+        # Guard: detect a layer whose data_source was already set by the
+        # aggregate resolver (_layer_agg_N).  This means the layer had both
+        # bin= and aggregate= on different encoding channels.  In the layered
+        # named-transform architecture there is no named→named chaining: named
+        # transforms all read from the same unnamed-chain tail.  Overwriting the
+        # aggregate data_source with the bin data_source would silently point the
+        # layer at the original (unaggregated) input while encoding y still
+        # references the aggregated output column — a missing-column error at
+        # render time.  Raise rather than produce silent garbage.
+        if layer.data_source is not None and layer.data_source.startswith("_layer_agg_"):
+            raise ValueError(
+                "A layer cannot have both bin= and aggregate= encoding kwargs in a layered "
+                "chart.  The layered named-transform architecture does not support chaining "
+                "a per-layer Bin into a per-layer Aggregate (named transforms cannot read "
+                "from other named transforms' outputs).  "
+                "Use separate layers: one layer with bin= and one layer with aggregate=."
+            )
+
+        # Use the first pending bin (a layer encoding typically has one binned
+        # channel).  Multiple bins on the same layer would each create their
+        # own named transform; here we use index `i` plus a sub-index.
+        new_encoding: dict = {}
+        layer_named_transforms: list = []
+
+        for sub_i, pb in enumerate(pending):
+            bin_name = f"_layer_bin_{i}" if len(pending) == 1 else f"_layer_bin_{i}_{sub_i}"
+            if pb.bin_obj is not None:
+                # Pre-built Bin instance — use it directly inside the named
+                # wrapper.  The serialiser (_transforms_to_json_list_named)
+                # injects the name field from _NamedTransform.name, so the
+                # Bin object itself does not need to carry a name.
+                layer_named_transforms.append(_NamedTransform(pb.bin_obj, bin_name))
+            else:
+                bin_kwargs = dict(pb.bin_kwargs)
+                bin_kwargs.pop("name", None)  # never inherit a name from the Bin kwargs
+                bin_xform = Bin(pb.field, name=bin_name, **bin_kwargs)
+                layer_named_transforms.append(_NamedTransform(bin_xform, bin_name))
+
+        named_transforms.extend(layer_named_transforms)
+
+        # The last (or only) bin's name becomes the layer's data_source.
+        final_bin_name = layer_named_transforms[-1].name
+
+        # Remap each binned channel's field to bin_start, strip bin kwarg.
+        for axis, ch in layer.encoding.items():
+            if isinstance(ch, ChannelBase) and ch._kwargs.get("bin"):
+                kwargs = {k: v for k, v in ch._kwargs.items() if k != "bin"}
+                new_encoding[axis] = ch.__class__("bin_start", **kwargs)
+                continue
+            new_encoding[axis] = ch
+
+        new_layers.append(replace(layer, encoding=new_encoding, data_source=final_bin_name))
 
     return new_layers, named_transforms
 
@@ -3152,6 +3262,48 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 resolved_transforms.append(t)
         return resolved_transforms
 
+    def _resolve_pending_bins(self, effective_transforms: list) -> list:
+        """Resolve ``_PendingBin`` sentinels to concrete unnamed ``Bin`` objects.
+
+        Used by the single-chart path (``to_spec``).  Named transforms (used
+        by the layered path via ``_resolve_layer_bins``) are NOT produced here;
+        the single-chart path keeps the Bin unnamed so it chains through the
+        pipeline as before — byte-stable with pre-FA4 behavior.
+
+        Parameters
+        ----------
+        effective_transforms :
+            The current list of transforms, which may contain ``_PendingBin``
+            sentinels.
+
+        Returns
+        -------
+        list
+            A new list with all ``_PendingBin`` sentinels replaced by concrete
+            unnamed ``Bin`` instances.  If no sentinels are present, the input
+            list is returned unchanged.
+        """
+        if not any(isinstance(t, _PendingBin) for t in effective_transforms):
+            return effective_transforms
+
+        from ferrum import Bin
+
+        resolved_transforms: list = []
+        for t in effective_transforms:
+            if isinstance(t, _PendingBin):
+                if t.bin_obj is not None:
+                    # Pre-built Bin instance — use it directly (single-chart
+                    # path always produces unnamed transforms).  The instance
+                    # already bakes in the correct field, bin_count, etc.
+                    resolved_transforms.append(t.bin_obj)
+                else:
+                    bin_kwargs = dict(t.bin_kwargs)
+                    bin_kwargs.pop("name", None)  # single-chart bins are always unnamed
+                    resolved_transforms.append(Bin(t.field, **bin_kwargs))
+            else:
+                resolved_transforms.append(t)
+        return resolved_transforms
+
     def to_spec(self):
         """Build the Rust ``ChartSpec`` for this chart.
 
@@ -3206,6 +3358,12 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         effective_transforms = list(resolved._transforms) if resolved._transforms else []
         effective_transforms = self._resolve_pending_aggregates(resolved, effective_transforms)
 
+        # --- Resolve _PendingBin sentinels to concrete unnamed Bin objects (single-chart) ---
+        # For layered charts the bin sentinels are resolved per-layer below, so
+        # this call is a no-op on that path (sentinels already stripped from
+        # top-level transforms by _expand_layers).
+        effective_transforms = self._resolve_pending_bins(effective_transforms)
+
         # --- Resolve per-layer encoding aggregates (layered charts) ---
         # Each aggregating layer becomes a NAMED chart-level Aggregate transform
         # whose output the layer reads via ``data_source`` (per-layer transforms
@@ -3219,6 +3377,17 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             serialized_layers, layer_agg_transforms = _resolve_layer_aggregates(resolved._layers)
             if layer_agg_transforms:
                 effective_transforms = effective_transforms + layer_agg_transforms
+
+        # --- Resolve per-layer encoding bins (layered charts) ---
+        # Each binning layer becomes a NAMED chart-level Bin transform whose
+        # output the layer reads via ``data_source`` (fan-out: does not advance
+        # the unnamed chain, so the shared batch is not corrupted for other
+        # layers or for named aggregate transforms).  Run after aggregate
+        # resolution so the layer list processes the aggregate-resolved layers.
+        if resolved._layers:
+            serialized_layers, layer_bin_transforms = _resolve_layer_bins(serialized_layers)
+            if layer_bin_transforms:
+                effective_transforms = effective_transforms + layer_bin_transforms
 
         # --- Transform serialization ---
         if effective_transforms:

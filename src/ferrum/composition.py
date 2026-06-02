@@ -2240,10 +2240,14 @@ def _expand_layers(c) -> tuple[list, list]:
     aggregate the merged batch once with the wrong (single-layer) groupby.
     """
     from ferrum._layer import _Layer
-    from ferrum.encoding.base import _PendingAggregate
+    from ferrum.encoding.base import _PendingAggregate, _PendingBin
 
     def _top_transforms(chart) -> list:
-        return [t for t in (chart._transforms or []) if not isinstance(t, _PendingAggregate)]
+        return [
+            t
+            for t in (chart._transforms or [])
+            if not isinstance(t, (_PendingAggregate, _PendingBin))
+        ]
 
     if c._layers is not None:
         return list(c._layers), _top_transforms(c)
