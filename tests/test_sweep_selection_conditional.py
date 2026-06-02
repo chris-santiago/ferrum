@@ -22,7 +22,7 @@ import pytest
 import ferrum as fm
 from ferrum._core import render_interactive
 from ferrum._interactive import InteractiveChart, _render_scene
-from ferrum.selection import selection_interval, selection_point, value
+from ferrum.selection import ConditionalSpec, selection_interval, selection_point, value
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -427,9 +427,18 @@ def test_e_composition_interaction_keys_present(df):
 
 
 def test_e_conditional_without_matching_selection_raises(df):
-    """Chart.conditional() with unregistered selection name raises ValueError."""
-    sel = selection_point(fields=["group"], name="e_unreg")
-    cond = sel.when(fm.Color("group")).otherwise(value("#cccccc"))
+    """Chart.conditional() raises ValueError when the selection truly is not
+    available: the spec carries no source Selection and none is registered.
+
+    A spec built via ``sel.when(...).otherwise(...)`` carries its source
+    Selection, so conditional() auto-registers it; this test exercises the
+    genuinely-unavailable path with a bare ConditionalSpec.
+    """
+    cond = ConditionalSpec(
+        selection_name="e_unreg",
+        if_selected=fm.Color("group"),
+        if_not=value("#cccccc"),
+    )
     chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
     with pytest.raises(ValueError, match="no selection named"):
         chart.conditional(cond)

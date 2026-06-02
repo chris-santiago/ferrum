@@ -194,6 +194,7 @@ class _SelectionCondition:
             selection_name=self.selection.name,
             if_selected=self.if_encoding,
             if_not=else_encoding,
+            selection=self.selection,
         )
 
 
@@ -213,6 +214,17 @@ class ConditionalSpec:
         Encoding applied when a datum falls inside the selection.
     if_not : encoding channel or value(...)
         Encoding applied when a datum falls outside the selection.
+    channel : str or None, default None
+        Explicit wire channel (e.g. ``"opacity"``, ``"size"``, ``"color"``).
+        Set by ``Chart.encode(<channel>=cond)`` from the encode key, so the
+        wire ``channel`` and the value-kind resolution match even when the
+        branches are bare numbers (which carry no channel of their own). When
+        ``None`` the channel is inferred from ``if_selected`` via
+        ``_resolve_channel``.
+    selection : Selection or None, default None
+        The originating ``Selection``, carried so callers
+        (``Chart.encode`` / ``Chart.conditional``) can auto-register it without
+        a separate ``.add_selection()`` call.
 
     Examples
     --------
@@ -226,10 +238,18 @@ class ConditionalSpec:
     selection_name: str
     if_selected: Any
     if_not: Any
+    channel: str | None = None
+    selection: Selection | None = None
 
     def to_spec_dict(self) -> dict:
-        """Serialize to a dict matching the Rust ``ConditionalEncoding`` shape."""
-        channel = _resolve_channel(self.if_selected)
+        """Serialize to a dict matching the Rust ``ConditionalEncoding`` shape.
+
+        When ``self.channel`` is set (the ``encode(<channel>=cond)`` path) it is
+        used as both the wire ``channel`` and the value-kind hint for
+        ``if_selected``/``if_not``. Otherwise the channel is inferred from
+        ``if_selected`` (the ``.conditional(...)`` path with an encoding object).
+        """
+        channel = self.channel if self.channel is not None else _resolve_channel(self.if_selected)
         return {
             "selection_name": self.selection_name,
             "channel": channel,
@@ -481,9 +501,12 @@ def value(v: Any) -> "_LiteralValue":
     ...     color=sel.when(fm.Color("category")).otherwise(fm.value("#cccccc")),
     ... ).add_selection(sel)
 
-    Fade unselected marks with low opacity:
+    Fade unselected marks with low opacity (numeric branches resolve to opacity
+    values, not colours, so assign to the ``opacity`` channel):
 
-    >>> color=sel.when(fm.Color("category")).otherwise(fm.value(0.1))
+    >>> opacity = fm.when(sel).then(1.0).otherwise(0.1)
+    >>> # or, equivalently, with explicit value(...) wrappers:
+    >>> opacity = sel.when(fm.value(1.0)).otherwise(fm.value(0.1))
     """
     return _LiteralValue(v)
 
@@ -551,10 +574,12 @@ class _WhenThen:
             ``ConditionalEncoding`` wire (``selection_name``, ``channel``,
             ``if_selected``, ``if_not``).
         """
+        selection = self._parameter if isinstance(self._parameter, Selection) else None
         return ConditionalSpec(
             selection_name=self._parameter.name,
             if_selected=self._if_val,
             if_not=_ensure_value(v),
+            selection=selection,
         )
 
 
@@ -608,13 +633,16 @@ def when(parameter: Parameter) -> _When:
 
     Examples
     --------
-    Fade unselected marks:
+    Fade unselected marks — assign the conditional to the ``opacity`` channel so
+    the numeric branches resolve to opacity values (``encode`` stamps the channel
+    from its key and auto-registers ``sel``):
 
     >>> import ferrum as fm
     >>> sel = fm.selection_point()
-    >>> cond = fm.when(sel).then(1).otherwise(0.2)
-    >>> type(cond).__name__
-    'ConditionalSpec'
+    >>> chart = fm.Chart(df).mark_point().encode(
+    ...     x=fm.X("x"), y=fm.Y("y"),
+    ...     opacity=fm.when(sel).then(1.0).otherwise(0.2),
+    ... )
 
     Colour toggle on legend selection:
 
@@ -715,6 +743,12 @@ def _resolve_channel(enc: Any) -> str:
         return "fill_opacity"
     if isinstance(enc, Angle):
         return "angle"
+    if isinstance(enc, _LiteralValue) and isinstance(enc.val, (int, float)):
+        # A bare number carries no channel of its own. Default to "opacity":
+        # it is the sensible default for a numeric literal and the only numeric
+        # channel whose (channel, kind) tuple the WASM matcher handles when no
+        # explicit channel is supplied via encode(<channel>=...).
+        return "opacity"
     return "color"
 
 

@@ -255,6 +255,7 @@ class _Facet:
 
 
 from ferrum.encoding import _channel_class_map, _channel_class_for, _apply_channel_aliases
+from ferrum.selection import ConditionalSpec
 
 
 class _NamedTransform:
@@ -1496,6 +1497,21 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             cls = _channel_class_for(name)
             if cls is None:
                 raise ValueError(f"unknown encoding channel: {name!r}")
+
+            if isinstance(value, ConditionalSpec):
+                # encode(<channel>=cond): the wire channel is KNOWN from the
+                # encode key (already snake_case, e.g. "opacity", "size",
+                # "stroke_width"). Stamp it so both the wire channel and the
+                # value-kind resolution are correct, then record the conditional
+                # and auto-register its source selection. Conditionals live in
+                # _conditionals, not _encoding.
+                new._conditionals.append(replace(value, channel=name))
+                sel = value.selection
+                if sel is not None:
+                    existing = {s.name for s in new._selections if hasattr(s, "name")}
+                    if sel.name not in existing:
+                        new._selections.append(sel)
+                continue
 
             if isinstance(value, ChannelBase):
                 channel = value
@@ -3443,13 +3459,19 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         new._conditionals.append(spec)
         if hasattr(spec, "selection_name"):
             # Ensure the selection is also registered so scene_build can wire it.
-            existing = {s.name: s for s in new._selections if hasattr(s, "name")}
+            existing = {s.name for s in new._selections if hasattr(s, "name")}
             if spec.selection_name not in existing:
-                raise ValueError(
-                    f"Chart.conditional(): no selection named {spec.selection_name!r} "
-                    f"is attached to this chart. Call .add_selection(sel) first, or use "
-                    f"chart.add_selection(sel).encode(...) with the conditional encoding."
-                )
+                # Auto-register the carried selection when the spec knows it,
+                # so the explicit path benefits like encode(<channel>=cond) does.
+                carried = getattr(spec, "selection", None)
+                if carried is not None and carried.name == spec.selection_name:
+                    new._selections.append(carried)
+                else:
+                    raise ValueError(
+                        f"Chart.conditional(): no selection named {spec.selection_name!r} "
+                        f"is attached to this chart. Call .add_selection(sel) first, or use "
+                        f"chart.add_selection(sel).encode(...) with the conditional encoding."
+                    )
         return new
 
     def __repr__(self) -> str:

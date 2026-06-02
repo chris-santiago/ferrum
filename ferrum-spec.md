@@ -843,6 +843,16 @@ Color(field="category", condition=selection.when(Color("category")).otherwise(va
 
 Or via chart-level `.conditional(sel, color=..., else_color=...)`.
 
+> **Note (2026-06-01):** A conditional built by `sel.when(...).otherwise(...)`
+> or `fm.when(sel).then(...).otherwise(...)` may be passed directly to
+> `encode(<channel>=cond)`. The wire channel is taken from the encode key
+> (so `encode(opacity=fm.when(sel).then(1.0).otherwise(0.2))` resolves the
+> numeric branches as opacity, not colour), and the conditional's source
+> selection is auto-registered — no separate `.add_selection()` is required.
+> `Chart.conditional(spec)` likewise auto-registers the spec's source selection
+> when it carries one. A bare number with no channel context (e.g. via
+> `fm.value(0.5)` outside an `encode` key) defaults to the `opacity` channel.
+
 ---
 
 ### 3.11 Annotations
