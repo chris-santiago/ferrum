@@ -52,14 +52,14 @@ pub fn build_scene(
 
         // Strip title — emitted as separate nodes in the panel, not a group.
         // Includes both the column-header strip (top) and, in grid mode, the
-        // row-header strip (left side). Both are appended to the same vec so
+        // row-header strip (right side). Both are appended to the same vec so
         // the compositor's offset logic picks them up without a schema change.
         let mut strip_title_nodes: Vec<SceneNode> = panel.strip_title.as_ref()
             .map(|strip| marks::strip_title::build_strip_title(strip, &panel.plot_area, theme))
             .unwrap_or_default();
         if let Some(row_strip) = &panel.row_strip_title {
             strip_title_nodes.extend(
-                marks::strip_title::build_row_strip_title(row_strip, theme)
+                marks::strip_title::build_row_strip_title(row_strip, panel.plot_area.h, theme)
             );
         }
 

@@ -700,10 +700,11 @@ pub fn compute_layout(
         } else {
             gy
         };
-        // Grid mode with a row dimension: reserve a left-side strip band for
-        // row headers so they don't overlap the y-axis. Use the same height
-        // metric as the column strip band (strip_band_height computed below is
-        // used as the width here since it represents a single line of text).
+        // Grid mode with a row dimension: reserve a right-side strip band for
+        // row headers (ggplot2 / Altair convention — row strips on the right).
+        // Reserving on the right keeps the y-axis title and tick labels
+        // unobstructed on the left. The band width equals one line of
+        // strip text plus vertical padding on each side.
         let row_strip_width = if facet.row.is_some() {
             let text_h = metrics.line_height(theme.sizes.strip_text_size);
             text_h + 2.0 * theme.padding.strip_padding
@@ -712,7 +713,7 @@ pub fn compute_layout(
         };
         let grid_region = if row_strip_width > 0.0 {
             Rect {
-                x: plot_region.x + row_strip_width,
+                x: plot_region.x,
                 y: plot_region.y,
                 w: (plot_region.w - row_strip_width).max(0.0),
                 h: plot_region.h,
@@ -799,7 +800,7 @@ pub fn compute_layout(
     // panel in a multi-column faceted chart causes visual overlap).
     let min_col = panel_rects.iter().map(|(_, c, _, _, _)| *c).min().unwrap_or(0);
 
-    // Width of the row-header strip on the left side of the grid region (grid
+    // Width of the row-header strip on the right side of the grid region (grid
     // mode only). Mirrored from the reservation made when building panel_rects.
     let row_strip_band_width = if spec.facet.as_ref().is_some_and(|f| f.row.is_some()) {
         let text_h = metrics.line_height(theme.sizes.strip_text_size);
@@ -807,9 +808,14 @@ pub fn compute_layout(
     } else {
         0.0
     };
+    // Maximum column index across all panels. Used to identify the rightmost
+    // column so each row-header strip is emitted once, on the right edge.
+    // Two-way grid facets always form a proper rectangular grid, so max_col is
+    // uniform across all rows.
+    let max_col = panel_rects.iter().map(|(_, c, _, _, _)| *c).max().unwrap_or(0);
     // Track which grid rows have already had their row-header strip emitted. In
     // a 3×3 grid, row_val "r1" appears for three panels (cols c1, c2, c3); we
-    // only want one row-header strip per grid row (the leftmost col).
+    // only want one row-header strip per grid row (the rightmost col).
     let mut emitted_row_strips: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // 7. Per-panel: clamp degenerate rects, collect axes.
@@ -853,14 +859,21 @@ pub fn compute_layout(
             None
         };
 
-        // Row header strip (left side, grid mode only). One strip per grid row,
-        // emitted on the leftmost panel of each row. The strip sits in the
-        // row_strip_band_width reservation made when building panel_rects.
+        // Row header strip (right side, grid mode only). One strip per grid row,
+        // emitted on the rightmost panel of each row. The strip sits in the
+        // row_strip_band_width reservation made when building panel_rects,
+        // which was carved from the right side of the grid region so it never
+        // overlaps the y-axis title or tick labels on the left.
         let row_strip_title = if let Some(rk) = &row_facet_key {
-            let is_first_in_row = emitted_row_strips.insert(rk.value.clone());
-            if is_first_in_row && rect != Rect::ZERO && row_strip_band_width > 0.0 {
-                // Place the row-header strip to the left of the current panel.
-                let strip_center_x = rect.x - row_strip_band_width / 2.0;
+            // Emit on the rightmost column only (col == max_col). Use the
+            // HashSet to guard against degenerate cases where max_col panels
+            // are repeated (shouldn't happen in a proper grid, but be safe).
+            let is_rightmost = col == max_col;
+            let not_yet_emitted = is_rightmost && emitted_row_strips.insert(rk.value.clone());
+            if not_yet_emitted && rect != Rect::ZERO && row_strip_band_width > 0.0 {
+                // Place the row-header strip to the right of the rightmost panel,
+                // centered within the reserved band.
+                let strip_center_x = rect.x + rect.w + row_strip_band_width / 2.0;
                 let strip_center_y = rect.y + rect.h / 2.0;
                 Some(StripTitleLayout {
                     text: rk.value.clone(),
@@ -1769,5 +1782,174 @@ mod tests {
             "wrap-mode facet must never emit EmptyPartitions; got {:?}",
             result.warnings
         );
+    }
+
+    // ── Row-strip right-side placement (layout regression) ───────────────────
+
+    /// Helper: two-way grid spec for row/col faceting.
+    fn two_way_grid_spec() -> ChartSpec {
+        let mut s = minimal_chart_spec();
+        s.facet = Some(FacetSpec {
+            field: "col_cat".into(),
+            row: Some("row_cat".into()),
+            mode: FacetMode::Grid { nrows: 2, ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve::default(),
+        });
+        s
+    }
+
+    /// Helper: 2×2 two-way grid facet groups with data in every cell.
+    fn two_way_2x2_groups() -> Vec<FacetGroup> {
+        vec![
+            FacetGroup {
+                key: FacetKey { field: "col_cat".into(), value: "A".into() },
+                n_rows: 10,
+                row_key: Some(FacetKey { field: "row_cat".into(), value: "High".into() }),
+            },
+            FacetGroup {
+                key: FacetKey { field: "col_cat".into(), value: "B".into() },
+                n_rows: 10,
+                row_key: Some(FacetKey { field: "row_cat".into(), value: "High".into() }),
+            },
+            FacetGroup {
+                key: FacetKey { field: "col_cat".into(), value: "A".into() },
+                n_rows: 10,
+                row_key: Some(FacetKey { field: "row_cat".into(), value: "Low".into() }),
+            },
+            FacetGroup {
+                key: FacetKey { field: "col_cat".into(), value: "B".into() },
+                n_rows: 10,
+                row_key: Some(FacetKey { field: "row_cat".into(), value: "Low".into() }),
+            },
+        ]
+    }
+
+    /// The row-strip label must be placed to the RIGHT of the rightmost panel,
+    /// not to the left where it would collide with y-axis ticks/title.
+    ///
+    /// Specifically:
+    ///  - Each row produces exactly one `row_strip_title` (on the rightmost col panel).
+    ///  - The strip anchor x must be strictly greater than all panel plot_area right edges.
+    ///  - The strip anchor x must be strictly greater than the y-axis label band right edge
+    ///    (i.e. `plot_region.x`), confirming no left-side placement.
+    #[test]
+    fn row_strip_anchor_is_right_of_panels_not_left() {
+        let spec = two_way_grid_spec();
+        let groups = two_way_2x2_groups();
+        let axes = AxesInput {
+            x: AxisInput::new(AxisOrient::Bottom, Some("x".into()), vec!["0".into(), "5".into()], None),
+            y: AxisInput::new(AxisOrient::Left, Some("y".into()), vec!["0".into(), "5".into()], None),
+            show_x: true,
+            show_y: true,
+        };
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 600.0 },
+            &axes,
+            &groups,
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(result.panels.len(), 4, "expected 4 panels in 2×2 grid");
+
+        // Collect panels that have a row_strip_title.
+        let stripped_panels: Vec<&PanelLayout> = result
+            .panels
+            .iter()
+            .filter(|p| p.row_strip_title.is_some())
+            .collect();
+        assert_eq!(stripped_panels.len(), 2, "expected one row-strip per row (2 rows)");
+
+        for panel in &stripped_panels {
+            let strip = panel.row_strip_title.as_ref().unwrap();
+            let panel_right = panel.plot_area.x + panel.plot_area.w;
+
+            // Strip anchor must be to the RIGHT of the panel's right edge.
+            assert!(
+                strip.anchor.0 > panel_right,
+                "row strip anchor.x ({:.1}) must be right of panel right edge ({:.1})",
+                strip.anchor.0,
+                panel_right
+            );
+
+            // Strip anchor must not be to the left of any panel's right edge
+            // (verifies it's not placed in the left margin near the y-axis).
+            let min_panel_right = result
+                .panels
+                .iter()
+                .map(|p| p.plot_area.x + p.plot_area.w)
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                strip.anchor.0 >= min_panel_right,
+                "row strip anchor.x ({:.1}) must not be left of any panel right edge ({:.1})",
+                strip.anchor.0,
+                min_panel_right
+            );
+        }
+
+        // Verify no row_strip label is emitted on the leftmost column (col 0 panels
+        // should have row_strip_title == None in a 2-column right-side layout).
+        let left_col_panels: Vec<&PanelLayout> = result.panels.iter().filter(|p| p.col == 0).collect();
+        for p in left_col_panels {
+            assert!(
+                p.row_strip_title.is_none(),
+                "col-0 panel should have no row_strip_title (strip emitted on rightmost col only)"
+            );
+        }
+    }
+
+    /// Smoke test: a two-way grid facet chart renders without panicking and
+    /// produces valid strip titles (both col strips on top and row strips on right).
+    #[test]
+    fn two_way_facet_grid_renders_both_strip_kinds() {
+        let spec = two_way_grid_spec();
+        let groups = two_way_2x2_groups();
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 600.0 },
+            &axes,
+            &groups,
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+        )
+        .unwrap();
+
+        // Column strips: all 4 panels have a col strip_title.
+        assert!(
+            result.panels.iter().all(|p| p.strip_title.is_some()),
+            "all panels should have a column strip_title"
+        );
+
+        // Row strips: exactly 2 panels (rightmost column) have row_strip_title.
+        let row_strip_count = result.panels.iter().filter(|p| p.row_strip_title.is_some()).count();
+        assert_eq!(row_strip_count, 2, "expected 2 row-strip panels (one per row, rightmost col)");
+
+        // Row strip text values must match the row_cat values.
+        let row_strip_texts: Vec<&str> = result
+            .panels
+            .iter()
+            .filter_map(|p| p.row_strip_title.as_ref())
+            .map(|s| s.text.as_str())
+            .collect();
+        assert!(row_strip_texts.contains(&"High"), "expected 'High' row strip");
+        assert!(row_strip_texts.contains(&"Low"), "expected 'Low' row strip");
     }
 }
