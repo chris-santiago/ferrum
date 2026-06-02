@@ -105,7 +105,12 @@ def desugar_boxplot(
         raise ValueError("mark_boxplot() requires .encode(x=..., y=...)")
     cat = y_field if horizontal else x_field
     val = x_field if horizontal else y_field
-    groupby = [cat] + ([color_field] if color_field else [])
+    # Only split by hue when color_field is a distinct column from the
+    # categorical axis. When color encodes the same field as cat (e.g.
+    # color="cat:N"), adding it to groupby would create a duplicate entry
+    # that the Rust BoxStats transform rejects.
+    split_hue = color_field is not None and color_field != cat
+    groupby = [cat] + ([color_field] if split_hue else [])
 
     transforms = [
         BoxStats(field=val, groupby=groupby, whisker_extent=_extent_to_box(extent), name="box")
@@ -132,6 +137,8 @@ def desugar_boxplot(
             d["y"] = Y(y_col, title=title) if title else y_col
             if y2_col:
                 d["y2"] = y2_col
+        if color_field:
+            d["color"] = color_field
         return d
 
     layers = [
