@@ -19,6 +19,7 @@ from ferrum import (
 )
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum.marks._desugar_helpers import resolve_color_groupby
 
 
 def desugar_contour(
@@ -309,8 +310,7 @@ def desugar_violin(
     # Add the hue field to the groupby only when it is a distinct column; when
     # color encodes the same field as x the KDE is already split per x-category
     # and the body just colors by the surviving x column.
-    split_hue = color_field is not None and color_field != x_field
-    groupby = [x_field, color_field] if split_hue else [x_field]
+    groupby, split_hue = resolve_color_groupby(x_field, color_field, [x_field])
 
     body_encoding: dict = {"x": x_enc_val, "y": Y("violin_y", title=y_field)}
     if color_field is not None:

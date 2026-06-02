@@ -959,15 +959,17 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 transform_kwargs = {**transform_kwargs, "x_sort": x_sort}
             if y_sort is not None and kind != "errorbar":
                 transform_kwargs = {**transform_kwargs, "y_sort": y_sort}
-        # violin / boxplot: thread the color (hue) field into the desugar so
-        # each (x, hue) group gets its own split KDE / box-stats summary, and
+        # violin / boxplot / errorbar / errorband: thread the color (hue) field
+        # into the desugar so each (x, hue) group gets its own split summary, and
         # every emitted layer carries a color encoding consistent with the hue.
-        # Without this, violin/boxplot collapses to one shape per x-category
-        # while still drawing a hue legend (silent-wrong-output).
+        # Without this, these marks collapse to one shape per x-category while
+        # still drawing a hue legend (silent-wrong-output).
         # Respect an explicit caller-supplied color_field (non-falsy overrides
         # the encoding-inferred one); a None/empty value from the mark call's
         # default is treated as "not set" so the encoding can still inject it.
-        if kind in ("violin", "boxplot") and not transform_kwargs.get("color_field"):
+        if kind in ("violin", "boxplot", "errorbar", "errorband") and not transform_kwargs.get(
+            "color_field"
+        ):
             color_enc = self._encoding.get("color")
             if color_enc is not None:
                 color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc

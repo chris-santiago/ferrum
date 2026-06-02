@@ -11,6 +11,7 @@ from ferrum import BoxStats, ErrorExtent, LetterValue, Outliers
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum.encoding import X, Y
+from ferrum.marks._desugar_helpers import resolve_color_groupby
 from ferrum.marks._mark_kwargs import (
     apply_user_mark_kwargs as _apply,
     validate_user_mark_kwargs as _validate,
@@ -109,8 +110,7 @@ def desugar_boxplot(
     # categorical axis. When color encodes the same field as cat (e.g.
     # color="cat:N"), adding it to groupby would create a duplicate entry
     # that the Rust BoxStats transform rejects.
-    split_hue = color_field is not None and color_field != cat
-    groupby = [cat] + ([color_field] if split_hue else [])
+    groupby, split_hue = resolve_color_groupby(cat, color_field, [cat])
 
     transforms = [
         BoxStats(field=val, groupby=groupby, whisker_extent=_extent_to_box(extent), name="box")
@@ -213,6 +213,7 @@ def desugar_errorbar(
     *,
     extent: str = "ci",
     ticks: bool = True,
+    color_field: Optional[str] = None,
     x_sort: Any = None,
     **mark_kwargs: Any,
 ) -> "MarkDesugarResult":
@@ -249,6 +250,12 @@ def desugar_errorbar(
     ticks : bool, default True
         Whether to add endpoint tick marks at the top and bottom of each
         error bar.
+    color_field : str or None, default None
+        Optional column to use for color encoding.  When set (and distinct from
+        ``x_field``), it is added to the ``ErrorExtent`` groupby so the error
+        extent is computed per (x, color) group, and every emitted layer carries
+        a ``color`` encoding so each group is visually distinct.  When ``None``,
+        behavior is byte-stable with the previous (no-hue) implementation.
     x_sort : optional
         Sort order applied to the categorical positional axis, injected by
         the composite-mark expansion from ``sort=`` on the encoding.
@@ -275,13 +282,25 @@ def desugar_errorbar(
     if x_field is None or y_field is None:
         raise ValueError("mark_errorbar() requires .encode(x=..., y=...)")
     # Errorbar always uses x_field as the categorical grouping axis.
+    # Include color_field in the groupby when it is a distinct column so the
+    # error extent is computed per (x, hue) group, not pooled across hues.
+    groupby, split_hue = resolve_color_groupby(x_field, color_field, [x_field])
     x_enc_val = X(x_field, sort=x_sort) if x_sort is not None else x_field
-    transforms = [ErrorExtent(field=y_field, groupby=[x_field], method=extent, name="err")]
+
+    def _enc(y_col: str, y2_col: str | None = None) -> dict:
+        d: dict = {"x": x_enc_val, "y": y_col}
+        if y2_col is not None:
+            d["y2"] = y2_col
+        if split_hue:
+            d["color"] = color_field
+        return d
+
+    transforms = [ErrorExtent(field=y_field, groupby=groupby, method=extent, name="err")]
     layers = [
         _Layer(
             name="rule",
             mark="rule",
-            encoding={"x": x_enc_val, "y": "lower", "y2": "upper"},
+            encoding=_enc("lower", "upper"),
             mark_kwargs={"stroke": "theme:label", "stroke_dash": []},
             data_source="err",
         ),
@@ -292,14 +311,14 @@ def desugar_errorbar(
                 _Layer(
                     name="lower_cap",
                     mark="tick",
-                    encoding={"x": x_enc_val, "y": "lower"},
+                    encoding=_enc("lower"),
                     mark_kwargs={"band_size": 0.3, "stroke": "theme:label"},
                     data_source="err",
                 ),
                 _Layer(
                     name="upper_cap",
                     mark="tick",
-                    encoding={"x": x_enc_val, "y": "upper"},
+                    encoding=_enc("upper"),
                     mark_kwargs={"band_size": 0.3, "stroke": "theme:label"},
                     data_source="err",
                 ),
@@ -326,6 +345,7 @@ def desugar_errorband(
     *,
     extent: str = "ci",
     borders: bool = False,
+    color_field: Optional[str] = None,
     **mark_kwargs: Any,
 ) -> "MarkDesugarResult":
     """Error-band (shaded CI ribbon) composite mark desugar.
@@ -359,6 +379,12 @@ def desugar_errorband(
     borders : bool, default False
         Whether to draw solid border lines at the upper and lower edges of
         the ribbon.
+    color_field : str or None, default None
+        Optional column to use for color encoding.  When set (and distinct from
+        ``x_field``), it is added to the ``ErrorExtent`` groupby so the error
+        extent is computed per (x, color) group, and every emitted layer carries
+        a ``color`` encoding so each group's ribbon is visually distinct.  When
+        ``None``, behavior is byte-stable with the previous (no-hue) implementation.
 
     Returns
     -------
@@ -381,12 +407,28 @@ def desugar_errorband(
     user_kw = _validate("errorband", mark_kwargs)
     if x_field is None or y_field is None:
         raise ValueError("mark_errorband() requires .encode(x=..., y=...)")
-    transforms = [ErrorExtent(field=y_field, groupby=[x_field], method=extent, name="err")]
+    # Include color_field in the groupby when it is a distinct column so the
+    # error extent is computed per (x, hue) group, not pooled across hues.
+    groupby, split_hue = resolve_color_groupby(x_field, color_field, [x_field])
+
+    def _enc_ribbon() -> dict:
+        d: dict = {"x": x_field, "y": Y("lower", title=y_field), "y2": "upper"}
+        if split_hue:
+            d["color"] = color_field
+        return d
+
+    def _enc_border(y_col: str) -> dict:
+        d: dict = {"x": x_field, "y": y_col}
+        if split_hue:
+            d["color"] = color_field
+        return d
+
+    transforms = [ErrorExtent(field=y_field, groupby=groupby, method=extent, name="err")]
     layers = [
         _Layer(
             name="ribbon",
             mark="ribbon",
-            encoding={"x": x_field, "y": Y("lower", title=y_field), "y2": "upper"},
+            encoding=_enc_ribbon(),
             mark_kwargs={"opacity": 0.2, "stroke": "none"},
             data_source="err",
         ),
@@ -397,13 +439,13 @@ def desugar_errorband(
                 _Layer(
                     name="lower_border",
                     mark="line",
-                    encoding={"x": x_field, "y": "lower"},
+                    encoding=_enc_border("lower"),
                     data_source="err",
                 ),
                 _Layer(
                     name="upper_border",
                     mark="line",
-                    encoding={"x": x_field, "y": "upper"},
+                    encoding=_enc_border("upper"),
                     data_source="err",
                 ),
             ]
