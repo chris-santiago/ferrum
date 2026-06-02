@@ -122,17 +122,7 @@ pub(crate) fn k_for_depth(strategy: &KDepth, n: usize) -> usize {
     k.min(K_MAX_NAMED)
 }
 
-/// numpy-style linear-interpolation quantile on already-sorted ascending values.
-fn quantile_sorted(sorted: &[f64], p: f64) -> f64 {
-    let n = sorted.len();
-    if n == 0 { return f64::NAN; }
-    if n == 1 { return sorted[0]; }
-    let h = p * (n as f64 - 1.0);
-    let lo = h.floor() as usize;
-    let hi = (h.ceil() as usize).min(n - 1);
-    let frac = h - h.floor();
-    sorted[lo] * (1.0 - frac) + sorted[hi] * frac
-}
+use crate::transform::numeric_util::quantile_sorted;
 
 struct DepthRow {
     group: Option<String>,

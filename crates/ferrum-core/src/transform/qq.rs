@@ -341,21 +341,7 @@ pub(crate) fn secondary_outputs(
     Ok(vec![("qq_line".to_string(), line_batch)])
 }
 
-/// Linearly-interpolated quantile over an already-sorted (ascending) sequence.
-fn quantile_sorted(sorted: &[f64], p: f64) -> f64 {
-    let n = sorted.len();
-    if n == 0 {
-        return f64::NAN;
-    }
-    if n == 1 {
-        return sorted[0];
-    }
-    let h = p * (n as f64 - 1.0);
-    let lo = h.floor() as usize;
-    let hi = (h.ceil() as usize).min(n - 1);
-    let frac = h - h.floor();
-    sorted[lo] * (1.0 - frac) + sorted[hi] * frac
-}
+use crate::transform::numeric_util::quantile_sorted;
 
 // ---------- PyO3 wrapper ----------
 

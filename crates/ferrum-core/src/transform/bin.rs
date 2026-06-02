@@ -91,16 +91,7 @@ fn apply_one_group(
     };
 
     // Drop nulls and NaN; optionally restrict to a subset of row indices (for groupby).
-    let mut clean: Vec<f64> = Vec::new();
-    let push = |i: usize, clean: &mut Vec<f64>| {
-        if arr.is_null(i) { return; }
-        let v = arr.value(i);
-        if !v.is_nan() { clean.push(v); }
-    };
-    match only_indices {
-        Some(ixs) => for &i in ixs { push(i, &mut clean); },
-        None => for i in 0..arr.len() { push(i, &mut clean); },
-    }
+    let clean = crate::transform::numeric_util::clean_float64_values(arr, only_indices);
 
     // Empty input → empty output (per spec §6: stat_bin is the exception that allows empty)
     if clean.is_empty() {
