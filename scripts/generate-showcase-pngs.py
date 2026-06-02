@@ -479,6 +479,299 @@ def build_faceted_scatter() -> fm.Chart:
     )
 
 
+def build_coxcomb() -> fm.Chart:
+    """Coxcomb / wind-rose: polar bar chart with equal angular bands, season-colored."""
+    rng = random.Random(RANDOM_SEED)
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    rainfall = [rng.uniform(30, 120) for _ in months]
+    # 4-category season variable eliminates color wrap (12 months > 8-color palette)
+    season_map = {
+        "Jan": "Winter", "Feb": "Winter",
+        "Mar": "Spring", "Apr": "Spring", "May": "Spring",
+        "Jun": "Summer", "Jul": "Summer", "Aug": "Summer",
+        "Sep": "Fall", "Oct": "Fall", "Nov": "Fall",
+        "Dec": "Winter",
+    }
+    seasons = [season_map[m] for m in months]
+    df = pl.DataFrame({"month": months, "rainfall": rainfall, "season": seasons})
+    return (
+        fm.Chart(df)
+        .mark_bar()
+        .encode(x="month:N", y="rainfall:Q", color="season:N")
+        .coord(fm.CoordPolar(theta="x"))
+        .properties(
+            title=fm.Title(
+                text="Coxcomb / Wind-Rose",
+                subtitle="Polar bar chart — radius encodes rainfall, color by season",
+            ),
+            width=420,
+            height=420,
+        )
+    )
+
+
+def build_candlestick() -> fm.Chart:
+    """Candlestick / OHLC: layered segment (wick) + bar (body)."""
+    rng = random.Random(RANDOM_SEED)
+    days = [str(d) for d in range(1, 16)]
+    opens = [100.0]
+    for _ in range(14):
+        opens.append(opens[-1] + rng.gauss(0, 2.0))
+    closes = [o + rng.gauss(0, 3.0) for o in opens]
+    lows = [min(o, c) - abs(rng.gauss(0, 1.5)) for o, c in zip(opens, closes)]
+    highs = [max(o, c) + abs(rng.gauss(0, 1.5)) for o, c in zip(opens, closes)]
+    dirs = ["up" if c >= o else "down" for o, c in zip(opens, closes)]
+    df = pl.DataFrame(
+        {"day": days, "open": opens, "close": closes, "low": lows, "high": highs, "dir": dirs}
+    )
+    wick = (
+        fm.Chart(df)
+        .mark_segment(stroke="#333333", stroke_width=1.5)
+        .encode(
+            x="day:O",
+            x2="day:O",
+            y=fm.Y("low:Q", axis=fm.Axis(title="Price")),
+            y2="high:Q",
+        )
+    )
+    body = (
+        fm.Chart(df)
+        .mark_bar()
+        .encode(
+            x="day:O",
+            y=fm.Y("open:Q", axis=fm.Axis(title="Price")),
+            y2="close:Q",
+            color="dir:N",
+        )
+    )
+    # Body is rendered first; wick draws on top so high/low tails are always visible.
+    return (body + wick).properties(
+        title=fm.Title(
+            text="Candlestick (OHLC)",
+            subtitle="mark_segment wick + mark_bar body; color = direction",
+        ),
+        width=500,
+        height=320,
+    )
+
+
+def build_marimekko() -> fm.Chart:
+    """Marimekko / mosaic: variable-width stacked rects from precomputed x0/x1, y0/y1."""
+    products = ["Alpha", "Beta", "Gamma"]
+    regions = ["North", "South", "East", "West"]
+    col_sizes = [0.45, 0.30, 0.25]
+    stacks = {
+        "Alpha": [0.40, 0.25, 0.20, 0.15],
+        "Beta": [0.30, 0.35, 0.20, 0.15],
+        "Gamma": [0.20, 0.30, 0.30, 0.20],
+    }
+    data: dict[str, list] = {"x0": [], "x1": [], "y0": [], "y1": [], "product": [], "region": []}
+    x = 0.0
+    for prod, width in zip(products, col_sizes):
+        x1 = x + width
+        y = 0.0
+        for region, share in zip(regions, stacks[prod]):
+            data["x0"].append(x)
+            data["x1"].append(x1)
+            data["y0"].append(y)
+            data["y1"].append(y + share)
+            data["product"].append(prod)
+            data["region"].append(region)
+            y += share
+        x = x1
+
+    df = pl.DataFrame(data)
+    return (
+        fm.Chart(df)
+        .mark_rect()
+        .encode(
+            x=fm.X("x0:Q", axis=fm.Axis(title="Cumulative share")),
+            x2="x1:Q",
+            y=fm.Y("y0:Q", axis=fm.Axis(title="Share within segment")),
+            y2="y1:Q",
+            color="region:N",
+        )
+        .properties(
+            title=fm.Title(
+                text="Marimekko / Mosaic Chart",
+                subtitle="Column width = region share; fill = region via x/x2 + y/y2",
+            ),
+            width=480,
+            height=340,
+        )
+    )
+
+
+def build_diverging_likert() -> fm.Chart:
+    """Diverging Likert: floating bars stacked from center using x0/x1."""
+    statements = ["Easy to use", "Well documented", "Fast", "Reliable", "Good support"]
+    levels = ["Strongly disagree", "Disagree", "Neutral", "Agree", "Strongly agree"]
+    counts_data = {
+        "Easy to use": [5, 10, 15, 40, 30],
+        "Well documented": [10, 20, 20, 30, 20],
+        "Fast": [3, 8, 12, 45, 32],
+        "Reliable": [4, 7, 18, 42, 29],
+        "Good support": [15, 25, 20, 25, 15],
+    }
+    data: dict[str, list] = {"statement": [], "level": [], "x0": [], "x1": []}
+    for stmt in statements:
+        counts = counts_data[stmt]
+        total = sum(counts)
+        props = [c / total for c in counts]
+        # Center diverges at (neutral/2); negative side is Disagree + Strongly Disagree
+        x = -(props[2] / 2 + props[1] + props[0])
+        for lv, prop in zip(levels, props):
+            data["statement"].append(stmt)
+            data["level"].append(lv)
+            data["x0"].append(x)
+            data["x1"].append(x + prop)
+            x += prop
+
+    df = pl.DataFrame(data)
+    return (
+        fm.Chart(df)
+        .mark_bar()
+        .encode(
+            x=fm.X("x0:Q", axis=fm.Axis(title="Share of responses")),
+            x2="x1:Q",
+            y="statement:N",
+            color=fm.Color("level:N", scale={"scheme": "redblue"}),
+        )
+        .properties(
+            title=fm.Title(
+                text="Diverging Likert Chart",
+                subtitle="Bars float from center via x/x2 — redblue maps agreement",
+            ),
+            width=500,
+            height=300,
+        )
+    )
+
+
+def build_viridis_heatmap() -> fm.Chart:
+    """Continuous-color heatmap using the viridis sequential scheme (D1)."""
+    xs = [str(i) for i in range(10)]
+    ys = [str(i) for i in range(10)]
+    data: dict[str, list] = {"x": [], "y": [], "z": []}
+    for xi, x in enumerate(xs):
+        for yi, y in enumerate(ys):
+            data["x"].append(x)
+            data["y"].append(y)
+            data["z"].append(math.sin(xi * 0.7) * math.cos(yi * 0.7))
+
+    df = pl.DataFrame(data)
+    return (
+        fm.Chart(df)
+        .mark_rect()
+        .encode(
+            x="x:O",
+            y="y:O",
+            color=fm.Color("z:Q", scale={"scheme": "viridis"}),
+        )
+        .properties(
+            title=fm.Title(
+                text="Continuous-Color Heatmap — Viridis",
+                subtitle="Viridis sequential scheme; Q field auto-resolves continuous scale",
+            ),
+            width=380,
+            height=340,
+        )
+    )
+
+
+def build_split_violin() -> fm.Chart:
+    """Split violin by hue (T10): two distributions mirrored per category."""
+    rng = random.Random(RANDOM_SEED)
+    days = ["Thur", "Fri", "Sat", "Sun"]
+    smoker_params = {"Yes": (3.5, 1.3), "No": (2.9, 1.0)}
+    rows: dict[str, list] = {"day": [], "tip": [], "smoker": []}
+    for day in days:
+        for smoker, (mu, sigma) in smoker_params.items():
+            for _ in range(60):
+                rows["day"].append(day)
+                rows["tip"].append(max(0.5, mu + rng.gauss(0, sigma)))
+                rows["smoker"].append(smoker)
+
+    df = pl.DataFrame(rows)
+    return (
+        fm.Chart(df)
+        .mark_violin()
+        .encode(x="day:N", y="tip:Q", color="smoker:N")
+        .properties(
+            title=fm.Title(
+                text="Split Violin by Hue",
+                subtitle="Each violin is mirrored by smoker/non-smoker — hue splits the violin halves",
+            ),
+            width=480,
+            height=340,
+        )
+    )
+
+
+def build_per_hue_errorband() -> fm.Chart:
+    """Per-hue error band (S1): two model forecasts with visibly different spreads."""
+    rng = random.Random(RANDOM_SEED)
+    months = list(range(1, 13))
+    rows: dict[str, list] = {"month": [], "y": [], "model": []}
+    for _ in range(60):
+        for m in months:
+            rows["month"].append(float(m))
+            rows["y"].append(2.0 + 0.3 * m + rng.gauss(0, 0.6))
+            rows["model"].append("Model A")
+    for _ in range(60):
+        for m in months:
+            rows["month"].append(float(m))
+            rows["y"].append(1.5 + 0.4 * m + rng.gauss(0, 1.8))
+            rows["model"].append("Model B")
+
+    df = pl.DataFrame(rows)
+    return (
+        fm.Chart(df)
+        .mark_errorband()
+        .encode(x="month:Q", y="y:Q", color="model:N")
+        .properties(
+            title=fm.Title(
+                text="Per-Hue Error Band",
+                subtitle="Model A (narrow band) vs Model B (wide band) — color splits error extents per group",
+            ),
+            width=500,
+            height=320,
+        )
+    )
+
+
+def build_twoby_facet() -> fm.Chart:
+    """Two-way facet trellis: row × col small multiples (D2)."""
+    rng = random.Random(RANDOM_SEED)
+    params = {
+        ("High", "Group A"): (2.0, 3.0),
+        ("High", "Group B"): (5.0, 2.0),
+        ("Low", "Group A"): (1.0, 1.5),
+        ("Low", "Group B"): (4.0, 4.5),
+    }
+    rows: dict[str, list] = {"x": [], "y": [], "row": [], "col": []}
+    for (row_val, col_val), (mx, my) in params.items():
+        for _ in range(50):
+            rows["x"].append(mx + rng.gauss(0, 0.8))
+            rows["y"].append(my + rng.gauss(0, 0.8))
+            rows["row"].append(row_val)
+            rows["col"].append(col_val)
+
+    df = pl.DataFrame(rows)
+    return (
+        fm.Chart(df)
+        .mark_point(opacity=0.7, size=40)
+        .encode(x="x:Q", y="y:Q")
+        .facet(row="row", col="col")
+        .properties(
+            title=fm.Title(
+                text="Two-Way Facet Trellis",
+                subtitle="2 × 2 grid of scatter panels — row and col facets reveal interaction effects",
+            ),
+        )
+    )
+
+
 CHARTS: list[tuple[str, object]] = [
     ("showcase_gapminder_bubble", build_gapminder_bubble),
     ("showcase_highlight_line", build_highlight_line),
@@ -490,6 +783,15 @@ CHARTS: list[tuple[str, object]] = [
     ("showcase_ridgeline", build_ridgeline),
     ("showcase_hexbin", build_hexbin),
     ("showcase_faceted_scatter", build_faceted_scatter),
+    # --- flexibility-campaign additions ---
+    ("showcase_coxcomb", build_coxcomb),
+    ("showcase_candlestick", build_candlestick),
+    ("showcase_marimekko", build_marimekko),
+    ("showcase_diverging_likert", build_diverging_likert),
+    ("showcase_viridis_heatmap", build_viridis_heatmap),
+    ("showcase_split_violin", build_split_violin),
+    ("showcase_per_hue_errorband", build_per_hue_errorband),
+    ("showcase_twoby_facet", build_twoby_facet),
 ]
 
 
