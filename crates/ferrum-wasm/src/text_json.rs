@@ -377,6 +377,8 @@ mod tests {
             conditionals: vec![],
             linked_panels: vec![],
             toolbar: true,
+            params: vec![],
+            param_bindings: vec![],
             tick_levels: vec![ferrum_scene::PanelTickLevels {
                 panel_id: 0,
                 x_levels: vec![ferrum_scene::TickLevel {
@@ -462,6 +464,8 @@ mod tests {
             conditionals: vec![],
             linked_panels: vec![],
             toolbar: true,
+            params: vec![],
+            param_bindings: vec![],
             tick_levels: vec![ferrum_scene::PanelTickLevels {
                 panel_id: 0,
                 x_levels: vec![ferrum_scene::TickLevel {
@@ -520,6 +524,8 @@ mod tests {
             conditionals: vec![],
             linked_panels: vec![],
             toolbar: true,
+            params: vec![],
+            param_bindings: vec![],
             tick_levels: vec![ferrum_scene::PanelTickLevels {
                 panel_id: 0,
                 x_levels: vec![ferrum_scene::TickLevel {

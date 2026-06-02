@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 pub use self::axis::{
     AxesInput, AxisInput, AxisLayout, AxisOrient, AxisTitleLayout, TickLayout, TickProjection,
 };
-pub use self::facet::{FacetGroup, FacetMode, FacetSpec};
+pub use self::facet::{FacetGroup, FacetMode, FacetResolve, FacetSpec, ResolveMode};
 pub use self::geometry::{Inset, Rect, Viewport};
 pub use self::legend::{
     ColorbarInput, ColorbarLayout, ColorbarTick, LegendDirection, LegendEntry,
@@ -84,7 +84,18 @@ pub enum LayoutWarning {
     PanelCollapsed { panel_index: usize },
     LabelsElided { axis: usize, count: u32 },
     LegendOverflowed { entries_dropped: u32 },
-    PanelsDropped { count: u32 },
+    /// One or more facet panels were dropped because the explicit grid
+    /// `nrows × ncols` is smaller than the number of facet groups.
+    /// `count` is the number of dropped panels; `keys` identifies them by
+    /// their facet-group key string (e.g. `"col_cat=c2"`).
+    PanelsDropped { count: u32, keys: Vec<String> },
+    /// One or more grid-facet cells in the observed cartesian product of
+    /// distinct(row) × distinct(col) values contain no data rows.
+    /// `keys` is one entry per empty cell, formatted as
+    /// `"<col_field>=<col_val>, <row_field>=<row_val>"` so the user can
+    /// identify the missing data combination.  One aggregated warning is
+    /// emitted listing all empty cells (spec §4/§11).
+    EmptyPartitions { keys: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -666,7 +677,9 @@ pub fn compute_layout(
         warnings.push(LayoutWarning::LegendOverflowed { entries_dropped: legend_dropped });
     }
 
-    let panel_rects: Vec<(u32, u32, Rect, Option<FacetKey>)> = if let Some(facet) = &spec.facet {
+    // panel_rects: (grid_row, grid_col, cell_rect, col_facet_key, row_facet_key)
+    // row_facet_key is Some only in grid mode (FacetSpec.row is set).
+    let panel_rects: Vec<(u32, u32, Rect, Option<FacetKey>, Option<FacetKey>)> = if let Some(facet) = &spec.facet {
         let n_panels = facet_groups.len() as u32;
         let (gx, gy) = facet
             .spacing
@@ -687,16 +700,75 @@ pub fn compute_layout(
         } else {
             gy
         };
+        // Grid mode with a row dimension: reserve a left-side strip band for
+        // row headers so they don't overlap the y-axis. Use the same height
+        // metric as the column strip band (strip_band_height computed below is
+        // used as the width here since it represents a single line of text).
+        let row_strip_width = if facet.row.is_some() {
+            let text_h = metrics.line_height(theme.sizes.strip_text_size);
+            text_h + 2.0 * theme.padding.strip_padding
+        } else {
+            0.0
+        };
+        let grid_region = if row_strip_width > 0.0 {
+            Rect {
+                x: plot_region.x + row_strip_width,
+                y: plot_region.y,
+                w: (plot_region.w - row_strip_width).max(0.0),
+                h: plot_region.h,
+            }
+        } else {
+            plot_region
+        };
         let grid = match facet.mode {
             FacetMode::Wrap { ncols } => {
-                facet::FacetGrid::compute_wrap(ncols, n_panels, plot_region, gx, gy)
+                facet::FacetGrid::compute_wrap(ncols, n_panels, grid_region, gx, gy)
             }
             FacetMode::Grid { nrows, ncols } => {
-                facet::FacetGrid::compute_grid(nrows, ncols, n_panels, plot_region, gx, gy)
+                facet::FacetGrid::compute_grid(nrows, ncols, n_panels, grid_region, gx, gy)
             }
         };
         if grid.dropped_count() > 0 {
-            warnings.push(LayoutWarning::PanelsDropped { count: grid.dropped_count() });
+            let dropped = grid.dropped_count();
+            // Collect the key strings for the panels that were cut off.
+            // `panel_positions()` returns only the first `nrows*ncols` panels;
+            // the remaining `facet_groups` entries (beyond that cap) are dropped.
+            let cap = facet_groups.len().saturating_sub(dropped as usize);
+            let dropped_keys: Vec<String> = facet_groups[cap..]
+                .iter()
+                .map(|g| format!("{}={}", g.key.field, g.key.value))
+                .collect();
+            warnings.push(LayoutWarning::PanelsDropped { count: dropped, keys: dropped_keys });
+        }
+        // Detect empty cells in the observed cartesian product of distinct
+        // row × col values (two-way grid mode only). `group_rows_by_two_fields`
+        // emits one `FacetGroup` per (row_val, col_val) pair — including pairs
+        // with no data rows (`n_rows == 0`). Those are genuine empty cells that
+        // the user may not have intended. Emit one aggregated warning listing
+        // all of them so the user can diagnose the data gap.
+        //
+        // Scope: only fires when `facet.row` is set (two-way grid mode) and
+        // at least one group has `n_rows == 0`. Wrap mode and single-field
+        // facets never produce empty groups (partition_batch_by_field only
+        // yields observed values), so this check is harmless for them but the
+        // `facet.row.is_some()` guard makes the intent explicit.
+        if facet.row.is_some() {
+            let empty_keys: Vec<String> = facet_groups
+                .iter()
+                .filter(|g| g.n_rows == 0)
+                .map(|g| {
+                    // Format: "<col_field>=<col_val>, <row_field>=<row_val>"
+                    // Both field names and values are present so the user can
+                    // identify which data combination is missing.
+                    let row_part = g.row_key.as_ref()
+                        .map(|rk| format!(", {}={}", rk.field, rk.value))
+                        .unwrap_or_default();
+                    format!("{}={}{}", g.key.field, g.key.value, row_part)
+                })
+                .collect();
+            if !empty_keys.is_empty() {
+                warnings.push(LayoutWarning::EmptyPartitions { keys: empty_keys });
+            }
         }
         grid.panel_positions()
             .into_iter()
@@ -704,11 +776,12 @@ pub fn compute_layout(
             .map(|(i, (row, col))| {
                 let rect = grid.cell_rect(row, col);
                 let key = facet_groups.get(i).map(|g| g.key.clone());
-                (row, col, rect, key)
+                let row_key = facet_groups.get(i).and_then(|g| g.row_key.clone());
+                (row, col, rect, key, row_key)
             })
             .collect()
     } else {
-        vec![(0, 0, plot_region, None)]
+        vec![(0, 0, plot_region, None, None)]
     };
 
     let strip_band_height = if spec.facet.is_some() {
@@ -720,20 +793,35 @@ pub fn compute_layout(
     // Compute the maximum row index so non-bottom panels can suppress the
     // x-axis title (only the bottom row needs it — duplicating it in every
     // inter-row gutter is visually noisy).
-    let max_row = panel_rects.iter().map(|(r, _, _, _)| *r).max().unwrap_or(0);
+    let max_row = panel_rects.iter().map(|(r, _, _, _, _)| *r).max().unwrap_or(0);
     // Compute the minimum column index so non-leftmost panels can suppress the
     // y-axis title (only the leftmost column needs it — duplicating it on every
     // panel in a multi-column faceted chart causes visual overlap).
-    let min_col = panel_rects.iter().map(|(_, c, _, _)| *c).min().unwrap_or(0);
+    let min_col = panel_rects.iter().map(|(_, c, _, _, _)| *c).min().unwrap_or(0);
+
+    // Width of the row-header strip on the left side of the grid region (grid
+    // mode only). Mirrored from the reservation made when building panel_rects.
+    let row_strip_band_width = if spec.facet.as_ref().is_some_and(|f| f.row.is_some()) {
+        let text_h = metrics.line_height(theme.sizes.strip_text_size);
+        text_h + 2.0 * theme.padding.strip_padding
+    } else {
+        0.0
+    };
+    // Track which grid rows have already had their row-header strip emitted. In
+    // a 3×3 grid, row_val "r1" appears for three panels (cols c1, c2, c3); we
+    // only want one row-header strip per grid row (the leftmost col).
+    let mut emitted_row_strips: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // 7. Per-panel: clamp degenerate rects, collect axes.
     let mut axis_layouts: Vec<AxisLayout> = Vec::new();
-    for (panel_index, (row, col, mut rect, facet_key)) in panel_rects.into_iter().enumerate() {
+    for (panel_index, (row, col, mut rect, facet_key, row_facet_key)) in panel_rects.into_iter().enumerate() {
         if rect.w <= MIN_PANEL_DIM || rect.h <= MIN_PANEL_DIM {
             warnings.push(LayoutWarning::PanelCollapsed { panel_index });
             rect = Rect::ZERO;
         }
 
+        // Column header strip (top of each panel). Reserved from the top of
+        // the cell rect — behavior unchanged from single-field faceting.
         let strip_title = if let Some(key) = &facet_key {
             if rect != Rect::ZERO {
                 let strip_rect = Rect {
@@ -755,6 +843,28 @@ pub fn compute_layout(
                         strip_rect.x + strip_rect.w / 2.0,
                         strip_rect.y + theme.padding.strip_padding + theme.sizes.strip_text_size,
                     ),
+                    align: TextAnchor::Middle,
+                    font_size: theme.sizes.strip_text_size,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Row header strip (left side, grid mode only). One strip per grid row,
+        // emitted on the leftmost panel of each row. The strip sits in the
+        // row_strip_band_width reservation made when building panel_rects.
+        let row_strip_title = if let Some(rk) = &row_facet_key {
+            let is_first_in_row = emitted_row_strips.insert(rk.value.clone());
+            if is_first_in_row && rect != Rect::ZERO && row_strip_band_width > 0.0 {
+                // Place the row-header strip to the left of the current panel.
+                let strip_center_x = rect.x - row_strip_band_width / 2.0;
+                let strip_center_y = rect.y + rect.h / 2.0;
+                Some(StripTitleLayout {
+                    text: rk.value.clone(),
+                    anchor: (strip_center_x, strip_center_y),
                     align: TextAnchor::Middle,
                     font_size: theme.sizes.strip_text_size,
                 })
@@ -789,6 +899,8 @@ pub fn compute_layout(
             row,
             col,
             strip_title,
+            row_strip_title,
+            row_facet_key,
         });
 
         if rect != Rect::ZERO {
@@ -890,7 +1002,8 @@ mod tests {
             LayoutWarning::PanelCollapsed { panel_index: 2 },
             LayoutWarning::LabelsElided { axis: 0, count: 5 },
             LayoutWarning::LegendOverflowed { entries_dropped: 3 },
-            LayoutWarning::PanelsDropped { count: 1 },
+            LayoutWarning::PanelsDropped { count: 1, keys: vec!["col_cat=c2".into()] },
+            LayoutWarning::EmptyPartitions { keys: vec!["col_cat=c2, row_cat=r2".into()] },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: LayoutWarning = serde_json::from_str(&json).unwrap();
@@ -926,6 +1039,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         }
     }
 
@@ -1062,7 +1176,7 @@ mod tests {
         assert_eq!(parsed, result);
     }
 
-    use crate::layout::facet::{FacetMode, FacetSpec};
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
     use crate::layout::panel::FacetKey;
 
     fn faceted_spec(ncols: u32) -> ChartSpec {
@@ -1072,15 +1186,16 @@ mod tests {
             row: None,
             mode: FacetMode::Wrap { ncols },
             spacing: None,
+            resolve: FacetResolve::default(),
         });
         s
     }
 
     fn three_groups() -> Vec<FacetGroup> {
         vec![
-            FacetGroup { key: FacetKey { field: "species".into(), value: "setosa".into() }, n_rows: 50 },
-            FacetGroup { key: FacetKey { field: "species".into(), value: "versicolor".into() }, n_rows: 50 },
-            FacetGroup { key: FacetKey { field: "species".into(), value: "virginica".into() }, n_rows: 50 },
+            FacetGroup { key: FacetKey { field: "species".into(), value: "setosa".into() }, n_rows: 50, row_key: None },
+            FacetGroup { key: FacetKey { field: "species".into(), value: "versicolor".into() }, n_rows: 50, row_key: None },
+            FacetGroup { key: FacetKey { field: "species".into(), value: "virginica".into() }, n_rows: 50, row_key: None },
         ]
     }
 
@@ -1134,6 +1249,7 @@ mod tests {
             row: None,
             mode: FacetMode::Grid { nrows: 1, ncols: 2 },
             spacing: None,
+            resolve: FacetResolve::default(),
         });
         let groups = three_groups();
         let axes = dummy_axes();
@@ -1157,7 +1273,7 @@ mod tests {
         assert_eq!(result.panels.len(), 2);
         let dropped = result.warnings.iter().any(|w| matches!(
             w,
-            LayoutWarning::PanelsDropped { count: 1 }
+            LayoutWarning::PanelsDropped { count: 1, .. }
         ));
         assert!(dropped, "expected PanelsDropped(1); got {:?}", result.warnings);
     }
@@ -1230,6 +1346,7 @@ mod tests {
             row: None,
             mode: FacetMode::Grid { nrows: 2, ncols: 2 },
             spacing: None,
+            resolve: FacetResolve::default(),
         });
 
         let groups: Vec<FacetGroup> = ["a", "b", "c", "d"]
@@ -1237,6 +1354,7 @@ mod tests {
             .map(|v| FacetGroup {
                 key: FacetKey { field: "group".into(), value: v.to_string() },
                 n_rows: 10,
+                row_key: None,
             })
             .collect();
 
@@ -1457,5 +1575,199 @@ mod tests {
         assert_eq!(t.typography.title_offset, 6.0);
         assert_eq!(t.colors.background_color, palette::Srgba::new(0xFA, 0xF7, 0xF2, 0xFF));
         assert_eq!(t.colors.mark_color, palette::Srgba::new(0x25, 0x63, 0xEB, 0xFF));
+    }
+
+    // ── D5c: empty-partition warning for sparse two-way grid facets ──────────
+
+    /// Build a two-way grid FacetSpec with explicit nrows/ncols that matches
+    /// the number of distinct row × col values.
+    fn sparse_grid_spec(nrows: u32, ncols: u32) -> ChartSpec {
+        let mut s = minimal_chart_spec();
+        s.facet = Some(FacetSpec {
+            field: "col_cat".into(),
+            row: Some("row_cat".into()),
+            mode: FacetMode::Grid { nrows, ncols },
+            spacing: None,
+            resolve: FacetResolve::default(),
+        });
+        s
+    }
+
+    /// Build `FacetGroup` entries for a 2×2 sparse grid where (r2, c2) is empty.
+    ///
+    /// `group_rows_by_two_fields` produces all four cartesian-product entries
+    /// in row-major order, with `n_rows == 0` for the missing (r2, c2) cell.
+    fn sparse_2x2_groups() -> Vec<FacetGroup> {
+        vec![
+            FacetGroup {
+                key: FacetKey { field: "col_cat".into(), value: "c1".into() },
+                n_rows: 1,
+                row_key: Some(FacetKey { field: "row_cat".into(), value: "r1".into() }),
+            },
+            FacetGroup {
+                key: FacetKey { field: "col_cat".into(), value: "c2".into() },
+                n_rows: 1,
+                row_key: Some(FacetKey { field: "row_cat".into(), value: "r1".into() }),
+            },
+            FacetGroup {
+                key: FacetKey { field: "col_cat".into(), value: "c1".into() },
+                n_rows: 1,
+                row_key: Some(FacetKey { field: "row_cat".into(), value: "r2".into() }),
+            },
+            FacetGroup {
+                key: FacetKey { field: "col_cat".into(), value: "c2".into() },
+                n_rows: 0,
+                row_key: Some(FacetKey { field: "row_cat".into(), value: "r2".into() }),
+            },
+        ]
+    }
+
+    #[test]
+    fn compute_layout_sparse_grid_emits_empty_partitions_warning() {
+        // A 2×2 two-way grid facet where (r2, c2) has no data must emit
+        // exactly one EmptyPartitions warning identifying the missing cell.
+        let spec = sparse_grid_spec(2, 2);
+        let groups = sparse_2x2_groups();
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 600.0 },
+            &axes,
+            &groups,
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+        )
+        .unwrap();
+
+        // Exactly one EmptyPartitions warning.
+        let empty_warns: Vec<&LayoutWarning> = result
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, LayoutWarning::EmptyPartitions { .. }))
+            .collect();
+        assert_eq!(
+            empty_warns.len(), 1,
+            "expected exactly one EmptyPartitions warning; got {:?}",
+            result.warnings
+        );
+
+        // The warning identifies both the col and row key values.
+        if let LayoutWarning::EmptyPartitions { keys } = empty_warns[0] {
+            assert_eq!(keys.len(), 1, "expected one empty key entry");
+            let key = &keys[0];
+            assert!(
+                key.contains("c2"),
+                "empty-partition key must contain col value 'c2'; got '{key}'"
+            );
+            assert!(
+                key.contains("r2"),
+                "empty-partition key must contain row value 'r2'; got '{key}'"
+            );
+        }
+
+        // No PanelsDropped (the 2×2 grid fits all 4 groups — including the empty one).
+        let dropped = result.warnings.iter().any(|w| matches!(w, LayoutWarning::PanelsDropped { .. }));
+        assert!(!dropped, "sparse grid must not emit PanelsDropped when grid is correctly sized");
+    }
+
+    #[test]
+    fn compute_layout_complete_grid_emits_no_empty_partitions_warning() {
+        // A 2×2 two-way grid facet where all four cells have data must not
+        // emit any EmptyPartitions warning.
+        let spec = sparse_grid_spec(2, 2);
+        // All four groups have n_rows > 0.
+        let complete_groups: Vec<FacetGroup> = vec![
+            FacetGroup {
+                key: FacetKey { field: "col_cat".into(), value: "c1".into() },
+                n_rows: 2,
+                row_key: Some(FacetKey { field: "row_cat".into(), value: "r1".into() }),
+            },
+            FacetGroup {
+                key: FacetKey { field: "col_cat".into(), value: "c2".into() },
+                n_rows: 2,
+                row_key: Some(FacetKey { field: "row_cat".into(), value: "r1".into() }),
+            },
+            FacetGroup {
+                key: FacetKey { field: "col_cat".into(), value: "c1".into() },
+                n_rows: 2,
+                row_key: Some(FacetKey { field: "row_cat".into(), value: "r2".into() }),
+            },
+            FacetGroup {
+                key: FacetKey { field: "col_cat".into(), value: "c2".into() },
+                n_rows: 2,
+                row_key: Some(FacetKey { field: "row_cat".into(), value: "r2".into() }),
+            },
+        ];
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 600.0 },
+            &axes,
+            &complete_groups,
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+        )
+        .unwrap();
+
+        let empty_warns: Vec<&LayoutWarning> = result
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, LayoutWarning::EmptyPartitions { .. }))
+            .collect();
+        assert!(
+            empty_warns.is_empty(),
+            "complete grid must emit no EmptyPartitions warning; got {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn compute_layout_wrap_mode_emits_no_empty_partitions_warning() {
+        // Wrap-mode facets never have empty cells (they only group observed values),
+        // so no EmptyPartitions warning must be emitted even when n_rows differs.
+        let spec = faceted_spec(3); // wrap mode, ncols=3
+        let groups = three_groups(); // all three groups have n_rows > 0
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec,
+            &default_theme_inputs(),
+            Viewport { width: 800.0, height: 400.0 },
+            &axes,
+            &groups,
+            &[],
+            None,
+            None,
+            &m,
+            &legend::LegendOverrides::default(),
+            &[],
+        )
+        .unwrap();
+
+        let empty_warns: Vec<&LayoutWarning> = result
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, LayoutWarning::EmptyPartitions { .. }))
+            .collect();
+        assert!(
+            empty_warns.is_empty(),
+            "wrap-mode facet must never emit EmptyPartitions; got {:?}",
+            result.warnings
+        );
     }
 }

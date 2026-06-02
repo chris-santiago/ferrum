@@ -4,6 +4,12 @@
 pub mod conditional;
 pub mod error;
 pub mod hit_test;
+// Reactive-parameter runtime (D6): consumed by the wasm32 `WasmRenderer`; its
+// pure pixel↔data helpers are also unit-tested on the host. Gated to those two
+// targets so the non-test host build does not flag the wasm-only helpers as
+// dead code.
+#[cfg(any(target_arch = "wasm32", test))]
+pub mod param_runtime;
 pub mod scene_load;
 pub mod selection_state;
 pub mod spatial_index;
@@ -274,7 +280,42 @@ impl WasmRenderer {
             sx0, sy0, sx1, sy1,
         );
 
-        self.apply_conditionals_and_render()
+        // D6 crossfilter (BindingRole::Filter): dim marks on a bound target
+        // panel that fall outside this brush. Re-projects the source brush
+        // extent into the target panel's pixel space via the shared data
+        // domain, then reuses the conditional-containment dimming path.
+        // No-op (and no behavior change) when there are no Filter bindings.
+        let selection = self.apply_crossfilter(panel_id as usize, (sx0, sx1), (sy0, sy1))?;
+
+        // D6 reactive rescale (BindingRole::Domain): rescale a bound target
+        // panel to the brushed sub-domain via the existing zoom transform.
+        // No-op (returns None) when there are no Domain bindings for the
+        // brushed selection.
+        let rescaled =
+            self.apply_reactive_rescale(panel_id as usize, (x0 as f64, x1 as f64), (y0 as f64, y1 as f64));
+
+        // Envelope the selection-state JSON with the rescale signal. When a
+        // Domain binding rescaled a target panel, the JS brush handler must NOT
+        // clobber that affine with a trailing identity `setTransform` (Fix 1).
+        // `rescaled` is the affected panel index (or null for plain
+        // crossfilter/selection drags — unchanged behavior); `rescaled_text` is
+        // that panel's re-placed label JSON so the overlay can reposition text
+        // without resetting the transform.
+        let selection_value: serde_json::Value =
+            serde_json::from_str(&selection).unwrap_or(serde_json::Value::Null);
+        let (rescaled_panel, rescaled_text) = match rescaled {
+            Some((panel, text)) => (
+                serde_json::Value::from(panel),
+                serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+            ),
+            None => (serde_json::Value::Null, serde_json::Value::Null),
+        };
+        Ok(serde_json::json!({
+            "selection": selection_value,
+            "rescaled": rescaled_panel,
+            "rescaled_text": rescaled_text,
+        })
+        .to_string())
     }
 
     /// Apply a wheel-zoom event on the given panel and re-render via GPU affine transform.
@@ -486,6 +527,67 @@ impl WasmRenderer {
         }
         self.apply_conditionals_and_render()
     }
+
+    /// Toggle a legend-bound point selection's membership for one category
+    /// (D6 `BindingRole::Legend`).
+    ///
+    /// `selection_name` is the legend-bound point selection (from the `Legend`
+    /// param binding); `category` is the legend entry's label. Toggling mirrors
+    /// `handle_click`'s field-value point-selection update: the category is
+    /// stored as a `FieldValue::String` so the existing conditional path dims
+    /// or highlights every mark whose tooltip carries that value. Calling again
+    /// with the same category removes it. After updating selection state this
+    /// re-runs `apply_conditionals_and_render` (the same machinery legend-less
+    /// point selections use).
+    #[wasm_bindgen(js_name = "toggleLegend")]
+    pub fn toggle_legend(&mut self, selection_name: &str, category: &str) -> Result<String, JsValue> {
+        use ferrum_scene::FieldValue;
+        use selection_state::SelectionState;
+
+        // Find the field this selection toggles on. A legend-bound point
+        // selection declares its `fields` (typically the color field); the
+        // category is a value of that field. Fall back to a single synthetic
+        // field name when none is declared so the toggle is still expressible.
+        let field_name = self
+            .selections
+            .iter()
+            .find_map(|spec| match spec {
+                ferrum_scene::SelectionSpec::Point { name, fields, .. } if name == selection_name => {
+                    fields.as_ref().and_then(|f| f.first()).cloned()
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "_legend".to_string());
+
+        let entry = (field_name, FieldValue::String { value: category.to_string() });
+        let state = self
+            .interaction_state
+            .selections
+            .entry(selection_name.to_string())
+            .or_insert(SelectionState::Empty);
+
+        // Toggle this category in/out of the field-value set, mirroring the
+        // shift-click toggle in `handle_click`.
+        let mut field_values: Vec<(String, FieldValue)> = match state {
+            SelectionState::Point { field_values, .. } => field_values.clone(),
+            _ => Vec::new(),
+        };
+        if let Some(pos) = field_values.iter().position(|fv| *fv == entry) {
+            field_values.remove(pos);
+        } else {
+            field_values.push(entry);
+        }
+        if field_values.is_empty() {
+            *state = SelectionState::Empty;
+        } else {
+            *state = SelectionState::Point {
+                indices: Vec::new(),
+                field_values,
+            };
+        }
+
+        self.apply_conditionals_and_render()
+    }
 }
 
 /// Private helpers that share implementation across public `wasm_bindgen` methods.
@@ -509,6 +611,201 @@ impl WasmRenderer {
             &self.gpu,
             &self.pipelines,
         )
+    }
+
+    /// D6 crossfilter (`BindingRole::Filter`): dim marks on each bound target
+    /// panel that fall outside the brush just applied on `source_panel`.
+    ///
+    /// `brush_x`/`brush_y` are the *scene-space* brush extents on the source
+    /// panel (the same coordinates `handle_drag` stored in the interval
+    /// selection). For each `Filter` binding whose target panel differs from
+    /// the source, the source extent is re-projected into the target panel's
+    /// pixel space through the shared data domain, then the existing
+    /// conditional-containment dimming runs over that panel only.
+    ///
+    /// Returns the selection-state JSON (from the conditional re-render). When
+    /// there are no `Filter` bindings this delegates straight to
+    /// `apply_conditionals_and_render`, so non-param charts are unchanged.
+    fn apply_crossfilter(
+        &mut self,
+        source_panel: usize,
+        brush_x: (f64, f64),
+        brush_y: (f64, f64),
+    ) -> Result<String, JsValue> {
+        use crate::param_runtime::{reproject_extent, Axis};
+        use crate::selection_state::SelectionState;
+
+        // Gather the active Filter bindings up front so we can drop the
+        // immutable borrow of `self.interaction` before mutating buffers.
+        let filter_targets: Vec<usize> = self
+            .interaction
+            .param_bindings
+            .iter()
+            .filter(|b| matches!(b.role, ferrum_scene::BindingRole::Filter))
+            .filter_map(|b| b.panel)
+            .collect();
+
+        if filter_targets.is_empty() {
+            return self.apply_conditionals_and_render();
+        }
+
+        let Some(loaded) = self.loaded.as_mut() else {
+            return Ok("{}".to_string());
+        };
+
+        // Start from the base instance buffers so crossfilter dimming composes
+        // cleanly with any declared conditionals applied below.
+        let conditionals = &loaded.scene.interaction.conditionals;
+        let updates = conditional::resolve_conditionals_with_packed(
+            &loaded.scene.panels,
+            conditionals,
+            &self.interaction_state.selections,
+            &loaded.data.circle_instances,
+            &loaded.data.rect_instances,
+            &loaded.data.packed_batch_meta,
+        );
+        let mut circles = updates.circle_instances;
+        let mut rects = updates.rect_instances;
+
+        let source = loaded.scene.panels.get(source_panel);
+        for &target_panel in &filter_targets {
+            if target_panel == source_panel {
+                continue;
+            }
+            let (Some(src), Some(tgt)) =
+                (source, loaded.scene.panels.get(target_panel))
+            else {
+                continue;
+            };
+
+            // Re-project the brushed extent on whichever axis has a shared
+            // domain. Most crossfilters share the x-domain; try x first, then y.
+            let mut x_range = None;
+            let mut y_range = None;
+            if let Some(r) = reproject_extent(
+                brush_x, &src.plot_area, &src.coord, &tgt.plot_area, &tgt.coord, Axis::X,
+            ) {
+                x_range = Some(r);
+            }
+            if let Some(r) = reproject_extent(
+                brush_y, &src.plot_area, &src.coord, &tgt.plot_area, &tgt.coord, Axis::Y,
+            ) {
+                y_range = Some(r);
+            }
+            if x_range.is_none() && y_range.is_none() {
+                continue;
+            }
+
+            let sel = SelectionState::Interval { x_range, y_range };
+            conditional::apply_crossfilter_to_panel(
+                &loaded.scene.panels,
+                target_panel,
+                &sel,
+                conditional::CROSSFILTER_DIM_OPACITY,
+                &mut circles,
+                &mut rects,
+                &loaded.data.packed_batch_meta,
+            );
+        }
+
+        loaded.buffers.update_instances(&self.gpu, &circles, &rects);
+        render::render_frame(&self.gpu, &self.pipelines, &loaded.buffers, loaded.data.background)
+            .map_err(JsValue::from)?;
+        Ok(self.interaction_state.to_json())
+    }
+
+    /// D6 reactive rescale (`BindingRole::Domain`): rescale each bound target
+    /// panel to the brushed sub-region via the existing zoom transform.
+    ///
+    /// `brush_x`/`brush_y` are *canvas-space* brush extents on the source panel
+    /// (pre-`inverse_apply`), matching the pixel space the zoom transform
+    /// operates in. For each `Domain` binding, the per-axis boxzoom affine that
+    /// maps the brushed source sub-extent onto the target panel's plot area is
+    /// computed and pushed through `ZoomPanState::set_absolute` — the same
+    /// affine the wheel/pan/D3-zoom path applies — then the target panel is
+    /// re-rendered with that transform.
+    ///
+    /// A no-op (no transform mutation, no extra render) when there are no
+    /// `Domain` bindings, so non-param interactive charts are unchanged.
+    ///
+    /// Returns the target panel that was rescaled (the last bound panel touched)
+    /// together with that panel's re-placed text JSON, so the JS caller can
+    /// avoid clobbering the freshly-applied affine with a trailing
+    /// `setTransform`/identity reset and can still reposition the rescaled
+    /// panel's labels. `None` means no rescale ran.
+    fn apply_reactive_rescale(
+        &mut self,
+        source_panel: usize,
+        brush_x: (f64, f64),
+        brush_y: (f64, f64),
+    ) -> Option<(usize, String)> {
+        use crate::param_runtime::{rescale_affine, Axis};
+
+        let bindings: Vec<(usize, Axis, (f64, f64))> = self
+            .interaction
+            .param_bindings
+            .iter()
+            .filter(|b| matches!(b.role, ferrum_scene::BindingRole::Domain))
+            .filter_map(|b| {
+                let panel = b.panel?;
+                let axis = b.channel.as_deref().and_then(Axis::from_channel)?;
+                let brush = match axis {
+                    Axis::X => brush_x,
+                    Axis::Y => brush_y,
+                };
+                Some((panel, axis, brush))
+            })
+            .collect();
+
+        if bindings.is_empty() {
+            return None;
+        }
+
+        let zoom_range = self.zoom.zoom_range;
+        let loaded = self.loaded.as_ref()?;
+        let mut rendered_panel = None;
+        for (panel, axis, brush) in bindings {
+            let (Some(src), Some(tgt)) = (
+                loaded.scene.panels.get(source_panel),
+                loaded.scene.panels.get(panel),
+            ) else {
+                continue;
+            };
+            let Some((scale, offset)) =
+                rescale_affine(brush, &src.plot_area, &tgt.plot_area, axis)
+            else {
+                continue;
+            };
+            // Drive the target panel's affine directly (not set_absolute, which
+            // forces sy == sx): a domain param rescales only the bound axis. The
+            // single-uniform render layer (see render.rs) applies one transform
+            // per draw, so the rescaled target panel is the one re-rendered
+            // below. Reuses the existing Affine2 + transform render path.
+            //
+            // Fix 2: writing sx/sy directly bypasses set_absolute's clamp, so we
+            // re-apply the same per-axis zoom_range clamp here. A narrow brush
+            // must not exceed the 50x cap the wheel/D3-zoom path enforces.
+            let scale = scale.clamp(zoom_range.0, zoom_range.1);
+            if let Some(t) = self.zoom.transforms.get_mut(panel) {
+                match axis {
+                    Axis::X => {
+                        t.sx = scale;
+                        t.tx = offset;
+                    }
+                    Axis::Y => {
+                        t.sy = scale;
+                        t.ty = offset;
+                    }
+                }
+            }
+            rendered_panel = Some(panel);
+        }
+
+        let panel = rendered_panel?;
+        let text_json = self
+            .upload_transform_and_render(panel)
+            .unwrap_or_else(|_| "[]".to_string());
+        Some((panel, text_json))
     }
 
     /// Upload the per-panel affine transform uniform and re-render, then return zoomed text JSON.

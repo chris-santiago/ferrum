@@ -93,7 +93,8 @@ impl PowScaleData {
 ///     Fractional inward pixel padding.
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct PowScale(PowScaleData, Option<f64>, bool);
+pub struct PowScale(PowScaleData, Option<f64>, bool, bool);
+//                  ^^^data        ^^^padding  ^^^range_user_set  ^^^domain_user_set
 
 impl PowScale {
     /// Crate-internal constructor (no PyO3, no validation), for render-side use.
@@ -104,7 +105,7 @@ impl PowScale {
             exponent,
             clamp,
         };
-        PowScale(d, None, true)
+        PowScale(d, None, true, true)
     }
 
     /// Crate-internal scale call (no PyO3 boundary).
@@ -151,10 +152,19 @@ impl PowScale {
 
     fn repr_string(&self) -> String {
         let PowScaleData { domain, range, exponent, clamp } = &self.0;
+        let domain_s = if self.3 {
+            format!("[{}, {}]", domain[0], domain[1])
+        } else {
+            "None".to_string()
+        };
+        let range_s = if self.2 {
+            format!("[{}, {}]", range[0], range[1])
+        } else {
+            "None".to_string()
+        };
         format!(
-            "PowScale(domain=[{}, {}], range=[{}, {}], exponent={}, clamp={})",
-            domain[0], domain[1], range[0], range[1], exponent,
-            if *clamp { "True" } else { "False" }
+            "PowScale(domain={}, range={}, exponent={}, clamp={})",
+            domain_s, range_s, exponent, if *clamp { "True" } else { "False" }
         )
     }
 }
@@ -162,9 +172,9 @@ impl PowScale {
 #[pymethods]
 impl PowScale {
     #[new]
-    #[pyo3(signature = (*, domain, range = None, exponent = 2.0, clamp = false, nice = false, padding = None))]
+    #[pyo3(signature = (*, domain = None, range = None, exponent = 2.0, clamp = false, nice = false, padding = None))]
     fn new(
-        domain: Vec<f64>,
+        domain: Option<Vec<f64>>,
         range: Option<Vec<f64>>,
         exponent: f64,
         clamp: bool,
@@ -172,23 +182,29 @@ impl PowScale {
         padding: Option<f64>,
     ) -> PyResult<Self> {
         let range_user_set = range.is_some();
+        let domain_user_set = domain.is_some();
         let r = range.unwrap_or_else(|| vec![0.0, 1.0]);
-        validate_continuous_pair(&domain, &r)?;
         if !exponent.is_finite() || exponent <= 0.0 {
             return Err(PyValueError::new_err(format!(
                 "exponent must be finite and > 0; got {exponent}"
             )));
         }
+        // Use sentinel [0.0, 1.0] when no domain supplied; render-time inference
+        // replaces it before any scale computation occurs.
+        let dom = domain.unwrap_or_else(|| vec![0.0, 1.0]);
+        if domain_user_set {
+            validate_continuous_pair(&dom, &r)?;
+        }
         let mut d = PowScaleData {
-            domain: [domain[0], domain[1]],
+            domain: [dom[0], dom[1]],
             range: [r[0], r[1]],
             exponent,
             clamp,
         };
-        if nice {
+        if nice && domain_user_set {
             d = d.nice();
         }
-        Ok(PowScale(d, padding, range_user_set))
+        Ok(PowScale(d, padding, range_user_set, domain_user_set))
     }
 
     /// Map a single input value ``x`` to its output range coordinate.
@@ -202,15 +218,17 @@ impl PowScale {
     fn ticks(&self, count: usize) -> Vec<f64> { self.0.ticks(count) }
 
     /// Return a copy of this scale with domain endpoints rounded to "nice" values.
-    fn nice(&self) -> Self { PowScale(self.0.clone().nice(), self.1, self.2) }
+    fn nice(&self) -> Self { PowScale(self.0.clone().nice(), self.1, self.2, self.3) }
 
     /// Fractional inward pixel padding.
     #[getter]
     fn padding(&self) -> Option<f64> { self.1 }
 
-    /// Input domain as ``[min, max]``.
+    /// Input domain as ``[min, max]``, or ``None`` when data-derived.
     #[getter]
-    fn domain(&self) -> Vec<f64> { self.0.domain.to_vec() }
+    fn domain(&self) -> Option<Vec<f64>> {
+        if self.3 { Some(self.0.domain.to_vec()) } else { None }
+    }
 
     /// Output range as ``[lo, hi]`` pixel coordinates, or ``None`` when
     /// the renderer should auto-fill from the plot-area dimensions.
@@ -249,7 +267,8 @@ impl PowScale {
 ///     Fractional inward pixel padding.
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct SqrtScale(PowScaleData, Option<f64>, bool);
+pub struct SqrtScale(PowScaleData, Option<f64>, bool, bool);
+//                   ^^^data        ^^^padding  ^^^range_user_set  ^^^domain_user_set
 
 impl SqrtScale {
     /// Crate-internal scale call (no PyO3 boundary).
@@ -286,27 +305,33 @@ impl SqrtScale {
 #[pymethods]
 impl SqrtScale {
     #[new]
-    #[pyo3(signature = (*, domain, range = None, clamp = false, nice = false, padding = None))]
+    #[pyo3(signature = (*, domain = None, range = None, clamp = false, nice = false, padding = None))]
     fn new(
-        domain: Vec<f64>,
+        domain: Option<Vec<f64>>,
         range: Option<Vec<f64>>,
         clamp: bool,
         nice: bool,
         padding: Option<f64>,
     ) -> PyResult<Self> {
         let range_user_set = range.is_some();
+        let domain_user_set = domain.is_some();
         let r = range.unwrap_or_else(|| vec![0.0, 1.0]);
-        validate_continuous_pair(&domain, &r)?;
+        // Use sentinel [0.0, 1.0] when no domain supplied; render-time inference
+        // replaces it before any scale computation occurs.
+        let dom = domain.unwrap_or_else(|| vec![0.0, 1.0]);
+        if domain_user_set {
+            validate_continuous_pair(&dom, &r)?;
+        }
         let mut d = PowScaleData {
-            domain: [domain[0], domain[1]],
+            domain: [dom[0], dom[1]],
             range: [r[0], r[1]],
             exponent: 0.5,
             clamp,
         };
-        if nice {
+        if nice && domain_user_set {
             d = d.nice();
         }
-        Ok(SqrtScale(d, padding, range_user_set))
+        Ok(SqrtScale(d, padding, range_user_set, domain_user_set))
     }
 
     /// Map a single input value ``x`` to its output range coordinate.
@@ -320,15 +345,17 @@ impl SqrtScale {
     fn ticks(&self, count: usize) -> Vec<f64> { self.0.ticks(count) }
 
     /// Return a copy of this scale with domain endpoints rounded to "nice" values.
-    fn nice(&self) -> Self { SqrtScale(self.0.clone().nice(), self.1, self.2) }
+    fn nice(&self) -> Self { SqrtScale(self.0.clone().nice(), self.1, self.2, self.3) }
 
     /// Fractional inward pixel padding.
     #[getter]
     fn padding(&self) -> Option<f64> { self.1 }
 
-    /// Input domain as ``[min, max]``.
+    /// Input domain as ``[min, max]``, or ``None`` when data-derived.
     #[getter]
-    fn domain(&self) -> Vec<f64> { self.0.domain.to_vec() }
+    fn domain(&self) -> Option<Vec<f64>> {
+        if self.3 { Some(self.0.domain.to_vec()) } else { None }
+    }
 
     /// Output range as ``[lo, hi]`` pixel coordinates, or ``None`` when
     /// the renderer should auto-fill from the plot-area dimensions.
@@ -347,10 +374,19 @@ impl SqrtScale {
 
     fn __repr__(&self) -> String {
         let PowScaleData { domain, range, clamp, .. } = &self.0;
+        let domain_s = if self.3 {
+            format!("[{}, {}]", domain[0], domain[1])
+        } else {
+            "None".to_string()
+        };
+        let range_s = if self.2 {
+            format!("[{}, {}]", range[0], range[1])
+        } else {
+            "None".to_string()
+        };
         format!(
-            "SqrtScale(domain=[{}, {}], range=[{}, {}], clamp={})",
-            domain[0], domain[1], range[0], range[1],
-            if *clamp { "True" } else { "False" }
+            "SqrtScale(domain={}, range={}, clamp={})",
+            domain_s, range_s, if *clamp { "True" } else { "False" }
         )
     }
 }
@@ -419,6 +455,7 @@ mod tests {
             PowScaleData { domain: [0.0, 10.0], range: [0.0, 1.0], exponent: 3.0, clamp: false },
             None,
             true,
+            true,
         );
         assert_eq!(s.0.exponent, 3.0);
     }
@@ -428,6 +465,7 @@ mod tests {
         let s = SqrtScale(
             PowScaleData { domain: [0.0, 100.0], range: [0.0, 1.0], exponent: 0.5, clamp: false },
             None,
+            true,
             true,
         );
         assert_eq!(s.0.exponent, 0.5);
@@ -515,6 +553,7 @@ mod tests {
         let scale = SqrtScale(
             PowScaleData { domain: [0.0, 100.0], range: [0.0, 600.0], exponent: 0.5, clamp: false },
             None,
+            true,
             true,
         );
         let minors = scale.minor_ticks_internal();

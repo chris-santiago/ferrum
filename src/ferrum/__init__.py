@@ -99,6 +99,7 @@ from ferrum.axis import Axis
 from ferrum.grid import Grid
 from ferrum.legend import Legend
 from ferrum.title import Title
+from ferrum.parameter import Parameter, VariableParameter, param
 from ferrum.selection import (
     Selection,
     SelectionMark,
@@ -108,6 +109,7 @@ from ferrum.selection import (
     selection_single,
     selection_multi,
     value,
+    when,
 )
 
 # Phase 12 — data transforms
@@ -242,6 +244,8 @@ from ferrum.encoding import (
     YError2,
     Theta,
     Radius,
+    Theta2,
+    Radius2,
     Color,
     Fill,
     Stroke,
@@ -271,7 +275,7 @@ from importlib.metadata import version as _pkg_version
 __version__ = _pkg_version("ferrum-viz")
 
 
-def hconcat(*charts, spacing=10.0):
+def hconcat(*charts, spacing=10.0, resolve=None):
     """Horizontal concatenation of charts.
 
     Parameters
@@ -280,6 +284,9 @@ def hconcat(*charts, spacing=10.0):
         Two or more charts to place side-by-side.
     spacing : float, default 10.0
         Pixel gap between adjacent charts.
+    resolve : dict, optional
+        Per-channel scale-sharing overrides, e.g.
+        ``{"color": "shared"}``.
 
     Returns
     -------
@@ -294,10 +301,10 @@ def hconcat(*charts, spacing=10.0):
     """
     from ferrum.composition import HConcatChart
 
-    return HConcatChart(list(charts), spacing=spacing)
+    return HConcatChart(list(charts), spacing=spacing, resolve=resolve)
 
 
-def vconcat(*charts, spacing=10.0):
+def vconcat(*charts, spacing=10.0, resolve=None):
     """Vertical concatenation of charts.
 
     Parameters
@@ -306,6 +313,9 @@ def vconcat(*charts, spacing=10.0):
         Two or more charts to stack top-to-bottom.
     spacing : float, default 10.0
         Pixel gap between adjacent charts.
+    resolve : dict, optional
+        Per-channel scale-sharing overrides, e.g.
+        ``{"color": "shared"}``.
 
     Returns
     -------
@@ -320,7 +330,7 @@ def vconcat(*charts, spacing=10.0):
     """
     from ferrum.composition import VConcatChart
 
-    return VConcatChart(list(charts), spacing=spacing)
+    return VConcatChart(list(charts), spacing=spacing, resolve=resolve)
 
 
 def layer(*charts, resolve=None, title=None):
@@ -471,6 +481,8 @@ __all__ = [
     "YError2",
     "Theta",
     "Radius",
+    "Theta2",
+    "Radius2",
     "Color",
     "Fill",
     "Stroke",
@@ -517,6 +529,11 @@ __all__ = [
     "selection_single",
     "selection_multi",
     "value",
+    # D6 — reactive parameters
+    "Parameter",
+    "VariableParameter",
+    "param",
+    "when",
     # Phase 8b
     "ContinuousScheme",
     "continuous_palette",

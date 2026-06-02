@@ -66,10 +66,70 @@ def test_to_implicit_transforms_with_bin_kwarg():
     c = _BinTestChannel("price", bin=True)
     transforms = c.to_implicit_transforms()
     assert len(transforms) == 1
-    # First (and only) transform should be a Bin instance
-    from ferrum import Bin
+    # to_implicit_transforms() now returns a _PendingBin sentinel instead of a
+    # Rust Bin object.  The sentinel defers the named-vs-unnamed decision until
+    # chart.to_spec() knows whether the chart is single or layered (FA-4 fix).
+    from ferrum.encoding.base import _PendingBin
 
-    assert isinstance(transforms[0], Bin)
+    assert isinstance(transforms[0], _PendingBin)
+    assert transforms[0].field == "price"
+    # bin=True carries no extra kwargs.
+    assert transforms[0].bin_kwargs == ()
+    # bin=True path has no pre-built bin_obj.
+    assert transforms[0].bin_obj is None
+
+
+def test_to_implicit_transforms_with_bin_instance():
+    """BUG 1: bin=Bin("price", bin_count=5) must carry the Bin object intact.
+
+    Pre-fix: to_implicit_transforms() tried bin_arg.to_json() (absent on PyO3
+    Bin), fell through to _bin_dict={}, and silently dropped bin_count.
+    The _PendingBin sentinel must now carry the Bin instance in bin_obj so the
+    resolvers (single-chart and layered) can use it directly without guessing
+    at PyO3 internals.
+    """
+
+    class _BinInstanceChannel(ChannelBase):
+        _channel_name = "x"
+        _honored_kwargs = frozenset(["type", "bin"])
+
+    from ferrum._core import Bin as RustBin
+    from ferrum.encoding.base import _PendingBin
+
+    reset_warnings()
+    rust_bin = RustBin("price", bin_count=5)
+    c = _BinInstanceChannel("price", bin=rust_bin)
+    transforms = c.to_implicit_transforms()
+    assert len(transforms) == 1
+    pb = transforms[0]
+    assert isinstance(pb, _PendingBin)
+    assert pb.field == "price"
+    # bin_obj must hold the Bin instance, not be None.
+    assert pb.bin_obj is rust_bin, (
+        f"_PendingBin.bin_obj must be the passed Bin instance, got {pb.bin_obj!r}"
+    )
+    # bin_kwargs must be empty (kwargs come from the Bin object itself).
+    assert pb.bin_kwargs == ()
+
+
+def test_to_implicit_transforms_with_bin_dict():
+    """bin={"bin_count": N} must preserve the kwarg in _PendingBin.bin_kwargs."""
+
+    class _BinDictChannel(ChannelBase):
+        _channel_name = "x"
+        _honored_kwargs = frozenset(["type", "bin"])
+
+    from ferrum.encoding.base import _PendingBin
+
+    reset_warnings()
+    c = _BinDictChannel("price", bin={"bin_count": 7})
+    transforms = c.to_implicit_transforms()
+    assert len(transforms) == 1
+    pb = transforms[0]
+    assert isinstance(pb, _PendingBin)
+    assert pb.field == "price"
+    assert pb.bin_obj is None
+    assert dict(pb.bin_kwargs) == {"bin_count": 7}
 
 
 def test_to_implicit_transforms_with_aggregate_kwarg():

@@ -33,6 +33,25 @@ _LINETYPE_MAP: dict[str, list[float]] = {
     "longdash": [8.0, 4.0],
 }
 
+# Canonical set of valid constant shape names for mark_point(shape=...).
+# Must stay in sync with shape_from_str() in crates/ferrum-core/src/render/marks/point.rs.
+_VALID_POINT_SHAPES: frozenset[str] = frozenset(
+    [
+        "circle",
+        "square",
+        "cross",
+        "diamond",
+        "triangle-up",
+        "triangle_up",
+        "triangle-down",
+        "triangle_down",
+        "|",
+        "vline",
+        "-",
+        "hline",
+    ]
+)
+
 _VALID_MARK_KWARGS = frozenset(
     [
         "size",
@@ -76,6 +95,7 @@ _VALID_MARK_KWARGS = frozenset(
         "multiple",  # density/histogram
         "blend",  # layer blend mode ("normal", "additive")
         "leader_line",  # label: draw thin leader line from data point to label
+        "zero",  # mark_bar: suppress the y-scale zero-anchor (zero=False)
     ]
 )
 
@@ -137,6 +157,16 @@ class MarkBase:
                 raise TypeError(
                     f"mark_{mark_name}: unknown keyword argument {k!r}. "
                     f"Valid: {sorted(_VALID_MARK_KWARGS)}"
+                )
+        # Validate shape= value for point marks. The constant shape is a fixed
+        # string that must name one of the glyphs supported by the Rust renderer;
+        # an unknown name would silently default to circle at render time.
+        shape_val = resolved.get("shape")
+        if shape_val is not None and isinstance(shape_val, str):
+            if shape_val not in _VALID_POINT_SHAPES:
+                raise ValueError(
+                    f"mark_{mark_name}: unknown shape {shape_val!r}. "
+                    f"Valid shapes: {sorted(_VALID_POINT_SHAPES)}"
                 )
         self._kwargs = resolved
 
@@ -214,6 +244,27 @@ class MarkBase:
         # S4: orient="horizontal" → consumed Python-side; set coord flip flag.
         # The caller (_set_mark) reads this via orient_coord_flip().
         return out
+
+    def zero_anchor(self) -> bool:
+        """Return the effective value of the ``zero=`` parameter (default ``True``).
+
+        Used by ``Chart._set_mark`` to store the zero-anchor preference on the
+        chart so ``_build_encoding_specs`` can suppress the ``scale.zero=True``
+        injection when the caller passes ``zero=False``.
+
+        Returns
+        -------
+        bool
+            ``False`` when ``zero=False`` was explicitly passed; ``True`` otherwise.
+
+        Examples
+        --------
+        >>> MarkBase("bar", zero=False).zero_anchor()
+        False
+        >>> MarkBase("bar").zero_anchor()
+        True
+        """
+        return bool(self._kwargs.get("zero", True))
 
     def orient_coord_flip(self) -> bool:
         """Return True if ``orient="horizontal"`` was passed, indicating coord flip.

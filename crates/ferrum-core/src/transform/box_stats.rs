@@ -2,13 +2,17 @@
 //! Output schema = groupby cols + q1, median, q3, lower_whisker, upper_whisker (all f64, nullable).
 //! One row per group.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
+use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+use crate::transform::group_key::{
+    groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col, KeyValue,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
@@ -32,12 +36,6 @@ pub(crate) struct BoxStatsSpec {
     pub whisker_extent: WhiskerExtent,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum KeyValue {
-    Str(String),
-    Float(u64),
 }
 
 pub(crate) fn apply(spec: &BoxStatsSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -65,10 +63,12 @@ pub(crate) fn apply(spec: &BoxStatsSpec, batch: &RecordBatch) -> PyResult<Record
             ))
         })?;
         let dt = schema.field(i).data_type().clone();
-        if dt != DataType::Float64 && !matches!(dt, DataType::Utf8) {
+        if !is_groupby_supported_dtype(&dt) {
             return Err(PyValueError::new_err(format!(
-                "stat_box_stats: groupby column '{}' must be Float64 or Utf8",
-                g
+                "stat_box_stats: groupby column '{}' has unsupported dtype {:?}; \
+                 supported: Utf8/LargeUtf8, Float64/Float32, \
+                 Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean",
+                g, dt
             )));
         }
         group_dtypes.push(dt);
@@ -96,27 +96,12 @@ pub(crate) fn apply(spec: &BoxStatsSpec, batch: &RecordBatch) -> PyResult<Record
     for row in 0..n_rows {
         let mut key = Vec::with_capacity(spec.groupby.len());
         for (gi, arr) in group_arrays.iter().enumerate() {
-            match group_dtypes[gi] {
-                DataType::Float64 => {
-                    let a = arr.as_any().downcast_ref::<Float64Array>()
-                        .ok_or_else(|| PyValueError::new_err("stat_box_stats: expected Float64Array for groupby column"))?;
-                    if a.is_null(row) {
-                        key.push(KeyValue::Float(f64::NAN.to_bits()));
-                    } else {
-                        key.push(KeyValue::Float(a.value(row).to_bits()));
-                    }
-                }
-                DataType::Utf8 => {
-                    let a = arr.as_any().downcast_ref::<StringArray>()
-                        .ok_or_else(|| PyValueError::new_err("stat_box_stats: expected StringArray for groupby column"))?;
-                    if a.is_null(row) {
-                        key.push(KeyValue::Str(String::new()));
-                    } else {
-                        key.push(KeyValue::Str(a.value(row).to_string()));
-                    }
-                }
-                _ => unreachable!(),
-            }
+            let kv = groupby_key_at(*arr, &group_dtypes[gi], row).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "stat_box_stats: internal error extracting groupby key at row {row}"
+                ))
+            })?;
+            key.push(kv);
         }
         groups.entry(key).or_default().push(row);
     }
@@ -170,30 +155,8 @@ pub(crate) fn apply(spec: &BoxStatsSpec, batch: &RecordBatch) -> PyResult<Record
     let out_schema = Arc::new(Schema::new(fields));
 
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(spec.groupby.len() + 5);
-    for gi in 0..spec.groupby.len() {
-        match group_dtypes[gi] {
-            DataType::Float64 => {
-                let v: Vec<f64> = group_keys_out
-                    .iter()
-                    .map(|k| match &k[gi] {
-                        KeyValue::Float(bits) => f64::from_bits(*bits),
-                        KeyValue::Str(_) => unreachable!(),
-                    })
-                    .collect();
-                cols.push(Arc::new(Float64Array::from(v)));
-            }
-            DataType::Utf8 => {
-                let v: Vec<String> = group_keys_out
-                    .iter()
-                    .map(|k| match &k[gi] {
-                        KeyValue::Str(s) => s.clone(),
-                        KeyValue::Float(_) => unreachable!(),
-                    })
-                    .collect();
-                cols.push(Arc::new(StringArray::from(v)));
-            }
-            _ => unreachable!(),
-        }
+    for (gi, dt) in group_dtypes.iter().enumerate() {
+        cols.push(materialize_groupby_col(&group_keys_out, gi, dt).map_err(PyValueError::new_err)?);
     }
     cols.push(Arc::new(Float64Array::from(q1s)));
     cols.push(Arc::new(Float64Array::from(medians)));
@@ -580,5 +543,86 @@ mod tests {
         assert!((q3[0] - 7.0).abs() < 1e-12, "q3 should be 7.0; got {}", q3[0]);
         assert!((lo[0] - 7.0).abs() < 1e-12, "lower whisker should be 7.0; got {}", lo[0]);
         assert!((hi[0] - 7.0).abs() < 1e-12, "upper whisker should be 7.0; got {}", hi[0]);
+    }
+
+    // ── FA-7: shared group-keying — integer groupby support ──────────────────
+
+    fn batch_value_int64_group(values: Vec<f64>, groups: Vec<i64>) -> RecordBatch {
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("grp", DataType::Int64, false),
+        ]));
+        let v = Float64Array::from(values);
+        let g = Int64Array::from(groups);
+        RecordBatch::try_new(schema, vec![Arc::new(v), Arc::new(g)]).unwrap()
+    }
+
+    fn col_i64(b: &RecordBatch, name: &str) -> Vec<i64> {
+        use arrow::array::Int64Array;
+        let arr = b
+            .column(b.schema().index_of(name).unwrap())
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        (0..arr.len()).map(|i| arr.value(i)).collect()
+    }
+
+    /// FA-7: box_stats grouped on an Int64 column groups correctly and preserves
+    /// the Int64 output dtype. Before FA-7 the private `KeyValue` enum rejected
+    /// non-Float64/Utf8 groupby columns with an error.
+    #[test]
+    fn box_stats_int64_groupby_succeeds_and_preserves_dtype() {
+        pyo3::Python::initialize();
+        // Group 1: [1,2,3,4,5] q1=2 median=3 q3=4
+        // Group 2: [10,20,30,40,50] q1=20 median=30 q3=40
+        let b = batch_value_int64_group(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0],
+            vec![1, 1, 1, 1, 1, 2, 2, 2, 2, 2],
+        );
+        let spec = BoxStatsSpec {
+            field: "v".into(),
+            groupby: vec!["grp".into()],
+            whisker_extent: WhiskerExtent::IqrMultiplier(1.5),
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+        assert_eq!(out.num_rows(), 2);
+        assert_eq!(
+            out.schema().field(out.schema().index_of("grp").unwrap()).data_type(),
+            &DataType::Int64
+        );
+        let grps = col_i64(&out, "grp");
+        let median = col_f64(&out, "median");
+        let g1 = grps.iter().position(|&g| g == 1).unwrap();
+        let g2 = grps.iter().position(|&g| g == 2).unwrap();
+        assert!((median[g1] - 3.0).abs() < 1e-12, "group 1 median: {}", median[g1]);
+        assert!((median[g2] - 30.0).abs() < 1e-12, "group 2 median: {}", median[g2]);
+    }
+
+    /// FA-7 byte-stability guard: a Utf8 groupby still materializes a StringArray
+    /// with identical per-group quartiles after migrating to the shared module.
+    #[test]
+    fn box_stats_utf8_groupby_byte_stable() {
+        pyo3::Python::initialize();
+        let b = batch_value_group(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0],
+            vec!["a", "a", "a", "a", "a", "b", "b", "b", "b", "b"],
+        );
+        let spec = BoxStatsSpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            whisker_extent: WhiskerExtent::IqrMultiplier(1.5),
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+        assert_eq!(
+            out.schema().field(out.schema().index_of("group").unwrap()).data_type(),
+            &DataType::Utf8
+        );
+        let groups = col_str(&out, "group");
+        let median = col_f64(&out, "median");
+        let a = groups.iter().position(|g| g == "a").unwrap();
+        assert!((median[a] - 3.0).abs() < 1e-12);
     }
 }

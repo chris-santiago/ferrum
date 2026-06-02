@@ -492,18 +492,26 @@ fn extract_xy(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<&[usi
         .ok_or_else(|| PyValueError::new_err(format!("stat_smooth: expected Float64Array for '{}'", spec.x)))?;
     let ya = batch.column(yi).as_any().downcast_ref::<Float64Array>()
         .ok_or_else(|| PyValueError::new_err(format!("stat_smooth: expected Float64Array for '{}'", spec.y)))?;
-    let mut xs = Vec::with_capacity(xa.len());
-    let mut ys = Vec::with_capacity(ya.len());
-    let push = |i: usize, xs: &mut Vec<f64>, ys: &mut Vec<f64>| {
-        if xa.is_null(i) || ya.is_null(i) { return; }
-        let xv = xa.value(i); let yv = ya.value(i);
-        if xv.is_nan() || yv.is_nan() { return; }
-        xs.push(xv); ys.push(yv);
+    // Collect row indices that are valid in BOTH arrays (non-null, non-NaN).
+    // Uses the same null+NaN predicate as clean_float64_values in numeric_util,
+    // but applied to paired columns so only jointly-clean rows are kept.
+    use crate::transform::numeric_util::clean_float64_values;
+    let candidate_iter: Box<dyn Iterator<Item = usize>> = match only_indices {
+        Some(ixs) => Box::new(ixs.iter().copied()),
+        None => Box::new(0..xa.len()),
     };
-    match only_indices {
-        Some(ixs) => for &i in ixs { push(i, &mut xs, &mut ys); },
-        None => for i in 0..xa.len() { push(i, &mut xs, &mut ys); },
-    }
+    let valid_indices: Vec<usize> = candidate_iter
+        .filter(|&i| {
+            !xa.is_null(i) && !ya.is_null(i)
+                && !xa.value(i).is_nan()
+                && !ya.value(i).is_nan()
+        })
+        .collect();
+
+    // Extract each column at the valid indices via the shared cleaner.
+    // This reuses the same null+NaN drop logic across all transform callers.
+    let xs = clean_float64_values(xa, Some(&valid_indices));
+    let ys = clean_float64_values(ya, Some(&valid_indices));
     Ok((xs, ys))
 }
 
@@ -1846,6 +1854,90 @@ mod tests {
                 "PySmooth::new with method={method:?} should succeed; got {:?}",
                 result.err().map(|e| e.to_string())
             );
+        }
+    }
+
+    // ── NaN regression: smooth must drop NaN rows, matching kde/bin behavior ────
+
+    /// A NaN x-value in the input must be silently dropped: the smoothed output
+    /// must be identical to running the same smooth on the clean (NaN-free) subset.
+    #[test]
+    fn test_nan_in_x_is_dropped_from_smooth() {
+        let xs_clean: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let ys_clean: Vec<f64> = xs_clean.iter().map(|x| 2.0 * x + 1.0).collect();
+
+        // Inject a NaN at index 3.
+        let mut xs_nan = xs_clean.clone();
+        xs_nan[3] = f64::NAN;
+
+        let batch_clean = xy_batch(xs_clean.clone(), ys_clean.clone());
+        let batch_nan = xy_batch(xs_nan, ys_clean.clone());
+
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: None,
+            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: None, name: None,
+        };
+
+        let out_clean = apply(&spec, &batch_clean).unwrap();
+        let out_nan   = apply(&spec, &batch_nan).unwrap();
+
+        let yf_clean = col(&out_clean, "y");
+        let yf_nan   = col(&out_nan,   "y");
+
+        assert_eq!(yf_clean.len(), yf_nan.len());
+        for (i, (a, b)) in yf_clean.iter().zip(yf_nan.iter()).enumerate() {
+            // Neither result should be NaN-corrupted.
+            assert!(a.is_finite(), "clean output y[{i}]={a} should be finite");
+            assert!(b.is_finite(), "nan-input output y[{i}]={b} should be NaN-corrupted (expected finite)");
+            assert!(
+                (a - b).abs() < 1e-9,
+                "y[{i}]: clean={a}, nan-input={b}; dropping NaN row must not change smoothed values"
+            );
+        }
+    }
+
+    /// A NaN y-value in the input must be silently dropped.
+    #[test]
+    fn test_nan_in_y_is_dropped_from_smooth() {
+        let xs_clean: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let ys_clean: Vec<f64> = xs_clean.iter().map(|x| 3.0 * x - 0.5).collect();
+
+        // Inject a NaN at index 5.
+        let mut ys_nan = ys_clean.clone();
+        ys_nan[5] = f64::NAN;
+
+        let batch_clean = xy_batch(xs_clean.clone(), ys_clean.clone());
+        let batch_nan = xy_batch(xs_clean.clone(), ys_nan);
+
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: None,
+            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: None, name: None,
+        };
+
+        let out_clean = apply(&spec, &batch_clean).unwrap();
+        let out_nan   = apply(&spec, &batch_nan).unwrap();
+
+        let yf_clean = col(&out_clean, "y");
+        let yf_nan   = col(&out_nan,   "y");
+
+        assert_eq!(yf_clean.len(), yf_nan.len());
+        for (i, (a, b)) in yf_clean.iter().zip(yf_nan.iter()).enumerate() {
+            // Both should be finite (NaN row was dropped, LM can still fit).
+            assert!(a.is_finite(), "clean output y[{i}]={a} should be finite");
+            assert!(b.is_finite(), "nan-y-input output y[{i}]={b} should be finite after NaN drop");
+            // The fit values must be close but NOT required to be byte-identical
+            // (removing one data point changes the regression coefficients slightly).
+            // What must NOT happen: NaN-corrupted output.  Here we just assert finite.
         }
     }
 

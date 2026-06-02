@@ -235,6 +235,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            params: Vec::new(),
         }
     }
 
@@ -245,7 +246,7 @@ mod tests {
             facet_key: None,
             row: 0,
             col: 0,
-            strip_title: None,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
         }
     }
 

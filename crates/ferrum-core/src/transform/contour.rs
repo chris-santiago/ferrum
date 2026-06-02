@@ -1,18 +1,25 @@
 //! Contour: Marching Squares isolines and isobands over a Kde2D-shaped grid.
 //!
-//! Reads a single-row batch with the Kde2D output schema:
+//! Reads a batch with the Kde2D output schema (one or more rows):
 //!   grid_x:  List<Float64>   length nx
 //!   grid_y:  List<Float64>   length ny
 //!   density: List<Float64>   length nx*ny, row-major: density[gy * nx + gx]
 //!   nx:      UInt32
 //!   ny:      UInt32
 //!   extent:  List<Float64>   length 4: [xmin, xmax, ymin, ymax]
+//!   <group>: Utf8 (OPTIONAL trailing column — present only in grouped Kde2D output)
+//!
+//! When a trailing Utf8 column is present beyond the 6 known fields, the batch
+//! is treated as grouped Kde2D output (one row per group). The contour
+//! extraction runs once per row and the group key is propagated to every output
+//! vertex so downstream marks can `color=<group>`.
 //!
 //! Output (one row per polyline vertex, NOT per polyline):
 //!   level_id:    UInt32
 //!   level_value: Float64
 //!   contour_x:   Float64
 //!   contour_y:   Float64
+//!   [<group>:    Utf8]   — only when input is grouped
 //!
 //! `level_id` encoding:
 //!   - Isoline mode: (level_index << 16) | segment_index
@@ -26,7 +33,7 @@
 //!   - `smooth=true` applies a 3×3 Gaussian kernel (center=4, edges=2, corners=1, /16)
 //!     to interior grid cells; border cells are copied unchanged.
 
-use arrow::array::{Array, ArrayRef, Float64Array, ListArray, RecordBatch, UInt32Array};
+use arrow::array::{Array, ArrayRef, Float64Array, ListArray, RecordBatch, StringArray, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -103,7 +110,7 @@ fn empty_output(fill: bool) -> PyResult<RecordBatch> {
     }
 }
 
-fn extract_list_f64(batch: &RecordBatch, name: &str) -> PyResult<Vec<f64>> {
+fn extract_list_f64_row(batch: &RecordBatch, name: &str, row: usize) -> PyResult<Vec<f64>> {
     let idx = batch.schema().index_of(name).map_err(|_| {
         PyValueError::new_err(format!(
             "stat_contour: input must be a Kde2D output (missing column '{name}')"
@@ -118,7 +125,7 @@ fn extract_list_f64(batch: &RecordBatch, name: &str) -> PyResult<Vec<f64>> {
                 "stat_contour: column '{name}' must be List<Float64>"
             ))
         })?;
-    let inner = la.value(0);
+    let inner = la.value(row);
     let arr = inner
         .as_any()
         .downcast_ref::<Float64Array>()
@@ -130,7 +137,7 @@ fn extract_list_f64(batch: &RecordBatch, name: &str) -> PyResult<Vec<f64>> {
     Ok((0..arr.len()).map(|i| arr.value(i)).collect())
 }
 
-fn extract_u32(batch: &RecordBatch, name: &str) -> PyResult<u32> {
+fn extract_u32_row(batch: &RecordBatch, name: &str, row: usize) -> PyResult<u32> {
     let idx = batch.schema().index_of(name).map_err(|_| {
         PyValueError::new_err(format!(
             "stat_contour: input must be a Kde2D output (missing column '{name}')"
@@ -143,57 +150,35 @@ fn extract_u32(batch: &RecordBatch, name: &str) -> PyResult<u32> {
         .ok_or_else(|| {
             PyValueError::new_err(format!("stat_contour: column '{name}' must be UInt32"))
         })?;
-    Ok(arr.value(0))
+    Ok(arr.value(row))
 }
 
-pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    if spec.thresholds == 0 {
-        return Err(PyValueError::new_err(
-            "stat_contour: thresholds must be > 0",
-        ));
-    }
+/// Output accumulator for a single surface's contour extraction.
+struct SurfaceOutput {
+    level_ids: Vec<u32>,
+    level_vals: Vec<f64>,
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    /// Present only in isoline mode.
+    x2s: Option<Vec<f64>>,
+    y2s: Option<Vec<f64>>,
+}
 
-    // Validate required columns are present.
-    for name in ["grid_x", "grid_y", "density", "nx", "ny", "extent"] {
-        if batch.schema().index_of(name).is_err() {
-            return Err(PyValueError::new_err(format!(
-                "stat_contour: input must be a Kde2D output (missing column '{name}')"
-            )));
-        }
-    }
-
-    if batch.num_rows() == 0 {
-        return empty_output(spec.fill);
-    }
-    if batch.num_rows() != 1 {
-        return Err(PyValueError::new_err(format!(
-            "stat_contour: input must be single-row (got {})",
-            batch.num_rows()
-        )));
-    }
-
-    let grid_x = extract_list_f64(batch, "grid_x")?;
-    let grid_y = extract_list_f64(batch, "grid_y")?;
-    let density = extract_list_f64(batch, "density")?;
-    let nx = extract_u32(batch, "nx")? as usize;
-    let ny = extract_u32(batch, "ny")? as usize;
-
-    if grid_x.len() != nx || grid_y.len() != ny || density.len() != nx * ny {
-        return Err(PyValueError::new_err(format!(
-            "stat_contour: dimension mismatch (nx={nx}, ny={ny}, grid_x.len={}, grid_y.len={}, density.len={})",
-            grid_x.len(), grid_y.len(), density.len()
-        )));
-    }
-
-    if nx < 2 || ny < 2 {
-        return empty_output(spec.fill);
-    }
-
+/// Extract contour lines or isobands from a single 2-D density surface.
+/// The caller supplies pre-validated grid/density data; no RecordBatch access here.
+fn contour_one_surface(
+    spec: &ContourSpec,
+    grid_x: &[f64],
+    grid_y: &[f64],
+    density: &[f64],
+    nx: usize,
+    ny: usize,
+) -> Option<SurfaceOutput> {
     // Compute thresholds: t evenly-spaced interior levels.
     let dmin = density.iter().copied().fold(f64::INFINITY, f64::min);
     let dmax = density.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     if !dmin.is_finite() || !dmax.is_finite() || dmax <= dmin {
-        return empty_output(spec.fill);
+        return None;
     }
     let t = spec.thresholds;
     let levels: Vec<f64> = (1..=t)
@@ -203,7 +188,7 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
     // R1: Gaussian smoothing. Apply a 3×3 kernel (center=4, edges=2, corners=1, /16)
     // to all interior cells. Border cells are copied unchanged.
     let density: Vec<f64> = if spec.smooth && nx >= 3 && ny >= 3 {
-        let mut smoothed = density.clone();
+        let mut smoothed = density.to_vec();
         for gy in 1..(ny - 1) {
             for gx in 1..(nx - 1) {
                 let tl = density[(gy - 1) * nx + (gx - 1)];
@@ -222,7 +207,7 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
         }
         smoothed
     } else {
-        density
+        density.to_vec()
     };
 
     let mut level_ids: Vec<u32> = Vec::new();
@@ -232,9 +217,6 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
 
     if !spec.fill {
         // ---------- Isoline mode (Marching Squares) ----------
-        // Output: one row per segment with columns
-        //   (level_id, level_value, contour_x, contour_y, contour_x2, contour_y2)
-        // Each segment is a single row; x2s/y2s hold the segment's end point.
         let mut x2s: Vec<f64> = Vec::new();
         let mut y2s: Vec<f64> = Vec::new();
 
@@ -327,7 +309,6 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
                     for (p0, p1) in segs {
                         let id = ((li as u32) << 16) | seg_idx;
                         seg_idx = seg_idx.wrapping_add(1);
-                        // One row per segment: start point in (x,y), end in (x2,y2).
                         level_ids.push(id);
                         level_vals.push(level);
                         xs.push(p0.0);
@@ -339,29 +320,20 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
             }
         }
 
-        let schema = out_schema_isoline();
-        let cols: Vec<ArrayRef> = vec![
-            Arc::new(UInt32Array::from(level_ids)),
-            Arc::new(Float64Array::from(level_vals)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(Float64Array::from(x2s)),
-            Arc::new(Float64Array::from(y2s)),
-        ];
-        return RecordBatch::try_new(schema, cols)
-            .map_err(|e| PyValueError::new_err(format!("stat_contour: {e}")));
+        Some(SurfaceOutput {
+            level_ids,
+            level_vals,
+            xs,
+            ys,
+            x2s: Some(x2s),
+            y2s: Some(y2s),
+        })
     } else {
         // ---------- Isoband mode (Sutherland-Hodgman polygon clipping) ----------
-        // With t thresholds we emit t-1 bands [L_i, L_{i+1}].
-        // Each cell's four corners (TL, TR, BR, BL) carry (x, y, density).
-        // We clip the quadrilateral first against density >= lo, then against
-        // density <= hi.  If the result has >= 3 vertices it is emitted as a
-        // closed polygon (first vertex repeated as last).
         if levels.len() < 2 {
-            return empty_output(spec.fill);
+            return None;
         }
 
-        // A vertex with position and density for S-H clipping.
         #[derive(Clone, Copy)]
         struct Vtx {
             x: f64,
@@ -369,9 +341,11 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
             d: f64,
         }
 
-        /// Sutherland-Hodgman clip against a single half-plane defined by
-        /// `inside(v) → true`.  Intersections are linearly interpolated.
-        fn sh_clip(poly: &[Vtx], inside: impl Fn(&Vtx) -> bool, t_at: impl Fn(&Vtx, &Vtx) -> f64) -> Vec<Vtx> {
+        fn sh_clip(
+            poly: &[Vtx],
+            inside: impl Fn(&Vtx) -> bool,
+            t_at: impl Fn(&Vtx, &Vtx) -> f64,
+        ) -> Vec<Vtx> {
             if poly.is_empty() {
                 return Vec::new();
             }
@@ -386,7 +360,6 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
                     out.push(cur);
                 }
                 if cur_in != nxt_in {
-                    // Edge crosses the clip boundary; interpolate.
                     let t = t_at(&cur, &nxt);
                     let ix = cur.x + t * (nxt.x - cur.x);
                     let iy = cur.y + t * (nxt.y - cur.y);
@@ -421,7 +394,6 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
                         Vtx { x: x0, y: y1, d: d_bl },
                     ];
 
-                    // Clip against density >= lo.
                     let clipped_lo = sh_clip(
                         &quad,
                         |v| v.d >= lo,
@@ -434,7 +406,6 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
                         continue;
                     }
 
-                    // Clip against density <= hi.
                     let clipped = sh_clip(
                         &clipped_lo,
                         |v| v.d <= hi,
@@ -447,7 +418,6 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
                         continue;
                     }
 
-                    // Emit closed polygon (first vertex repeated as last).
                     let id = ((bi as u32) << 16) | cell_idx;
                     cell_idx = cell_idx.wrapping_add(1);
                     let band_value = lo;
@@ -465,18 +435,198 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
                 }
             }
         }
+
+        Some(SurfaceOutput {
+            level_ids,
+            level_vals,
+            xs,
+            ys,
+            x2s: None,
+            y2s: None,
+        })
+    }
+}
+
+/// Detect the optional group column: the trailing field beyond the 6 known
+/// Kde2D surface columns, if it has Utf8 type. Returns `(field_name, column_index)`
+/// or `None` when no group column is present.
+fn detect_group_col(batch: &RecordBatch) -> Option<(String, usize)> {
+    const SURFACE_COLS: usize = 6;
+    let schema = batch.schema();
+    if schema.fields().len() > SURFACE_COLS {
+        let idx = SURFACE_COLS; // one trailing column by convention
+        let field = schema.field(idx);
+        if field.data_type() == &DataType::Utf8 {
+            return Some((field.name().to_string(), idx));
+        }
+    }
+    None
+}
+
+pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    if spec.thresholds == 0 {
+        return Err(PyValueError::new_err(
+            "stat_contour: thresholds must be > 0",
+        ));
     }
 
-    // Isoband output: 4 columns (vertex rows, no x2/y2).
-    let schema = out_schema_isoband();
-    let cols: Vec<ArrayRef> = vec![
-        Arc::new(UInt32Array::from(level_ids)),
-        Arc::new(Float64Array::from(level_vals)),
-        Arc::new(Float64Array::from(xs)),
-        Arc::new(Float64Array::from(ys)),
-    ];
-    RecordBatch::try_new(schema, cols)
-        .map_err(|e| PyValueError::new_err(format!("stat_contour: {e}")))
+    // Validate required surface columns are present.
+    for name in ["grid_x", "grid_y", "density", "nx", "ny", "extent"] {
+        if batch.schema().index_of(name).is_err() {
+            return Err(PyValueError::new_err(format!(
+                "stat_contour: input must be a Kde2D output (missing column '{name}')"
+            )));
+        }
+    }
+
+    if batch.num_rows() == 0 {
+        return empty_output(spec.fill);
+    }
+
+    // Detect the optional group column (trailing Utf8 field beyond the 6 surface cols).
+    let group_col = detect_group_col(batch);
+
+    // Accumulate output across all rows (one row = one surface, possibly one group).
+    let mut all_level_ids: Vec<u32> = Vec::new();
+    let mut all_level_vals: Vec<f64> = Vec::new();
+    let mut all_xs: Vec<f64> = Vec::new();
+    let mut all_ys: Vec<f64> = Vec::new();
+    let mut all_x2s: Vec<f64> = Vec::new(); // isoline only
+    let mut all_y2s: Vec<f64> = Vec::new(); // isoline only
+    let mut all_group_tags: Vec<String> = Vec::new(); // grouped path only
+
+    let group_arr: Option<&StringArray> = group_col.as_ref().map(|(_, col_idx)| {
+        batch
+            .column(*col_idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("group column confirmed Utf8 by detect_group_col")
+    });
+
+    for row in 0..batch.num_rows() {
+        let grid_x = extract_list_f64_row(batch, "grid_x", row)?;
+        let grid_y = extract_list_f64_row(batch, "grid_y", row)?;
+        let density = extract_list_f64_row(batch, "density", row)?;
+        let nx = extract_u32_row(batch, "nx", row)? as usize;
+        let ny = extract_u32_row(batch, "ny", row)? as usize;
+
+        if grid_x.len() != nx || grid_y.len() != ny || density.len() != nx * ny {
+            return Err(PyValueError::new_err(format!(
+                "stat_contour: row {row}: dimension mismatch \
+                 (nx={nx}, ny={ny}, grid_x.len={}, grid_y.len={}, density.len={})",
+                grid_x.len(),
+                grid_y.len(),
+                density.len()
+            )));
+        }
+
+        if nx < 2 || ny < 2 {
+            // Surface too small to contour; skip this row (not an error).
+            continue;
+        }
+
+        let surface = contour_one_surface(spec, &grid_x, &grid_y, &density, nx, ny);
+        let surface = match surface {
+            None => continue, // degenerate surface (flat density etc.)
+            Some(s) => s,
+        };
+
+        let n_new = surface.level_ids.len();
+        all_level_ids.extend(surface.level_ids);
+        all_level_vals.extend(surface.level_vals);
+        all_xs.extend(surface.xs);
+        all_ys.extend(surface.ys);
+        if let (Some(x2s), Some(y2s)) = (surface.x2s, surface.y2s) {
+            all_x2s.extend(x2s);
+            all_y2s.extend(y2s);
+        }
+
+        // Tag every output vertex with the group key when grouped.
+        if let Some(garr) = group_arr {
+            let key = garr.value(row).to_string();
+            all_group_tags.extend(std::iter::repeat_n(key, n_new));
+        }
+    }
+
+    build_output(
+        spec.fill,
+        &group_col,
+        AccumulatedOutput {
+            level_ids: all_level_ids,
+            level_vals: all_level_vals,
+            xs: all_xs,
+            ys: all_ys,
+            x2s: all_x2s,
+            y2s: all_y2s,
+            group_tags: all_group_tags,
+        },
+    )
+}
+
+/// Accumulated per-vertex output across all processed surfaces.
+struct AccumulatedOutput {
+    level_ids: Vec<u32>,
+    level_vals: Vec<f64>,
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    /// Non-empty only in isoline mode.
+    x2s: Vec<f64>,
+    /// Non-empty only in isoline mode.
+    y2s: Vec<f64>,
+    /// Non-empty only in grouped mode.
+    group_tags: Vec<String>,
+}
+
+/// Assemble the final RecordBatch from accumulated output vectors.
+fn build_output(
+    fill: bool,
+    group_col: &Option<(String, usize)>,
+    out: AccumulatedOutput,
+) -> PyResult<RecordBatch> {
+    let AccumulatedOutput { level_ids, level_vals, xs, ys, x2s, y2s, group_tags } = out;
+    let has_group = group_col.is_some();
+
+    if fill {
+        let mut schema_fields = out_schema_isoband().fields().to_vec();
+        if let Some((name, _)) = group_col {
+            schema_fields.push(Arc::new(Field::new(name.as_str(), DataType::Utf8, false)));
+        }
+        let schema = Arc::new(Schema::new(schema_fields));
+        let mut cols: Vec<ArrayRef> = vec![
+            Arc::new(UInt32Array::from(level_ids)),
+            Arc::new(Float64Array::from(level_vals)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+        ];
+        if has_group {
+            cols.push(Arc::new(StringArray::from(
+                group_tags.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            )));
+        }
+        RecordBatch::try_new(schema, cols)
+            .map_err(|e| PyValueError::new_err(format!("stat_contour: {e}")))
+    } else {
+        let mut schema_fields = out_schema_isoline().fields().to_vec();
+        if let Some((name, _)) = group_col {
+            schema_fields.push(Arc::new(Field::new(name.as_str(), DataType::Utf8, false)));
+        }
+        let schema = Arc::new(Schema::new(schema_fields));
+        let mut cols: Vec<ArrayRef> = vec![
+            Arc::new(UInt32Array::from(level_ids)),
+            Arc::new(Float64Array::from(level_vals)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(Float64Array::from(x2s)),
+            Arc::new(Float64Array::from(y2s)),
+        ];
+        if has_group {
+            cols.push(Arc::new(StringArray::from(
+                group_tags.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            )));
+        }
+        RecordBatch::try_new(schema, cols)
+            .map_err(|e| PyValueError::new_err(format!("stat_contour: {e}")))
+    }
 }
 
 // ---------- PyO3 wrapper ----------
@@ -552,7 +702,7 @@ impl PyContour {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Float64Array, Float64Builder, ListBuilder, UInt32Array};
+    use arrow::array::{Float64Array, Float64Builder, ListBuilder, StringArray, UInt32Array};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
@@ -807,6 +957,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n: 16,
             extent: None,
+            groupby: None,
             name: None,
         };
         let kde_out = kde_2d::apply(&kde2d_spec, &in_batch).unwrap();
@@ -892,6 +1043,192 @@ mod tests {
         }
         assert!(found_band0, "expected at least one band 0 polygon");
         assert!(found_band1, "expected at least one band 1 polygon");
+    }
+
+    /// Build a 2-row grouped Kde2D-shaped batch (mimics kde_2d grouped output).
+    /// Each row is one group surface; a trailing Utf8 column holds the group key.
+    fn make_grouped_kde2d_batch(
+        rows: Vec<(Vec<f64>, Vec<f64>, Vec<f64>)>, // (grid_x, grid_y, density) per group
+        group_col: &str,
+        group_vals: Vec<&str>,
+    ) -> RecordBatch {
+        assert_eq!(rows.len(), group_vals.len());
+        let list_f64 = DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("grid_x", list_f64.clone(), false),
+            Field::new("grid_y", list_f64.clone(), false),
+            Field::new("density", list_f64.clone(), false),
+            Field::new("nx", DataType::UInt32, false),
+            Field::new("ny", DataType::UInt32, false),
+            Field::new("extent", list_f64, false),
+            Field::new(group_col, DataType::Utf8, false),
+        ]));
+
+        let mut gxb = ListBuilder::new(Float64Builder::new());
+        let mut gyb = ListBuilder::new(Float64Builder::new());
+        let mut db = ListBuilder::new(Float64Builder::new());
+        let mut eb = ListBuilder::new(Float64Builder::new());
+        let mut nxv: Vec<u32> = Vec::new();
+        let mut nyv: Vec<u32> = Vec::new();
+
+        for (grid_x, grid_y, density) in &rows {
+            let nx = grid_x.len() as u32;
+            let ny = grid_y.len() as u32;
+            assert_eq!(density.len(), (nx * ny) as usize);
+            gxb.values().append_slice(grid_x);
+            gxb.append(true);
+            gyb.values().append_slice(grid_y);
+            gyb.append(true);
+            db.values().append_slice(density);
+            db.append(true);
+            eb.values().append_slice(&[
+                grid_x[0],
+                *grid_x.last().unwrap(),
+                grid_y[0],
+                *grid_y.last().unwrap(),
+            ]);
+            eb.append(true);
+            nxv.push(nx);
+            nyv.push(ny);
+        }
+
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(gxb.finish()),
+                Arc::new(gyb.finish()),
+                Arc::new(db.finish()),
+                Arc::new(UInt32Array::from(nxv)),
+                Arc::new(UInt32Array::from(nyv)),
+                Arc::new(eb.finish()),
+                Arc::new(StringArray::from(group_vals)),
+            ],
+        )
+        .unwrap()
+    }
+
+    // --- RED tests (will fail until grouped path is implemented) ---
+
+    #[test]
+    fn contour_grouped_two_groups_both_tagged() {
+        // Two-group Kde2D batch → contour must emit rows for BOTH groups,
+        // each tagged with the correct group key; output schema gains the
+        // group column.
+        pyo3::Python::initialize();
+        let n = 4usize;
+        let grid_x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let grid_y: Vec<f64> = (0..n).map(|i| i as f64).collect();
+
+        // Build a simple peaked density for both groups.
+        let make_density = |cx: f64, cy: f64| -> Vec<f64> {
+            let mut d = vec![0.0f64; n * n];
+            for gy in 0..n {
+                for gx in 0..n {
+                    let dx = (gx as f64) - cx;
+                    let dy = (gy as f64) - cy;
+                    d[gy * n + gx] = (-(dx * dx + dy * dy)).exp();
+                }
+            }
+            d
+        };
+
+        let rows = vec![
+            (grid_x.clone(), grid_y.clone(), make_density(1.0, 1.0)),
+            (grid_x.clone(), grid_y.clone(), make_density(2.0, 2.0)),
+        ];
+        let b = make_grouped_kde2d_batch(rows, "species", vec!["A", "B"]);
+
+        let spec = ContourSpec {
+            thresholds: 2,
+            fill: false,
+            smooth: false,
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+
+        // Output must have isoline columns PLUS the group column.
+        let s = out.schema();
+        assert_eq!(s.fields().len(), 7, "grouped isoline output must have 7 columns (6 + group)");
+        assert_eq!(s.field(6).name(), "species");
+        assert_eq!(s.field(6).data_type(), &DataType::Utf8);
+
+        // Rows from both groups must be present.
+        assert!(out.num_rows() > 0, "grouped contour must emit rows");
+        let gcol = out.column(6).as_any().downcast_ref::<StringArray>().unwrap();
+        let has_a = (0..gcol.len()).any(|i| gcol.value(i) == "A");
+        let has_b = (0..gcol.len()).any(|i| gcol.value(i) == "B");
+        assert!(has_a, "output must contain rows tagged 'A'");
+        assert!(has_b, "output must contain rows tagged 'B'");
+    }
+
+    #[test]
+    fn contour_grouped_isoband_two_groups_both_tagged() {
+        // Same as above but fill=true (isoband mode).
+        pyo3::Python::initialize();
+        let n = 4usize;
+        let grid_x: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let grid_y: Vec<f64> = (0..n).map(|i| i as f64).collect();
+
+        let make_density = |cx: f64, cy: f64| -> Vec<f64> {
+            let mut d = vec![0.0f64; n * n];
+            for gy in 0..n {
+                for gx in 0..n {
+                    let dx = (gx as f64) - cx;
+                    let dy = (gy as f64) - cy;
+                    d[gy * n + gx] = (-(dx * dx + dy * dy)).exp();
+                }
+            }
+            d
+        };
+
+        let rows = vec![
+            (grid_x.clone(), grid_y.clone(), make_density(1.0, 1.0)),
+            (grid_x.clone(), grid_y.clone(), make_density(2.0, 2.0)),
+        ];
+        let b = make_grouped_kde2d_batch(rows, "hue", vec!["X", "Y"]);
+
+        let spec = ContourSpec {
+            thresholds: 3,
+            fill: true,
+            smooth: false,
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+
+        let s = out.schema();
+        assert_eq!(s.fields().len(), 5, "grouped isoband output must have 5 columns (4 + group)");
+        assert_eq!(s.field(4).name(), "hue");
+        assert_eq!(s.field(4).data_type(), &DataType::Utf8);
+
+        assert!(out.num_rows() > 0, "grouped isoband contour must emit rows");
+        let gcol = out.column(4).as_any().downcast_ref::<StringArray>().unwrap();
+        let has_x = (0..gcol.len()).any(|i| gcol.value(i) == "X");
+        let has_y = (0..gcol.len()).any(|i| gcol.value(i) == "Y");
+        assert!(has_x, "output must contain rows tagged 'X'");
+        assert!(has_y, "output must contain rows tagged 'Y'");
+    }
+
+    #[test]
+    fn contour_single_row_no_group_col_byte_stable() {
+        // Single-row (no group column) path must still work; no schema change.
+        pyo3::Python::initialize();
+        let grid_x: Vec<f64> = (0..4).map(|i| i as f64).collect();
+        let grid_y: Vec<f64> = (0..4).map(|i| i as f64).collect();
+        let mut density = vec![0.0_f64; 16];
+        for gy in 0..4 {
+            for gx in 0..4 {
+                let dx = (gx as f64) - 1.5;
+                let dy = (gy as f64) - 1.5;
+                density[gy * 4 + gx] = (-(dx * dx + dy * dy)).exp();
+            }
+        }
+        let b = make_kde2d_batch(grid_x, grid_y, density);
+        let spec = ContourSpec { thresholds: 2, fill: false, smooth: false, name: None };
+        let out = apply(&spec, &b).unwrap();
+        // Must be exactly 6 columns, no group column appended.
+        assert_eq!(out.schema().fields().len(), 6, "ungrouped isoline must have 6 columns");
+        // Must have rows.
+        assert!(out.num_rows() > 0, "ungrouped path must still emit segments");
     }
 
     #[test]

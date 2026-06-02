@@ -72,16 +72,7 @@ fn apply_one_group(
         .downcast_ref::<Float64Array>()
         .ok_or_else(|| PyValueError::new_err(format!(
             "stat_kde: expected Float64Array for column '{}'", spec.field)))?;
-    let mut clean: Vec<f64> = Vec::new();
-    let push = |i: usize, clean: &mut Vec<f64>| {
-        if arr.is_null(i) { return; }
-        let v = arr.value(i);
-        if !v.is_nan() { clean.push(v); }
-    };
-    match only_indices {
-        Some(ixs) => for &i in ixs { push(i, &mut clean); },
-        None => for i in 0..arr.len() { push(i, &mut clean); },
-    }
+    let clean = crate::transform::numeric_util::clean_float64_values(arr, only_indices);
 
     let (lo, hi) = match spec.extent {
         Some((a, b)) => (a, b),

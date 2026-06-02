@@ -470,18 +470,31 @@ pub(crate) fn apply_stack(
         crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: format!("value col '{}' not found",
             value_field.field) }
     })?;
-    // Stack accepts Float64 directly; for UInt64 (e.g. Bin's `count` column),
-    // we transparently widen to f64 so stacked histograms over Bin's groupby
-    // output work without an explicit cast.
+    // Stack accepts Float64 directly; for UInt64 (e.g. Bin's `count` column)
+    // and all signed integer types (Int8/Int16/Int32/Int64 — common for Polars
+    // integer columns that have not been explicitly cast to Float64), we
+    // transparently widen to f64 so stacked charts work without an explicit
+    // cast at the Python boundary.
     let y_col = batch.column(yi);
     let ya_vals: Vec<f64> = if let Some(a) = y_col.as_any().downcast_ref::<Float64Array>() {
         (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) }).collect()
     } else if let Some(a) = y_col.as_any().downcast_ref::<arrow::array::UInt64Array>() {
         (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) as f64 }).collect()
+    } else if let Some(a) = y_col.as_any().downcast_ref::<arrow::array::Int64Array>() {
+        (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) as f64 }).collect()
+    } else if let Some(a) = y_col.as_any().downcast_ref::<arrow::array::Int32Array>() {
+        (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) as f64 }).collect()
+    } else if let Some(a) = y_col.as_any().downcast_ref::<arrow::array::Int16Array>() {
+        (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) as f64 }).collect()
+    } else if let Some(a) = y_col.as_any().downcast_ref::<arrow::array::Int8Array>() {
+        (0..a.len()).map(|i| if a.is_null(i) { 0.0 } else { a.value(i) as f64 }).collect()
     } else {
         return Err(crate::render::RenderError::PositionAdjustFailed {
             adjustment: "Stack",
-            reason: format!("y must be Float64 or UInt64; got {:?}", y_col.data_type()),
+            reason: format!(
+                "y must be Float64, UInt64, or a signed integer type (Int8/Int16/Int32/Int64); got {:?}",
+                y_col.data_type()
+            ),
         });
     };
     let ya_len = ya_vals.len();
@@ -915,6 +928,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            params: Vec::new(),
         };
 
         let result = axis_batch_for_y(&spec, "y", &batch);
@@ -1007,6 +1021,93 @@ mod tests {
         let out = apply_position(&b, Some(&pos), &s, &enc, false).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // Same assertions as stack_zero_accumulates_y.
+        assert_eq!(ya.value(0), 10.0);
+        assert_eq!(ya.value(1), 30.0);
+        assert_eq!(ya.value(2), 30.0);
+        assert_eq!(ya.value(3), 70.0);
+    }
+
+    // D4 regression: Stack must accept Int64 (and other signed integer) measure
+    // columns — widening them to f64 transparently, identical to UInt64.
+    #[test]
+    fn stack_int64_measure_accepted_and_widened_to_f64() {
+        use arrow::array::Int64Array;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Int64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+                Arc::new(Int64Array::from(vec![10_i64, 20, 30, 40])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap();
+
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+        };
+
+        // Must not error — Int64 should be widened to f64.
+        let out = apply_position(&batch, Some(&pos), &s, &enc, false)
+            .expect("Stack must accept Int64 measure without error");
+
+        // Output y column must be Float64 (promoted from Int64).
+        assert_eq!(
+            out.schema().field(1).data_type(),
+            &DataType::Float64,
+            "y column must be promoted to Float64 after stacking"
+        );
+
+        let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        // Group order: a=0, b=1. At x=1: a=10→10, b=20→30. At x=2: a=30→30, b=40→70.
+        // These are the same cumulative values as the Float64 test (stack_zero_accumulates_y).
+        assert_eq!(ya.value(0), 10.0, "x=1 a segment top");
+        assert_eq!(ya.value(1), 30.0, "x=1 b segment top");
+        assert_eq!(ya.value(2), 30.0, "x=2 a segment top");
+        assert_eq!(ya.value(3), 70.0, "x=2 b segment top");
+    }
+
+    #[test]
+    fn stack_int32_measure_accepted_and_widened_to_f64() {
+        use arrow::array::Int32Array;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Int32, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+                Arc::new(Int32Array::from(vec![10_i32, 20, 30, 40])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+            ],
+        )
+        .unwrap();
+
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+        };
+
+        let out = apply_position(&batch, Some(&pos), &s, &enc, false)
+            .expect("Stack must accept Int32 measure without error");
+
+        assert_eq!(out.schema().field(1).data_type(), &DataType::Float64);
+        let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(ya.value(0), 10.0);
         assert_eq!(ya.value(1), 30.0);
         assert_eq!(ya.value(2), 30.0);

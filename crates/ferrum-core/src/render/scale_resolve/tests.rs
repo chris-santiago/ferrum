@@ -46,6 +46,7 @@ fn make_spec_with_color() -> ChartSpec {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     }
 }
 
@@ -131,6 +132,7 @@ fn color_overflow_emits_warning() {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (_, warnings) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -186,6 +188,7 @@ fn make_spec_with_size() -> ChartSpec {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     }
 }
 
@@ -212,6 +215,7 @@ fn make_spec_with_shape() -> ChartSpec {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     }
 }
 
@@ -238,6 +242,7 @@ fn make_spec_with_opacity() -> ChartSpec {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     }
 }
 
@@ -253,6 +258,7 @@ fn explicit_log_scale_overrides_auto_detection() {
             clamp: false,
             padding: None,
             scheme: None,
+            domain_param: None,
         },
         nice: false,
     });
@@ -325,6 +331,7 @@ fn y2_field_extends_y_domain_when_set() {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) =
@@ -378,6 +385,7 @@ fn x2_field_extends_x_domain_when_set() {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) =
@@ -433,6 +441,7 @@ fn resolved_scales_include_x2_y2_field_names_when_set() {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) =
@@ -476,6 +485,7 @@ fn resolved_scales_x2_y2_default_to_none_for_8a_charts() {
     axis_x: None, axis_y: None,
     selections: Vec::new(), conditionals: Vec::new(),
     chart_description: None,
+    params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) =
@@ -532,6 +542,7 @@ fn single_value_domain_expands_to_symmetric_band() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -575,6 +586,7 @@ fn single_value_zero_domain_expands_to_minus_one_plus_one() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -614,6 +626,7 @@ fn child_scale_type_override_wins_over_parent_auto_detection() {
                     constant: 2.0,
                     common: crate::spec::encoding::ContinuousScaleCommon {
                         domain: None, range: None, clamp: false, padding: None, scheme: None,
+                        domain_param: None,
                     },
                     nice: false,
                 }),
@@ -632,6 +645,7 @@ fn child_scale_type_override_wins_over_parent_auto_detection() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -681,6 +695,7 @@ fn all_null_column_resolves_to_default_domain() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let result = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme);
@@ -729,6 +744,7 @@ fn empty_color_domain_produces_no_color_scale() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let result = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme);
@@ -777,6 +793,7 @@ fn pow_scale_exponent_2_compresses_low_values() {
                         clamp: false,
                         padding: None,
                         scheme: None,
+                        domain_param: None,
                     },
                 }),
                 ..Default::default()
@@ -794,6 +811,7 @@ fn pow_scale_exponent_2_compresses_low_values() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -844,6 +862,7 @@ fn sqrt_scale_expands_low_values() {
                         clamp: false,
                         padding: None,
                         scheme: None,
+                        domain_param: None,
                     },
                 }),
                 ..Default::default()
@@ -861,6 +880,7 @@ fn sqrt_scale_expands_low_values() {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -996,6 +1016,7 @@ fn d1_ordinal_color_explicit_string_range_resolves_per_domain() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
 
     let theme = ThemeInputs::default();
@@ -1122,6 +1143,7 @@ fn d1_ordinal_color_named_css_colors_in_range() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
 
     let theme = ThemeInputs::default();
@@ -1219,6 +1241,7 @@ fn d1_declared_domain_overrides_data_appearance_order() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
 
     let theme = ThemeInputs::default();
@@ -1334,6 +1357,7 @@ fn d1_invalid_color_in_range_emits_warning_and_falls_through_to_default_palette(
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
 
     let theme = ThemeInputs::default();
@@ -1419,6 +1443,7 @@ fn d4_linear_scale_scheme_honored_in_continuous_color() {
                             clamp: false,
                             padding: None,
                             scheme: Some(scheme.to_string()),
+                            domain_param: None,
                         },
                         nice: false,
                         zero: false,
@@ -1439,6 +1464,7 @@ fn d4_linear_scale_scheme_honored_in_continuous_color() {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            params: Vec::new(),
         }
     }
 
@@ -1529,6 +1555,7 @@ fn d4_encoding_level_scheme_still_works_for_continuous_color() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
     let theme = ThemeInputs::default();
     let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
@@ -1625,6 +1652,7 @@ fn make_bar_spec_with_sort(sort: serde_json::Value) -> ChartSpec {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     }
 }
 
@@ -1813,6 +1841,7 @@ fn f1_float64_explicit_ordinal_type_resolves_to_ordinal_scale() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
 
     let theme = ThemeInputs::default();
@@ -1885,6 +1914,7 @@ fn f1_float64_ordinal_fractional_values_resolve() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
 
     let theme = ThemeInputs::default();
@@ -1995,6 +2025,7 @@ fn f5_parse_failure_fallback_palette_matches_default_palette() {
         selections: Vec::new(),
         conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
     };
 
     let theme = ThemeInputs::default();
@@ -2034,4 +2065,199 @@ fn f5_parse_failure_fallback_palette_matches_default_palette() {
         }
         _ => panic!("expected both to be Categorical"),
     }
+}
+
+// ── Gap 2: piecewise diverging midpoint normalization ─────────────────────────
+
+#[test]
+fn normalize_continuous_sequential_is_pure_linear() {
+    // None midpoint → pure-linear (v - lo) / (hi - lo)
+    assert!((super::normalize_continuous((0.0, 1.0), None, 0.0) - 0.0).abs() < 1e-9);
+    assert!((super::normalize_continuous((0.0, 1.0), None, 0.5) - 0.5).abs() < 1e-9);
+    assert!((super::normalize_continuous((0.0, 1.0), None, 1.0) - 1.0).abs() < 1e-9);
+    // Clamping: out-of-range values clamp to [0, 1]
+    assert!((super::normalize_continuous((0.0, 1.0), None, -1.0) - 0.0).abs() < 1e-9);
+    assert!((super::normalize_continuous((0.0, 1.0), None, 2.0) - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn normalize_continuous_diverging_symmetric_midpoint_equals_linear() {
+    // mid = (lo + hi) / 2 → piecewise result must match pure-linear
+    let lo = -1.0_f64;
+    let hi = 1.0_f64;
+    let mid = 0.0_f64; // geometric center
+    for &v in &[-1.0, -0.5, 0.0, 0.5, 1.0_f64] {
+        let piecewise = super::normalize_continuous((lo, hi), Some(mid), v);
+        let linear = super::normalize_continuous((lo, hi), None, v);
+        assert!(
+            (piecewise - linear).abs() < 1e-9,
+            "symmetric mid={mid}: v={v}, piecewise={piecewise}, linear={linear}"
+        );
+    }
+}
+
+#[test]
+fn normalize_continuous_diverging_noncentral_midpoint() {
+    // domain=[-1, 1], mid=0.5 (non-central)
+    // lo → t=0, mid → t=0.5, hi → t=1
+    let domain = (-1.0_f64, 1.0_f64);
+    let mid = 0.5_f64;
+    assert!((super::normalize_continuous(domain, Some(mid), -1.0) - 0.0).abs() < 1e-9,
+        "lo must map to 0");
+    assert!((super::normalize_continuous(domain, Some(mid), 0.5) - 0.5).abs() < 1e-9,
+        "mid must map to 0.5");
+    assert!((super::normalize_continuous(domain, Some(mid), 1.0) - 1.0).abs() < 1e-9,
+        "hi must map to 1.0");
+    // val=0.0 < mid=0.5 → left half: t = 0.5 * (0.0 - (-1.0)) / (0.5 - (-1.0)) = 0.5 * 1/1.5 ≈ 0.333
+    let t_at_geom_center = super::normalize_continuous(domain, Some(mid), 0.0);
+    assert!(t_at_geom_center > 0.0 && t_at_geom_center < 0.5,
+        "val=0.0 < mid=0.5 must map to left half (0, 0.5), got {t_at_geom_center}");
+    // val=0.0 must be less than 0.5 (reddish, left of neutral)
+    assert!(t_at_geom_center < 0.5,
+        "geometric center 0.0 must be left of neutral when mid=0.5, got {t_at_geom_center}");
+}
+
+#[test]
+fn normalize_continuous_diverging_clamping() {
+    let domain = (-1.0_f64, 1.0_f64);
+    let mid = 0.0_f64;
+    // Values outside domain clamp to [0, 1]
+    assert!((super::normalize_continuous(domain, Some(mid), -2.0) - 0.0).abs() < 1e-9);
+    assert!((super::normalize_continuous(domain, Some(mid), 2.0) - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn normalize_continuous_degenerate_domain_returns_half() {
+    // Zero-span domain returns 0.5
+    assert!((super::normalize_continuous((1.0, 1.0), None, 1.0) - 0.5).abs() < 1e-9);
+    assert!((super::normalize_continuous((1.0, 1.0), Some(1.0), 1.0) - 0.5).abs() < 1e-9);
+}
+
+// ── D2d: per-channel independent vs shared facet scale resolution ─────────────
+//
+// Validates that resolving scales from a per-panel partition (independent mode)
+// yields a panel-specific domain, while resolving from the merged batch (shared
+// mode) yields a unified domain across all panels. This is the behavioral
+// invariant that FacetSpec.resolve.y = Independent vs Shared must satisfy.
+//
+// The test uses `resolve_scales_with_outputs` directly — the function that both
+// `prepare.rs` (shared path, called on the full batch) and `scene_build.rs`
+// (per-panel path, called on the filtered panel batch) call. The resolution
+// itself is the same function; independent vs shared is determined by which
+// batch is passed.
+
+/// D2d: resolving from a per-panel partition with disjoint y ranges must yield
+/// per-panel domains that differ from each other and from the global domain.
+///
+/// Partition A: y ∈ [0, 5]     (low range)
+/// Partition B: y ∈ [100, 200] (high range)
+/// Global merged: y ∈ [0, 200]
+///
+/// Independent path: each partition → its own y-domain.
+/// Shared path: merged batch → single y-domain [0, 200] for all panels.
+#[test]
+fn d2d_independent_resolve_yields_per_panel_domains() {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use std::collections::HashMap;
+
+    // Build the two panel batches with disjoint y ranges.
+    let make_panel_batch = |x_vals: Vec<f64>, y_vals: Vec<f64>| -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDataType::Float64, false),
+            Field::new("y", ArrowDataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(x_vals)),
+                Arc::new(Float64Array::from(y_vals)),
+            ],
+        )
+        .unwrap()
+    };
+
+    let panel_a = make_panel_batch(vec![1.0, 2.0, 3.0], vec![0.0, 2.5, 5.0]);
+    let panel_b = make_panel_batch(vec![1.0, 2.0, 3.0], vec![100.0, 150.0, 200.0]);
+
+    // Merged batch simulating the shared (global) path.
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+    ]));
+    let merged = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.0, 2.5, 5.0, 100.0, 150.0, 200.0])),
+        ],
+    )
+    .unwrap();
+
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None, axis_y: None,
+        selections: Vec::new(), conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    };
+    let theme = ThemeInputs::default();
+    let empty_outputs: HashMap<String, RecordBatch> = HashMap::new();
+    let pixel_range = (0.0, 200.0);
+
+    // Independent path: each panel resolves from its own partition.
+    let (scales_a, _) = resolve_scales_with_outputs(
+        &spec, &panel_a, &empty_outputs, pixel_range, pixel_range, &theme,
+    ).unwrap();
+    let (scales_b, _) = resolve_scales_with_outputs(
+        &spec, &panel_b, &empty_outputs, pixel_range, pixel_range, &theme,
+    ).unwrap();
+
+    // Shared path: both panels resolve from the global merged batch.
+    let (scales_global, _) = resolve_scales_with_outputs(
+        &spec, &merged, &empty_outputs, pixel_range, pixel_range, &theme,
+    ).unwrap();
+
+    // Independent: domains must differ between panels A and B.
+    let (a_lo, a_hi) = scales_a.y.data_domain().expect("panel A y must have a domain");
+    let (b_lo, b_hi) = scales_b.y.data_domain().expect("panel B y must have a domain");
+    assert!(
+        (a_hi - b_hi).abs() > 50.0,
+        "independent panels must have different y domains: A=[{a_lo},{a_hi}], B=[{b_lo},{b_hi}]"
+    );
+    assert!(
+        a_hi < 20.0,
+        "panel A y-max must be near 5.0 (from its partition), got {a_hi}"
+    );
+    assert!(
+        b_lo > 50.0,
+        "panel B y-min must be near 100.0 (from its partition), got {b_lo}"
+    );
+
+    // Shared: global domain must cover both ranges.
+    let (g_lo, g_hi) = scales_global.y.data_domain().expect("global y must have a domain");
+    assert!(
+        g_lo <= 1.0 && g_hi >= 199.0,
+        "shared global y must span both partitions: [{g_lo},{g_hi}]"
+    );
+
+    // The per-panel (independent) domains must be subsets of the global domain.
+    assert!(a_lo >= g_lo - 0.1 && a_hi <= g_hi + 0.1,
+        "panel A domain [{a_lo},{a_hi}] must be contained in global [{g_lo},{g_hi}]");
+    assert!(b_lo >= g_lo - 0.1 && b_hi <= g_hi + 0.1,
+        "panel B domain [{b_lo},{b_hi}] must be contained in global [{g_lo},{g_hi}]");
 }

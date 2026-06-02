@@ -39,6 +39,8 @@ _DOC_ALLOWLIST: set[str] = {
     "YError2",
     "Theta",
     "Radius",
+    "Theta2",
+    "Radius2",
     "Color",
     "Fill",
     "Stroke",
@@ -235,6 +237,11 @@ _DOC_ALLOWLIST: set[str] = {
     "selection_single",
     "selection_multi",
     "value",
+    # D6 — reactive parameters (5a)
+    "Parameter",
+    "VariableParameter",
+    "param",
+    "when",
     # Auto-raster policy (Phase 12)
     "RenderConfig",
     # Declarative configuration surface

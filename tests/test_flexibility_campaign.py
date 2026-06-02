@@ -1065,10 +1065,26 @@ def test_d7_px_norm_wrappers_unaffected() -> None:
     assert _coord(3.14) == 3.14, f"float 3.14 must pass through unchanged"
 
 
-def test_d7_invalid_iso_string_raises_value_error() -> None:
-    """An unparseable string raises ValueError with a clear message."""
-    with pytest.raises(ValueError, match="Cannot parse annotation coordinate"):
-        fm.annotate_vline(x="not-a-date")
+def test_d7_non_iso_string_becomes_ordinal_category() -> None:
+    """A non-ISO-8601 string is treated as an ordinal category label, not an error.
+
+    Updated by C2 (2026-06-02): the original D7 contract was that invalid ISO
+    strings raised ``ValueError``.  C2 changed this: non-ISO strings are now
+    treated as ordinal category coordinates so that annotations like
+    ``annotate_vline("cat_a")`` work on categorical axes.  The string is stored
+    as ``OrdinalCategoryCoord`` and resolved to a band center at render time.
+    """
+    from ferrum.annotation.coords import OrdinalCategoryCoord
+
+    # Must not raise.
+    ann = fm.annotate_vline(x="not-a-date")
+    prim = ann._annotation_primitive
+    assert prim is not None
+    # The x coordinate must be stored as OrdinalCategoryCoord, not a float.
+    assert isinstance(prim.x1, OrdinalCategoryCoord), (
+        f"Non-ISO string 'not-a-date' must be stored as OrdinalCategoryCoord, got {type(prim.x1)}"
+    )
+    assert prim.x1.value == "not-a-date"
 
 
 # ---------------------------------------------------------------------------

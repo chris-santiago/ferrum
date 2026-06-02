@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from typing import Any, ClassVar
 
 from ferrum._warn import warn_once
@@ -26,6 +26,49 @@ class _PendingAggregate:
     field: str
     agg: str
     output_col: str
+
+
+@dataclass(frozen=True)
+class _PendingBin:
+    """Sentinel emitted by ``to_implicit_transforms()`` for bin= channels.
+
+    Carries the source field and either a pre-built ``Bin`` instance
+    (``bin_obj``, when the user passed a ``Bin(...)`` directly) or optional
+    Bin constructor kwargs (``bin_kwargs``, for ``bin=True`` / ``bin={...}``).
+
+    The decision of whether to produce an unnamed chain-advancing transform
+    (single-chart path) or a named fan-out transform (layered path) is deferred
+    until ``chart.to_spec()`` knows the chart structure:
+
+    - Single-chart: ``_resolve_pending_bins`` converts these to unnamed ``Bin``
+      objects — byte-identical to the pre-FA4 behaviour.  When ``bin_obj`` is
+      present, it is used directly (already a ``Bin``).  When ``bin_kwargs`` is
+      set, a new ``Bin`` is constructed from ``field`` + those kwargs.
+    - Layered: ``_resolve_layer_bins`` builds one named ``Bin`` per layer and
+      points the layer's ``data_source`` at it.  When ``bin_obj`` is present,
+      it is wrapped directly inside a ``_NamedTransform`` (the serialiser injects
+      the name field); when ``bin_kwargs`` is set, a ``Bin`` is constructed with
+      ``name=bin_name``.
+
+    The PyO3 ``Bin`` class exposes no Python-readable attributes (no ``field``,
+    no ``bin_count``, etc.).  The ``field`` stored here always comes from the
+    encoding channel's ``self.field`` — never from introspecting the ``Bin``
+    object.  ``bin_kwargs`` is always empty when ``bin_obj`` is not ``None``.
+
+    This is an internal implementation detail — callers outside ``chart.py``
+    must not construct or inspect this type directly.
+    """
+
+    field: str
+    # Optional Bin constructor kwargs stored as a tuple of (key, value) pairs
+    # so the dataclass stays hashable (frozen=True + dict would fail).
+    bin_kwargs: tuple = ()
+    # Pre-built Bin instance when the user passed bin=Bin(...) directly.
+    # When set, bin_kwargs is always empty.  The PyO3 Bin type is not hashable,
+    # so this field is excluded from the auto-generated __hash__ and __eq__
+    # via hash=False, compare=False.  Equality and hashing use field + bin_kwargs
+    # only; bin_obj identity is intentionally not compared.
+    bin_obj: Any = dataclass_field(default=None, hash=False, compare=False)
 
 
 class ChannelBase:
@@ -109,6 +152,14 @@ class ChannelBase:
         if (v := self._kwargs.get("scale")) is not None:
             out["scale"] = _scale_to_dict(v)
         for k in ("title", "axis", "legend", "sort", "stack", "impute", "scheme", "format"):
+            if k == "title" and "title" in self._kwargs:
+                # title=None (explicitly passed) → suppress axis title by forwarding
+                # an empty string to Rust, which renders a blank title instead of
+                # falling back to the field name.  title omitted (key absent) keeps
+                # the existing field-name default.  title="Foo" passes through as-is.
+                raw_title = self._kwargs["title"]
+                out["title"] = "" if raw_title is None else raw_title
+                continue
             if k == "axis" and "axis" in self._kwargs:
                 # Accept Axis instances, False (suppression), or raw dicts.
                 normalized = _normalize_axis(self._kwargs["axis"])
@@ -141,24 +192,29 @@ class ChannelBase:
     def to_implicit_transforms(self) -> list:
         """Return a list of transform objects derived from kwargs (bin, aggregate).
 
-        Aggregate transforms are returned as ``_PendingAggregate`` sentinels
-        rather than Rust ``Aggregate`` objects.  The ``chart.to_spec()`` method
-        resolves them into concrete ``Aggregate`` objects once all sibling
-        encoding channels are known, allowing it to infer the correct groupby
-        from non-aggregate fields (Altair-style auto-groupby).
+        Both bin and aggregate transforms are returned as pending sentinels
+        rather than concrete Rust objects.  ``chart.to_spec()`` resolves them:
+
+        - ``_PendingBin``: single-chart path converts to an unnamed ``Bin``
+          (byte-stable); layered path converts to a named ``Bin`` fan-out so
+          it does not corrupt the shared unnamed chain.
+        - ``_PendingAggregate``: defers groupby assignment until all sibling
+          encoding channels are known (Altair-style auto-groupby).
         """
         out: list = []
         bin_arg = self._kwargs.get("bin")
         if bin_arg:
-            from ferrum import Bin
-
             if isinstance(bin_arg, dict):
-                out.append(Bin(self.field, **bin_arg))
+                out.append(_PendingBin(field=self.field, bin_kwargs=tuple(bin_arg.items())))
             elif isinstance(bin_arg, bool):
-                out.append(Bin(self.field))
+                out.append(_PendingBin(field=self.field))
             else:
-                # Bin instance passed directly
-                out.append(bin_arg)
+                # Bin instance passed directly.  The PyO3 Bin object exposes no
+                # Python-readable attributes (no .field, .bin_count, etc.), so
+                # we cannot extract kwargs from it.  Store the instance in
+                # bin_obj alongside the channel's own field name so resolvers
+                # can use the pre-built Bin directly without guessing internals.
+                out.append(_PendingBin(field=self.field, bin_obj=bin_arg))
         agg = self._kwargs.get("aggregate")
         if agg:
             out.append(

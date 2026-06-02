@@ -170,11 +170,17 @@ def test_resolve_encoding_value_literal_non_color_string():
 
 
 def test_conditional_without_add_selection_raises():
-    """Chart.conditional() must raise ValueError if the selection_name
-    is not registered via add_selection()."""
+    """Chart.conditional() must raise ValueError when the selection truly is
+    not available — i.e. the spec carries no source Selection and none is
+    registered. (When the spec carries its source Selection, as it does from
+    ``sel.when(...).otherwise(...)``, conditional() auto-registers it.)"""
     df = _small_df()
-    sel = selection_point(name="absent_sel")
-    cond = sel.when(fm.Color("g")).otherwise(value("#ccc"))
+    # Build a spec with no carried selection to exercise the unavailable path.
+    cond = ConditionalSpec(
+        selection_name="absent_sel",
+        if_selected=fm.Color("g"),
+        if_not=value("#ccc"),
+    )
     chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
     with pytest.raises(ValueError, match="no selection named"):
         chart.conditional(cond)

@@ -484,6 +484,7 @@ class StatisticalMarksMixin:
         smooth=True,
         fill=False,
         cmap=None,
+        groupby=None,
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -505,10 +506,17 @@ class StatisticalMarksMixin:
             contouring.  Default is ``True``.
         fill : bool, optional
             Render filled contour regions instead of contour lines.  Default is
-            ``False``.
+            ``False``.  When ``groupby`` is set, this parameter is ignored and
+            isoline (segment) mode is always used.
         cmap : str or None, optional
             Colour map name applied to contour levels.  ``None`` (default) defers
-            to the theme's sequential scheme.
+            to the theme's sequential scheme.  Ignored when ``groupby`` is set.
+        groupby : str or None, optional
+            Group column (Utf8). When set, one 2-D KDE surface is computed per
+            group and contour lines for each group are colored by the group field.
+            Use ``.encode(color=<groupby>)`` to match legend colors to contours.
+            Grouped contours use isoline (segment) mode to avoid cross-group
+            polygon merging issues.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -538,6 +546,7 @@ class StatisticalMarksMixin:
                 "smooth": smooth,
                 "fill": fill,
                 "cmap": cmap,
+                "groupby": groupby,
                 **mark_kwargs,
             },
             placeholder="polygon",

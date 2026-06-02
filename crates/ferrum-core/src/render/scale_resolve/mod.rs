@@ -433,9 +433,18 @@ pub enum ColorScale {
     /// Continuous color scale: maps a numeric value to a color via a
     /// ContinuousScheme. Used by heatmap, raster, and any chart with an
     /// explicit linear color scale spec.
+    ///
+    /// `midpoint` is `Some(mid)` only for diverging scales with a non-geometric
+    /// center.  When present, the normalization is piecewise-linear:
+    ///   t = 0.5 * (v - lo) / (mid - lo)   for v <= mid
+    ///   t = 0.5 + 0.5 * (v - mid) / (hi - mid)  for v > mid
+    /// Sequential scales always have `midpoint = None` and use the existing
+    /// pure-linear `(v - lo) / (hi - lo)` normalization.
     Continuous {
         domain: (f64, f64),
         scheme: crate::render::color::ContinuousScheme,
+        /// Explicit diverging midpoint. `None` → pure-linear (sequential).
+        midpoint: Option<f64>,
     },
 }
 
@@ -446,11 +455,10 @@ impl ColorScale {
                 .iter()
                 .position(|v| v == value)
                 .map(|i| palette[i % palette.len()]),
-            Self::Continuous { domain, scheme } => {
+            Self::Continuous { domain, scheme, midpoint } => {
                 let v: f64 = value.parse().ok()?;
-                let (lo, hi) = *domain;
-                let t = if hi > lo { (v - lo) / (hi - lo) } else { 0.5 };
-                Some(scheme.sample(t.clamp(0.0, 1.0)))
+                let t = normalize_continuous(*domain, *midpoint, v);
+                Some(scheme.sample(t))
             }
         }
     }
@@ -459,12 +467,44 @@ impl ColorScale {
     /// Categorical scales.
     pub fn lookup_f64(&self, value: f64) -> Option<Color> {
         match self {
-            Self::Continuous { domain, scheme } => {
-                let (lo, hi) = *domain;
-                let t = if hi > lo { (value - lo) / (hi - lo) } else { 0.5 };
-                Some(scheme.sample(t.clamp(0.0, 1.0)))
+            Self::Continuous { domain, scheme, midpoint } => {
+                let t = normalize_continuous(*domain, *midpoint, value);
+                Some(scheme.sample(t))
             }
             _ => None,
+        }
+    }
+}
+
+/// Normalize a data value to `t ∈ [0, 1]` for color lookup.
+///
+/// Sequential scales (midpoint = None): pure-linear `(v - lo) / (hi - lo)`.
+/// Diverging scales with an explicit midpoint: piecewise-linear so that
+/// `lo → 0`, `mid → 0.5`, `hi → 1`, placing the scheme's neutral center at
+/// the user-supplied `mid` rather than the geometric center.
+///
+/// The result is clamped to `[0, 1]` in both branches.
+pub(super) fn normalize_continuous(domain: (f64, f64), midpoint: Option<f64>, v: f64) -> f64 {
+    let (lo, hi) = domain;
+    if hi <= lo {
+        return 0.5;
+    }
+    match midpoint {
+        None => {
+            // Sequential: pure-linear normalization.
+            ((v - lo) / (hi - lo)).clamp(0.0, 1.0)
+        }
+        Some(mid) => {
+            // Diverging: piecewise-linear around the midpoint.
+            if v <= mid {
+                let denom = mid - lo;
+                if denom == 0.0 { return 0.5; }
+                (0.5 * (v - lo) / denom).clamp(0.0, 0.5)
+            } else {
+                let denom = hi - mid;
+                if denom == 0.0 { return 0.5; }
+                (0.5 + 0.5 * (v - mid) / denom).clamp(0.5, 1.0)
+            }
         }
     }
 }
@@ -705,7 +745,9 @@ pub fn resolve_scales_with_outputs(
             let dummy_y = ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 1.0], vec![y_pixel_range.1, y_pixel_range.0], false, false,
             ));
-            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme)?;
+            // FA-5: area marks always group color discretely; force categorical.
+            let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
+            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat)?;
             warnings.extend(color_warns);
             let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
             let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
@@ -722,7 +764,9 @@ pub fn resolve_scales_with_outputs(
             let dummy_x = ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 1.0], vec![x_pixel_range.0, x_pixel_range.1], false, false,
             ));
-            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme)?;
+            // FA-5: area marks always group color discretely; force categorical.
+            let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
+            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat)?;
             warnings.extend(color_warns);
             let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
             let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
@@ -780,8 +824,14 @@ pub fn resolve_scales_with_outputs(
     // matching Phase 8a behavior. (build_color_scale is the one exception —
     // it accepts transform_outputs because composite-mark color fields may
     // live in a named output rather than primary.)
+    //
+    // FA-5: area marks always group color as discrete categories
+    // (col_as_ordinal_category_str), so their color scale must be Categorical
+    // regardless of the column's Arrow dtype.  This ensures legend swatches
+    // and area fill colors both use the same palette.
+    let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
     let (color, color_warns) = build_color_scale(
-        &spec.encoding, primary_batch, transform_outputs, theme,
+        &spec.encoding, primary_batch, transform_outputs, theme, force_cat,
     )?;
     warnings.extend(color_warns);
 

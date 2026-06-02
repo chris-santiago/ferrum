@@ -21,12 +21,45 @@ from ferrum._marks_statistical import StatisticalMarksMixin
 from ferrum._render import _RenderMixin
 from ferrum._shorthand import parse_shorthand
 from ferrum._spec_view import _SpecView
-from ferrum.encoding.base import ChannelBase, _PendingAggregate
+from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
 from ferrum.marks.base import MarkBase
 from ferrum.marks.statistical import _build_prior_layer
 
 
 _PRIMITIVE_MARKS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
+
+# Marks whose Rust renderers consume the ``__stack_y_base__`` column produced
+# by ``apply_stack`` (see ``crates/ferrum-core/src/render/marks/bar.rs`` and
+# ``area.rs``).  Every other mark type silently drops stacked data, so when
+# ``stack=`` is set on a non-stackable mark we warn and strip it before
+# forwarding to the Rust layer.
+_STACKABLE_MARKS = frozenset(["bar", "area"])
+
+
+def _strip_unstackable(d: dict, mark: str | None) -> None:
+    """Strip an unsupported ``stack=`` from a non-stackable mark's encoding dict.
+
+    Only ``bar``/``area`` consume the ``__stack_y_base__`` column emitted by
+    ``apply_stack``; every other mark silently drops its marks when the stacking
+    path runs. When ``stack=`` is requested on such a mark we pop it (so the mark
+    renders unstacked) and emit a one-time ``UserWarning`` naming the dropped
+    field. A falsy ``stack`` (``None``/``False``) means "do not stack" and is a
+    no-op, so it is left untouched. Shared by the single-chart and layered paths.
+    """
+    if d.get("stack") and mark not in _STACKABLE_MARKS:
+        from ferrum._warn import warn_once
+
+        stack_val = d.pop("stack")
+        mark_label = f"mark_{mark}" if mark else "this mark"
+        warn_once(
+            "encoding",
+            f"stack_on_{mark}",
+            message=(
+                f"stack={stack_val!r} is not supported by {mark_label} and was ignored. "
+                "Stacking is only honored by mark_bar and mark_area."
+            ),
+        )
+
 
 # Channels honored by the renderer at to_spec() time. Other channels in
 # resolved._encoding (Stroke, Fill, Tooltip, etc.) are stored on the spec
@@ -75,7 +108,7 @@ _SILENT_CHANNELS = frozenset(
 )
 # Polar channels raise NotImplementedError when a chart is actually rendered
 # with them, rather than emitting a misleading "not yet rendered" warning.
-_POLAR_CHANNELS = frozenset(("theta", "radius"))
+_POLAR_CHANNELS = frozenset(("theta", "radius", "theta2", "radius2"))
 # Facet channels have a separate code path through resolved._facet — no
 # silent-drop, no warn.
 _FACET_CHANNELS = frozenset(("facet", "facet_row", "facet_col"))
@@ -198,6 +231,235 @@ def _apply_style_to_layer(layer: _Layer, style_dict: dict) -> _Layer:
     return replace(layer, mark_kwargs=merged)
 
 
+def _infer_agg_groupby(encoding: dict) -> list[str]:
+    """Collect groupby fields for an encoding-level aggregate (Altair auto-groupby).
+
+    Returns the fields of every channel that carries *no* ``aggregate`` kwarg,
+    in first-seen order with duplicates removed.  Plain string-valued channels
+    (e.g. ``encode(x="t")``) and ``ChannelBase`` channels without an aggregate
+    both contribute their field; channels with an ``aggregate`` kwarg are the
+    measures being summarised and are excluded.
+
+    Shared by the single-chart path (``_resolve_pending_aggregates``, which also
+    folds in facet dimensions) and the per-layer path (``_resolve_layer_aggregates``).
+    """
+    from ferrum.repeat import _RepeatPlaceholder as _RPH
+
+    fields: list[str] = []
+    for ch in encoding.values():
+        if isinstance(ch, ChannelBase):
+            if ch._kwargs.get("aggregate"):
+                continue
+            f = ch.field
+        elif isinstance(ch, str):
+            f = ch
+        else:
+            continue
+        if f is None or isinstance(f, _RPH):
+            continue
+        if f not in fields:
+            fields.append(f)
+    return fields
+
+
+def _layer_pending_aggregates(layer: _Layer) -> list[_PendingAggregate]:
+    """Collect the encoding-level aggregate sentinels carried by *layer*."""
+    pending: list[_PendingAggregate] = []
+    for ch in layer.encoding.values():
+        if isinstance(ch, ChannelBase):
+            for t in ch.to_implicit_transforms():
+                if isinstance(t, _PendingAggregate):
+                    pending.append(t)
+    return pending
+
+
+def _resolve_layer_aggregates(layers: list) -> tuple[list, list]:
+    """Resolve each layer's encoding aggregates into named chart-level transforms.
+
+    Mirrors ``Chart._resolve_pending_aggregates`` for the layered path, but
+    respects the render architecture: per-layer ``transforms`` are never executed
+    on their own; a layer reads its input batch from a *named* chart-level
+    transform via ``data_source``.  So for every layer that carries an
+    ``aggregate=`` encoding kwarg (e.g. ``Y("v", aggregate="mean")`` or the
+    ``count()`` shorthand) this builds a named ``Aggregate`` transform — groupby
+    inferred from the layer's own non-aggregate encoding fields — points the
+    layer's ``data_source`` at it, and remaps the aggregated channel's field to
+    the transform's output column.
+
+    Each aggregating layer gets its OWN named transform, so two aggregating
+    layers aggregate independently and never share a groupby.
+
+    A layer that already carries a ``data_source`` is handled too: the
+    ``+`` column-overlap path pre-assigns a named ``_ident_`` identity source to
+    RHS layers before this resolver runs.  In the named-transform model every
+    named transform reads the same input (the unnamed-chain tail / original
+    batch), so the new ``Aggregate`` reads exactly what the ``_ident_`` source
+    read, and re-pointing the layer's ``data_source`` to the aggregate keeps the
+    ``inherit_non_positional`` routing the overlap path needs.  Only layers
+    routed to an explicit non-aggregate ``data_source`` *with no pending
+    aggregate* (e.g. composite-mark desugar layers) pass through unchanged,
+    keeping serialized output byte-identical.
+
+    Note: per-layer ``bin=`` encodings have the same per-layer-transform-never-run
+    gap and are not yet resolved here; only ``aggregate=`` is handled.
+
+    Parameters
+    ----------
+    layers :
+        The chart's resolved ``_Layer`` list.
+
+    Returns
+    -------
+    (new_layers, named_transforms)
+        ``new_layers`` is the layer list with aggregating layers rewritten;
+        ``named_transforms`` is the list of ``_NamedTransform`` objects to add to
+        the chart-level pipeline (empty when no layer aggregates).
+    """
+    from ferrum import Aggregate, AggregateOp
+
+    new_layers: list = []
+    named_transforms: list = []
+    for i, layer in enumerate(layers):
+        pending = _layer_pending_aggregates(layer)
+        if not pending:
+            new_layers.append(layer)
+            continue
+
+        groupby = _infer_agg_groupby(layer.encoding)
+        ops = [AggregateOp(p.field, p.agg, p.output_col) for p in pending]
+        agg_name = f"_layer_agg_{i}"
+        named_transforms.append(_NamedTransform(Aggregate(ops, groupby=groupby), agg_name))
+
+        # Remap each aggregated channel's field to its output column.  count()
+        # shorthands carry field="" (no source column); key those on "".
+        field_remap = {p.field if p.field else "": p.output_col for p in pending}
+        new_encoding: dict = {}
+        for axis, ch in layer.encoding.items():
+            if isinstance(ch, ChannelBase):
+                _remap_key = ch.field if ch.field is not None else ""
+                if _remap_key in field_remap and ch._kwargs.get("aggregate"):
+                    # Rebuild the channel pointing at the aggregated output
+                    # column, dropping the now-resolved aggregate kwarg.
+                    kwargs = {k: v for k, v in ch._kwargs.items() if k != "aggregate"}
+                    new_encoding[axis] = ch.__class__(field_remap[_remap_key], **kwargs)
+                    continue
+            new_encoding[axis] = ch
+
+        new_layers.append(replace(layer, encoding=new_encoding, data_source=agg_name))
+
+    return new_layers, named_transforms
+
+
+def _layer_pending_bins(layer: _Layer) -> list[_PendingBin]:
+    """Collect the encoding-level bin sentinels carried by *layer*."""
+    pending: list[_PendingBin] = []
+    for ch in layer.encoding.values():
+        if isinstance(ch, ChannelBase):
+            for t in ch.to_implicit_transforms():
+                if isinstance(t, _PendingBin):
+                    pending.append(t)
+    return pending
+
+
+def _resolve_layer_bins(layers: list) -> tuple[list, list]:
+    """Resolve each layer's encoding bin sentinels into named chart-level transforms.
+
+    Mirrors ``_resolve_layer_aggregates`` for the bin case.  The renderer never
+    executes per-layer transforms standalone; a layer reads its input batch from
+    a *named* chart-level transform via ``data_source``.  So for every layer
+    that carries a ``bin=`` encoding kwarg this builds a named ``Bin``
+    transform — reads from the original input (fan-out semantics, does not
+    advance the unnamed chain) — points the layer's ``data_source`` at it, and
+    remaps the binned channel's field to ``bin_start`` (the Bin output column),
+    stripping the now-resolved ``bin`` kwarg.
+
+    Each binning layer gets its OWN named transform so two binning layers bin
+    independently.
+
+    A layer that already carries a ``data_source`` is handled correctly:
+    if it also has a pending bin, the bin transform is still created and the
+    layer's ``data_source`` is updated to the named bin.  Layers with a
+    pre-set ``data_source`` but no pending bin pass through unchanged.
+
+    Parameters
+    ----------
+    layers :
+        The chart's resolved ``_Layer`` list, already processed by
+        ``_resolve_layer_aggregates`` (aggregate routing is preserved).
+
+    Returns
+    -------
+    (new_layers, named_transforms)
+        ``new_layers`` is the layer list with binning layers rewritten;
+        ``named_transforms`` is the list of ``_NamedTransform`` objects to add
+        to the chart-level pipeline (empty when no layer bins).
+    """
+    from ferrum import Bin
+
+    new_layers: list = []
+    named_transforms: list = []
+    for i, layer in enumerate(layers):
+        pending = _layer_pending_bins(layer)
+        if not pending:
+            new_layers.append(layer)
+            continue
+
+        # Guard: detect a layer whose data_source was already set by the
+        # aggregate resolver (_layer_agg_N).  This means the layer had both
+        # bin= and aggregate= on different encoding channels.  In the layered
+        # named-transform architecture there is no named→named chaining: named
+        # transforms all read from the same unnamed-chain tail.  Overwriting the
+        # aggregate data_source with the bin data_source would silently point the
+        # layer at the original (unaggregated) input while encoding y still
+        # references the aggregated output column — a missing-column error at
+        # render time.  Raise rather than produce silent garbage.
+        if layer.data_source is not None and layer.data_source.startswith("_layer_agg_"):
+            raise ValueError(
+                "A layer cannot have both bin= and aggregate= encoding kwargs in a layered "
+                "chart.  The layered named-transform architecture does not support chaining "
+                "a per-layer Bin into a per-layer Aggregate (named transforms cannot read "
+                "from other named transforms' outputs).  "
+                "Use separate layers: one layer with bin= and one layer with aggregate=."
+            )
+
+        # Use the first pending bin (a layer encoding typically has one binned
+        # channel).  Multiple bins on the same layer would each create their
+        # own named transform; here we use index `i` plus a sub-index.
+        new_encoding: dict = {}
+        layer_named_transforms: list = []
+
+        for sub_i, pb in enumerate(pending):
+            bin_name = f"_layer_bin_{i}" if len(pending) == 1 else f"_layer_bin_{i}_{sub_i}"
+            if pb.bin_obj is not None:
+                # Pre-built Bin instance — use it directly inside the named
+                # wrapper.  The serialiser (_transforms_to_json_list_named)
+                # injects the name field from _NamedTransform.name, so the
+                # Bin object itself does not need to carry a name.
+                layer_named_transforms.append(_NamedTransform(pb.bin_obj, bin_name))
+            else:
+                bin_kwargs = dict(pb.bin_kwargs)
+                bin_kwargs.pop("name", None)  # never inherit a name from the Bin kwargs
+                bin_xform = Bin(pb.field, name=bin_name, **bin_kwargs)
+                layer_named_transforms.append(_NamedTransform(bin_xform, bin_name))
+
+        named_transforms.extend(layer_named_transforms)
+
+        # The last (or only) bin's name becomes the layer's data_source.
+        final_bin_name = layer_named_transforms[-1].name
+
+        # Remap each binned channel's field to bin_start, strip bin kwarg.
+        for axis, ch in layer.encoding.items():
+            if isinstance(ch, ChannelBase) and ch._kwargs.get("bin"):
+                kwargs = {k: v for k, v in ch._kwargs.items() if k != "bin"}
+                new_encoding[axis] = ch.__class__("bin_start", **kwargs)
+                continue
+            new_encoding[axis] = ch
+
+        new_layers.append(replace(layer, encoding=new_encoding, data_source=final_bin_name))
+
+    return new_layers, named_transforms
+
+
 @dataclass(frozen=True)
 class _Facet:
     """Internal facet spec — frozen dataclass replacing the legacy dict shape.
@@ -205,6 +467,11 @@ class _Facet:
     ``mode_kind`` is the tagged-union discriminator: ``"wrap"`` uses ``field``;
     ``"grid"`` uses ``row`` and ``col``. Other fields are sizing hints honored
     by ``_build_facet_dict()`` when serialising to the Rust ``FacetSpec``.
+
+    ``resolve`` carries per-channel scale-resolution modes set via
+    ``Chart.share_scale()``.  Keys are channel names (``"x"``, ``"y"``);
+    values are ``"shared"`` or ``"independent"``.  Absent keys default to
+    ``"shared"`` in the Rust layer.
     """
 
     mode_kind: str
@@ -213,9 +480,11 @@ class _Facet:
     col: Optional[str] = None
     ncols: Optional[int] = None
     nrows: Optional[int] = None
+    resolve: Optional[dict] = None
 
 
 from ferrum.encoding import _channel_class_map, _channel_class_for, _apply_channel_aliases
+from ferrum.selection import ConditionalSpec
 
 
 class _NamedTransform:
@@ -321,6 +590,58 @@ def _to_polars(data):
     if isinstance(data, pl.DataFrame):
         return data
     return pl.from_arrow(to_arrow_table(data))
+
+
+def _coalesce_facet_rhs_columns(chart: "Chart") -> "Chart":
+    """Coalesce renamed RHS copies of facet fields back into the primary column.
+
+    When ``Chart.__add__`` merges two DataFrames with overlapping column names,
+    it renames the RHS columns to ``"{col}__rhs_{hex}"``.  If one of those
+    columns is a facet field, the RHS layer rows end up with ``null`` in the
+    facet column and are dropped by the facet partitioner.
+
+    This function detects such renamed copies and coalesces them so the facet
+    column is populated for all layers' rows.  Only columns that are facet
+    fields are coalesced; other renamed columns are left alone so genuinely
+    different columns (with different semantics) are not silently merged.
+
+    Returns the (possibly mutated) chart.  The chart's data is updated in-place
+    on the clone.
+    """
+    if chart._facet is None or chart._data is None:
+        return chart
+
+    import polars as pl
+
+    if not isinstance(chart._data, pl.DataFrame):
+        return chart
+
+    f = chart._facet
+    # Collect facet fields that are used for partitioning.
+    facet_fields = [ff for ff in (f.field, f.col, f.row) if ff is not None]
+
+    df = chart._data
+    modified = False
+    for facet_col in facet_fields:
+        if facet_col not in df.columns:
+            continue
+        # Find any "__rhs_" renamed copies of this facet column.
+        rhs_prefix = f"{facet_col}__rhs_"
+        rhs_copies = [c for c in df.columns if c.startswith(rhs_prefix)]
+        if not rhs_copies:
+            continue
+        # Coalesce: fill nulls in the primary facet column from RHS copies.
+        # The primary column has the LHS values; RHS rows have null there.
+        expr = pl.col(facet_col)
+        for rhs_col in rhs_copies:
+            expr = pl.coalesce([expr, pl.col(rhs_col)])
+        df = df.with_columns(expr.alias(facet_col))
+        modified = True
+
+    if modified:
+        chart._data = df
+
+    return chart
 
 
 def _infer_type_from_data(field: str | None, data: Any) -> str | None:
@@ -453,12 +774,15 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         "_composite_kind",
         "_selections",
         "_conditionals",
+        "_params",  # list[Parameter] — D6 reactive parameters (fm.param / selections)
         "_render_config",
         "_configure",  # list[Configure] — accumulated configure layers
         "_annotations",  # list[Annotate] — accumulated annotation layers
         "_structural",  # list — accumulated structural features (SecondaryY, BreakAxis, Inset)
         "_overrides",  # dict — spec-path override kwargs
         "_annotation_primitive",  # optional annotation primitive for annotate_* helpers
+        "_mark_zero",  # bool — False when mark_bar(zero=False) suppresses the y zero-anchor
+        "_figure_caption",  # str or None — figure-level caption rendered below the SVG
     )
 
     def __init__(
@@ -498,12 +822,15 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         self._composite_kind: Optional[str] = None
         self._selections: list = []
         self._conditionals: list = []
+        self._params: list = []
         self._render_config = None
         self._configure: list = []
         self._annotations: list = []
         self._structural: list = []
         self._overrides: dict = {}
         self._annotation_primitive = None
+        self._mark_zero: bool = True
+        self._figure_caption: Optional[str] = None
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -632,6 +959,22 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 transform_kwargs = {**transform_kwargs, "x_sort": x_sort}
             if y_sort is not None and kind != "errorbar":
                 transform_kwargs = {**transform_kwargs, "y_sort": y_sort}
+        # violin / boxplot / errorbar / errorband: thread the color (hue) field
+        # into the desugar so each (x, hue) group gets its own split summary, and
+        # every emitted layer carries a color encoding consistent with the hue.
+        # Without this, these marks collapse to one shape per x-category while
+        # still drawing a hue legend (silent-wrong-output).
+        # Respect an explicit caller-supplied color_field (non-falsy overrides
+        # the encoding-inferred one); a None/empty value from the mark call's
+        # default is treated as "not set" so the encoding can still inject it.
+        if kind in ("violin", "boxplot", "errorbar", "errorband") and not transform_kwargs.get(
+            "color_field"
+        ):
+            color_enc = self._encoding.get("color")
+            if color_enc is not None:
+                color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
+                if color_field:
+                    transform_kwargs = {**transform_kwargs, "color_field": color_field}
         # density/histogram: auto-set groupby from color encoding when not explicit.
         if kind in ("density", "histogram") and "groupby" not in transform_kwargs:
             color_enc = self._encoding.get("color")
@@ -790,6 +1133,9 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         # S4: orient="horizontal" → coord flip (consumed Python-side).
         if m.orient_coord_flip():
             new._coord = "flip"
+        # D3: zero=False suppresses the bar y-scale zero-anchor injection.
+        # Consumed Python-side; not forwarded to the Rust renderer.
+        new._mark_zero = m.zero_anchor()
         return new
 
     def _set_composite_mark(
@@ -1397,6 +1743,21 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             if cls is None:
                 raise ValueError(f"unknown encoding channel: {name!r}")
 
+            if isinstance(value, ConditionalSpec):
+                # encode(<channel>=cond): the wire channel is KNOWN from the
+                # encode key (already snake_case, e.g. "opacity", "size",
+                # "stroke_width"). Stamp it so both the wire channel and the
+                # value-kind resolution are correct, then record the conditional
+                # and auto-register its source selection. Conditionals live in
+                # _conditionals, not _encoding.
+                new._conditionals.append(replace(value, channel=name))
+                sel = value.selection
+                if sel is not None:
+                    existing = {s.name for s in new._selections if hasattr(s, "name")}
+                    if sel.name not in existing:
+                        new._selections.append(sel)
+                continue
+
             if isinstance(value, ChannelBase):
                 channel = value
             elif isinstance(value, str):
@@ -1651,8 +2012,14 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         lhs = self._resolve_pending()
         rhs = other._resolve_pending()
         new = lhs._clone()
-        lhs_layers, _ = _expand_layers(lhs)
+        lhs_layers, lhs_top_xforms = _expand_layers(lhs)
         rhs_layers, rhs_top_xforms = _expand_layers(rhs)
+        # Adopt the LHS's *filtered* top-level transforms (``_expand_layers``
+        # strips encoding-implicit ``_PendingAggregate`` sentinels — each layer
+        # aggregates its own data via ``_resolve_layer_aggregates``).  The clone
+        # above copied ``lhs._transforms`` verbatim, which would re-introduce a
+        # spurious chart-level aggregate over the merged batch.
+        new._transforms = lhs_top_xforms
 
         # When the LHS is an annotate_* helper chart, its annotation primitive
         # fully describes the visual element — the mark layers must be excluded
@@ -1757,6 +2124,11 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                     new._selections.append(s)
         if rhs._conditionals:
             new._conditionals.extend(rhs._conditionals)
+        if rhs._params:
+            existing_param_names = {p.name for p in new._params}
+            for p in rhs._params:
+                if p.name not in existing_param_names:
+                    new._params.append(p)
         # Merge RHS configure/annotation/structural/override slots.
         if rhs._configure:
             new._configure = new._configure + rhs._configure
@@ -1928,6 +2300,74 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             )
         else:
             raise ValueError("facet() requires either `field=`, or `row=`/`col=`")
+        # 2c fix: coalesce any renamed RHS copies of the facet field(s) back
+        # into the primary column.  When Chart.__add__ merges two DataFrames
+        # with overlapping column names, it renames the RHS columns to
+        # "{col}__rhs_{hex}".  If one of those columns is the facet field,
+        # the RHS layer's rows end up with null in the facet column and are
+        # dropped by the facet partitioner.  We detect and coalesce here so
+        # all layers' rows carry the facet field value.
+        new = _coalesce_facet_rhs_columns(new)
+        return new
+
+    def share_scale(
+        self,
+        *,
+        x: Optional[str] = None,
+        y: Optional[str] = None,
+    ) -> "Chart":
+        """Set per-channel facet scale resolution for this faceted chart.
+
+        Each panel can either lock to the union domain across all partitions
+        (``"shared"``, the default) or compute its own domain from its
+        partition's data (``"independent"``).
+
+        Parameters
+        ----------
+        x : str or None, optional
+            Scale resolution for the x channel.  ``"shared"`` or
+            ``"independent"``.  ``None`` leaves the current setting unchanged.
+        y : str or None, optional
+            Scale resolution for the y channel.  ``"shared"`` or
+            ``"independent"``.  ``None`` leaves the current setting unchanged.
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` with the scale resolution updated.
+
+        Raises
+        ------
+        ValueError
+            If called before ``facet()``, or if a value is not ``"shared"``
+            or ``"independent"``.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"g": ["a","a","b","b"], "x": [1,2,1,2],
+        ...                    "y": [1.0,2.0,100.0,101.0]})
+        >>> (fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+        ...  .facet(col="g").share_scale(y="independent"))
+        Chart(mark='point', encoding=['x', 'y'])
+        """
+        if self._facet is None:
+            raise ValueError("share_scale() requires a faceted chart; call facet() first")
+        _valid = ("shared", "independent")
+        if x is not None and x not in _valid:
+            raise ValueError(f"share_scale: x={x!r}; expected 'shared' or 'independent'")
+        if y is not None and y not in _valid:
+            raise ValueError(f"share_scale: y={y!r}; expected 'shared' or 'independent'")
+        # Build updated resolve dict from existing + new values.
+        existing_resolve = self._facet.resolve or {}
+        new_resolve = dict(existing_resolve)
+        if x is not None:
+            new_resolve["x"] = x
+        if y is not None:
+            new_resolve["y"] = y
+        new = self._clone()
+        new._facet = replace(self._facet, resolve=new_resolve if new_resolve else None)
         return new
 
     def theme(self, theme: Any) -> "Chart":
@@ -2236,14 +2676,21 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 result.append(entry)
         return result
 
-    def _build_layers_list(self) -> list:
-        """Convert internal _layers to a list of JSON-serializable dicts for Rust.
+    def _build_layers_list(self, layers: list | None = None) -> list:
+        """Convert ``_layers`` to a list of JSON-serializable dicts for Rust.
 
         ``coerce_layers`` in Rust runs ``json.dumps()`` on each dict, so every
         value must be JSON-serializable (no PyO3 objects).
+
+        Parameters
+        ----------
+        layers :
+            Override layer list to serialize.  Defaults to ``self._layers``;
+            ``to_spec`` passes the aggregate-resolved layers so the originating
+            chart object is never mutated.
         """
         out = []
-        for layer in self._layers or []:
+        for layer in (layers if layers is not None else self._layers) or []:
             encoding_dict: dict = {}
             for axis in _RENDERER_HONORED_CHANNELS:
                 ch = layer.encoding.get(axis)
@@ -2275,6 +2722,10 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                     enc_json_dict: dict = {"field": field}
                     if raw_type := d.get("type_"):
                         enc_json_dict["type"] = _TYPE_EXPAND.get(raw_type, raw_type)
+                    # D5b (layered path): strip ``stack=`` on marks that cannot
+                    # honor stacking and warn. Shares ``_strip_unstackable`` with
+                    # the single-chart path in ``_build_encoding_specs``.
+                    _strip_unstackable(d, layer.mark or "point")
                     for opt_key in (
                         "title",
                         "aggregate",
@@ -2324,27 +2775,85 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         return out
 
     def _build_facet_dict(self) -> dict:
-        """Convert internal _facet to the JSON dict Rust's FacetSpec expects."""
+        """Convert internal _facet to the JSON dict Rust's FacetSpec expects.
+
+        The ``"resolve"`` key is emitted only when at least one channel is set
+        to ``"independent"``.  Absent keys default to ``"shared"`` in Rust, so
+        omitting the key entirely when all channels are shared keeps the output
+        byte-stable with existing goldens.
+        """
         f = self._facet
+        # Build the resolve sub-dict only when there is at least one
+        # non-default (independent) resolution; omit entirely otherwise.
+        resolve_dict: dict | None = None
+        if f.resolve:
+            non_default = {ch: mode for ch, mode in f.resolve.items() if mode == "independent"}
+            if non_default:
+                resolve_dict = dict(f.resolve)
+
         if f.mode_kind == "wrap":
             ncols = f.ncols or 1  # u32 required; default 1
-            return {"field": f.field, "mode": {"kind": "wrap", "ncols": int(ncols)}}
+            d: dict = {"field": f.field, "mode": {"kind": "wrap", "ncols": int(ncols)}}
+            if resolve_dict is not None:
+                d["resolve"] = resolve_dict
+            return d
         # grid: col is the primary (column) field; row is the secondary (row) field.
         field = f.col if f.col is not None else (f.field or "")
-        nrows = f.nrows or 1
-        ncols = f.ncols or 1
-        d: dict = {
+        # Infer nrows/ncols from the data when the user did not supply them.
+        # This is the common case: facet(row="a", col="b") without explicit
+        # nrows/ncols.  Without inference the geometry defaults to 1×1, dropping
+        # all but one panel.
+        nrows = f.nrows if f.nrows is not None else self._infer_facet_cardinality(f.row)
+        ncols = f.ncols if f.ncols is not None else self._infer_facet_cardinality(f.col)
+        d = {
             "field": field,
             "mode": {"kind": "grid", "nrows": int(nrows), "ncols": int(ncols)},
         }
         if f.row is not None:
             d["row"] = f.row
+        if resolve_dict is not None:
+            d["resolve"] = resolve_dict
         return d
+
+    def _infer_facet_cardinality(self, col_name: Optional[str]) -> int:
+        """Return the number of distinct values in *col_name* from self._data.
+
+        Falls back to 1 when *col_name* is None, the data is absent, or the
+        column is not found — so the existing behaviour is preserved for cases
+        where inference is not possible.
+        """
+        if col_name is None or self._data is None:
+            return 1
+        try:
+            import polars as pl
+
+            if isinstance(self._data, pl.DataFrame):
+                if col_name in self._data.columns:
+                    return self._data[col_name].n_unique()
+                return 1
+            # PyArrow fallback
+            import pyarrow as pa
+
+            tbl = self._data if isinstance(self._data, pa.Table) else to_arrow_table(self._data)
+            if col_name in tbl.schema.names:
+                col = tbl.column(col_name)
+                return len(col.unique())
+            return 1
+        except Exception:
+            return 1
 
     # ---- Properties ----
 
     def properties(
-        self, *, width=None, height=None, title=None, description=None, render_config=None
+        self,
+        *,
+        width=None,
+        height=None,
+        title=None,
+        subtitle=None,
+        caption=None,
+        description=None,
+        render_config=None,
     ) -> "Chart":
         """Set chart-level display properties.
 
@@ -2359,6 +2868,15 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             Chart height in pixels.
         title : str or None, optional
             Chart title rendered above the plot area.
+        subtitle : str or None, optional
+            Chart subtitle rendered below the title.  On a faceted chart this
+            renders inside the facet grid via the ``Title`` spec.  On a plain
+            single-panel chart it behaves identically to
+            ``.labs(subtitle=...)``.
+        caption : str or None, optional
+            Figure-level caption rendered below the chart.  Applied as a
+            post-render chrome band so that it appears beneath the plot area
+            regardless of chart type.
         description : str or None, optional
             Accessible description attached to the SVG root.
         render_config : RenderConfig or None, optional
@@ -2381,6 +2899,10 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         ... )
         Chart(mark='point', encoding=['x', 'y'])
         """
+        import dataclasses
+
+        from ferrum.title import Title as _TitleCls
+
         new = self._clone()
         if width is not None:
             new._width = width
@@ -2388,9 +2910,17 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             new._height = height
         if title is not None:
             # Schwabish SB1: accept Title value class or plain str.
-            from ferrum.title import Title as _TitleCls
-
             new._title = title if isinstance(title, _TitleCls) else _TitleCls(text=str(title))
+        if subtitle is not None:
+            # Route subtitle into the Title value class, preserving any
+            # existing title text (same logic as labs(subtitle=...)).
+            existing = new._title
+            if isinstance(existing, _TitleCls):
+                new._title = dataclasses.replace(existing, subtitle=subtitle)
+            else:
+                new._title = _TitleCls(text="", subtitle=subtitle)
+        if caption is not None:
+            new._figure_caption = caption
         if description is not None:
             new._description = description
         if render_config is not None:
@@ -2520,10 +3050,18 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
 
         theta_ch = resolved._coord.theta  # "x" or "y"
         radius_ch = "y" if theta_ch == "x" else "x"
+        # Second-extent channels mirror the primary axis assignment:
+        # theta2 -> x2 when theta->x, else y2; radius2 -> y2 when radius->y, else x2.
+        theta2_ch = f"{theta_ch}2"
+        radius2_ch = f"{radius_ch}2"
         if "theta" in enc:
             enc[theta_ch] = enc.pop("theta")
+        if "theta2" in enc:
+            enc[theta2_ch] = enc.pop("theta2")
         if "radius" in enc:
             enc[radius_ch] = enc.pop("radius")
+        if "radius2" in enc:
+            enc[radius2_ch] = enc.pop("radius2")
         # Arc marks need a dummy y (or x) so scale_resolve doesn't fail when
         # only one axis is encoded.  The arc builder ignores the dummy scale.
         if resolved._mark == "arc":
@@ -2635,10 +3173,38 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             # start at zero unless the caller explicitly sets domain or
             # zero on their Y() channel.  The injected scale must carry
             # `type` because Rust's ScaleSpec is a tagged enum.
-            if axis == "y" and resolved._mark == "bar":
+            #
+            # D3: suppress the injection when the caller passed zero=False OR
+            # when y2 is bound (the bar extent is taken literally from [y, y2]
+            # and force-anchoring to zero would distort the domain).
+            # x2 only affects the horizontal bin width of histograms; it must
+            # NOT suppress the y zero-anchor.
+            _y2_bound = "y2" in enc
+            _zero_anchor_wanted = getattr(resolved, "_mark_zero", True) and not _y2_bound
+            # D4-C: only inject the linear+zero scale when the y encoding is
+            # quantitative.  Ordinal/nominal y (e.g. string category on a
+            # horizontal bar) requires a band scale — forcing linear here raises
+            # "unsupported dtype: Utf8" in the Rust scale resolver.  When type_
+            # is absent the encoding defaults to quantitative (Altair convention),
+            # so we only suppress when an explicit categorical type is set.
+            _y_enc_type = d.get("type_")
+            _y_is_categorical = _y_enc_type in ("O", "N", "ordinal", "nominal")
+            if (
+                axis == "y"
+                and resolved._mark == "bar"
+                and _zero_anchor_wanted
+                and not _y_is_categorical
+            ):
                 scale = d.get("scale") or {}
                 if "domain" not in scale and "zero" not in scale:
                     d["scale"] = {"type": scale.get("type", "linear"), **scale, "zero": True}
+            # D5b: strip ``stack=`` on marks that cannot honor stacking and emit
+            # a one-time UserWarning.  Only ``bar`` and ``area`` consume the
+            # ``__stack_y_base__`` column emitted by ``apply_stack``; every other
+            # mark type silently drops marks when the stacking path executes.
+            # Apply the guard only on the positional value channel (``y`` for
+            # normal orientation, ``x`` when coord-flipped).
+            _strip_unstackable(d, resolved._mark)
             # `field` is positional; rest are keyword-only on EncodingSpec.__new__.
             # The Python-visible param name is `type_` (Rust signature `type_: Option<&str>`).
             field = d.pop("field")
@@ -2679,20 +3245,10 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             return effective_transforms
 
         from ferrum import Aggregate, AggregateOp
-        from ferrum.repeat import _RepeatPlaceholder as _RPH
 
-        # Collect fields from channels that carry no aggregate.
-        non_agg_fields: list[str] = []
-        for _ch in resolved._encoding.values():
-            if not isinstance(_ch, ChannelBase):
-                continue
-            if _ch._kwargs.get("aggregate"):
-                continue
-            f = _ch.field
-            if f is None or isinstance(f, _RPH):
-                continue
-            if f not in non_agg_fields:
-                non_agg_fields.append(f)
+        # Collect fields from channels that carry no aggregate (shared with the
+        # per-layer path via ``_infer_agg_groupby``).
+        non_agg_fields = _infer_agg_groupby(resolved._encoding)
         # Include facet fields (row/col grouping dimensions).
         if resolved._facet is not None:
             for _ff in (resolved._facet.col, resolved._facet.row, resolved._facet.field):
@@ -2708,6 +3264,48 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                         groupby=non_agg_fields,
                     )
                 )
+            else:
+                resolved_transforms.append(t)
+        return resolved_transforms
+
+    def _resolve_pending_bins(self, effective_transforms: list) -> list:
+        """Resolve ``_PendingBin`` sentinels to concrete unnamed ``Bin`` objects.
+
+        Used by the single-chart path (``to_spec``).  Named transforms (used
+        by the layered path via ``_resolve_layer_bins``) are NOT produced here;
+        the single-chart path keeps the Bin unnamed so it chains through the
+        pipeline as before — byte-stable with pre-FA4 behavior.
+
+        Parameters
+        ----------
+        effective_transforms :
+            The current list of transforms, which may contain ``_PendingBin``
+            sentinels.
+
+        Returns
+        -------
+        list
+            A new list with all ``_PendingBin`` sentinels replaced by concrete
+            unnamed ``Bin`` instances.  If no sentinels are present, the input
+            list is returned unchanged.
+        """
+        if not any(isinstance(t, _PendingBin) for t in effective_transforms):
+            return effective_transforms
+
+        from ferrum import Bin
+
+        resolved_transforms: list = []
+        for t in effective_transforms:
+            if isinstance(t, _PendingBin):
+                if t.bin_obj is not None:
+                    # Pre-built Bin instance — use it directly (single-chart
+                    # path always produces unnamed transforms).  The instance
+                    # already bakes in the correct field, bin_count, etc.
+                    resolved_transforms.append(t.bin_obj)
+                else:
+                    bin_kwargs = dict(t.bin_kwargs)
+                    bin_kwargs.pop("name", None)  # single-chart bins are always unnamed
+                    resolved_transforms.append(Bin(t.field, **bin_kwargs))
             else:
                 resolved_transforms.append(t)
         return resolved_transforms
@@ -2766,6 +3364,37 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         effective_transforms = list(resolved._transforms) if resolved._transforms else []
         effective_transforms = self._resolve_pending_aggregates(resolved, effective_transforms)
 
+        # --- Resolve _PendingBin sentinels to concrete unnamed Bin objects (single-chart) ---
+        # For layered charts the bin sentinels are resolved per-layer below, so
+        # this call is a no-op on that path (sentinels already stripped from
+        # top-level transforms by _expand_layers).
+        effective_transforms = self._resolve_pending_bins(effective_transforms)
+
+        # --- Resolve per-layer encoding aggregates (layered charts) ---
+        # Each aggregating layer becomes a NAMED chart-level Aggregate transform
+        # whose output the layer reads via ``data_source`` (per-layer transforms
+        # are never executed standalone by the renderer).  Two aggregating layers
+        # therefore aggregate independently.  No-op when no layer aggregates.
+        # ``resolved`` may be ``self`` (no pending desugar), so the resolved
+        # layers are threaded through ``_build_layers_list`` rather than mutated
+        # onto the chart.
+        serialized_layers = resolved._layers
+        if resolved._layers:
+            serialized_layers, layer_agg_transforms = _resolve_layer_aggregates(resolved._layers)
+            if layer_agg_transforms:
+                effective_transforms = effective_transforms + layer_agg_transforms
+
+        # --- Resolve per-layer encoding bins (layered charts) ---
+        # Each binning layer becomes a NAMED chart-level Bin transform whose
+        # output the layer reads via ``data_source`` (fan-out: does not advance
+        # the unnamed chain, so the shared batch is not corrupted for other
+        # layers or for named aggregate transforms).  Run after aggregate
+        # resolution so the layer list processes the aggregate-resolved layers.
+        if resolved._layers:
+            serialized_layers, layer_bin_transforms = _resolve_layer_bins(serialized_layers)
+            if layer_bin_transforms:
+                effective_transforms = effective_transforms + layer_bin_transforms
+
         # --- Transform serialization ---
         if effective_transforms:
             # If any transform is a _NamedTransform or a plain dict (Phase 12
@@ -2790,7 +3419,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         if mk:
             kw["mark_style"] = mk
         if resolved._layers is not None:
-            kw["layers"] = resolved._build_layers_list()
+            kw["layers"] = resolved._build_layers_list(serialized_layers)
         if resolved._position is not None:
             kw["position"] = resolved._position.to_spec_dict()
         if resolved._title is not None:
@@ -2856,7 +3485,46 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         if resolved._conditionals:
             kw["conditionals"] = json.dumps([c.to_spec_dict() for c in resolved._conditionals])
 
+        # --- Reactive-parameter (D6) params section ---
+        # Unified declaration: registered selections (auto-promoted),
+        # explicit fm.param() variables, and any Parameter referenced as a
+        # scale domain. Deduped by name (first-seen wins); omitted entirely
+        # when empty so param-free specs stay byte-identical to before.
+        params_list = self._collect_params(resolved, enc)
+        if params_list:
+            kw["params"] = json.dumps([p.to_param_spec_dict() for p in params_list])
+
         return ChartSpec(**kw)
+
+    @staticmethod
+    def _collect_params(resolved, enc: dict) -> list:
+        """Collect the unified, de-duplicated reactive-parameter list (D6).
+
+        Order: registered selections, explicit ``add_params`` variables, then
+        any ``Parameter`` referenced as a scale domain.  Deduplicated by
+        ``.name`` preserving first-seen order.
+        """
+        from ferrum.parameter import Parameter
+
+        ordered: list = []
+        seen: set[str] = set()
+
+        def _add(p) -> None:
+            if isinstance(p, Parameter) and p.name not in seen:
+                seen.add(p.name)
+                ordered.append(p)
+
+        for sel in resolved._selections:
+            _add(sel)
+        for p in resolved._params:
+            _add(p)
+        for ch in enc.values():
+            scale = ch.option("scale") if isinstance(ch, ChannelBase) else None
+            if isinstance(scale, dict):
+                domain = scale.get("domain")
+                if isinstance(domain, Parameter):
+                    _add(domain)
+        return ordered
 
     def _inject_auto_tooltips(self, kw: dict) -> dict:
         """Inject auto-generated tooltip fields into a serialised spec dict.
@@ -3010,6 +3678,42 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         new._selections.extend(selections)
         return new
 
+    def add_params(self, *params) -> "Chart":
+        """Attach reactive variable parameter(s) to this chart.
+
+        Records one or more :class:`~ferrum.parameter.Parameter` objects (built
+        via ``fm.param()``) so they are emitted into the spec's ``params``
+        section.  Parameters drive reactive scale domains (``scale={"domain":
+        param}``) and crossfilters (``transform_filter(param)``) in the WASM
+        runtime; at static render time their initial ``value`` is used.
+
+        Selections referenced as scale domains or registered via
+        ``add_selection`` are auto-promoted into the params section at
+        serialization, so they do not need to be passed here.  Duplicate names
+        are de-duplicated (first-seen wins) when the spec is built.
+
+        Parameters
+        ----------
+        *params : Parameter
+            Any number of parameter objects (typically ``fm.param(...)``).
+
+        Returns
+        -------
+        Chart
+            New ``Chart`` (clone) with the parameters recorded.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
+        >>> k = fm.param("k", value=3)
+        >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y").add_params(k)
+        """
+        new = self._clone()
+        new._params.extend(params)
+        return new
+
     def interactive(self, *, toolbar: bool = True) -> "Chart":
         """Mark this chart as interactive.
 
@@ -3076,13 +3780,19 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         new._conditionals.append(spec)
         if hasattr(spec, "selection_name"):
             # Ensure the selection is also registered so scene_build can wire it.
-            existing = {s.name: s for s in new._selections if hasattr(s, "name")}
+            existing = {s.name for s in new._selections if hasattr(s, "name")}
             if spec.selection_name not in existing:
-                raise ValueError(
-                    f"Chart.conditional(): no selection named {spec.selection_name!r} "
-                    f"is attached to this chart. Call .add_selection(sel) first, or use "
-                    f"chart.add_selection(sel).encode(...) with the conditional encoding."
-                )
+                # Auto-register the carried selection when the spec knows it,
+                # so the explicit path benefits like encode(<channel>=cond) does.
+                carried = getattr(spec, "selection", None)
+                if carried is not None and carried.name == spec.selection_name:
+                    new._selections.append(carried)
+                else:
+                    raise ValueError(
+                        f"Chart.conditional(): no selection named {spec.selection_name!r} "
+                        f"is attached to this chart. Call .add_selection(sel) first, or use "
+                        f"chart.add_selection(sel).encode(...) with the conditional encoding."
+                    )
         return new
 
     def __repr__(self) -> str:

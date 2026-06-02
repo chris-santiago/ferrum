@@ -117,6 +117,20 @@ export class WasmRenderer {
      * is committed as the loaded scene.
      */
     tickTransition(t: number): void;
+    /**
+     * Toggle a legend-bound point selection's membership for one category
+     * (D6 `BindingRole::Legend`).
+     *
+     * `selection_name` is the legend-bound point selection (from the `Legend`
+     * param binding); `category` is the legend entry's label. Toggling mirrors
+     * `handle_click`'s field-value point-selection update: the category is
+     * stored as a `FieldValue::String` so the existing conditional path dims
+     * or highlights every mark whose tooltip carries that value. Calling again
+     * with the same category removes it. After updating selection state this
+     * re-runs `apply_conditionals_and_render` (the same machinery legend-less
+     * point selections use).
+     */
+    toggleLegend(selection_name: string, category: string): string;
 }
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -142,6 +156,7 @@ export interface InitOutput {
     readonly wasmrenderer_setTransform: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly wasmrenderer_startTransition: (a: number, b: number, c: number) => [number, number];
     readonly wasmrenderer_tickTransition: (a: number, b: number) => [number, number];
+    readonly wasmrenderer_toggleLegend: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly wasm_bindgen__convert__closures_____invoke__h4eb714a55877aa02: (a: number, b: number, c: any) => [number, number];
     readonly wasm_bindgen__convert__closures_____invoke__h5ec2816eae335d2e: (a: number, b: number, c: any, d: any) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

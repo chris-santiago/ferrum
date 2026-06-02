@@ -734,6 +734,7 @@ mod tests {
             selections: Vec::new(),
             conditionals: Vec::new(),
             chart_description: None,
+            params: Vec::new(),
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -748,7 +749,7 @@ mod tests {
         ]).unwrap();
 
         let theme = ThemeInputs::default();
-        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -857,7 +858,7 @@ mod tests {
         use crate::render::color::{ContinuousScheme, NamedContinuous};
         use crate::render::scale_resolve::ColorScale;
         let scheme = ContinuousScheme::Named(NamedContinuous::Viridis);
-        let scale = ColorScale::Continuous { domain: (0.0, 10.0), scheme };
+        let scale = ColorScale::Continuous { domain: (0.0, 10.0), scheme, midpoint: None };
         let fallback = crate::render::color::from_rgb(0x77, 0x77, 0x77);
         // The continuous branch must consume the f64 directly (no round-trip):
         // the resolved color equals scale.lookup_f64(value).
@@ -908,7 +909,7 @@ mod tests {
             },
             transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
             position: None, title: None, axis_x: None, axis_y: None,
-            selections: Vec::new(), conditionals: Vec::new(), chart_description: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
         };
 
         let schema = Arc::new(Schema::new(vec![
@@ -923,7 +924,7 @@ mod tests {
         ]).unwrap();
 
         let theme = ThemeInputs::default();
-        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None };
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };

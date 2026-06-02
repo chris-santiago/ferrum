@@ -21,6 +21,7 @@ pub(crate) mod marks;
 pub(crate) mod position;
 pub mod compositor;
 pub(crate) mod grid_compose;
+pub(crate) mod figure_chrome;
 pub(crate) mod pack_instances;
 pub(crate) mod scene_build;
 pub(crate) mod svg_walk;
@@ -558,7 +559,7 @@ pub(crate) fn apply_color_config_to_color_scale(
 ) {
     let Some(ref mut scale) = color_scale else { return };
     match scale {
-        scale_resolve::ColorScale::Continuous { ref mut domain, ref mut scheme } => {
+        scale_resolve::ColorScale::Continuous { ref mut domain, ref mut scheme, .. } => {
             if let Some(ref d) = cfg.domain {
                 let floats: Vec<f64> = d.iter().filter_map(|v| v.as_f64()).collect();
                 if floats.len() == 2 {
@@ -868,6 +869,7 @@ mod orchestration_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -959,6 +961,7 @@ mod orchestration_tests {
                 row: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
+                resolve: crate::layout::facet::FacetResolve::default(),
             }),
             layers: None,
             coord: None,
@@ -968,6 +971,7 @@ mod orchestration_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let result = render_svg(
             &spec,
@@ -1097,6 +1101,7 @@ mod png_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -1133,6 +1138,7 @@ mod png_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -1214,6 +1220,7 @@ mod golden_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -1268,6 +1275,7 @@ mod golden_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -1305,6 +1313,7 @@ mod golden_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -1341,6 +1350,7 @@ mod golden_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -1377,6 +1387,7 @@ mod golden_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -1413,6 +1424,7 @@ mod golden_tests {
                 row: None,
                 mode: crate::layout::FacetMode::Wrap { ncols: 3 },
                 spacing: None,
+                resolve: crate::layout::facet::FacetResolve::default(),
             }),
             layers: None,
             coord: None,
@@ -1422,6 +1434,7 @@ mod golden_tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let result = render_svg(
             &spec, &batch, &ThemeInputs::default(),
@@ -1842,6 +1855,7 @@ mod chart_config_application_tests {
         let mut color_scale: Option<ColorScale> = Some(ColorScale::Continuous {
             domain: (0.0, 1.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
         });
         let cfg = ColorConfigSpec { domain: Some(vec![serde_json::json!(10.0), serde_json::json!(90.0)]), ..Default::default() };
         apply_color_config_to_color_scale(&mut color_scale, &cfg);
@@ -1859,6 +1873,7 @@ mod chart_config_application_tests {
         let mut color_scale: Option<ColorScale> = Some(ColorScale::Continuous {
             domain: (0.0, 1.0),
             scheme: ContinuousScheme::Named(NamedContinuous::Viridis),
+            midpoint: None,
         });
         let cfg = ColorConfigSpec {
             range: Some(vec!["#ffffff".to_string(), "#000000".to_string()]),

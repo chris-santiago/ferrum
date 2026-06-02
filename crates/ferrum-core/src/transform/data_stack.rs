@@ -122,7 +122,16 @@ pub(crate) fn apply(spec: &DataStackSpec, batch: &RecordBatch) -> PyResult<Recor
                     y1[row] -= half;
                 }
             }
-            _ => {} // Unknown offset → treat as zero.
+            // Unknown offset: all Python entry points (transform_stack, PyDataStack::new)
+            // validate offset before the spec reaches here, so this arm is dead in
+            // normal operation. Raise an explicit error so any direct Rust construction
+            // with a bad offset string fails loudly rather than silently using zero.
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "data_stack: unknown offset {:?}; expected one of \"zero\", \"normalize\", \"center\"",
+                    spec.offset
+                )));
+            }
         }
     }
 
@@ -168,15 +177,24 @@ pub(crate) struct PyDataStack(pub(crate) TransformSpec);
 impl PyDataStack {
     #[new]
     #[pyo3(signature = (field, groupby, *, offset = "zero", name = None))]
-    fn new(field: String, groupby: Vec<String>, offset: &str, name: Option<String>) -> Self {
-        PyDataStack(TransformSpec::DataStack(DataStackSpec {
+    fn new(field: String, groupby: Vec<String>, offset: &str, name: Option<String>) -> PyResult<Self> {
+        match offset {
+            "zero" | "normalize" | "center" => {}
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "DataStack: offset={:?} is not valid. Expected one of \"zero\", \"normalize\", \"center\"",
+                    offset
+                )));
+            }
+        }
+        Ok(PyDataStack(TransformSpec::DataStack(DataStackSpec {
             field,
             groupby,
             sort: None,
             as_: default_stack_as(),
             offset: offset.into(),
             name,
-        }))
+        })))
     }
 
     fn __repr__(&self) -> String {
@@ -279,5 +297,35 @@ mod tests {
         // Total = 6, half = 3. First y0 = 0-3 = -3, first y1 = 2-3 = -1.
         assert!((y0_col.value(0) - (-3.0)).abs() < 1e-12);
         assert!((y1_col.value(0) - (-1.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn unknown_offset_returns_error() {
+        // An unknown offset string must produce an explicit Err, not silently
+        // fall through to zero-offset behavior.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("val", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![1.0, 2.0]))],
+        )
+        .unwrap();
+
+        let spec = DataStackSpec {
+            field: "val".into(),
+            groupby: vec![],
+            sort: None,
+            as_: ("y0".into(), "y1".into()),
+            offset: "streamgraph".into(), // not a valid offset
+            name: None,
+        };
+        let result = apply(&spec, &batch);
+        assert!(result.is_err(), "unknown offset must return Err, not silently use zero");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("streamgraph") || err_msg.contains("offset"),
+            "error message must reference the bad offset: {err_msg}"
+        );
     }
 }

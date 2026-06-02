@@ -133,6 +133,7 @@ def desugar_density(
                 thresholds=thresholds,
                 smooth=smooth,
                 cmap=cmap,
+                groupby=groupby if isinstance(groupby, str) else None,
             )
 
     _VALID_KERNELS = {"gaussian", "epanechnikov", "epan", "tophat", "uniform", "cosine"}

@@ -29,6 +29,68 @@ def _copy_configure_layers(src: "_ChartLike", dst: "_ChartLike") -> None:
         dst._configure_layers = list(config)
 
 
+def _validate_resolve(resolve: Optional[Dict[str, str]], label: str) -> None:
+    """Raise ``ValueError`` when *resolve* is not a valid channel-mode dict.
+
+    Parameters
+    ----------
+    resolve : dict or None
+        Must be a dict mapping channel names to ``"shared"`` or
+        ``"independent"`` when not ``None``.
+    label : str
+        Class or function name used in the error message.
+    """
+    if resolve is None:
+        return
+    if not isinstance(resolve, dict):
+        raise ValueError(
+            f"{label}: resolve must be a dict mapping channel names "
+            f"to 'shared' or 'independent'; got {type(resolve).__name__}"
+        )
+    for ch, mode in resolve.items():
+        if mode not in ("shared", "independent"):
+            raise ValueError(
+                f"{label}: resolve[{ch!r}]={mode!r}; expected 'shared' or 'independent'"
+            )
+
+
+def _apply_resolve(charts: list, resolve: Optional[Dict[str, str]]) -> list:
+    """Return charts with shared-scale injection applied per *resolve*.
+
+    For each channel whose mode is ``"shared"``, compute the union domain
+    across all charts and inject an explicit scale on every chart that
+    binds that channel.  Charts are returned unchanged when *resolve* is
+    ``None`` or empty, or when no channel qualifies.
+
+    Parameters
+    ----------
+    charts : list of Chart
+        Source charts.
+    resolve : dict or None
+        Per-channel scale-sharing spec, e.g. ``{"color": "shared"}``.
+
+    Returns
+    -------
+    list of Chart
+        Original list (same object) when nothing changes, otherwise a
+        new list with scale-injected clones.
+    """
+    if not resolve:
+        return charts
+    from ferrum._scale_share import compute_union_domain, inject_scale
+
+    shared = [ch for ch, mode in resolve.items() if mode == "shared"]
+    if not shared:
+        return charts
+    result = list(charts)
+    for channel in shared:
+        sd = compute_union_domain(result, channel)
+        if sd is None:
+            continue
+        result = [inject_scale(c, channel, sd) for c in result]
+    return result
+
+
 class _ChartLike(ConfigureMixin):
     """Common rendering plumbing shared by every composition wrapper.
 
@@ -245,11 +307,17 @@ class _ChartLike(ConfigureMixin):
     def properties(self, **kwargs):
         """Forward ``properties(**kwargs)`` to every sub-chart.
 
+        This base implementation is used by non-composite subclasses
+        (``LayerChart``, ``RepeatChart``, ``JointChart``, ``ClusterMapChart``).
+        ``_CompositeBase`` overrides this with a version that intercepts
+        figure-level chrome (``title``, ``subtitle``, ``caption``) and stores
+        it at the composition level rather than fanning it to every child.
+
         Parameters
         ----------
         **kwargs
             Keyword arguments accepted by ``Chart.properties`` (e.g.
-            ``width``, ``height``, ``title``, ``background``).
+            ``width``, ``height``, ``title``).
 
         Returns
         -------
@@ -312,12 +380,18 @@ class _CompositeBase(_ChartLike):
 
     Holds an ordered ``charts`` list and a pixel ``spacing`` between cells.
     ``__or__`` and ``__and__`` chain further compositions; ``theme`` and
-    ``properties`` fan out to every child.
+    ``properties`` fan out to every child.  Figure-level chrome
+    (``title``, ``subtitle``, ``caption``) is stored at the composition
+    level and rendered once around the whole figure — it is never fanned
+    to individual child panels.
     """
 
     def __init__(self, charts: List, *, spacing: float = 10.0) -> None:
         self.charts = list(charts)
         self.spacing = spacing
+        self._figure_title: Optional[str] = None
+        self._figure_subtitle: Optional[str] = None
+        self._figure_caption: Optional[str] = None
 
     def __copy__(self):
         """Shallow copy that duplicates mutable list attributes."""
@@ -344,15 +418,81 @@ class _CompositeBase(_ChartLike):
     def __and__(self, other):
         return VConcatChart([self, other])
 
+    def properties(self, **kwargs):
+        """Set figure-level or per-child chart properties.
+
+        The keyword arguments ``title``, ``subtitle``, and ``caption`` are
+        intercepted and stored at the figure level — they render once around
+        the whole composed figure and are never fanned to individual child
+        panels.  All other keyword arguments (e.g. ``width``, ``height``)
+        are forwarded to each child via ``Chart.properties``.
+
+        Parameters
+        ----------
+        title : str, optional
+            Figure-level title rendered above all panels.
+        subtitle : str, optional
+            Figure-level subtitle rendered below the title, above all panels.
+        caption : str, optional
+            Figure-level caption rendered below all panels.
+        **kwargs
+            Additional keyword arguments forwarded to ``Chart.properties``
+            for every child chart (e.g. ``width``, ``height``).
+
+        Returns
+        -------
+        _CompositeBase
+            A new instance of the same composition class with the figure
+            chrome stored and / or child properties updated.
+        """
+        # Separate figure-level chrome from per-child kwargs.
+        figure_title = kwargs.pop("title", None)
+        figure_subtitle = kwargs.pop("subtitle", None)
+        figure_caption = kwargs.pop("caption", None)
+
+        if kwargs:
+            # Forward remaining kwargs to children as before.
+            result = self._rebuild_with_charts(lambda c: c.properties(**kwargs))
+        else:
+            # Nothing to fan — rebuild preserving charts unchanged.
+            result = self._rebuild_with_charts(lambda c: c)
+
+        _copy_configure_layers(self, result)
+
+        # Apply figure-level chrome (only update when a value was provided).
+        if figure_title is not None:
+            result._figure_title = figure_title
+        elif self._figure_title is not None:
+            result._figure_title = self._figure_title
+
+        if figure_subtitle is not None:
+            result._figure_subtitle = figure_subtitle
+        elif self._figure_subtitle is not None:
+            result._figure_subtitle = self._figure_subtitle
+
+        if figure_caption is not None:
+            result._figure_caption = figure_caption
+        elif self._figure_caption is not None:
+            result._figure_caption = self._figure_caption
+
+        return result
+
     def _rebuild_with_charts(self, fn):
-        return type(self)([fn(c) for c in self.charts], spacing=self.spacing)
+        new = type(self)([fn(c) for c in self.charts], spacing=self.spacing)
+        # Carry figure-level chrome through rebuilds.
+        new._figure_title = self._figure_title
+        new._figure_subtitle = self._figure_subtitle
+        new._figure_caption = self._figure_caption
+        return new
 
 
 class HConcatChart(_CompositeBase):
     """Horizontal concatenation of two or more charts.
 
-    Each sub-chart retains its own scales, axes, and legend.  Construct via
-    the ``|`` operator on ``Chart`` instances or directly with a list.
+    Each sub-chart retains its own scales, axes, and legend by default.
+    Pass ``resolve=`` to unify one or more channels across panels.
+    Construct via the ``|`` operator on ``Chart`` instances or directly
+    with a list.
 
     Parameters
     ----------
@@ -360,6 +500,10 @@ class HConcatChart(_CompositeBase):
         Sub-charts to concatenate left-to-right.
     spacing : float, default 10.0
         Horizontal pixel gap between adjacent charts.
+    resolve : dict, optional
+        Per-channel scale-sharing overrides, e.g.
+        ``{"color": "shared"}``.  Accepts the same keys and values as
+        ``ConcatChart(resolve=...)``.
 
     Examples
     --------
@@ -368,9 +512,35 @@ class HConcatChart(_CompositeBase):
     >>> combined.save("side_by_side.svg")
     """
 
+    def __init__(
+        self,
+        charts: List,
+        *,
+        spacing: float = 10.0,
+        resolve: Optional[Dict[str, str]] = None,
+    ) -> None:
+        _validate_resolve(resolve, "HConcatChart")
+        super().__init__(charts, spacing=spacing)
+        self._resolve = resolve
+
+    def _resolved_charts(self) -> list:
+        """Return charts with shared scales injected per ``resolve``."""
+        return _apply_resolve(self.charts, self._resolve)
+
+    def _rebuild_with_charts(self, fn):
+        new = HConcatChart(
+            [fn(c) for c in self.charts],
+            spacing=self.spacing,
+            resolve=self._resolve,
+        )
+        new._figure_title = self._figure_title
+        new._figure_subtitle = self._figure_subtitle
+        new._figure_caption = self._figure_caption
+        return new
+
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) by merging child scenes horizontally."""
-        charts = [self._inject_parent_config(c) for c in self.charts]
+        charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
         return _merge_child_scenes(charts, self.spacing, layout="horizontal")
 
     def show_svg(self) -> str:
@@ -383,9 +553,16 @@ class HConcatChart(_CompositeBase):
         """
         from ferrum._core import compose_svg_horizontal
 
-        charts = [self._inject_parent_config(c) for c in self.charts]
+        charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
         svgs = [c.show_svg() for c in charts]
-        return compose_svg_horizontal(svgs, spacing=self.spacing, align="top")
+        return compose_svg_horizontal(
+            svgs,
+            spacing=self.spacing,
+            align="top",
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
+        )
 
     def __repr__(self) -> str:
         """Return a short developer-readable description."""
@@ -395,8 +572,10 @@ class HConcatChart(_CompositeBase):
 class VConcatChart(_CompositeBase):
     """Vertical concatenation of two or more charts.
 
-    Each sub-chart retains its own scales, axes, and legend.  Construct via
-    the ``&`` operator on ``Chart`` instances or directly with a list.
+    Each sub-chart retains its own scales, axes, and legend by default.
+    Pass ``resolve=`` to unify one or more channels across panels.
+    Construct via the ``&`` operator on ``Chart`` instances or directly
+    with a list.
 
     Parameters
     ----------
@@ -404,6 +583,10 @@ class VConcatChart(_CompositeBase):
         Sub-charts to stack top-to-bottom.
     spacing : float, default 10.0
         Vertical pixel gap between adjacent charts.
+    resolve : dict, optional
+        Per-channel scale-sharing overrides, e.g.
+        ``{"color": "shared"}``.  Accepts the same keys and values as
+        ``ConcatChart(resolve=...)``.
 
     Examples
     --------
@@ -412,9 +595,35 @@ class VConcatChart(_CompositeBase):
     >>> stacked.save("stacked.svg")
     """
 
+    def __init__(
+        self,
+        charts: List,
+        *,
+        spacing: float = 10.0,
+        resolve: Optional[Dict[str, str]] = None,
+    ) -> None:
+        _validate_resolve(resolve, "VConcatChart")
+        super().__init__(charts, spacing=spacing)
+        self._resolve = resolve
+
+    def _resolved_charts(self) -> list:
+        """Return charts with shared scales injected per ``resolve``."""
+        return _apply_resolve(self.charts, self._resolve)
+
+    def _rebuild_with_charts(self, fn):
+        new = VConcatChart(
+            [fn(c) for c in self.charts],
+            spacing=self.spacing,
+            resolve=self._resolve,
+        )
+        new._figure_title = self._figure_title
+        new._figure_subtitle = self._figure_subtitle
+        new._figure_caption = self._figure_caption
+        return new
+
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) by merging child scenes vertically."""
-        charts = [self._inject_parent_config(c) for c in self.charts]
+        charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
         return _merge_child_scenes(charts, self.spacing, layout="vertical")
 
     def show_svg(self) -> str:
@@ -427,9 +636,16 @@ class VConcatChart(_CompositeBase):
         """
         from ferrum._core import compose_svg_vertical
 
-        charts = [self._inject_parent_config(c) for c in self.charts]
+        charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
         svgs = [c.show_svg() for c in charts]
-        return compose_svg_vertical(svgs, spacing=self.spacing, align="left")
+        return compose_svg_vertical(
+            svgs,
+            spacing=self.spacing,
+            align="left",
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
+        )
 
     def __repr__(self) -> str:
         """Return a short developer-readable description."""
@@ -1507,17 +1723,7 @@ class ConcatChart(_CompositeBase):
             raise ValueError("ConcatChart requires at least one chart")
         if columns is not None and columns <= 0:
             raise ValueError(f"ConcatChart: columns must be > 0; got {columns}")
-        if resolve is not None:
-            if not isinstance(resolve, dict):
-                raise ValueError(
-                    "ConcatChart: resolve must be a dict mapping channel names "
-                    f"to 'shared' or 'independent'; got {type(resolve).__name__}"
-                )
-            for ch, mode in resolve.items():
-                if mode not in ("shared", "independent"):
-                    raise ValueError(
-                        f"ConcatChart: resolve[{ch!r}]={mode!r}; expected 'shared' or 'independent'"
-                    )
+        _validate_resolve(resolve, "ConcatChart")
         super().__init__(list(charts), spacing=spacing)
         self._columns = columns
         self._resolve = resolve
@@ -1563,32 +1769,27 @@ class ConcatChart(_CompositeBase):
             row_ratios=[1.0] * n_rows,
             col_ratios=[1.0] * n_cols,
             spacing=self.spacing,
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
         )
 
     def _resolved_charts(self) -> list:
         """Return charts with shared scales injected per ``resolve``."""
-        if not self._resolve:
-            return self.charts
-        from ferrum._scale_share import compute_union_domain, inject_scale
-
-        shared = [ch for ch, mode in self._resolve.items() if mode == "shared"]
-        if not shared:
-            return self.charts
-        result = list(self.charts)
-        for channel in shared:
-            sd = compute_union_domain(result, channel)
-            if sd is None:
-                continue
-            result = [inject_scale(c, channel, sd) for c in result]
-        return result
+        return _apply_resolve(self.charts, self._resolve)
 
     def _rebuild_with_charts(self, fn):
-        return ConcatChart(
+        new = ConcatChart(
             *[fn(c) for c in self.charts],
             columns=self._columns,
             spacing=self.spacing,
             resolve=self._resolve,
         )
+        # Carry figure-level chrome through rebuilds (mirrors _CompositeBase._rebuild_with_charts).
+        new._figure_title = self._figure_title
+        new._figure_subtitle = self._figure_subtitle
+        new._figure_caption = self._figure_caption
+        return new
 
     def __repr__(self) -> str:
         """Return a short developer-readable description."""
@@ -1916,6 +2117,23 @@ def _merge_one_child(
         merged["interaction"]["zoom_enabled"] = False
     if not child_interaction.get("pan_enabled", True):
         merged["interaction"]["pan_enabled"] = False
+    existing_param_names = {p["name"] for p in merged["interaction"]["params"]}
+    for param in child_interaction.get("params", []):
+        if param["name"] not in existing_param_names:
+            merged["interaction"]["params"].append(param)
+            existing_param_names.add(param["name"])
+    existing_binding_keys = {
+        (b["param"], b["role"], b.get("panel"), b.get("channel"))
+        for b in merged["interaction"]["param_bindings"]
+    }
+    for binding in child_interaction.get("param_bindings", []):
+        b = dict(binding)
+        if b.get("panel") is not None:
+            b["panel"] = b["panel"] + panel_id_offset
+        key = (b["param"], b["role"], b.get("panel"), b.get("channel"))
+        if key not in existing_binding_keys:
+            merged["interaction"]["param_bindings"].append(b)
+            existing_binding_keys.add(key)
     if merged["background"] is None and scene.get("background"):
         merged["background"] = scene["background"]
 
@@ -1946,6 +2164,8 @@ def _empty_scene() -> dict:
             "conditionals": [],
             "linked_panels": [],
             "tick_levels": [],
+            "params": [],
+            "param_bindings": [],
         },
     }
 
@@ -2113,11 +2333,27 @@ def _expand_layers(c) -> tuple[list, list]:
     Transforms are returned as plain PyO3 objects.  The named-transform path
     (routing a layer's output to a specific ``data_source``) is handled in
     ``__add__`` when the LHS chart has no transforms and the RHS does.
+
+    Encoding-implicit ``_PendingAggregate`` sentinels (added to ``c._transforms``
+    by ``encode()`` for channels like ``Y("v", aggregate="mean")``) are excluded
+    from the returned top-level transforms.  In a layered chart each layer
+    aggregates its own data independently; ``Chart.to_spec`` rebuilds these
+    aggregates per-layer from each layer's encoding via
+    ``_resolve_layer_aggregates``.  Leaving them at the chart top level would
+    aggregate the merged batch once with the wrong (single-layer) groupby.
     """
     from ferrum._layer import _Layer
+    from ferrum.encoding.base import _PendingAggregate, _PendingBin
+
+    def _top_transforms(chart) -> list:
+        return [
+            t
+            for t in (chart._transforms or [])
+            if not isinstance(t, (_PendingAggregate, _PendingBin))
+        ]
 
     if c._layers is not None:
-        return list(c._layers), list(c._transforms or [])
+        return list(c._layers), _top_transforms(c)
     return [
         _Layer(
             mark=c._mark,
@@ -2126,7 +2362,7 @@ def _expand_layers(c) -> tuple[list, list]:
             mark_kwargs=dict(c._mark_kwargs) if c._mark_kwargs else None,
             position=c._position,
         )
-    ], list(c._transforms or [])
+    ], _top_transforms(c)
 
 
 def _merge_top_transforms(new, rhs_top_xforms: list) -> None:

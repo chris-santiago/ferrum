@@ -1,11 +1,11 @@
 use arrow::record_batch::RecordBatch;
 use ferrum_scene::{
-    BlendMode, CoordKind, InteractionConfig, MarkBatch, Panel, PanelTickLevels, SceneGraph,
-    SceneNode, TickLevel,
+    BindingRole, BlendMode, CoordKind, InteractionConfig, MarkBatch, Panel, ParamBinding,
+    PanelTickLevels, SceneGraph, SceneNode, TickLevel,
 };
 use crate::spec::coord::to_scene_coord;
 
-use crate::layout::{LayoutResult, ThemeInputs};
+use crate::layout::{AxisLayout, LayoutResult, ResolveMode, ThemeInputs};
 use crate::spec::chart::ChartSpec;
 
 use super::arrow_cast::col_as_str;
@@ -39,62 +39,38 @@ pub fn build_scene(
     let mut panels: Vec<Panel> = Vec::new();
     let mut tick_levels: Vec<PanelTickLevels> = Vec::new();
 
+    // Heuristic text metrics for per-panel independent axis layout rebuilds.
+    // Constructed once outside the panel loop; FontdueMetrics has no mutable
+    // state so sharing it across panels is correct.
+    let facet_metrics = super::font::FontdueMetrics::new();
+
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
             warnings.push(RenderWarning::EmptyPanel { panel_index: panel_idx });
             continue;
         }
 
-        // Per-panel axes
-        let panel_axes_layout: Vec<&crate::layout::AxisLayout> = layout
-            .axes
-            .iter()
-            .filter(|a| a.panel_index == panel_idx)
-            .collect();
-        let panel_x_axis = panel_axes_layout
-            .iter()
-            .copied()
-            .find(|a| matches!(a.orient,
-                crate::layout::AxisOrient::Bottom | crate::layout::AxisOrient::Top));
-        let panel_y_axis = panel_axes_layout
-            .iter()
-            .copied()
-            .find(|a| matches!(a.orient,
-                crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right));
-
-        // Polar and Geo coordinates suppress Cartesian axes and gridlines.
-        let suppress_axes = matches!(
-            &spec.coord,
-            Some(crate::spec::coord::CoordKind::Polar { .. })
-            | Some(crate::spec::coord::CoordKind::Geo { .. })
-        );
-
-        let grid_band_colors: &[String] = chart_config.grid
-            .as_ref()
-            .and_then(|g| g.band_colors.as_deref())
-            .unwrap_or(&[]);
-        let mut grid_nodes = if suppress_axes {
-            Vec::new()
-        } else {
-            marks::axis::build_grid(panel.plot_area, panel_x_axis, panel_y_axis, theme, grid_band_colors)
-        };
-
-        // Axes
-        let mut axes_nodes: Vec<SceneNode> = Vec::new();
-        if !suppress_axes {
-            for axis in &panel_axes_layout {
-                axes_nodes.extend(marks::axis::build_axis(axis, theme));
-            }
-        }
-
-        // Strip title — emitted as separate nodes in the panel, not a group
-        let strip_title_nodes: Vec<SceneNode> = panel.strip_title.as_ref()
+        // Strip title — emitted as separate nodes in the panel, not a group.
+        // Includes both the column-header strip (top) and, in grid mode, the
+        // row-header strip (left side). Both are appended to the same vec so
+        // the compositor's offset logic picks them up without a schema change.
+        let mut strip_title_nodes: Vec<SceneNode> = panel.strip_title.as_ref()
             .map(|strip| marks::strip_title::build_strip_title(strip, &panel.plot_area, theme))
             .unwrap_or_default();
+        if let Some(row_strip) = &panel.row_strip_title {
+            strip_title_nodes.extend(
+                marks::strip_title::build_row_strip_title(row_strip, theme)
+            );
+        }
 
-        // Facet filter
+        // Facet filter: filter the merged batch on col (and row in grid mode).
         let panel_batch = if let Some(key) = &panel.facet_key {
-            filter_batch_by_facet(prep.final_batch(), &key.field, &key.value)?
+            let col_filtered = filter_batch_by_facet(prep.final_batch(), &key.field, &key.value)?;
+            if let Some(rk) = &panel.row_facet_key {
+                filter_batch_by_facet(&col_filtered, &rk.field, &rk.value)?
+            } else {
+                col_filtered
+            }
         } else {
             prep.final_batch().clone()
         };
@@ -113,7 +89,13 @@ pub fn build_scene(
                         "layer.data_source validated by prepare_render_inputs",
                     );
                     if let Some(key) = &panel.facet_key {
-                        filter_batch_by_facet(src, &key.field, &key.value)
+                        let col_filtered =
+                            filter_batch_by_facet(src, &key.field, &key.value)?;
+                        if let Some(rk) = &panel.row_facet_key {
+                            filter_batch_by_facet(&col_filtered, &rk.field, &rk.value)
+                        } else {
+                            Ok(col_filtered)
+                        }
                     } else {
                         Ok(src.clone())
                     }
@@ -124,10 +106,13 @@ pub fn build_scene(
         // Encoding merge
         let mut merged_encoding = spec.encoding.clone();
         merged_encoding.overlay_from(&prep.layers[0].encoding);
-        let rendering_spec_for_panel = ChartSpec {
+        let mut rendering_spec_for_panel = ChartSpec {
             encoding: merged_encoding,
             ..spec.clone()
         };
+        // Reactive-rescale substitution (D6): turn `domainParam` references into
+        // concrete domains before scale resolution. No-op when `params` is empty.
+        resolve_param_domains(&mut rendering_spec_for_panel);
 
         // Scale resolution
         let (mut scales, scale_warnings) = scale_resolve::resolve_scales_with_outputs(
@@ -149,6 +134,174 @@ pub fn build_scene(
         }
 
         tick_levels.push(build_tick_levels(&scales, panel_idx));
+
+        // Per-panel axes — collected from the globally-computed layout.
+        // When a facet channel requests independent scale resolution, the global
+        // axis layout is replaced with a fresh per-panel layout derived from the
+        // per-panel scales resolved above.
+        let panel_axes_layout: Vec<&crate::layout::AxisLayout> = layout
+            .axes
+            .iter()
+            .filter(|a| a.panel_index == panel_idx)
+            .collect();
+        let panel_x_axis_global = panel_axes_layout
+            .iter()
+            .copied()
+            .find(|a| matches!(a.orient,
+                crate::layout::AxisOrient::Bottom | crate::layout::AxisOrient::Top));
+        let panel_y_axis_global = panel_axes_layout
+            .iter()
+            .copied()
+            .find(|a| matches!(a.orient,
+                crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right));
+
+        // Independent-axis override: when the facet spec requests independent
+        // resolution for x or y, rebuild that channel's AxisLayout from the
+        // per-panel scales. Shared channels keep the global layout as-is.
+        let x_independent = spec.facet.as_ref()
+            .map(|f| f.resolve.x == ResolveMode::Independent)
+            .unwrap_or(false);
+        let y_independent = spec.facet.as_ref()
+            .map(|f| f.resolve.y == ResolveMode::Independent)
+            .unwrap_or(false);
+
+        // Re-derive raw format specs from the merged rendering encoding so that
+        // independent-axis label formatting uses the same precedence logic as
+        // the shared path (Axis(label_format=) > encoding.format > none).
+        // `resolve_axis_label_format` is the canonical single source of truth
+        // for this precedence — calling it here avoids duplicating the logic
+        // and ensures both paths stay in sync.
+        let (x_fmt_spec, x_fmt_type) = super::prepare::resolve_axis_label_format(
+            rendering_spec_for_panel.encoding.x.as_ref(),
+        );
+        let (y_fmt_spec, y_fmt_type) = super::prepare::resolve_axis_label_format(
+            rendering_spec_for_panel.encoding.y.as_ref(),
+        );
+
+        // Storage for owned AxisLayout values when rebuilding independent axes.
+        // Declared as Options so they live long enough for references into them
+        // to remain valid for the rest of the panel block.
+        let independent_x_layout: Option<AxisLayout> = if x_independent {
+            // Use the global tick count as the hint so per-panel independent axes
+            // produce a similar label density to what the layout engine chose globally.
+            let x_tick_count = prep.axes.x.tick_labels.len().max(1);
+            let mut x_input = prep.axes.x.clone();
+            let new_x_labels = scales.x.tick_labels(x_tick_count);
+            x_input.tick_projection = build_independent_x_projection(&scales.x, x_tick_count);
+            // Re-apply the encoding-level label format to the fresh per-panel raw labels.
+            // The shared path (prepare.rs + mod.rs) already formatted the global tick_labels —
+            // those formatted strings were discarded when tick_labels was replaced with
+            // per-panel scale output above.  Calling apply_tick_format here mirrors what
+            // the shared path does, keeping both paths identical.
+            x_input.tick_labels = super::prepare::apply_tick_format(
+                new_x_labels,
+                x_fmt_spec.as_deref(),
+                x_fmt_type.as_deref(),
+            );
+            let (new_x_layout, _warn) = crate::layout::axis::layout_x_axis(
+                &x_input,
+                panel.plot_area,
+                panel_idx,
+                theme.typography.label_font_size,
+                theme.typography.title_font_size,
+                theme.padding.axis_title_padding,
+                crate::layout::DEFAULT_CULL_THRESHOLD,
+                &facet_metrics,
+            );
+            Some(new_x_layout)
+        } else {
+            None
+        };
+
+        let independent_y_layout: Option<AxisLayout> = if y_independent {
+            let y_tick_count = prep.axes.y.tick_labels.len().max(1);
+            let mut y_input = prep.axes.y.clone();
+            let mut new_y_labels = scales.y.tick_labels(y_tick_count);
+            // Non-ordinal y labels must be reversed so high values appear at
+            // the top of the axis (matching the inverted y pixel range).
+            if !matches!(scales.y, scale_resolve::ScaleKind::Ordinal(_)) {
+                new_y_labels.reverse();
+            }
+            // Re-apply the encoding-level label format to the fresh per-panel raw labels.
+            // Mirrors the shared path.  The labels are passed in their final order
+            // (already reversed above) so the format is applied once in the right order.
+            y_input.tick_labels = super::prepare::apply_tick_format(
+                new_y_labels,
+                y_fmt_spec.as_deref(),
+                y_fmt_type.as_deref(),
+            );
+            y_input.tick_projection = build_independent_y_projection(&scales.y, y_tick_count);
+            let new_y_layout = crate::layout::axis::layout_y_axis(
+                &y_input,
+                panel.plot_area,
+                panel_idx,
+                theme.typography.label_font_size,
+                theme.typography.title_font_size,
+                theme.padding.axis_title_padding,
+                &facet_metrics,
+            );
+            Some(new_y_layout)
+        } else {
+            None
+        };
+
+        // Resolve the effective per-panel axis references: use the freshly-built
+        // independent layout when available, otherwise the global shared one.
+        let panel_x_axis: Option<&AxisLayout> = independent_x_layout
+            .as_ref()
+            .or(panel_x_axis_global);
+        let panel_y_axis: Option<&AxisLayout> = independent_y_layout
+            .as_ref()
+            .or(panel_y_axis_global);
+
+        // Polar and Geo coordinates suppress Cartesian axes and gridlines.
+        let suppress_axes = matches!(
+            &spec.coord,
+            Some(crate::spec::coord::CoordKind::Polar { .. })
+            | Some(crate::spec::coord::CoordKind::Geo { .. })
+        );
+
+        let grid_band_colors: &[String] = chart_config.grid
+            .as_ref()
+            .and_then(|g| g.band_colors.as_deref())
+            .unwrap_or(&[]);
+        let mut grid_nodes = if suppress_axes {
+            Vec::new()
+        } else {
+            marks::axis::build_grid(panel.plot_area, panel_x_axis, panel_y_axis, theme, grid_band_colors)
+        };
+
+        // Axes — draw from the effective (possibly per-panel) AxisLayout values.
+        // `panel_x_axis` and `panel_y_axis` already point to either the
+        // independent (per-panel) or the shared (global) layout. Emit them
+        // first, then any additional axes (e.g. secondary Top/Right) from the
+        // global layout that were not overridden.
+        let mut axes_nodes: Vec<SceneNode> = Vec::new();
+        if !suppress_axes {
+            if x_independent || y_independent {
+                // Emit the effective x and y axes (may be independent).
+                if let Some(ax) = panel_x_axis {
+                    axes_nodes.extend(marks::axis::build_axis(ax, theme));
+                }
+                if let Some(ay) = panel_y_axis {
+                    axes_nodes.extend(marks::axis::build_axis(ay, theme));
+                }
+                // Also emit any other orientations (Top, Right) from the global
+                // layout that are not covered by the independent overrides.
+                for axis in &panel_axes_layout {
+                    if !matches!(axis.orient,
+                        crate::layout::AxisOrient::Bottom | crate::layout::AxisOrient::Top
+                        | crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right)
+                    {
+                        axes_nodes.extend(marks::axis::build_axis(axis, theme));
+                    }
+                }
+            } else {
+                for axis in &panel_axes_layout {
+                    axes_nodes.extend(marks::axis::build_axis(axis, theme));
+                }
+            }
+        }
 
         // Polar axis: circular boundary + radial tick marks (replaces Cartesian axes)
         if matches!(&spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. })) {
@@ -201,9 +354,16 @@ pub fn build_scene(
             let mut result = draw::dispatch_mark_build(&layer.mark, &ctx);
 
             // For CoordPolar, transform all mark nodes from Cartesian pixel
-            // space to polar pixel space (arc marks handle their own transform).
+            // space to polar pixel space. Arc marks (Mark::Arc) handle their
+            // own polar geometry and must not be transformed again.  Bars under
+            // CoordPolar route through `build_polar`, which also generates
+            // arc-geometry nodes (MarkBatchKind::Arc) in polar space — those
+            // must likewise be excluded from the transform, or the wedge
+            // coordinates are corrupted by a second polar projection.
+            let is_arc_geometry = matches!(result.kind, ferrum_scene::MarkBatchKind::Arc);
             if matches!(&spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. }))
                 && !matches!(layer.mark, crate::spec::mark::Mark::Arc)
+                && !is_arc_geometry
             {
                 apply_polar_node_transform(&mut result.nodes, &panel.plot_area);
             }
@@ -368,6 +528,11 @@ pub fn build_scene(
     // Legend
     build_legend_decorations(layout, spec, prep, theme, chart_config, &mut legend_nodes)?;
 
+    // Param→scene bindings (D6, 5e-2a). Computed from the ORIGINAL `spec`,
+    // which still carries `domainParam`/transform `param`/selection `bind`:
+    // the static resolver only mutated per-panel clones.
+    let param_bindings = collect_param_bindings(spec, layout.panels.len());
+
     let interaction = InteractionConfig {
         zoom_enabled: !spec.selections.is_empty(),
         pan_enabled: !spec.selections.is_empty(),
@@ -375,6 +540,8 @@ pub fn build_scene(
         linked_panels: Vec::new(),
         tick_levels,
         toolbar: true,
+        params: spec.params.clone(),
+        param_bindings,
     };
 
     Ok(SceneGraph {
@@ -389,6 +556,121 @@ pub fn build_scene(
         interaction,
         chart_description: spec.chart_description.clone(),
     })
+}
+
+/// Static reactive-rescale substitution (D6).
+///
+/// Walks the spec's continuous positional/color/size/opacity scales; for each
+/// one carrying a `domainParam` reference, substitutes the named variable's
+/// static numeric-array value as the concrete `domain` (and clears the
+/// reference). A reference to a selection (or a non-numeric variable) leaves
+/// `domain = None`, so the renderer auto-infers from data — the correct static
+/// semantics for an empty selection.
+///
+/// No-op when `spec.params` is empty (the byte-stability gate): the early return
+/// keeps param-free specs on the exact pre-D6 code path.
+fn resolve_param_domains(spec: &mut ChartSpec) {
+    if spec.params.is_empty() {
+        return;
+    }
+    let store = crate::spec::parameter::ParamStore::new(&spec.params);
+    if store.is_empty() {
+        return;
+    }
+    let enc = &mut spec.encoding;
+    for channel in [
+        enc.x.as_mut(),
+        enc.y.as_mut(),
+        enc.color.as_mut(),
+        enc.size.as_mut(),
+        enc.opacity.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let Some(scale) = channel.scale.as_mut() else { continue };
+        let Some(name) = scale.domain_param().map(str::to_owned) else { continue };
+        if let Some(domain) = store.numeric_domain(&name) {
+            scale.set_domain(domain);
+        }
+        // else: leave domain = None → auto-infer (empty-selection semantics).
+    }
+}
+
+/// Collect param→scene bindings (D6, 5e-2a) from the original spec.
+///
+/// The static resolver substitutes `domainParam` into a concrete domain and
+/// clears the reference before the scene exists, so the emitted scene has no
+/// record of which panel/scale a param drives. This walks the original spec
+/// (which still carries the markers) and emits one binding per (param, panel,
+/// channel) connection:
+///
+/// - **Domain:** each `{x,y,color,size,opacity}` encoding scale with a
+///   `domainParam` → one binding per panel, with the channel wire name.
+/// - **Filter:** each `filter` transform carrying a `param` → one binding per
+///   panel (channel `None`).
+/// - **Legend:** each declared parameter whose `bind` is the string `"legend"`
+///   → one panel-free binding (the selection name).
+///
+/// Returns an empty vec when no markers apply, preserving param-free
+/// byte-stability.
+fn collect_param_bindings(spec: &ChartSpec, n_panels: usize) -> Vec<ParamBinding> {
+    use crate::transform::core::TransformSpec;
+
+    let mut bindings: Vec<ParamBinding> = Vec::new();
+    let panel_count = n_panels.max(1);
+
+    // Domain bindings: walk the positional/visual continuous channels.
+    let enc = &spec.encoding;
+    let channels: [(&str, Option<&crate::spec::encoding::EncodingSpec>); 5] = [
+        ("x", enc.x.as_ref()),
+        ("y", enc.y.as_ref()),
+        ("color", enc.color.as_ref()),
+        ("size", enc.size.as_ref()),
+        ("opacity", enc.opacity.as_ref()),
+    ];
+    for (wire_name, channel) in channels {
+        let Some(channel) = channel else { continue };
+        let Some(scale) = channel.scale.as_ref() else { continue };
+        let Some(param) = scale.domain_param() else { continue };
+        for panel in 0..panel_count {
+            bindings.push(ParamBinding {
+                param: param.to_owned(),
+                role: BindingRole::Domain,
+                panel: Some(panel),
+                channel: Some(wire_name.to_owned()),
+            });
+        }
+    }
+
+    // Filter bindings: each filter transform carrying a `param` marker.
+    for transform in &spec.transforms {
+        if let TransformSpec::Filter(filter) = transform {
+            let Some(param) = filter.param.as_ref() else { continue };
+            for panel in 0..panel_count {
+                bindings.push(ParamBinding {
+                    param: param.clone(),
+                    role: BindingRole::Filter,
+                    panel: Some(panel),
+                    channel: None,
+                });
+            }
+        }
+    }
+
+    // Legend bindings: a selection declared with `bind="legend"`.
+    for param in &spec.params {
+        if matches!(&param.bind, Some(serde_json::Value::String(s)) if s == "legend") {
+            bindings.push(ParamBinding {
+                param: param.name.clone(),
+                role: BindingRole::Legend,
+                panel: None,
+                channel: None,
+            });
+        }
+    }
+
+    bindings
 }
 
 fn build_title(
@@ -452,10 +734,11 @@ fn build_legend_decorations(
     if layout.legend.is_none() && layout.aux_legends.is_empty() {
         return Ok(());
     }
-    let rendering_spec_for_legend = ChartSpec {
+    let mut rendering_spec_for_legend = ChartSpec {
         encoding: prep.layers[0].encoding.clone(),
         ..spec.clone()
     };
+    resolve_param_domains(&mut rendering_spec_for_legend);
     let mut color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
         let (gs, _) = scale_resolve::resolve_scales_with_outputs(
             &rendering_spec_for_legend,
@@ -1141,6 +1424,88 @@ fn remap_coord(
     break_axis::broken_scale_map(data_val, br)
 }
 
+// ── Independent-axis projection helpers ──────────────────────────────────────
+//
+// These helpers rebuild `AxisInput.tick_projection` from a per-panel
+// `ScaleKind` so that tick positions are correct relative to the per-panel
+// scale domain (not the global one). The provisional `[0,1]`-range scale
+// used in `prepare.rs` is reproduced here by building a matching scale over
+// the `[0,1]` range and computing fractions from it — this mirrors the exact
+// logic in `prepare.rs::prepare_render_inputs`.
+
+/// Build a `TickProjection` for an x-axis from a per-panel resolved scale.
+///
+/// The scale's tick fractions are computed relative to the `[0, 1]` range so
+/// they are panel-range-agnostic; `layout_x_axis` maps them onto the actual
+/// panel pixel range. Returns `None` for ordinal (categorical) scales, keeping
+/// uniform-slot placement (same as the shared path).
+fn build_independent_x_projection(
+    scale: &scale_resolve::ScaleKind,
+    tick_count: usize,
+) -> Option<crate::layout::TickProjection> {
+    // Ordinal axes do not use scale-projected placement.
+    if matches!(scale, scale_resolve::ScaleKind::Ordinal(_)) {
+        return None;
+    }
+    // Rebuild a provisional [0,1]-range scale so tick fractions are portable
+    // across different panel pixel ranges (the same approach prepare.rs uses).
+    let fractions = build_provisional_fractions(scale, tick_count);
+    if fractions.is_empty() {
+        return None;
+    }
+    let padding_frac = build_provisional_padding(scale);
+    Some(crate::layout::TickProjection {
+        padding_frac,
+        major: fractions,
+        minor: Vec::new(), // minor ticks are not rebuilt for independent axes
+    })
+}
+
+/// Build a `TickProjection` for a y-axis from a per-panel resolved scale.
+///
+/// Y fractions must be produced in REVERSED order (high domain values first)
+/// so they align with the reversed tick labels (`prepare.rs` reverses y labels
+/// for non-ordinal axes). Returns `None` for ordinal scales.
+fn build_independent_y_projection(
+    scale: &scale_resolve::ScaleKind,
+    tick_count: usize,
+) -> Option<crate::layout::TickProjection> {
+    if matches!(scale, scale_resolve::ScaleKind::Ordinal(_)) {
+        return None;
+    }
+    let mut fractions = build_provisional_fractions(scale, tick_count);
+    if fractions.is_empty() {
+        return None;
+    }
+    // Reverse so the carrier is index-aligned with the reversed y tick labels.
+    fractions.reverse();
+    let padding_frac = build_provisional_padding(scale);
+    Some(crate::layout::TickProjection {
+        padding_frac,
+        major: fractions,
+        minor: Vec::new(),
+    })
+}
+
+/// Compute tick fractions `t ∈ [0, 1]` for `scale` over its own data domain,
+/// normalizing pixel positions by the scale's pixel span. This mirrors the
+/// approach in `ScaleKind::tick_fractions`.
+///
+/// Callers that need reversed fractions (e.g. y-axis) reverse the result
+/// themselves after calling this function.
+fn build_provisional_fractions(
+    scale: &scale_resolve::ScaleKind,
+    tick_count: usize,
+) -> Vec<f64> {
+    scale.tick_fractions(tick_count)
+}
+
+/// Recover the scale padding fraction from the provisional scale's pixel range.
+/// Mirrors `ScaleKind::padding_fraction` used in `prepare.rs`.
+fn build_provisional_padding(scale: &scale_resolve::ScaleKind) -> f64 {
+    scale.padding_fraction()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1298,5 +1663,211 @@ mod tests {
             }
             other => panic!("expected Path node, got {other:?}"),
         }
+    }
+
+    // ── D6 reactive-rescale static resolver ──────────────────────────────
+
+    use crate::spec::encoding::{ContinuousScaleCommon, EncodingSpec, ScaleSpec};
+    use crate::spec::mark::Mark;
+    use ferrum_scene::{ParamKind, ParameterSpec};
+
+    fn linear_domain_param(name: &str) -> ScaleSpec {
+        ScaleSpec::Linear {
+            common: ContinuousScaleCommon {
+                domain: None,
+                range: None,
+                clamp: false,
+                padding: None,
+                scheme: None,
+                domain_param: Some(name.to_string()),
+            },
+            nice: false,
+            zero: false,
+        }
+    }
+
+    fn spec_with_x_domain_param(params: Vec<ParameterSpec>) -> ChartSpec {
+        let mut spec = ChartSpec {
+            data: crate::spec::data_ref::DataRef::default(),
+            mark: Mark::Point,
+            encoding: crate::spec::encoding::Encoding {
+                x: Some(EncodingSpec {
+                    field: "v".into(),
+                    scale: Some(linear_domain_param("d")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        spec.params = params;
+        spec
+    }
+
+    fn x_domain(spec: &ChartSpec) -> Option<Vec<f64>> {
+        match spec.encoding.x.as_ref()?.scale.as_ref()? {
+            ScaleSpec::Linear { common, .. } => common.domain.clone(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn resolve_param_domains_substitutes_variable_array() {
+        let mut spec = spec_with_x_domain_param(vec![ParameterSpec {
+            name: "d".into(),
+            kind: ParamKind::Variable,
+            value: Some(serde_json::json!([10, 20])),
+            bind: None,
+            select: None,
+        }]);
+        resolve_param_domains(&mut spec);
+        assert_eq!(x_domain(&spec), Some(vec![10.0, 20.0]));
+        // domain_param cleared after substitution.
+        assert_eq!(spec.encoding.x.unwrap().scale.unwrap().domain_param(), None);
+    }
+
+    #[test]
+    fn resolve_param_domains_no_matching_param_leaves_auto() {
+        // domainParam "d" referenced, but no such param declared → domain stays
+        // None (auto-infer), and the reference is left in place.
+        let mut spec = spec_with_x_domain_param(vec![ParameterSpec {
+            name: "other".into(),
+            kind: ParamKind::Variable,
+            value: Some(serde_json::json!([1, 2])),
+            bind: None,
+            select: None,
+        }]);
+        resolve_param_domains(&mut spec);
+        assert_eq!(x_domain(&spec), None);
+    }
+
+    #[test]
+    fn resolve_param_domains_selection_leaves_auto() {
+        // A selection (interval) yields no static numeric domain → auto-infer.
+        let mut spec = spec_with_x_domain_param(vec![ParameterSpec {
+            name: "d".into(),
+            kind: ParamKind::Interval,
+            value: None,
+            bind: None,
+            select: None,
+        }]);
+        resolve_param_domains(&mut spec);
+        assert_eq!(x_domain(&spec), None);
+    }
+
+    #[test]
+    fn resolve_param_domains_noop_when_no_params() {
+        // The byte-stability gate: empty params → spec unchanged.
+        let mut spec = spec_with_x_domain_param(Vec::new());
+        let before = serde_json::to_string(&spec).unwrap();
+        resolve_param_domains(&mut spec);
+        let after = serde_json::to_string(&spec).unwrap();
+        assert_eq!(before, after);
+    }
+
+    // ── D6 param→scene bindings (5e-2a) ──────────────────────────────────
+
+    use ferrum_scene::BindingRole;
+
+    #[test]
+    fn collect_param_bindings_emits_domain_binding() {
+        // An x-scale domainParam → a Domain binding on panel 0, channel "x".
+        let spec = spec_with_x_domain_param(vec![ParameterSpec {
+            name: "d".into(),
+            kind: ParamKind::Variable,
+            value: Some(serde_json::json!([0, 100])),
+            bind: None,
+            select: None,
+        }]);
+        let bindings = collect_param_bindings(&spec, 1);
+        assert_eq!(bindings.len(), 1);
+        let b = &bindings[0];
+        assert_eq!(b.param, "d");
+        assert_eq!(b.role, BindingRole::Domain);
+        assert_eq!(b.panel, Some(0));
+        assert_eq!(b.channel.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn collect_param_bindings_domain_per_panel_for_facets() {
+        let spec = spec_with_x_domain_param(vec![ParameterSpec {
+            name: "d".into(),
+            kind: ParamKind::Variable,
+            value: Some(serde_json::json!([0, 100])),
+            bind: None,
+            select: None,
+        }]);
+        let bindings = collect_param_bindings(&spec, 3);
+        assert_eq!(bindings.len(), 3);
+        assert_eq!(
+            bindings.iter().filter_map(|b| b.panel).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(bindings
+            .iter()
+            .all(|b| b.role == BindingRole::Domain && b.channel.as_deref() == Some("x")));
+    }
+
+    #[test]
+    fn collect_param_bindings_emits_filter_binding() {
+        let mut spec = spec_with_x_domain_param(Vec::new());
+        // Drop the domainParam so only the filter contributes.
+        spec.encoding.x = None;
+        spec.transforms = vec![crate::transform::core::TransformSpec::Filter(
+            crate::transform::filter::FilterSpec {
+                predicate: "true".into(),
+                name: None,
+                param: Some("brush".into()),
+            },
+        )];
+        let bindings = collect_param_bindings(&spec, 1);
+        assert_eq!(bindings.len(), 1);
+        let b = &bindings[0];
+        assert_eq!(b.param, "brush");
+        assert_eq!(b.role, BindingRole::Filter);
+        assert_eq!(b.panel, Some(0));
+        assert_eq!(b.channel, None);
+    }
+
+    #[test]
+    fn collect_param_bindings_emits_legend_binding() {
+        let mut spec = spec_with_x_domain_param(vec![ParameterSpec {
+            name: "sel".into(),
+            kind: ParamKind::Point,
+            value: None,
+            bind: Some(serde_json::json!("legend")),
+            select: None,
+        }]);
+        spec.encoding.x = None;
+        let bindings = collect_param_bindings(&spec, 1);
+        assert_eq!(bindings.len(), 1);
+        let b = &bindings[0];
+        assert_eq!(b.param, "sel");
+        assert_eq!(b.role, BindingRole::Legend);
+        assert_eq!(b.panel, None);
+        assert_eq!(b.channel, None);
+    }
+
+    #[test]
+    fn collect_param_bindings_empty_for_param_free_spec() {
+        let spec = spec_with_x_domain_param(Vec::new());
+        // spec_with_x_domain_param sets an x domainParam "d", but param-free
+        // here means no params declared; the marker still produces a Domain
+        // binding because the reference exists. Strip it to assert true emptiness.
+        let mut bare = spec;
+        bare.encoding.x = None;
+        assert!(collect_param_bindings(&bare, 1).is_empty());
     }
 }

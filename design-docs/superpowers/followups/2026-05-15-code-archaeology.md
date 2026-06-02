@@ -45,6 +45,12 @@
 
 > **Regression tests added `aab2b0d`:** 16 new `#[cfg(test)]` tests across all four previously untested fix paths. Each test was verified to fail on the reverted code: geoshape `polygon_with_hole_has_two_rings` fails if holes are dropped; polar transform tests assert coordinate changes and Rect→Polygon conversion; leader-line tests assert `SceneNode::Line` presence/absence by flag.
 
+> **Open (noted 2026-06-01, flexibility D2):** `fix_kde_extents_for_facet` in `render/prepare.rs` pins the global x-extent for a single-group faceted KDE so per-panel curves share a comparable axis. It is **KDE-only**: faceting-before-transform drops cross-partition extent unification in general, and `Bin`/`Violin` carry the same `extent`/`shared_extent` field pair. A faceted histogram or violin with auto extent has the same per-panel-drift and is NOT fixed by this helper. Generalize the extent-pin across transforms when faceted `Bin`/`Violin` is next touched — do not file it as a new regression.
+
+> **Open (noted 2026-06-01, flexibility D10):** figure-level `.properties(title=/subtitle=/caption=)` chrome (rendered once around a composed figure) is wired for `_CompositeBase` (`VConcatChart`/`HConcatChart`/`ConcatChart`) and faceted `Chart`. `JointChart` (`composition.py:619`) and `ClusterMapChart` (`composition.py:1268`) override `properties` to route all kwargs into their inner panel, so `joint.properties(title=...)` lands the title on the center panel rather than wrapping the figure. Out of D10's stated scope (vconcat/hconcat/facet); wire figure chrome into those two composites when next touched.
+
+> **Open (noted 2026-06-01, flexibility D7):** `build_polar` in `render/marks/bar.rs` (polar/coxcomb bars) emits `tooltips: None`/`hrefs: None` and applies only flat `mark_style.opacity`, whereas the arc annular path (`build_annular`) wires per-row tooltips and per-row opacity. So a polar `mark_bar` with `tooltip=`/per-row `opacity=` silently loses them. Out of D7's geometry scope; wire to match `build_annular` when polar bars are next touched. Also: the polar channel-mapping convention (theta="x"→radius=y etc.) is duplicated between `arc.rs` and `bar.rs` — extract a shared `polar_channels(ctx)` helper if a third polar mark lands.
+
 ---
 
 ## Python Silent Drops (accepted by Python API, never reach Rust)
@@ -197,3 +203,79 @@ Surfaced by 4 parallel auditors (scene-pipeline, theme-wiring, pyo3-binding, int
 | R5 | S3 | **WASM colorbar-in-inset id collision** — JS `_buildIdMap` namespaces by literal id per loadScene, so an outer colorbar gradient (`ferrum-colorbar-0`, hardcoded in `legend.rs:58`) and an inset chart that *also* has a colorbar collapse to one namespaced id → the inset's (or outer's) colorbar renders with the wrong gradient. Narrow trigger (continuous-color chart + `.inset()` of another continuous-color chart) but a genuine wrong-render. The only confirmed correctness issue across all reviews. | ✅ **Fixed `0b57b61`** — `legend.rs` merges the colorbar `<defs>`+`<rect>` into one self-contained Raw fragment (removing the only cross-fragment id ref; static SVG byte-identical); `ferrum-anywidget.js` switches to per-fragment id namespacing (`ferrum-raw-{loadIdx}-{fragIdx}-{id}`), now collision-free + reference-complete. Regression test pins old-collapses-to-1 vs new-2-distinct. |
 | R6 | S2 | Interactive text-vs-raw z-order flips on the first zoom tick (`_placeTextSvg` re-append moves labels above the raw overlay groups). Cosmetic; rarely-overlapping content. `ferrum-anywidget.js`. | Deferred — follow-up |
 | R7 | S2 | Discretizing *positional* scales (`Quantize`/`BinOrdinal`/`Sequential`/`Diverging` declared on an x/y axis) resolve to `ScaleKind::Linear` in `positional.rs` before `minor_ticks_internal` is reached, so they would get *linear-subdivided* minors rather than empty. Unreachable in practice (these are color/size specs); semantic corner only. | Deferred — add a clarifying comment when next touching `positional.rs` |
+
+---
+
+## D6 reactive-parameter runtime (2026-06-01, `feat/flexibility-new-capabilities`)
+
+D6 (reactive parameters) shipped complete (sub-tasks 5a–5e-2b). One pre-existing render-layer limitation surfaced and is recorded here; it is **not** a D6 regression.
+
+| ID | Severity | Item | Disposition |
+|---|---|---|---|
+| D6-1 | S3 | **Multi-panel simultaneous reactive rescale** is bounded by the single-transform-uniform render path: `render::upload_transform_and_render` uploads one transform uniform per frame and renders the whole frame, so when a brush drives reactive rescale, only one bound target panel's affine takes visible effect at a time (the same constraint that limits `setTransform` to panel 0). Single-panel overview→detail rescale works. A strict multi-panel rescale needs per-panel transform uniforms in the GPU render layer. | Deferred — render-layer change; out of D6 scope. Reactive rescale, crossfilter, and legend toggle all work for the single-target case validated by the audit's blocked designs. |
+
+Note: the packed-batch field-value-point-selection gap (legend toggle on ≥1000-mark batches) that a review flagged was **closed** in 5e-2b (`09ba4f7`) via `scene_load::tooltip_field_value` — packed batches carry `tooltip_bytes`, so field-projected point selections now match on packed marks. No follow-up needed there.
+
+---
+
+## Flexibility re-audit fix campaign (2026-06-02, `feat/flexibility-new-capabilities`)
+
+Re-ran `/audit-flexibility` after D1-D10 + D6; it confirmed 6 of 10 baseline defects closed and surfaced fresh ones. Fixed this campaign (each gated + regression-tested):
+
+| Fix | Commit | What |
+|---|---|---|
+| G-D6 | a00126d | `fm.when(sel).then(num).otherwise(num)` no longer a silent no-op; channel taken from the encode key; `encode(<ch>=ConditionalSpec)` works; numeric value → opacity default |
+| G-D7 | 9aacabf | radial bars stack outward (`Radius(stack=)` honored); `_normalize_stack` shared across X/Y/Theta/Radius fixes a latent `stack=True` PyO3 crash |
+| T9 | 45e047e | `transform_top_k` aggregates integer columns instead of silently counting (was Float64-only) |
+| T10 | cccf36d | `mark_violin` honors color/hue (per-(x,hue) KDE, overlaid) instead of silently collapsing |
+| T11 | 834f126 | `mark_area` splits by `detail=` and non-nominal/ordinal color (was Utf8-color-only collapse) |
+| T12 | 8b15f74 | per-layer `aggregate=` no longer dropped when layered (named chart-level Aggregate + data_source routing; both disjoint and column-overlap `__add__` paths) |
+
+### Phase C campaign (2026-06-02) — FA-1..FA-6 + cross-cutting consistency gaps RESOLVED
+
+All FA follow-ups and five cross-cutting synthesis items (SYNTHESIS §C-D) fixed on `feat/flexibility-new-capabilities`, each gated (spec/quality + review-lite) and regression-tested; render changes visually inspected. Full suite after: **pytest 5293 passed / 0 failed; cargo all suites 0 failed.**
+
+| ID | Commit | Resolution |
+|---|---|---|
+| C1 | 2bfe629 | `title=None` AND `Axis(title="")` truly suppress (no reserved margin, no phantom `<text>`); empty title resolves to None at the prepare boundary (Python forwards `""`, Rust skips the field fallback). |
+| C2 | 7dfb0c9 | annotations anchor to categorical/ordinal axes (non-ISO strings → ordinal category coords, not force-parsed temporal); `fm.annotate_*` accept `fm.px`/`fm.norm`; unresolved category warns before center-fallback. |
+| C3 | d731f07 | typed continuous scales (Linear/Log/Pow/Sqrt/Symlog) accept optional `domain` and auto-infer from data like the dict form. |
+| C4 | 3a2ee59 | `resolve=` on `vconcat`/`hconcat`; `pairplot(hue=)` shares one color domain. **Residual:** a single deduped legend rendered once outside the grid needs compositor layout work — domain is unified, per-panel legends remain (documented in `matrix.py`). |
+| C5 | 5e2dd63 | 2-D density splits by categorical hue (`Kde2D groupby` → per-group surfaces; `Contour` iterates surfaces; `jointplot(kind='kde', hue=)` + `mark_contour(groupby=)`). **Note:** grouped contours render as isolines colored by group; filled per-group isobands are blocked by per-group `level_id` collision (group A and B both start `level_id=0` → polygon renderer merges them). |
+| FA-1 | 059a050 | `mark_arc(theta:N, radius:Q)` renders an equal-band Nightingale coxcomb (was blank). |
+| FA-2 | 2480b08 | polar bars render equal full-circle angular bands (was narrow upper-arc petals — root cause a double polar transform on `MarkBatchKind::Arc` geometry). |
+| FA-3 | 10ecc4a | `stat_aggregate` accepts integer/uint/bool groupby (KeyValue gained Null/Int/UInt/Bool; output preserves the key dtype). |
+| FA-4 | 803d753 | per-layer `bin=` resolved via named transform + data_source routing (mirrors T12); `bin=Bin(...)` kwargs preserved; bin+aggregate on one layer raises rather than clobbering. |
+| FA-5 | 4459c29 | ordinal/quantitative-color `mark_area` legend swatches match fills (`build_color_scale` forces categorical for `Mark::Area`). |
+| FA-6 | 54da54d | violin/boxplot box-inner layers color-encode by hue (also fixed standalone `mark_boxplot` color threading). |
+
+### New follow-ups surfaced DURING the Phase C campaign (open)
+
+| ID | Severity | Item | Notes |
+|---|---|---|---|
+| FA-7 | S3 | **RESOLVED (480f72f)** — Int64/uint/bool groupby was rejected by 4 sibling transforms | `violin.rs`, `summary.rs`, `error_extent.rs`, `box_stats.rs` each carried a private `KeyValue` enum (Str+Float only). Extracted canonical keying into `transform/group_key.rs` and migrated all 5 transforms (incl. aggregate); int/bool groupby now works in violin/boxplot/errorband/summary; Float64/Utf8 byte-stable (zero golden movement). |
+| FA-8 | S2 | **C5 grouped contours are isoline-only** | filled per-group isobands need globally-unique `level_id` across groups (namespace `level_id` by group index in `contour.rs`); until then `desugar_contour(groupby=)` forces `fill=False`. |
+| FA-9 | S1 | **Int64 null groupby key materializes as `0`** | `aggregate.rs materialize_groupby_col` emits `0i64` for a null integer key, which collides with a genuine `0` key (null float → NaN is unambiguous; null int → 0 is not). Pinned/documented by a regression test; emit a proper null instead. |
+| FA-10 | S2 | **typed-Scale sentinel+flag is two sources of truth** | C3 stores a sentinel domain + `domain_user_set` bool; crate-internal `_internal` accessors read the sentinel directly. Safe today (only called on data-derived scales) but latent; an `Option<[f64;2]>` inner domain would make the unset case unrepresentable. (Found by C3 quality review.) |
+
+**Resolved from the prior frontier:** annotation categorical-axis anchoring (C2), typed-Scale domain auto-inference (C3), shared color domain across concat/pairplot (C4, legend-dedup residual remains), 2-D `mark_density` hue (C5). **Still open in SYNTHESIS §C-D:** `title=None` was C1 (done); custom `fm.Gradient` continuous palettes; gridded `contourf`/`pcolormesh`/`quiver`; flow geometry (Sankey/variable-width trail); recursive treemap/icicle rectangling; public `mark_polygon` for half-violins/raincloud.
+
+### Structural pass (2026-06-02) — break the fix-exposes-next-instance recursion
+
+A 4-agent duplication + silent-failure audit (Rust transforms, Rust render/marks, Python) found the *mechanisms* behind the recurring bug classes: (1) copy-paste dispatch reimplemented per file (fix one, N drift), (2) transform→render layer coupling (new data shape the renderer never handled), (3) silent-failure as default. Findings were **verified before fixing** — several audit claims were false positives (see below). Fixed the confirmed subset; deferred the risky/unconfirmed with honest status. Full suite after: **pytest 5336 / 0 fail; cargo 2206 / 0 fail.**
+
+| ID | Commit | Resolution |
+|---|---|---|
+| S1 | (errorbar hue) | `mark_errorbar`/`mark_errorband` computed the error extent pooled across hue groups (`error_extent` groupby `[x]` only) while coloring bands per group — same silent-wrong class as T10/FA-6. Threaded color into the groupby + layer encodings; extracted shared `marks/_desugar_helpers.resolve_color_groupby` so boxplot/violin/errorbar/errorband share one color-threading path (also drops `None` keys — a latent bug). |
+| S2 | (shape/offset raise) | `mark_point(shape='typo')` silently drew a circle; `transform_stack(offset='bogus')` silently stacked at zero. Both now validated at the Python API boundary (clear `ValueError`); `data_stack.rs` raises on unknown offset; `point.rs` keeps a non-panicking circle fallback for raw-JSON specs (Python is the guard). |
+| S3 | (numeric_util) | Unified byte-identical `clean_float64_values` (bin/kde/smooth) and `quantile_sorted` (qq/letter_value) into `transform/numeric_util.rs`. Pure drift-prevention, byte-stable. |
+
+**Audit false-positives caught by verify-before-fix (NOT bugs):** `smooth.rs` "missing NaN filter" — `extract_xy:500` already filters NaN (audit read the wrong lines); `mark_line` integer color — works (6/6 distinct strokes verified); `mark_ribbon` integer color — splits correctly; legend-swatch≠fill beyond FA-5 — `legend.rs` and `area.rs` already use the same `color_scale.lookup`. Chasing these would have *been* the recursion.
+
+**Deferred (recorded, intentionally NOT fixed — drift-prevention or unconfirmed, not active bugs):**
+| ID | Severity | Item |
+|---|---|---|
+| FA-11 | S2 | **Opacity resolution duplicated + drifted across 5 marks** (point/bar/area/line/rect): per-row vs group-first sampling, scale-applied vs not, `general_opacity` fallback only on bar, `fill_opacity` unread on line. Unifying needs design decisions (is opacity scaled? per-row in grouped marks?) and risks behavior change — no confirmed active bug today. A shared `OpacityChannels` resolver would prevent future drift. `render/marks/{point,bar,area,line,rect}.rs`. |
+| FA-12 | S3 | **Group-partition+stack duplicated across bin/kde/kde_2d/smooth** (`apply_grouped`, ~4 near-identical bodies; extent logic already subtly differs). FA-7 unified the *keying*; this is the row-partition + per-group output stacking. Big refactor, drift-risk, no active bug. |
+| FA-13 | S3 | **Color/detail grouping duplicated across area/line/ribbon** (`col_as_ordinal_category_str` grouping). Verified working at runtime (line/ribbon int-color split correctly), so drift-prevention only — extract `build_color_detail_groups`. |
+| FA-14 | S2 | **`prepare.rs:142` StringView columns bypass string normalization** (`_ => {}`). Potential silent skip; needs a probe to confirm StringView even reaches this path (polars/pyarrow usually yield Utf8). Verify-then-fix-or-close. |

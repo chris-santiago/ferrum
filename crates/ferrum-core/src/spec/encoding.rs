@@ -88,6 +88,14 @@ pub struct ContinuousScaleCommon {
     /// without the scheme being silently dropped (D4 fix, 2026-05-31).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
+    /// Reactive-rescale reference (D6): names a parameter whose static value
+    /// (a numeric array) supplies this scale's domain. A sibling of `domain`
+    /// rather than a retyped `domain`, so every scale struct stays byte-stable
+    /// when no parameter is referenced. The static resolver substitutes the
+    /// parameter's value into `domain` (and clears this field) before scale
+    /// resolution; WASM reads it to rescale live.
+    #[serde(rename = "domainParam", default, skip_serializing_if = "Option::is_none")]
+    pub domain_param: Option<String>,
 }
 
 /// Scale override on an encoding channel. Honored by scale_resolve.rs in Phase 8a.
@@ -214,6 +222,45 @@ pub enum ScaleSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scheme: Option<String>,
     },
+}
+
+impl ScaleSpec {
+    /// The `domainParam` reference on a continuous scale, if any.
+    ///
+    /// Only the 7 continuous variants carry `ContinuousScaleCommon` (and thus a
+    /// `domain_param`); categorical / sequential / diverging variants always
+    /// return `None` (their reactive rescale is a recorded D6 follow-up).
+    pub(crate) fn domain_param(&self) -> Option<&str> {
+        let common = match self {
+            ScaleSpec::Linear { common, .. }
+            | ScaleSpec::Log { common, .. }
+            | ScaleSpec::Time { common, .. }
+            | ScaleSpec::Symlog { common, .. }
+            | ScaleSpec::Pow { common, .. }
+            | ScaleSpec::Sqrt { common, .. }
+            | ScaleSpec::Utc { common, .. } => common,
+            _ => return None,
+        };
+        common.domain_param.as_deref()
+    }
+
+    /// Set the numeric `domain` on a continuous scale and clear any
+    /// `domainParam` reference (so downstream scale resolution sees a clean,
+    /// fully-resolved domain). No-op for non-continuous variants.
+    pub(crate) fn set_domain(&mut self, domain: Vec<f64>) {
+        let common = match self {
+            ScaleSpec::Linear { common, .. }
+            | ScaleSpec::Log { common, .. }
+            | ScaleSpec::Time { common, .. }
+            | ScaleSpec::Symlog { common, .. }
+            | ScaleSpec::Pow { common, .. }
+            | ScaleSpec::Sqrt { common, .. }
+            | ScaleSpec::Utc { common, .. } => common,
+            _ => return,
+        };
+        common.domain = Some(domain);
+        common.domain_param = None;
+    }
 }
 
 fn default_log_base() -> f64 {
@@ -733,6 +780,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_linear_scale_domain_param_round_trips() {
+        // `domainParam` deserializes from the compact wire form Python emits...
+        let scale: ScaleSpec =
+            serde_json::from_str(r#"{"type":"linear","domainParam":"d"}"#).unwrap();
+        assert_eq!(scale.domain_param(), Some("d"));
+        // ...and survives a serialize → deserialize round-trip.
+        let back = serde_json::to_string(&scale).unwrap();
+        assert!(back.contains(r#""domainParam":"d""#), "missing domainParam: {back}");
+        let reparsed: ScaleSpec = serde_json::from_str(&back).unwrap();
+        assert_eq!(reparsed, scale);
+    }
+
+    #[test]
+    fn test_scale_set_domain_clears_domain_param() {
+        let mut scale: ScaleSpec =
+            serde_json::from_str(r#"{"type":"linear","domainParam":"d"}"#).unwrap();
+        scale.set_domain(vec![10.0, 20.0]);
+        assert_eq!(scale.domain_param(), None);
+        match scale {
+            ScaleSpec::Linear { common, .. } => assert_eq!(common.domain, Some(vec![10.0, 20.0])),
+            _ => panic!("expected Linear"),
+        }
+    }
+
+    #[test]
     fn test_data_type_short_and_long_forms() {
         assert_eq!(DataType::from_str("Q").unwrap(), DataType::Quantitative);
         assert_eq!(DataType::from_str("quantitative").unwrap(), DataType::Quantitative);
@@ -851,6 +923,7 @@ mod tests {
                     clamp: false,
                     padding: None,
                     scheme: None,
+                    domain_param: None,
                 },
                 nice: true,
             }),
@@ -1218,7 +1291,7 @@ mod tests {
             x: Some(EncodingSpec {
                 field: "val".into(),
                 type_: Some(DataType::Quantitative),
-                scale: Some(ScaleSpec::Log { base: 2.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None }, nice: true }),
+                scale: Some(ScaleSpec::Log { base: 2.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None }, nice: true }),
                 title: Some("Value (log2)".into()),
                 axis: Some(AxisSpec { extra: {
                     let mut m = serde_json::Map::new();
@@ -1255,7 +1328,7 @@ mod tests {
             x: Some(EncodingSpec {
                 field: "val".into(),
                 type_: Some(DataType::Temporal),
-                scale: Some(ScaleSpec::Linear { common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None }, nice: true, zero: false }),
+                scale: Some(ScaleSpec::Linear { common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None }, nice: true, zero: false }),
                 title: Some("Parent Title".into()),
                 scheme: Some("parent_scheme".into()),
                 format: Some("parent_fmt".into()),
@@ -1268,7 +1341,7 @@ mod tests {
             x: Some(EncodingSpec {
                 field: "val".into(),
                 type_: Some(DataType::Quantitative),
-                scale: Some(ScaleSpec::Log { base: 10.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None }, nice: false }),
+                scale: Some(ScaleSpec::Log { base: 10.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None }, nice: false }),
                 title: Some("Child Title".into()),
                 scheme: Some("child_scheme".into()),
                 format: Some("child_fmt".into()),

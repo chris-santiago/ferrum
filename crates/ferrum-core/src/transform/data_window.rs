@@ -353,12 +353,18 @@ fn compute_window_op(
 
             for partition in partitions {
                 for (pos, &idx) in partition.iter().enumerate() {
+                    // Vega/Altair convention: frame=(preceding, following) where
+                    // `preceding` is NEGATIVE to count rows *before* the current
+                    // row (e.g. frame=(-2, 0) = trailing window of 3 rows).
+                    // `following` is POSITIVE to count rows *after* the current row.
+                    // start = pos + preceding  (preceding ≤ 0, clamped to 0)
+                    // end   = pos + following  (following ≥ 0, inclusive → +1)
                     let start = match preceding {
-                        Some(p) => (pos as i64 - p).max(0) as usize,
+                        Some(p) => (pos as i64 + p).max(0) as usize,
                         None => 0,
                     };
                     let end = match following {
-                        Some(f) => ((pos as i64 + f) as usize + 1).min(partition.len()),
+                        Some(f) => ((pos as i64 + f + 1) as usize).min(partition.len()),
                         None => partition.len(),
                     };
 
@@ -460,21 +466,24 @@ mod tests {
             }],
             sort: None,
             groupby: None,
-            frame: Some((Some(1), Some(1))), // 1 preceding, 1 following
+            // Vega convention: preceding is NEGATIVE (rows before current),
+            // following is POSITIVE (rows after current).
+            // frame=(-1, 1) = 1 preceding + current + 1 following (symmetric).
+            frame: Some((Some(-1), Some(1))),
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.num_rows(), 5);
         let means = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
-        // Row 0: mean(1,2) = 1.5
+        // Row 0: window [0..=1] → mean(1,2) = 1.5
         assert!((means.value(0) - 1.5).abs() < 1e-12);
-        // Row 1: mean(1,2,3) = 2.0
+        // Row 1: window [0..=2] → mean(1,2,3) = 2.0
         assert!((means.value(1) - 2.0).abs() < 1e-12);
-        // Row 2: mean(2,3,4) = 3.0
+        // Row 2: window [1..=3] → mean(2,3,4) = 3.0
         assert!((means.value(2) - 3.0).abs() < 1e-12);
-        // Row 3: mean(3,4,5) = 4.0
+        // Row 3: window [2..=4] → mean(3,4,5) = 4.0
         assert!((means.value(3) - 4.0).abs() < 1e-12);
-        // Row 4: mean(4,5) = 4.5
+        // Row 4: window [3..=4] → mean(4,5) = 4.5
         assert!((means.value(4) - 4.5).abs() < 1e-12);
     }
 
@@ -549,5 +558,89 @@ mod tests {
         assert_eq!(lead.value(0), 2.0);
         assert_eq!(lead.value(1), 3.0);
         assert!(lead.value(3).is_nan()); // No following
+    }
+
+    fn make_val_batch(vals: Vec<f64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vals))]).unwrap()
+    }
+
+    fn mean_op() -> WindowOp {
+        WindowOp { op: "mean".into(), field: Some("x".into()), as_: "m".into(), param: None }
+    }
+
+    fn get_means(out: &RecordBatch) -> Vec<f64> {
+        let arr = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        (0..arr.len()).map(|i| arr.value(i)).collect()
+    }
+
+    // Trailing window: frame=(-2, 0) on [1,2,3,4,5].
+    // Expected: [1.0, 1.5, 2.0, 3.0, 4.0]
+    #[test]
+    fn window_trailing_frame_negative_preceding() {
+        let batch = make_val_batch(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let spec = DataWindowSpec {
+            ops: vec![mean_op()],
+            sort: None, groupby: None,
+            frame: Some((Some(-2), Some(0))),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let means = get_means(&out);
+        assert!((means[0] - 1.0).abs() < 1e-12, "pos=0: {}", means[0]);
+        assert!((means[1] - 1.5).abs() < 1e-12, "pos=1: {}", means[1]);
+        assert!((means[2] - 2.0).abs() < 1e-12, "pos=2: {}", means[2]);
+        assert!((means[3] - 3.0).abs() < 1e-12, "pos=3: {}", means[3]);
+        assert!((means[4] - 4.0).abs() < 1e-12, "pos=4: {}", means[4]);
+    }
+
+    // Leading window: frame=(0, 2) on [1,2,3,4,5].
+    // Expected: [2.0, 3.0, 4.0, 4.5, 5.0]
+    #[test]
+    fn window_leading_frame_positive_following() {
+        let batch = make_val_batch(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let spec = DataWindowSpec {
+            ops: vec![mean_op()],
+            sort: None, groupby: None,
+            frame: Some((Some(0), Some(2))),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let means = get_means(&out);
+        // pos=0: window [0..=2] → mean(1,2,3) = 2.0
+        assert!((means[0] - 2.0).abs() < 1e-12, "pos=0: {}", means[0]);
+        // pos=1: window [1..=3] → mean(2,3,4) = 3.0
+        assert!((means[1] - 3.0).abs() < 1e-12, "pos=1: {}", means[1]);
+        // pos=2: window [2..=4] → mean(3,4,5) = 4.0
+        assert!((means[2] - 4.0).abs() < 1e-12, "pos=2: {}", means[2]);
+        // pos=3: window [3..=4] → mean(4,5) = 4.5
+        assert!((means[3] - 4.5).abs() < 1e-12, "pos=3: {}", means[3]);
+        // pos=4: window [4..=4] → mean(5) = 5.0
+        assert!((means[4] - 5.0).abs() < 1e-12, "pos=4: {}", means[4]);
+    }
+
+    // Symmetric window: frame=(-1, 1) on [1,2,3,4,5].
+    // Expected: [1.5, 2.0, 3.0, 4.0, 4.5]
+    #[test]
+    fn window_symmetric_frame() {
+        let batch = make_val_batch(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let spec = DataWindowSpec {
+            ops: vec![mean_op()],
+            sort: None, groupby: None,
+            frame: Some((Some(-1), Some(1))),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let means = get_means(&out);
+        // pos=0: window [0..=1] → mean(1,2) = 1.5
+        assert!((means[0] - 1.5).abs() < 1e-12, "pos=0: {}", means[0]);
+        // pos=1: window [0..=2] → mean(1,2,3) = 2.0
+        assert!((means[1] - 2.0).abs() < 1e-12, "pos=1: {}", means[1]);
+        // pos=2: window [1..=3] → mean(2,3,4) = 3.0
+        assert!((means[2] - 3.0).abs() < 1e-12, "pos=2: {}", means[2]);
+        // pos=3: window [2..=4] → mean(3,4,5) = 4.0
+        assert!((means[3] - 4.0).abs() < 1e-12, "pos=3: {}", means[3]);
+        // pos=4: window [3..=4] → mean(4,5) = 4.5
+        assert!((means[4] - 4.5).abs() < 1e-12, "pos=4: {}", means[4]);
     }
 }

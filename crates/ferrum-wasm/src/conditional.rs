@@ -7,6 +7,12 @@ use crate::selection_state::SelectionState;
 
 use std::collections::HashMap;
 
+/// Opacity applied to marks that fall *outside* a D6 crossfilter brush.
+///
+/// Shared by the crossfilter dimming path here and the `WasmRenderer`
+/// call site in `lib.rs` so the "filtered out" appearance is defined once.
+pub(crate) const CROSSFILTER_DIM_OPACITY: f64 = 0.15;
+
 // ── wasm32-only: apply conditionals and re-render ────────────────────────────
 
 /// Resolve conditional encodings against the current selection state,
@@ -53,14 +59,90 @@ pub struct ConditionalUpdates {
     pub rect_instances: Vec<RectInstance>,
 }
 
+/// Apply a crossfilter dim to a single target panel's marks (D6 `Filter`
+/// binding).
+///
+/// A `transform_filter(param)` declares that marks outside the brushed interval
+/// should be removed from the bound panel. We reuse the exact spatial-
+/// containment dimming selections already use: the brushed extent is supplied
+/// as an `Interval` selection in the *target panel's pixel space* (re-projected
+/// through the shared data domain by the caller), and a synthesized opacity
+/// conditional dims marks whose centers fall outside it.
+///
+/// `circles`/`rects` are mutated in place over the full instance buffers; only
+/// the instances belonging to `target_panel` are touched (offsets are advanced
+/// across earlier panels exactly as `resolve_conditionals_with_packed` does, so
+/// the two paths stay in lock-step on the packed/non-packed layout).
+///
+/// Consumed by the wasm32 `WasmRenderer`; gated to wasm32 + test so the
+/// non-test host build does not flag it as dead code (host coverage is via the
+/// `#[cfg(test)]` unit test below).
+#[cfg(any(target_arch = "wasm32", test))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_crossfilter_to_panel(
+    panels: &[Panel],
+    target_panel: usize,
+    selection: &SelectionState,
+    dimmed_opacity: f64,
+    circles: &mut [CircleInstance],
+    rects: &mut [RectInstance],
+    packed_batch_meta: &HashMap<(u32, u32), PackedBatchMeta>,
+) {
+    // A filtered-in mark keeps its opacity; a filtered-out mark is dimmed.
+    let if_selected = EncodingValue::Opacity { value: 1.0 };
+    let if_not = EncodingValue::Opacity { value: dimmed_opacity };
+    let channel = ChannelName::Opacity;
+
+    let mut circle_offset = 0usize;
+    let mut rect_offset = 0usize;
+
+    for (panel_idx, panel) in panels.iter().enumerate() {
+        for (batch_idx, batch) in panel.marks.iter().enumerate() {
+            let key = (panel_idx as u32, batch_idx as u32);
+
+            if let Some(meta) = packed_batch_meta.get(&key) {
+                if panel_idx == target_panel && !matches!(selection, SelectionState::Empty) {
+                    apply_conditional_to_packed(
+                        &channel, &if_selected, &if_not, selection, meta, circles, rects,
+                    );
+                }
+                match meta.kind {
+                    0 => circle_offset += meta.instance_count,
+                    1 => rect_offset += meta.instance_count,
+                    _ => {}
+                }
+            } else {
+                let (n_circles, n_rects) = count_instances(batch);
+                if panel_idx == target_panel
+                    && !matches!(selection, SelectionState::Empty)
+                {
+                    if let Some(indices) = &batch.data_indices {
+                        let mut bufs = InstanceBuffers {
+                            circles,
+                            circle_offset,
+                            rects,
+                            rect_offset,
+                        };
+                        apply_conditional_to_batch(
+                            &channel, &if_selected, &if_not, selection, indices, batch, &mut bufs,
+                        );
+                    }
+                }
+                circle_offset += n_circles;
+                rect_offset += n_rects;
+            }
+        }
+    }
+}
+
 /// Mutable references to the circle and rect instance buffers together with
 /// the current write offsets. Groups the four mutable-state parameters that
 /// `apply_conditional_to_batch` needs, keeping its signature manageable.
-struct InstanceBuffers<'a> {
-    circles: &'a mut [CircleInstance],
-    circle_offset: usize,
-    rects: &'a mut [RectInstance],
-    rect_offset: usize,
+pub(crate) struct InstanceBuffers<'a> {
+    pub(crate) circles: &'a mut [CircleInstance],
+    pub(crate) circle_offset: usize,
+    pub(crate) rects: &'a mut [RectInstance],
+    pub(crate) rect_offset: usize,
 }
 
 pub fn resolve_conditionals(
@@ -169,12 +251,56 @@ pub fn resolve_conditionals_with_packed(
     }
 }
 
+/// Decide whether the `i`-th instance of a packed batch is selected.
+///
+/// Mirrors the unpacked [`apply_conditional_to_batch`] membership rules so the
+/// two paths stay in lock-step:
+/// - `Point` with non-empty `field_values` → match against the packed tooltip
+///   string table (the field-projected legend / linked-selection path);
+/// - `Point` with `indices` only → data-index membership;
+/// - `Interval` → spatial containment of the instance center (via `with_pos`).
+///
+/// `with_pos` supplies the instance center lazily so the caller reads it from
+/// whichever buffer (circle or rect) holds this packed batch.
+fn packed_instance_selected(
+    sel: &SelectionState,
+    meta: &PackedBatchMeta,
+    i: usize,
+    with_pos: impl Fn() -> Option<(f64, f64)>,
+) -> bool {
+    match sel {
+        SelectionState::Empty => false,
+        SelectionState::Interval { .. } => {
+            with_pos().is_some_and(|(x, y)| sel.contains_point(x, y))
+        }
+        SelectionState::Point { field_values, .. } if !field_values.is_empty() => {
+            // Field-value matching against the packed tooltip table — the same
+            // semantics the unpacked path applies via `batch.tooltips`. This is
+            // what makes legend toggle and field-projected linked selection work
+            // on packed (>= 1000-mark) batches.
+            let Some(bytes) = meta.tooltip_bytes.as_deref() else {
+                return false;
+            };
+            field_values.iter().all(|(fname, fval)| {
+                crate::scene_load::tooltip_field_value(bytes, i, fname)
+                    .is_some_and(|tv| field_value_matches_tooltip(&tv, fval))
+            })
+        }
+        SelectionState::Point { indices, .. } => meta
+            .data_indices
+            .as_ref()
+            .and_then(|dis| dis.get(i))
+            .is_some_and(|&di| indices.contains(&(di as usize))),
+    }
+}
+
 /// Apply conditional encoding to a packed batch's instances.
 ///
 /// For Interval selections, checks spatial containment of each instance's
-/// center against the selection rectangle. For Point selections with
-/// data_indices, checks index membership.
-fn apply_conditional_to_packed(
+/// center against the selection rectangle. For Point selections this matches
+/// either by `field_values` (against the packed tooltip table) or by data
+/// index — the same rules the unpacked path uses.
+pub(crate) fn apply_conditional_to_packed(
     channel: &ChannelName,
     if_selected: &EncodingValue,
     if_not: &EncodingValue,
@@ -191,27 +317,11 @@ fn apply_conditional_to_packed(
             // Packed circles.
             for i in 0..count {
                 let idx = start + i;
-                let selected = match sel {
-                    SelectionState::Interval { .. } => {
-                        if let Some(ci) = circles.get(idx) {
-                            sel.contains_point(ci.center[0] as f64, ci.center[1] as f64)
-                        } else {
-                            false
-                        }
-                    }
-                    SelectionState::Point { indices, field_values, .. } if field_values.is_empty() => {
-                        meta.data_indices
-                            .as_ref()
-                            .and_then(|dis| dis.get(i))
-                            .is_some_and(|&di| indices.contains(&(di as usize)))
-                    }
-                    _ => {
-                        meta.data_indices
-                            .as_ref()
-                            .and_then(|dis| dis.get(i))
-                            .is_some_and(|&di| sel.contains(di as usize))
-                    }
-                };
+                let selected = packed_instance_selected(sel, meta, i, || {
+                    circles
+                        .get(idx)
+                        .map(|ci| (ci.center[0] as f64, ci.center[1] as f64))
+                });
                 let value = if selected { if_selected } else { if_not };
                 if let Some(inst) = circles.get_mut(idx) {
                     apply_value_to_circle(inst, channel, value);
@@ -222,29 +332,13 @@ fn apply_conditional_to_packed(
             // Packed rects.
             for i in 0..count {
                 let idx = start + i;
-                let selected = match sel {
-                    SelectionState::Interval { .. } => {
-                        if let Some(ri) = rects.get(idx) {
-                            let cx = ri.position[0] as f64 + ri.size[0] as f64 / 2.0;
-                            let cy = ri.position[1] as f64 + ri.size[1] as f64 / 2.0;
-                            sel.contains_point(cx, cy)
-                        } else {
-                            false
-                        }
-                    }
-                    SelectionState::Point { indices, field_values, .. } if field_values.is_empty() => {
-                        meta.data_indices
-                            .as_ref()
-                            .and_then(|dis| dis.get(i))
-                            .is_some_and(|&di| indices.contains(&(di as usize)))
-                    }
-                    _ => {
-                        meta.data_indices
-                            .as_ref()
-                            .and_then(|dis| dis.get(i))
-                            .is_some_and(|&di| sel.contains(di as usize))
-                    }
-                };
+                let selected = packed_instance_selected(sel, meta, i, || {
+                    rects.get(idx).map(|ri| {
+                        let cx = ri.position[0] as f64 + ri.size[0] as f64 / 2.0;
+                        let cy = ri.position[1] as f64 + ri.size[1] as f64 / 2.0;
+                        (cx, cy)
+                    })
+                });
                 let value = if selected { if_selected } else { if_not };
                 if let Some(inst) = rects.get_mut(idx) {
                     apply_value_to_rect(inst, channel, value);
@@ -255,7 +349,7 @@ fn apply_conditional_to_packed(
     }
 }
 
-fn count_instances(batch: &MarkBatch) -> (usize, usize) {
+pub(crate) fn count_instances(batch: &MarkBatch) -> (usize, usize) {
     let mut nc = 0usize;
     let mut nr = 0usize;
     for node in &batch.nodes {
@@ -268,7 +362,7 @@ fn count_instances(batch: &MarkBatch) -> (usize, usize) {
     (nc, nr)
 }
 
-fn apply_conditional_to_batch(
+pub(crate) fn apply_conditional_to_batch(
     channel: &ChannelName,
     if_selected: &EncodingValue,
     if_not: &EncodingValue,
@@ -426,6 +520,156 @@ mod tests {
     use super::*;
     use crate::scene_load::srgb_to_linear;
     use ferrum_scene::{Color, FieldValue};
+
+    // ── D6 crossfilter: apply_crossfilter_to_panel dims only the target panel ─
+
+    #[test]
+    fn crossfilter_dims_only_target_panel_outside_interval() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+        let mk_panel = |cx: f64| Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![SceneNode::Circle { cx, cy: 50.0, r: 5.0, style: style.clone() }],
+                data_indices: Some(vec![0]),
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        };
+        // Panel 0 (source) mark at x=10 (inside the brush); panel 1 (target)
+        // mark at x=400 (outside the re-projected interval).
+        let panels = vec![mk_panel(10.0), mk_panel(400.0)];
+
+        let mut circles = vec![
+            CircleInstance {
+                center: [10.0, 50.0], radius: 5.0,
+                fill_color: [0.0; 4], stroke_color: [0.0; 4],
+                stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
+                stroke_dash: 0.0, angle: 0.0,
+            },
+            CircleInstance {
+                center: [400.0, 50.0], radius: 5.0,
+                fill_color: [0.0; 4], stroke_color: [0.0; 4],
+                stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
+                stroke_dash: 0.0, angle: 0.0,
+            },
+        ];
+        let mut rects: Vec<RectInstance> = vec![];
+
+        // Brush covers x in [0, 100] on the target panel's pixel space.
+        let sel = SelectionState::Interval {
+            x_range: Some((0.0, 100.0)),
+            y_range: None,
+        };
+
+        apply_crossfilter_to_panel(
+            &panels, 1, &sel, 0.15, &mut circles, &mut rects, &HashMap::new(),
+        );
+
+        // Source panel (index 0) mark must be untouched (full opacity).
+        assert!(
+            (circles[0].opacity - 1.0).abs() < 1e-6,
+            "source-panel mark must not be dimmed by crossfilter, got {}",
+            circles[0].opacity
+        );
+        // Target panel mark at x=400 is outside [0,100] → dimmed.
+        assert!(
+            (circles[1].opacity - 0.15).abs() < 1e-6,
+            "target-panel mark outside interval must be dimmed, got {}",
+            circles[1].opacity
+        );
+    }
+
+    #[test]
+    fn crossfilter_keeps_target_marks_inside_interval() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None, y_domain: None, expand: true, clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![SceneNode::Circle { cx: 50.0, cy: 50.0, r: 5.0, style }],
+                data_indices: Some(vec![0]),
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+        let mut circles = vec![CircleInstance {
+            center: [50.0, 50.0], radius: 5.0,
+            fill_color: [0.0; 4], stroke_color: [0.0; 4],
+            stroke_width: 0.0, opacity: 1.0, stroke_opacity: 0.0,
+            stroke_dash: 0.0, angle: 0.0,
+        }];
+        let mut rects: Vec<RectInstance> = vec![];
+        // Brush [0, 100] contains the mark at x=50.
+        let sel = SelectionState::Interval { x_range: Some((0.0, 100.0)), y_range: None };
+        apply_crossfilter_to_panel(
+            &panels, 0, &sel, 0.15, &mut circles, &mut rects, &HashMap::new(),
+        );
+        assert!(
+            (circles[0].opacity - 1.0).abs() < 1e-6,
+            "mark inside interval must stay at full opacity, got {}",
+            circles[0].opacity
+        );
+    }
 
     #[test]
     fn apply_color_to_circle() {
@@ -2052,6 +2296,141 @@ mod tests {
         assert!(
             (result.circle_instances[2].opacity - 1.0).abs() < 0.01,
             "non-packed circle after packed batch must be selected (opacity=1.0), got {}",
+            result.circle_instances[2].opacity
+        );
+    }
+
+    // ── Fix 3: packed-batch field-value point selection (legend toggle) ──────
+
+    /// Build a packed tooltip string table (matches `parse_tooltip_json`'s
+    /// layout): `[num_fields][names…][rows × values…]`, row-major.
+    fn build_tooltip_bytes(field_names: &[&str], rows: &[Vec<&str>]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(field_names.len() as u32).to_le_bytes());
+        for name in field_names {
+            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            buf.extend_from_slice(name.as_bytes());
+        }
+        for row in rows {
+            for val in row {
+                buf.extend_from_slice(&(val.len() as u32).to_le_bytes());
+                buf.extend_from_slice(val.as_bytes());
+            }
+        }
+        buf
+    }
+
+    /// A legend toggle builds a `Point` selection with non-empty `field_values`
+    /// and empty `indices`. On a packed batch this must match marks whose packed
+    /// tooltip carries the selected category — not silently match nothing.
+    #[test]
+    fn packed_field_value_point_selection_matches_via_tooltip() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect,
+        };
+
+        // Single packed batch with three circles, categories a / b / a.
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None, y_domain: None, expand: true, clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![], // empty — packed batch
+                data_indices: None,
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+
+        let red = Color { r: 255, g: 0, b: 0, a: 255 };
+        let grey = Color { r: 128, g: 128, b: 128, a: 255 };
+        let conditionals = vec![ConditionalEncoding {
+            selection_name: "leg".to_string(),
+            channel: ChannelName::Opacity,
+            if_selected: EncodingValue::Opacity { value: 1.0 },
+            if_not: EncodingValue::Opacity { value: 0.2 },
+        }];
+        // Colors kept distinct so a future colour conditional would still read
+        // sensibly; this test exercises the opacity dim that legend toggle uses.
+        let _ = (red, grey);
+
+        // Legend toggle on category "a": Point selection, empty indices.
+        let mut selections = HashMap::new();
+        selections.insert(
+            "leg".to_string(),
+            SelectionState::Point {
+                indices: Vec::new(),
+                field_values: vec![(
+                    "cat".to_string(),
+                    FieldValue::String { value: "a".to_string() },
+                )],
+            },
+        );
+
+        let neutral = [0.0_f32, 0.0, 0.0, 1.0];
+        let base_circles: Vec<CircleInstance> = (0..3)
+            .map(|i| CircleInstance {
+                center: [50.0 + i as f32 * 100.0, 50.0],
+                radius: 5.0,
+                fill_color: neutral,
+                stroke_color: [0.0; 4],
+                stroke_width: 0.0,
+                opacity: 0.5,
+                stroke_opacity: 0.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
+            })
+            .collect();
+
+        let tooltip_bytes = build_tooltip_bytes(
+            &["cat"],
+            &[vec!["a"], vec!["b"], vec!["a"]],
+        );
+        let mut packed_meta = HashMap::new();
+        packed_meta.insert(
+            (0u32, 0u32),
+            PackedBatchMeta {
+                data_indices: Some(vec![0, 1, 2]),
+                tooltip_bytes: Some(tooltip_bytes),
+                kind: 0,
+                instance_start: 0,
+                instance_count: 3,
+            },
+        );
+
+        let result = resolve_conditionals_with_packed(
+            &panels, &conditionals, &selections, &base_circles, &[], &packed_meta,
+        );
+
+        // Marks 0 and 2 carry cat="a" → selected → opacity 1.0.
+        // Mark 1 carries cat="b" → not selected → dimmed to 0.2.
+        assert!(
+            (result.circle_instances[0].opacity - 1.0).abs() < 0.01,
+            "packed mark 0 (cat=a) must be selected, got {}",
+            result.circle_instances[0].opacity
+        );
+        assert!(
+            (result.circle_instances[1].opacity - 0.2).abs() < 0.01,
+            "packed mark 1 (cat=b) must be dimmed, got {}",
+            result.circle_instances[1].opacity
+        );
+        assert!(
+            (result.circle_instances[2].opacity - 1.0).abs() < 0.01,
+            "packed mark 2 (cat=a) must be selected, got {}",
             result.circle_instances[2].opacity
         );
     }

@@ -11,6 +11,10 @@ Classes
 -------
 Selection          — immutable selection descriptor, with .when() conditional builder
 SelectionMark      — visual style for interval selection brush
+
+Module-level builders
+---------------------
+when               — ``fm.when(sel).then(v_if).otherwise(v_else)`` conditional builder
 """
 
 from __future__ import annotations
@@ -19,6 +23,8 @@ import uuid
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, Literal
+
+from ferrum.parameter import Parameter, _normalize_bind
 
 
 @dataclass(frozen=True)
@@ -76,12 +82,16 @@ class SelectionMark:
 
 
 @dataclass(frozen=True)
-class Selection:
+class Selection(Parameter):
     """Immutable selection descriptor.
 
     Created by ``selection_point()``, ``selection_interval()``,
     ``selection_single()``, or ``selection_multi()`` — do not construct
     directly.
+
+    ``Selection`` is a subtype of ``Parameter``, so ``isinstance(sel,
+    Parameter)`` is ``True`` and ``sel.ref()`` returns
+    ``{"param": self.name}``.
 
     Attributes
     ----------
@@ -92,6 +102,10 @@ class Selection:
         Selection type.
     params : dict
         Resolved parameters forwarded to the Rust ``SelectionSpec``.
+    bind : str or None, default None
+        Optional bind target.  ``"legend"`` wires legend-entry clicks to
+        toggle the point selection.  When ``None`` the ``"bind"`` key is
+        omitted from ``to_param_spec_dict()`` output.
 
     Examples
     --------
@@ -108,15 +122,65 @@ class Selection:
     name: str
     kind: Literal["point", "interval"]
     params: dict = field(default_factory=dict)
+    bind: str | None = None
 
     def when(self, if_encoding: Any) -> _SelectionCondition:
         """Start a conditional encoding: ``sel.when(Color("x")).otherwise(value("#ccc"))``."""
         return _SelectionCondition(selection=self, if_encoding=if_encoding)
 
     def to_spec_dict(self) -> dict:
-        """Serialize to a dict matching the Rust ``SelectionSpec`` shape."""
+        """Serialize to a dict matching the Rust ``SelectionSpec`` shape.
+
+        This is the existing Phase 11c wire format consumed by the WASM
+        renderer.  The ``bind`` field is intentionally excluded here — it
+        belongs only in ``to_param_spec_dict()``.
+
+        Returns
+        -------
+        dict
+            ``{"type": kind, "name": name, ...params}``
+        """
         d: dict[str, Any] = {"type": self.kind, "name": self.name}
         d.update(self.params)
+        return d
+
+    def to_param_spec_dict(self) -> dict:
+        """Serialize to the params-array wire dict (D6 reactive-parameter format).
+
+        This is the unified declaration consumed by the static resolver and
+        the new WASM parameter wiring.  Selections also continue to
+        serialize into the existing ``selections`` key via ``to_spec_dict()``
+        for backward-compatible WASM reads.
+
+        ``"bind"`` is emitted only when set to avoid null clutter.
+
+        Returns
+        -------
+        dict
+            Wire shape::
+
+                {"name": str, "kind": "point"|"interval",
+                 "select": {<params dict>}}
+
+                # with bind:
+                {"name": str, "kind": "point"|"interval",
+                 "select": {<params dict>}, "bind": str}
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> brush = fm.selection_interval(name="brush", encodings=["x"])
+        >>> brush.to_param_spec_dict()
+        {'name': 'brush', 'kind': 'interval', 'select': {'translate': True, ...}}
+        """
+        d: dict[str, Any] = {
+            "name": self.name,
+            "kind": self.kind,
+            "select": dict(self.params),
+        }
+        normalized = _normalize_bind(self.bind)
+        if normalized is not None:
+            d["bind"] = normalized
         return d
 
 
@@ -130,6 +194,7 @@ class _SelectionCondition:
             selection_name=self.selection.name,
             if_selected=self.if_encoding,
             if_not=else_encoding,
+            selection=self.selection,
         )
 
 
@@ -149,6 +214,17 @@ class ConditionalSpec:
         Encoding applied when a datum falls inside the selection.
     if_not : encoding channel or value(...)
         Encoding applied when a datum falls outside the selection.
+    channel : str or None, default None
+        Explicit wire channel (e.g. ``"opacity"``, ``"size"``, ``"color"``).
+        Set by ``Chart.encode(<channel>=cond)`` from the encode key, so the
+        wire ``channel`` and the value-kind resolution match even when the
+        branches are bare numbers (which carry no channel of their own). When
+        ``None`` the channel is inferred from ``if_selected`` via
+        ``_resolve_channel``.
+    selection : Selection or None, default None
+        The originating ``Selection``, carried so callers
+        (``Chart.encode`` / ``Chart.conditional``) can auto-register it without
+        a separate ``.add_selection()`` call.
 
     Examples
     --------
@@ -162,10 +238,18 @@ class ConditionalSpec:
     selection_name: str
     if_selected: Any
     if_not: Any
+    channel: str | None = None
+    selection: Selection | None = None
 
     def to_spec_dict(self) -> dict:
-        """Serialize to a dict matching the Rust ``ConditionalEncoding`` shape."""
-        channel = _resolve_channel(self.if_selected)
+        """Serialize to a dict matching the Rust ``ConditionalEncoding`` shape.
+
+        When ``self.channel`` is set (the ``encode(<channel>=cond)`` path) it is
+        used as both the wire ``channel`` and the value-kind hint for
+        ``if_selected``/``if_not``. Otherwise the channel is inferred from
+        ``if_selected`` (the ``.conditional(...)`` path with an encoding object).
+        """
+        channel = self.channel if self.channel is not None else _resolve_channel(self.if_selected)
         return {
             "selection_name": self.selection_name,
             "channel": channel,
@@ -184,6 +268,7 @@ def selection_point(
     clear: str = "mouseout",
     resolve: Literal["global", "union", "intersect"] = "global",
     name: str | None = None,
+    bind: str | None = None,
 ) -> Selection:
     """Create a point selection activated by clicking on marks.
 
@@ -213,6 +298,10 @@ def selection_point(
         How to resolve this selection when the chart is faceted.
     name : str, optional
         Stable identifier for the selection.  Auto-generated when omitted.
+    bind : str or None, default None
+        Optional bind target.  ``"legend"`` wires legend-entry clicks to
+        toggle the point selection (and thus any series linked to it via a
+        conditional encoding).  When ``None`` no bind is configured.
 
     Returns
     -------
@@ -234,6 +323,10 @@ def selection_point(
     Nearest-mark selection on mouse-over:
 
     >>> sel = fm.selection_point(nearest=True, on="mouseover", clear="mouseout")
+
+    Legend-toggle selection:
+
+    >>> sel = fm.selection_point(bind="legend")
     """
     sel_name = name or f"sel_{uuid.uuid4().hex[:8]}"
     params: dict[str, Any] = {
@@ -247,7 +340,7 @@ def selection_point(
         params["fields"] = fields
     if encodings is not None:
         params["encodings"] = [e.lower() for e in encodings]
-    return Selection(name=sel_name, kind="point", params=params)
+    return Selection(name=sel_name, kind="point", params=params, bind=bind)
 
 
 def selection_interval(
@@ -408,9 +501,12 @@ def value(v: Any) -> "_LiteralValue":
     ...     color=sel.when(fm.Color("category")).otherwise(fm.value("#cccccc")),
     ... ).add_selection(sel)
 
-    Fade unselected marks with low opacity:
+    Fade unselected marks with low opacity (numeric branches resolve to opacity
+    values, not colours, so assign to the ``opacity`` channel):
 
-    >>> color=sel.when(fm.Color("category")).otherwise(fm.value(0.1))
+    >>> opacity = fm.when(sel).then(1.0).otherwise(0.1)
+    >>> # or, equivalently, with explicit value(...) wrappers:
+    >>> opacity = sel.when(fm.value(1.0)).otherwise(fm.value(0.1))
     """
     return _LiteralValue(v)
 
@@ -418,6 +514,149 @@ def value(v: Any) -> "_LiteralValue":
 @dataclass(frozen=True)
 class _LiteralValue:
     val: Any
+
+
+# ── Module-level when() builder ───────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class _When:
+    """Intermediate builder produced by ``fm.when(parameter)``.
+
+    Call ``.then(v)`` to continue the chain.
+    """
+
+    _parameter: Parameter
+
+    def then(self, v: Any) -> "_WhenThen":
+        """Provide the value to use when the parameter's selection is active.
+
+        Parameters
+        ----------
+        v : Any
+            Value applied when a datum falls inside the selection.  Plain
+            values are wrapped via ``value()``; passing an already-wrapped
+            ``value(...)`` is also accepted.  Hex colour strings are
+            interpreted as colours at serialization time (in
+            ``_resolve_encoding_value``), not at this layer.
+
+        Returns
+        -------
+        _WhenThen
+            Intermediate builder; call ``.otherwise(v)`` to finalize.
+        """
+        return _WhenThen(_parameter=self._parameter, _if_val=_ensure_value(v))
+
+
+@dataclass(frozen=True)
+class _WhenThen:
+    """Intermediate builder produced by ``fm.when(parameter).then(v)``.
+
+    Call ``.otherwise(v)`` to produce the final ``ConditionalSpec``.
+    """
+
+    _parameter: Parameter
+    _if_val: "_LiteralValue"
+
+    def otherwise(self, v: Any) -> ConditionalSpec:
+        """Provide the value to use when the selection is NOT active.
+
+        Parameters
+        ----------
+        v : Any
+            Value applied when a datum falls outside the selection.  Plain
+            numbers and hex colour strings are auto-wrapped via ``value()``.
+
+        Returns
+        -------
+        ConditionalSpec
+            Resolved conditional encoding spec.  Passes through the existing
+            ``ConditionalEncoding`` wire (``selection_name``, ``channel``,
+            ``if_selected``, ``if_not``).
+        """
+        selection = self._parameter if isinstance(self._parameter, Selection) else None
+        return ConditionalSpec(
+            selection_name=self._parameter.name,
+            if_selected=self._if_val,
+            if_not=_ensure_value(v),
+            selection=selection,
+        )
+
+
+def _ensure_value(v: Any) -> "_LiteralValue":
+    """Wrap *v* in a ``_LiteralValue`` unless it already is one."""
+    if isinstance(v, _LiteralValue):
+        return v
+    return _LiteralValue(v)
+
+
+def when(parameter: Parameter) -> _When:
+    """Start a module-level conditional encoding builder.
+
+    A more explicit alternative to ``sel.when(enc).otherwise(enc)`` for
+    cases where the conditional test is on a selection parameter and the
+    branches are literal values (opacity, colour) rather than encoding
+    channels.
+
+    Usage::
+
+        fm.when(sel).then(v_if).otherwise(v_else)
+
+    The ``parameter`` argument must be a ``Selection`` instance — the
+    conditional test is "datum ∈ selection".  Variable parameters
+    (``fm.param``) drive value/domain/bind references, not the conditional
+    predicate; passing one raises ``TypeError``.
+
+    ``v_if`` and ``v_else`` may be plain numbers or ``fm.value(...)``
+    wrappers; they are wrapped via ``value()`` when not already a
+    ``_LiteralValue``.  Hex colour strings are interpreted as colours at
+    serialization time (in ``_resolve_encoding_value``), not at this layer.
+
+    Parameters
+    ----------
+    parameter : Selection
+        The selection whose active/inactive state drives the condition.
+        Produced by ``selection_point()`` or ``selection_interval()``.
+
+    Returns
+    -------
+    _When
+        Intermediate builder.  Call ``.then(v_if).otherwise(v_else)`` to
+        finalize.
+
+    Raises
+    ------
+    TypeError
+        If ``parameter`` is not a ``Selection`` instance.  Variable
+        parameters from ``fm.param`` drive value/domain/bind references,
+        not the conditional predicate.
+
+    Examples
+    --------
+    Fade unselected marks — assign the conditional to the ``opacity`` channel so
+    the numeric branches resolve to opacity values (``encode`` stamps the channel
+    from its key and auto-registers ``sel``):
+
+    >>> import ferrum as fm
+    >>> sel = fm.selection_point()
+    >>> chart = fm.Chart(df).mark_point().encode(
+    ...     x=fm.X("x"), y=fm.Y("y"),
+    ...     opacity=fm.when(sel).then(1.0).otherwise(0.2),
+    ... )
+
+    Colour toggle on legend selection:
+
+    >>> sel = fm.selection_point(bind="legend")
+    >>> cond = fm.when(sel).then(fm.value("#1f77b4")).otherwise(fm.value("#cccccc"))
+    """
+    if not isinstance(parameter, Selection):
+        raise TypeError(
+            f"fm.when(...) requires a selection-kind parameter (a Selection produced by "
+            f"selection_point() or selection_interval()); got {type(parameter).__name__}. "
+            f"Variable parameters from fm.param() drive value/domain/bind references, "
+            f"not the conditional predicate."
+        )
+    return _When(_parameter=parameter)
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -504,6 +743,12 @@ def _resolve_channel(enc: Any) -> str:
         return "fill_opacity"
     if isinstance(enc, Angle):
         return "angle"
+    if isinstance(enc, _LiteralValue) and isinstance(enc.val, (int, float)):
+        # A bare number carries no channel of its own. Default to "opacity":
+        # it is the sensible default for a numeric literal and the only numeric
+        # channel whose (channel, kind) tuple the WASM matcher handles when no
+        # explicit channel is supplied via encode(<channel>=...).
+        return "opacity"
     return "color"
 
 

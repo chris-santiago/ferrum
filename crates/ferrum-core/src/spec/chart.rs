@@ -89,6 +89,12 @@ pub struct ChartSpec {
     pub selections: Vec<ferrum_scene::SelectionSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditionals: Vec<ferrum_scene::ConditionalEncoding>,
+    /// Reactive parameters (D6): `fm.param` variables and selections, unified.
+    /// Read by the static resolver (for `domainParam` substitution) and by WASM
+    /// (for live reactive wiring). Additive — empty by default, omitted from
+    /// canonical JSON so param-free specs stay byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<ferrum_scene::ParameterSpec>,
     /// Chart-level accessibility description. When `Some`, emitted as `<desc>`
     /// in the root SVG element. Distinct from the per-mark `description`
     /// encoding channel.
@@ -118,6 +124,7 @@ impl ChartSpec {
         key = None,                                               // Phase 11c (transition key)
         selections = None,                                        // Phase 11c (JSON)
         conditionals = None,                                      // Phase 11c (JSON)
+        params = None,                                            // D6 (JSON): reactive parameters
         url = None,                                               // mark_image URL-tile path
         stroke_opacity = None,                                    // Task 10: per-element stroke opacity
         stroke_width = None,                                      // Task 10: per-element stroke width
@@ -155,6 +162,7 @@ impl ChartSpec {
         key: Option<&Bound<'_, PyAny>>,
         selections: Option<&str>,
         conditionals: Option<&str>,
+        params: Option<&str>,
         url: Option<&Bound<'_, PyAny>>,
         stroke_opacity: Option<&Bound<'_, PyAny>>,
         stroke_width: Option<&Bound<'_, PyAny>>,
@@ -276,6 +284,11 @@ impl ChartSpec {
             Some(s) => serde_json::from_str(s)
                 .map_err(|e| PyValueError::new_err(format!("conditionals: {e}")))?,
         };
+        let params = match params {
+            None => Vec::new(),
+            Some(s) => serde_json::from_str(s)
+                .map_err(|e| PyValueError::new_err(format!("params: {e}")))?,
+        };
 
         Ok(ChartSpec {
             data,
@@ -293,6 +306,7 @@ impl ChartSpec {
             axis_y,
             selections,
             conditionals,
+            params,
             chart_description,
         })
     }
@@ -558,6 +572,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         }
     }
 
@@ -648,6 +663,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert_eq!(
@@ -680,6 +696,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(!json.contains("transforms"), "empty transforms should be skipped: {json}");
@@ -713,6 +730,7 @@ mod tests {
         axis_x: None, axis_y: None,
         selections: Vec::new(), conditionals: Vec::new(),
         chart_description: None,
+        params: Vec::new(),
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""transforms":["#), "should include transforms array: {json}");
@@ -744,6 +762,7 @@ mod tests {
             row: None,
             mode: FacetMode::Wrap { ncols: 3 },
             spacing: None,
+            resolve: crate::layout::facet::FacetResolve::default(),
         });
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""facet":{"#));
@@ -860,6 +879,39 @@ mod tests {
         let json = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{}}"#;
         let parsed: ChartSpec = serde_json::from_str(json).unwrap();
         assert!(parsed.mark_style.is_none());
+    }
+
+    #[test]
+    fn test_chart_spec_params_round_trip() {
+        use ferrum_scene::{ParamKind, ParameterSpec};
+        let mut spec = minimal_scatter();
+        spec.params = vec![
+            ParameterSpec {
+                name: "thresh".into(),
+                kind: ParamKind::Variable,
+                value: Some(serde_json::json!([0.0, 100.0])),
+                bind: None,
+                select: None,
+            },
+            ParameterSpec {
+                name: "brush".into(),
+                kind: ParamKind::Interval,
+                value: None,
+                bind: None,
+                select: Some(serde_json::json!({"encodings": ["x"]})),
+            },
+        ];
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""params":["#), "params array missing: {json}");
+        let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
+    }
+
+    #[test]
+    fn test_chart_spec_params_omitted_in_canonical_json_when_empty() {
+        let spec = minimal_scatter();
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("params"), "empty params should be skipped: {json}");
     }
 
     #[test]

@@ -163,6 +163,168 @@ def _warn_large_chart(mark_count: int) -> None:
     )
 
 
+def _build_ordinal_norm_map(domain: list) -> dict[str, float]:
+    """Build a category → norm-center mapping for an ordinal domain list.
+
+    Each category occupies an equal band of width ``1/n``.  The band center
+    for item at index *i* (0-based) is ``(i + 0.5) / n``.
+
+    Parameters
+    ----------
+    domain : list
+        Ordered list of category values as they appear in the data.
+
+    Returns
+    -------
+    dict[str, float]
+        ``{str(category): norm_center}``
+
+    Examples
+    --------
+    >>> _build_ordinal_norm_map(["a", "b", "c"])
+    {'a': 0.1667, 'b': 0.5, 'c': 0.8333}
+    """
+    n = len(domain)
+    if n == 0:
+        return {}
+    # NOTE: (i+0.5)/n is a band-center approximation that ignores the Rust band
+    # scale's padding_inner/outer (default 0.1), so the annotation lands in the
+    # correct band/order but is not pixel-aligned to the bar center.
+    return {str(v): (i + 0.5) / n for i, v in enumerate(domain)}
+
+
+def _extract_ordinal_domain(chart: Any, channel: str) -> list:
+    """Return the ordered unique values for *channel* in *chart*, or an empty list.
+
+    Checks the chart's ``_data`` attribute against the field name(s) bound to
+    *channel* in ``_encoding`` (single-mark path) and ``_layers`` (layered path).
+    Only processes columns whose dtype is ordinal-compatible (string or
+    categorical).
+
+    Parameters
+    ----------
+    chart : Chart
+        Chart to inspect.
+    channel : str
+        Encoding channel, typically ``"x"`` or ``"y"``.
+
+    Returns
+    -------
+    list
+        Unique values in first-appearance order.
+    """
+    import polars as pl
+    from ferrum._scale_share import _chart_bindings
+
+    data = getattr(chart, "_data", None)
+    if data is None or not isinstance(data, pl.DataFrame):
+        return []
+
+    for field in _chart_bindings(chart, channel):
+        if field is None:
+            continue
+        try:
+            col = data[field]
+        except (KeyError, AttributeError):
+            continue
+        if col.dtype not in (pl.Utf8, pl.String, pl.Categorical):
+            continue
+        # Preserve appearance order using unique(maintain_order=True)
+        return col.unique(maintain_order=True).to_list()
+
+    return []
+
+
+def _resolve_category_coords_in_annotations(
+    ann_list: list[dict],
+    chart: Any,
+) -> list[dict]:
+    """Replace ``{"category": value}`` annotation coordinate dicts with ``{"norm": frac}``.
+
+    The Rust annotation renderer's ``CoordValue`` enum only accepts
+    ``Data(f64)``, ``Pixel { px }``, and ``Norm { norm }``.  Ordinal category
+    coordinates (strings that are not ISO-8601 dates) are serialized by
+    ``_coord()`` as ``{"category": value}`` so they can be post-processed here
+    using the chart's ordinal domain before the annotation list is sent to Rust.
+
+    Resolution rules:
+    - Build the ordinal domain for the x and y axes from the chart's data.
+    - For each coordinate dict that is ``{"category": v}``, look up ``v`` in
+      the appropriate axis domain and replace the dict with
+      ``{"norm": band_center}`` where ``band_center = (index + 0.5) / n``.
+    - If the category is not found in the domain (unknown label, or wrong axis),
+      fall back to ``{"norm": 0.5}`` (plot center) so the annotation renders
+      without crashing.
+
+    Parameters
+    ----------
+    ann_list : list[dict]
+        Annotation spec dicts (as produced by ``to_dict_list()``).
+    chart : Chart
+        The chart whose ordinal domain is used for resolution.
+
+    Returns
+    -------
+    list[dict]
+        Annotation spec dicts with all ``{"category": ...}`` entries resolved.
+    """
+    # Lazily build the norm maps only when at least one {"category": ...} entry
+    # exists to avoid scanning chart data on every render.
+    _x_map: dict[str, float] | None = None
+    _y_map: dict[str, float] | None = None
+
+    def _x_norm_map() -> dict[str, float]:
+        nonlocal _x_map
+        if _x_map is None:
+            _x_map = _build_ordinal_norm_map(_extract_ordinal_domain(chart, "x"))
+        return _x_map
+
+    def _y_norm_map() -> dict[str, float]:
+        nonlocal _y_map
+        if _y_map is None:
+            _y_map = _build_ordinal_norm_map(_extract_ordinal_domain(chart, "y"))
+        return _y_map
+
+    # Coordinate keys that belong to the x-axis vs y-axis.
+    _X_KEYS = frozenset({"x", "x1", "x2"})
+    _Y_KEYS = frozenset({"y", "y1", "y2"})
+
+    def _resolve_coord(key: str, val: Any) -> Any:
+        """Replace a single coordinate value if it is a category dict."""
+        if not isinstance(val, dict) or "category" not in val:
+            return val
+        cat = val["category"]
+        if key in _X_KEYS:
+            norm_map = _x_norm_map()
+            axis_label = "x"
+        elif key in _Y_KEYS:
+            norm_map = _y_norm_map()
+            axis_label = "y"
+        else:
+            # Unrecognised key — fall back to center.
+            norm_map = {}
+            axis_label = key
+        cat_str = str(cat)
+        if cat_str not in norm_map:
+            domain_repr = sorted(norm_map.keys()) if norm_map else []
+            warnings.warn(
+                f"annotation category {cat_str!r} not found in {axis_label}-axis domain "
+                f"{domain_repr}; placing at plot center",
+                UserWarning,
+                stacklevel=2,
+            )
+        norm_val = norm_map.get(cat_str, 0.5)
+        return {"norm": norm_val}
+
+    resolved = []
+    for ann in ann_list:
+        new_ann = dict(ann)
+        for key, val in ann.items():
+            new_ann[key] = _resolve_coord(key, val)
+        resolved.append(new_ann)
+    return resolved
+
+
 class _RenderMixin:
     """Rendering, display, and auto-raster methods for ``Chart``.
 
@@ -327,6 +489,10 @@ class _RenderMixin:
             ann_list = []
             for annotate in self._annotations:
                 ann_list.extend(annotate.to_dict_list())
+            # Resolve any {"category": value} coordinate dicts to {"norm": frac}
+            # so the Rust renderer receives only the Data/Pixel/Norm variants it
+            # knows about.  This handles ordinal category string annotations.
+            ann_list = _resolve_category_coords_in_annotations(ann_list, self)
             merged["annotations"] = ann_list
         if self._structural:
             merged["structural"] = [self._serialize_structural(feat) for feat in self._structural]
@@ -462,17 +628,33 @@ class _RenderMixin:
         spec, data, viewport, theme_dict, chart_config_dict = chart._render_inputs()
         if data.num_rows == 0:
             w, h = viewport
-            return (
+            empty_svg = (
                 f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">'
                 f"<!-- empty dataset --></svg>"
             )
-        return render_svg(
+            figure_caption = getattr(chart, "_figure_caption", None)
+            if figure_caption is not None:
+                from ferrum._core import compose_svg_vertical
+
+                return compose_svg_vertical([empty_svg], spacing=0.0, caption=figure_caption)
+            return empty_svg
+        svg = render_svg(
             spec,
             data,
             viewport=viewport,
             theme=theme_dict,
             chart_config=chart_config_dict or None,
         )
+        # Post-wrap with a caption band when one has been set via
+        # .properties(caption=...).  Using compose_svg_vertical with a single
+        # SVG is byte-identical to the plain SVG when no chrome is given, so
+        # this branch is only reached when a caption is actually present.
+        figure_caption = getattr(chart, "_figure_caption", None)
+        if figure_caption is not None:
+            from ferrum._core import compose_svg_vertical
+
+            svg = compose_svg_vertical([svg], spacing=0.0, caption=figure_caption)
+        return svg
 
     def show_png(self, *, raster: bool | None = None, scale: float = 2.0) -> bytes:
         """Render the chart to PNG bytes.

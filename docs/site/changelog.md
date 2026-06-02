@@ -4,7 +4,16 @@ All notable changes to Ferrum are documented here.
 
 ## Unreleased
 
-*No unreleased changes.*
+### Changed
+
+- **Breaking:** `transform_window(..., frame=(preceding, following))` now follows the documented Vega/Altair convention, where a negative `preceding` counts rows *before* the current row. A trailing window is `frame=(-k, 0)` (the `k` preceding rows through the current row). The sign was previously inverted, so trailing rolling aggregates silently produced all-null or forward-looking results. Pipelines that compensated for the inverted sign must drop the workaround.
+
+### Fixed
+
+- Continuous color scales bound through `SequentialScale`/`DivergingScale` now honor the named scheme, `domain`, and `clamp` (every scheme rendered blue before); added `reds`/`greens`/`oranges`/`purples`; diverging midpoint placed via piecewise normalization
+- `mark_bar`/`mark_area` honor a second positional extent (`y2`/`x2`) for candlestick, floating, and diverging bars; `mark_bar(zero=False)` opts out of the zero-anchored y-domain
+- Integer and nominal columns render on categorical channels (integer-keyed heatmaps, nominal bar `y`) and stack correctly; integer storage still defaults to quantitative
+- Annotation span `label_position` (`top`/`middle`/`bottom`) is honored; unsupported `stack=` on non-stackable marks warns instead of silently dropping marks; empty facet partitions name the dropped key in the warning
 
 ## 0.14.0
 

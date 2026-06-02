@@ -115,7 +115,6 @@ pub enum AnnotationSpec {
         #[serde(default = "default_span_opacity")]
         opacity: f64,
         #[serde(default = "default_label_position")]
-        #[allow(dead_code)]
         label_position: String,
         #[serde(default)]
         label: Option<String>,
@@ -370,8 +369,8 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 },
             });
         }
-        AnnotationSpec::Span { axis, start, end, fill, opacity, label, .. } => {
-            emit_span(axis, start, end, fill, *opacity, label.as_deref(), ctx, out);
+        AnnotationSpec::Span { axis, start, end, fill, opacity, label, label_position } => {
+            emit_span(axis, start, end, fill, *opacity, label.as_deref(), label_position.as_str(), ctx, out);
         }
         AnnotationSpec::Bracket { x1, y1, x2, y2, label, direction, stroke, tip_length } => {
             emit_bracket(ctx.resolve_x(x1), ctx.resolve_y(y1), ctx.resolve_x(x2), ctx.resolve_y(y2),
@@ -482,6 +481,7 @@ fn emit_arrow(
 fn emit_span(
     axis: &str, start: &CoordValue, end: &CoordValue,
     fill: &str, opacity: f64, label: Option<&str>,
+    label_position: &str,
     ctx: &ScaleContext, out: &mut Vec<SceneNode>,
 ) {
     let (x, y, w, h) = if axis == "x" {
@@ -523,15 +523,36 @@ fn emit_span(
 
     if let Some(label_text) = label {
         if !label_text.is_empty() {
+            // Small inset used for top/bottom placements so the label clears
+            // the span edge. Consistent with other annotation label insets.
+            const LABEL_INSET: f64 = 6.0;
+
+            // In SVG, y increases downward: lower y = higher on screen.
+            // "top" → near the top edge of the span (lower SVG y value),
+            // "bottom" → near the bottom edge (higher SVG y value),
+            // "middle" / anything else → vertical center.
+            let label_y = match label_position {
+                "top" => y + LABEL_INSET,
+                "bottom" => y + h - LABEL_INSET,
+                _ => y + h * 0.5,
+            };
+            // "top" places the label near the top edge — baseline is Top so
+            // text hangs below the anchor point and sits inside the span.
+            let baseline = match label_position {
+                "top" => TextBaseline::Top,
+                "bottom" => TextBaseline::Alphabetic,
+                _ => TextBaseline::Middle,
+            };
+
             out.push(SceneNode::Text {
                 x: x + w * 0.5,
-                y: y + h * 0.5,
+                y: label_y,
                 content: label_text.to_string(),
                 style: TextStyle {
                     font_size: 11.0,
                     font_weight: FontWeight::Normal,
                     anchor: TextAnchor::Middle,
-                    baseline: TextBaseline::Middle,
+                    baseline,
                     angle: 0.0,
                     color: Color::rgb(51, 51, 51),
                     opacity: 1.0,

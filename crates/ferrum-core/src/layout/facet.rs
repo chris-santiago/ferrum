@@ -7,6 +7,49 @@ use serde::{Deserialize, Serialize};
 use super::geometry::Rect;
 use super::panel::FacetKey;
 
+/// Per-channel scale resolution policy for a faceted chart.
+///
+/// `Shared` (default): the positional scale domain is resolved from the full
+/// (all-panels-merged) batch — all panels share identical axis ticks and the
+/// same data-space extents. This is the existing behavior and must remain the
+/// default so previously-serialized facet dicts (no `resolve` key) keep their
+/// current rendering byte-for-byte.
+///
+/// `Independent`: each panel's positional scale domain is resolved from that
+/// panel's own partition, so panels may have different axis extents and
+/// different tick labels. Color/size/shape resolution is not affected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ResolveMode {
+    #[default]
+    Shared,
+    Independent,
+}
+
+/// Per-channel resolution modes for a faceted chart.
+///
+/// Fields default to `ResolveMode::Shared` via serde `#[serde(default)]` so
+/// a facet dict that omits `resolve` entirely deserializes to all-shared —
+/// preserving existing byte-stable behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FacetResolve {
+    /// Scale resolution for the x (horizontal) positional channel.
+    #[serde(default)]
+    pub x: ResolveMode,
+    /// Scale resolution for the y (vertical) positional channel.
+    #[serde(default)]
+    pub y: ResolveMode,
+}
+
+impl Default for FacetResolve {
+    fn default() -> Self {
+        FacetResolve {
+            x: ResolveMode::Shared,
+            y: ResolveMode::Shared,
+        }
+    }
+}
+
 /// Spec-side facet declaration. Carried by `ChartSpec.facet`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FacetSpec {
@@ -20,6 +63,20 @@ pub struct FacetSpec {
     /// If set, overrides `theme.column_padding` / `theme.row_padding` symmetrically.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spacing: Option<f64>,
+    /// Per-channel scale resolution policy. Omitting this field (or setting it to
+    /// `{"x": "shared", "y": "shared"}`) keeps the current globally-shared behavior.
+    /// Set `{"y": "independent"}` to give each panel its own y-axis domain.
+    #[serde(default, skip_serializing_if = "FacetResolve::is_all_shared")]
+    pub resolve: FacetResolve,
+}
+
+impl FacetResolve {
+    /// Returns `true` when both channels are `Shared` — used as the
+    /// `skip_serializing_if` predicate so all-shared resolvers are omitted from
+    /// the wire format, keeping existing facet dicts byte-identical.
+    pub fn is_all_shared(r: &FacetResolve) -> bool {
+        r.x == ResolveMode::Shared && r.y == ResolveMode::Shared
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -31,10 +88,18 @@ pub enum FacetMode {
 
 /// Caller-supplied per-panel input. `n_rows` is informational only — Phase 6
 /// does not use it for layout decisions but Phase 7+ may.
+///
+/// In grid mode (`FacetSpec.row` is set), `key` holds the column-dimension key
+/// and `row_key` holds the row-dimension key. Both are used: `key` drives the
+/// column-header strip title; `row_key` drives the row-header strip title and
+/// the secondary filter in the per-panel render loop. `row_key` is `None` in
+/// wrap mode (single-field facet).
 #[derive(Debug, Clone, PartialEq)]
 pub struct FacetGroup {
     pub key: FacetKey,
     pub n_rows: u64,
+    /// Row-dimension key for grid-mode two-way facets. `None` in wrap mode.
+    pub row_key: Option<FacetKey>,
 }
 
 /// Computed grid sizing. `cell_rect(row, col, origin)` returns the panel rect.
@@ -158,12 +223,15 @@ mod tests {
             row: None,
             mode: FacetMode::Wrap { ncols: 3 },
             spacing: None,
+            resolve: FacetResolve::default(),
         };
         let json = serde_json::to_string(&s).unwrap();
         let parsed: FacetSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, s);
         assert!(json.contains(r#""kind":"wrap""#));
         assert!(json.contains(r#""ncols":3"#));
+        // Default all-shared resolve must not appear in the wire format.
+        assert!(!json.contains("resolve"), "all-shared resolve must be omitted: {json}");
     }
 
     #[test]
@@ -173,6 +241,7 @@ mod tests {
             row: None,
             mode: FacetMode::Grid { nrows: 2, ncols: 3 },
             spacing: Some(12.0),
+            resolve: FacetResolve::default(),
         };
         let json = serde_json::to_string(&s).unwrap();
         let parsed: FacetSpec = serde_json::from_str(&json).unwrap();
@@ -187,9 +256,55 @@ mod tests {
             row: None,
             mode: FacetMode::Wrap { ncols: 2 },
             spacing: None,
+            resolve: FacetResolve::default(),
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("spacing"));
+    }
+
+    #[test]
+    fn facet_spec_resolve_independent_round_trips() {
+        let s = FacetSpec {
+            field: "g".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve {
+                x: ResolveMode::Shared,
+                y: ResolveMode::Independent,
+            },
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let parsed: FacetSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, s);
+        // resolve must appear because y is independent.
+        assert!(json.contains("resolve"), "resolve must be serialized when non-default: {json}");
+        assert!(json.contains(r#""y":"independent""#), "y must serialize as independent: {json}");
+    }
+
+    #[test]
+    fn facet_spec_resolve_omitted_from_wire_when_all_shared() {
+        let s = FacetSpec {
+            field: "g".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve {
+                x: ResolveMode::Shared,
+                y: ResolveMode::Shared,
+            },
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("resolve"), "all-shared resolve must be omitted: {json}");
+    }
+
+    #[test]
+    fn facet_spec_legacy_json_without_resolve_deserializes_as_shared() {
+        // Simulate an existing serialized facet dict (no resolve key).
+        let json = r#"{"field":"species","mode":{"kind":"wrap","ncols":3}}"#;
+        let parsed: FacetSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.resolve.x, ResolveMode::Shared);
+        assert_eq!(parsed.resolve.y, ResolveMode::Shared);
     }
 
     fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {

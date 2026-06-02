@@ -5,6 +5,53 @@ from __future__ import annotations
 from ferrum.encoding.base import ChannelBase
 
 
+_VALID_STACK = frozenset(("zero", "normalize", "center", "false", "null", "none"))
+
+
+def _normalize_stack(value: object, channel: str) -> str:
+    """Normalize a ``stack=`` kwarg value to a string for Rust's ``Option<String>``.
+
+    Rust's ``EncodingSpec.stack`` is ``Option<String>``; passing a Python bool
+    crashes PyO3 with ``TypeError: argument 'stack': 'bool' object is not an
+    instance of 'str'``.  This helper converts booleans and validates strings.
+
+    Parameters
+    ----------
+    value:
+        The raw ``stack=`` argument supplied by the caller.
+    channel:
+        Channel name used in ``ValueError`` messages.
+
+    Returns
+    -------
+    str
+        ``"zero"`` for ``True``; ``"false"`` for ``False``; the original string
+        when it is a recognised stack strategy.
+
+    Raises
+    ------
+    ValueError
+        When *value* is a string that is not a recognised stack strategy.
+    """
+    if value is True:
+        return "zero"
+    if value is False:
+        return "false"
+    if not isinstance(value, str):
+        raise TypeError(
+            f"{channel}(stack={value!r}): stack= must be a bool or one of "
+            "'zero', 'normalize', 'center', 'false', 'null', 'none'; "
+            f"got {type(value).__name__!r}"
+        )
+    if value.lower() not in _VALID_STACK:
+        raise ValueError(
+            f"{channel}(stack={value!r}): must be one of "
+            "'zero', 'normalize', 'center', or a falsy value ('false', 'null', 'none'); "
+            f"got {value!r}"
+        )
+    return value
+
+
 _RENDERED_HONORED = frozenset(
     [
         "type",
@@ -67,6 +114,12 @@ class X(ChannelBase):
     _channel_name = "x"
     _honored_kwargs = _RENDERED_HONORED
 
+    def _validate(self) -> None:
+        super()._validate()
+        stack = self._kwargs.get("stack")
+        if stack is not None:
+            self._kwargs["stack"] = _normalize_stack(stack, "X")
+
 
 class Y(ChannelBase):
     """Positional Y channel — maps a field to the vertical axis.
@@ -105,18 +158,11 @@ class Y(ChannelBase):
     _channel_name = "y"
     _honored_kwargs = _RENDERED_HONORED
 
-    _VALID_STACK = frozenset(("zero", "normalize", "center", "false", "null", "none"))
-
     def _validate(self) -> None:
         super()._validate()
         stack = self._kwargs.get("stack")
-        if stack is not None and isinstance(stack, str):
-            if stack.lower() not in self._VALID_STACK:
-                raise ValueError(
-                    f"Y(stack={stack!r}): must be one of "
-                    "'zero', 'normalize', 'center', or None; "
-                    f"got {stack!r}"
-                )
+        if stack is not None:
+            self._kwargs["stack"] = _normalize_stack(stack, "Y")
 
 
 class X2(ChannelBase):
@@ -336,6 +382,12 @@ class Theta(ChannelBase):
 
     _honored_kwargs = frozenset(["type", "stack"])
 
+    def _validate(self) -> None:
+        super()._validate()
+        stack = self._kwargs.get("stack")
+        if stack is not None:
+            self._kwargs["stack"] = _normalize_stack(stack, "Theta")
+
 
 class Radius(ChannelBase):
     """Polar radius channel — maps a field to the radial position in polar coords.
@@ -348,12 +400,24 @@ class Radius(ChannelBase):
         Column name in the input DataFrame.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
+    stack : bool or str, optional
+        Stacking behaviour for radial bars (wind-rose / coxcomb charts).
+        ``True`` or ``"zero"`` accumulates segments outward from the origin;
+        ``"normalize"`` produces percentage rings; ``"center"`` produces a
+        symmetric streamgraph-style layout.  ``False`` or ``None`` disables
+        stacking.  Requires ``mark_bar`` under ``CoordPolar``.
 
     Notes
     -----
     Requires ``CoordPolar()`` on the chart to activate polar rendering;
     without it the channel is registered but the mark renders in Cartesian
     space.
+
+    When ``stack`` is set, the radius channel is remapped to ``y`` (the value
+    axis) before reaching Rust's ``apply_stack``; ``bar.rs build_polar`` then
+    reads ``__stack_y_base__`` as the inner radius so each segment starts
+    where the previous one ended.  Pass ``position=fm.Stack()`` on
+    ``mark_bar()`` as an alternative.
 
     Other kwargs are accepted but are reserved for future use (no-op today)
     — they trigger a one-time deprecation warning.
@@ -362,8 +426,100 @@ class Radius(ChannelBase):
     --------
     >>> import ferrum as fm
     >>> fm.Chart(df).encode(theta=fm.Theta("count"), radius=fm.Radius("distance"))
+    >>> # Stacked wind-rose / coxcomb:
+    >>> fm.Chart(df).encode(
+    ...     theta=fm.Theta("direction"),
+    ...     radius=fm.Radius("speed", stack=True),
+    ...     color="category:N",
+    ... ).coord(fm.CoordPolar(theta="x"))
     """
 
     _channel_name = "radius"
+
+    _honored_kwargs = frozenset(["type", "stack"])
+
+    def _validate(self) -> None:
+        super()._validate()
+        stack = self._kwargs.get("stack")
+        if stack is not None:
+            self._kwargs["stack"] = _normalize_stack(stack, "Radius")
+
+
+class Theta2(ChannelBase):
+    """Polar second-extent angle channel — maps a field to the angular end position.
+
+    Used with ``Theta`` to define an explicit angular span for each arc segment
+    (annular wedge marks).  When both ``theta`` and ``theta2`` are encoded, the
+    arc sweeps from the ``theta`` value to the ``theta2`` value directly from
+    data, rather than computing a proportional sweep from column sums.
+
+    Parameters
+    ----------
+    field : str
+        Column name in the input DataFrame.
+    type_ : {"Q", "N", "O", "T"}, optional
+        Data type. Inferred from the column dtype when omitted.
+
+    Notes
+    -----
+    Requires ``CoordPolar()`` on the chart to activate polar rendering.
+    Remapped to ``x2`` (when ``CoordPolar(theta="x")``) or ``y2``
+    (when ``CoordPolar(theta="y")``) before the spec reaches Rust.
+
+    Other kwargs are accepted but are reserved for future use (no-op today)
+    — they trigger a one-time deprecation warning.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.Chart(df).encode(
+    ...     theta=fm.Theta("t_start"),
+    ...     theta2=fm.Theta2("t_end"),
+    ...     radius=fm.Radius("r_inner"),
+    ...     radius2=fm.Radius2("r_outer"),
+    ... )
+    """
+
+    _channel_name = "theta2"
+
+    _honored_kwargs = frozenset(["type"])
+
+
+class Radius2(ChannelBase):
+    """Polar second-extent radius channel — maps a field to the outer radial boundary.
+
+    Used with ``Radius`` to define an explicit inner/outer radial span for each
+    arc segment (annular wedge marks).  When both ``radius`` and ``radius2`` are
+    encoded, the arc spans from the ``radius`` column value (inner boundary) to
+    the ``radius2`` column value (outer boundary) per row.
+
+    Parameters
+    ----------
+    field : str
+        Column name in the input DataFrame.
+    type_ : {"Q", "N", "O", "T"}, optional
+        Data type. Inferred from the column dtype when omitted.
+
+    Notes
+    -----
+    Requires ``CoordPolar()`` on the chart to activate polar rendering.
+    Remapped to ``y2`` (when ``CoordPolar(theta="x")``) or ``x2``
+    (when ``CoordPolar(theta="y")``) before the spec reaches Rust.
+
+    Other kwargs are accepted but are reserved for future use (no-op today)
+    — they trigger a one-time deprecation warning.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.Chart(df).encode(
+    ...     theta=fm.Theta("t_start"),
+    ...     theta2=fm.Theta2("t_end"),
+    ...     radius=fm.Radius("r_inner"),
+    ...     radius2=fm.Radius2("r_outer"),
+    ... )
+    """
+
+    _channel_name = "radius2"
 
     _honored_kwargs = frozenset(["type"])

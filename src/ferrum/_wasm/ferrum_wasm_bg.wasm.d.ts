@@ -20,6 +20,7 @@ export const wasmrenderer_selectInRect: (a: number, b: number, c: number, d: num
 export const wasmrenderer_setTransform: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const wasmrenderer_startTransition: (a: number, b: number, c: number) => [number, number];
 export const wasmrenderer_tickTransition: (a: number, b: number) => [number, number];
+export const wasmrenderer_toggleLegend: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const wasm_bindgen__convert__closures_____invoke__h4eb714a55877aa02: (a: number, b: number, c: any) => [number, number];
 export const wasm_bindgen__convert__closures_____invoke__h5ec2816eae335d2e: (a: number, b: number, c: any, d: any) => void;
 export const __wbindgen_malloc: (a: number, b: number) => number;

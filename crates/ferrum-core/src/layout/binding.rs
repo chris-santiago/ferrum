@@ -115,6 +115,7 @@ pub fn compute_layout(
         .map(|(field, value, n_rows)| FacetGroup {
             key: FacetKey { field, value },
             n_rows,
+            row_key: None,
         })
         .collect();
 

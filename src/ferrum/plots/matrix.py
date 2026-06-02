@@ -290,12 +290,20 @@ def pairplot(
         if diagonal is not None:
             diagonal = diagonal.theme(theme)
 
+    # When hue is set, unify the color scale domain across all cells so
+    # every panel maps the same category → color (consistent colors).
+    # Note: per-panel legend rendering remains — a single shared legend
+    # rendered once outside the grid would require compositor layout work
+    # beyond resolve=; consistent color domain is shipped here, one legend
+    # per panel is the known residual.
+    rc_resolve = {"color": "shared"} if hue is not None else None
     rc = RepeatChart(
         off,
         row=rows,
         column=cols,
         diagonal=diagonal,
         corner=corner,
+        resolve=rc_resolve,
     )
     rc = _finalize_chart(
         rc, mark=mark, encode=encode, properties=properties, layers=layers, theme=None
@@ -944,7 +952,14 @@ def jointplot(
     if kind == "scatter":
         center = Chart(data).mark_point(**jk).encode(**enc_center)
     elif kind == "kde":
-        center = Chart(data).mark_density(**jk).encode(**enc_center)
+        # When hue is set, thread it as groupby so the bivariate KDE splits per
+        # group. desugar_density routes groupby into desugar_contour on the 2D
+        # path, which configures Kde2D(groupby=hue) and produces per-group
+        # isoline contours colored by the group field.
+        kde_jk = dict(jk)
+        if hue is not None:
+            kde_jk["groupby"] = hue
+        center = Chart(data).mark_density(**kde_jk).encode(**enc_center)
     elif kind == "hist":
         # Use Bin2D + mark_rect for 2D histogram.
         bin2d_kwargs: dict = {}

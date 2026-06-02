@@ -11,6 +11,10 @@ pub enum NamedContinuous {
     Inferno,
     Cividis,
     Blues,
+    Reds,
+    Greens,
+    Oranges,
+    Purples,
     RdBu,
     // Paper Ink family
     CoolBlue,
@@ -36,21 +40,25 @@ pub enum ContinuousScheme {
 impl NamedContinuous {
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
-            "viridis"       => Some(Self::Viridis),
-            "plasma"        => Some(Self::Plasma),
-            "magma"         => Some(Self::Magma),
-            "inferno"       => Some(Self::Inferno),
-            "cividis"       => Some(Self::Cividis),
-            "blues"         => Some(Self::Blues),
-            "rdbu"          => Some(Self::RdBu),
-            "cool_blue"     => Some(Self::CoolBlue),
-            "warm_ochre"    => Some(Self::WarmOchre),
-            "blue_to_red"   => Some(Self::BlueToRed),
-            "night_blue"    => Some(Self::NightBlue),
-            "electric_lime" => Some(Self::ElectricLime),
-            "cyan_to_amber" => Some(Self::CyanToAmber),
-            "signal_blue"   => Some(Self::SignalBlue),
-            "ember_orange"  => Some(Self::EmberOrange),
+            "viridis"        => Some(Self::Viridis),
+            "plasma"         => Some(Self::Plasma),
+            "magma"          => Some(Self::Magma),
+            "inferno"        => Some(Self::Inferno),
+            "cividis"        => Some(Self::Cividis),
+            "blues"          => Some(Self::Blues),
+            "reds"           => Some(Self::Reds),
+            "greens"         => Some(Self::Greens),
+            "oranges"        => Some(Self::Oranges),
+            "purples"        => Some(Self::Purples),
+            "rdbu"           => Some(Self::RdBu),
+            "cool_blue"      => Some(Self::CoolBlue),
+            "warm_ochre"     => Some(Self::WarmOchre),
+            "blue_to_red"    => Some(Self::BlueToRed),
+            "night_blue"     => Some(Self::NightBlue),
+            "electric_lime"  => Some(Self::ElectricLime),
+            "cyan_to_amber"  => Some(Self::CyanToAmber),
+            "signal_blue"    => Some(Self::SignalBlue),
+            "ember_orange"   => Some(Self::EmberOrange),
             "blue_to_violet" => Some(Self::BlueToViolet),
             _ => None,
         }
@@ -58,7 +66,9 @@ impl NamedContinuous {
 
     pub fn list() -> &'static [&'static str] {
         &[
-            "viridis", "plasma", "magma", "inferno", "cividis", "blues", "rdbu",
+            "viridis", "plasma", "magma", "inferno", "cividis",
+            "blues", "reds", "greens", "oranges", "purples",
+            "rdbu",
             "cool_blue", "warm_ochre", "blue_to_red",
             "night_blue", "electric_lime", "cyan_to_amber",
             "signal_blue", "ember_orange", "blue_to_violet",
@@ -73,6 +83,10 @@ impl NamedContinuous {
             Self::Inferno => Some(colorous::INFERNO),
             Self::Cividis => Some(colorous::CIVIDIS),
             Self::Blues   => Some(colorous::BLUES),
+            Self::Reds    => Some(colorous::REDS),
+            Self::Greens  => Some(colorous::GREENS),
+            Self::Oranges => Some(colorous::ORANGES),
+            Self::Purples => Some(colorous::PURPLES),
             Self::RdBu    => Some(colorous::RED_BLUE),
             _ => None,
         }
@@ -313,6 +327,49 @@ mod tests {
             "night_blue", "electric_lime", "cyan_to_amber",
             "signal_blue", "ember_orange", "blue_to_violet",
         ] {
+            assert!(NamedContinuous::from_name(name).is_some(), "{name} not found");
+        }
+    }
+
+    #[test]
+    fn reds_endpoints_match_colorbrewer() {
+        let s = ContinuousScheme::Named(NamedContinuous::Reds);
+        let c0 = s.sample(0.0); // near-white ~#fff5f0: R≈255, G≈245, B≈240
+        let c1 = s.sample(1.0); // dark crimson ~#67000d: R≈103, G≈0, B≈13
+        assert!(c0.red > 220 && c0.green > 200 && c0.blue > 200, "reds(0): {:?}", c0);
+        assert!(c1.red > 80 && c1.green < 30 && c1.blue < 40, "reds(1): {:?}", c1);
+    }
+
+    #[test]
+    fn greens_endpoints_match_colorbrewer() {
+        let s = ContinuousScheme::Named(NamedContinuous::Greens);
+        let c0 = s.sample(0.0); // near-white ~#f7fcf5: R≈247, G≈252, B≈245
+        let c1 = s.sample(1.0); // dark forest ~#00441b: R≈0, G≈68, B≈27
+        assert!(c0.red > 220 && c0.green > 220 && c0.blue > 220, "greens(0): {:?}", c0);
+        assert!(c1.red < 30 && c1.green > 50 && c1.blue < 40, "greens(1): {:?}", c1);
+    }
+
+    #[test]
+    fn oranges_endpoints_match_colorbrewer() {
+        let s = ContinuousScheme::Named(NamedContinuous::Oranges);
+        let c0 = s.sample(0.0); // near-white ~#fff5eb: R≈255, G≈245, B≈235
+        let c1 = s.sample(1.0); // dark orange-brown ~#7f2704: R≈127, G≈39, B≈4
+        assert!(c0.red > 220 && c0.green > 200 && c0.blue > 180, "oranges(0): {:?}", c0);
+        assert!(c1.red > 100 && c1.green < 60 && c1.blue < 20, "oranges(1): {:?}", c1);
+    }
+
+    #[test]
+    fn purples_endpoints_match_colorbrewer() {
+        let s = ContinuousScheme::Named(NamedContinuous::Purples);
+        let c0 = s.sample(0.0); // near-white ~#fcfbfd: R≈252, G≈251, B≈253
+        let c1 = s.sample(1.0); // dark purple ~#3f007d: R≈63, G≈0, B≈125
+        assert!(c0.red > 220 && c0.green > 220 && c0.blue > 220, "purples(0): {:?}", c0);
+        assert!(c1.red < 80 && c1.green < 20 && c1.blue > 80, "purples(1): {:?}", c1);
+    }
+
+    #[test]
+    fn new_schemes_resolve_via_from_name() {
+        for name in &["reds", "greens", "oranges", "purples"] {
             assert!(NamedContinuous::from_name(name).is_some(), "{name} not found");
         }
     }

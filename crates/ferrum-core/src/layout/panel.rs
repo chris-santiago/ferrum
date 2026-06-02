@@ -13,6 +13,30 @@ pub struct PanelLayout {
     pub col: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strip_title: Option<StripTitleLayout>,
+    /// Grid-mode row-dimension header strip (left side). `None` in wrap mode
+    /// and for non-faceted charts. Serialized only when present so single-field
+    /// facet and non-faceted output is byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_strip_title: Option<StripTitleLayout>,
+    /// Grid-mode row-dimension filter key used by the per-panel render loop to
+    /// filter the merged batch on both col and row dimensions. `None` in wrap
+    /// mode (the primary `facet_key` alone is sufficient).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_facet_key: Option<FacetKey>,
+}
+
+impl Default for PanelLayout {
+    fn default() -> Self {
+        PanelLayout {
+            plot_area: Rect::ZERO,
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None,
+            row_strip_title: None,
+            row_facet_key: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,9 +73,13 @@ mod tests {
             row: 0,
             col: 0,
             strip_title: None,
+            row_strip_title: None,
+            row_facet_key: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(!json.contains("facet_key"), "facet_key None must be skipped: {json}");
+        assert!(!json.contains("row_strip_title"), "row_strip_title None must be skipped: {json}");
+        assert!(!json.contains("row_facet_key"), "row_facet_key None must be skipped: {json}");
         let parsed: PanelLayout = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, p);
     }
@@ -67,6 +95,8 @@ mod tests {
             row: 1,
             col: 2,
             strip_title: None,
+            row_strip_title: None,
+            row_facet_key: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let parsed: PanelLayout = serde_json::from_str(&json).unwrap();
@@ -99,6 +129,8 @@ mod strip_title_tests {
             row: 0,
             col: 0,
             strip_title: None,
+            row_strip_title: None,
+            row_facet_key: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(!json.contains("strip_title"), "expected omission, got: {json}");
@@ -117,6 +149,8 @@ mod strip_title_tests {
                 align: TextAnchor::Middle,
                 font_size: 13.0,
             }),
+            row_strip_title: None,
+            row_facet_key: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let parsed: PanelLayout = serde_json::from_str(&json).unwrap();

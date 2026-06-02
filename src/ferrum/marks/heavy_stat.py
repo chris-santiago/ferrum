@@ -19,6 +19,7 @@ from ferrum import (
 )
 from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
+from ferrum.marks._desugar_helpers import resolve_color_groupby
 
 
 def desugar_contour(
@@ -30,11 +31,12 @@ def desugar_contour(
     smooth: bool = True,
     fill: bool = True,
     cmap: str | None = None,
+    groupby: str | None = None,
 ) -> "MarkDesugarResult":
     """Bivariate-density contour mark desugar.
 
     Converts ``chart.mark_contour(...)`` into a ``Kde2D`` → ``Contour``
-    transform chain plus a polygon layer.  Also used by
+    transform chain plus a polygon or segment layer.  Also used by
     ``desugar_density`` when both x and y encodings are present.
 
     Data contract
@@ -42,16 +44,28 @@ def desugar_contour(
     Input: DataFrame with numeric columns ``x_field`` and ``y_field``.
 
     ``Kde2D`` (unnamed — advances the chain) estimates a 2D kernel-density
-    surface on a 128×128 grid.
+    surface on a 128×128 grid.  When ``groupby`` is set, one surface is
+    emitted per group and a trailing Utf8 group column is appended.
 
     ``Contour`` (named ``"contour"``) traces iso-density curves on that
     surface and produces:
     ``[level_id (UInt32), contour_x (Float64), contour_y (Float64)]``
+    plus the trailing group column when the input was grouped.
 
-    Layers emitted
-    --------------
+    Layers emitted (no groupby)
+    ---------------------------
     1. ``polygon`` — ``x="contour_x"``, ``y="contour_y"``,
-       ``mark_kwargs={"cmap": cmap, "detail": "level_id"}``.
+       ``color="level_value"``, ``mark_kwargs={"cmap": cmap, "detail": "level_id"}``.
+
+    Layers emitted (with groupby)
+    -----------------------------
+    1. ``segment`` — ``x="contour_x"``, ``y="contour_y"``,
+       ``x2="contour_x2"``, ``y2="contour_y2"``, ``color=groupby``.
+       Isoline segments are used for grouped contours because the isoband
+       ``level_id`` encoding is not globally unique across groups; polygon
+       grouping by ``level_id`` would merge polygons from different groups
+       into incorrect shapes.  Segment marks are per-row and color each
+       group's contour lines categorically — each group is visually distinct.
 
     Parameters
     ----------
@@ -67,14 +81,20 @@ def desugar_contour(
         Whether to smooth the KDE grid before contouring.
     fill : bool, default False
         Whether the contour polygons are filled (passed to ``Contour``).
+        Ignored when ``groupby`` is set — grouped contours always use
+        isoline (segment) mode to avoid cross-group polygon merging.
     cmap : str or None, default None
         Colormap name applied to the polygon layer.  ``None`` defers to the
-        theme's sequential scheme.
+        theme's sequential scheme.  Ignored when ``groupby`` is set.
+    groupby : str or None, default None
+        Group column (Utf8). When set, ``Kde2D`` computes one surface per
+        group and ``Contour`` propagates the group column.  The layer
+        uses segment marks and colors by the group field so each group's
+        contour lines are a distinct categorical color.
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", transforms, None, None, layers)``.
+    MarkDesugarResult
 
     Raises
     ------
@@ -84,32 +104,68 @@ def desugar_contour(
     Examples
     --------
     >>> result = desugar_contour("x", "y")
-    >>> result[0]
-    '__layered__'
-    >>> result[4][0]["mark"]
+    >>> result.layers[0].mark
     'polygon'
+    >>> result_grouped = desugar_contour("x", "y", groupby="g")
+    >>> result_grouped.layers[0].mark
+    'segment'
     """
     if x_field is None or y_field is None:
         raise ValueError("mark_contour() requires .encode(x=..., y=...)")
     # Kde2D is UNNAMED so it advances the chain (current → Kde2D output);
     # Contour then runs on the chained Kde2D output. Contour is named so the
     # downstream layer can route through data_source="contour".
+    kde_kwargs: dict = dict(x=x_field, y=y_field, bandwidth=bandwidth, n=128)
+    if groupby is not None:
+        kde_kwargs["groupby"] = groupby
     transforms = [
-        Kde2D(x=x_field, y=y_field, bandwidth=bandwidth, n=128),
-        Contour(thresholds=thresholds, fill=fill, smooth=smooth, name="contour"),
+        Kde2D(**kde_kwargs),
+        Contour(
+            thresholds=thresholds,
+            fill=False if groupby is not None else fill,
+            smooth=smooth,
+            name="contour",
+        ),
     ]
-    if fill:
+    from ferrum.encoding import X, Y
+
+    if groupby is not None:
+        # Grouped contour: use isoline (segment) mode so each row is an
+        # independent line segment — no polygon grouping needed, no cross-group
+        # level_id collision.  Color by the group column for categorical hue.
+        # The Contour transform outputs isoline columns:
+        #   level_id, level_value, contour_x, contour_y, contour_x2, contour_y2, <groupby>
+        layers = [
+            _Layer(
+                name="segment",
+                mark="segment",
+                encoding={
+                    "x": X("contour_x", title=x_field),
+                    "y": Y("contour_y", title=y_field),
+                    "x2": "contour_x2",
+                    "y2": "contour_y2",
+                    "color": groupby,
+                },
+                mark_kwargs=None,
+                data_source="contour",
+            )
+        ]
+    elif fill:
         # Isoband mode: Contour emits polygon vertex rows (x, y per vertex).
         # Use polygon mark grouped by level_id; color by level_value so each
         # density band gets a distinct fill from the sequential colormap.
-        mk: dict = {"detail": "level_id"}
+        mk = {"detail": "level_id"}
         if cmap is not None:
             mk["cmap"] = cmap
         layers = [
             _Layer(
                 name="polygon",
                 mark="polygon",
-                encoding={"x": "contour_x", "y": "contour_y", "color": "level_value"},
+                encoding={
+                    "x": X("contour_x", title=x_field),
+                    "y": Y("contour_y", title=y_field),
+                    "color": "level_value",
+                },
                 mark_kwargs=mk,
                 data_source="contour",
             )
@@ -126,8 +182,8 @@ def desugar_contour(
                 name="segment",
                 mark="segment",
                 encoding={
-                    "x": "contour_x",
-                    "y": "contour_y",
+                    "x": X("contour_x", title=x_field),
+                    "y": Y("contour_y", title=y_field),
                     "x2": "contour_x2",
                     "y2": "contour_y2",
                 },
@@ -157,6 +213,7 @@ def desugar_violin(
     inner: Optional[str] = "box",
     x_sort: Any = None,
     y_sort: Any = None,
+    color_field: str | None = None,
 ) -> "MarkDesugarResult":
     """Violin-plot composite mark desugar.
 
@@ -201,6 +258,14 @@ def desugar_violin(
     x_sort, y_sort : optional
         Sort order applied to the categorical positional axis, injected by
         the composite-mark expansion from ``sort=`` on the encoding.
+    color_field : str or None, default None
+        Hue field, injected by the composite-mark expansion from a ``color=``
+        encoding.  When set, the ``Violin`` (and inner ``BoxStats``) groupby
+        becomes ``[x_field, color_field]`` so the KDE is computed per (x, hue)
+        group, the violin body gains a ``color`` encoding, and the per-hue
+        violins are overlaid (distinct fills, ``fill_opacity=0.5``) within each
+        x-category band.  When ``None`` the output is byte-identical to a
+        single-group violin.
 
     Returns
     -------
@@ -235,34 +300,58 @@ def desugar_violin(
     # honors the user's sort request across all inner layers.
     x_enc_val = X(x_field, sort=x_sort) if x_sort is not None else x_field
 
-    transforms = [Violin(field=y_field, groupby=[x_field], bandwidth=bandwidth, name="violin")]
+    # When a hue (color) field is present, the KDE — and every inner summary —
+    # must split per (x, hue) group rather than pooling across hues.  The Violin
+    # and BoxStats transforms propagate all groupby columns to their output, so
+    # `color_field` is available as an output column on the violin batch and can
+    # drive a per-hue fill on the body polygon.  `detail="group_id"` keeps each
+    # (x, hue) group drawing as a distinct closed polygon (group_id is per
+    # groupby-group), so the per-hue violins overlay within each x band.
+    # Add the hue field to the groupby only when it is a distinct column; when
+    # color encodes the same field as x the KDE is already split per x-category
+    # and the body just colors by the surviving x column.
+    groupby, split_hue = resolve_color_groupby(x_field, color_field, [x_field])
+
+    body_encoding: dict = {"x": x_enc_val, "y": Y("violin_y", title=y_field)}
+    if color_field is not None:
+        body_encoding["color"] = color_field
+
+    transforms = [Violin(field=y_field, groupby=groupby, bandwidth=bandwidth, name="violin")]
     violin_layer = _Layer(
         name="body",
         mark="polygon",
-        encoding={"x": x_enc_val, "y": Y("violin_y", title=y_field)},
+        encoding=body_encoding,
         mark_kwargs={"detail": "group_id", "fill_opacity": 0.5},
         data_source="violin",
     )
     if inner is None:
         return MarkDesugarResult(transforms=transforms, layers=[violin_layer])
     if inner == "point":
+        point_encoding: dict = {"x": x_enc_val, "y": y_field}
+        if color_field is not None:
+            point_encoding["color"] = color_field
+        # raw points read from the original (unsplit) data, so coloring by the
+        # hue column is always valid regardless of split_hue.
         return MarkDesugarResult(
             transforms=transforms,
             layers=[
                 violin_layer,
-                _Layer(name="point", mark="point", encoding={"x": x_enc_val, "y": y_field}),
+                _Layer(name="point", mark="point", encoding=point_encoding),
             ],
         )
     if inner == "quartile":
-        transforms.append(BoxStats(field=y_field, groupby=[x_field], name="quart"))
+        transforms.append(BoxStats(field=y_field, groupby=groupby, name="quart"))
         layers = [violin_layer]
         for col in ("q1", "median", "q3"):
             mk = {} if col == "median" else {"stroke_dash": [2, 2]}
+            quart_encoding: dict = {"x": x_enc_val, "y": col}
+            if color_field is not None:
+                quart_encoding["color"] = color_field
             layers.append(
                 _Layer(
                     name=col,
                     mark="rule",
-                    encoding={"x": x_enc_val, "y": col},
+                    encoding=quart_encoding,
                     mark_kwargs=mk if mk else None,
                     data_source="quart",
                 )
@@ -272,7 +361,14 @@ def desugar_violin(
     from ferrum.marks.composite import desugar_boxplot
 
     box_result = desugar_boxplot(
-        x_field, y_field, extent=1.5, outliers=False, size=0.1, x_sort=x_sort, y_sort=y_sort
+        x_field,
+        y_field,
+        extent=1.5,
+        outliers=False,
+        size=0.1,
+        x_sort=x_sort,
+        y_sort=y_sort,
+        color_field=color_field if split_hue else None,
     )
     return MarkDesugarResult(
         transforms=[*transforms, *box_result.transforms],
@@ -618,6 +714,8 @@ def desugar_hex(
         raise ValueError(f"mark_hex aggregate={aggregate!r} must be one of {_VALID_AGGREGATES}")
     if aggregate != "count" and field is None:
         raise ValueError(f"mark_hex aggregate={aggregate!r} requires field=...")
+    from ferrum.encoding import X, Y
+
     transforms = [
         Hex(x=x_field, y=y_field, bin_size=bin_size, aggregate=aggregate, field=field, name="hex")
     ]
@@ -632,7 +730,11 @@ def desugar_hex(
         _Layer(
             name="polygon",
             mark="polygon",
-            encoding={"x": "hex_x", "y": "hex_y", "color": "value"},
+            encoding={
+                "x": X("hex_x", title=x_field),
+                "y": Y("hex_y", title=y_field),
+                "color": "value",
+            },
             mark_kwargs=mk,
             data_source="hex",
         )

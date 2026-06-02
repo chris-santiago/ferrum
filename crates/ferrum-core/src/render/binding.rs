@@ -686,12 +686,20 @@ fn render_err_to_py(e: RenderError) -> PyErr {
 /// align : str, default "top"
 ///     Vertical alignment of panels with different heights. One of
 ///     ``"top"``, ``"center"``, or ``"bottom"``.
+/// title : str or None, default None
+///     Figure-level title rendered as a band above all panels (bold, 16 px).
+///     Per-panel child titles are unaffected.
+/// subtitle : str or None, default None
+///     Figure-level subtitle rendered below the title, above the panels (13 px).
+/// caption : str or None, default None
+///     Figure-level caption rendered as a band below all panels (muted, 11 px).
 ///
 /// Returns
 /// -------
 /// str
 ///     A single SVG document whose width equals the sum of panel widths
-///     plus total spacing and whose height equals the tallest panel.
+///     plus total spacing and whose height equals the tallest panel (plus
+///     header/footer bands when title/subtitle/caption are provided).
 ///
 /// Raises
 /// ------
@@ -704,6 +712,8 @@ fn render_err_to_py(e: RenderError) -> PyErr {
 /// Used internally by ``HConcatChart`` to combine column-concatenated
 /// charts. The returned SVG preserves each panel's coordinate system via
 /// nested ``<g transform="translate(...)">`` elements.
+/// When all of *title*, *subtitle*, and *caption* are ``None`` the output is
+/// byte-identical to the previous behavior.
 ///
 /// Examples
 /// --------
@@ -711,11 +721,14 @@ fn render_err_to_py(e: RenderError) -> PyErr {
 /// >>> combined = fm.compose_svg_horizontal([svg1, svg2], spacing=10)
 #[pyfunction]
 #[pyo3(name = "compose_svg_horizontal")]
-#[pyo3(signature = (svgs, *, spacing = 10.0, align = "top"))]
+#[pyo3(signature = (svgs, *, spacing = 10.0, align = "top", title = None, subtitle = None, caption = None))]
 pub fn compose_svg_horizontal_py(
     svgs: Vec<String>,
     spacing: f64,
     align: &str,
+    title: Option<&str>,
+    subtitle: Option<&str>,
+    caption: Option<&str>,
 ) -> PyResult<String> {
     let align_val = match align {
         "top" => crate::render::compositor::VerticalAlign::Top,
@@ -727,7 +740,10 @@ pub fn compose_svg_horizontal_py(
             )))
         }
     };
-    crate::render::compositor::compose_svg_horizontal(&svgs, spacing, align_val)
+    let composed = crate::render::compositor::compose_svg_horizontal(&svgs, spacing, align_val)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let chrome = crate::render::figure_chrome::FigureChrome { title, subtitle, caption };
+    crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
@@ -743,12 +759,20 @@ pub fn compose_svg_horizontal_py(
 /// align : str, default "left"
 ///     Horizontal alignment of panels with different widths. One of
 ///     ``"left"``, ``"center"``, or ``"right"``.
+/// title : str or None, default None
+///     Figure-level title rendered as a band above all panels (bold, 16 px).
+///     Per-panel child titles are unaffected.
+/// subtitle : str or None, default None
+///     Figure-level subtitle rendered below the title, above the panels (13 px).
+/// caption : str or None, default None
+///     Figure-level caption rendered as a band below all panels (muted, 11 px).
 ///
 /// Returns
 /// -------
 /// str
 ///     A single SVG document whose height equals the sum of panel heights
-///     plus total spacing and whose width equals the widest panel.
+///     plus total spacing and whose width equals the widest panel (plus
+///     header/footer bands when title/subtitle/caption are provided).
 ///
 /// Raises
 /// ------
@@ -761,6 +785,8 @@ pub fn compose_svg_horizontal_py(
 /// Used internally by ``VConcatChart`` to combine row-concatenated charts.
 /// The returned SVG preserves each panel's coordinate system via nested
 /// ``<g transform="translate(...)">`` elements.
+/// When all of *title*, *subtitle*, and *caption* are ``None`` the output is
+/// byte-identical to the previous behavior.
 ///
 /// Examples
 /// --------
@@ -768,11 +794,14 @@ pub fn compose_svg_horizontal_py(
 /// >>> combined = fm.compose_svg_vertical([svg1, svg2], spacing=10)
 #[pyfunction]
 #[pyo3(name = "compose_svg_vertical")]
-#[pyo3(signature = (svgs, *, spacing = 10.0, align = "left"))]
+#[pyo3(signature = (svgs, *, spacing = 10.0, align = "left", title = None, subtitle = None, caption = None))]
 pub fn compose_svg_vertical_py(
     svgs: Vec<String>,
     spacing: f64,
     align: &str,
+    title: Option<&str>,
+    subtitle: Option<&str>,
+    caption: Option<&str>,
 ) -> PyResult<String> {
     let align_val = match align {
         "left" => crate::render::compositor::HorizontalAlign::Left,
@@ -784,7 +813,10 @@ pub fn compose_svg_vertical_py(
             )))
         }
     };
-    crate::render::compositor::compose_svg_vertical(&svgs, spacing, align_val)
+    let composed = crate::render::compositor::compose_svg_vertical(&svgs, spacing, align_val)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let chrome = crate::render::figure_chrome::FigureChrome { title, subtitle, caption };
+    crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
@@ -807,12 +839,20 @@ pub fn compose_svg_vertical_py(
 /// spacing : float, default 10.0
 ///     Gap in pixels between adjacent cells (applied both horizontally and
 ///     vertically).
+/// title : str or None, default None
+///     Figure-level title rendered as a band above all panels (bold, 16 px).
+///     Per-panel child titles are unaffected.
+/// subtitle : str or None, default None
+///     Figure-level subtitle rendered below the title, above the panels (13 px).
+/// caption : str or None, default None
+///     Figure-level caption rendered as a band below all panels (muted, 11 px).
 ///
 /// Returns
 /// -------
 /// str
 ///     A single SVG document containing all cells positioned according to
-///     the ratio-weighted grid layout.
+///     the ratio-weighted grid layout (plus header/footer bands when
+///     title/subtitle/caption are provided).
 ///
 /// Raises
 /// ------
@@ -837,6 +877,9 @@ pub fn compose_svg_vertical_py(
 /// composition time, or `JointChart`/`ClusterMapChart`'s `axis(show=False)`
 /// suppression for marginal/dendrogram cells.
 ///
+/// When all of *title*, *subtitle*, and *caption* are ``None`` the output is
+/// byte-identical to the previous behavior.
+///
 /// Examples
 /// --------
 /// >>> import ferrum as fm
@@ -846,7 +889,8 @@ pub fn compose_svg_vertical_py(
 /// ... )
 #[pyfunction]
 #[pyo3(name = "compose_svg_grid")]
-#[pyo3(signature = (cells, *, rows, cols, row_ratios, col_ratios, spacing = 10.0))]
+#[pyo3(signature = (cells, *, rows, cols, row_ratios, col_ratios, spacing = 10.0, title = None, subtitle = None, caption = None))]
+#[allow(clippy::too_many_arguments)]
 pub fn compose_svg_grid_py(
     cells: Vec<Option<String>>,
     rows: usize,
@@ -854,8 +898,11 @@ pub fn compose_svg_grid_py(
     row_ratios: Vec<f64>,
     col_ratios: Vec<f64>,
     spacing: f64,
+    title: Option<&str>,
+    subtitle: Option<&str>,
+    caption: Option<&str>,
 ) -> PyResult<String> {
-    crate::render::grid_compose::compose_svg_grid(
+    let composed = crate::render::grid_compose::compose_svg_grid(
         &cells,
         rows,
         cols,
@@ -863,7 +910,10 @@ pub fn compose_svg_grid_py(
         &col_ratios,
         spacing,
     )
-    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let chrome = crate::render::figure_chrome::FigureChrome { title, subtitle, caption };
+    crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 /// Rasterize a complete SVG string to PNG bytes.
