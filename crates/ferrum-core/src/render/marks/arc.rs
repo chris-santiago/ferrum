@@ -3,11 +3,15 @@ use ferrum_scene::{
     TooltipField as FsTooltipField,
 };
 
-use crate::render::arrow_cast::{col_as_f64, col_as_str};
+use crate::render::arrow_cast::{col_as_f64, col_as_ordinal_category_str, col_as_str};
 use crate::render::color::with_opacity;
-use crate::render::draw::{to_scene_fill_stroke, DrawCtx, MarkBuildResult, MetadataColumns};
+use crate::render::draw::{
+    color_field, resolve_fill_color, to_scene_fill_stroke, DrawCtx, MarkBuildResult,
+    MetadataColumns,
+};
 use crate::render::scale_resolve::ColorScale;
 use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
+use crate::spec::encoding::DataType as SpecDataType;
 
 /// Resolved polar geometry shared by the pie/donut and annular-wedge paths.
 pub(crate) struct PolarGeom {
@@ -119,6 +123,21 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         return MarkBuildResult::empty(MarkBatchKind::Arc);
     };
 
+    // Detect nominal/ordinal theta: use equal-band layout where each category
+    // gets an equal angular slice and the radius channel sets the outer radius.
+    // This handles `mark_arc(theta:N, radius:Q)` — the Nightingale coxcomb via
+    // the arc mark rather than mark_bar + CoordPolar.
+    let theta_enc = match theta_ch {
+        PolarThetaChannel::X => ctx.spec.encoding.x.as_ref(),
+        PolarThetaChannel::Y => ctx.spec.encoding.y.as_ref(),
+    };
+    let theta_is_categorical = theta_enc.is_some_and(|e| {
+        matches!(e.type_, Some(SpecDataType::Nominal) | Some(SpecDataType::Ordinal))
+    });
+    if theta_is_categorical {
+        return build_nominal_theta(ctx, &geom, field, radius_field, radius_scale);
+    }
+
     let Ok(values) = col_as_f64(ctx.batch, field) else {
         return MarkBuildResult::empty(MarkBatchKind::Arc);
     };
@@ -228,6 +247,160 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
                                 .get(row_idx)
                                 .and_then(|v| v.clone())
                                 .unwrap_or_default(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        )
+    };
+
+    MarkBuildResult {
+        kind: MarkBatchKind::Arc,
+        nodes,
+        data_indices: Some(data_indices),
+        tooltips,
+        hrefs: None,
+        descriptions: None,
+    }
+}
+
+/// Build arc wedges for a nominal/ordinal theta channel.
+///
+/// Each distinct category in `theta_field` gets an equal angular band spanning
+/// `tau / n_cats` radians. The `radius_field` (if present) sets the outer
+/// radius for each row via `radius_to_pixel`; absent radius falls back to the
+/// coord's full outer radius (every wedge reaches the edge).
+///
+/// This enables `mark_arc(theta:N, radius:Q)` (Nightingale coxcomb via the arc
+/// mark), producing the same equal-band layout as `build_polar` in `bar.rs`
+/// but for the `Arc` mark.
+fn build_nominal_theta(
+    ctx: &DrawCtx<'_>,
+    geom: &PolarGeom,
+    theta_field: &str,
+    radius_field: Option<&str>,
+    radius_scale: &crate::render::scale_resolve::ScaleKind,
+) -> MarkBuildResult {
+    let angle_strs = match col_as_ordinal_category_str(ctx.batch, theta_field) {
+        Ok(v) => v,
+        Err(_) => return MarkBuildResult::empty(MarkBatchKind::Arc),
+    };
+
+    let radii: Option<Vec<Option<f64>>> = radius_field
+        .and_then(|f| col_as_f64(ctx.batch, f).ok());
+
+    // Build category index in first-appearance order.
+    let mut cat_index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut cat_order: Vec<&str> = Vec::new();
+    for s in angle_strs.iter().flatten() {
+        if !cat_index.contains_key(s.as_str()) {
+            cat_index.insert(s.as_str(), cat_order.len());
+            cat_order.push(s.as_str());
+        }
+    }
+    let n_cats = cat_order.len().max(1);
+    let tau = std::f64::consts::TAU;
+    let band = tau / n_cats as f64;
+
+    let pad_angle = if geom.pad_angle > 0.0 {
+        geom.pad_angle
+    } else if n_cats == 1 {
+        1e-3
+    } else {
+        0.0
+    };
+
+    // Per-row color columns.
+    let cfield = color_field(ctx, ctx.spec);
+    let color_str: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
+        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
+        _ => None,
+    };
+    let color_f64: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
+        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
+        _ => None,
+    };
+    let opacity_values: Option<Vec<Option<f64>>> = ctx.spec.encoding.opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+
+    let meta = MetadataColumns::from_ctx(ctx);
+
+    let mut nodes: Vec<SceneNode> = Vec::with_capacity(angle_strs.len());
+    let mut data_indices: Vec<usize> = Vec::with_capacity(angle_strs.len());
+
+    for (i, cat_opt) in angle_strs.iter().enumerate() {
+        let cat = match cat_opt { Some(s) => s.as_str(), None => continue };
+        let k = *cat_index.get(cat).unwrap_or(&0);
+
+        let angle_start = geom.start_angle + k as f64 * band + pad_angle / 2.0;
+        let angle_end = geom.start_angle + (k as f64 + 1.0) * band - pad_angle / 2.0;
+        if angle_end <= angle_start {
+            continue;
+        }
+
+        // Outer radius: from the radius channel (data value) if present, else
+        // full coord outer radius (wedge reaches the edge).
+        let outer_r = match radii.as_ref().and_then(|v| v.get(i).copied().flatten()) {
+            Some(rv) if rv.is_finite() => {
+                radius_to_pixel(radius_scale, geom.inner_radius, geom.outer_radius, rv)
+            }
+            _ => geom.outer_radius,
+        };
+
+        let fill_base = match (&ctx.scales.color, &color_f64, &color_str) {
+            (Some(scale @ ColorScale::Continuous { .. }), Some(vals), _) => {
+                vals.get(i).and_then(|v| *v)
+                    .and_then(|v| if v.is_finite() { scale.lookup_f64(v) } else { None })
+                    .unwrap_or(ctx.mark_style.fill)
+            }
+            (Some(scale @ ColorScale::Categorical { .. }), _, Some(vals)) => {
+                vals.get(i).and_then(|v| v.as_deref())
+                    .and_then(|v| scale.lookup(v))
+                    .unwrap_or(ctx.mark_style.fill)
+            }
+            _ => resolve_fill_color(ctx.scales.color.as_ref(), None, None, ctx.mark_style.fill),
+        };
+        let row_opacity = if let (Some(values), Some(scale)) = (&opacity_values, &ctx.scales.opacity) {
+            match values.get(i).copied().flatten().and_then(|v| scale.inner.to_pixel_f64(v)) {
+                Some(op) => op,
+                None => ctx.mark_style.opacity,
+            }
+        } else {
+            ctx.mark_style.opacity
+        };
+        let fill_color = with_opacity(fill_base, row_opacity);
+
+        let commands = wedge_path(
+            geom.cx, geom.cy, geom.inner_radius, outer_r, angle_start, angle_end,
+        );
+        nodes.push(SceneNode::Path {
+            commands,
+            style: to_scene_fill_stroke(
+                Some(fill_color),
+                ctx.mark_style.stroke,
+                ctx.mark_style.stroke_width,
+                row_opacity,
+                ctx.mark_style.stroke_dash.as_deref(),
+            ),
+            closed: true,
+        });
+        data_indices.push(i);
+    }
+
+    let tooltips: Option<Vec<FsTooltipContent>> = if meta.tooltip_cols.is_empty() {
+        None
+    } else {
+        Some(
+            data_indices
+                .iter()
+                .map(|&row_idx| FsTooltipContent {
+                    fields: meta
+                        .tooltip_cols
+                        .iter()
+                        .map(|(name, col)| FsTooltipField {
+                            name: name.clone(),
+                            value: col.get(row_idx).and_then(|v| v.clone()).unwrap_or_default(),
                         })
                         .collect(),
                 })
