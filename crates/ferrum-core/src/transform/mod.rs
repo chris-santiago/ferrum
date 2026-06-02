@@ -3,6 +3,7 @@
 //! own their `apply` math; `linalg.rs` is a small shared utility.
 
 pub(crate) mod core;
+pub(crate) mod group_key;
 pub(crate) mod bin;
 pub(crate) mod bin_2d;
 pub(crate) mod context;

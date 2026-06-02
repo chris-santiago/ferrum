@@ -8,7 +8,7 @@
 //!
 //! Output schema = group_id (u32) + groupby cols + violin_x (f64) + violin_y (f64).
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray, UInt32Array};
+use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, UInt32Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::transform::group_key::{
+    empty_groupby_col, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
+    KeyValue,
+};
 use crate::transform::kde::{self, BandwidthSpec, KdeSpec};
 
 fn default_bandwidth() -> BandwidthSpec {
@@ -43,12 +47,6 @@ pub(crate) struct ViolinSpec {
     pub width: f64,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum KeyValue {
-    Str(String),
-    Float(u64),
 }
 
 pub(crate) fn apply(spec: &ViolinSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -81,10 +79,12 @@ pub(crate) fn apply_with_context(
             ))
         })?;
         let dt = schema.field(i).data_type().clone();
-        if dt != DataType::Float64 && !matches!(dt, DataType::Utf8) {
+        if !is_groupby_supported_dtype(&dt) {
             return Err(PyValueError::new_err(format!(
-                "stat_violin: groupby column '{}' must be Float64 or Utf8",
-                g
+                "stat_violin: groupby column '{}' has unsupported dtype {:?}; \
+                 supported: Utf8/LargeUtf8, Float64/Float32, \
+                 Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean",
+                g, dt
             )));
         }
         group_dtypes.push(dt);
@@ -109,16 +109,8 @@ pub(crate) fn apply_with_context(
     if n_rows == 0 {
         let mut cols: Vec<ArrayRef> = Vec::with_capacity(spec.groupby.len() + 4);
         cols.push(Arc::new(UInt32Array::from(Vec::<u32>::new())));
-        for gi in 0..spec.groupby.len() {
-            match group_dtypes[gi] {
-                DataType::Float64 => {
-                    cols.push(Arc::new(Float64Array::from(Vec::<f64>::new())));
-                }
-                DataType::Utf8 => {
-                    cols.push(Arc::new(StringArray::from(Vec::<String>::new())));
-                }
-                _ => unreachable!(),
-            }
+        for dt in &group_dtypes {
+            cols.push(empty_groupby_col(dt).map_err(PyValueError::new_err)?);
         }
         cols.push(Arc::new(Float64Array::from(Vec::<f64>::new())));
         cols.push(Arc::new(Float64Array::from(Vec::<f64>::new())));
@@ -144,27 +136,12 @@ pub(crate) fn apply_with_context(
     for row in 0..n_rows {
         let mut key = Vec::with_capacity(spec.groupby.len());
         for (gi, arr) in group_arrays.iter().enumerate() {
-            match group_dtypes[gi] {
-                DataType::Float64 => {
-                    let a = arr.as_any().downcast_ref::<Float64Array>()
-                        .ok_or_else(|| PyValueError::new_err("stat_violin: expected Float64Array for groupby column"))?;
-                    if a.is_null(row) {
-                        key.push(KeyValue::Float(f64::NAN.to_bits()));
-                    } else {
-                        key.push(KeyValue::Float(a.value(row).to_bits()));
-                    }
-                }
-                DataType::Utf8 => {
-                    let a = arr.as_any().downcast_ref::<StringArray>()
-                        .ok_or_else(|| PyValueError::new_err("stat_violin: expected StringArray for groupby column"))?;
-                    if a.is_null(row) {
-                        key.push(KeyValue::Str(String::new()));
-                    } else {
-                        key.push(KeyValue::Str(a.value(row).to_string()));
-                    }
-                }
-                _ => unreachable!(),
-            }
+            let kv = groupby_key_at(*arr, &group_dtypes[gi], row).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "stat_violin: internal error extracting groupby key at row {row}"
+                ))
+            })?;
+            key.push(kv);
         }
         groups.entry(key).or_default().push(row);
     }
@@ -318,30 +295,8 @@ pub(crate) fn apply_with_context(
 
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(spec.groupby.len() + 3);
     cols.push(Arc::new(UInt32Array::from(group_ids)));
-    for gi in 0..spec.groupby.len() {
-        match group_dtypes[gi] {
-            DataType::Float64 => {
-                let v: Vec<f64> = keys_out
-                    .iter()
-                    .map(|k| match &k[gi] {
-                        KeyValue::Float(bits) => f64::from_bits(*bits),
-                        KeyValue::Str(_) => unreachable!(),
-                    })
-                    .collect();
-                cols.push(Arc::new(Float64Array::from(v)));
-            }
-            DataType::Utf8 => {
-                let v: Vec<String> = keys_out
-                    .iter()
-                    .map(|k| match &k[gi] {
-                        KeyValue::Str(s) => s.clone(),
-                        KeyValue::Float(_) => unreachable!(),
-                    })
-                    .collect();
-                cols.push(Arc::new(StringArray::from(v)));
-            }
-            _ => unreachable!(),
-        }
+    for (gi, dt) in group_dtypes.iter().enumerate() {
+        cols.push(materialize_groupby_col(&keys_out, gi, dt).map_err(PyValueError::new_err)?);
     }
     // Convert violin_x (in normalized polygon-width units; |violin_x| ≤ spec.width)
     // to per-vertex pixel offsets on the category axis. With n_groups categories
@@ -791,5 +746,98 @@ mod tests {
         );
         assert!(distinct.contains(&0), "group_id 0 must be present");
         assert!(distinct.contains(&1), "group_id 1 must be present");
+    }
+
+    // ── FA-7: shared group-keying — integer groupby support ──────────────────
+
+    fn batch_value_int64_group(values: Vec<f64>, groups: Vec<i64>) -> RecordBatch {
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("grp", DataType::Int64, false),
+        ]));
+        let v = Float64Array::from(values);
+        let g = Int64Array::from(groups);
+        RecordBatch::try_new(schema, vec![Arc::new(v), Arc::new(g)]).unwrap()
+    }
+
+    fn col_i64(b: &RecordBatch, name: &str) -> Vec<i64> {
+        use arrow::array::Int64Array;
+        let arr = b
+            .column(b.schema().index_of(name).unwrap())
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        (0..arr.len()).map(|i| arr.value(i)).collect()
+    }
+
+    /// FA-7: violin grouped on an Int64 column groups correctly and preserves
+    /// the Int64 output dtype. Before FA-7 the private `KeyValue` enum rejected
+    /// non-Float64/Utf8 groupby columns with an error.
+    #[test]
+    fn violin_int64_groupby_succeeds_and_preserves_dtype() {
+        pyo3::Python::initialize();
+        let mut vals: Vec<f64> = Vec::new();
+        let mut grps: Vec<i64> = Vec::new();
+        for i in 0..50 {
+            vals.push(i as f64);
+            grps.push(2020);
+        }
+        for i in 0..50 {
+            vals.push(100.0 + i as f64);
+            grps.push(2021);
+        }
+        let b = batch_value_int64_group(vals, grps);
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["grp".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+        // Output groupby column must retain Int64 dtype.
+        assert_eq!(
+            out.schema().field(out.schema().index_of("grp").unwrap()).data_type(),
+            &DataType::Int64
+        );
+        let gids = col_u32(&out, "group_id");
+        let distinct: std::collections::BTreeSet<u32> = gids.iter().copied().collect();
+        assert_eq!(distinct.len(), 2, "expected 2 distinct group_ids; got {:?}", distinct);
+        // Both year keys must be present, materialized as Int64.
+        let grp_vals: std::collections::BTreeSet<i64> = col_i64(&out, "grp").into_iter().collect();
+        assert!(grp_vals.contains(&2020), "key 2020 must be present; got {:?}", grp_vals);
+        assert!(grp_vals.contains(&2021), "key 2021 must be present; got {:?}", grp_vals);
+    }
+
+    /// FA-7 byte-stability guard: a Utf8 groupby still materializes a StringArray
+    /// with identical key values after migrating to the shared group_key module.
+    #[test]
+    fn violin_utf8_groupby_byte_stable() {
+        pyo3::Python::initialize();
+        let mut vals: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        vals.extend((0..50).map(|i| 100.0 + i as f64));
+        let mut grps: Vec<&str> = vec!["a"; 50];
+        grps.extend(vec!["b"; 50]);
+        let b = batch_value_group(vals, grps);
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+        assert_eq!(
+            out.schema().field(out.schema().index_of("group").unwrap()).data_type(),
+            &DataType::Utf8
+        );
+        let keys: std::collections::BTreeSet<String> = col_str(&out, "group").into_iter().collect();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains("a") && keys.contains("b"));
     }
 }
