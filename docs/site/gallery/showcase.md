@@ -2,7 +2,7 @@
 
 Well-known chart designs from the matplotlib, seaborn, Altair, and D3 traditions — built in Ferrum's Rust engine. Every image below was produced entirely in Python using Ferrum's grammar-of-graphics API; no matplotlib, no browser, no external renderer. These designs lean on Ferrum features like categorical color ranges, temporal axis auto-inference, size and shape legends, stroke routing on line marks, sort specs, annotation date coordinates, X2/Y2 floating geometry, polar coordinates, continuous-color schemes, hue-split density, per-group error extents, and two-way row-by-column faceting.
 
-Where the [Gallery](index.md) catalogs each individual mark and helper, the Showcase assembles those primitives into complete, recognizable chart designs. Each card shows the concise API call alongside the rendered output.
+Where the [Gallery](gallery.md) catalogs each individual mark and helper, the Showcase assembles those primitives into complete, recognizable chart designs. Each card shows the concise API call alongside the rendered output.
 
 ---
 

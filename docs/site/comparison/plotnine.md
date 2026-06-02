@@ -138,4 +138,4 @@ plotnine delegates statistical computation to scipy and statsmodels via matplotl
 - [Marks & encodings](../guide/marks-encodings.md) for the full mark and channel reference.
 - [Composition](../guide/composition.md) for the `+`, `|`, `&` operators.
 - [Themes](../guide/themes.md) for Ferrum's twelve built-in themes.
-- [Gallery](../gallery/index.md) for rendered examples with code.
+- [Gallery](../gallery/gallery.md) for rendered examples with code.

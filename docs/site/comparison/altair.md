@@ -282,4 +282,4 @@ chart.to_dict()   # Python dict
 - [Composition](../guide/composition.md) for the `+`, `|`, `&` operators and repeat charts.
 - [Interactive rendering](../guide/interactive.md) for the WASM renderer and selections.
 - [Themes](../guide/themes.md) for Ferrum's twelve built-in themes.
-- [Gallery](../gallery/index.md) for rendered examples with code.
+- [Gallery](../gallery/gallery.md) for rendered examples with code.

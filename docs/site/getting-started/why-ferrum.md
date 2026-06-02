@@ -56,4 +56,4 @@ The goal is not maximal novelty, but a plotting system that is broad, fast, stat
 
 - Read [Install](install.md) and [your first plot](first-plot.md) if you want to start with code.
 - Read the [Concepts](../guide/concepts/one-chart-model.md) pages if you want the design rationale behind the choices above.
-- Browse the [Gallery](../gallery/index.md) if you prefer to see what Ferrum looks like in practice.
+- Browse the [Gallery](../gallery/gallery.md) if you prefer to see what Ferrum looks like in practice.
