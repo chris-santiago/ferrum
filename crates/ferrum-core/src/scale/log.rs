@@ -165,7 +165,8 @@ impl LogScaleData {
 ///     )
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct LogScale(LogScaleData, Option<f64>, bool);
+pub struct LogScale(LogScaleData, Option<f64>, bool, bool);
+//                  ^^^data        ^^^padding  ^^^range_user_set  ^^^domain_user_set
 
 impl LogScale {
     /// Rust-side constructor (no Python validation overhead).
@@ -177,7 +178,7 @@ impl LogScale {
             clamp,
         };
         if nice { d = d.nice(); }
-        LogScale(d, None, true)
+        LogScale(d, None, true, true)
     }
 
     pub(crate) fn scale_internal(&self, x: f64) -> f64 { self.0.scale(x) }
@@ -209,9 +210,19 @@ impl LogScale {
 
     pub(crate) fn repr_string(&self) -> String {
         let LogScaleData { domain, range, base, clamp } = &self.0;
+        let domain_s = if self.3 {
+            format!("[{}, {}]", domain[0], domain[1])
+        } else {
+            "None".to_string()
+        };
+        let range_s = if self.2 {
+            format!("[{}, {}]", range[0], range[1])
+        } else {
+            "None".to_string()
+        };
         format!(
-            "LogScale(domain=[{}, {}], range=[{}, {}], base={}, clamp={})",
-            domain[0], domain[1], range[0], range[1], base, if *clamp { "True" } else { "False" }
+            "LogScale(domain={}, range={}, base={}, clamp={})",
+            domain_s, range_s, base, if *clamp { "True" } else { "False" }
         )
     }
 }
@@ -219,9 +230,9 @@ impl LogScale {
 #[pymethods]
 impl LogScale {
     #[new]
-    #[pyo3(signature = (*, domain, range = None, base = 10.0, clamp = false, nice = false, padding = None))]
+    #[pyo3(signature = (*, domain = None, range = None, base = 10.0, clamp = false, nice = false, padding = None))]
     fn new(
-        domain: Vec<f64>,
+        domain: Option<Vec<f64>>,
         range: Option<Vec<f64>>,
         base: f64,
         clamp: bool,
@@ -229,33 +240,39 @@ impl LogScale {
         padding: Option<f64>,
     ) -> PyResult<Self> {
         let range_user_set = range.is_some();
+        let domain_user_set = domain.is_some();
         let r = range.unwrap_or_else(|| vec![0.0, 1.0]);
-        validate_continuous_pair(&domain, &r)?;
         if !base.is_finite() || base <= 0.0 || base == 1.0 {
             return Err(PyValueError::new_err(format!(
                 "base must be finite, > 0, and != 1; got {base}"
             )));
         }
-        if domain[0] == 0.0 || domain[1] == 0.0 {
-            return Err(PyValueError::new_err(
-                "log scale domain must not contain 0",
-            ));
-        }
-        if domain[0].signum() != domain[1].signum() {
-            return Err(PyValueError::new_err(
-                "log scale domain endpoints must have the same sign",
-            ));
+        // Use sentinel [1.0, 10.0] when no domain supplied; render-time inference
+        // replaces it before any scale computation occurs.
+        let dom = domain.unwrap_or_else(|| vec![1.0, 10.0]);
+        if domain_user_set {
+            validate_continuous_pair(&dom, &r)?;
+            if dom[0] == 0.0 || dom[1] == 0.0 {
+                return Err(PyValueError::new_err(
+                    "log scale domain must not contain 0",
+                ));
+            }
+            if dom[0].signum() != dom[1].signum() {
+                return Err(PyValueError::new_err(
+                    "log scale domain endpoints must have the same sign",
+                ));
+            }
         }
         let mut d = LogScaleData {
-            domain: [domain[0], domain[1]],
+            domain: [dom[0], dom[1]],
             range:  [r[0],  r[1]],
             base,
             clamp,
         };
-        if nice {
+        if nice && domain_user_set {
             d = d.nice();
         }
-        Ok(LogScale(d, padding, range_user_set))
+        Ok(LogScale(d, padding, range_user_set, domain_user_set))
     }
 
     /// Map a single input value ``x`` to its output range coordinate.
@@ -268,16 +285,18 @@ impl LogScale {
     fn ticks(&self, count: usize) -> Vec<f64> { self.0.ticks(count) }
 
     /// Return a copy of this scale with domain endpoints rounded to the nearest power of ``base``.
-    fn nice(&self) -> Self { LogScale(self.0.clone().nice(), self.1, self.2) }
+    fn nice(&self) -> Self { LogScale(self.0.clone().nice(), self.1, self.2, self.3) }
 
     /// Fractional inward pixel padding (themes-T4). ``None`` lets the renderer
     /// apply the 5% default when ``domain`` is unset.
     #[getter]
     fn padding(&self) -> Option<f64> { self.1 }
 
-    /// Input domain as ``[min, max]``.
+    /// Input domain as ``[min, max]``, or ``None`` when data-derived.
     #[getter]
-    fn domain(&self) -> Vec<f64> { self.0.domain.to_vec() }
+    fn domain(&self) -> Option<Vec<f64>> {
+        if self.3 { Some(self.0.domain.to_vec()) } else { None }
+    }
 
     /// Output range as ``[lo, hi]`` pixel coordinates, or ``None`` when
     /// the renderer should auto-fill from the plot-area dimensions.

@@ -87,15 +87,15 @@ class ChartSpec:
 # ---------- Scales (Phase 4) ----------
 
 class LinearScale:
-    domain: list[float]
-    range: list[float]
+    domain: list[float] | None
+    range: list[float] | None
     clamp: bool
     padding: float | None
     def __init__(
         self,
         *,
-        domain: Sequence[float],
-        range: Sequence[float],
+        domain: Sequence[float] | None = None,
+        range: Sequence[float] | None = None,
         clamp: bool = False,
         nice: bool = False,
         padding: float | None = None,
@@ -108,16 +108,16 @@ class LinearScale:
     def __eq__(self, other: object) -> bool: ...
 
 class LogScale:
-    domain: list[float]
-    range: list[float]
+    domain: list[float] | None
+    range: list[float] | None
     base: float
     clamp: bool
     padding: float | None
     def __init__(
         self,
         *,
-        domain: Sequence[float],
-        range: Sequence[float],
+        domain: Sequence[float] | None = None,
+        range: Sequence[float] | None = None,
         base: float = 10.0,
         clamp: bool = False,
         nice: bool = False,
@@ -152,16 +152,16 @@ class TimeScale:
     def __eq__(self, other: object) -> bool: ...
 
 class SymlogScale:
-    domain: list[float]
-    range: list[float]
+    domain: list[float] | None
+    range: list[float] | None
     constant: float
     clamp: bool
     padding: float | None
     def __init__(
         self,
         *,
-        domain: Sequence[float],
-        range: Sequence[float],
+        domain: Sequence[float] | None = None,
+        range: Sequence[float] | None = None,
         constant: float = 1.0,
         clamp: bool = False,
         nice: bool = False,
@@ -226,7 +226,7 @@ class QuantileScale:
     def __eq__(self, other: object) -> bool: ...
 
 class PowScale:
-    domain: list[float]
+    domain: Optional[list[float]]
     range: Optional[list[float]]
     exponent: float
     clamp: bool
@@ -234,7 +234,7 @@ class PowScale:
     def __init__(
         self,
         *,
-        domain: Sequence[float],
+        domain: Optional[Sequence[float]] = None,
         range: Optional[Sequence[float]] = None,
         exponent: float = 2.0,
         clamp: bool = False,
@@ -249,7 +249,7 @@ class PowScale:
     def __eq__(self, other: object) -> bool: ...
 
 class SqrtScale:
-    domain: list[float]
+    domain: Optional[list[float]]
     range: Optional[list[float]]
     exponent: float
     clamp: bool
@@ -257,7 +257,7 @@ class SqrtScale:
     def __init__(
         self,
         *,
-        domain: Sequence[float],
+        domain: Optional[Sequence[float]] = None,
         range: Optional[Sequence[float]] = None,
         clamp: bool = False,
         nice: bool = False,
