@@ -259,3 +259,23 @@ All FA follow-ups and five cross-cutting synthesis items (SYNTHESIS §C-D) fixed
 | FA-10 | S2 | **typed-Scale sentinel+flag is two sources of truth** | C3 stores a sentinel domain + `domain_user_set` bool; crate-internal `_internal` accessors read the sentinel directly. Safe today (only called on data-derived scales) but latent; an `Option<[f64;2]>` inner domain would make the unset case unrepresentable. (Found by C3 quality review.) |
 
 **Resolved from the prior frontier:** annotation categorical-axis anchoring (C2), typed-Scale domain auto-inference (C3), shared color domain across concat/pairplot (C4, legend-dedup residual remains), 2-D `mark_density` hue (C5). **Still open in SYNTHESIS §C-D:** `title=None` was C1 (done); custom `fm.Gradient` continuous palettes; gridded `contourf`/`pcolormesh`/`quiver`; flow geometry (Sankey/variable-width trail); recursive treemap/icicle rectangling; public `mark_polygon` for half-violins/raincloud.
+
+### Structural pass (2026-06-02) — break the fix-exposes-next-instance recursion
+
+A 4-agent duplication + silent-failure audit (Rust transforms, Rust render/marks, Python) found the *mechanisms* behind the recurring bug classes: (1) copy-paste dispatch reimplemented per file (fix one, N drift), (2) transform→render layer coupling (new data shape the renderer never handled), (3) silent-failure as default. Findings were **verified before fixing** — several audit claims were false positives (see below). Fixed the confirmed subset; deferred the risky/unconfirmed with honest status. Full suite after: **pytest 5336 / 0 fail; cargo 2206 / 0 fail.**
+
+| ID | Commit | Resolution |
+|---|---|---|
+| S1 | (errorbar hue) | `mark_errorbar`/`mark_errorband` computed the error extent pooled across hue groups (`error_extent` groupby `[x]` only) while coloring bands per group — same silent-wrong class as T10/FA-6. Threaded color into the groupby + layer encodings; extracted shared `marks/_desugar_helpers.resolve_color_groupby` so boxplot/violin/errorbar/errorband share one color-threading path (also drops `None` keys — a latent bug). |
+| S2 | (shape/offset raise) | `mark_point(shape='typo')` silently drew a circle; `transform_stack(offset='bogus')` silently stacked at zero. Both now validated at the Python API boundary (clear `ValueError`); `data_stack.rs` raises on unknown offset; `point.rs` keeps a non-panicking circle fallback for raw-JSON specs (Python is the guard). |
+| S3 | (numeric_util) | Unified byte-identical `clean_float64_values` (bin/kde/smooth) and `quantile_sorted` (qq/letter_value) into `transform/numeric_util.rs`. Pure drift-prevention, byte-stable. |
+
+**Audit false-positives caught by verify-before-fix (NOT bugs):** `smooth.rs` "missing NaN filter" — `extract_xy:500` already filters NaN (audit read the wrong lines); `mark_line` integer color — works (6/6 distinct strokes verified); `mark_ribbon` integer color — splits correctly; legend-swatch≠fill beyond FA-5 — `legend.rs` and `area.rs` already use the same `color_scale.lookup`. Chasing these would have *been* the recursion.
+
+**Deferred (recorded, intentionally NOT fixed — drift-prevention or unconfirmed, not active bugs):**
+| ID | Severity | Item |
+|---|---|---|
+| FA-11 | S2 | **Opacity resolution duplicated + drifted across 5 marks** (point/bar/area/line/rect): per-row vs group-first sampling, scale-applied vs not, `general_opacity` fallback only on bar, `fill_opacity` unread on line. Unifying needs design decisions (is opacity scaled? per-row in grouped marks?) and risks behavior change — no confirmed active bug today. A shared `OpacityChannels` resolver would prevent future drift. `render/marks/{point,bar,area,line,rect}.rs`. |
+| FA-12 | S3 | **Group-partition+stack duplicated across bin/kde/kde_2d/smooth** (`apply_grouped`, ~4 near-identical bodies; extent logic already subtly differs). FA-7 unified the *keying*; this is the row-partition + per-group output stacking. Big refactor, drift-risk, no active bug. |
+| FA-13 | S3 | **Color/detail grouping duplicated across area/line/ribbon** (`col_as_ordinal_category_str` grouping). Verified working at runtime (line/ribbon int-color split correctly), so drift-prevention only — extract `build_color_detail_groups`. |
+| FA-14 | S2 | **`prepare.rs:142` StringView columns bypass string normalization** (`_ => {}`). Potential silent skip; needs a probe to confirm StringView even reaches this path (polars/pyarrow usually yield Utf8). Verify-then-fix-or-close. |
