@@ -290,12 +290,20 @@ def pairplot(
         if diagonal is not None:
             diagonal = diagonal.theme(theme)
 
+    # When hue is set, unify the color scale domain across all cells so
+    # every panel maps the same category → color (consistent colors).
+    # Note: per-panel legend rendering remains — a single shared legend
+    # rendered once outside the grid would require compositor layout work
+    # beyond resolve=; consistent color domain is shipped here, one legend
+    # per panel is the known residual.
+    rc_resolve = {"color": "shared"} if hue is not None else None
     rc = RepeatChart(
         off,
         row=rows,
         column=cols,
         diagonal=diagonal,
         corner=corner,
+        resolve=rc_resolve,
     )
     rc = _finalize_chart(
         rc, mark=mark, encode=encode, properties=properties, layers=layers, theme=None
