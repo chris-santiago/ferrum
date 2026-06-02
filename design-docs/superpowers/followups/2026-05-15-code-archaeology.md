@@ -231,15 +231,31 @@ Re-ran `/audit-flexibility` after D1-D10 + D6; it confirmed 6 of 10 baseline def
 | T11 | 834f126 | `mark_area` splits by `detail=` and non-nominal/ordinal color (was Utf8-color-only collapse) |
 | T12 | 8b15f74 | per-layer `aggregate=` no longer dropped when layered (named chart-level Aggregate + data_source routing; both disjoint and column-overlap `__add__` paths) |
 
-### New follow-ups surfaced by the audit (open, not yet fixed)
+### Phase C campaign (2026-06-02) — FA-1..FA-6 + cross-cutting consistency gaps RESOLVED
+
+All FA follow-ups and five cross-cutting synthesis items (SYNTHESIS §C-D) fixed on `feat/flexibility-new-capabilities`, each gated (spec/quality + review-lite) and regression-tested; render changes visually inspected. Full suite after: **pytest 5293 passed / 0 failed; cargo all suites 0 failed.**
+
+| ID | Commit | Resolution |
+|---|---|---|
+| C1 | 2bfe629 | `title=None` AND `Axis(title="")` truly suppress (no reserved margin, no phantom `<text>`); empty title resolves to None at the prepare boundary (Python forwards `""`, Rust skips the field fallback). |
+| C2 | 7dfb0c9 | annotations anchor to categorical/ordinal axes (non-ISO strings → ordinal category coords, not force-parsed temporal); `fm.annotate_*` accept `fm.px`/`fm.norm`; unresolved category warns before center-fallback. |
+| C3 | d731f07 | typed continuous scales (Linear/Log/Pow/Sqrt/Symlog) accept optional `domain` and auto-infer from data like the dict form. |
+| C4 | 3a2ee59 | `resolve=` on `vconcat`/`hconcat`; `pairplot(hue=)` shares one color domain. **Residual:** a single deduped legend rendered once outside the grid needs compositor layout work — domain is unified, per-panel legends remain (documented in `matrix.py`). |
+| C5 | 5e2dd63 | 2-D density splits by categorical hue (`Kde2D groupby` → per-group surfaces; `Contour` iterates surfaces; `jointplot(kind='kde', hue=)` + `mark_contour(groupby=)`). **Note:** grouped contours render as isolines colored by group; filled per-group isobands are blocked by per-group `level_id` collision (group A and B both start `level_id=0` → polygon renderer merges them). |
+| FA-1 | 059a050 | `mark_arc(theta:N, radius:Q)` renders an equal-band Nightingale coxcomb (was blank). |
+| FA-2 | 2480b08 | polar bars render equal full-circle angular bands (was narrow upper-arc petals — root cause a double polar transform on `MarkBatchKind::Arc` geometry). |
+| FA-3 | 10ecc4a | `stat_aggregate` accepts integer/uint/bool groupby (KeyValue gained Null/Int/UInt/Bool; output preserves the key dtype). |
+| FA-4 | 803d753 | per-layer `bin=` resolved via named transform + data_source routing (mirrors T12); `bin=Bin(...)` kwargs preserved; bin+aggregate on one layer raises rather than clobbering. |
+| FA-5 | 4459c29 | ordinal/quantitative-color `mark_area` legend swatches match fills (`build_color_scale` forces categorical for `Mark::Area`). |
+| FA-6 | 54da54d | violin/boxplot box-inner layers color-encode by hue (also fixed standalone `mark_boxplot` color threading). |
+
+### New follow-ups surfaced DURING the Phase C campaign (open)
 
 | ID | Severity | Item | Notes |
 |---|---|---|---|
-| FA-1 | S3 | **`mark_arc(theta:N, radius:Q)` Nightingale coxcomb renders blank** | falls into the pie path which `col_as_f64`'s the nominal theta → empty. The idiomatic coxcomb path is `mark_bar`+`CoordPolar` (fixed in G-D7); `mark_arc` should either render equal-band value wedges or raise, not silently blank. `arc.rs` build gate + the Python polar dummy-y remapping. |
-| FA-2 | S2 | **Polar-bar angular layout is not equal full-circle bands** | G-D7 visual check showed 2-category coxcombs render as two narrow "petals" in the upper arc rather than equal wedges filling 360° (the "value-driven-angle" geometry the categorical agent flagged). Radial stacking is correct; the angular band-scale/extent under `CoordPolar` needs a look (`bar.rs build_polar` angular bands / polar band-scale padding/extent). |
-| FA-3 | S3 | **Rust `stat_aggregate` rejects Int64 groupby** (Float64/Utf8 only) | affects both single-chart and layered aggregate; an Int64 x/groupby column errors. `crates/ferrum-core/src/transform/` aggregate path. |
-| FA-4 | S3 | **Per-layer `bin=` has the same never-run gap T12 fixed for aggregate** | the layered path now resolves per-layer aggregates into named transforms but NOT per-layer `Bin` sentinels (`_layer_pending_aggregates` keeps only `_PendingAggregate`). A layer with `bin=` encoding silently isn't binned. Same named-transform+data_source fix pattern applies. |
-| FA-5 | S1 | **Ordinal/quantitative-color `mark_area` legend swatch ≠ fill** | T11 inspection: legend swatches show categorical colors (blue/red/gold) while area fills use a sequential-ish ramp; the areas split correctly (the T11 fix) but the legend/fill color source for ordinal area diverges. |
-| FA-6 | S1 | **violin box-inner layers don't color-encode while quartile/point do** | sibling asymmetry from `desugar_boxplot`'s layer contract (its layers never color-encode); cosmetic under the T10 overlay. |
+| FA-7 | S3 | **Int64/uint/bool groupby still rejected by 4 sibling transforms** | `violin.rs`, `summary.rs`, `error_extent.rs`, `box_stats.rs` each carry a private `KeyValue` enum (Str+Float only) with the same Float64/Utf8-only group-keying FA-3 just removed from `aggregate.rs`. They reject integer/bool groupby exactly as `aggregate.rs` did. Extract a shared `groupby_key_at`/`materialize_groupby_col` so the dtype support is not a one-transform island. (Found by FA-3 quality review.) |
+| FA-8 | S2 | **C5 grouped contours are isoline-only** | filled per-group isobands need globally-unique `level_id` across groups (namespace `level_id` by group index in `contour.rs`); until then `desugar_contour(groupby=)` forces `fill=False`. |
+| FA-9 | S1 | **Int64 null groupby key materializes as `0`** | `aggregate.rs materialize_groupby_col` emits `0i64` for a null integer key, which collides with a genuine `0` key (null float → NaN is unambiguous; null int → 0 is not). Pinned/documented by a regression test; emit a proper null instead. |
+| FA-10 | S2 | **typed-Scale sentinel+flag is two sources of truth** | C3 stores a sentinel domain + `domain_user_set` bool; crate-internal `_internal` accessors read the sentinel directly. Safe today (only called on data-derived scales) but latent; an `Option<[f64;2]>` inner domain would make the unset case unrepresentable. (Found by C3 quality review.) |
 
-The larger remaining frontier (annotation categorical-axis anchoring, typed-Scale domain auto-inference, shared legend across Repeat/concat, 2-D `mark_density` hue, custom `fm.Gradient` palettes, gridded `contourf`, flow geometry) is catalogued in the audit synthesis (`/tmp/ferrum-ux-audit/SYNTHESIS.md`, section C-D).
+**Resolved from the prior frontier:** annotation categorical-axis anchoring (C2), typed-Scale domain auto-inference (C3), shared color domain across concat/pairplot (C4, legend-dedup residual remains), 2-D `mark_density` hue (C5). **Still open in SYNTHESIS §C-D:** `title=None` was C1 (done); custom `fm.Gradient` continuous palettes; gridded `contourf`/`pcolormesh`/`quiver`; flow geometry (Sankey/variable-width trail); recursive treemap/icicle rectangling; public `mark_polygon` for half-violins/raincloud.
