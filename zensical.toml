@@ -53,10 +53,8 @@ nav = [
     { Recipes = "guide/recipes.md" },
     { "Interactive rendering" = "guide/interactive.md" },
   ] },
-  { Gallery = [
-    { Gallery = "gallery/index.md" },
-    { Showcase = "gallery/showcase.md" },
-  ] },
+  { Gallery = "gallery/index.md" },
+  { Showcase = "gallery/showcase.md" },
   { Comparison = [
     { "vs Altair" = "comparison/altair.md" },
     { "vs plotnine" = "comparison/plotnine.md" },
