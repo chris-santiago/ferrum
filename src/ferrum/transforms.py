@@ -666,6 +666,9 @@ def transform_top_k(
     return {"type": "top_k", "n": n, "field": field, "op": op, "sort": sort}
 
 
+_VALID_STACK_OFFSETS: frozenset[str] = frozenset(["zero", "normalize", "center"])
+
+
 def transform_stack(
     field: str,
     *,
@@ -694,6 +697,11 @@ def transform_stack(
     dict
         Transform specification for the Rust engine.
 
+    Raises
+    ------
+    ValueError
+        If ``offset`` is not one of ``"zero"``, ``"normalize"``, ``"center"``.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -703,6 +711,11 @@ def transform_stack(
     >>> t["as_"]
     ['y0', 'y1']
     """
+    if offset not in _VALID_STACK_OFFSETS:
+        raise ValueError(
+            f"transform_stack: offset={offset!r} is not valid. "
+            f"Valid values: {sorted(_VALID_STACK_OFFSETS)}"
+        )
     spec: dict = {
         "type": "data_stack",
         "field": field,

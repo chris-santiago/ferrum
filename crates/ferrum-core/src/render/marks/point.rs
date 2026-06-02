@@ -6,9 +6,18 @@ use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::{ColorScale, ScaleKind, ShapeKind};
 
-/// Parse a shape name string to a `ShapeKind`. Unknown values fall back to `Circle`.
+/// Parse a shape name string to a `ShapeKind`.
+///
+/// Returns `ShapeKind::Circle` for any unrecognised string. This is the
+/// raw-spec fallback: specs that arrive via `ChartSpec::from_json` or other
+/// routes that bypass the Python `mark_point(shape=)` boundary can carry
+/// arbitrary strings; falling back to a circle avoids a panic on that path.
+/// The Python layer (`ferrum.marks.base._VALID_POINT_SHAPES`) is the
+/// primary validation gate for user-facing errors — unknown shape names
+/// produce a clear `ValueError` there before any JSON is produced.
 pub(crate) fn shape_from_str(s: &str) -> ShapeKind {
     match s {
+        "circle" => ShapeKind::Circle,
         "square" => ShapeKind::Square,
         "cross" => ShapeKind::Cross,
         "diamond" => ShapeKind::Diamond,
@@ -16,7 +25,10 @@ pub(crate) fn shape_from_str(s: &str) -> ShapeKind {
         "triangle-down" | "triangle_down" => ShapeKind::TriangleDown,
         "|" | "vline" => ShapeKind::VLine,
         "-" | "hline" => ShapeKind::HLine,
-        _ => ShapeKind::Circle, // "circle" and unknown values
+        // Unknown strings from raw/JSON specs fall back to circle.
+        // This path is not reachable via the normal Python API because
+        // mark_point(shape=) validates against _VALID_POINT_SHAPES first.
+        _ => ShapeKind::Circle,
     }
 }
 
@@ -852,6 +864,28 @@ mod tests {
     // ── VLine / HLine shape tests ───────────────────────────────────────────
 
     #[test]
+    fn test_shape_from_str_circle() {
+        assert_eq!(shape_from_str("circle"), ShapeKind::Circle);
+    }
+
+    #[test]
+    fn test_shape_from_str_all_valid() {
+        // All Python-validated shape names must map to a distinct ShapeKind.
+        assert_eq!(shape_from_str("circle"), ShapeKind::Circle);
+        assert_eq!(shape_from_str("square"), ShapeKind::Square);
+        assert_eq!(shape_from_str("cross"), ShapeKind::Cross);
+        assert_eq!(shape_from_str("diamond"), ShapeKind::Diamond);
+        assert_eq!(shape_from_str("triangle-up"), ShapeKind::TriangleUp);
+        assert_eq!(shape_from_str("triangle_up"), ShapeKind::TriangleUp);
+        assert_eq!(shape_from_str("triangle-down"), ShapeKind::TriangleDown);
+        assert_eq!(shape_from_str("triangle_down"), ShapeKind::TriangleDown);
+        assert_eq!(shape_from_str("|"), ShapeKind::VLine);
+        assert_eq!(shape_from_str("vline"), ShapeKind::VLine);
+        assert_eq!(shape_from_str("-"), ShapeKind::HLine);
+        assert_eq!(shape_from_str("hline"), ShapeKind::HLine);
+    }
+
+    #[test]
     fn test_shape_from_str_vline() {
         assert_eq!(shape_from_str("|"), ShapeKind::VLine);
         assert_eq!(shape_from_str("vline"), ShapeKind::VLine);
@@ -861,6 +895,16 @@ mod tests {
     fn test_shape_from_str_hline() {
         assert_eq!(shape_from_str("-"), ShapeKind::HLine);
         assert_eq!(shape_from_str("hline"), ShapeKind::HLine);
+    }
+
+    /// Unknown shape strings from raw/JSON specs fall back to Circle.
+    /// The Python API validates shape names before producing JSON, so this
+    /// path is only reachable via hand-crafted or round-tripped specs.
+    #[test]
+    fn test_shape_from_str_unknown_defaults_to_circle() {
+        assert_eq!(shape_from_str("hexagon"), ShapeKind::Circle);
+        assert_eq!(shape_from_str("not_a_real_shape"), ShapeKind::Circle);
+        assert_eq!(shape_from_str(""), ShapeKind::Circle);
     }
 
     fn default_shape_style() -> ShapeStyle {

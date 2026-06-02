@@ -33,6 +33,25 @@ _LINETYPE_MAP: dict[str, list[float]] = {
     "longdash": [8.0, 4.0],
 }
 
+# Canonical set of valid constant shape names for mark_point(shape=...).
+# Must stay in sync with shape_from_str() in crates/ferrum-core/src/render/marks/point.rs.
+_VALID_POINT_SHAPES: frozenset[str] = frozenset(
+    [
+        "circle",
+        "square",
+        "cross",
+        "diamond",
+        "triangle-up",
+        "triangle_up",
+        "triangle-down",
+        "triangle_down",
+        "|",
+        "vline",
+        "-",
+        "hline",
+    ]
+)
+
 _VALID_MARK_KWARGS = frozenset(
     [
         "size",
@@ -138,6 +157,16 @@ class MarkBase:
                 raise TypeError(
                     f"mark_{mark_name}: unknown keyword argument {k!r}. "
                     f"Valid: {sorted(_VALID_MARK_KWARGS)}"
+                )
+        # Validate shape= value for point marks. The constant shape is a fixed
+        # string that must name one of the glyphs supported by the Rust renderer;
+        # an unknown name would silently default to circle at render time.
+        shape_val = resolved.get("shape")
+        if shape_val is not None and isinstance(shape_val, str):
+            if shape_val not in _VALID_POINT_SHAPES:
+                raise ValueError(
+                    f"mark_{mark_name}: unknown shape {shape_val!r}. "
+                    f"Valid shapes: {sorted(_VALID_POINT_SHAPES)}"
                 )
         self._kwargs = resolved
 
