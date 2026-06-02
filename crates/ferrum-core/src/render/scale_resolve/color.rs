@@ -55,11 +55,24 @@ use super::{distinct_values_in_order, infer_spec_type, numeric_extent, ColorScal
 ///   2. `encoding.scale.common.scheme` (inside a continuous scale spec)
 ///   3. Theme sequential/diverging scheme
 ///   4. Hard fallback: Viridis
+///
+/// # FA-5 — `force_categorical` for area marks
+///
+/// When `force_categorical = true`, the Quantitative/Temporal path is skipped
+/// and the color field is always resolved as a `Categorical` scale regardless
+/// of its Arrow dtype.  Set this flag for `mark_area`, which always groups rows
+/// into discrete per-color bands (via `col_as_ordinal_category_str`) and therefore
+/// must use the same categorical palette for both fills and legend swatches.
+///
+/// Without this flag a Float64/Int64 color column would produce a `Continuous`
+/// scale (gradient colorbar legend) while the area fills sampled discrete points
+/// on that ramp — legend ≠ fill (the FA-5 bug).
 pub fn build_color_scale(
     encoding: &crate::spec::encoding::Encoding,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     theme: &ThemeInputs,
+    force_categorical: bool,
 ) -> Result<(Option<ColorScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(c_enc) = &encoding.color else {
         return Ok((None, Vec::new()));
@@ -68,7 +81,12 @@ pub fn build_color_scale(
         .ok_or_else(|| RenderError::UnknownColumn { name: c_enc.field.clone() })?;
 
     let inferred = infer_spec_type(c_enc, located.col.data_type());
-    let is_continuous_color = matches!(
+    // FA-5: When force_categorical is set (mark_area), treat any quantitative/temporal
+    // color field as categorical.  Area always groups by distinct color values
+    // (col_as_ordinal_category_str), so both the fills and the legend must agree on
+    // a categorical palette rather than diverging: fills from a continuous ramp vs.
+    // legend showing a gradient colorbar.
+    let is_continuous_color = !force_categorical && matches!(
         inferred,
         SpecDataType::Quantitative | SpecDataType::Temporal,
     );
