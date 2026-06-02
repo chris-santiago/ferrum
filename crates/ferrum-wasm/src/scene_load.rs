@@ -148,6 +148,17 @@ pub struct SceneData {
     /// normal-blend commands; mark batches carry their scene-graph
     /// `BlendMode`.
     pub draw_commands: Vec<DrawCommand>,
+    /// Per-panel mark-mesh index ranges + plot areas.
+    ///
+    /// Each entry corresponds to one panel whose mark batches contributed
+    /// mesh geometry (lines, areas, paths). `render_frame` uses this list to
+    /// draw each panel's mesh slice with a scissor rect clamped to its
+    /// `plot_area`, preventing zoomed/panned geometry from bleeding outside
+    /// the plot boundary into axis margins or adjacent panels.
+    ///
+    /// Panels that contributed no mesh geometry (e.g. only packed
+    /// circle/rect instances) are absent from this list.
+    pub mark_mesh_panels: Vec<MarkMeshPanel>,
 }
 
 #[derive(Clone)]
@@ -234,6 +245,22 @@ pub struct DrawCommand {
     pub plot_area: Option<[f32; 4]>,
 }
 
+/// Per-panel mark-mesh draw range.
+///
+/// Captures the contiguous slice of the mark-mesh index buffer that belongs
+/// to one panel, together with that panel's plot area. `render_frame` iterates
+/// this list to scissor each panel's mesh draw to its own plot area, preventing
+/// zoomed/panned geometry from bleeding into axis margins or adjacent panels.
+#[derive(Clone, Debug)]
+pub struct MarkMeshPanel {
+    /// First index in the flat mark-mesh index buffer for this panel.
+    pub index_start: u32,
+    /// Number of indices (triangle soup) belonging to this panel.
+    pub index_count: u32,
+    /// Plot area `[x, y, w, h]` in canvas pixels.
+    pub plot_area: [f32; 4],
+}
+
 /// Accumulator for one full scene-load pass.
 ///
 /// Replaces the 8 loose `let mut` variables previously threaded through every
@@ -260,6 +287,11 @@ pub struct SceneCollector {
     /// Collected alongside text elements and exported to JS.
     pub raws: Vec<RawFragmentData>,
     pub draw_commands: Vec<DrawCommand>,
+    /// Per-panel mark-mesh index ranges. Each entry records the contiguous
+    /// slice of the mark-mesh index buffer contributed by one panel and that
+    /// panel's plot area, so `render_frame` can scissor each panel's mesh
+    /// draw independently.
+    pub mark_mesh_panels: Vec<MarkMeshPanel>,
     /// Snapshot of `circles.len()` at the last `emit` call.
     prev_c: usize,
     /// Snapshot of `rects.len()` at the last `emit` call.
@@ -284,6 +316,7 @@ impl SceneCollector {
             images: Vec::new(),
             raws: Vec::new(),
             draw_commands: Vec::new(),
+            mark_mesh_panels: Vec::new(),
             prev_c: 0,
             prev_r: 0,
         }
@@ -396,6 +429,30 @@ impl SceneCollector {
         self.prev_r = new_r;
     }
 
+    /// Record the mark-mesh index range for one panel.
+    ///
+    /// Call this once per panel in the scene-graph walk: pass the mesh index
+    /// count *before* collecting any mark batches for the panel as
+    /// `index_start_before`, and the count *after* all batches have been
+    /// collected as `index_end_after`. If the panel contributed no mesh
+    /// geometry (e.g. a panel with only packed circle/rect batches), no entry
+    /// is recorded.
+    pub fn record_mark_mesh_panel(
+        &mut self,
+        index_start_before: u32,
+        index_end_after: u32,
+        plot_area: [f32; 4],
+    ) {
+        let index_count = index_end_after - index_start_before;
+        if index_count > 0 {
+            self.mark_mesh_panels.push(MarkMeshPanel {
+                index_start: index_start_before,
+                index_count,
+                plot_area,
+            });
+        }
+    }
+
     /// Snapshot the current circle and rect counts so a subsequent `emit` only
     /// covers instances appended after this point. Used when instances are
     /// pre-populated from a binary sidecar (packed batches) rather than from
@@ -451,12 +508,17 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         }).collect();
         collector.collect_static(&snapped_grid, None, None);
 
-        let panel_plot_area = Some([
+        let panel_plot_area_arr = [
             panel.plot_area.x as f32,
             panel.plot_area.y as f32,
             panel.plot_area.w as f32,
             panel.plot_area.h as f32,
-        ]);
+        ];
+        let panel_plot_area = Some(panel_plot_area_arr);
+
+        // Snapshot the mark-mesh index count before processing this panel's
+        // mark batches so we can record the contiguous range afterward.
+        let mesh_index_start_before = collector.mesh.indices.len() as u32;
 
         for (batch_idx, batch) in panel.marks.iter().enumerate() {
             let additive = batch_uses_additive_blend(batch.blend);
@@ -490,6 +552,16 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
             }
         }
 
+        // Record this panel's mark-mesh index range. Panels that contributed
+        // no mesh geometry (e.g. only packed instances) produce a zero-count
+        // range and are skipped by `record_mark_mesh_panel`.
+        let mesh_index_end_after = collector.mesh.indices.len() as u32;
+        collector.record_mark_mesh_panel(
+            mesh_index_start_before,
+            mesh_index_end_after,
+            panel_plot_area_arr,
+        );
+
         // Axes, strip titles: non-mark → static mesh
         collector.collect_static(&panel.axes, None, None);
         collector.collect_static(&panel.strip_title, None, None);
@@ -516,6 +588,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         height: scene.height as f32,
         packed_batch_meta: batch_meta,
         draw_commands: collector.draw_commands,
+        mark_mesh_panels: collector.mark_mesh_panels,
     }
 }
 
@@ -3406,6 +3479,200 @@ mod tests {
             "mark mesh must be empty when no mark nodes are present"
         );
     }
+
+    // ── Per-panel mark-mesh scissor ranges ───────────────────────────
+    //
+    // These tests cover the `MarkMeshPanel` mechanism added to fix the
+    // zoom/pan geometry bleed bug: mark mesh geometry must be partitioned
+    // by panel so render_frame can scissor each panel's draw to its own
+    // plot area.
+
+    /// A single-panel scene with mesh marks must produce exactly one
+    /// `MarkMeshPanel` entry that spans the entire mark mesh index buffer.
+    #[test]
+    fn single_panel_mesh_scene_produces_one_mark_mesh_panel() {
+        let nodes = vec![
+            SceneNode::Line {
+                x1: 50.0, y1: 50.0, x2: 300.0, y2: 200.0,
+                style: default_stroke_style(),
+            },
+        ];
+        let scene = make_scene_with_nodes(MarkBatchKind::Rule, nodes);
+        let data = load_scene(&scene);
+
+        // At least some mesh indices must have been produced for the assertion
+        // to be meaningful.
+        assert!(
+            !data.mesh_buffers.indices.is_empty(),
+            "prerequisite: line must tessellate to non-empty mesh"
+        );
+
+        assert_eq!(
+            data.mark_mesh_panels.len(), 1,
+            "one panel with mesh marks → one MarkMeshPanel entry"
+        );
+
+        let panel = &data.mark_mesh_panels[0];
+        assert_eq!(
+            panel.index_start, 0,
+            "single panel: index_start must be 0 (buffer starts fresh)"
+        );
+        assert_eq!(
+            panel.index_count,
+            data.mesh_buffers.indices.len() as u32,
+            "single panel: index_count must span the entire mesh index buffer"
+        );
+        // Plot area must match the panel's plot_area from make_scene_with_nodes.
+        assert!((panel.plot_area[0] - 50.0).abs() < 1e-3, "plot_area x");
+        assert!((panel.plot_area[1] - 10.0).abs() < 1e-3, "plot_area y");
+        assert!((panel.plot_area[2] - 400.0).abs() < 1e-3, "plot_area w");
+        assert!((panel.plot_area[3] - 350.0).abs() < 1e-3, "plot_area h");
+    }
+
+    /// A two-panel scene each with mesh marks must produce two `MarkMeshPanel`
+    /// entries whose index ranges are contiguous, non-overlapping, and together
+    /// cover the entire mark mesh index buffer.
+    #[test]
+    fn two_panel_mesh_scene_produces_two_mark_mesh_panels_covering_full_buffer() {
+        use ferrum_scene::{Panel, MarkBatch, BlendMode};
+        use ferrum_scene::{CoordKind, Rect, InteractionConfig};
+
+        let line_node = || SceneNode::Line {
+            x1: 50.0, y1: 50.0, x2: 300.0, y2: 200.0,
+            style: default_stroke_style(),
+        };
+
+        let scene = SceneGraph {
+            width: 600.0,
+            height: 400.0,
+            background: None,
+            title: vec![],
+            panels: vec![
+                Panel {
+                    id: 0,
+                    plot_area: Rect { x: 50.0, y: 10.0, w: 200.0, h: 150.0 },
+                    clip: Rect { x: 50.0, y: 10.0, w: 200.0, h: 150.0 },
+                    coord: CoordKind::Cartesian {
+                        x_domain: None, y_domain: None, expand: true, clip: true,
+                    },
+                    grid: vec![],
+                    marks: vec![MarkBatch {
+                        kind: MarkBatchKind::Rule,
+                        nodes: vec![line_node()],
+                        data_indices: None, tooltips: None, hrefs: None,
+                        descriptions: None, keys: None,
+                        blend: BlendMode::Normal,
+                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                    }],
+                    axes: vec![], annotations: vec![], strip_title: vec![],
+                },
+                Panel {
+                    id: 1,
+                    plot_area: Rect { x: 310.0, y: 10.0, w: 200.0, h: 150.0 },
+                    clip: Rect { x: 310.0, y: 10.0, w: 200.0, h: 150.0 },
+                    coord: CoordKind::Cartesian {
+                        x_domain: None, y_domain: None, expand: true, clip: true,
+                    },
+                    grid: vec![],
+                    marks: vec![MarkBatch {
+                        kind: MarkBatchKind::Rule,
+                        nodes: vec![line_node()],
+                        data_indices: None, tooltips: None, hrefs: None,
+                        descriptions: None, keys: None,
+                        blend: BlendMode::Normal,
+                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                    }],
+                    axes: vec![], annotations: vec![], strip_title: vec![],
+                },
+            ],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let data = load_scene(&scene);
+
+        assert_eq!(
+            data.mark_mesh_panels.len(), 2,
+            "two panels with mesh marks → two MarkMeshPanel entries"
+        );
+
+        let p0 = &data.mark_mesh_panels[0];
+        let p1 = &data.mark_mesh_panels[1];
+
+        // Ranges must be contiguous: panel 1 starts where panel 0 ends.
+        assert_eq!(
+            p1.index_start, p0.index_start + p0.index_count,
+            "panel 1 index_start must immediately follow panel 0 range"
+        );
+
+        // Together they must cover the entire mesh index buffer.
+        assert_eq!(
+            p0.index_count + p1.index_count,
+            data.mesh_buffers.indices.len() as u32,
+            "combined panel ranges must cover the full mesh index buffer"
+        );
+
+        // Plot areas must match each panel.
+        assert!((p0.plot_area[0] - 50.0).abs() < 1e-3, "panel 0 x");
+        assert!((p1.plot_area[0] - 310.0).abs() < 1e-3, "panel 1 x");
+    }
+
+    /// A panel with only circle instances (no mesh nodes) must NOT appear in
+    /// `mark_mesh_panels` — zero-count ranges are dropped.
+    #[test]
+    fn panel_with_no_mesh_marks_produces_no_mark_mesh_panel_entry() {
+        // Circle nodes go to the instance buffer, not the mesh buffer.
+        let circle_node = SceneNode::Circle {
+            cx: 100.0, cy: 100.0, r: 5.0,
+            style: default_fill_stroke(),
+        };
+        let scene = make_scene_with_nodes(MarkBatchKind::Point, vec![circle_node]);
+        let data = load_scene(&scene);
+
+        assert!(
+            data.mark_mesh_panels.is_empty(),
+            "circle-only panel must produce no MarkMeshPanel entries \
+             (circles go to the instance buffer, not the mesh)"
+        );
+        // Sanity: the circle did land in instances.
+        assert_eq!(data.circle_instances.len(), 1);
+    }
+
+    /// `SceneCollector::record_mark_mesh_panel` is the core primitive.
+    /// Verify it correctly accumulates entries and drops zero-count panels.
+    #[test]
+    fn record_mark_mesh_panel_accumulates_and_drops_zeros() {
+        let mut collector = SceneCollector::new();
+
+        // Record a non-zero range.
+        collector.record_mark_mesh_panel(0, 30, [10.0, 20.0, 200.0, 150.0]);
+        assert_eq!(collector.mark_mesh_panels.len(), 1);
+        assert_eq!(collector.mark_mesh_panels[0].index_start, 0);
+        assert_eq!(collector.mark_mesh_panels[0].index_count, 30);
+
+        // Record a zero-count range — must be dropped.
+        collector.record_mark_mesh_panel(30, 30, [10.0, 200.0, 200.0, 150.0]);
+        assert_eq!(
+            collector.mark_mesh_panels.len(), 1,
+            "zero-count panel must not be appended"
+        );
+
+        // Record a second non-zero range that follows the first.
+        collector.record_mark_mesh_panel(30, 55, [220.0, 20.0, 200.0, 150.0]);
+        assert_eq!(collector.mark_mesh_panels.len(), 2);
+        assert_eq!(collector.mark_mesh_panels[1].index_start, 30);
+        assert_eq!(collector.mark_mesh_panels[1].index_count, 25);
+
+        // Verify plot areas are stored correctly.
+        let pa0 = collector.mark_mesh_panels[0].plot_area;
+        assert!((pa0[0] - 10.0).abs() < 1e-6, "panel 0 x");
+        assert!((pa0[2] - 200.0).abs() < 1e-6, "panel 0 w");
+        let pa1 = collector.mark_mesh_panels[1].plot_area;
+        assert!((pa1[0] - 220.0).abs() < 1e-6, "panel 1 x");
+    }
 }
 
 #[cfg(test)]
@@ -3922,4 +4189,5 @@ mod bug_hunt_tests {
         assert_eq!(data.raw_fragments[0].anchor, "chrome");
         assert!(data.raw_fragments[0].svg.contains("nested"));
     }
+
 }

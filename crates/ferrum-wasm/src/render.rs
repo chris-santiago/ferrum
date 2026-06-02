@@ -3,7 +3,7 @@ use wgpu::util::DeviceExt;
 use crate::error::WasmRenderError;
 use crate::gpu::GpuContext;
 use crate::pipelines::RenderPipelines;
-use crate::scene_load::{DrawCommand, DrawKind, SceneData};
+use crate::scene_load::{DrawCommand, DrawKind, MarkMeshPanel, SceneData};
 
 struct ImageGpu {
     vertex_buffer: wgpu::Buffer,
@@ -27,6 +27,10 @@ pub struct GpuBuffers {
     mesh_vertex_buffer: Option<wgpu::Buffer>,
     mesh_index_buffer: Option<wgpu::Buffer>,
     pub(crate) mesh_index_count: u32,
+    /// Per-panel mark-mesh index ranges + plot areas. Used by `render_frame`
+    /// to scissor each panel's mesh draw to its own plot area, preventing
+    /// zoomed/panned geometry from bleeding into axis margins.
+    mark_mesh_panels: Vec<MarkMeshPanel>,
     /// Static mesh (grid lines, axis ticks, legend, title,
     /// decorations) — identity transform (stays fixed during zoom/pan).
     static_mesh_vertex_buffer: Option<wgpu::Buffer>,
@@ -235,6 +239,7 @@ impl GpuBuffers {
             mesh_vertex_buffer,
             mesh_index_buffer,
             mesh_index_count: scene.mesh_buffers.indices.len() as u32,
+            mark_mesh_panels: scene.mark_mesh_panels.clone(),
             static_mesh_vertex_buffer,
             static_mesh_index_buffer,
             static_mesh_index_count: scene.static_mesh_buffers.indices.len() as u32,
@@ -404,9 +409,20 @@ pub fn render_frame(
             multiview_mask: None,
         });
 
+        // Surface dimensions and DPR scale factors — used throughout the draw
+        // sequence for scissor rect scaling. Computed once here rather than
+        // inside the per-batch loop so the mark-mesh scissor path can also use
+        // them (the mark mesh is drawn before the per-batch loop).
+        let surface_w = surface_tex.texture.width();
+        let surface_h = surface_tex.texture.height();
+        // Scale factor for DPR: when the canvas is resized for PNG capture
+        // (e.g., 2x on Retina), plot_area is still in logical pixels.
+        let scale_x = surface_w as f32 / buffers.scene_width;
+        let scale_y = surface_h as f32 / buffers.scene_height;
+
         // Draw order:
         //   1. Static mesh (grid, axes, legend, title) — identity transform
-        //   2. Mark mesh (lines, areas, paths) — zoom/pan transform
+        //   2. Mark mesh (lines, areas, paths) — zoom/pan transform, per-panel scissor
         //   3. Images — zoom/pan transform
         //   4. Per-batch circle/rect commands — mixed (is_mark selects transform)
         //   5. Annotation mesh (reference lines/paths) — identity transform
@@ -427,7 +443,18 @@ pub fn render_frame(
             pass.draw_indexed(0..buffers.static_mesh_index_count, 0, 0..1);
         }
 
-        // 2. Mark mesh — zoom/pan transform
+        // 2. Mark mesh — zoom/pan transform, scissored per panel.
+        //
+        // The mark mesh is a single combined buffer for all panels. Without
+        // a per-panel scissor, zoomed/panned geometry bleeds outside the
+        // plot area into axis margins (and into adjacent panels on multi-panel
+        // charts such as focus+context). We iterate the per-panel index ranges
+        // recorded at scene-load time and set a scissor rect matching each
+        // panel's plot area before drawing its slice of the buffer.
+        //
+        // When `mark_mesh_panels` is empty (no mesh marks in the scene) the
+        // loop body never executes, so the behaviour is identical to the old
+        // single-draw path for circle/rect-only charts.
         if let (Some(vb), Some(ib)) =
             (&buffers.mesh_vertex_buffer, &buffers.mesh_index_buffer)
         {
@@ -435,7 +462,28 @@ pub fn render_frame(
             pass.set_bind_group(0, &buffers.uniform_bind_group, &[]);
             pass.set_vertex_buffer(0, vb.slice(..));
             pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..buffers.mesh_index_count, 0, 0..1);
+
+            if buffers.mark_mesh_panels.is_empty() {
+                // Fallback: no panel metadata (should not occur in practice for
+                // mesh-bearing scenes, but guards against stale GpuBuffers).
+                pass.draw_indexed(0..buffers.mesh_index_count, 0, 0..1);
+            } else {
+                for panel in &buffers.mark_mesh_panels {
+                    let pa = &panel.plot_area;
+                    pass.set_scissor_rect(
+                        (pa[0] * scale_x) as u32,
+                        (pa[1] * scale_y) as u32,
+                        (pa[2] * scale_x) as u32,
+                        (pa[3] * scale_y) as u32,
+                    );
+                    let range = panel.index_start..(panel.index_start + panel.index_count);
+                    pass.draw_indexed(range, 0, 0..1);
+                }
+                // Relax scissor to full surface so subsequent draws
+                // (images, circle/rect commands, annotations) are not clipped
+                // to the last panel's plot area.
+                pass.set_scissor_rect(0, 0, surface_w, surface_h);
+            }
         }
 
         for img in &buffers.image_draws {
@@ -450,13 +498,6 @@ pub fn render_frame(
         // zoom-transformed uniforms; non-mark commands (axes, gridlines,
         // legend, title, etc.) use the identity-transform uniforms so
         // they stay fixed during zoom/pan.
-        let surface_w = surface_tex.texture.width();
-        let surface_h = surface_tex.texture.height();
-        // Scale factor for DPR: when the canvas is resized for PNG capture
-        // (e.g., 2x on Retina), plot_area is still in logical pixels.
-        let scale_x = surface_w as f32 / buffers.scene_width;
-        let scale_y = surface_h as f32 / buffers.scene_height;
-
         for cmd in &buffers.draw_commands {
             if cmd.instance_count == 0 {
                 continue;

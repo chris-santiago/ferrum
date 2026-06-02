@@ -1119,6 +1119,7 @@ mod tests {
             height: 500.0,
             packed_batch_meta: packed_meta,
             draw_commands: vec![],
+            mark_mesh_panels: vec![],
         };
 
         let idx = SpatialIndex::build_with_packed(&panels, Some(&data));
@@ -1185,6 +1186,7 @@ mod tests {
             height: 500.0,
             packed_batch_meta: packed_meta,
             draw_commands: vec![],
+            mark_mesh_panels: vec![],
         };
 
         let idx = SpatialIndex::build_with_packed(&panels, Some(&data));
@@ -1244,6 +1246,7 @@ mod tests {
             height: 500.0,
             packed_batch_meta: packed_meta,
             draw_commands: vec![],
+            mark_mesh_panels: vec![],
         };
 
         let idx = SpatialIndex::build_with_packed(&panels, Some(&data));

@@ -203,6 +203,7 @@ impl WasmRenderer {
                 height: tr.new_data.height,
                 packed_batch_meta: tr.new_data.packed_batch_meta.clone(),
                 draw_commands: tr.new_data.draw_commands.clone(),
+                mark_mesh_panels: tr.new_data.mark_mesh_panels.clone(),
             };
             let buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &lerped_data);
             render::render_frame(&self.gpu, &self.pipelines, &buffers, lerped_data.background)
@@ -1038,6 +1039,7 @@ mod tests {
             height: 500.0,
             packed_batch_meta: packed_meta,
             draw_commands: vec![],
+            mark_mesh_panels: vec![],
         };
 
         // Build spatial index with packed data.
