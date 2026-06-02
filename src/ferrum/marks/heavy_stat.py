@@ -163,6 +163,7 @@ def desugar_violin(
     inner: Optional[str] = "box",
     x_sort: Any = None,
     y_sort: Any = None,
+    color_field: str | None = None,
 ) -> "MarkDesugarResult":
     """Violin-plot composite mark desugar.
 
@@ -207,6 +208,14 @@ def desugar_violin(
     x_sort, y_sort : optional
         Sort order applied to the categorical positional axis, injected by
         the composite-mark expansion from ``sort=`` on the encoding.
+    color_field : str or None, default None
+        Hue field, injected by the composite-mark expansion from a ``color=``
+        encoding.  When set, the ``Violin`` (and inner ``BoxStats``) groupby
+        becomes ``[x_field, color_field]`` so the KDE is computed per (x, hue)
+        group, the violin body gains a ``color`` encoding, and the per-hue
+        violins are overlaid (distinct fills, ``fill_opacity=0.5``) within each
+        x-category band.  When ``None`` the output is byte-identical to a
+        single-group violin.
 
     Returns
     -------
@@ -241,34 +250,59 @@ def desugar_violin(
     # honors the user's sort request across all inner layers.
     x_enc_val = X(x_field, sort=x_sort) if x_sort is not None else x_field
 
-    transforms = [Violin(field=y_field, groupby=[x_field], bandwidth=bandwidth, name="violin")]
+    # When a hue (color) field is present, the KDE — and every inner summary —
+    # must split per (x, hue) group rather than pooling across hues.  The Violin
+    # and BoxStats transforms propagate all groupby columns to their output, so
+    # `color_field` is available as an output column on the violin batch and can
+    # drive a per-hue fill on the body polygon.  `detail="group_id"` keeps each
+    # (x, hue) group drawing as a distinct closed polygon (group_id is per
+    # groupby-group), so the per-hue violins overlay within each x band.
+    # Add the hue field to the groupby only when it is a distinct column; when
+    # color encodes the same field as x the KDE is already split per x-category
+    # and the body just colors by the surviving x column.
+    split_hue = color_field is not None and color_field != x_field
+    groupby = [x_field, color_field] if split_hue else [x_field]
+
+    body_encoding: dict = {"x": x_enc_val, "y": Y("violin_y", title=y_field)}
+    if color_field is not None:
+        body_encoding["color"] = color_field
+
+    transforms = [Violin(field=y_field, groupby=groupby, bandwidth=bandwidth, name="violin")]
     violin_layer = _Layer(
         name="body",
         mark="polygon",
-        encoding={"x": x_enc_val, "y": Y("violin_y", title=y_field)},
+        encoding=body_encoding,
         mark_kwargs={"detail": "group_id", "fill_opacity": 0.5},
         data_source="violin",
     )
     if inner is None:
         return MarkDesugarResult(transforms=transforms, layers=[violin_layer])
     if inner == "point":
+        point_encoding: dict = {"x": x_enc_val, "y": y_field}
+        if color_field is not None:
+            point_encoding["color"] = color_field
+        # raw points read from the original (unsplit) data, so coloring by the
+        # hue column is always valid regardless of split_hue.
         return MarkDesugarResult(
             transforms=transforms,
             layers=[
                 violin_layer,
-                _Layer(name="point", mark="point", encoding={"x": x_enc_val, "y": y_field}),
+                _Layer(name="point", mark="point", encoding=point_encoding),
             ],
         )
     if inner == "quartile":
-        transforms.append(BoxStats(field=y_field, groupby=[x_field], name="quart"))
+        transforms.append(BoxStats(field=y_field, groupby=groupby, name="quart"))
         layers = [violin_layer]
         for col in ("q1", "median", "q3"):
             mk = {} if col == "median" else {"stroke_dash": [2, 2]}
+            quart_encoding: dict = {"x": x_enc_val, "y": col}
+            if color_field is not None:
+                quart_encoding["color"] = color_field
             layers.append(
                 _Layer(
                     name=col,
                     mark="rule",
-                    encoding={"x": x_enc_val, "y": col},
+                    encoding=quart_encoding,
                     mark_kwargs=mk if mk else None,
                     data_source="quart",
                 )
@@ -278,7 +312,14 @@ def desugar_violin(
     from ferrum.marks.composite import desugar_boxplot
 
     box_result = desugar_boxplot(
-        x_field, y_field, extent=1.5, outliers=False, size=0.1, x_sort=x_sort, y_sort=y_sort
+        x_field,
+        y_field,
+        extent=1.5,
+        outliers=False,
+        size=0.1,
+        x_sort=x_sort,
+        y_sort=y_sort,
+        color_field=color_field if split_hue else None,
     )
     return MarkDesugarResult(
         transforms=[*transforms, *box_result.transforms],

@@ -730,6 +730,16 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 transform_kwargs = {**transform_kwargs, "x_sort": x_sort}
             if y_sort is not None and kind != "errorbar":
                 transform_kwargs = {**transform_kwargs, "y_sort": y_sort}
+        # violin: thread the color (hue) field into the desugar so each (x, hue)
+        # group gets its own split KDE.  Mirrors the x_sort/y_sort threading above.
+        # Without this the violin collapses to one shape per x-category while still
+        # drawing a hue legend (silent-wrong-output).
+        if kind == "violin":
+            color_enc = self._encoding.get("color")
+            if color_enc is not None:
+                color_field = color_enc.field if isinstance(color_enc, ChannelBase) else color_enc
+                if color_field:
+                    transform_kwargs = {**transform_kwargs, "color_field": color_field}
         # density/histogram: auto-set groupby from color encoding when not explicit.
         if kind in ("density", "histogram") and "groupby" not in transform_kwargs:
             color_enc = self._encoding.get("color")
