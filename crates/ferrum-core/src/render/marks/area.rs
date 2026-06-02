@@ -1,9 +1,16 @@
-//! mark_area: filled region between y(x) and the x-axis baseline. Single area
-//! over all rows when no color encoding; one area per category otherwise.
+//! mark_area: filled region between y(x) and the x-axis baseline.
+//!
+//! Grouping rules (mirroring line.rs D8):
+//! - Color encoding only: one area per color category. Nominal (Utf8) and
+//!   non-nominal (Int*, Float*, Bool) color columns are both supported via
+//!   `col_as_ordinal_category_str`. Color drives the fill color legend.
+//! - `mark_style.detail` only: one area per detail value, theme-default fill.
+//!   Areas are not legendable via detail.
+//! - Both color and detail: one area per (color, detail) pair.
+//! - Neither: single area over all rows.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
-use crate::render::scale_resolve::ColorScale;
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, x_field, y_field, DrawCtx};
 
 /// Build `Vec<PathCmd>` for the top-edge line using the given interpolation
 /// method. Mirrors `build_top_line_path` but emits structured commands.
@@ -93,12 +100,23 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let baseline_y = ctx.panel.plot_area.y + ctx.panel.plot_area.h;
 
     let cf = color_field(ctx, spec);
-    let color_values = cf.and_then(|f| col_as_str(ctx.batch, f).ok());
+    // Use col_as_ordinal_category_str so that Int*, Float*, and Bool color columns
+    // split into groups just like Utf8 columns do. col_as_str returns Err for
+    // non-Utf8 dtypes, which silently collapsed everything into one path (the bug).
+    let color_values = cf.and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
+    let detail_values = ctx.mark_style.detail.as_deref()
+        .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
 
-    let groups: Vec<(Option<String>, Vec<usize>)> = match (color_values.as_ref(), &ctx.scales.color) {
-        (Some(values), Some(_)) => {
+    let n_rows = xs.len();
+    let groups: Vec<(Option<String>, Vec<usize>)> = match (
+        color_values.as_ref(),
+        detail_values.as_ref(),
+        &ctx.scales.color,
+    ) {
+        // Color only: one area per color category; color drives the legend.
+        (Some(cv), None, Some(_)) => {
             let mut g: Vec<(Option<String>, Vec<usize>)> = Vec::new();
-            for (i, v) in values.iter().enumerate() {
+            for (i, v) in cv.iter().enumerate() {
                 let key = v.clone();
                 match g.iter().position(|(k, _)| k == &key) {
                     Some(p) => g[p].1.push(i),
@@ -107,7 +125,37 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             }
             g
         }
-        _ => vec![(None, (0..xs.len()).collect())],
+        // Detail only: one area per detail value, no color legend key.
+        (None, Some(dv), _) => {
+            let mut g: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+            for (i, v) in dv.iter().enumerate() {
+                let key = v.clone();
+                match g.iter().position(|(k, _)| k == &key) {
+                    Some(p) => g[p].1.push(i),
+                    None => g.push((key, vec![i])),
+                }
+            }
+            // Strip the key so that the fill-color branch below falls to the
+            // mark-style fill (no per-group color from the legend).
+            g.into_iter().map(|(_, rows)| (None, rows)).collect()
+        }
+        // Both color and detail: one area per (color, detail) pair.
+        (Some(cv), Some(dv), _) => {
+            let mut g: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+            for i in 0..n_rows {
+                let composite = (cv[i].clone(), dv[i].clone());
+                match g.iter().position(|(_, rows)| {
+                    rows.first().map(|&r| (cv[r].clone(), dv[r].clone()) == composite)
+                        .unwrap_or(false)
+                }) {
+                    Some(p) => g[p].1.push(i),
+                    None => g.push((cv[i].clone(), vec![i])),
+                }
+            }
+            g
+        }
+        // No color, no detail: single area.
+        _ => vec![(None, (0..n_rows).collect())],
     };
 
     // Phase 9c — per-row position-adjustment pixel offsets (Stack).
@@ -458,5 +506,267 @@ mod tests {
         });
         assert!(!has_baseline,
             "area band path must not include the axis baseline pixel {baseline_pixel}; path={path_y2:?}");
+    }
+
+    // ── T11 grouping tests ───────────────────────────────────────────────────
+
+    /// Helper: 3 groups × 4 x-positions interleaved in the batch, group column
+    /// has the given Arrow dtype. Returns the batch and the area spec that
+    /// references the grouping column as color.
+    fn make_grouped_color_batch_and_spec(
+        group_col: Arc<dyn arrow::array::Array>,
+        group_dtype: DataType,
+    ) -> (arrow::record_batch::RecordBatch, ChartSpec) {
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+        // x = [0,1,2,3, 0,1,2,3, 0,1,2,3]; y = 0..12; g = 3×4 groups
+        let n = 12usize;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", group_dtype, false),
+        ]));
+        let xs: Vec<f64> = (0..n).map(|i| (i % 4) as f64).collect();
+        let ys: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            group_col,
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        (batch, spec)
+    }
+
+    /// T11-A: Nominal (Utf8) color still splits into N areas (back-compat guard).
+    #[test]
+    fn area_nominal_color_splits_into_n_areas() {
+        use arrow::array::StringArray;
+        let groups: Vec<&str> = (0..12).map(|i| match i / 4 { 0 => "a", 1 => "b", _ => "c" }).collect();
+        let group_col: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(groups));
+        let (batch, spec) = make_grouped_color_batch_and_spec(group_col, DataType::Utf8);
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Area);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let closed_paths = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { closed: true, .. })).count();
+        assert_eq!(closed_paths, 3, "Utf8 color must produce 3 separate closed area paths; got {closed_paths}");
+    }
+
+    /// T11-B (regression): Int64 ordinal color previously collapsed into 1 path;
+    /// after the fix it must produce N separate areas.
+    #[test]
+    fn area_int_ordinal_color_splits_into_n_areas() {
+        use arrow::array::Int64Array;
+        let groups: Vec<i64> = (0..12).map(|i| (i / 4) as i64).collect();
+        let group_col: Arc<dyn arrow::array::Array> = Arc::new(Int64Array::from(groups));
+        let (batch, spec) = make_grouped_color_batch_and_spec(group_col, DataType::Int64);
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Area);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let closed_paths = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { closed: true, .. })).count();
+        assert_eq!(closed_paths, 3,
+            "Int64 ordinal color must emit one area path per group (3 groups); got {closed_paths}. \
+             Old bug: col_as_str failed on Int64 → color_values=None → single merged path.");
+    }
+
+    /// T11-C: Float64 quantitative color also splits (e.g. ridgeline with Q color).
+    #[test]
+    fn area_float_quantitative_color_splits_into_n_areas() {
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+        // 3 groups by float value: [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]
+        let groups: Vec<f64> = (0..12).map(|i| (i / 4) as f64).collect();
+        let group_col: Arc<dyn arrow::array::Array> = Arc::new(Float64Array::from(groups));
+        let n = 12usize;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Float64, false),
+        ]));
+        let xs: Vec<f64> = (0..n).map(|i| (i % 4) as f64).collect();
+        let ys: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            group_col,
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                // :Q color — the bug case
+                color: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Area);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let closed_paths = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { closed: true, .. })).count();
+        assert_eq!(closed_paths, 3,
+            "Float64 quantitative color must emit one area per distinct value (3); got {closed_paths}. \
+             Old bug: col_as_str failed on Float64 → single merged path.");
+    }
+
+    /// T11-D: detail= only (no color encoding) splits areas without a legend key.
+    #[test]
+    fn area_detail_only_splits_into_n_areas() {
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::StringArray;
+        // 3 series × 4 x-positions, interleaved
+        let n = 12usize;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("series", DataType::Utf8, false),
+        ]));
+        let xs: Vec<f64> = (0..n).map(|i| (i % 4) as f64).collect();
+        let ys: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let series: Vec<&str> = (0..n).map(|i| match i / 4 { 0 => "s0", 1 => "s1", _ => "s2" }).collect();
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(series)),
+        ]).unwrap();
+        let spec = area_spec(); // no color encoding
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let overrides = MarkKwargsSpec { detail: Some("series".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Area);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let closed_paths = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { closed: true, .. })).count();
+        assert_eq!(closed_paths, 3,
+            "detail= only must emit one area per detail group (3 groups); got {closed_paths}. \
+             Old bug: detail was ignored for areas.");
+    }
+
+    /// T11-E: Int64 detail splits into N areas (mirrors line.rs D8 regression).
+    #[test]
+    fn area_int_detail_splits_into_n_areas() {
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::Int64Array;
+        // 3 groups × 3 x positions = 9 rows, interleaved
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Int64, false),
+        ]));
+        let xs: Vec<f64> = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
+        let ys: Vec<f64> = vec![0.0, 100.0, 200.0, 1.0, 101.0, 201.0, 2.0, 102.0, 202.0];
+        let gs: Vec<i64> = vec![1, 2, 3, 1, 2, 3, 1, 2, 3];
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(Int64Array::from(gs)),
+        ]).unwrap();
+        let spec = area_spec();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let overrides = MarkKwargsSpec { detail: Some("g".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Area);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let closed_paths = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { closed: true, .. })).count();
+        assert_eq!(closed_paths, 3,
+            "Int64 detail must emit one area per group (3 groups); got {closed_paths}");
+    }
+
+    /// T11-F: color + detail combination produces one area per (color, detail) pair.
+    #[test]
+    fn area_color_and_detail_splits_by_combination() {
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::StringArray;
+        // 2 colors × 2 detail values × 3 x-positions = 12 rows
+        let n = 12usize;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("cls", DataType::Utf8, false),
+            Field::new("sid", DataType::Utf8, false),
+        ]));
+        let xs: Vec<f64> = (0..n).map(|i| (i % 3) as f64).collect();
+        let ys: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        // cls: A for first 6, B for last 6; sid: 4 distinct values (2 per class)
+        let classes: Vec<&str> = (0..n).map(|i| if i < 6 { "A" } else { "B" }).collect();
+        let sids: Vec<String> = (0..n).map(|i| format!("s{}", i / 3)).collect();
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(classes)),
+            Arc::new(StringArray::from(sids)),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                color: Some(EncodingSpec { field: "cls".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let overrides = MarkKwargsSpec { detail: Some("sid".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Area);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let closed_paths = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { closed: true, .. })).count();
+        // 4 (color, detail) pairs → 4 area paths
+        assert_eq!(closed_paths, 4,
+            "color+detail must emit one area per (color, detail) pair (4 pairs); got {closed_paths}");
+    }
+
+    /// T11-G: Single-series area (no grouping) still emits exactly one closed path.
+    #[test]
+    fn area_no_grouping_still_one_path() {
+        let spec = area_spec();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 2.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Area);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let closed_paths = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { closed: true, .. })).count();
+        assert_eq!(closed_paths, 1, "no-grouping area must emit exactly 1 closed path; got {closed_paths}");
     }
 }
