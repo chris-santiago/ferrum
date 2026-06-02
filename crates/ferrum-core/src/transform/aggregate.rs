@@ -1,4 +1,9 @@
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
+use arrow::array::{
+    Array, ArrayRef, BooleanArray, Float64Array,
+    Int8Array, Int16Array, Int32Array, Int64Array,
+    RecordBatch, StringArray,
+    UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -41,10 +46,196 @@ pub(crate) struct AggregateSpec {
 }
 
 /// Internal representation of a group key value. Order matters: BTreeMap relies on Ord.
+///
+/// `Null` sorts first (lowest), then the typed variants. This ensures that null
+/// rows from any dtype always collapse into the same group without colliding with
+/// any real value (avoids the "0 as null sentinel" problem for integer columns).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum KeyValue {
+    Null,        // null row for any dtype — groups all nulls together.
     Str(String),
-    Float(u64),  // f64 bits — works for grouping but NaN handling is callers' responsibility.
+    Float(u64),  // f64 bits — NaN rows use Null, not Float(NAN.to_bits()).
+    Int(i64),    // signed integer types (i8/i16/i32/i64), widened to i64 for grouping.
+    UInt(u64),   // unsigned integer types (u8/u16/u32/u64), widened to u64 for grouping.
+    Bool(u8),    // boolean: 0 = false, 1 = true (nulls use Null variant above).
+}
+
+/// Returns `true` for the Arrow dtypes that `stat_aggregate` supports as groupby keys.
+fn is_groupby_supported_dtype(dt: &DataType) -> bool {
+    matches!(
+        dt,
+        DataType::Utf8
+            | DataType::LargeUtf8
+            | DataType::Float64
+            | DataType::Float32
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Boolean
+    )
+}
+
+/// Extract the groupby `KeyValue` for a single row from an Arrow column.
+///
+/// Signed integers (i8/i16/i32/i64) are widened to `KeyValue::Int(i64)`.
+/// Unsigned integers (u8/u16/u32/u64) are widened to `KeyValue::UInt(u64)`.
+/// Float32 is widened to `KeyValue::Float` (f64 bits) to match Float64 grouping.
+/// Null rows always produce `KeyValue::Null` regardless of dtype, so nulls from
+/// the same column always collapse into one group with no risk of colliding with
+/// a real value.
+///
+/// Returns `None` only if `dt` is not a supported groupby dtype (should not
+/// happen after validation, but guards against logic errors).
+fn groupby_key_at(arr: &dyn Array, dt: &DataType, row: usize) -> Option<KeyValue> {
+    macro_rules! int_key {
+        ($arr_ty:ty, $variant:expr) => {{
+            let a = arr.as_any().downcast_ref::<$arr_ty>()?;
+            return Some(if a.is_null(row) {
+                KeyValue::Null
+            } else {
+                $variant(a.value(row) as _)
+            });
+        }};
+    }
+
+    match dt {
+        DataType::Utf8 => {
+            let a = arr.as_any().downcast_ref::<StringArray>()?;
+            Some(if a.is_null(row) { KeyValue::Null }
+                 else { KeyValue::Str(a.value(row).to_string()) })
+        }
+        DataType::LargeUtf8 => {
+            use arrow::array::LargeStringArray;
+            let a = arr.as_any().downcast_ref::<LargeStringArray>()?;
+            Some(if a.is_null(row) { KeyValue::Null }
+                 else { KeyValue::Str(a.value(row).to_string()) })
+        }
+        DataType::Float64 => {
+            let a = arr.as_any().downcast_ref::<Float64Array>()?;
+            Some(if a.is_null(row) { KeyValue::Null }
+                 else { KeyValue::Float(a.value(row).to_bits()) })
+        }
+        DataType::Float32 => {
+            use arrow::array::Float32Array;
+            let a = arr.as_any().downcast_ref::<Float32Array>()?;
+            Some(if a.is_null(row) { KeyValue::Null }
+                 else { KeyValue::Float((a.value(row) as f64).to_bits()) })
+        }
+        DataType::Int64 => { int_key!(Int64Array, KeyValue::Int) }
+        DataType::Int32 => { int_key!(Int32Array, KeyValue::Int) }
+        DataType::Int16 => { int_key!(Int16Array, KeyValue::Int) }
+        DataType::Int8  => { int_key!(Int8Array,  KeyValue::Int) }
+        DataType::UInt64 => { int_key!(UInt64Array, KeyValue::UInt) }
+        DataType::UInt32 => { int_key!(UInt32Array, KeyValue::UInt) }
+        DataType::UInt16 => { int_key!(UInt16Array, KeyValue::UInt) }
+        DataType::UInt8  => { int_key!(UInt8Array,  KeyValue::UInt) }
+        DataType::Boolean => {
+            let a = arr.as_any().downcast_ref::<BooleanArray>()?;
+            Some(if a.is_null(row) { KeyValue::Null }
+                 else { KeyValue::Bool(a.value(row) as u8) })
+        }
+        _ => None,
+    }
+}
+
+/// Reconstruct the output Arrow column for a single groupby dimension from the
+/// materialized group keys.  The output dtype matches the original input column
+/// dtype so the schema is preserved end-to-end.
+///
+/// Signed-integer variants are narrowed back to their original width; if a
+/// widened value does not fit (which cannot happen for i32/i16/i8 keys
+/// generated by this module's own `groupby_key_at`) the cast falls back
+/// saturating — these cases are unreachable in practice.
+fn materialize_groupby_col(
+    keys: &[Vec<KeyValue>],
+    gi: usize,
+    dt: &DataType,
+) -> Result<ArrayRef, String> {
+    // Null groupby keys (rows where the groupby column was null) are emitted
+    // with a type-specific "null proxy" value (NaN for floats, empty string for
+    // Utf8, 0 for integers). This is consistent with the pre-existing Float64/Utf8
+    // behaviour and avoids changing the output schema to nullable.
+    macro_rules! build_int {
+        ($arr_ty:ty, $native:ty) => {{
+            let v: Vec<$native> = keys.iter().map(|k| match k[gi] {
+                KeyValue::Int(x) => x as $native,
+                KeyValue::Null   => 0,
+                _ => unreachable!("expected KeyValue::Int or Null for signed-integer dtype"),
+            }).collect();
+            Ok(Arc::new(<$arr_ty>::from(v)) as ArrayRef)
+        }};
+    }
+    macro_rules! build_uint {
+        ($arr_ty:ty, $native:ty) => {{
+            let v: Vec<$native> = keys.iter().map(|k| match k[gi] {
+                KeyValue::UInt(x) => x as $native,
+                KeyValue::Null    => 0,
+                _ => unreachable!("expected KeyValue::UInt or Null for unsigned-integer dtype"),
+            }).collect();
+            Ok(Arc::new(<$arr_ty>::from(v)) as ArrayRef)
+        }};
+    }
+
+    match dt {
+        DataType::Utf8 => {
+            let v: Vec<String> = keys.iter().map(|k| match &k[gi] {
+                KeyValue::Str(s) => s.clone(),
+                KeyValue::Null   => String::new(),
+                _ => unreachable!("expected KeyValue::Str or Null for Utf8 dtype"),
+            }).collect();
+            Ok(Arc::new(StringArray::from(v)) as ArrayRef)
+        }
+        DataType::LargeUtf8 => {
+            use arrow::array::LargeStringArray;
+            let v: Vec<String> = keys.iter().map(|k| match &k[gi] {
+                KeyValue::Str(s) => s.clone(),
+                KeyValue::Null   => String::new(),
+                _ => unreachable!("expected KeyValue::Str or Null for LargeUtf8 dtype"),
+            }).collect();
+            Ok(Arc::new(LargeStringArray::from(v)) as ArrayRef)
+        }
+        DataType::Float64 => {
+            let v: Vec<f64> = keys.iter().map(|k| match k[gi] {
+                KeyValue::Float(bits) => f64::from_bits(bits),
+                KeyValue::Null        => f64::NAN,
+                _ => unreachable!("expected KeyValue::Float or Null for Float64 dtype"),
+            }).collect();
+            Ok(Arc::new(Float64Array::from(v)) as ArrayRef)
+        }
+        DataType::Float32 => {
+            use arrow::array::Float32Array;
+            let v: Vec<f32> = keys.iter().map(|k| match k[gi] {
+                KeyValue::Float(bits) => f64::from_bits(bits) as f32,
+                KeyValue::Null        => f32::NAN,
+                _ => unreachable!("expected KeyValue::Float or Null for Float32 dtype"),
+            }).collect();
+            Ok(Arc::new(Float32Array::from(v)) as ArrayRef)
+        }
+        DataType::Int64  => build_int!(Int64Array,  i64),
+        DataType::Int32  => build_int!(Int32Array,  i32),
+        DataType::Int16  => build_int!(Int16Array,  i16),
+        DataType::Int8   => build_int!(Int8Array,   i8),
+        DataType::UInt64 => build_uint!(UInt64Array, u64),
+        DataType::UInt32 => build_uint!(UInt32Array, u32),
+        DataType::UInt16 => build_uint!(UInt16Array, u16),
+        DataType::UInt8  => build_uint!(UInt8Array,  u8),
+        DataType::Boolean => {
+            let v: Vec<bool> = keys.iter().map(|k| match k[gi] {
+                KeyValue::Bool(b) => b != 0,
+                KeyValue::Null    => false,
+                _ => unreachable!("expected KeyValue::Bool or Null for Boolean dtype"),
+            }).collect();
+            Ok(Arc::new(BooleanArray::from(v)) as ArrayRef)
+        }
+        other => Err(format!(
+            "stat_aggregate: cannot materialize groupby output for dtype {other:?}"
+        )),
+    }
 }
 
 pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -82,9 +273,11 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
             ))
         })?;
         let dt = schema.field(idx).data_type().clone();
-        if dt != DataType::Float64 && !matches!(dt, DataType::Utf8) {
+        if !is_groupby_supported_dtype(&dt) {
             return Err(PyValueError::new_err(format!(
-                "stat_aggregate: groupby column '{}' must be Float64 or Utf8; got {:?}",
+                "stat_aggregate: groupby column '{}' has unsupported dtype {:?}; \
+                 supported: Utf8/LargeUtf8, Float64/Float32, \
+                 Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean",
                 g, dt
             )));
         }
@@ -102,27 +295,11 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
     for row in 0..n_rows {
         let mut key = Vec::with_capacity(spec.groupby.len());
         for (gi, arr) in group_arrays.iter().enumerate() {
-            match group_dtypes[gi] {
-                DataType::Float64 => {
-                    let a = arr.as_any().downcast_ref::<Float64Array>()
-                        .ok_or_else(|| PyValueError::new_err("stat_aggregate: expected Float64Array for groupby column"))?;
-                    if a.is_null(row) {
-                        key.push(KeyValue::Float(f64::NAN.to_bits()));
-                    } else {
-                        key.push(KeyValue::Float(a.value(row).to_bits()));
-                    }
-                }
-                DataType::Utf8 => {
-                    let a = arr.as_any().downcast_ref::<StringArray>()
-                        .ok_or_else(|| PyValueError::new_err("stat_aggregate: expected StringArray for groupby column"))?;
-                    if a.is_null(row) {
-                        key.push(KeyValue::Str(String::new()));
-                    } else {
-                        key.push(KeyValue::Str(a.value(row).to_string()));
-                    }
-                }
-                _ => unreachable!(),
-            }
+            let kv = groupby_key_at(*arr, &group_dtypes[gi], row)
+                .ok_or_else(|| PyValueError::new_err(format!(
+                    "stat_aggregate: internal error extracting groupby key at row {row}"
+                )))?;
+            key.push(kv);
         }
         groups.entry(key).or_default().push(row);
     }
@@ -187,24 +364,10 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
     let out_schema = Arc::new(Schema::new(fields));
 
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(spec.groupby.len() + spec.ops.len());
-    for gi in 0..spec.groupby.len() {
-        match group_dtypes[gi] {
-            DataType::Float64 => {
-                let v: Vec<f64> = group_keys_out.iter().map(|k| match &k[gi] {
-                    KeyValue::Float(bits) => f64::from_bits(*bits),
-                    KeyValue::Str(_) => unreachable!(),
-                }).collect();
-                cols.push(Arc::new(Float64Array::from(v)));
-            }
-            DataType::Utf8 => {
-                let v: Vec<String> = group_keys_out.iter().map(|k| match &k[gi] {
-                    KeyValue::Str(s) => s.clone(),
-                    KeyValue::Float(_) => unreachable!(),
-                }).collect();
-                cols.push(Arc::new(StringArray::from(v)));
-            }
-            _ => unreachable!(),
-        }
+    for (gi, dt) in group_dtypes.iter().enumerate() {
+        let col = materialize_groupby_col(&group_keys_out, gi, dt)
+            .map_err(PyValueError::new_err)?;
+        cols.push(col);
     }
     for op_vec in op_values_out.into_iter() {
         cols.push(Arc::new(Float64Array::from(op_vec)));
@@ -429,7 +592,7 @@ impl PyAggregate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Array, Float64Array, RecordBatch, StringArray};
+    use arrow::array::{Array, Float64Array, Int64Array, RecordBatch, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
@@ -803,5 +966,381 @@ mod tests {
             });
             assert_eq!(parsed.fn_, fn_, "fn '{}' should round-trip to {:?}", canonical_name, fn_);
         }
+    }
+
+    // ── FA-3: integer groupby columns ─────────────────────────────────────────
+
+    fn batch_value_int64_group(values: Vec<Option<f64>>, groups: Vec<i64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v",   DataType::Float64, true),
+            Field::new("grp", DataType::Int64,   false),
+        ]));
+        let v_arr = Float64Array::from(values);
+        let g_arr = Int64Array::from(groups);
+        RecordBatch::try_new(schema, vec![Arc::new(v_arr), Arc::new(g_arr)]).unwrap()
+    }
+
+    fn col_i64(b: &RecordBatch, name: &str) -> Vec<i64> {
+        let arr = b.column(b.schema().index_of(name).unwrap())
+            .as_any().downcast_ref::<Int64Array>().unwrap();
+        (0..arr.len()).map(|i| arr.value(i)).collect()
+    }
+
+    #[test]
+    fn test_aggregate_int64_groupby_sum() {
+        // FA-3: sum grouped on an Int64 column produces correct per-group sums.
+        let batch = batch_value_int64_group(
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)],
+            vec![10, 10, 20, 20, 30],
+        );
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Sum, as_: "s".into() }],
+            groupby: vec!["grp".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 3);
+
+        // Output groupby column must retain Int64 dtype.
+        assert_eq!(out.schema().field(0).data_type(), &DataType::Int64);
+
+        let grps = col_i64(&out, "grp");
+        let sums = col_f64(&out, "s");
+        let g10 = grps.iter().position(|&g| g == 10).unwrap();
+        let g20 = grps.iter().position(|&g| g == 20).unwrap();
+        let g30 = grps.iter().position(|&g| g == 30).unwrap();
+
+        assert!((sums[g10] - 3.0).abs() < 1e-12, "group 10 sum: {}", sums[g10]);
+        assert!((sums[g20] - 7.0).abs() < 1e-12, "group 20 sum: {}", sums[g20]);
+        assert!((sums[g30] - 5.0).abs() < 1e-12, "group 30 sum: {}", sums[g30]);
+    }
+
+    #[test]
+    fn test_aggregate_int64_groupby_mean() {
+        // FA-3: mean grouped on Int64 groupby.
+        let batch = batch_value_int64_group(
+            vec![Some(1.0), Some(3.0), Some(2.0), Some(4.0)],
+            vec![2020, 2020, 2021, 2021],
+        );
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Mean, as_: "m".into() }],
+            groupby: vec!["grp".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 2);
+
+        let grps = col_i64(&out, "grp");
+        let means = col_f64(&out, "m");
+        let y2020 = grps.iter().position(|&g| g == 2020).unwrap();
+        let y2021 = grps.iter().position(|&g| g == 2021).unwrap();
+        assert!((means[y2020] - 2.0).abs() < 1e-12, "2020 mean: {}", means[y2020]);
+        assert!((means[y2021] - 3.0).abs() < 1e-12, "2021 mean: {}", means[y2021]);
+    }
+
+    #[test]
+    fn test_aggregate_int64_groupby_count() {
+        // FA-3: count grouped on Int64 groupby.
+        let batch = batch_value_int64_group(
+            vec![Some(0.0), Some(0.0), Some(0.0), Some(0.0), Some(0.0)],
+            vec![1, 1, 1, 2, 2],
+        );
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Count, as_: "c".into() }],
+            groupby: vec!["grp".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 2);
+
+        let grps = col_i64(&out, "grp");
+        let counts = col_f64(&out, "c");
+        let g1 = grps.iter().position(|&g| g == 1).unwrap();
+        let g2 = grps.iter().position(|&g| g == 2).unwrap();
+        assert_eq!(counts[g1] as u64, 3, "group 1 count: {}", counts[g1]);
+        assert_eq!(counts[g2] as u64, 2, "group 2 count: {}", counts[g2]);
+    }
+
+    #[test]
+    fn test_aggregate_int32_groupby_sum() {
+        // FA-3: Int32 groupby also accepted.
+        use arrow::array::Int32Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v",   DataType::Float64, true),
+            Field::new("grp", DataType::Int32,   false),
+        ]));
+        let v_arr = Float64Array::from(vec![Some(10.0), Some(20.0), Some(30.0)]);
+        let g_arr = Int32Array::from(vec![1i32, 1, 2]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(v_arr), Arc::new(g_arr)]).unwrap();
+
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Sum, as_: "s".into() }],
+            groupby: vec!["grp".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 2);
+        // Output dtype preserved as Int32.
+        assert_eq!(out.schema().field(0).data_type(), &DataType::Int32);
+    }
+
+    #[test]
+    fn test_aggregate_uint32_groupby_sum() {
+        // FA-3: UInt32 groupby also accepted.
+        use arrow::array::UInt32Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v",   DataType::Float64, true),
+            Field::new("grp", DataType::UInt32,  false),
+        ]));
+        let v_arr = Float64Array::from(vec![Some(5.0), Some(15.0), Some(25.0)]);
+        let g_arr = UInt32Array::from(vec![100u32, 100, 200]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(v_arr), Arc::new(g_arr)]).unwrap();
+
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Sum, as_: "s".into() }],
+            groupby: vec!["grp".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 2);
+        assert_eq!(out.schema().field(0).data_type(), &DataType::UInt32);
+    }
+
+    // ── FA-3 null-key grouping regression ────────────────────────────────────
+
+    /// Build a batch with a nullable Float64 groupby column.
+    fn batch_value_float64_group_nullable(
+        values: Vec<Option<f64>>,
+        groups: Vec<Option<f64>>,
+    ) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v",   DataType::Float64, true),
+            Field::new("grp", DataType::Float64, true),
+        ]));
+        let v_arr = Float64Array::from(values);
+        let g_arr = Float64Array::from(groups);
+        RecordBatch::try_new(schema, vec![Arc::new(v_arr), Arc::new(g_arr)]).unwrap()
+    }
+
+    /// Build a batch with a nullable Int64 groupby column.
+    fn batch_value_int64_group_nullable(
+        values: Vec<Option<f64>>,
+        groups: Vec<Option<i64>>,
+    ) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v",   DataType::Float64, true),
+            Field::new("grp", DataType::Int64,   true),
+        ]));
+        let v_arr = Float64Array::from(values);
+        let g_arr = Int64Array::from(groups);
+        RecordBatch::try_new(schema, vec![Arc::new(v_arr), Arc::new(g_arr)]).unwrap()
+    }
+
+    #[test]
+    fn test_aggregate_null_float64_groupby_key_collapses_to_single_group() {
+        // FA-3 regression: null keys in a Float64 groupby column must all land in
+        // the SAME group (KeyValue::Null), separate from any real-valued groups.
+        //
+        // Materialization contract (Float64 null key → output NaN):
+        //   row 0: grp=None (null)  → KeyValue::Null  → output NaN
+        //   row 1: grp=None (null)  → KeyValue::Null  → same group as row 0
+        //   row 2: grp=Some(1.0)    → KeyValue::Float → separate group
+        //
+        // Pre-FA-3 bug: null was encoded as Float(NAN.to_bits()), which would
+        // collide with a genuine NaN *value* in the groupby column and could
+        // produce multiple spurious groups if NaN bits differ.
+        let batch = batch_value_float64_group_nullable(
+            vec![Some(10.0), Some(20.0), Some(5.0)],
+            vec![None,        None,        Some(1.0)],
+        );
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Sum, as_: "s".into() }],
+            groupby: vec!["grp".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+
+        // Exactly two groups: the null group and the real-valued group.
+        assert_eq!(out.num_rows(), 2, "expected 2 groups (null + 1.0), got {}", out.num_rows());
+
+        let grp_arr = out.column(out.schema().index_of("grp").unwrap())
+            .as_any().downcast_ref::<Float64Array>().unwrap();
+        let sums = col_f64(&out, "s");
+
+        // Find the group whose key is NaN (the null-key proxy) and the one whose key is 1.0.
+        let null_idx = (0..grp_arr.len()).find(|&i| grp_arr.value(i).is_nan())
+            .expect("null-key group must materialize with NaN output key");
+        let real_idx = (0..grp_arr.len()).find(|&i| (grp_arr.value(i) - 1.0).abs() < 1e-12)
+            .expect("real-valued group (key=1.0) must be present");
+
+        // Null group: rows 0 and 1 → sum = 10 + 20 = 30.
+        assert!(
+            (sums[null_idx] - 30.0).abs() < 1e-12,
+            "null-key group sum should be 30.0, got {}",
+            sums[null_idx]
+        );
+        // Real group: row 2 → sum = 5.
+        assert!(
+            (sums[real_idx] - 5.0).abs() < 1e-12,
+            "real-key group (1.0) sum should be 5.0, got {}",
+            sums[real_idx]
+        );
+    }
+
+    #[test]
+    fn test_aggregate_null_int64_groupby_key_collapses_to_single_group() {
+        // FA-3 regression: null keys in an Int64 groupby column must all land in
+        // the SAME group (KeyValue::Null), separate from non-null groups.
+        //
+        // Materialization contract (Int64 null key → output 0i64):
+        //   row 0: grp=None  → KeyValue::Null → output 0
+        //   row 1: grp=None  → KeyValue::Null → same group as row 0
+        //   row 2: grp=Some(7) → KeyValue::Int(7) → separate group
+        //
+        // NOTE: the null-proxy output value is 0i64 (same as a real key of 0).
+        // This is the documented behavior: null keys are grouped correctly during
+        // aggregation, but the materialized output key is a proxy value (0 for
+        // integers), not a typed null. Callers that need to distinguish a true
+        // null group from a zero group must not use Int64 columns with both nulls
+        // and a real zero key in the same groupby.
+        let batch = batch_value_int64_group_nullable(
+            vec![Some(3.0), Some(7.0), Some(100.0)],
+            vec![None,       None,       Some(7)],
+        );
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Sum, as_: "s".into() }],
+            groupby: vec!["grp".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+
+        // Exactly two groups: the null group and the real-valued group.
+        assert_eq!(out.num_rows(), 2, "expected 2 groups (null + 7), got {}", out.num_rows());
+
+        let grps = col_i64(&out, "grp");
+        let sums = col_f64(&out, "s");
+
+        // Null-key group materializes as key=0i64.
+        let null_idx = grps.iter().position(|&g| g == 0)
+            .expect("null-key group must materialize with output key 0i64");
+        // Real-valued group: key=7.
+        let real_idx = grps.iter().position(|&g| g == 7)
+            .expect("real-valued group (key=7) must be present");
+
+        // Null group: rows 0 and 1 → sum = 3 + 7 = 10.
+        assert!(
+            (sums[null_idx] - 10.0).abs() < 1e-12,
+            "null-key group sum should be 10.0, got {}",
+            sums[null_idx]
+        );
+        // Real group: row 2 → sum = 100.
+        assert!(
+            (sums[real_idx] - 100.0).abs() < 1e-12,
+            "real-key group (7) sum should be 100.0, got {}",
+            sums[real_idx]
+        );
+    }
+
+    #[test]
+    fn test_aggregate_null_float64_groupby_separate_from_genuine_nan_key() {
+        // FA-3 regression: a genuine NaN *value* in a Float64 groupby column must
+        // form its own group (KeyValue::Float(NAN.to_bits())), distinct from a null
+        // key (KeyValue::Null).  Pre-FA-3 this was a collision: both mapped to
+        // Float(NAN.to_bits()), merging what should be two separate groups.
+        //
+        // row 0: grp = None    → KeyValue::Null              → null group
+        // row 1: grp = Some(NaN) → KeyValue::Float(NAN bits) → NaN group
+        // row 2: grp = Some(2.0) → KeyValue::Float(2.0 bits) → real group
+        let nan = f64::NAN;
+        let batch = batch_value_float64_group_nullable(
+            vec![Some(1.0), Some(2.0), Some(3.0)],
+            vec![None,       Some(nan), Some(2.0)],
+        );
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Sum, as_: "s".into() }],
+            groupby: vec!["grp".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+
+        // Three distinct groups: null, NaN, and 2.0.
+        assert_eq!(
+            out.num_rows(), 3,
+            "expected 3 groups (null, NaN, 2.0), got {}; FA-3 null/NaN collision?",
+            out.num_rows()
+        );
+
+        let grp_arr = out.column(out.schema().index_of("grp").unwrap())
+            .as_any().downcast_ref::<Float64Array>().unwrap();
+        let sums = col_f64(&out, "s");
+
+        // Count how many output keys are NaN.
+        let nan_indices: Vec<usize> = (0..grp_arr.len())
+            .filter(|&i| grp_arr.value(i).is_nan())
+            .collect();
+        // Both the null-proxy (NaN) and the genuine-NaN group materialize with NaN
+        // as their output key — they are distinguished only during grouping, not in
+        // the materialized output.  So we expect exactly 2 NaN-key rows.
+        assert_eq!(
+            nan_indices.len(), 2,
+            "expected 2 NaN-keyed output rows (one for null group, one for NaN group), got {}",
+            nan_indices.len()
+        );
+
+        // The real-valued group (key=2.0) must be present with sum=3.0.
+        let real_idx = (0..grp_arr.len()).find(|&i| (grp_arr.value(i) - 2.0).abs() < 1e-12)
+            .expect("real-valued group (key=2.0) must be present");
+        assert!(
+            (sums[real_idx] - 3.0).abs() < 1e-12,
+            "real-key group (2.0) sum should be 3.0, got {}",
+            sums[real_idx]
+        );
+        // The two NaN-keyed rows together account for sums 1.0 (null group) and 2.0 (NaN group).
+        let nan_sums: Vec<f64> = nan_indices.iter().map(|&i| sums[i]).collect();
+        assert!(
+            nan_sums.contains(&1.0) || nan_sums.iter().any(|&s| (s - 1.0).abs() < 1e-12),
+            "null group (row 0) sum should be 1.0; nan_sums = {:?}",
+            nan_sums
+        );
+        assert!(
+            nan_sums.iter().any(|&s| (s - 2.0).abs() < 1e-12),
+            "NaN-key group (row 1) sum should be 2.0; nan_sums = {:?}",
+            nan_sums
+        );
+    }
+
+    #[test]
+    fn test_aggregate_unsupported_groupby_dtype_errors_clearly() {
+        // FA-3 regression: genuinely unsupported dtypes (e.g., List) must raise a
+        // clear error, not panic or silently miscount.
+        use arrow::array::ListArray;
+        use arrow::buffer::OffsetBuffer;
+        use arrow::datatypes::Field as ArrowField;
+        pyo3::Python::initialize();
+
+        // Construct a minimal ListArray column.
+        let values = arrow::array::Int32Array::from(vec![1, 2, 3]);
+        let offsets = OffsetBuffer::new(arrow::buffer::ScalarBuffer::from(vec![0i32, 2, 3]));
+        let field = ArrowField::new("item", DataType::Int32, false);
+        let list_arr = ListArray::new(Arc::new(field), offsets, Arc::new(values), None);
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v",   DataType::Float64, true),
+            Field::new("grp", DataType::List(Arc::new(ArrowField::new("item", DataType::Int32, false))), false),
+        ]));
+        let v_arr = Float64Array::from(vec![Some(1.0), Some(2.0)]);
+        let batch = RecordBatch::try_new(
+            schema, vec![Arc::new(v_arr), Arc::new(list_arr)]
+        ).unwrap();
+
+        let spec = AggregateSpec {
+            ops: vec![AggregateOp { field: "v".into(), fn_: AggFn::Sum, as_: "s".into() }],
+            groupby: vec!["grp".into()],
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unsupported dtype"), "expected 'unsupported dtype' in: {msg}");
+        assert!(msg.contains("grp"), "expected column name 'grp' in error: {msg}");
     }
 }
