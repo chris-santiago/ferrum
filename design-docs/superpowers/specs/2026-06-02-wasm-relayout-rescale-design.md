@@ -1,9 +1,28 @@
 # FA-16 Stroke-Width Ribbon Fix — Design Spec
 
-> Status: Option 1 (screen-space stroke width) **chosen 2026-06-03** after a scoping
-> spike; supersedes the Option-3 re-layout approach for the FA-16 ribbon. The Option-3
-> re-layout design is preserved in §11 as the deferred broader fix (for when correct
-> ticks/labels/curve-resampling at the rescaled domain are also required).
+> Status: **IMPLEMENTED + browser-validated 2026-06-03 (v0.15.2).** Option 1
+> (screen-space stroke width) chosen after a scoping spike; supersedes the Option-3
+> re-layout approach for the FA-16 ribbon (Option 3 preserved in §11 as the deferred
+> broader fix for tick/label/curve-resampling fidelity).
+>
+> **What actually fixed it (three pieces, the third was decisive):**
+> 1. Un-bake width — store the stroke centerline (`position_on_path`) + `normal` +
+>    `half_width` per `MeshVertex` and apply the width offset in the shader, not lyon.
+> 2. Direction-correct the offset for non-uniform affine via the inverse-transpose
+>    (`normalize(vec2(sy*nx, sx*ny))`) — fixes straight segments under `sx≠sy`.
+> 3. **Bevel joins** (`LineJoin::Bevel` in WASM stroke tessellation). This was the key
+>    miss in the original design: lyon baked *miter* joins with elongated, scene-space
+>    bisector normals (`|normal|>1`), and a per-vertex shader **cannot** recompute a
+>    screen-space miter from that baked scalar — so steps 1–2 fixed straight segments
+>    but every line *vertex* still ribboned. Bevel emits only unit normals, so the
+>    screen-space offset is correct at joins too. Trade-off (accepted): interactive
+>    line joins are now beveled; the static SVG renderer is untouched and keeps miter.
+>
+> **Separate follow-up still open (FA-18, NOT in v0.15.2):** the mesh transform uniform
+> is bound once per `render_frame` (`render.rs:462`), so during a reactive rescale every
+> panel's mesh is drawn with the rescaled panel's affine (scissored to its own box) —
+> sibling panels' lines shear / the overview line disappears during the brush. Pre-existing,
+> independent of FA-16; needs a per-panel uniform bind in the mesh draw loop.
 >
 > Original status: Option-3 re-layout approved 2026-06-02 (now deferred).
 
