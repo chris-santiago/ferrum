@@ -740,7 +740,7 @@ impl WasmRenderer {
         brush_x: (f64, f64),
         brush_y: (f64, f64),
     ) -> Option<(usize, String)> {
-        use crate::param_runtime::{rescale_affine, Axis};
+        use crate::param_runtime::{rescale_affine_cross_panel, Axis};
 
         let bindings: Vec<(usize, Axis, (f64, f64))> = self
             .interaction
@@ -772,9 +772,21 @@ impl WasmRenderer {
             ) else {
                 continue;
             };
-            let Some((scale, offset)) =
-                rescale_affine(brush, &src.plot_area, &tgt.plot_area, axis)
-            else {
+            // Reproject the brush from source-panel pixel space through the
+            // shared data domain into target-panel pixel space before building
+            // the affine. This is the correct path for `hconcat(overview,
+            // detail)` where source and target occupy different pixel regions.
+            // When both panels share the same plot area (single-panel
+            // self-rescale) the reprojection is a no-op, preserving existing
+            // behavior. See `param_runtime::rescale_affine_cross_panel`.
+            let Some((scale, offset)) = rescale_affine_cross_panel(
+                brush,
+                &src.plot_area,
+                &src.coord,
+                &tgt.plot_area,
+                &tgt.coord,
+                axis,
+            ) else {
                 continue;
             };
             // Drive the target panel's affine directly (not set_absolute, which
