@@ -226,12 +226,18 @@ fn build_mesh_pipeline(
     uniform_bgl: &wgpu::BindGroupLayout,
     blend: Option<wgpu::BlendState>,
 ) -> RenderPipeline {
+    // FA-16: affine-invariant stroke width.
+    // Layout: position(2) + normal(2) + half_width(1) + color(4) = 9 floats = 36 bytes.
+    // Attribute locations must match the @location annotations in mesh.wgsl and the
+    // field order of MeshVertex in tessellate.rs.
     let mesh_vertex_layout = wgpu::VertexBufferLayout {
-        array_stride: 6 * 4, // position(2) + color(4) = 6 floats
+        array_stride: 9 * 4, // 36 bytes
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
-            wgpu::VertexAttribute { offset: 0,  shader_location: 0, format: wgpu::VertexFormat::Float32x2 },
-            wgpu::VertexAttribute { offset: 8,  shader_location: 1, format: wgpu::VertexFormat::Float32x4 },
+            wgpu::VertexAttribute { offset: 0,  shader_location: 0, format: wgpu::VertexFormat::Float32x2 }, // position
+            wgpu::VertexAttribute { offset: 8,  shader_location: 1, format: wgpu::VertexFormat::Float32x2 }, // normal
+            wgpu::VertexAttribute { offset: 16, shader_location: 2, format: wgpu::VertexFormat::Float32 },   // half_width
+            wgpu::VertexAttribute { offset: 20, shader_location: 3, format: wgpu::VertexFormat::Float32x4 }, // color
         ],
     };
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

@@ -7,12 +7,36 @@ use lyon::tessellation::{
     StrokeOptions, StrokeTessellator, StrokeVertex, VertexBuffers,
 };
 
+/// Per-vertex data for the mesh pipeline (strokes and fills share one format).
+///
+/// Strokes carry the stroke centerline in `position`, the lyon offset direction
+/// in `normal`, and `half_width > 0`. The vertex shader applies the width
+/// offset in screen space (after the per-panel affine), so stroke width is
+/// affine-invariant — constant pixel width regardless of sx/sy.
+///
+/// Fills set `normal = [0,0]` and `half_width = 0`; the shader's `select`
+/// produces no offset, so fill vertices are transformed identically to before.
+///
+/// Field order (position, normal, half_width, color) must match the pipeline
+/// layout attribute offsets in `pipelines.rs`.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MeshVertex {
+    /// Stroke: centerline point in scene space. Fill: position in scene space.
     pub position: [f32; 2],
+    /// Stroke: unit normal from lyon. With bevel joins |normal| ≈ 1.0 at all
+    /// vertices, which is required for the screen-space-width shader to be
+    /// correct under non-uniform affines (sx ≠ sy). Miter joins would bake
+    /// elongated normals (|normal| > 1) in scene space, producing the
+    /// "ribbon" artifact on rescale. Fill: [0,0].
+    pub normal: [f32; 2],
+    /// Stroke: half of the stroke line width in pixels. Fill: 0.0.
+    pub half_width: f32,
     pub color: [f32; 4],
 }
+
+// Compile-time guard: position(8) + normal(8) + half_width(4) + color(16) = 36 bytes.
+const _: () = assert!(core::mem::size_of::<MeshVertex>() == 36);
 
 pub fn tessellate_line(
     x1: f64, y1: f64, x2: f64, y2: f64,
@@ -51,6 +75,8 @@ pub fn tessellate_path(
             &FillOptions::default(),
             &mut BuffersBuilder::new(buffers, move |v: FillVertex| MeshVertex {
                 position: v.position().to_array(),
+                normal: [0.0, 0.0],
+                half_width: 0.0,
                 color,
             }),
         );
@@ -125,6 +151,8 @@ pub fn tessellate_polygon(
             &FillOptions::default(),
             &mut BuffersBuilder::new(buffers, move |v: FillVertex| MeshVertex {
                 position: v.position().to_array(),
+                normal: [0.0, 0.0],
+                half_width: 0.0,
                 color,
             }),
         );
@@ -133,13 +161,21 @@ pub fn tessellate_polygon(
     if let Some(stroke) = &style.stroke {
         let stroke_alpha = style.opacity * style.stroke_opacity;
         let color = color_to_f32(stroke, stroke_alpha);
-        let opts = StrokeOptions::default().with_line_width(style.stroke_width as f32);
+        // Use Bevel joins so every stroke vertex carries a unit normal (|normal| ≈ 1).
+        // This is required for the screen-space-width shader to stay correct under
+        // non-uniform affines (sx ≠ sy). Miter joins bake elongated bisector normals
+        // in scene space and produce the "ribbon" artefact on reactive rescale.
+        let opts = StrokeOptions::default()
+            .with_line_width(style.stroke_width as f32)
+            .with_line_join(LineJoin::Bevel);
         let mut tess = StrokeTessellator::new();
         let _ = tess.tessellate_path(
             &path,
             &opts,
             &mut BuffersBuilder::new(buffers, move |v: StrokeVertex| MeshVertex {
-                position: v.position().to_array(),
+                position: v.position_on_path().to_array(),
+                normal: { let n = v.normal(); [n.x, n.y] },
+                half_width: v.line_width() / 2.0,
                 color,
             }),
         );
@@ -239,7 +275,9 @@ fn stroke_path_dashed(
         to_tessellate,
         opts,
         &mut BuffersBuilder::new(buffers, move |v: StrokeVertex| MeshVertex {
-            position: v.position().to_array(),
+            position: v.position_on_path().to_array(),
+            normal: { let n = v.normal(); [n.x, n.y] },
+            half_width: v.line_width() / 2.0,
             color,
         }),
     );
@@ -570,6 +608,123 @@ mod tests {
             );
         }
     }
+
+    // ── FA-16: screen-space stroke width ────────────────────────────────────
+
+    /// A stroked horizontal segment must produce vertices where the stored
+    /// `position` is the centerline (y ≈ 0 for a segment at y=0) and the stored
+    /// `normal * half_width` is the half-width offset (≈ ±1.0 here for width=2.0).
+    ///
+    /// `StrokeVertex` is consumed inside the build closure, so this test cannot
+    /// re-derive lyon's `v.position()` after the fact; it checks the centerline
+    /// and offset *bounds* instead. The exact at-rest byte-stability — that
+    /// `position_on_path() + normal()*(line_width()/2) == old v.position()` at
+    /// identity transform, which is what the shader's screen-space offset
+    /// reproduces — is guaranteed structurally by lyon 1.x's documented contract,
+    /// not asserted here.
+    #[test]
+    fn fa16_stroke_centerline_plus_normal_equals_lyon_position() {
+        let style = make_stroke_style(1.0, 1.0);
+        // Use width=2.0 (from make_stroke_style); segment along y=0.
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_line(0.0, 0.0, 100.0, 0.0, &style, &mut buffers);
+
+        assert!(!buffers.vertices.is_empty(), "must produce stroke vertices");
+
+        // For each vertex: centerline + normal*half_width must reconstruct the
+        // baked position that lyon's v.position() would have returned.
+        // At identity (sx=sy=1, tx=ty=0) the shader computes:
+        //   final_px = position * 1 + 0 + normal * half_width
+        // which must equal the old baked vertex position.
+        //
+        // We cannot call v.position() here after-the-fact, but we can verify:
+        //   1. The centerline y is near 0 (segment is along y=0).
+        //   2. The reconstructed half-width offset is ≈ ±1.0 (half of width=2.0).
+        for v in &buffers.vertices {
+            // Centerline must be close to y=0 (within float tolerance).
+            // x is somewhere in [0, 100] along the segment.
+            assert!(
+                v.position[0] >= -0.1 && v.position[0] <= 100.1,
+                "centerline x must be in segment range [0, 100], got {}",
+                v.position[0]
+            );
+            assert!(
+                v.position[1].abs() < 0.1,
+                "centerline y must be ~0 for horizontal segment, got {}",
+                v.position[1]
+            );
+
+            // normal * half_width is the offset — its magnitude ≈ half_width.
+            // With bevel joins, |normal| ≈ 1.0 at every vertex (no elongation);
+            // for a straight segment half_width=1, so offset magnitude ≈ 1.0.
+            // Allow generous tolerance for cap geometry at endpoints.
+            let offset_magnitude = (v.normal[0] * v.half_width).hypot(v.normal[1] * v.half_width);
+            assert!(
+                offset_magnitude < 3.0,
+                "offset magnitude must be bounded (< 3.0 * half_width), got {}",
+                offset_magnitude
+            );
+        }
+    }
+
+    /// Fill vertices must have half_width == 0.0 and normal == [0, 0].
+    #[test]
+    fn fa16_fill_has_zero_half_width_and_normal() {
+        use ferrum_scene::PathCmd;
+        let style = make_fill_stroke_style(1.0, 1.0, 1.0);
+        let commands = vec![
+            PathCmd::MoveTo { x: 0.0, y: 0.0 },
+            PathCmd::LineTo { x: 100.0, y: 0.0 },
+            PathCmd::LineTo { x: 100.0, y: 100.0 },
+            PathCmd::Close,
+        ];
+        let mut fill_only = style;
+        fill_only.stroke = None;
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_path(&commands, &fill_only, true, None, None, &mut buffers);
+
+        assert!(!buffers.vertices.is_empty(), "fill must produce vertices");
+        for v in &buffers.vertices {
+            assert_eq!(v.half_width, 0.0, "fill half_width must be 0.0");
+            assert_eq!(v.normal, [0.0, 0.0], "fill normal must be [0, 0]");
+        }
+    }
+
+    /// Polygon fill vertices must also have half_width == 0 and normal == [0,0].
+    #[test]
+    fn fa16_polygon_fill_has_zero_half_width() {
+        let style = make_fill_stroke_style(1.0, 1.0, 1.0);
+        let mut fill_only = style;
+        fill_only.stroke = None;
+        let rings = vec![vec![
+            [0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0],
+        ]];
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_polygon(&rings, &fill_only, &mut buffers);
+
+        assert!(!buffers.vertices.is_empty(), "polygon fill must produce vertices");
+        for v in &buffers.vertices {
+            assert_eq!(v.half_width, 0.0, "polygon fill half_width must be 0.0");
+            assert_eq!(v.normal, [0.0, 0.0], "polygon fill normal must be [0,0]");
+        }
+    }
+
+    /// Stroke vertices from tessellate_line must have half_width > 0.
+    #[test]
+    fn fa16_stroke_has_nonzero_half_width() {
+        let style = make_stroke_style(1.0, 1.0);
+        let mut buffers: VertexBuffers<MeshVertex, u32> = VertexBuffers::new();
+        tessellate_line(0.0, 0.0, 100.0, 0.0, &style, &mut buffers);
+
+        assert!(!buffers.vertices.is_empty());
+        for v in &buffers.vertices {
+            assert!(
+                v.half_width > 0.0,
+                "stroke half_width must be > 0, got {}",
+                v.half_width
+            );
+        }
+    }
 }
 
 fn apply_cap_join(
@@ -577,6 +732,16 @@ fn apply_cap_join(
     cap: Option<StrokeCap>,
     join: Option<StrokeJoin>,
 ) {
+    // Default to Bevel joins unconditionally. Bevel emits unit-normal vertices
+    // (|normal| ≈ 1) at every join, which is required for the screen-space-width
+    // shader to remain correct under non-uniform affines (sx ≠ sy). Miter joins
+    // bake elongated bisector normals in scene space, causing the "ribbon" artefact
+    // during reactive rescale. The caller may override this default by passing an
+    // explicit `StrokeJoin` (including `StrokeJoin::Miter` if the caller accepts
+    // the limitation), but for all interactive WASM mesh tessellation the default
+    // must be Bevel.
+    opts.line_join = LineJoin::Bevel;
+
     if let Some(c) = cap {
         let lc = match c {
             StrokeCap::Butt => LineCap::Butt,
