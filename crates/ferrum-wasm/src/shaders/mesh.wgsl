@@ -32,8 +32,10 @@ struct Uniforms {
 // Under non-uniform (sx != sy): direction is corrected to screen-perpendicular;
 // magnitude stays half_width * miter, so width is constant in screen pixels.
 //
-// miter = length(in.normal): lyon extends |normal| > 1 at miter joins to preserve
-// the correct corner geometry; we preserve that factor in the magnitude.
+// miter = length(in.normal): with bevel joins (the WASM tessellation default)
+// |normal| ≈ 1.0 at every vertex, so `miter` ≈ 1 and `length` is a no-op. The
+// factor is retained defensively so that any caller-supplied StrokeJoin::Round
+// or StrokeJoin::Miter still produces correct output.
 //
 // Zero-normal guard: the `half_width > 1e-4` gate already excludes fills (half_width=0).
 // For strokes, lyon guarantees non-zero normals on valid paths. If a degenerate
@@ -74,7 +76,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let ny = in.normal.y;
     // Inverse-transpose direction: normalize(vec2(nx/sx, ny/sy)) == normalize(vec2(sy*nx, sx*ny)).
     let screen_dir = normalize(vec2<f32>(sy * nx, sx * ny));
-    // Preserve lyon's miter-join factor (|normal| > 1 at sharp corners).
+    // Preserve lyon's join-elongation factor (|normal| ≈ 1 with bevel joins;
+    // retained defensively for round/miter overrides from callers).
     let miter = length(in.normal);
     let offset = screen_dir * (in.half_width * miter);
     let final_px = px + select(vec2<f32>(0.0, 0.0), offset, in.half_width > 1e-4);

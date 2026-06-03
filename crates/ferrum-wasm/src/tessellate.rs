@@ -24,7 +24,11 @@ use lyon::tessellation::{
 pub struct MeshVertex {
     /// Stroke: centerline point in scene space. Fill: position in scene space.
     pub position: [f32; 2],
-    /// Stroke: unit-ish normal from lyon (may exceed 1.0 at miter joins). Fill: [0,0].
+    /// Stroke: unit normal from lyon. With bevel joins |normal| ≈ 1.0 at all
+    /// vertices, which is required for the screen-space-width shader to be
+    /// correct under non-uniform affines (sx ≠ sy). Miter joins would bake
+    /// elongated normals (|normal| > 1) in scene space, producing the
+    /// "ribbon" artifact on rescale. Fill: [0,0].
     pub normal: [f32; 2],
     /// Stroke: half of the stroke line width in pixels. Fill: 0.0.
     pub half_width: f32,
@@ -157,7 +161,13 @@ pub fn tessellate_polygon(
     if let Some(stroke) = &style.stroke {
         let stroke_alpha = style.opacity * style.stroke_opacity;
         let color = color_to_f32(stroke, stroke_alpha);
-        let opts = StrokeOptions::default().with_line_width(style.stroke_width as f32);
+        // Use Bevel joins so every stroke vertex carries a unit normal (|normal| ≈ 1).
+        // This is required for the screen-space-width shader to stay correct under
+        // non-uniform affines (sx ≠ sy). Miter joins bake elongated bisector normals
+        // in scene space and produce the "ribbon" artefact on reactive rescale.
+        let opts = StrokeOptions::default()
+            .with_line_width(style.stroke_width as f32)
+            .with_line_join(LineJoin::Bevel);
         let mut tess = StrokeTessellator::new();
         let _ = tess.tessellate_path(
             &path,
@@ -644,11 +654,11 @@ mod tests {
                 v.position[1]
             );
 
-            // normal * half_width is the offset — its magnitude ≈ half_width
-            // (normal magnitude may exceed 1.0 at joins but for a straight line it's 1.0).
+            // normal * half_width is the offset — its magnitude ≈ half_width.
+            // With bevel joins, |normal| ≈ 1.0 at every vertex (no elongation);
+            // for a straight segment half_width=1, so offset magnitude ≈ 1.0.
+            // Allow generous tolerance for cap geometry at endpoints.
             let offset_magnitude = (v.normal[0] * v.half_width).hypot(v.normal[1] * v.half_width);
-            // For a straight segment with width=2, half_width=1, offset ≈ 1.0.
-            // Allow generous tolerance for cap/join geometry at endpoints.
             assert!(
                 offset_magnitude < 3.0,
                 "offset magnitude must be bounded (< 3.0 * half_width), got {}",
@@ -722,6 +732,16 @@ fn apply_cap_join(
     cap: Option<StrokeCap>,
     join: Option<StrokeJoin>,
 ) {
+    // Default to Bevel joins unconditionally. Bevel emits unit-normal vertices
+    // (|normal| ≈ 1) at every join, which is required for the screen-space-width
+    // shader to remain correct under non-uniform affines (sx ≠ sy). Miter joins
+    // bake elongated bisector normals in scene space, causing the "ribbon" artefact
+    // during reactive rescale. The caller may override this default by passing an
+    // explicit `StrokeJoin` (including `StrokeJoin::Miter` if the caller accepts
+    // the limitation), but for all interactive WASM mesh tessellation the default
+    // must be Bevel.
+    opts.line_join = LineJoin::Bevel;
+
     if let Some(c) = cap {
         let lc = match c {
             StrokeCap::Butt => LineCap::Butt,
