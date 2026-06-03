@@ -6,6 +6,18 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.15.2
+
+*2026-06-03*
+
+### Fixed
+
+- Interactive (WASM) line and area **stroke width is now constant under reactive domain-rescale** — the "ribbon"/variable-width artifact when a focus+context brush rescaled an axis non-uniformly is gone. Stroke width is applied in screen space and is invariant to the zoom/rescale transform. As part of this, interactive line joins are now beveled (the static SVG renderer is unchanged and keeps miter joins).
+
+### Known limitations
+
+- A few interactive-renderer issues remain tracked for a follow-up pass: the reactive-rescale brush-mode default, sibling panels shearing during a cross-panel rescale, and occasional axis-line segment breaks. These do not affect the static SVG renderer.
+
 ## 0.15.1
 
 *2026-06-03*
