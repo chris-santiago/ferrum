@@ -2118,15 +2118,43 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         # Merge RHS selections and conditionals into the layered chart
         # so interactive features from all layers are preserved.
         if rhs._selections:
-            existing_names = {s.name for s in new._selections}
+            from ferrum.parameter import VariableParameter
+
+            existing_names = {s.name for s in new._selections if s is not None}
+            existing_variable_names = {
+                p.name
+                for p in new._params
+                if p is not None and isinstance(p, VariableParameter)
+            }
             for s in rhs._selections:
+                if s is None:
+                    continue
+                if s.name in existing_variable_names:
+                    raise ValueError(
+                        f"Reactive-parameter name collision during layer merge: {s.name!r} "
+                        f"is a VariableParameter in the LHS chart and a Selection in the "
+                        f"RHS chart. A name must resolve to a single reactive-object kind. "
+                        f"Rename one of them."
+                    )
                 if s.name not in existing_names:
                     new._selections.append(s)
         if rhs._conditionals:
             new._conditionals.extend(rhs._conditionals)
         if rhs._params:
-            existing_param_names = {p.name for p in new._params}
+            from ferrum.parameter import VariableParameter
+
+            existing_selection_names = {s.name for s in new._selections if s is not None}
+            existing_param_names = {p.name for p in new._params if p is not None}
             for p in rhs._params:
+                if p is None:
+                    continue
+                if isinstance(p, VariableParameter) and p.name in existing_selection_names:
+                    raise ValueError(
+                        f"Reactive-parameter name collision during layer merge: {p.name!r} "
+                        f"is a Selection in the LHS chart and a VariableParameter in the "
+                        f"RHS chart. A name must resolve to a single reactive-object kind. "
+                        f"Rename one of them."
+                    )
                 if p.name not in existing_param_names:
                     new._params.append(p)
         # Merge RHS configure/annotation/structural/override slots.
@@ -3503,8 +3531,44 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         Order: registered selections, explicit ``add_params`` variables, then
         any ``Parameter`` referenced as a scale domain.  Deduplicated by
         ``.name`` preserving first-seen order.
+
+        Raises
+        ------
+        ValueError
+            If a name is registered as both a ``Selection`` and a
+            ``VariableParameter`` (cross-kind collision).  This is always a
+            user error — two distinct reactive-object kinds cannot share a name
+            without producing a silently wrong spec.
         """
-        from ferrum.parameter import Parameter
+        from ferrum.parameter import Parameter, VariableParameter
+        from ferrum.selection import Selection
+
+        # Detect cross-kind collisions before building the ordered list.
+        # Guard against None entries that should not exist but are technically
+        # possible given that _selections / _params are bare untyped lists.
+        selection_names = {sel.name for sel in resolved._selections if sel is not None}
+        variable_names = {
+            p.name for p in resolved._params if p is not None and isinstance(p, VariableParameter)
+        }
+        collisions = selection_names & variable_names
+        if collisions:
+            names = ", ".join(repr(n) for n in sorted(collisions))
+            raise ValueError(
+                f"Reactive-parameter name collision: {names} is registered as both "
+                f"a Selection and a VariableParameter. A name must resolve to a "
+                f"single reactive-object kind. Rename one of them."
+            )
+        # Also check domain-referenced VariableParameters against selections.
+        for ch in enc.values():
+            scale = ch.option("scale") if isinstance(ch, ChannelBase) else None
+            if isinstance(scale, dict):
+                domain = scale.get("domain")
+                if isinstance(domain, VariableParameter) and domain.name in selection_names:
+                    raise ValueError(
+                        f"Reactive-parameter name collision: {domain.name!r} is used as a "
+                        f"scale domain VariableParameter but is also registered as a "
+                        f"Selection. Rename one of them."
+                    )
 
         ordered: list = []
         seen: set[str] = set()
@@ -3674,6 +3738,15 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         >>> df = pl.DataFrame({"x": [1, 2], "y": [3, 4]})
         >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y").add_selection()
         """
+        from ferrum.selection import Selection
+
+        for sel in selections:
+            if not isinstance(sel, Selection):
+                raise TypeError(
+                    f"add_selection() expects Selection instances (from "
+                    f"fm.selection_point(), fm.selection_interval(), etc.); "
+                    f"got {type(sel).__name__!r}. Did you mean add_params()?"
+                )
         new = self._clone()
         new._selections.extend(selections)
         return new
@@ -3710,6 +3783,14 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         >>> k = fm.param("k", value=3)
         >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y").add_params(k)
         """
+        from ferrum.parameter import Parameter
+
+        for p in params:
+            if not isinstance(p, Parameter):
+                raise TypeError(
+                    f"add_params() expects Parameter instances (from fm.param() "
+                    f"or selection constructors); got {type(p).__name__!r}."
+                )
         new = self._clone()
         new._params.extend(params)
         return new
