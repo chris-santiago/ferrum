@@ -4,6 +4,10 @@
 pub mod conditional;
 pub mod error;
 pub mod hit_test;
+// MSAA sample-count selection (FA-19). Pure logic consumed by the wasm32 GPU
+// context; gated to wasm32+test so the host build does not flag it as dead.
+#[cfg(any(target_arch = "wasm32", test))]
+pub mod msaa;
 // Reactive-parameter runtime (D6): consumed by the wasm32 `WasmRenderer`; its
 // pure pixel↔data helpers are also unit-tested on the host. Gated to those two
 // targets so the non-test host build does not flag the wasm-only helpers as
@@ -85,7 +89,7 @@ impl WasmRenderer {
     pub async fn create(canvas: HtmlCanvasElement) -> Result<WasmRenderer, JsValue> {
         console_error_panic_hook::set_once();
         let gpu = gpu::init_gpu(canvas).await.map_err(JsValue::from)?;
-        let pipelines = RenderPipelines::new(&gpu.device, gpu.format);
+        let pipelines = RenderPipelines::new(&gpu.device, gpu.format, gpu.sample_count);
         Ok(WasmRenderer {
             gpu,
             pipelines,
@@ -400,6 +404,9 @@ impl WasmRenderer {
         self.gpu
             .surface
             .configure(&self.gpu.device, &self.gpu.config);
+        // FA-19: keep the MSAA target sized to the surface (this is also the
+        // PNG-capture path that resizes the canvas to 2× DPR).
+        self.gpu.rebuild_msaa_view();
         let _ = self.render_frame_js();
     }
 

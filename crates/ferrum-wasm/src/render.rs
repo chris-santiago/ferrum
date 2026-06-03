@@ -450,11 +450,18 @@ pub fn render_frame(
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
 
     {
+        // FA-19: when MSAA is active, render into the multisampled target and
+        // resolve into the single-sample surface view; at 1× render directly
+        // into the surface view (byte-identical to the pre-MSAA path).
+        let (color_view, resolve_target) = match gpu.msaa_view.as_ref() {
+            Some(msaa) => (msaa, Some(&view)),
+            None => (&view, None),
+        };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("main"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view,
-                resolve_target: None,
+                view: color_view,
+                resolve_target,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: bg[0] as f64,

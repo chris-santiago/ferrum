@@ -14,7 +14,7 @@ pub struct RenderPipelines {
 }
 
 impl RenderPipelines {
-    pub fn new(device: &Device, format: TextureFormat) -> Self {
+    pub fn new(device: &Device, format: TextureFormat, sample_count: u32) -> Self {
         let circle_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("circle.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/circle.wgsl").into()),
@@ -74,17 +74,17 @@ impl RenderPipelines {
         let additive_blend = Some(additive_blend_state());
 
         let instanced_circle =
-            build_instanced_pipeline(device, &circle_shader, format, &uniform_bgl, alpha_blend, &circle_instance_layout());
+            build_instanced_pipeline(device, &circle_shader, format, &uniform_bgl, alpha_blend, &circle_instance_layout(), sample_count);
         let instanced_rect =
-            build_instanced_pipeline(device, &rect_shader, format, &uniform_bgl, alpha_blend, &rect_instance_layout());
-        let mesh = build_mesh_pipeline(device, &mesh_shader, format, &uniform_bgl, alpha_blend);
+            build_instanced_pipeline(device, &rect_shader, format, &uniform_bgl, alpha_blend, &rect_instance_layout(), sample_count);
+        let mesh = build_mesh_pipeline(device, &mesh_shader, format, &uniform_bgl, alpha_blend, sample_count);
         let textured =
-            build_textured_pipeline(device, &textured_shader, format, &uniform_bgl, &texture_bgl, alpha_blend);
+            build_textured_pipeline(device, &textured_shader, format, &uniform_bgl, &texture_bgl, alpha_blend, sample_count);
 
         let instanced_circle_additive =
-            build_instanced_pipeline(device, &circle_shader, format, &uniform_bgl, additive_blend, &circle_instance_layout());
+            build_instanced_pipeline(device, &circle_shader, format, &uniform_bgl, additive_blend, &circle_instance_layout(), sample_count);
         let instanced_rect_additive =
-            build_instanced_pipeline(device, &rect_shader, format, &uniform_bgl, additive_blend, &rect_instance_layout());
+            build_instanced_pipeline(device, &rect_shader, format, &uniform_bgl, additive_blend, &rect_instance_layout(), sample_count);
 
         Self {
             instanced_circle,
@@ -180,6 +180,7 @@ fn build_instanced_pipeline(
     uniform_bgl: &wgpu::BindGroupLayout,
     blend: Option<wgpu::BlendState>,
     instance_layout: &wgpu::VertexBufferLayout<'_>,
+    sample_count: u32,
 ) -> RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
@@ -213,7 +214,11 @@ fn build_instanced_pipeline(
             ..Default::default()
         },
         depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState {
+            count: sample_count,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
         multiview_mask: None,
         cache: None,
     })
@@ -225,6 +230,7 @@ fn build_mesh_pipeline(
     format: TextureFormat,
     uniform_bgl: &wgpu::BindGroupLayout,
     blend: Option<wgpu::BlendState>,
+    sample_count: u32,
 ) -> RenderPipeline {
     // FA-16: affine-invariant stroke width.
     // Layout: position(2) + normal(2) + half_width(1) + color(4) = 9 floats = 36 bytes.
@@ -269,7 +275,11 @@ fn build_mesh_pipeline(
             ..Default::default()
         },
         depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState {
+            count: sample_count,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
         multiview_mask: None,
         cache: None,
     })
@@ -282,6 +292,7 @@ fn build_textured_pipeline(
     uniform_bgl: &wgpu::BindGroupLayout,
     texture_bgl: &wgpu::BindGroupLayout,
     blend: Option<wgpu::BlendState>,
+    sample_count: u32,
 ) -> RenderPipeline {
     let vertex_layout = wgpu::VertexBufferLayout {
         array_stride: 4 * 4, // position(2) + tex_coord(2) = 4 floats
@@ -320,7 +331,11 @@ fn build_textured_pipeline(
             ..Default::default()
         },
         depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState {
+            count: sample_count,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
         multiview_mask: None,
         cache: None,
     })
