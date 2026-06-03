@@ -6,6 +6,26 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.15.1
+
+*2026-06-03*
+
+A post-v0.15.0 audit (bug-hunters, seam auditors, and heavyweight cohesion reviews) found a cluster of incomplete-unification, sibling-drift, and silent-failure bugs in the flexibility-campaign surface. All are fixed here, each with a regression test.
+
+### Fixed
+
+- Finished the group-by-key unification: `transform_window`, `data_stack`, `stat_aggregate`'s join/pivot/aggregate paths now accept integer/uint/bool groupby columns (they previously collapsed every row into one group). A null group key now stays distinct from a real `0`/`false`/empty (FA-9), which also fixes a crash in `summary`/`boxplot`/`violin`/`errorband` when a groupby column contained a null
+- Cross-panel reactive rescale (focus+context brushing) now zooms the detail panel **in-bounds** — the rescale is reprojected through the shared data domain instead of the source panel's pixels, which previously sent the detail marks off-screen
+- Polar bars, ranged rects, and arc marks now honor the per-row `opacity`/`stroke_width`/`stroke_opacity`/`stroke_dash`/`fill_opacity`/`angle`/`tooltip`/`href`/`description` channels their sibling marks already supported
+- `Axis(title=None)` and `Legend(title=None)` truly suppress the title (no phantom text node), matching the channel-level `fm.X(title=None)`
+- `add_params`/`add_selection` raise a clear `TypeError` on wrong-typed arguments, and a selection colliding with a same-named parameter raises instead of silently shadowing it
+- A non-finite (Inf/NaN) value in an `fm.param` domain raises a legible error naming the parameter; a `bind="legend"` selection registered via `add_params` is now wired correctly; the `ChartSpec` type stub covers all constructor arguments
+- `mark_area` with an `x2` channel, and `mark_bar` with both `x2` and `y2`, now raise a clear error pointing to `mark_rect` instead of silently dropping the second extent
+
+### Known limitations
+
+- A single-panel reactive-rescale chart may still default to pan mode; click the box-select tool to brush (FA-17). The line "ribbon" appearance under a non-uniform rescale (FA-16) is tracked separately.
+
 ## 0.15.0
 
 *2026-06-02*
