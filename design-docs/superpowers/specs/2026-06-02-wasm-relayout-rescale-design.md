@@ -1,207 +1,185 @@
-# Re-layout-in-WASM for Reactive Domain-Rescale Design Spec
+# FA-16 Stroke-Width Ribbon Fix — Design Spec
 
-> Status: approved 2026-06-02. Fixes FA-16 (line/area stroke-width "ribbon" and
-> tick/label distortion under reactive x-domain rescale) at its root.
+> Status: Option 1 (screen-space stroke width) **chosen 2026-06-03** after a scoping
+> spike; supersedes the Option-3 re-layout approach for the FA-16 ribbon. The Option-3
+> re-layout design is preserved in §11 as the deferred broader fix (for when correct
+> ticks/labels/curve-resampling at the rescaled domain are also required).
+>
+> Original status: Option-3 re-layout approved 2026-06-02 (now deferred).
 
 ## 1. Scope
 
-Reactive focus+context rescale (a brush selection that re-domains another panel's
-axis) is currently faked in the WASM runtime by writing a non-uniform affine
-(`sx` large, `sy = 1`) into the GPU uniforms. Because mark stroke width is baked
-into mesh vertices in scene-space, the non-uniform affine stretches that width into
-"ribbons," and it only approximates tick positions and label spacing. This spec
-defines replacing that affine approximation, **for the reactive-rescale case only**,
-with a true re-computation of the affected panel's layout and scales in the browser:
-the same Rust layout/scale kernels that produce the static scene run again at the new
-domain, and the panel's marks, axes, and labels are rebuilt from the recomputed
-geometry. Wheel-zoom and pan are unchanged.
+Line/area mark stroke width is baked into mesh vertices in *scene space* by lyon (the
+vertex position already includes the `±normal·half_width` offset), and the WASM vertex
+shader then applies the per-panel affine to those positions. Under a **non-uniform**
+affine (`sx ≠ sy`, which is exactly what reactive x-domain rescale produces), the baked
+width is stretched anisotropically — the "ribbon." This spec makes stroke width
+**affine-invariant**: the shader transforms only the stroke *centerline* by the affine,
+then applies the width offset in *screen space*, so a stroke renders at its nominal
+pixel width regardless of `sx`/`sy`. This fixes the ribbon under reactive rescale and
+makes stroke width constant under all interactive transforms (uniform zoom and pan
+included), matching standard d3/Vega behavior. The static SVG renderer is untouched.
 
 ## 2. Goals
 
-- A reactive domain-rescale renders the target panel identically to a statically
-  rendered chart at that domain: constant-width strokes, correct tick positions,
-  correct label spacing, correctly resampled curves, correct clip.
-- The layout/scale kernels have a single source of truth shared by the native
-  (PyO3) and browser (WASM) builds — no duplicated or re-implemented layout math.
-- Re-layout runs in the browser with no Python round-trip and no network call.
-- The native render path is byte-stable across the kernel extraction.
-- Wheel-zoom and pan retain their current cheap GPU-affine behavior and performance.
+- Strokes render at constant nominal pixel width under any GPU affine (uniform zoom,
+  pan, and non-uniform reactive rescale) — no ribbon.
+- lyon's full stroke topology (caps, joins, dashes) is preserved unchanged; only the
+  *location* of the width offset moves from tessellation-time to the shader.
+- Fill meshes, circle/rect instance marks, and the static SVG path are unaffected.
+- At rest (identity transform) the rendered output is byte-identical to today.
 
 ## 3. Non-goals
 
-- No change to wheel-zoom or pan (they keep the uniform GPU affine).
-- No Arrow / `pyo3-arrow` dependency in the WASM build.
-- Transforms, statistical computation, and RNG stay in `ferrum-core`; they are not
-  moved into the shared crate and are not run in the browser.
-- The static SVG render path is untouched.
-- No new user-facing API. This is an internal fidelity fix to existing
-  `.interactive()` behavior.
+- No change to tick/label positions or curve resampling under rescale — those remain
+  the affine's approximation (the broader Option-3 re-layout in §11 addresses them when
+  needed). This spec fixes stroke width only.
+- No change to the static SVG renderer (`ferrum-core` `render/svg.rs`), to circle/rect
+  instance pipelines, or to fill-mesh appearance at rest.
+- No new user-facing API; internal fidelity fix to existing `.interactive()` behavior.
+- No new crate, no Arrow in WASM, no mark-value re-layout payload (those belong to §11).
 
 ## 4. System behavior
 
-**Wheel-zoom / pan (unchanged):** the runtime applies a uniform affine to the GPU
-uniforms. `sx == sy`, so strokes keep constant apparent width and the result is
-visually correct. No re-layout occurs.
+A stroke (line, polyline, path-stroke, polygon-outline, area-outline) renders at its
+nominal pixel width regardless of the active per-panel affine:
 
-**Reactive domain-rescale (new):** when a bound selection changes a panel's domain
-(focus+context brushing, or a `domain`-role param binding), the runtime recomputes
-that panel's layout and scales at the new domain and rebuilds the panel's rendered
-content from the recomputed geometry rather than transforming the existing geometry:
+- **At rest (identity transform):** byte-identical to today — at `sx=sy=1` the
+  screen-space offset equals the previously-baked offset.
+- **Uniform zoom / pan (`sx == sy`):** strokes stay constant pixel width (they no longer
+  thicken with zoom). This is a deliberate, confirmed behavior change — standard zoom
+  behavior — and is what generalizes the ribbon fix to all transforms.
+- **Reactive rescale (`sx ≠ sy`):** strokes stay constant pixel width — the ribbon is
+  gone. Tick/label spacing under rescale is unchanged from current behavior (still the
+  affine approximation; see §11).
 
-- Mark positions are recomputed at the new domain. Instanced marks (circles, rects)
-  get rebuilt instance buffers; mesh marks (lines, areas, paths) are re-tessellated
-  at the new positions and drawn with an **identity** transform, so stroke width is
-  correct by construction (no affine stretch → no ribbon).
-- Axis ticks and labels are recomputed at the new domain (new tick values, new
-  positions, correct spacing) and re-rendered.
-- The panel clip uses the recomputed plot area.
-
-Re-layout is **coalesced to at most one run per animation frame**: rapid brush
-updates within a frame collapse to a single re-layout, and the most recent domain
-wins. The first rescale decodes the mark-value payload once; subsequent rescales
-reuse the cached decoded columns.
+Fills (polygon/path fills) are unchanged — they carry no width and are not offset.
 
 ## 5. Architecture
 
-**New crate `ferrum-layout` (pure Rust).** A workspace member alongside
-`ferrum-scene`, holding the layout engine (`compute_layout` and its sub-modules)
-and the 14 scale kernels. It depends on `ferrum-scene` and on no native-only crate
-(no `pyo3`, no `pyo3-arrow`, no `arrow`, no `rand`). It is the single home for
-layout and scale math.
+The change is contained to the WASM mesh pipeline (`crates/ferrum-wasm/`), three files:
 
-**`ferrum-core`** depends on `ferrum-layout` and retains the PyO3 binding layer and
-the scale validators (the only parts that touch `pyo3`). Core calls the kernels in
-the new crate; its observable behavior is unchanged.
+**Tessellation (`src/tessellate.rs`).** The `MeshVertex` struct gains two fields:
+`normal: [f32; 2]` and `half_width: f32` (24 → 36 bytes). Every stroke tessellation
+closure (currently `BuffersBuilder::new(buffers, |v: StrokeVertex| MeshVertex {
+position: v.position(), color })`) changes to capture lyon's un-offset centerline and
+offset components instead of the pre-offset position:
+- `position` ← `v.position_on_path()` (centerline, **not** `v.position()`)
+- `normal` ← `v.normal()`
+- `half_width` ← `v.line_width() / 2.0`
 
-**`ferrum-wasm`** depends on `ferrum-layout` and gains a re-layout path invoked on
-reactive domain-rescale. It already compiles to `wasm32-unknown-unknown` and already
-links `lyon` for tessellation, so re-tessellation reuses existing machinery.
+Fill closures (`FillVertex`) set `normal: [0.0, 0.0], half_width: 0.0`. Affected stroke
+sites: `tessellate_line`, `tessellate_polyline`, `tessellate_path` (stroke branch),
+`tessellate_polygon` (stroke branch), and the shared `stroke_path_dashed` builder.
 
-Layering: `ferrum-scene` (data model) → `ferrum-layout` (geometry + scales) →
-`{ferrum-core (native/PyO3), ferrum-wasm (browser/wgpu)}`. This mirrors the existing
-`ferrum-scene` split rather than introducing conditional compilation inside
-`ferrum-core`.
+**Shader (`src/shaders/mesh.wgsl`).** `VertexInput` gains `normal` and `half_width`
+attributes. `vs_main` transforms the centerline by the affine, then adds the screen-space
+width offset only when `half_width > ε`:
+`final_px = affine(position) + select(0, normal * half_width, half_width > ε)`.
+NDC conversion is unchanged.
 
-**Data flow on rescale:** brush selection → new domain for the bound panel →
-(decode mark-value columns on first use, else use cache) → `ferrum-layout` recomputes
-panel layout + scaled mark positions + ticks/labels → rebuild instance buffers /
-re-tessellate meshes (identity transform) / re-render axis text → draw.
+**Pipeline (`src/pipelines.rs`).** The mesh vertex-buffer layout updates to the new
+stride (36 bytes) and attribute set (position @0, normal, half_width, color).
+
+lyon's `StrokeVertex` (`position_on_path()`, `normal()`, `line_width()`) is stable public
+API in the pinned lyon 1.x and exposes exactly these components, so lyon's caps/joins/
+dashes geometry is retained — only the width offset is deferred to the shader.
 
 ## 6. Canonical interfaces / data contracts
 
-**Mark-value payload.** Layout-relevant columns only (the positional and grouping
-fields each mark batch consumes — not the full dataframe), carried in the existing
-packed-bytes channel, keyed by `(panel_index, batch_index)`. Each column is
-dtype-tagged; strings are encoded as `u32` offsets into a per-payload string pool.
-The contract is: given a `(panel, batch)` key, the runtime can reconstruct the typed
-column vectors needed to re-run that batch's scales and layout. Decoded columns are
-cached in WASM memory after first decode; the payload is decoded lazily (only if a
-rescale actually occurs).
+**`MeshVertex` (the one mesh vertex format, shared by strokes and fills):**
 
-**Re-layout entry point.** `ferrum-layout` exposes a panel-level layout computation
-that takes a scale domain (or domains), panel dimensions / plot area, theme inputs,
-a text-metrics provider, and the mark data, and returns laid-out scene geometry
-(scaled mark positions, axis ticks, labels, plot area). The native binding and the
-WASM runtime call the same entry point; neither re-implements layout.
+```rust
+#[repr(C)]
+struct MeshVertex {
+    position:   [f32; 2], // stroke centerline (scene space); fill position
+    normal:     [f32; 2], // unit-ish offset direction from lyon; [0,0] for fills
+    half_width: f32,      // half stroke width in px; 0.0 for fills
+    color:      [f32; 4],
+}
+```
 
-**Trigger contract.** Only param bindings of role `domain` (reactive rescale)
-trigger re-layout. Bindings of role `filter` and `legend`, and the zoom/pan affine,
-do not. Wheel/pan continue to write the GPU affine directly.
+**Shader offset contract:** `half_width == 0.0` ⇒ no offset (fills + any zero-width
+geometry render exactly as the transformed position). `half_width > 0.0` ⇒ offset by
+`normal * half_width` in screen space, *after* the affine, so width is invariant to
+`sx`/`sy`. Strokes and fills therefore share one pipeline and one shader, branchless
+except for the `select` on `half_width`.
 
 ## 7. Invariants and constraints
 
-- **Native byte-stability:** moving the kernels into `ferrum-layout` must not change
-  any native render output. Existing goldens and `cargo test` pass unchanged.
-- **No PyO3/Arrow/rand in `ferrum-layout`:** the crate must compile to
-  `wasm32-unknown-unknown` on its own. RNG-dependent transforms are excluded by
-  construction (they live in `ferrum-core`).
-- **WASM build stays green:** `cargo build -p ferrum-wasm --target wasm32-unknown-unknown`
-  must succeed; the `getrandom/js` blocker must not appear (it can only enter via
-  `rand`, which is not a dependency of the shared crate).
-- **Single source of truth:** layout/scale math exists in exactly one place; the WASM
-  re-layout must not fork or approximate it.
-- **Performance:** wheel/pan performance is unchanged. Reactive re-layout is
-  rAF-coalesced and must not block the frame loop; at typical interactive sizes a
-  re-layout completes within a frame budget, and at large N degrades to fewer updates
-  per second rather than stalling.
-- **Payload minimality:** only layout-relevant columns are exported; the payload must
-  not balloon the interactive HTML for charts that never rescale (it is inert unless a
-  `domain`-role binding exists).
+- **At-rest byte-stability:** with the identity transform, WASM output is unchanged
+  (the screen-space offset at `sx=sy=1` equals the old baked offset).
+- **Static SVG untouched:** `ferrum-core` render path produces no `MeshVertex`; goldens
+  and `cargo test -p ferrum-core` are unaffected.
+- **Instance marks untouched:** circle/rect pipelines and their per-instance
+  `stroke_width` are not part of the mesh format change.
+- **Topology preserved:** caps, joins, and dash patterns render identically (dash
+  flattening happens before stroke tessellation; the offset move is post-topology).
+- **WASM gates:** `cargo build -p ferrum-wasm --target wasm32-unknown-unknown` succeeds;
+  `cargo clippy -p ferrum-wasm --target wasm32-unknown-unknown -- -D warnings` clean.
 
 ## 8. Key decisions and tradeoffs
 
-- **Extract a shared crate, not feature-gate `ferrum-core`.** `ferrum-scene` already
-  establishes the "pure-Rust shared kernel + native crate + browser crate" pattern;
-  extraction mirrors it and keeps `ferrum-core` PyO3-only. Feature-gating would
-  introduce `#[cfg(feature)]` conditional compilation that exists nowhere in the crate
-  today and make `ferrum-core` a dual-target crate — less cohesive. Cost: upfront
-  move-and-rewire of the layout/scale modules.
-- **One crate (`ferrum-layout`) for both layout and scales**, not two. Layout already
-  depends on the scale kernels and they move together; a two-crate split buys nothing.
-- **Packed-binary payload, not columnar JSON or Arrow.** Binary is strictly ≥ JSON on
-  load and first-decode cost and never slower; it reuses ferrum's existing bytemuck
-  packed-bytes path (the channel GPU instances already travel), so it is cohesive with
-  how ferrum already moves bulk numeric data for speed and scales to large N without a
-  wire-size/parse cliff. Steady-state interaction latency is encoding-independent
-  (decode-once-and-cache), so the binary choice is about load/first-decode and large-N
-  headroom, accepting the cost of dtype tags + a string side-pool. Arrow is rejected:
-  no `arrow` dependency exists in WASM today and `pyo3-arrow` is native-only.
-- **Affine for zoom/pan; re-layout only on reactive rescale.** Uniform zoom/pan are
-  already correct and cheap under the affine (`sx == sy`, no ribbon); only non-uniform
-  domain-rescale (`sx ≠ sy`) distorts. Re-laying out everything would put layout cost on
-  the hot path for interactions the affine already handles correctly — a regression.
-- **Re-tessellate mesh marks with identity transform on rescale.** Correct stroke
-  width by construction; reuses the `lyon` dependency already present in WASM.
+- **Option 1 (screen-space width) over Option 3 (re-layout).** The browser-confirmed
+  evidence is that the defect is *only* the non-uniform stretch of baked width; ticks/
+  labels under the affine were not reported as a problem. Option 1 fixes exactly that,
+  in 3 WASM files, with no new crate/payload/round-trip. Option 3 additionally fixes
+  tick/label spacing and curve resampling but is a much larger build (kept in §11 for
+  when that fidelity is required).
+- **Capture lyon's centerline + normal, don't replace lyon.** lyon's `StrokeVertex`
+  exposes `position_on_path`/`normal`/`line_width`, so caps/joins/dashes stay lyon's;
+  only the offset application moves. This is the difference between MODERATE and a LARGE
+  rewrite.
+- **Constant width under uniform zoom too (confirmed).** Screen-space width applies to
+  all transforms, so uniform zoom no longer thickens strokes. This is the standard
+  behavior and is what makes the fix general; the prior thickening was an artifact of
+  baking width in data space.
+- **One shared mesh pipeline, branch on `half_width`.** Fills carry `half_width = 0` and
+  skip the offset, avoiding a second pipeline.
 
 ## 9. Acceptance criteria
 
-- In the interactive 3-plot demo, after a focus+context brush rescale: lines render at
-  constant width (no ribbon), axis ticks sit at correct positions for the new domain,
-  and tick labels show the correct values with correct spacing.
-- Wheel-zoom and pan behave and perform exactly as before the change.
-- `ferrum-layout` compiles to `wasm32-unknown-unknown` standalone; `ferrum-wasm`
-  builds for `wasm32-unknown-unknown`.
-- Full native `cargo test` and the Python golden suite pass unchanged (kernel
-  extraction is byte-stable).
-- An interactive chart with no `domain`-role binding ships no meaningfully larger HTML
-  than before (payload is inert/absent).
+- In the focus+context interactive demo, after a brush rescale the detail lines render
+  at constant width (no ribbon) with dashes/joins intact.
+- Uniform zoom and pan render strokes at constant width (no thickening), no ribbon.
+- At-rest interactive render and all static SVG goldens are byte-identical to before.
+- `cargo test -p ferrum-wasm` passes (incl. new tessellation tests); `cargo build`/
+  `clippy` for `wasm32-unknown-unknown` are green; the shipped WASM bundle is rebuilt.
 
 ## 10. Validation strategy
 
-- **Kernel-parity unit tests in `ferrum-layout`:** for representative specs, the same
-  domain + dimensions produce identical layout/scale output, asserting the extraction
-  preserved behavior. These run on the native target and the crate also builds for
-  wasm32.
-- **Native regression:** existing `cargo test` and golden SVG byte/visual checks
-  confirm the static path is unchanged.
-- **WASM build gate:** `cargo build -p ferrum-wasm --target wasm32-unknown-unknown`
-  succeeds in CI.
-- **Browser validation:** the 3-plot interactive demo is exported and visually
-  inspected — ribbon gone, ticks/labels correct at the rescaled domain, zoom/pan
-  unaffected. (This is the CI-unverifiable path; it requires human inspection in a
-  browser, consistent with prior interactive validation.)
+- **Tessellation unit tests** (`src/tessellate.rs`): a stroked segment yields vertices
+  whose `position` is the centerline and whose `normal * half_width` reproduces the old
+  baked offset at identity; fills yield `half_width == 0`.
+- **WASM build + clippy gates** for `wasm32-unknown-unknown`.
+- **Static regression:** `cargo test -p ferrum-core` + golden SVGs unchanged (this fix
+  does not touch that path).
+- **Browser validation:** export the focus+context demo, confirm ribbon gone, constant
+  width under both uniform zoom and non-uniform rescale, dashes/joins correct. (CI-
+  unverifiable; human browser inspection, consistent with prior interactive validation.)
 
-## 11. Open questions
+## 11. Deferred alternative — Option 3: re-layout in WASM (broader fix)
 
-- **WASM text rendering of new tick labels.** Re-layout produces tick labels with new
-  values at the new domain. Whether the WASM runtime can render *arbitrary new* text
-  strings (vs. only a pre-baked glyph atlas of the original labels) is unverified and
-  could shift the rendering approach for axes (e.g., an HTML/SVG overlay or a dynamic
-  glyph path instead of GPU-drawn text). This must be resolved before the axis-text
-  portion of re-layout is designed in the plan; it does not affect the crate
-  extraction, payload format, or trigger wiring, which proceed regardless.
-- **Reconsider Option 1 (screen-space line width) as the lighter fix — added 2026-06-03.**
-  v0.15.1 browser validation of the INT-1 cross-panel rescale fix showed that the
-  *uniform* zoom/magnify path (sx==sy) renders lines cleanly (they only thicken
-  evenly), and the "ribbon" appears *exclusively* under the *non-uniform* rescale
-  affine (sx≠sy). This localizes the defect to the non-uniform case and is strong
-  evidence that an affine-invariant **screen-space line width** in the mesh shader —
-  i.e. apply the per-vertex width offset *after* the affine so it is not stretched by
-  the non-uniform scale — would resolve FA-16 on its own, without the full panel
-  re-layout. Option 1 is more surgical than the re-layout this spec currently prefers
-  (it touches only line/area mesh width, not tick/label spacing or curve resampling).
-  Trade-off: Option 1 fixes only stroke width (ticks/labels under the affine remain
-  approximate), whereas re-layout fixes everything; but if the brushed-detail axis
-  fidelity is acceptable, Option 1 is the cheaper path. Evaluate Option 1 first when
-  FA-16 is picked up; reserve the re-layout for when correct ticks/labels/resampling at
-  the rescaled domain are also required.
+Retained for when correct **tick/label spacing and curve resampling at the rescaled
+domain** are required (Option 1 leaves those as the affine approximation). A scoping
+spike (2026-06-02) found this feasible but a larger build:
+
+- Extract a pure-Rust **`ferrum-layout`** crate (the `compute_layout` engine + the 14
+  scale kernels) alongside `ferrum-scene`, depended on by both `ferrum-core` (PyO3
+  bindings/validators stay there) and `ferrum-wasm`. No `pyo3`/`pyo3-arrow`/`arrow`/
+  `rand` in the shared crate (the only `wasm32` blocker is `getrandom/js` via `rand`,
+  which is transform-only and stays in core).
+- Ship a **packed-binary mark-value payload** (layout-relevant columns only, dtype-
+  tagged, string side-pool) in the existing packed-bytes channel, keyed by
+  `(panel, batch)`, decoded-once-and-cached in WASM.
+- On a `domain`-role rescale (only that trigger; zoom/pan keep the affine), recompute
+  the panel layout at the new domain and rebuild instances / re-tessellate meshes
+  (identity transform) / re-render ticks+labels; coalesce to one run per animation frame.
+- **Open question for Option 3:** whether the WASM runtime can render *arbitrary new*
+  tick-label strings (vs. a pre-baked glyph atlas) — may need an HTML/SVG overlay or a
+  dynamic glyph path. Resolve before designing the axis-text portion.
+
+Option 3 supersedes the affine entirely for domain rescale (and would moot Option 1 for
+that case), at the cost of a new crate, an export-payload format, and a WASM↔layout
+round-trip. Prefer Option 1 until tick/label/resampling fidelity at the rescaled domain
+is actually needed.
