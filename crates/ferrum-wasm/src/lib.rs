@@ -38,7 +38,7 @@ use crate::gpu::GpuContext;
 #[cfg(target_arch = "wasm32")]
 use crate::pipelines::RenderPipelines;
 #[cfg(target_arch = "wasm32")]
-use crate::render::{GpuBuffers, Uniforms};
+use crate::render::GpuBuffers;
 #[cfg(target_arch = "wasm32")]
 use crate::scene_load::SceneData;
 #[cfg(target_arch = "wasm32")]
@@ -204,6 +204,7 @@ impl WasmRenderer {
                 packed_batch_meta: tr.new_data.packed_batch_meta.clone(),
                 draw_commands: tr.new_data.draw_commands.clone(),
                 mark_mesh_panels: tr.new_data.mark_mesh_panels.clone(),
+                panel_count: tr.new_data.panel_count,
             };
             let buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &lerped_data);
             render::render_frame(&self.gpu, &self.pipelines, &buffers, lerped_data.background)
@@ -359,8 +360,15 @@ impl WasmRenderer {
     pub fn reset_zoom(&mut self, panel_id: u32) -> Result<String, JsValue> {
         let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
         self.zoom.reset(panel_id as usize);
-        let uniforms = Uniforms::identity(loaded.data.width, loaded.data.height);
-        loaded.buffers.upload_uniforms(&self.gpu, &uniforms);
+        // Re-upload every panel's affine (the reset panel is now identity;
+        // siblings keep whatever zoom/pan state they had) so resetting one
+        // panel does not disturb the others.
+        loaded.buffers.upload_panel_transforms(
+            &self.gpu,
+            loaded.data.width,
+            loaded.data.height,
+            &self.zoom.transforms,
+        );
         render::render_frame(&self.gpu, &self.pipelines, &loaded.buffers, loaded.data.background)
             .map_err(JsValue::from)?;
         Ok(text_json::build_text_json(&loaded.data))
@@ -1052,6 +1060,7 @@ mod tests {
             packed_batch_meta: packed_meta,
             draw_commands: vec![],
             mark_mesh_panels: vec![],
+            panel_count: 1,
         };
 
         // Build spatial index with packed data.

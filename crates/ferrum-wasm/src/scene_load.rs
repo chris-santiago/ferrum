@@ -159,6 +159,10 @@ pub struct SceneData {
     /// Panels that contributed no mesh geometry (e.g. only packed
     /// circle/rect instances) are absent from this list.
     pub mark_mesh_panels: Vec<MarkMeshPanel>,
+    /// Number of panels in the source scene graph. `GpuBuffers` allocates one
+    /// per-panel transform slot for each, so any `panel_id` recorded on a mark
+    /// draw command or mesh panel has a slot to bind. Always `>= 1`.
+    pub panel_count: usize,
 }
 
 #[derive(Clone)]
@@ -243,6 +247,12 @@ pub struct DrawCommand {
     /// restrict the GPU clip region so zoomed marks do not bleed into axis
     /// margins. `None` for non-mark commands (axes, grid, legend, title).
     pub plot_area: Option<[f32; 4]>,
+    /// For mark draw commands (`is_mark == true`), the index of the panel that
+    /// owns these instances. The render loop binds that panel's own affine
+    /// transform, so a non-uniform domain-rescale on one panel does not shear
+    /// or translate sibling panels' marks. Meaningless (always 0) for non-mark
+    /// commands, which always draw with the identity transform.
+    pub panel_id: usize,
 }
 
 /// Per-panel mark-mesh draw range.
@@ -259,6 +269,10 @@ pub struct MarkMeshPanel {
     pub index_count: u32,
     /// Plot area `[x, y, w, h]` in canvas pixels.
     pub plot_area: [f32; 4],
+    /// Index of the panel that owns this mesh slice. The render loop binds
+    /// this panel's own affine transform so a non-uniform domain-rescale on a
+    /// sibling panel does not shear or translate this panel's mesh.
+    pub panel_id: usize,
 }
 
 /// Accumulator for one full scene-load pass.
@@ -342,17 +356,19 @@ impl SceneCollector {
             batch_cap,
             batch_join,
         );
-        self.emit(false, false, None);
+        self.emit(false, false, None, 0);
     }
 
     /// Collect `nodes` into the mark mesh (mark batches: lines, areas, paths,
     /// polygons, polylines) and immediately emit draw commands for any new
-    /// circle/rect instances with the given blend mode and plot area.
+    /// circle/rect instances with the given blend mode, plot area, and owning
+    /// panel index.
     pub fn collect_mark(
         &mut self,
         nodes: &[SceneNode],
         additive: bool,
         plot_area: Option<[f32; 4]>,
+        panel_id: usize,
         batch_cap: Option<StrokeCap>,
         batch_join: Option<StrokeJoin>,
     ) {
@@ -367,7 +383,7 @@ impl SceneCollector {
             batch_cap,
             batch_join,
         );
-        self.emit(additive, true, plot_area);
+        self.emit(additive, true, plot_area, panel_id);
     }
 
     /// Collect `nodes` into the annotation mesh.
@@ -397,11 +413,15 @@ impl SceneCollector {
         );
         // Emit draw commands for any Circle/Rect annotation nodes so they
         // appear at the correct z-order (after mark batches).
-        self.emit(false, false, None);
+        self.emit(false, false, None, 0);
     }
 
     /// Emit draw commands for any circles/rects added since the last snapshot.
-    fn emit(&mut self, additive: bool, is_mark: bool, plot_area: Option<[f32; 4]>) {
+    ///
+    /// `panel_id` is only meaningful for mark commands (`is_mark == true`); the
+    /// render loop binds that panel's affine. Non-mark commands always draw
+    /// with the identity transform, so callers pass `0`.
+    fn emit(&mut self, additive: bool, is_mark: bool, plot_area: Option<[f32; 4]>, panel_id: usize) {
         let new_c = self.circles.len();
         if new_c > self.prev_c {
             self.draw_commands.push(DrawCommand {
@@ -411,6 +431,7 @@ impl SceneCollector {
                 additive,
                 is_mark,
                 plot_area,
+                panel_id,
             });
         }
         self.prev_c = new_c;
@@ -424,6 +445,7 @@ impl SceneCollector {
                 additive,
                 is_mark,
                 plot_area,
+                panel_id,
             });
         }
         self.prev_r = new_r;
@@ -442,6 +464,7 @@ impl SceneCollector {
         index_start_before: u32,
         index_end_after: u32,
         plot_area: [f32; 4],
+        panel_id: usize,
     ) {
         let index_count = index_end_after - index_start_before;
         if index_count > 0 {
@@ -449,6 +472,7 @@ impl SceneCollector {
                 index_start: index_start_before,
                 index_count,
                 plot_area,
+                panel_id,
             });
         }
     }
@@ -539,6 +563,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                     additive,
                     is_mark: true,
                     plot_area: panel_plot_area,
+                    panel_id: panel_idx,
                 });
             } else {
                 // Mark batches → mark mesh (zoom transform)
@@ -546,6 +571,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                     &batch.nodes,
                     additive,
                     panel_plot_area,
+                    panel_idx,
                     batch.stroke_cap,
                     batch.stroke_join,
                 );
@@ -560,6 +586,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
             mesh_index_start_before,
             mesh_index_end_after,
             panel_plot_area_arr,
+            panel_idx,
         );
 
         // Axes, strip titles: non-mark → static mesh
@@ -589,6 +616,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         packed_batch_meta: batch_meta,
         draw_commands: collector.draw_commands,
         mark_mesh_panels: collector.mark_mesh_panels,
+        panel_count: scene.panels.len().max(1),
     }
 }
 
@@ -2860,7 +2888,7 @@ mod tests {
         }];
 
         let mut collector = SceneCollector::new();
-        collector.collect_mark(&nodes, false, None, None, None);
+        collector.collect_mark(&nodes, false, None, 0, None, None);
 
         assert_eq!(collector.circles.len(), 1);
         // fill_color alpha must reflect fill_opacity (0.5), not overall opacity (1.0).
@@ -2903,7 +2931,7 @@ mod tests {
         }];
 
         let mut collector = SceneCollector::new();
-        collector.collect_mark(&nodes, false, None, None, None);
+        collector.collect_mark(&nodes, false, None, 0, None, None);
 
         assert_eq!(collector.rects.len(), 1);
         assert!(
@@ -3647,31 +3675,136 @@ mod tests {
     fn record_mark_mesh_panel_accumulates_and_drops_zeros() {
         let mut collector = SceneCollector::new();
 
-        // Record a non-zero range.
-        collector.record_mark_mesh_panel(0, 30, [10.0, 20.0, 200.0, 150.0]);
+        // Record a non-zero range for panel 0.
+        collector.record_mark_mesh_panel(0, 30, [10.0, 20.0, 200.0, 150.0], 0);
         assert_eq!(collector.mark_mesh_panels.len(), 1);
         assert_eq!(collector.mark_mesh_panels[0].index_start, 0);
         assert_eq!(collector.mark_mesh_panels[0].index_count, 30);
+        assert_eq!(collector.mark_mesh_panels[0].panel_id, 0);
 
         // Record a zero-count range — must be dropped.
-        collector.record_mark_mesh_panel(30, 30, [10.0, 200.0, 200.0, 150.0]);
+        collector.record_mark_mesh_panel(30, 30, [10.0, 200.0, 200.0, 150.0], 1);
         assert_eq!(
             collector.mark_mesh_panels.len(), 1,
             "zero-count panel must not be appended"
         );
 
-        // Record a second non-zero range that follows the first.
-        collector.record_mark_mesh_panel(30, 55, [220.0, 20.0, 200.0, 150.0]);
+        // Record a second non-zero range that follows the first (panel 2).
+        collector.record_mark_mesh_panel(30, 55, [220.0, 20.0, 200.0, 150.0], 2);
         assert_eq!(collector.mark_mesh_panels.len(), 2);
         assert_eq!(collector.mark_mesh_panels[1].index_start, 30);
         assert_eq!(collector.mark_mesh_panels[1].index_count, 25);
+        assert_eq!(
+            collector.mark_mesh_panels[1].panel_id, 2,
+            "the recorded panel_id must be preserved (the zero-count panel 1 was dropped)"
+        );
 
         // Verify plot areas are stored correctly.
         let pa0 = collector.mark_mesh_panels[0].plot_area;
         assert!((pa0[0] - 10.0).abs() < 1e-6, "panel 0 x");
         assert!((pa0[2] - 200.0).abs() < 1e-6, "panel 0 w");
         let pa1 = collector.mark_mesh_panels[1].plot_area;
-        assert!((pa1[0] - 220.0).abs() < 1e-6, "panel 1 x");
+        assert!((pa1[0] - 220.0).abs() < 1e-6, "panel 2 x");
+    }
+
+    /// FA-18: a two-panel scene must record distinct `panel_id`s on the
+    /// mesh-panel entries AND on the mark draw commands, so the render loop can
+    /// bind each panel's own transform slot. Without this, a non-uniform
+    /// domain-rescale on one panel sheared its siblings.
+    #[test]
+    fn two_panel_scene_records_distinct_panel_ids() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, InteractionConfig, MarkBatch, MarkBatchKind,
+            Panel, Rect, SceneGraph, SceneNode, StrokeStyle,
+        };
+
+        let line_style = StrokeStyle {
+            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            width: 1.0,
+            opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+            stroke_opacity: 1.0,
+        };
+        let circle_style = FillStroke {
+            fill: Some(Color { r: 255, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            stroke_dash: None,
+            angle: 0.0,
+        };
+
+        // Each panel carries one Line (→ mark mesh) and one Circle (→ mark
+        // instance draw command) so both per-panel tracks get populated.
+        let mk_panel = |x_off: f64| Panel {
+            id: 0,
+            plot_area: Rect { x: x_off, y: 0.0, w: 100.0, h: 100.0 },
+            clip: Rect { x: x_off, y: 0.0, w: 100.0, h: 100.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None, y_domain: None, expand: true, clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Line,
+                nodes: vec![
+                    SceneNode::Line {
+                        x1: x_off, y1: 10.0, x2: x_off + 50.0, y2: 80.0,
+                        style: line_style.clone(),
+                    },
+                    SceneNode::Circle {
+                        cx: x_off + 25.0, cy: 50.0, r: 4.0, style: circle_style.clone(),
+                    },
+                ],
+                data_indices: None,
+                tooltips: None,
+                hrefs: None,
+                descriptions: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        };
+
+        let scene = SceneGraph {
+            width: 200.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![mk_panel(0.0), mk_panel(100.0)],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let data = load_scene(&scene);
+
+        assert_eq!(data.panel_count, 2, "two-panel scene must report panel_count == 2");
+
+        // One mesh slice per panel, carrying distinct panel_ids 0 and 1.
+        assert_eq!(data.mark_mesh_panels.len(), 2, "one mesh slice per panel");
+        assert_eq!(data.mark_mesh_panels[0].panel_id, 0);
+        assert_eq!(data.mark_mesh_panels[1].panel_id, 1);
+
+        // The mark circle draw commands must carry distinct panel_ids too.
+        let mark_panel_ids: Vec<usize> = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.is_mark)
+            .map(|c| c.panel_id)
+            .collect();
+        assert!(mark_panel_ids.contains(&0), "a mark command must belong to panel 0");
+        assert!(mark_panel_ids.contains(&1), "a mark command must belong to panel 1");
     }
 }
 

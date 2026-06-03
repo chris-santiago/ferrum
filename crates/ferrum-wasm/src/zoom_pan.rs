@@ -116,6 +116,21 @@ impl ZoomPanState {
     }
 }
 
+/// Select the affine transform a given panel's marks should be drawn with.
+///
+/// Returns `transforms[panel_id]` when present, otherwise the identity
+/// transform. This is the per-panel render path's byte-stability anchor: at
+/// rest every panel maps to identity, so the per-panel uniform path produces
+/// the same affine the former single mark uniform did. Out-of-range ids never
+/// panic — they fall back to identity. Factored out here (host-compiled) so the
+/// panel → affine selection is unit-testable without a GPU device.
+pub(crate) fn select_panel_transform(transforms: &[Affine2], panel_id: usize) -> Affine2 {
+    transforms
+        .get(panel_id)
+        .copied()
+        .unwrap_or_else(Affine2::identity)
+}
+
 pub(crate) fn tick_level_for_zoom(zoom: f64) -> usize {
     if zoom < 0.5 {
         0
@@ -421,6 +436,52 @@ mod tests {
         let (x, y) = t.apply(10.0, 20.0);
         assert!((x - 10.0).abs() < 1e-10);
         assert!((y - 20.0).abs() < 1e-10);
+    }
+
+    // ── FA-18: per-panel mark transform selection ────────────────────────────
+
+    /// The selector must pick each panel's OWN affine: a non-uniform rescale
+    /// (sx ≠ sy) on one panel must not leak into a sibling that is at identity.
+    /// This is the core invariant that stops sibling shear during a reactive
+    /// domain rescale.
+    #[test]
+    fn select_panel_transform_picks_per_panel_affine() {
+        // Panel 0: identity. Panel 1: non-uniform rescale (sx != sy), like an
+        // x-only domain rescale written by `apply_reactive_rescale`.
+        let rescaled = Affine2 { sx: 3.0, sy: 1.0, tx: -40.0, ty: 0.0 };
+        let transforms = vec![Affine2::identity(), rescaled];
+
+        let t0 = select_panel_transform(&transforms, 0);
+        assert!(
+            (t0.sx - 1.0).abs() < 1e-9 && (t0.sy - 1.0).abs() < 1e-9,
+            "panel 0 must stay identity, got sx={} sy={}", t0.sx, t0.sy
+        );
+
+        let t1 = select_panel_transform(&transforms, 1);
+        assert!((t1.sx - 3.0).abs() < 1e-9, "panel 1 sx must be the rescale, got {}", t1.sx);
+        assert!((t1.sy - 1.0).abs() < 1e-9, "panel 1 sy must be 1.0 (x-only rescale), got {}", t1.sy);
+        assert!((t1.tx - (-40.0)).abs() < 1e-9, "panel 1 tx must be the rescale offset, got {}", t1.tx);
+
+        // Out-of-range panel_id falls back to identity (never panics).
+        let t_oob = select_panel_transform(&transforms, 9);
+        assert!(
+            (t_oob.sx - 1.0).abs() < 1e-9 && (t_oob.sy - 1.0).abs() < 1e-9,
+            "out-of-range panel must fall back to identity"
+        );
+    }
+
+    /// At rest (all panels identity) the per-panel selection yields identity
+    /// for every slot, so the rendered affine matches the former single-uniform
+    /// path exactly — the byte-stability anchor.
+    #[test]
+    fn select_panel_transform_identity_at_rest() {
+        let transforms = vec![Affine2::identity(); 3];
+        for panel_id in 0..3 {
+            let t = select_panel_transform(&transforms, panel_id);
+            assert!((t.sx - 1.0).abs() < 1e-9, "slot {panel_id} sx");
+            assert!((t.sy - 1.0).abs() < 1e-9, "slot {panel_id} sy");
+            assert!(t.tx.abs() < 1e-9 && t.ty.abs() < 1e-9, "slot {panel_id} translation");
+        }
     }
 
     #[test]
