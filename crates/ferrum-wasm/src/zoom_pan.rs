@@ -621,6 +621,80 @@ mod tests {
         assert!((t.ty - (-17.0)).abs() < 1e-10);
     }
 
+    // ── FA-20: set_absolute targets the correct panel on multi-panel charts ──
+
+    /// `set_absolute(1, …)` must write panel 1's transform and leave panel 0
+    /// at identity — the exact routing that `set_transform(panel_id, …)` relies
+    /// on in the WASM method.
+    #[test]
+    fn fa20_set_absolute_non_zero_panel_leaves_panel0_at_identity() {
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(2, &config);
+
+        // Apply an absolute transform to panel 1 only.
+        state.set_absolute(1, 3.0, 120.0, -50.0);
+
+        // Panel 0 must remain identity.
+        let t0 = &state.transforms[0];
+        assert!(
+            (t0.sx - 1.0).abs() < 1e-10,
+            "panel 0 sx must stay 1.0, got {}",
+            t0.sx
+        );
+        assert!(
+            (t0.sy - 1.0).abs() < 1e-10,
+            "panel 0 sy must stay 1.0, got {}",
+            t0.sy
+        );
+        assert!(t0.tx.abs() < 1e-10, "panel 0 tx must stay 0, got {}", t0.tx);
+        assert!(t0.ty.abs() < 1e-10, "panel 0 ty must stay 0, got {}", t0.ty);
+
+        // Panel 1 must reflect the absolute values (scale clamped to range).
+        let t1 = &state.transforms[1];
+        assert!(
+            (t1.sx - 3.0).abs() < 1e-10,
+            "panel 1 sx must be 3.0, got {}",
+            t1.sx
+        );
+        assert!(
+            (t1.sy - t1.sx).abs() < 1e-10,
+            "panel 1 sy must equal sx (uniform), got {} vs {}",
+            t1.sy,
+            t1.sx
+        );
+        assert!(
+            (t1.tx - 120.0).abs() < 1e-10,
+            "panel 1 tx must be 120.0, got {}",
+            t1.tx
+        );
+        assert!(
+            (t1.ty - (-50.0)).abs() < 1e-10,
+            "panel 1 ty must be -50.0, got {}",
+            t1.ty
+        );
+    }
+
+    /// Calling `set_absolute` on panel 1 then panel 0 independently must leave
+    /// each panel with its own transform — no cross-panel contamination.
+    #[test]
+    fn fa20_set_absolute_independent_panels_do_not_contaminate_each_other() {
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(2, &config);
+
+        state.set_absolute(0, 2.0, 10.0, 20.0);
+        state.set_absolute(1, 4.0, 30.0, 40.0);
+
+        let t0 = &state.transforms[0];
+        assert!((t0.sx - 2.0).abs() < 1e-10, "panel 0 sx");
+        assert!((t0.tx - 10.0).abs() < 1e-10, "panel 0 tx");
+        assert!((t0.ty - 20.0).abs() < 1e-10, "panel 0 ty");
+
+        let t1 = &state.transforms[1];
+        assert!((t1.sx - 4.0).abs() < 1e-10, "panel 1 sx");
+        assert!((t1.tx - 30.0).abs() < 1e-10, "panel 1 tx");
+        assert!((t1.ty - 40.0).abs() < 1e-10, "panel 1 ty");
+    }
+
     /// B1 regression: When zoomed 2x with translation, canvas-space coordinates
     /// must be converted to scene-space via inverse_apply before comparing against
     /// mark positions. This test exercises the exact math that hit_test_at must use
