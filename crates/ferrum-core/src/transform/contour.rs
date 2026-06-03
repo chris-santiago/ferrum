@@ -495,6 +495,13 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
     let mut all_y2s: Vec<f64> = Vec::new(); // isoline only
     let mut all_group_tags: Vec<String> = Vec::new(); // grouped path only
 
+    // FA-8: level_ids restart at 0 for every surface (per-surface seg/cell
+    // counter), so multiple grouped surfaces would emit colliding ids. Offset
+    // each surface's ids past the previous surface's maximum so the accumulated
+    // level_id column is globally unique. For a single surface the base stays 0,
+    // keeping existing (ungrouped) output byte-identical.
+    let mut level_id_base: u32 = 0;
+
     let group_arr: Option<&StringArray> = group_col.as_ref().map(|(_, col_idx)| {
         batch
             .column(*col_idx)
@@ -532,7 +539,18 @@ pub(crate) fn apply(spec: &ContourSpec, batch: &RecordBatch) -> PyResult<RecordB
         };
 
         let n_new = surface.level_ids.len();
-        all_level_ids.extend(surface.level_ids);
+        // FA-8: shift this surface's ids past all previously-emitted ids so they
+        // stay globally unique across grouped surfaces.
+        let surface_max = surface.level_ids.iter().copied().max();
+        all_level_ids.extend(
+            surface
+                .level_ids
+                .iter()
+                .map(|id| id.wrapping_add(level_id_base)),
+        );
+        if let Some(m) = surface_max {
+            level_id_base = level_id_base.wrapping_add(m).wrapping_add(1);
+        }
         all_level_vals.extend(surface.level_vals);
         all_xs.extend(surface.xs);
         all_ys.extend(surface.ys);

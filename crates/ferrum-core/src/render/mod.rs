@@ -66,6 +66,11 @@ pub enum RenderError {
     EmptyDomain { channel: String, field: String },
     SceneConstruction(String),
     HtmlBundleAssembly(String),
+    /// An encoding channel that is not supported by the given mark type was
+    /// supplied.  `mark` names the mark (e.g. `"mark_area"`); `channel` names
+    /// the unsupported channel (e.g. `"x2"`); `hint` is an actionable suggestion
+    /// pointing at the correct mark or channel to use instead.
+    UnsupportedChannelCombination { mark: &'static str, channel: &'static str, hint: &'static str },
 }
 
 impl std::fmt::Display for RenderError {
@@ -101,6 +106,8 @@ impl std::fmt::Display for RenderError {
                 write!(f, "scene construction failed: {msg}"),
             Self::HtmlBundleAssembly(msg) =>
                 write!(f, "HTML bundle assembly failed: {msg}"),
+            Self::UnsupportedChannelCombination { mark, channel, hint } =>
+                write!(f, "{mark}: channel '{channel}' is not supported; {hint}"),
         }
     }
 }
@@ -700,12 +707,20 @@ fn prepare_and_layout(
         }
     }
 
-    // D13: legend title override (replaces the default field-name title when Some).
-    let effective_legend_title = prep
-        .legend_overrides
-        .title
-        .clone()
-        .or_else(|| prep.legend_title.clone());
+    // D13 + v0.15.1: legend title override (replaces the default field-name title when Some).
+    //
+    // Three-way resolution mirrors the axis-title contract in prepare.rs:
+    //   - legend_overrides.title absent (None)   → fall through to field-name default
+    //   - legend_overrides.title = Some("")      → explicit suppress; no text node, no margin
+    //   - legend_overrides.title = Some("Foo")   → render "Foo" verbatim
+    //
+    // Python forwards `""` only when `Legend(title=None)` is explicitly passed,
+    // so `Some("")` here is always the caller's intentional suppress sentinel.
+    let effective_legend_title = match prep.legend_overrides.title.as_deref() {
+        Some(s) if s.trim().is_empty() => None, // explicit suppress — no fallback
+        Some(s) => Some(s.to_owned()),           // explicit non-empty title
+        None => prep.legend_title.clone(),       // absent — fall through to field-name default
+    };
 
     let mut legend_overrides = legend_overrides_from_prep(&prep);
     // Apply configure_legend overrides (level 3) — only fills in None fields.
@@ -1022,11 +1037,12 @@ mod orchestration_tests {
         }
         apply_chart_config(&mut effective_theme, &ChartConfig::default());
         let theme_ref = &effective_theme;
-        let effective_legend_title = prep
-            .legend_overrides
-            .title
-            .clone()
-            .or_else(|| prep.legend_title.clone());
+        // Same three-way resolution as prepare_and_layout (v0.15.1 suppress fix).
+        let effective_legend_title = match prep.legend_overrides.title.as_deref() {
+            Some(s) if s.trim().is_empty() => None,
+            Some(s) => Some(s.to_owned()),
+            None => prep.legend_title.clone(),
+        };
 
         let legend_overrides = legend_overrides_from_prep(&prep);
         let metrics = font::FontdueMetrics::new();

@@ -9,7 +9,7 @@
 
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::{ColorScale, ScaleKind};
 
 fn count_distinct(values: &[Option<String>]) -> usize {
@@ -85,6 +85,12 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let fill_opacity_values: Option<Vec<Option<f64>>> = spec.encoding.fill_opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
@@ -134,18 +140,43 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
         };
         let fill = with_opacity(fill, row_opacity);
 
+        let row_fill_opacity = fill_opacity_values
+            .as_ref()
+            .and_then(|v| v[i])
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(1.0);
+
+        let row_stroke_width = stroke_width_values
+            .as_ref()
+            .and_then(|v| v[i])
+            .filter(|v| *v >= 0.0 && v.is_finite())
+            .unwrap_or(ctx.mark_style.stroke_width);
+
+        // When stroke_width encoding produces a positive value but no explicit
+        // stroke color exists, use the fill color as the stroke so the width is
+        // visible in SVG (stroke-width is only emitted when stroke is Some).
+        let effective_stroke = if row_stroke_width > 0.0 && ctx.mark_style.stroke.is_none() && stroke_width_values.is_some() {
+            Some(fill)
+        } else {
+            ctx.mark_style.stroke
+        };
+
+        let mut style = to_scene_fill_stroke(
+            Some(fill),
+            effective_stroke,
+            row_stroke_width,
+            row_opacity,
+            ctx.mark_style.stroke_dash.as_deref(),
+        );
+        style.fill_opacity = row_fill_opacity;
+
         nodes.push(SceneNode::Rect {
             x: px_left,
             y: py_top,
             w,
             h,
-            style: to_scene_fill_stroke(
-                Some(fill),
-                ctx.mark_style.stroke,
-                ctx.mark_style.stroke_width,
-                row_opacity,
-                ctx.mark_style.stroke_dash.as_deref(),
-            ),
+            style,
             corner_radius: ctx.mark_style.corner_radius,
         });
         indices.push(i);
@@ -182,6 +213,12 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let fill_opacity_values: Option<Vec<Option<f64>>> = spec.encoding.fill_opacity
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
+        .as_ref()
+        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
@@ -195,10 +232,10 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             Some(f) => f, None => return empty_result(),
         };
         let n_categories = {
-            let xs_probe = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+            let xs_probe = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
             count_distinct(&xs_probe).max(1)
         };
-        let xs = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+        let xs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
         let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
         let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty_result() };
         if xs.len() != ys.len() || y2s.len() != ys.len() { return empty_result(); }
@@ -234,18 +271,40 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             };
             let fill = with_opacity(fill, row_opacity);
 
+            let row_fill_opacity = fill_opacity_values
+                .as_ref()
+                .and_then(|v| v[i])
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(0.0, 1.0))
+                .unwrap_or(1.0);
+
+            let row_stroke_width = stroke_width_values
+                .as_ref()
+                .and_then(|v| v[i])
+                .filter(|v| *v >= 0.0 && v.is_finite())
+                .unwrap_or(ctx.mark_style.stroke_width);
+
+            let effective_stroke = if row_stroke_width > 0.0 && ctx.mark_style.stroke.is_none() && stroke_width_values.is_some() {
+                Some(fill)
+            } else {
+                ctx.mark_style.stroke
+            };
+
+            let mut style = to_scene_fill_stroke(
+                Some(fill),
+                effective_stroke,
+                row_stroke_width,
+                row_opacity,
+                ctx.mark_style.stroke_dash.as_deref(),
+            );
+            style.fill_opacity = row_fill_opacity;
+
             nodes.push(SceneNode::Rect {
                 x: cx - box_w / 2.0,
                 y: rect_top,
                 w: box_w,
                 h: rect_h,
-                style: to_scene_fill_stroke(
-                    Some(fill),
-                    ctx.mark_style.stroke,
-                    ctx.mark_style.stroke_width,
-                    row_opacity,
-                    ctx.mark_style.stroke_dash.as_deref(),
-                ),
+                style,
                 corner_radius: ctx.mark_style.corner_radius,
             });
             indices.push(i);
@@ -256,10 +315,10 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             Some(f) => f, None => return empty_result(),
         };
         let n_categories = {
-            let ys_probe = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+            let ys_probe = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
             count_distinct(&ys_probe).max(1)
         };
-        let ys = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+        let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
         let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
         let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty_result() };
         if ys.len() != xs.len() || x2s.len() != xs.len() { return empty_result(); }
@@ -295,18 +354,40 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             };
             let fill = with_opacity(fill, row_opacity);
 
+            let row_fill_opacity = fill_opacity_values
+                .as_ref()
+                .and_then(|v| v[i])
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(0.0, 1.0))
+                .unwrap_or(1.0);
+
+            let row_stroke_width = stroke_width_values
+                .as_ref()
+                .and_then(|v| v[i])
+                .filter(|v| *v >= 0.0 && v.is_finite())
+                .unwrap_or(ctx.mark_style.stroke_width);
+
+            let effective_stroke = if row_stroke_width > 0.0 && ctx.mark_style.stroke.is_none() && stroke_width_values.is_some() {
+                Some(fill)
+            } else {
+                ctx.mark_style.stroke
+            };
+
+            let mut style = to_scene_fill_stroke(
+                Some(fill),
+                effective_stroke,
+                row_stroke_width,
+                row_opacity,
+                ctx.mark_style.stroke_dash.as_deref(),
+            );
+            style.fill_opacity = row_fill_opacity;
+
             nodes.push(SceneNode::Rect {
                 x: rect_left,
                 y: cy - box_h / 2.0,
                 w: rect_w,
                 h: box_h,
-                style: to_scene_fill_stroke(
-                    Some(fill),
-                    ctx.mark_style.stroke,
-                    ctx.mark_style.stroke_width,
-                    row_opacity,
-                    ctx.mark_style.stroke_dash.as_deref(),
-                ),
+                style,
                 corner_radius: ctx.mark_style.corner_radius,
             });
             indices.push(i);
@@ -333,8 +414,8 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
         (Some(a), Some(b)) => (a, b), _ => return empty_result(),
     };
-    let xs = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
-    let ys = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+    let xs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+    let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
     if xs.len() != ys.len() { return empty_result(); }
 
     let panel = ctx.panel.plot_area;

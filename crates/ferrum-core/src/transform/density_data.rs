@@ -3,12 +3,17 @@
 //! Produces a two-column output (x-grid, density) similar to the stat KDE
 //! transform but exposed as a data transform with different parameters.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
+use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use crate::transform::group_key::{
+    groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
+    KeyValue,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct DensityDataSpec {
@@ -64,26 +69,32 @@ fn apply_grouped(
     let g_idx = schema.index_of(g_col_name).map_err(|_| {
         PyValueError::new_err(format!("data_density: groupby column '{g_col_name}' not found"))
     })?;
+    let g_dtype = schema.field(g_idx).data_type().clone();
+    if !is_groupby_supported_dtype(&g_dtype) {
+        return Err(PyValueError::new_err(format!(
+            "data_density: groupby column '{g_col_name}' has unsupported dtype {g_dtype:?}; \
+             supported: Utf8/LargeUtf8, Float64/Float32, \
+             Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
+        )));
+    }
     let g_col = batch.column(g_idx);
-    let g_arr = g_col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-        PyValueError::new_err("data_density: groupby column must be Utf8")
-    })?;
 
-    // Partition rows by group.
-    let mut groups: std::collections::BTreeMap<String, Vec<usize>> = std::collections::BTreeMap::new();
+    // Partition rows by group key (FA-7: int/uint/bool/float/string supported).
+    let mut groups: std::collections::BTreeMap<KeyValue, Vec<usize>> =
+        std::collections::BTreeMap::new();
     for row in 0..n_rows {
-        let key = if g_arr.is_null(row) {
-            "__null__".to_string()
-        } else {
-            g_arr.value(row).to_string()
-        };
+        let key = groupby_key_at(g_col.as_ref(), &g_dtype, row).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "data_density: internal error extracting groupby key at row {row}"
+            ))
+        })?;
         groups.entry(key).or_default().push(row);
     }
 
     // Run KDE per group and concatenate.
     let mut all_x: Vec<f64> = Vec::new();
     let mut all_y: Vec<f64> = Vec::new();
-    let mut all_g: Vec<String> = Vec::new();
+    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
 
     for (group_key, rows) in &groups {
         let result = apply_one_group(spec, batch, field_idx, Some(rows), None)?;
@@ -92,19 +103,21 @@ fn apply_grouped(
         for i in 0..result.num_rows() {
             all_x.push(x_col.value(i));
             all_y.push(y_col.value(i));
-            all_g.push(group_key.clone());
+            group_keys_out.push(vec![group_key.clone()]);
         }
     }
 
     let out_schema = Arc::new(Schema::new(vec![
         Field::new(&spec.as_.0, DataType::Float64, false),
         Field::new(&spec.as_.1, DataType::Float64, false),
-        Field::new(g_col_name, DataType::Utf8, false),
+        Field::new(g_col_name, g_dtype.clone(), groupby_field_nullable()),
     ]));
+    let g_out = materialize_groupby_col(&group_keys_out, 0, &g_dtype)
+        .map_err(PyValueError::new_err)?;
     let cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(all_x)),
         Arc::new(Float64Array::from(all_y)),
-        Arc::new(StringArray::from(all_g)),
+        g_out,
     ];
     RecordBatch::try_new(out_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("data_density: {e}")))

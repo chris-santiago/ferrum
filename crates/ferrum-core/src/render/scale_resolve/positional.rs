@@ -17,7 +17,7 @@ use crate::spec::encoding::DataType as SpecDataType;
 use crate::render::{RenderError, RenderWarning};
 
 use super::domain::{apply_sort_to_domain, locate_field, numeric_domain_union, SortContext};
-use super::{distinct_values_in_order, infer_spec_type, ScaleKind};
+use super::{distinct_positional_categories, infer_spec_type, ScaleKind};
 
 /// The x/y field names bound at chart level, used to resolve data-aware sort
 /// forms (channel shorthand `"-y"` etc.). Threaded into `build_axis_scale` so an
@@ -93,7 +93,7 @@ pub(in crate::render) fn build_axis_scale(
             )))
         }
         SpecDataType::Ordinal | SpecDataType::Nominal => {
-            let mut domain = distinct_values_in_order(located.batch, &enc.field)?;
+            let mut domain = distinct_positional_categories(located.batch, &enc.field)?;
             let sort_ctx = SortContext {
                 category_field: &enc.field,
                 batch: located.batch,
@@ -165,7 +165,7 @@ pub(in crate::render) fn build_from_scale_spec(
         ScaleSpec::Ordinal { domain, range, padding } => {
             let mut d = match domain {
                 Some(d) => d.clone(),
-                None => distinct_values_in_order(batch, &enc.field)?,
+                None => distinct_positional_categories(batch, &enc.field)?,
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
             // Extract numeric pixel range from the typed polymorphic `range`.
@@ -189,7 +189,7 @@ pub(in crate::render) fn build_from_scale_spec(
         ScaleSpec::Band { domain, padding, padding_inner, .. } => {
             let mut d = match domain {
                 Some(d) => d.clone(),
-                None => distinct_values_in_order(batch, &enc.field)?,
+                None => distinct_positional_categories(batch, &enc.field)?,
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
             let effective_padding = padding_inner.unwrap_or(*padding);
@@ -202,7 +202,7 @@ pub(in crate::render) fn build_from_scale_spec(
         ScaleSpec::Point { domain, padding, .. } => {
             let mut d = match domain {
                 Some(d) => d.clone(),
-                None => distinct_values_in_order(batch, &enc.field)?,
+                None => distinct_positional_categories(batch, &enc.field)?,
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
             ScaleKind::Ordinal(OrdinalScale::new_internal(

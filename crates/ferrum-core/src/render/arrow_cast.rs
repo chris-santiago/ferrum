@@ -30,6 +30,15 @@ use arrow::record_batch::RecordBatch;
 
 use super::RenderError;
 
+/// Category label for a null value in an ordinal/nominal column (FA-9).
+///
+/// A null row in a categorical column becomes its own distinct category under
+/// this label, so a null groupby key stays separate from a real `0`/`false`/`""`
+/// value all the way to the category scale. `distinct_values_in_order` and
+/// `col_as_ordinal_category_str` both use this constant, so the per-row band
+/// lookup matches the domain entry.
+pub(crate) const NULL_CATEGORY: &str = "null";
+
 /// True for Arrow dtypes that should route as continuous/quantitative when
 /// inferring an encoding type from data alone.
 ///
@@ -206,6 +215,52 @@ pub(crate) fn col_as_ordinal_category_str(
         dtype: format!("{:?} (cannot convert to ordinal category string)", col.data_type()),
         context: None,
     })
+}
+
+/// Distinct categories for a **positional** (x:N / y:N) ordinal domain, with a
+/// null row surfaced as its own [`NULL_CATEGORY`] category (FA-9).
+///
+/// This is the positional counterpart to [`distinct_values_in_order`]. The base
+/// helper drops nulls — correct for color/shape/legend domains, where a null
+/// must NOT consume a palette slot or legend entry. Positional axes are
+/// different: a null groupby key (e.g. an aggregate's null group) must occupy
+/// its own band so the bar renders as a distinct category, satisfying the FA-9
+/// invariant that a null group and a real `0`/`false`/`""` group are two
+/// categories. Null-free columns are byte-identical to [`distinct_values_in_order`].
+pub(crate) fn distinct_positional_categories(
+    batch: &RecordBatch,
+    field: &str,
+) -> Result<Vec<String>, RenderError> {
+    let mut out = distinct_values_in_order(batch, field)?;
+    let col = batch
+        .column_by_name(field)
+        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+    // Append the null category (first-appearance order keeps it after real
+    // values, matching how the per-row mapper places it). `distinct_values_in_order`
+    // never emits NULL_CATEGORY for real values (no dtype stringifies to "null"
+    // except a literal Utf8 "null", which is an accepted edge-case merge).
+    if col.null_count() > 0 && !out.iter().any(|s| s == NULL_CATEGORY) {
+        out.push(NULL_CATEGORY.to_string());
+    }
+    Ok(out)
+}
+
+/// Per-row category strings for a **positional** (x:N / y:N) axis, mapping a
+/// null row to [`NULL_CATEGORY`] so it lands in the null band produced by
+/// [`distinct_positional_categories`] (FA-9).
+///
+/// The positional counterpart to [`col_as_ordinal_category_str`], which keeps
+/// nulls as `None` (correct for color/shape, where a null row draws no mark and
+/// no legend entry).
+pub(crate) fn col_as_positional_category_str(
+    batch: &RecordBatch,
+    field: &str,
+) -> Result<Vec<Option<String>>, RenderError> {
+    let per_row = col_as_ordinal_category_str(batch, field)?;
+    Ok(per_row
+        .into_iter()
+        .map(|o| o.or_else(|| Some(NULL_CATEGORY.to_string())))
+        .collect())
 }
 
 /// `(min, max)` over a numeric Arrow column, including non-finite values.
@@ -667,8 +722,16 @@ mod tests {
                 "per-row string {s:?} not found in domain {domain:?}; domain/drawer mismatch"
             );
         }
-        // Domain must be ["2000", "2001", "1.5"] (encounter order, deduped).
+        // Domain must be ["2000", "2001", "1.5"] (encounter order, deduped);
+        // the color/shape domain helper drops nulls.
         assert_eq!(domain, vec!["2000", "2001", "1.5"]);
+
+        // FA-9: the positional variants surface the null as its own category so a
+        // null group renders a distinct x:N band.
+        let pos_domain = distinct_positional_categories(&b, "yr").unwrap();
+        assert_eq!(pos_domain, vec!["2000", "2001", "1.5", NULL_CATEGORY]);
+        let pos_rows = col_as_positional_category_str(&b, "yr").unwrap();
+        assert_eq!(pos_rows[4], Some(NULL_CATEGORY.to_string()));
     }
 
     #[test]

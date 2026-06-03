@@ -17,7 +17,7 @@
 //! - Otherwise: one polyline over all rows in batch order.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx};
 use crate::render::scale_resolve::ScaleKind;
 
 /// Build a `Vec<PathCmd>` from a sequence of (x, y) pixel points using the
@@ -81,7 +81,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let n_rows = ctx.batch.num_rows();
     let xs_pix: Vec<Option<f64>> = match &ctx.scales.x {
         ScaleKind::Ordinal(_) => {
-            let xs_str = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
+            let xs_str = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
             xs_str.iter()
                 .map(|opt| opt.as_deref().and_then(|s| ctx.scales.x.to_pixel_str(s)))
                 .collect()
@@ -97,7 +97,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
     let ys_pix: Vec<Option<f64>> = match &ctx.scales.y {
         ScaleKind::Ordinal(_) => {
-            let ys_str = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
+            let ys_str = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
             ys_str.iter()
                 .map(|opt| opt.as_deref().and_then(|s| ctx.scales.y.to_pixel_str(s)))
                 .collect()

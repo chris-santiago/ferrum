@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::transform::group_key::{
-    groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col, KeyValue,
+    groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
+    KeyValue,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -133,7 +134,8 @@ pub(crate) fn apply(spec: &SummarySpec, batch: &RecordBatch) -> PyResult<RecordB
     // Build output.
     let mut fields: Vec<Field> = Vec::with_capacity(spec.groupby.len() + 3);
     for (gi, g) in spec.groupby.iter().enumerate() {
-        fields.push(Field::new(g, group_dtypes[gi].clone(), false));
+        // FA-9: nullable so a null-keyed group materializes as an Arrow null.
+        fields.push(Field::new(g, group_dtypes[gi].clone(), groupby_field_nullable()));
     }
     fields.push(Field::new("mean", DataType::Float64, true));
     fields.push(Field::new("lower", DataType::Float64, true));
@@ -642,6 +644,71 @@ mod tests {
         let g20 = grps.iter().position(|&g| g == 20).unwrap();
         assert!((mean[g10] - 2.0).abs() < 1e-12, "group 10 mean: {}", mean[g10]);
         assert!((mean[g20] - 15.0).abs() < 1e-12, "group 20 mean: {}", mean[g20]);
+    }
+
+    // ── FA-9: null groupby key regression ─────────────────────────────────────
+
+    fn batch_value_int64_group_nullable(
+        values: Vec<Option<f64>>,
+        groups: Vec<Option<i64>>,
+    ) -> RecordBatch {
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v",   DataType::Float64, true),
+            Field::new("grp", DataType::Int64,   true),
+        ]));
+        let v_arr = Float64Array::from(values);
+        let g_arr = Int64Array::from(groups);
+        RecordBatch::try_new(schema, vec![Arc::new(v_arr), Arc::new(g_arr)]).unwrap()
+    }
+
+    /// FA-9 regression: a null value in an Int64 groupby column must not cause
+    /// RecordBatch::try_new to panic or error. The null-keyed group must
+    /// materialize as an Arrow null in the output (distinct from a real 0 key).
+    #[test]
+    fn test_summary_null_int64_groupby_key_survives_and_is_distinct() {
+        // rows: grp=None(null), grp=None(null), grp=Some(10)
+        // null group: v=[1.0, 2.0] → mean=1.5
+        // real group: v=[5.0]       → mean=5.0 (n<2 → NaN bounds)
+        let batch = batch_value_int64_group_nullable(
+            vec![Some(1.0), Some(2.0), Some(5.0)],
+            vec![None,      None,      Some(10)],
+        );
+        let spec = SummarySpec {
+            field: "v".into(),
+            groupby: vec!["grp".into()],
+            error_fn: ErrorFn::Stdev,
+            ci: 0.95,
+            n_boot: 0,
+            seed: 0,
+            name: None,
+        };
+        // Must not error: the non-nullable schema declaration was the bug.
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 2, "expected 2 groups (null + 10)");
+
+        use arrow::array::Int64Array;
+        let grp_arr = out.column(out.schema().index_of("grp").unwrap())
+            .as_any().downcast_ref::<Int64Array>().unwrap();
+        let mean = col_f64(&out, "mean");
+
+        // FA-9: null-keyed group materializes as an Arrow null.
+        let null_idx = (0..grp_arr.len()).find(|&i| grp_arr.is_null(i))
+            .expect("null-key group must materialize as an Arrow null");
+        let real_idx = (0..grp_arr.len())
+            .find(|&i| !grp_arr.is_null(i) && grp_arr.value(i) == 10)
+            .expect("real-keyed group (grp=10) must be present");
+
+        assert!(
+            (mean[null_idx] - 1.5).abs() < 1e-12,
+            "null-key group mean should be 1.5; got {}",
+            mean[null_idx]
+        );
+        assert!(
+            (mean[real_idx] - 5.0).abs() < 1e-12,
+            "real-key group (10) mean should be 5.0; got {}",
+            mean[real_idx]
+        );
     }
 
     /// FA-7 byte-stability guard: a Utf8 groupby still materializes a StringArray

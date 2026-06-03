@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from typing import Any
 
+from ferrum._title_sentinel import TitleParam, _UNSET, serialize_title
+
 
 # Default values that should be omitted from serialization (they match
 # the renderer's built-in defaults and would add noise to the spec).
@@ -21,7 +23,9 @@ class Legend:
     Parameters
     ----------
     title : str, optional
-        Legend title text.
+        Legend title text.  Pass ``title=None`` to suppress the legend title
+        (the field name will not be shown).  Omitting ``title`` entirely keeps
+        the field-name default.
     orient : str
         Legend position ("right", "left", "top", "bottom", "none").
     direction : str
@@ -83,7 +87,7 @@ class Legend:
     {'title': 'Species', 'orient': 'top'}
     """
 
-    title: str | None = None
+    title: TitleParam = _UNSET
     orient: str = "right"
     direction: str = "vertical"
     type: str | None = None
@@ -115,7 +119,16 @@ class Legend:
         result: dict[str, Any] = {}
         for f in fields(self):
             val = getattr(self, f.name)
-            # Skip None values
+            if f.name == "title":
+                # Three-way title contract (mirrors base.py and prepare.rs):
+                #   _UNSET  → omit key; Rust falls back to field name (default)
+                #   None    → emit ""; Rust treats "" as suppress
+                #   "Foo"   → emit "Foo" verbatim
+                serialized = serialize_title(val)
+                if serialized is not None:
+                    result["title"] = serialized
+                continue
+            # Skip None values for all other fields
             if val is None:
                 continue
             # Skip values that match the renderer default

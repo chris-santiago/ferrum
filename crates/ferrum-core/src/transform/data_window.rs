@@ -10,6 +10,8 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct WindowOp {
     /// Window operation name.
@@ -150,16 +152,46 @@ fn build_partitions(
         })
         .collect::<PyResult<_>>()?;
 
+    // Validate groupby dtypes and capture them for shared key extraction (FA-7).
+    let group_dtypes: Vec<DataType> = group_col_indices
+        .iter()
+        .zip(groupby.iter())
+        .map(|(&gi, g)| {
+            let dt = schema.field(gi).data_type().clone();
+            if !is_groupby_supported_dtype(&dt) {
+                return Err(PyValueError::new_err(format!(
+                    "data_window: groupby column '{g}' has unsupported dtype {dt:?}; \
+                     supported: Utf8/LargeUtf8, Float64/Float32, \
+                     Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
+                )));
+            }
+            Ok(dt)
+        })
+        .collect::<PyResult<_>>()?;
+
     // Build group key per row, then partition sorted_indices by key.
+    let extract = |idx: usize| -> PyResult<Vec<KeyValue>> {
+        group_col_indices
+            .iter()
+            .enumerate()
+            .map(|(gpos, &gi)| {
+                groupby_key_at(batch.column(gi).as_ref(), &group_dtypes[gpos], idx).ok_or_else(
+                    || {
+                        PyValueError::new_err(format!(
+                            "data_window: internal error extracting groupby key at row {idx}"
+                        ))
+                    },
+                )
+            })
+            .collect()
+    };
+
     let mut partitions: Vec<Vec<usize>> = Vec::new();
-    let mut current_key: Option<Vec<String>> = None;
+    let mut current_key: Option<Vec<KeyValue>> = None;
     let mut current_partition: Vec<usize> = Vec::new();
 
     for &idx in sorted_indices {
-        let key: Vec<String> = group_col_indices
-            .iter()
-            .map(|&gi| extract_key(batch.column(gi).as_ref(), idx))
-            .collect();
+        let key = extract(idx)?;
 
         if current_key.as_ref() == Some(&key) {
             current_partition.push(idx);
@@ -176,19 +208,6 @@ fn build_partitions(
     }
 
     Ok(partitions)
-}
-
-fn extract_key(col: &dyn Array, row: usize) -> String {
-    if col.is_null(row) {
-        return "__null__".to_string();
-    }
-    if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-        return arr.value(row).to_string();
-    }
-    if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
-        return format!("{}", arr.value(row));
-    }
-    "__unknown__".to_string()
 }
 
 fn compute_window_op(

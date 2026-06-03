@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from typing import Any
 
+from ferrum._title_sentinel import TitleParam, _UNSET, serialize_title
+
 
 # Default values that should be omitted from serialization (they match
 # the renderer's built-in defaults and would add noise to the spec).
@@ -30,7 +32,9 @@ class Axis:
     Parameters
     ----------
     title : str, optional
-        Axis title text.
+        Axis title text.  Pass ``title=None`` to suppress the axis title
+        (the field name will not be shown).  Omitting ``title`` entirely keeps
+        the field-name default.
     orient : str, optional
         Axis orientation ("top", "bottom", "left", "right").
     ticks : bool
@@ -113,7 +117,7 @@ class Axis:
     {'title': 'Speed (km/h)', 'label_angle': -45}
     """
 
-    title: str | None = None
+    title: TitleParam = _UNSET
     orient: str | None = None
     ticks: bool = True
     tick_count: int | None = None
@@ -155,7 +159,16 @@ class Axis:
             if f.name in _PYTHON_ONLY_FIELDS:
                 continue
             val = getattr(self, f.name)
-            # Skip None values
+            if f.name == "title":
+                # Three-way title contract (mirrors base.py and prepare.rs):
+                #   _UNSET  → omit key; Rust falls back to field name (default)
+                #   None    → emit ""; Rust treats "" as suppress
+                #   "Foo"   → emit "Foo" verbatim
+                serialized = serialize_title(val)
+                if serialized is not None:
+                    result["title"] = serialized
+                continue
+            # Skip None values for all other fields
             if val is None:
                 continue
             # Skip values that match the renderer default

@@ -3,7 +3,7 @@
 //! Computes grouped aggregates and joins them back to the original rows,
 //! so the output has the same number of rows as the input plus new columns.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
+use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::transform::aggregate::AggFn;
+use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
 
 /// A single aggregation specification for JoinAggregate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -47,7 +48,7 @@ pub(crate) fn apply(spec: &JoinAggregateSpec, batch: &RecordBatch) -> PyResult<R
     let group_keys = build_group_keys(batch, &schema, &groupby)?;
 
     // Collect row indices per group.
-    let mut groups: BTreeMap<Vec<String>, Vec<usize>> = BTreeMap::new();
+    let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
     for (row, key) in group_keys.iter().enumerate() {
         groups.entry(key.clone()).or_default().push(row);
     }
@@ -96,9 +97,9 @@ fn build_group_keys(
     batch: &RecordBatch,
     schema: &arrow::datatypes::SchemaRef,
     groupby: &[String],
-) -> PyResult<Vec<Vec<String>>> {
+) -> PyResult<Vec<Vec<KeyValue>>> {
     let n_rows = batch.num_rows();
-    let mut keys = vec![Vec::new(); n_rows];
+    let mut keys = vec![Vec::with_capacity(groupby.len()); n_rows];
 
     for g in groupby {
         let idx = schema.index_of(g).map_err(|_| {
@@ -106,26 +107,25 @@ fn build_group_keys(
                 "data_join_aggregate: groupby column '{g}' not found"
             ))
         })?;
+        let dt = schema.field(idx).data_type().clone();
+        if !is_groupby_supported_dtype(&dt) {
+            return Err(PyValueError::new_err(format!(
+                "data_join_aggregate: groupby column '{g}' has unsupported dtype {dt:?}; \
+                 supported: Utf8/LargeUtf8, Float64/Float32, \
+                 Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
+            )));
+        }
         let col = batch.column(idx);
-        for row in 0..n_rows {
-            let s = extract_key_str(col.as_ref(), row);
-            keys[row].push(s);
+        for (row, key) in keys.iter_mut().enumerate() {
+            let kv = groupby_key_at(col.as_ref(), &dt, row).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "data_join_aggregate: internal error extracting groupby key at row {row}"
+                ))
+            })?;
+            key.push(kv);
         }
     }
     Ok(keys)
-}
-
-fn extract_key_str(col: &dyn Array, row: usize) -> String {
-    if col.is_null(row) {
-        return "__null__".to_string();
-    }
-    if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-        return arr.value(row).to_string();
-    }
-    if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
-        return format!("{}", arr.value(row));
-    }
-    "__unknown__".to_string()
 }
 
 fn compute_agg(col: &dyn Array, rows: &[usize], fn_: AggFn) -> PyResult<f64> {

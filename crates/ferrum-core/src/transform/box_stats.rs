@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::transform::group_key::{
-    groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col, KeyValue,
+    groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
+    KeyValue,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -145,7 +146,8 @@ pub(crate) fn apply(spec: &BoxStatsSpec, batch: &RecordBatch) -> PyResult<Record
     // Build output schema: groupby cols + q1 + median + q3 + lower_whisker + upper_whisker.
     let mut fields: Vec<Field> = Vec::with_capacity(spec.groupby.len() + 5);
     for (gi, g) in spec.groupby.iter().enumerate() {
-        fields.push(Field::new(g, group_dtypes[gi].clone(), false));
+        // FA-9: nullable so a null-keyed group materializes as an Arrow null.
+        fields.push(Field::new(g, group_dtypes[gi].clone(), groupby_field_nullable()));
     }
     fields.push(Field::new("q1", DataType::Float64, true));
     fields.push(Field::new("median", DataType::Float64, true));
@@ -598,6 +600,69 @@ mod tests {
         let g2 = grps.iter().position(|&g| g == 2).unwrap();
         assert!((median[g1] - 3.0).abs() < 1e-12, "group 1 median: {}", median[g1]);
         assert!((median[g2] - 30.0).abs() < 1e-12, "group 2 median: {}", median[g2]);
+    }
+
+    // ── FA-9: null groupby key regression ─────────────────────────────────────
+
+    fn batch_value_int64_group_nullable(
+        values: Vec<Option<f64>>,
+        groups: Vec<Option<i64>>,
+    ) -> RecordBatch {
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v",   DataType::Float64, true),
+            Field::new("grp", DataType::Int64,   true),
+        ]));
+        let v_arr = Float64Array::from(values);
+        let g_arr = Int64Array::from(groups);
+        RecordBatch::try_new(schema, vec![Arc::new(v_arr), Arc::new(g_arr)]).unwrap()
+    }
+
+    /// FA-9 regression: a null value in an Int64 groupby column must not cause
+    /// RecordBatch::try_new to panic or error. The null-keyed group must
+    /// materialize as an Arrow null in the output (distinct from a real 0 key).
+    #[test]
+    fn box_stats_null_int64_groupby_key_survives_and_is_distinct() {
+        pyo3::Python::initialize();
+        // null group: v=[1,2,3,4,5] → median=3; real group: v=[10,20,30,40,50] → median=30
+        let batch = batch_value_int64_group_nullable(
+            vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0),
+                 Some(10.0), Some(20.0), Some(30.0), Some(40.0), Some(50.0)],
+            vec![None, None, None, None, None,
+                 Some(99), Some(99), Some(99), Some(99), Some(99)],
+        );
+        let spec = BoxStatsSpec {
+            field: "v".into(),
+            groupby: vec!["grp".into()],
+            whisker_extent: WhiskerExtent::IqrMultiplier(1.5),
+            name: None,
+        };
+        // Must not error: the non-nullable schema declaration was the bug.
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 2, "expected 2 groups (null + 99)");
+
+        use arrow::array::Int64Array;
+        let grp_arr = out.column(out.schema().index_of("grp").unwrap())
+            .as_any().downcast_ref::<Int64Array>().unwrap();
+        let median = col_f64(&out, "median");
+
+        // FA-9: null-keyed group materializes as an Arrow null.
+        let null_idx = (0..grp_arr.len()).find(|&i| grp_arr.is_null(i))
+            .expect("null-key group must materialize as an Arrow null");
+        let real_idx = (0..grp_arr.len())
+            .find(|&i| !grp_arr.is_null(i) && grp_arr.value(i) == 99)
+            .expect("real-keyed group (grp=99) must be present");
+
+        assert!(
+            (median[null_idx] - 3.0).abs() < 1e-12,
+            "null-key group median should be 3.0; got {}",
+            median[null_idx]
+        );
+        assert!(
+            (median[real_idx] - 30.0).abs() < 1e-12,
+            "real-key group (99) median should be 30.0; got {}",
+            median[real_idx]
+        );
     }
 
     /// FA-7 byte-stability guard: a Utf8 groupby still materializes a StringArray

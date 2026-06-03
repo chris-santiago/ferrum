@@ -11,6 +11,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::transform::group_key::{
+    groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
+    KeyValue,
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct PivotSpec {
     /// Column whose unique values become new column headers.
@@ -79,6 +84,23 @@ pub(crate) fn apply(spec: &PivotSpec, batch: &RecordBatch) -> PyResult<RecordBat
         })
         .collect::<PyResult<_>>()?;
 
+    // Validate groupby dtypes and capture them for shared key extraction (FA-7).
+    let group_dtypes: Vec<DataType> = group_indices
+        .iter()
+        .zip(groupby.iter())
+        .map(|(&gi, g)| {
+            let dt = schema.field(gi).data_type().clone();
+            if !is_groupby_supported_dtype(&dt) {
+                return Err(PyValueError::new_err(format!(
+                    "data_pivot: groupby column '{g}' has unsupported dtype {dt:?}; \
+                     supported: Utf8/LargeUtf8, Float64/Float32, \
+                     Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
+                )));
+            }
+            Ok(dt)
+        })
+        .collect::<PyResult<_>>()?;
+
     // Collect unique pivot values (ordered by first appearance).
     let mut pivot_values: Vec<String> = Vec::new();
     let mut pivot_set: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -98,8 +120,7 @@ pub(crate) fn apply(spec: &PivotSpec, batch: &RecordBatch) -> PyResult<RecordBat
     }
 
     // Build group key → { pivot_value → Vec<f64> } map.
-    // Group key is a Vec of string representations for simplicity.
-    let mut groups: BTreeMap<Vec<String>, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
+    let mut groups: BTreeMap<Vec<KeyValue>, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
 
     for row in 0..n_rows {
         if field_col.is_null(row) {
@@ -110,10 +131,16 @@ pub(crate) fn apply(spec: &PivotSpec, batch: &RecordBatch) -> PyResult<RecordBat
             continue; // Pruned by limit.
         }
 
-        let key: Vec<String> = group_indices
-            .iter()
-            .map(|&gi| extract_string_key(batch.column(gi).as_ref(), row))
-            .collect();
+        let mut key = Vec::with_capacity(group_indices.len());
+        for (gpos, &gi) in group_indices.iter().enumerate() {
+            let kv = groupby_key_at(batch.column(gi).as_ref(), &group_dtypes[gpos], row)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "data_pivot: internal error extracting groupby key at row {row}"
+                    ))
+                })?;
+            key.push(kv);
+        }
 
         let val = if value_col.is_null(row) {
             f64::NAN
@@ -132,13 +159,11 @@ pub(crate) fn apply(spec: &PivotSpec, batch: &RecordBatch) -> PyResult<RecordBat
     // Build output: groupby columns + one Float64 column per pivot value.
     let n_out_rows = groups.len();
 
-    // Groupby output columns.
+    // Groupby output columns: preserve original dtype, nullable for FA-9 null keys.
     let mut out_fields: Vec<Field> = groupby
         .iter()
         .enumerate()
-        .map(|(i, name)| {
-            Field::new(name, schema.field(group_indices[i]).data_type().clone(), true)
-        })
+        .map(|(i, name)| Field::new(name, group_dtypes[i].clone(), groupby_field_nullable()))
         .collect();
     for pv in &pivot_values {
         out_fields.push(Field::new(pv, DataType::Float64, true));
@@ -146,7 +171,7 @@ pub(crate) fn apply(spec: &PivotSpec, batch: &RecordBatch) -> PyResult<RecordBat
     let out_schema = Arc::new(Schema::new(out_fields));
 
     // Fill columns.
-    let mut group_key_vecs: Vec<Vec<String>> = Vec::with_capacity(n_out_rows);
+    let mut group_key_vecs: Vec<Vec<KeyValue>> = Vec::with_capacity(n_out_rows);
     let mut pivot_data: Vec<Vec<f64>> = vec![Vec::with_capacity(n_out_rows); pivot_values.len()];
 
     for (key, pivot_map) in &groups {
@@ -160,12 +185,15 @@ pub(crate) fn apply(spec: &PivotSpec, batch: &RecordBatch) -> PyResult<RecordBat
         }
     }
 
-    // Build Arrow arrays.
+    // Build Arrow arrays. The groupby output dtype must match the declared schema
+    // field; materialize_groupby_col guarantees this (the previous code declared
+    // the original dtype but emitted a StringArray, crashing RecordBatch::try_new
+    // for non-Utf8 groupby columns).
     let mut out_cols: Vec<ArrayRef> = Vec::with_capacity(groupby.len() + pivot_values.len());
-    for (gi, _) in groupby.iter().enumerate() {
-        let vals: Vec<String> = group_key_vecs.iter().map(|k| k[gi].clone()).collect();
-        // Emit as Utf8 for simplicity (groupby keys).
-        out_cols.push(Arc::new(StringArray::from(vals)));
+    for (gi, dt) in group_dtypes.iter().enumerate() {
+        let col = materialize_groupby_col(&group_key_vecs, gi, dt)
+            .map_err(PyValueError::new_err)?;
+        out_cols.push(col);
     }
     for pv_data in pivot_data {
         out_cols.push(Arc::new(Float64Array::from(pv_data)));
@@ -173,19 +201,6 @@ pub(crate) fn apply(spec: &PivotSpec, batch: &RecordBatch) -> PyResult<RecordBat
 
     RecordBatch::try_new(out_schema, out_cols)
         .map_err(|e| PyValueError::new_err(format!("data_pivot: {e}")))
-}
-
-fn extract_string_key(col: &dyn Array, row: usize) -> String {
-    if col.is_null(row) {
-        return String::new();
-    }
-    if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-        return arr.value(row).to_string();
-    }
-    if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
-        return format!("{}", arr.value(row));
-    }
-    String::new()
 }
 
 fn aggregate_values(vals: &[f64], op: &str) -> f64 {

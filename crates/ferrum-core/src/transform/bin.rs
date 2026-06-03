@@ -1,4 +1,4 @@
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray, UInt64Array};
+use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, UInt64Array};
 use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::scale::ticks::sturges_floor;
+use crate::transform::group_key::{
+    groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
+    KeyValue,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct BinSpec {
@@ -204,23 +208,34 @@ fn apply_grouped(
     let gi = schema.index_of(group_col).map_err(|_|
         PyValueError::new_err(format!(
             "stat_bin: groupby column '{}' not found", group_col)))?;
-    let gtype = schema.field(gi).data_type();
-    if gtype != &DataType::Utf8 {
+    let gtype = schema.field(gi).data_type().clone();
+    if !is_groupby_supported_dtype(&gtype) {
         return Err(PyValueError::new_err(format!(
-            "stat_bin: groupby column '{}' must be Utf8; got {:?}", group_col, gtype)));
+            "stat_bin: groupby column '{}' has unsupported dtype {:?}; \
+             supported: Utf8/LargeUtf8, Float64/Float32, \
+             Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean",
+            group_col, gtype)));
     }
-    let garr = batch.column(gi).as_any().downcast_ref::<StringArray>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_bin: expected StringArray for groupby column '{}'", group_col)))?;
+    let garr = batch.column(gi);
 
-    // Group row indices by first-appearance order of the group value.
-    let mut group_order: Vec<String> = Vec::new();
-    let mut group_idx_map: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Group row indices by first-appearance order of the group value (FA-7:
+    // int/uint/bool/float/string all supported). A null group key collapses
+    // into its own group (KeyValue::Null), distinct from any real value.
+    let mut group_order: Vec<KeyValue> = Vec::new();
+    let mut group_idx_map: BTreeMap<KeyValue, Vec<usize>> = BTreeMap::new();
     for i in 0..garr.len() {
-        if garr.is_null(i) { continue; }
-        let gv = garr.value(i).to_string();
-        if seen.insert(gv.clone()) {
+        let gv = groupby_key_at(garr.as_ref(), &gtype, i).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "stat_bin: internal error extracting groupby key at row {i}"
+            ))
+        })?;
+        // Skip null group keys: the pre-existing behaviour excluded null rows
+        // from the grouped output, and a KDE/bin over a null bucket is not
+        // meaningful as its own series.
+        if matches!(gv, KeyValue::Null) {
+            continue;
+        }
+        if !group_idx_map.contains_key(&gv) {
             group_order.push(gv.clone());
         }
         group_idx_map.entry(gv).or_default().push(i);
@@ -285,11 +300,11 @@ fn apply_grouped(
     let mut all_ends: Vec<f64> = Vec::new();
     let mut all_counts: Vec<u64> = Vec::new();
     let mut all_densities: Vec<f64> = Vec::new();
-    let mut all_groups: Vec<String> = Vec::new();
+    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
     for g in &group_order {
         let ixs = group_idx_map.get(g)
             .ok_or_else(|| PyValueError::new_err(format!(
-                "stat_bin: missing group key '{g}' in index map")))?;
+                "stat_bin: missing group key {g:?} in index map")))?;
         let out = apply_one_group(spec_ref, batch, Some(ixs))?;
         let n = out.num_rows();
         let starts = out.column(0).as_any().downcast_ref::<Float64Array>()
@@ -305,11 +320,13 @@ fn apply_grouped(
             all_ends.push(ends.value(i));
             all_counts.push(counts.value(i));
             all_densities.push(densities.value(i));
-            all_groups.push(g.clone());
+            group_keys_out.push(vec![g.clone()]);
         }
     }
 
-    build_bin_batch_grouped(all_starts, all_ends, all_counts, all_densities, all_groups, group_col)
+    build_bin_batch_grouped(
+        all_starts, all_ends, all_counts, all_densities, group_keys_out, group_col, &gtype,
+    )
 }
 
 fn build_bin_batch(
@@ -339,22 +356,27 @@ fn build_bin_batch_grouped(
     ends: Vec<f64>,
     counts: Vec<u64>,
     densities: Vec<f64>,
-    groups: Vec<String>,
+    group_keys: Vec<Vec<KeyValue>>,
     group_col_name: &str,
+    group_dtype: &DataType,
 ) -> PyResult<RecordBatch> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("bin_start", DataType::Float64, false),
         Field::new("bin_end",   DataType::Float64, false),
         Field::new("count",     DataType::UInt64,  false),
         Field::new("density",   DataType::Float64, false),
-        Field::new(group_col_name, DataType::Utf8, false),
+        // FA-7: preserve the original groupby dtype (nullable for FA-9 null keys,
+        // though null keys are skipped upstream for stat_bin).
+        Field::new(group_col_name, group_dtype.clone(), groupby_field_nullable()),
     ]));
+    let group_col = materialize_groupby_col(&group_keys, 0, group_dtype)
+        .map_err(PyValueError::new_err)?;
     let cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(starts)),
         Arc::new(Float64Array::from(ends)),
         Arc::new(UInt64Array::from(counts)),
         Arc::new(Float64Array::from(densities)),
-        Arc::new(StringArray::from(groups.iter().map(|s| s.as_str()).collect::<Vec<_>>())),
+        group_col,
     ];
     RecordBatch::try_new(schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))
@@ -657,6 +679,7 @@ mod tests {
     #[test]
     fn test_bin_wrong_dtype_errors() {
         pyo3::Python::initialize();
+        use arrow::array::StringArray;
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Utf8, false),
         ]));

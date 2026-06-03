@@ -8,7 +8,7 @@
 #[cfg(test)]
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, resolve_fill_color, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, resolve_fill_color, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::ScaleKind;
 
 /// Load the per-row color-encoding columns for fill resolution, mirroring the
@@ -243,6 +243,9 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
+    let sc = StrokeChannels::load(ctx);
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
     let mut nodes = Vec::new();
     let mut indices = Vec::new();
@@ -266,18 +269,20 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             row_num(&color_values_f64, i),
             ctx.mark_style.fill,
         );
-        let fill = with_opacity(fill_color, ctx.mark_style.opacity);
+        let fill_c = crate::render::draw::to_scene_color(with_opacity(fill_color, ctx.mark_style.opacity));
+        let stroke_sc = ctx.mark_style.stroke.map(crate::render::draw::to_scene_color);
+        let base_style = BarBaseStyle {
+            stroke_width: ctx.mark_style.stroke_width,
+            opacity: ctx.mark_style.opacity,
+            stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
+            corner_radius: 0.0,
+        };
+        let (style, _) = sc.row_fill_stroke(Some(fill_c), stroke_sc, &base_style, i);
 
         let commands = wedge_path(geom.cx, geom.cy, inner_r, outer_r, angle_start, angle_end);
         nodes.push(SceneNode::Path {
             commands,
-            style: crate::render::draw::to_scene_fill_stroke(
-                Some(fill),
-                ctx.mark_style.stroke,
-                ctx.mark_style.stroke_width,
-                ctx.mark_style.opacity,
-                ctx.mark_style.stroke_dash.as_deref(),
-            ),
+            style,
             closed: true,
         });
         indices.push(i);
@@ -287,9 +292,9 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         kind: MarkBatchKind::Arc,
         nodes,
         data_indices: Some(indices),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
+        tooltips,
+        hrefs,
+        descriptions,
     }
 }
 
@@ -313,9 +318,10 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let spec = ctx.spec;
     let xf = match x_field(ctx, spec) { Some(f) => f, None => return empty_result() };
     let yf = match y_field(ctx, spec) { Some(f) => f, None => return empty_result() };
-    // Use col_as_ordinal_category_str so integer-typed ordinal x columns (e.g.
-    // Int64 year values) stringify consistently with the ordinal domain.
-    let x_strs = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+    // Use col_as_positional_category_str so integer-typed ordinal x columns (e.g.
+    // Int64 year values) stringify consistently with the ordinal domain, and a
+    // null x category lands in its own band (FA-9), matching the positional domain.
+    let x_strs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
     let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
     if x_strs.len() != ys.len() { return empty_result(); }
 
@@ -429,9 +435,10 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let spec = ctx.spec;
     let xf = match x_field(ctx, spec) { Some(f) => f, None => return empty_result() };
     let yf = match y_field(ctx, spec) { Some(f) => f, None => return empty_result() };
-    // Use col_as_ordinal_category_str so integer-typed ordinal y columns
-    // stringify consistently with the ordinal domain.
-    let y_strs = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+    // Use col_as_positional_category_str so integer-typed ordinal y columns
+    // stringify consistently with the ordinal domain, and a null y category gets
+    // its own band (FA-9).
+    let y_strs = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
     let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
     if y_strs.len() != xs.len() { return empty_result(); }
 

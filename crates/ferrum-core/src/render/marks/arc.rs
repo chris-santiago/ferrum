@@ -1,7 +1,4 @@
-use ferrum_scene::{
-    MarkBatchKind, PathCmd, SceneNode, TooltipContent as FsTooltipContent,
-    TooltipField as FsTooltipField,
-};
+use ferrum_scene::{MarkBatchKind, PathCmd, SceneNode};
 
 use crate::render::arrow_cast::{col_as_f64, col_as_ordinal_category_str, col_as_str};
 use crate::render::color::with_opacity;
@@ -230,37 +227,20 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         data_indices.push(i);
     }
 
-    // Build one tooltip per rendered node, indexed via data_indices.
-    let tooltips: Option<Vec<FsTooltipContent>> = if meta.tooltip_cols.is_empty() {
-        None
-    } else {
-        Some(
-            data_indices
-                .iter()
-                .map(|&row_idx| FsTooltipContent {
-                    fields: meta
-                        .tooltip_cols
-                        .iter()
-                        .map(|(name, col)| FsTooltipField {
-                            name: name.clone(),
-                            value: col
-                                .get(row_idx)
-                                .and_then(|v| v.clone())
-                                .unwrap_or_default(),
-                        })
-                        .collect(),
-                })
-                .collect(),
-        )
-    };
+    // Build tooltip/href/description aligned to KEPT nodes only. Some rows are
+    // skipped above (null or non-positive value), so the kept set is a strict
+    // subset of the original batch. `build_metadata_for_indices` gathers
+    // exactly the kept rows in node order so node j receives its true source
+    // row's metadata.
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
         kind: MarkBatchKind::Arc,
         nodes,
         data_indices: Some(data_indices),
         tooltips,
-        hrefs: None,
-        descriptions: None,
+        hrefs,
+        descriptions,
     }
 }
 
@@ -388,33 +368,20 @@ fn build_nominal_theta(
         data_indices.push(i);
     }
 
-    let tooltips: Option<Vec<FsTooltipContent>> = if meta.tooltip_cols.is_empty() {
-        None
-    } else {
-        Some(
-            data_indices
-                .iter()
-                .map(|&row_idx| FsTooltipContent {
-                    fields: meta
-                        .tooltip_cols
-                        .iter()
-                        .map(|(name, col)| FsTooltipField {
-                            name: name.clone(),
-                            value: col.get(row_idx).and_then(|v| v.clone()).unwrap_or_default(),
-                        })
-                        .collect(),
-                })
-                .collect(),
-        )
-    };
+    // Metadata must be aligned to the KEPT nodes, not all rows. Some rows are
+    // skipped above (null category, degenerate zero-span wedge), so the kept
+    // set is a subset of the original batch. `build_metadata_for_indices`
+    // gathers exactly the kept rows in node order so node j receives its true
+    // source row's tooltip/href/description (not row j's).
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
         kind: MarkBatchKind::Arc,
         nodes,
         data_indices: Some(data_indices),
         tooltips,
-        hrefs: None,
-        descriptions: None,
+        hrefs,
+        descriptions,
     }
 }
 
@@ -534,33 +501,20 @@ fn build_annular(
         data_indices.push(i);
     }
 
-    let tooltips: Option<Vec<FsTooltipContent>> = if meta.tooltip_cols.is_empty() {
-        None
-    } else {
-        Some(
-            data_indices
-                .iter()
-                .map(|&row_idx| FsTooltipContent {
-                    fields: meta
-                        .tooltip_cols
-                        .iter()
-                        .map(|(name, col)| FsTooltipField {
-                            name: name.clone(),
-                            value: col.get(row_idx).and_then(|v| v.clone()).unwrap_or_default(),
-                        })
-                        .collect(),
-                })
-                .collect(),
-        )
-    };
+    // Metadata must be aligned to the KEPT nodes, not all rows. Some rows are
+    // skipped above (null theta, non-finite theta2, degenerate zero-span wedge),
+    // so the kept set is a subset of the original batch. `build_metadata_for_indices`
+    // gathers exactly the kept rows in node order so node j receives its true
+    // source row's tooltip/href/description (not row j's).
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
         kind: MarkBatchKind::Arc,
         nodes,
         data_indices: Some(data_indices),
         tooltips,
-        hrefs: None,
-        descriptions: None,
+        hrefs,
+        descriptions,
     }
 }
 
@@ -891,5 +845,330 @@ mod tests {
             "outer-ring wedges should be annular (inner + outer arc): {outer_arcs:?}");
         assert!(inner_arcs.iter().all(|&c| c == 1),
             "inner-ring wedges (r0=0) should be solid (single outer arc): {inner_arcs:?}");
+    }
+
+    // ── Metadata-alignment regression tests ─────────────────────────────────
+    //
+    // These tests guard against the bug where `build_nominal_theta` and
+    // `build_annular` called `meta.build_metadata(ctx)` (which returns full
+    // per-row vectors indexed 0..n_rows) instead of
+    // `meta.build_metadata_for_indices(&data_indices)` (which gathers only the
+    // kept rows in node order). When any wedge is skipped the SVG walker's
+    // node-enumeration index j diverges from the source row index, so node j
+    // would receive row j's metadata rather than its true source row's.
+
+    /// Regression: pie with a null value (skipped wedge) + href encoding must
+    /// keep href aligned to kept nodes. The main `build` path already used
+    /// `data_indices` for tooltips; this test confirms it also handles hrefs
+    /// correctly and that the pie-with-null path is byte-stable.
+    #[test]
+    fn pie_skipped_null_href_stays_aligned() {
+        // 3 rows: val=[10.0, null, 60.0]. The null is skipped → 2 nodes.
+        // href values are ["http://a", "http://b", "http://c"]; after the skip
+        // the surviving nodes (rows 0 and 2) must map to "http://a" and "http://c".
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("val", DataType::Float64, true),
+            Field::new("link", DataType::Utf8, true),
+        ]));
+        // Build a nullable Float64Array with a null at index 1.
+        let val_array = Float64Array::from(vec![Some(10.0_f64), None, Some(60.0_f64)]);
+        let href_array = StringArray::from(vec![
+            Some("http://a"),
+            Some("http://b"),
+            Some("http://c"),
+        ]);
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(val_array),
+            Arc::new(href_array),
+        ]).unwrap();
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Arc,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                href: Some(EncodingSpec { field: "link".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(SpecCoord::Polar {
+                theta: PolarThetaChannel::X,
+                start_angle: 0.0,
+                inner_radius: 0.0,
+                outer_radius: None,
+                pad_angle: 0.0,
+                direction: PolarDirection::Clockwise,
+            }),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let scales = make_scales(false);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = build(&ctx);
+
+        // Exactly 2 wedges survive (null value is skipped).
+        assert_eq!(result.nodes.len(), 2, "expected 2 nodes after null skip; got {}", result.nodes.len());
+
+        let hrefs = result.hrefs.expect("hrefs must be Some when href is encoded");
+        assert_eq!(hrefs.len(), 2, "hrefs length must equal node count");
+        // Node 0 = source row 0 → "http://a". Node 1 = source row 2 → "http://c".
+        assert_eq!(hrefs[0].as_deref(), Some("http://a"),
+            "node 0 href must be row 0's href; got {:?}", hrefs[0]);
+        assert_eq!(hrefs[1].as_deref(), Some("http://c"),
+            "node 1 href must be row 2's href (not row 1's 'http://b'); got {:?}", hrefs[1]);
+    }
+
+    /// Regression: nominal-theta arc with a null category (skipped wedge) + tooltip
+    /// and href encoding must keep metadata aligned to kept nodes.
+    ///
+    /// Layout: 3 rows with categories ["A", null, "B"]. The null is skipped.
+    /// Surviving nodes are (in iteration order): row 0 (cat="A") and row 2 (cat="B").
+    /// href values are ["http://a", "http://b_skipped", "http://c"]; the surviving
+    /// nodes must receive "http://a" and "http://c" respectively, not the shifted
+    /// values "http://a" and "http://b_skipped" that the old full-row indexing
+    /// would have produced.
+    #[test]
+    fn nominal_theta_skipped_null_metadata_aligned() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, true),
+            Field::new("r",   DataType::Float64, false),
+            Field::new("link", DataType::Utf8, false),
+            Field::new("tip", DataType::Utf8, false),
+        ]));
+        // Row 1 has a null category → skipped.
+        let cat_array = StringArray::from(vec![Some("A"), None, Some("B")]);
+        let r_array   = Float64Array::from(vec![80.0_f64, 80.0, 80.0]);
+        let link_array = StringArray::from(vec!["http://a", "http://b_skipped", "http://c"]);
+        let tip_array  = StringArray::from(vec!["tip_a", "tip_b_skipped", "tip_c"]);
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(cat_array),
+            Arc::new(r_array),
+            Arc::new(link_array),
+            Arc::new(tip_array),
+        ]).unwrap();
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Arc,
+            encoding: Encoding {
+                // theta is nominal x; radius is quantitative y.
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "r".into(),   type_: Some(SDT::Quantitative), ..Default::default() }),
+                href: Some(EncodingSpec { field: "link".into(), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(SpecCoord::Polar {
+                theta: PolarThetaChannel::X,
+                start_angle: 0.0,
+                inner_radius: 0.0,
+                outer_radius: None,
+                pad_angle: 0.0,
+                direction: PolarDirection::Clockwise,
+            }),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 100.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 80.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = build(&ctx);
+
+        // 2 nodes survive (null category row is skipped).
+        assert_eq!(result.nodes.len(), 2,
+            "expected 2 nodes after null-category skip; got {}", result.nodes.len());
+
+        // hrefs: node 0 → row 0 ("http://a"); node 1 → row 2 ("http://c").
+        let hrefs = result.hrefs.expect("hrefs must be Some when href is encoded");
+        assert_eq!(hrefs.len(), 2, "hrefs length must equal node count");
+        assert_eq!(hrefs[0].as_deref(), Some("http://a"),
+            "node 0 href must be row 0's href; got {:?}", hrefs[0]);
+        assert_eq!(hrefs[1].as_deref(), Some("http://c"),
+            "node 1 href must be row 2's href (not row 1's 'http://b_skipped'); got {:?}", hrefs[1]);
+
+        // tooltips: node 0 → "tip_a"; node 1 → "tip_c".
+        let tooltips = result.tooltips.expect("tooltips must be Some when tooltip is encoded");
+        assert_eq!(tooltips.len(), 2, "tooltips length must equal node count");
+        let tip0 = &tooltips[0].fields[0].value;
+        let tip1 = &tooltips[1].fields[0].value;
+        assert_eq!(tip0, "tip_a",
+            "node 0 tooltip must be row 0's; got '{tip0}'");
+        assert_eq!(tip1, "tip_c",
+            "node 1 tooltip must be row 2's (not row 1's 'tip_b_skipped'); got '{tip1}'");
+    }
+
+    /// Regression: annular arc with a skipped row (null theta2 → no span) + href
+    /// encoding must keep metadata aligned to kept nodes.
+    ///
+    /// 3 rows. Row 1 has null theta2 → skipped. Surviving nodes are rows 0 and 2.
+    /// href values are ["http://a", "http://b_skipped", "http://c"]; surviving
+    /// nodes must receive "http://a" and "http://c".
+    #[test]
+    fn annular_skipped_row_metadata_aligned() {
+        let tau = std::f64::consts::TAU;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("t0",   DataType::Float64, false),
+            Field::new("t1",   DataType::Float64, true),  // nullable → null at row 1
+            Field::new("r0",   DataType::Float64, false),
+            Field::new("r1",   DataType::Float64, false),
+            Field::new("link", DataType::Utf8,    false),
+        ]));
+        // Row 1 has null t1 → no angular span → skipped.
+        let t0_arr  = Float64Array::from(vec![0.0_f64,    tau / 4.0, tau / 2.0]);
+        let t1_arr  = Float64Array::from(vec![Some(tau / 4.0), None, Some(tau)]);
+        let r0_arr  = Float64Array::from(vec![0.0_f64, 0.0, 0.0]);
+        let r1_arr  = Float64Array::from(vec![80.0_f64, 80.0, 80.0]);
+        let link_arr = StringArray::from(vec!["http://a", "http://b_skipped", "http://c"]);
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(t0_arr),
+            Arc::new(t1_arr),
+            Arc::new(r0_arr),
+            Arc::new(r1_arr),
+            Arc::new(link_arr),
+        ]).unwrap();
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Arc,
+            encoding: Encoding {
+                x:  Some(EncodingSpec { field: "t0".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                x2: Some(EncodingSpec { field: "t1".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y:  Some(EncodingSpec { field: "r0".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "r1".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                href: Some(EncodingSpec { field: "link".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(SpecCoord::Polar {
+                theta: PolarThetaChannel::X,
+                start_angle: 0.0,
+                inner_radius: 0.0,
+                outer_radius: None,
+                pad_angle: 0.0,
+                direction: PolarDirection::Clockwise,
+            }),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, tau], vec![0.0, 200.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 80.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None,
+            x2: Some("t1".into()), y2: Some("r1".into()),
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = build(&ctx);
+
+        // 2 nodes survive (row 1 has null t1 → skipped).
+        assert_eq!(result.nodes.len(), 2,
+            "expected 2 nodes after null-theta2 skip; got {}", result.nodes.len());
+
+        let hrefs = result.hrefs.expect("hrefs must be Some when href is encoded");
+        assert_eq!(hrefs.len(), 2, "hrefs length must equal node count");
+        assert_eq!(hrefs[0].as_deref(), Some("http://a"),
+            "node 0 href must be row 0's href; got {:?}", hrefs[0]);
+        assert_eq!(hrefs[1].as_deref(), Some("http://c"),
+            "node 1 href must be row 2's href (not row 1's 'http://b_skipped'); got {:?}", hrefs[1]);
+    }
+
+    /// Stability: arcs with NO skipped wedges (all rows valid) must produce
+    /// hrefs in the original row order — `build_metadata_for_indices` with
+    /// a full-range index must equal `build_metadata` for a complete dataset.
+    #[test]
+    fn pie_no_skipped_wedges_hrefs_unchanged() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("val",  DataType::Float64, false),
+            Field::new("link", DataType::Utf8, false),
+        ]));
+        let val_array  = Float64Array::from(vec![10.0_f64, 30.0, 60.0]);
+        let href_array = StringArray::from(vec!["http://a", "http://b", "http://c"]);
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(val_array),
+            Arc::new(href_array),
+        ]).unwrap();
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Arc,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                href: Some(EncodingSpec { field: "link".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(SpecCoord::Polar {
+                theta: PolarThetaChannel::X,
+                start_angle: 0.0,
+                inner_radius: 0.0,
+                outer_radius: None,
+                pad_angle: 0.0,
+                direction: PolarDirection::Clockwise,
+            }),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let scales = make_scales(false);
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = build(&ctx);
+
+        // All 3 rows are valid → 3 nodes, hrefs in original order.
+        assert_eq!(result.nodes.len(), 3, "expected 3 nodes; got {}", result.nodes.len());
+        let hrefs = result.hrefs.expect("hrefs must be Some");
+        assert_eq!(hrefs.len(), 3);
+        assert_eq!(hrefs[0].as_deref(), Some("http://a"));
+        assert_eq!(hrefs[1].as_deref(), Some("http://b"));
+        assert_eq!(hrefs[2].as_deref(), Some("http://c"));
     }
 }

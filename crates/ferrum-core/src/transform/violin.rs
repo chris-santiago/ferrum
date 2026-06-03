@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::transform::group_key::{
-    empty_groupby_col, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
-    KeyValue,
+    empty_groupby_col, groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype,
+    materialize_groupby_col, KeyValue,
 };
 use crate::transform::kde::{self, BandwidthSpec, KdeSpec};
 
@@ -96,7 +96,8 @@ pub(crate) fn apply_with_context(
     let mut fields: Vec<Field> = Vec::with_capacity(spec.groupby.len() + 3);
     fields.push(Field::new("group_id", DataType::UInt32, false));
     for (gi, g) in spec.groupby.iter().enumerate() {
-        fields.push(Field::new(g, group_dtypes[gi].clone(), false));
+        // FA-9: nullable so a null-keyed group materializes as an Arrow null.
+        fields.push(Field::new(g, group_dtypes[gi].clone(), groupby_field_nullable()));
     }
     fields.push(Field::new("violin_x", DataType::Float64, false));
     fields.push(Field::new("violin_y", DataType::Float64, false));
@@ -810,6 +811,72 @@ mod tests {
         let grp_vals: std::collections::BTreeSet<i64> = col_i64(&out, "grp").into_iter().collect();
         assert!(grp_vals.contains(&2020), "key 2020 must be present; got {:?}", grp_vals);
         assert!(grp_vals.contains(&2021), "key 2021 must be present; got {:?}", grp_vals);
+    }
+
+    // ── FA-9: null groupby key regression ─────────────────────────────────────
+
+    fn batch_value_int64_group_nullable(
+        values: Vec<Option<f64>>,
+        groups: Vec<Option<i64>>,
+    ) -> RecordBatch {
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v",   DataType::Float64, true),
+            Field::new("grp", DataType::Int64,   true),
+        ]));
+        let v_arr = Float64Array::from(values);
+        let g_arr = Int64Array::from(groups);
+        RecordBatch::try_new(schema, vec![Arc::new(v_arr), Arc::new(g_arr)]).unwrap()
+    }
+
+    /// FA-9 regression: a null value in an Int64 groupby column must not cause
+    /// RecordBatch::try_new to panic or error. Both the null-keyed group and the
+    /// real-keyed group must appear in the output (two distinct group_id values),
+    /// and the null key must materialize as an Arrow null in the groupby column.
+    #[test]
+    fn violin_null_int64_groupby_key_survives_and_is_distinct() {
+        pyo3::Python::initialize();
+        use arrow::array::Int64Array;
+
+        // null group: 50 observations in [0, 49]
+        // real group (grp=42): 50 observations in [100, 149]
+        let mut values: Vec<Option<f64>> = (0..50).map(|i| Some(i as f64)).collect();
+        values.extend((100..150).map(|i| Some(i as f64)));
+        let mut groups: Vec<Option<i64>> = vec![None; 50];
+        groups.extend(vec![Some(42); 50]);
+
+        let batch = batch_value_int64_group_nullable(values, groups);
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["grp".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 16,
+            width: 0.4,
+            name: None,
+        };
+        // Must not error: the non-nullable schema declaration was the bug.
+        let out = apply(&spec, &batch).unwrap();
+        assert!(out.num_rows() > 0, "output must be non-empty");
+
+        // Both groups must appear: two distinct group_id values.
+        let gids = col_u32(&out, "group_id");
+        let distinct_gids: std::collections::BTreeSet<u32> = gids.iter().copied().collect();
+        assert_eq!(
+            distinct_gids.len(), 2,
+            "expected 2 distinct group_ids (null + 42); got {:?}",
+            distinct_gids
+        );
+
+        // FA-9: the null-keyed group materializes as an Arrow null in the output column.
+        let grp_arr = out.column(out.schema().index_of("grp").unwrap())
+            .as_any().downcast_ref::<Int64Array>().unwrap();
+        let has_null_key = (0..grp_arr.len()).any(|i| grp_arr.is_null(i));
+        assert!(has_null_key, "null-key group must materialize as Arrow null in 'grp' column");
+
+        // The real-keyed group (grp=42) must also appear.
+        let has_real_key = (0..grp_arr.len()).any(|i| !grp_arr.is_null(i) && grp_arr.value(i) == 42);
+        assert!(has_real_key, "real-key group (grp=42) must be present in 'grp' column");
     }
 
     /// FA-7 byte-stability guard: a Utf8 groupby still materializes a StringArray

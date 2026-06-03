@@ -675,6 +675,16 @@ fn distinct_values_in_order(
     super::arrow_cast::distinct_values_in_order(batch, field)
 }
 
+/// Positional (x:N / y:N) ordinal domain: like [`distinct_values_in_order`] but
+/// surfaces a null row as its own category (FA-9). Used only by the positional
+/// scale path so color/shape/legend domains keep dropping nulls.
+fn distinct_positional_categories(
+    batch: &RecordBatch,
+    field: &str,
+) -> Result<Vec<String>, RenderError> {
+    super::arrow_cast::distinct_positional_categories(batch, field)
+}
+
 // ── Main entry points ───────────────────────────────────────────────────────
 
 /// Build scales from spec + post-transform batch + pixel ranges.
