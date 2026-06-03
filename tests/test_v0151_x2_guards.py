@@ -88,9 +88,7 @@ def test_mark_area_with_x2_error_names_alternative():
     msg = str(exc_info.value)
     # The hint should guide users toward y2 or mark_rect.
     has_alternative = "y2" in msg or "mark_rect" in msg or "rect" in msg.lower()
-    assert has_alternative, (
-        f"error should name an alternative (y2= or mark_rect); got: {msg!r}"
-    )
+    assert has_alternative, f"error should name an alternative (y2= or mark_rect); got: {msg!r}"
 
 
 # ---------------------------------------------------------------------------

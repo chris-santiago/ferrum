@@ -58,9 +58,7 @@ def _link_hrefs(svg: str) -> list[str]:
 
 def _data_tooltip_attrs(svg: str) -> list[str]:
     """Return data-tooltip or title attribute values in the SVG."""
-    return re.findall(r'data-tooltip="([^"]+)"', svg) + re.findall(
-        r'<title>([^<]+)</title>', svg
-    )
+    return re.findall(r'data-tooltip="([^"]+)"', svg) + re.findall(r"<title>([^<]+)</title>", svg)
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +72,7 @@ def test_polar_bar_honors_stroke_width_encoding():
         {
             "dir": ["N", "E", "S", "W"],
             "val": [10.0, 20.0, 15.0, 25.0],
-            "sw": [1.0, 3.0, 1.0, 3.0],   # alternating narrow / wide
+            "sw": [1.0, 3.0, 1.0, 3.0],  # alternating narrow / wide
         }
     )
     chart = (
@@ -339,12 +337,8 @@ def test_arc_nominal_theta_href_passes_through():
     assert svg.startswith("<svg")
 
     hrefs = _link_hrefs(svg)
-    assert hrefs, (
-        "build_nominal_theta dropped href encoding: no <a href> links found in SVG"
-    )
-    assert any("example.com" in h for h in hrefs), (
-        f"expected href URLs in SVG, got: {hrefs}"
-    )
+    assert hrefs, "build_nominal_theta dropped href encoding: no <a href> links found in SVG"
+    assert any("example.com" in h for h in hrefs), f"expected href URLs in SVG, got: {hrefs}"
 
 
 def test_arc_nominal_theta_tooltip_still_works():
@@ -370,8 +364,6 @@ def test_arc_nominal_theta_tooltip_still_works():
     assert svg.startswith("<svg")
 
     tooltip_data = _data_tooltip_attrs(svg)
-    assert any(
-        "Alpha" in t or "Beta" in t or "Gamma" in t for t in tooltip_data
-    ), (
+    assert any("Alpha" in t or "Beta" in t or "Gamma" in t for t in tooltip_data), (
         f"build_nominal_theta tooltip broken after refactor; tooltip_data: {tooltip_data}"
     )
