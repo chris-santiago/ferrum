@@ -66,6 +66,11 @@ pub enum RenderError {
     EmptyDomain { channel: String, field: String },
     SceneConstruction(String),
     HtmlBundleAssembly(String),
+    /// An encoding channel that is not supported by the given mark type was
+    /// supplied.  `mark` names the mark (e.g. `"mark_area"`); `channel` names
+    /// the unsupported channel (e.g. `"x2"`); `hint` is an actionable suggestion
+    /// pointing at the correct mark or channel to use instead.
+    UnsupportedChannelCombination { mark: &'static str, channel: &'static str, hint: &'static str },
 }
 
 impl std::fmt::Display for RenderError {
@@ -101,6 +106,8 @@ impl std::fmt::Display for RenderError {
                 write!(f, "scene construction failed: {msg}"),
             Self::HtmlBundleAssembly(msg) =>
                 write!(f, "HTML bundle assembly failed: {msg}"),
+            Self::UnsupportedChannelCombination { mark, channel, hint } =>
+                write!(f, "{mark}: channel '{channel}' is not supported; {hint}"),
         }
     }
 }

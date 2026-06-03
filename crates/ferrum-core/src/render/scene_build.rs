@@ -351,6 +351,7 @@ pub fn build_scene(
                 mark_style: &mark_style,
             };
 
+            validate_mark_encoding(&layer.mark, &layer.encoding)?;
             let mut result = draw::dispatch_mark_build(&layer.mark, &ctx);
 
             // For CoordPolar, transform all mark nodes from Cartesian pixel
@@ -1504,6 +1505,40 @@ fn build_provisional_fractions(
 /// Mirrors `ScaleKind::padding_fraction` used in `prepare.rs`.
 fn build_provisional_padding(scale: &scale_resolve::ScaleKind) -> f64 {
     scale.padding_fraction()
+}
+
+/// Validate that the encoding channels supplied to a mark are a supported
+/// combination for that mark type.  Called before `dispatch_mark_build` so that
+/// unsupported combinations surface as clear errors rather than silently
+/// producing wrong or empty geometry.
+///
+/// Currently enforced:
+/// - `mark_area` with `x2` bound: `x2` is not a documented area channel.
+///   Horizontal-band areas belong to `mark_rect`; vertical bands use `y2`.
+/// - `mark_bar` with both `x2` AND `y2` bound: a 2-D extent (width AND height
+///   from separate columns) defines a rectangle, not a bar.  Use `mark_rect`.
+fn validate_mark_encoding(
+    mark: &crate::spec::mark::Mark,
+    encoding: &crate::spec::encoding::Encoding,
+) -> Result<(), RenderError> {
+    use crate::spec::mark::Mark;
+    match mark {
+        Mark::Area if encoding.x2.is_some() => {
+            Err(RenderError::UnsupportedChannelCombination {
+                mark: "mark_area",
+                channel: "x2",
+                hint: "use y2= for a vertical band area, or use mark_rect for a 2-D extent",
+            })
+        }
+        Mark::Bar if encoding.x2.is_some() && encoding.y2.is_some() => {
+            Err(RenderError::UnsupportedChannelCombination {
+                mark: "mark_bar",
+                channel: "x2 and y2",
+                hint: "a 2-D extent (both x2= and y2=) is a rectangle; use mark_rect instead",
+            })
+        }
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
