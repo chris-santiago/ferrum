@@ -493,6 +493,10 @@ async function _render(container, sceneJson, adapter) {
   const cfg = JSON.parse(adapter.getInteractionConfig());
   const _hasPointSelections = (cfg.selections || []).some(s => s.type === 'point');
   const hasInterval = (cfg.selections || []).some(s => s.type === 'interval');
+  // A domain-rescale binding (scale={"domain": param}) also requires brush
+  // select mode to be active by default — without it the brush filter blocks
+  // all drag events in pan mode and the user never gets a rescale affordance.
+  const hasDomainRescale = (cfg.param_bindings || []).some(b => b.role === 'domain');
 
   // ── GPU init (may fail when WebGPU/WebGL context limit exceeded) ──
   // Effective DPR after clamping to GPU max texture size. Stored in
@@ -533,7 +537,7 @@ async function _render(container, sceneJson, adapter) {
   }
 
   // ── Mode switching ────────────────────────────────────────────────
-  const defaultMode = hasInterval ? 'select' : 'pan';
+  const defaultMode = (hasInterval || hasDomainRescale) ? 'select' : 'pan';
   let currentMode = defaultMode;
   container.dataset.mode = currentMode;
 
