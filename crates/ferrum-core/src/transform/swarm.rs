@@ -30,6 +30,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::transform::context::TransformContext;
+use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
 
 fn default_point_size() -> f64 {
     5.0
@@ -57,7 +58,7 @@ pub(crate) enum SwarmOrient {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct SwarmSpec {
-    pub category: String, // grouping field (Utf8 or Float64)
+    pub category: String, // grouping field (Utf8/LargeUtf8, Float, integer, or Boolean)
     pub value: String,    // Float64
     #[serde(default = "default_point_size")]
     pub point_size: f64,
@@ -184,9 +185,11 @@ pub(crate) fn apply_with_context(
             "stat_swarm: column '{}' not found", spec.category
         )))?;
     let cat_dt = schema.field(cat_idx).data_type().clone();
-    if cat_dt != DataType::Utf8 && cat_dt != DataType::Float64 {
+    if !is_groupby_supported_dtype(&cat_dt) {
         return Err(PyValueError::new_err(format!(
-            "stat_swarm: category column '{}' must be Utf8 or Float64; got {:?}",
+            "stat_swarm: category column '{}' has unsupported dtype {:?}; \
+             supported: Utf8/LargeUtf8, Float64/Float32, \
+             Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean",
             spec.category, cat_dt
         )));
     }
@@ -257,47 +260,19 @@ pub(crate) fn apply_with_context(
     };
 
     // 3. Group by category. BTreeMap for deterministic iteration order.
-    let mut groups: BTreeMap<String, Vec<(usize, f64)>> = BTreeMap::new();
-    let cat_keys: Vec<Option<String>> = match cat_dt {
-        DataType::Utf8 => {
-            let arr = batch
-                .column(cat_idx)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| PyValueError::new_err(format!(
-                    "stat_swarm: expected StringArray for category column '{}'", spec.category)))?;
-            (0..n)
-                .map(|i| {
-                    if arr.is_null(i) {
-                        None
-                    } else {
-                        Some(arr.value(i).to_string())
-                    }
-                })
-                .collect()
-        }
-        DataType::Float64 => {
-            let arr = batch
-                .column(cat_idx)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .ok_or_else(|| PyValueError::new_err(format!(
-                    "stat_swarm: expected Float64Array for category column '{}'", spec.category)))?;
-            (0..n)
-                .map(|i| {
-                    if arr.is_null(i) {
-                        None
-                    } else {
-                        // Use bit-pattern repr to handle NaN/0.0/-0.0 deterministically.
-                        Some(arr.value(i).to_bits().to_string())
-                    }
-                })
-                .collect()
-        }
-        _ => unreachable!(),
-    };
+    // FA-7: the shared group_key helper handles Utf8/Float64 and now also
+    // int/uint/bool category columns. A null category key (KeyValue::Null) is
+    // skipped below, matching the pre-existing "None category → skip row" rule.
+    let cat_col = batch.column(cat_idx);
+    let cat_keys: Vec<Option<KeyValue>> = (0..n)
+        .map(|i| match groupby_key_at(cat_col.as_ref(), &cat_dt, i) {
+            Some(KeyValue::Null) | None => None,
+            Some(kv) => Some(kv),
+        })
+        .collect();
 
-    for i in 0..n {
+    let mut groups: BTreeMap<KeyValue, Vec<(usize, f64)>> = BTreeMap::new();
+    for (i, cat_key) in cat_keys.iter().enumerate() {
         if val_arr.is_null(i) {
             continue;
         }
@@ -305,9 +280,9 @@ pub(crate) fn apply_with_context(
         if v.is_nan() {
             continue;
         }
-        let key = match &cat_keys[i] {
+        let key = match cat_key {
             None => continue,
-            Some(s) => s.clone(),
+            Some(kv) => kv.clone(),
         };
         groups.entry(key).or_default().push((i, v));
     }

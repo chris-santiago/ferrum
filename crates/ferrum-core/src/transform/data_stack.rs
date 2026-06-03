@@ -4,13 +4,15 @@
 //! `groupby`, sorts within each group, and accumulates field values.
 //! Supports offset modes: "zero" (default), "normalize", "center".
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
+use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct DataStackSpec {
@@ -68,13 +70,36 @@ pub(crate) fn apply(spec: &DataStackSpec, batch: &RecordBatch) -> PyResult<Recor
         })
         .collect::<PyResult<_>>()?;
 
+    // Validate groupby dtypes for shared key extraction (FA-7).
+    let group_dtypes: Vec<DataType> = group_cols
+        .iter()
+        .zip(spec.groupby.iter())
+        .map(|(&gi, g)| {
+            let dt = schema.field(gi).data_type().clone();
+            if !is_groupby_supported_dtype(&dt) {
+                return Err(PyValueError::new_err(format!(
+                    "data_stack: groupby column '{g}' has unsupported dtype {dt:?}; \
+                     supported: Utf8/LargeUtf8, Float64/Float32, \
+                     Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
+                )));
+            }
+            Ok(dt)
+        })
+        .collect::<PyResult<_>>()?;
+
     // Partition rows by group key.
-    let mut groups: BTreeMap<Vec<String>, Vec<usize>> = BTreeMap::new();
+    let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
     for row in 0..n_rows {
-        let key: Vec<String> = group_cols
-            .iter()
-            .map(|&gi| extract_key(batch.column(gi).as_ref(), row))
-            .collect();
+        let mut key = Vec::with_capacity(group_cols.len());
+        for (gpos, &gi) in group_cols.iter().enumerate() {
+            let kv = groupby_key_at(batch.column(gi).as_ref(), &group_dtypes[gpos], row)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "data_stack: internal error extracting groupby key at row {row}"
+                    ))
+                })?;
+            key.push(kv);
+        }
         groups.entry(key).or_default().push(row);
     }
 
@@ -149,19 +174,6 @@ pub(crate) fn apply(spec: &DataStackSpec, batch: &RecordBatch) -> PyResult<Recor
 
     RecordBatch::try_new(out_schema, columns)
         .map_err(|e| PyValueError::new_err(format!("data_stack: {e}")))
-}
-
-fn extract_key(col: &dyn Array, row: usize) -> String {
-    if col.is_null(row) {
-        return "__null__".to_string();
-    }
-    if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-        return arr.value(row).to_string();
-    }
-    if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
-        return format!("{}", arr.value(row));
-    }
-    "__unknown__".to_string()
 }
 
 // ─── PyO3 wrapper ──────────────────────────────────────────────────────────

@@ -250,7 +250,9 @@ pub fn resolve_mark_style(
     style
 }
 
-pub(crate) use super::arrow_cast::{col_as_f64, col_as_ordinal_category_str, col_as_str};
+pub(crate) use super::arrow_cast::{
+    col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str,
+};
 
 /// Pre-read per-row SVG metadata columns (tooltip, href, description).
 /// Constructed once per draw call; individual mark renderers call
@@ -378,11 +380,24 @@ impl MarkBuildResult {
     }
 }
 
+/// Return type for metadata build helpers: (tooltips, hrefs, descriptions).
+///
+/// The type alias avoids the "very complex type" clippy lint on every helper
+/// that returns the three optional per-node metadata vectors.
+pub type MetadataOutput = (
+    Option<Vec<FsTooltipContent>>,
+    Option<Vec<Option<String>>>,
+    Option<Vec<Option<String>>>,
+);
+
 impl MetadataColumns {
+    /// Build tooltip/href/description vectors for **all** rows (in original row
+    /// order). Suitable for marks where every row maps 1-to-1 to a node and no
+    /// rows are skipped.
     pub fn build_metadata(
         &self,
         _ctx: &DrawCtx,
-    ) -> (Option<Vec<FsTooltipContent>>, Option<Vec<Option<String>>>, Option<Vec<Option<String>>>) {
+    ) -> MetadataOutput {
         let tooltips = if self.tooltip_cols.is_empty() {
             None
         } else {
@@ -401,6 +416,50 @@ impl MetadataColumns {
         };
         let hrefs = self.href.clone();
         let descriptions = self.description.clone();
+        (tooltips, hrefs, descriptions)
+    }
+
+    /// Build tooltip/href/description vectors **aligned to a subset of kept rows**.
+    ///
+    /// When a mark renderer skips some rows (e.g. null category or degenerate
+    /// zero-span wedge via `continue`), the emitted `nodes` are a strict subset
+    /// of the original batch rows. Calling `build_metadata` in that case would
+    /// return per-row vectors of length `n_rows`; the SVG walker indexes these
+    /// by node-enumeration index, so node `j` would receive row `j`'s metadata
+    /// instead of its true source row — producing wrong tooltip/href/description
+    /// on any mark with skipped rows.
+    ///
+    /// This method takes the `data_indices` of the kept nodes (in node order)
+    /// and gathers exactly those rows from each metadata column, producing output
+    /// vectors of the same length as `data_indices`. The result is always
+    /// correctly aligned: node `j` receives `data_indices[j]`'s metadata.
+    ///
+    /// Callers that never skip rows should use `build_metadata` instead (zero
+    /// allocation overhead, same semantics).
+    pub fn build_metadata_for_indices(
+        &self,
+        data_indices: &[usize],
+    ) -> MetadataOutput {
+        let tooltips = if self.tooltip_cols.is_empty() {
+            None
+        } else {
+            Some(
+                data_indices.iter().map(|&row_idx| FsTooltipContent {
+                    fields: self.tooltip_cols.iter()
+                        .map(|(name, col)| FsTooltipField {
+                            name: name.clone(),
+                            value: col.get(row_idx).and_then(|v| v.clone()).unwrap_or_default(),
+                        })
+                        .collect(),
+                }).collect(),
+            )
+        };
+        let hrefs = self.href.as_ref().map(|col| {
+            data_indices.iter().map(|&row_idx| col.get(row_idx).and_then(|v| v.clone())).collect()
+        });
+        let descriptions = self.description.as_ref().map(|col| {
+            data_indices.iter().map(|&row_idx| col.get(row_idx).and_then(|v| v.clone())).collect()
+        });
         (tooltips, hrefs, descriptions)
     }
 }

@@ -6,7 +6,7 @@
 //!   ordinal y only → horizontal crossbars centered on each category band;
 //!   ordinal x only → vertical crossbars centered on each category band.
 
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_positional_category_str, x_field, y_field, DrawCtx};
 use crate::render::scale_resolve::ScaleKind;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -52,7 +52,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         if let Some(yf) = y_field(ctx, spec) {
             // Ordinal y only → horizontal crossbars centered on each category band.
             if matches!(&ctx.scales.y, ScaleKind::Ordinal(_)) {
-                let ys = match col_as_ordinal_category_str(ctx.batch, yf) {
+                let ys = match col_as_positional_category_str(ctx.batch, yf) {
                     Ok(v) => v,
                     Err(_) => return MarkBuildResult {
                         kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
@@ -120,7 +120,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Ordinal x + quantitative y → horizontal tick at data y position.
     if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) {
         if let Some(yf) = y_field(ctx, spec) {
-            let xs = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return MarkBuildResult {
+            let xs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return MarkBuildResult {
                 kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
                 tooltips: None, hrefs: None, descriptions: None,
             }};
@@ -167,7 +167,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
                 tooltips: None, hrefs: None, descriptions: None,
             }};
-            let ys = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return MarkBuildResult {
+            let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return MarkBuildResult {
                 kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
                 tooltips: None, hrefs: None, descriptions: None,
             }};
@@ -205,7 +205,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     // Ordinal x only (no y field) → vertical crossbars at each category, anchored at panel bottom.
     if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) && y_field(ctx, spec).is_none() {
-        let xs = match col_as_ordinal_category_str(ctx.batch, xf) {
+        let xs = match col_as_positional_category_str(ctx.batch, xf) {
             Ok(v) => v,
             Err(_) => return MarkBuildResult {
                 kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),

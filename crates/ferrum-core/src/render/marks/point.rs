@@ -3,7 +3,7 @@
 //! Phase 8a: honors per-row size/shape/opacity from ctx.scales when populated.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::scale_resolve::{ColorScale, ScaleKind, ShapeKind};
 
 /// Parse a shape name string to a `ShapeKind`.
@@ -222,11 +222,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
 
     let xs_f64 = col_as_f64(ctx.batch, xf).ok();
-    // Use col_as_ordinal_category_str so integer-typed ordinal columns (e.g.
-    // Int64 year values) stringify the same way the ordinal domain was built.
-    let xs_str = col_as_ordinal_category_str(ctx.batch, xf).ok();
+    // Use col_as_positional_category_str so integer-typed ordinal columns (e.g.
+    // Int64 year values) stringify the same way the ordinal domain was built, and
+    // a null positional category lands in its own band (FA-9).
+    let xs_str = col_as_positional_category_str(ctx.batch, xf).ok();
     let ys_f64 = col_as_f64(ctx.batch, yf).ok();
-    let ys_str = col_as_ordinal_category_str(ctx.batch, yf).ok();
+    let ys_str = col_as_positional_category_str(ctx.batch, yf).ok();
     let n = xs_f64
         .as_ref().map(|v| v.len())
         .or_else(|| xs_str.as_ref().map(|v| v.len()))

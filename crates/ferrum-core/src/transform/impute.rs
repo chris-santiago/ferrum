@@ -9,6 +9,8 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::numeric_util::clean_float64_values;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct ImputeSpec {
     /// Column to impute.
@@ -65,7 +67,7 @@ pub(crate) fn apply(spec: &ImputeSpec, batch: &RecordBatch) -> PyResult<RecordBa
             if count == 0 { 0.0 } else { sum / count as f64 }
         }
         "median" => {
-            let mut vals = clean_values(col);
+            let mut vals = clean_float64_values(col, None);
             if vals.is_empty() {
                 0.0
             } else {
@@ -79,11 +81,11 @@ pub(crate) fn apply(spec: &ImputeSpec, batch: &RecordBatch) -> PyResult<RecordBa
             }
         }
         "min" => {
-            let vals = clean_values(col);
+            let vals = clean_float64_values(col, None);
             vals.iter().fold(f64::INFINITY, |a, &b| a.min(b))
         }
         "max" => {
-            let vals = clean_values(col);
+            let vals = clean_float64_values(col, None);
             vals.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
         }
         other => {
@@ -121,21 +123,6 @@ pub(crate) fn apply(spec: &ImputeSpec, batch: &RecordBatch) -> PyResult<RecordBa
 
     RecordBatch::try_new(out_schema, columns)
         .map_err(|e| PyValueError::new_err(format!("data_impute: {e}")))
-}
-
-fn clean_values(col: &Float64Array) -> Vec<f64> {
-    (0..col.len())
-        .filter_map(|i| {
-            if col.is_null(i) {
-                return None;
-            }
-            let v = col.value(i);
-            if v.is_nan() {
-                return None;
-            }
-            Some(v)
-        })
-        .collect()
 }
 
 fn clean_stats(col: &Float64Array) -> (f64, usize) {

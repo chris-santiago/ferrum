@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::transform::group_key::{
-    groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col, KeyValue,
+    groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
+    KeyValue,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -162,7 +163,8 @@ pub(crate) fn apply(spec: &AggregateSpec, batch: &RecordBatch) -> PyResult<Recor
     // Build output schema and arrays.
     let mut fields: Vec<Field> = Vec::with_capacity(spec.groupby.len() + spec.ops.len());
     for (gi, g) in spec.groupby.iter().enumerate() {
-        fields.push(Field::new(g, group_dtypes[gi].clone(), false));
+        // FA-9: nullable so a null-keyed group materializes as an Arrow null.
+        fields.push(Field::new(g, group_dtypes[gi].clone(), groupby_field_nullable()));
     }
     for op in &spec.ops {
         fields.push(Field::new(&op.as_, DataType::Float64, true));
@@ -944,11 +946,12 @@ mod tests {
 
     #[test]
     fn test_aggregate_null_float64_groupby_key_collapses_to_single_group() {
-        // FA-3 regression: null keys in a Float64 groupby column must all land in
-        // the SAME group (KeyValue::Null), separate from any real-valued groups.
+        // FA-3/FA-9 regression: null keys in a Float64 groupby column must all
+        // land in the SAME group (KeyValue::Null), separate from any real-valued
+        // groups, and materialize as an actual Arrow null in the output.
         //
-        // Materialization contract (Float64 null key → output NaN):
-        //   row 0: grp=None (null)  → KeyValue::Null  → output NaN
+        // Materialization contract (Float64 null key → Arrow null):
+        //   row 0: grp=None (null)  → KeyValue::Null  → output Arrow null
         //   row 1: grp=None (null)  → KeyValue::Null  → same group as row 0
         //   row 2: grp=Some(1.0)    → KeyValue::Float → separate group
         //
@@ -973,10 +976,12 @@ mod tests {
             .as_any().downcast_ref::<Float64Array>().unwrap();
         let sums = col_f64(&out, "s");
 
-        // Find the group whose key is NaN (the null-key proxy) and the one whose key is 1.0.
-        let null_idx = (0..grp_arr.len()).find(|&i| grp_arr.value(i).is_nan())
-            .expect("null-key group must materialize with NaN output key");
-        let real_idx = (0..grp_arr.len()).find(|&i| (grp_arr.value(i) - 1.0).abs() < 1e-12)
+        // FA-9: the null-key group materializes as an Arrow null; the real group
+        // carries the value 1.0.
+        let null_idx = (0..grp_arr.len()).find(|&i| grp_arr.is_null(i))
+            .expect("null-key group must materialize as an Arrow null");
+        let real_idx = (0..grp_arr.len())
+            .find(|&i| !grp_arr.is_null(i) && (grp_arr.value(i) - 1.0).abs() < 1e-12)
             .expect("real-valued group (key=1.0) must be present");
 
         // Null group: rows 0 and 1 → sum = 10 + 20 = 30.
@@ -995,20 +1000,17 @@ mod tests {
 
     #[test]
     fn test_aggregate_null_int64_groupby_key_collapses_to_single_group() {
-        // FA-3 regression: null keys in an Int64 groupby column must all land in
-        // the SAME group (KeyValue::Null), separate from non-null groups.
+        // FA-3/FA-9 regression: null keys in an Int64 groupby column must all
+        // land in the SAME group (KeyValue::Null), separate from non-null groups,
+        // and materialize as an actual Arrow null in the output.
         //
-        // Materialization contract (Int64 null key → output 0i64):
-        //   row 0: grp=None  → KeyValue::Null → output 0
+        // Materialization contract (Int64 null key → Arrow null):
+        //   row 0: grp=None  → KeyValue::Null → output Arrow null
         //   row 1: grp=None  → KeyValue::Null → same group as row 0
         //   row 2: grp=Some(7) → KeyValue::Int(7) → separate group
         //
-        // NOTE: the null-proxy output value is 0i64 (same as a real key of 0).
-        // This is the documented behavior: null keys are grouped correctly during
-        // aggregation, but the materialized output key is a proxy value (0 for
-        // integers), not a typed null. Callers that need to distinguish a true
-        // null group from a zero group must not use Int64 columns with both nulls
-        // and a real zero key in the same groupby.
+        // FA-9: the null group materializes as a typed null, NOT a 0 proxy, so it
+        // stays distinct from a genuine 0 key downstream.
         let batch = batch_value_int64_group_nullable(
             vec![Some(3.0), Some(7.0), Some(100.0)],
             vec![None,       None,       Some(7)],
@@ -1023,14 +1025,16 @@ mod tests {
         // Exactly two groups: the null group and the real-valued group.
         assert_eq!(out.num_rows(), 2, "expected 2 groups (null + 7), got {}", out.num_rows());
 
-        let grps = col_i64(&out, "grp");
+        let grp_arr = out.column(out.schema().index_of("grp").unwrap())
+            .as_any().downcast_ref::<Int64Array>().unwrap();
         let sums = col_f64(&out, "s");
 
-        // Null-key group materializes as key=0i64.
-        let null_idx = grps.iter().position(|&g| g == 0)
-            .expect("null-key group must materialize with output key 0i64");
+        // FA-9: null-key group materializes as an Arrow null.
+        let null_idx = (0..grp_arr.len()).find(|&i| grp_arr.is_null(i))
+            .expect("null-key group must materialize as an Arrow null");
         // Real-valued group: key=7.
-        let real_idx = grps.iter().position(|&g| g == 7)
+        let real_idx = (0..grp_arr.len())
+            .find(|&i| !grp_arr.is_null(i) && grp_arr.value(i) == 7)
             .expect("real-valued group (key=7) must be present");
 
         // Null group: rows 0 and 1 → sum = 3 + 7 = 10.
@@ -1080,38 +1084,34 @@ mod tests {
             .as_any().downcast_ref::<Float64Array>().unwrap();
         let sums = col_f64(&out, "s");
 
-        // Count how many output keys are NaN.
-        let nan_indices: Vec<usize> = (0..grp_arr.len())
-            .filter(|&i| grp_arr.value(i).is_nan())
-            .collect();
-        // Both the null-proxy (NaN) and the genuine-NaN group materialize with NaN
-        // as their output key — they are distinguished only during grouping, not in
-        // the materialized output.  So we expect exactly 2 NaN-key rows.
-        assert_eq!(
-            nan_indices.len(), 2,
-            "expected 2 NaN-keyed output rows (one for null group, one for NaN group), got {}",
-            nan_indices.len()
-        );
+        // FA-9: the null group materializes as an Arrow null; the genuine-NaN
+        // group materializes as a (non-null) NaN value. They are now fully
+        // distinguishable in the output, not just during grouping.
+        let null_idx = (0..grp_arr.len()).find(|&i| grp_arr.is_null(i))
+            .expect("null-key group must materialize as an Arrow null");
+        let nan_idx = (0..grp_arr.len())
+            .find(|&i| !grp_arr.is_null(i) && grp_arr.value(i).is_nan())
+            .expect("genuine-NaN group must materialize as a non-null NaN value");
 
         // The real-valued group (key=2.0) must be present with sum=3.0.
-        let real_idx = (0..grp_arr.len()).find(|&i| (grp_arr.value(i) - 2.0).abs() < 1e-12)
+        let real_idx = (0..grp_arr.len())
+            .find(|&i| !grp_arr.is_null(i) && (grp_arr.value(i) - 2.0).abs() < 1e-12)
             .expect("real-valued group (key=2.0) must be present");
         assert!(
             (sums[real_idx] - 3.0).abs() < 1e-12,
             "real-key group (2.0) sum should be 3.0, got {}",
             sums[real_idx]
         );
-        // The two NaN-keyed rows together account for sums 1.0 (null group) and 2.0 (NaN group).
-        let nan_sums: Vec<f64> = nan_indices.iter().map(|&i| sums[i]).collect();
+        // Null group (row 0) sum = 1.0; NaN group (row 1) sum = 2.0.
         assert!(
-            nan_sums.contains(&1.0) || nan_sums.iter().any(|&s| (s - 1.0).abs() < 1e-12),
-            "null group (row 0) sum should be 1.0; nan_sums = {:?}",
-            nan_sums
+            (sums[null_idx] - 1.0).abs() < 1e-12,
+            "null group sum should be 1.0, got {}",
+            sums[null_idx]
         );
         assert!(
-            nan_sums.iter().any(|&s| (s - 2.0).abs() < 1e-12),
-            "NaN-key group (row 1) sum should be 2.0; nan_sums = {:?}",
-            nan_sums
+            (sums[nan_idx] - 2.0).abs() < 1e-12,
+            "NaN-key group sum should be 2.0, got {}",
+            sums[nan_idx]
         );
     }
 

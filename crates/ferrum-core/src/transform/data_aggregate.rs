@@ -3,7 +3,7 @@
 //! Same semantics as stat_aggregate but exposed as a data transform.
 //! Delegates to the existing aggregate module's logic.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
+use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -12,6 +12,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::transform::aggregate::AggFn;
+use crate::transform::group_key::{
+    groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
+    KeyValue,
+};
 use crate::transform::join_aggregate::AggSpec;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -56,12 +60,35 @@ pub(crate) fn apply(spec: &DataAggregateSpec, batch: &RecordBatch) -> PyResult<R
         })
         .collect::<PyResult<_>>()?;
 
-    let mut groups: BTreeMap<Vec<String>, Vec<usize>> = BTreeMap::new();
+    // Validate groupby dtypes and capture them for shared key extraction (FA-7).
+    let group_dtypes: Vec<DataType> = group_col_indices
+        .iter()
+        .zip(groupby.iter())
+        .map(|(&gi, g)| {
+            let dt = schema.field(gi).data_type().clone();
+            if !is_groupby_supported_dtype(&dt) {
+                return Err(PyValueError::new_err(format!(
+                    "data_aggregate: groupby column '{g}' has unsupported dtype {dt:?}; \
+                     supported: Utf8/LargeUtf8, Float64/Float32, \
+                     Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
+                )));
+            }
+            Ok(dt)
+        })
+        .collect::<PyResult<_>>()?;
+
+    let mut groups: BTreeMap<Vec<KeyValue>, Vec<usize>> = BTreeMap::new();
     for row in 0..n_rows {
-        let key: Vec<String> = group_col_indices
-            .iter()
-            .map(|&gi| extract_key(batch.column(gi).as_ref(), row))
-            .collect();
+        let mut key = Vec::with_capacity(group_col_indices.len());
+        for (gpos, &gi) in group_col_indices.iter().enumerate() {
+            let kv = groupby_key_at(batch.column(gi).as_ref(), &group_dtypes[gpos], row)
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "data_aggregate: internal error extracting groupby key at row {row}"
+                    ))
+                })?;
+            key.push(kv);
+        }
         groups.entry(key).or_default().push(row);
     }
 
@@ -73,7 +100,7 @@ pub(crate) fn apply(spec: &DataAggregateSpec, batch: &RecordBatch) -> PyResult<R
     let n_out_rows = groups.len();
 
     // Compute aggregates per group.
-    let mut group_key_vecs: Vec<Vec<String>> = Vec::with_capacity(n_out_rows);
+    let mut group_key_vecs: Vec<Vec<KeyValue>> = Vec::with_capacity(n_out_rows);
     let mut agg_results: Vec<Vec<f64>> = vec![Vec::with_capacity(n_out_rows); spec.aggregates.len()];
 
     for (key, rows) in &groups {
@@ -91,40 +118,25 @@ pub(crate) fn apply(spec: &DataAggregateSpec, batch: &RecordBatch) -> PyResult<R
         }
     }
 
-    // Build output schema: groupby columns (Utf8) + aggregate columns (Float64).
+    // Build output schema: groupby columns (original dtype, nullable for FA-9
+    // null keys) + aggregate columns (Float64).
     let mut fields: Vec<Field> = Vec::new();
     for (gi, g) in groupby.iter().enumerate() {
-        let dtype = schema.field(group_col_indices[gi]).data_type().clone();
-        fields.push(Field::new(g, dtype, true));
+        fields.push(Field::new(g, group_dtypes[gi].clone(), groupby_field_nullable()));
     }
     for agg in &spec.aggregates {
         fields.push(Field::new(&agg.as_, DataType::Float64, true));
     }
     let out_schema = Arc::new(Schema::new(fields));
 
-    // Build columns.
+    // Build columns. The groupby output array dtype must match the declared
+    // schema field; materialize_groupby_col guarantees this (the previous code
+    // declared the original dtype but emitted a StringArray).
     let mut columns: Vec<ArrayRef> = Vec::new();
-
-    for (gi, _) in groupby.iter().enumerate() {
-        let dtype = schema.field(group_col_indices[gi]).data_type();
-        match dtype {
-            DataType::Utf8 => {
-                let vals: Vec<String> = group_key_vecs.iter().map(|k| k[gi].clone()).collect();
-                columns.push(Arc::new(StringArray::from(vals)));
-            }
-            DataType::Float64 => {
-                let vals: Vec<f64> = group_key_vecs
-                    .iter()
-                    .map(|k| k[gi].parse::<f64>().unwrap_or(f64::NAN))
-                    .collect();
-                columns.push(Arc::new(Float64Array::from(vals)));
-            }
-            _ => {
-                // Fallback to Utf8.
-                let vals: Vec<String> = group_key_vecs.iter().map(|k| k[gi].clone()).collect();
-                columns.push(Arc::new(StringArray::from(vals)));
-            }
-        }
+    for (gi, dt) in group_dtypes.iter().enumerate() {
+        let col = materialize_groupby_col(&group_key_vecs, gi, dt)
+            .map_err(PyValueError::new_err)?;
+        columns.push(col);
     }
 
     for agg_vals in agg_results {
@@ -133,19 +145,6 @@ pub(crate) fn apply(spec: &DataAggregateSpec, batch: &RecordBatch) -> PyResult<R
 
     RecordBatch::try_new(out_schema, columns)
         .map_err(|e| PyValueError::new_err(format!("data_aggregate: {e}")))
-}
-
-fn extract_key(col: &dyn Array, row: usize) -> String {
-    if col.is_null(row) {
-        return "__null__".to_string();
-    }
-    if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-        return arr.value(row).to_string();
-    }
-    if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
-        return format!("{}", arr.value(row));
-    }
-    "__unknown__".to_string()
 }
 
 fn compute_agg(col: &dyn Array, rows: &[usize], fn_: AggFn) -> f64 {
