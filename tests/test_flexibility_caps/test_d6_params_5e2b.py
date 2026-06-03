@@ -38,9 +38,7 @@ def _df() -> pl.DataFrame:
 
 
 def _cat_df() -> pl.DataFrame:
-    return pl.DataFrame(
-        {"t": [0, 1, 2, 3], "a": [1, 2, 3, 4], "cat": ["x", "y", "x", "y"]}
-    )
+    return pl.DataFrame({"t": [0, 1, 2, 3], "a": [1, 2, 3, 4], "cat": ["x", "y", "x", "y"]})
 
 
 def _html_for(chart) -> str:
@@ -88,17 +86,8 @@ class TestReactiveRescaleArtifacts:
     def _composed(self):
         df = _df()
         brush = fm.selection_interval(name="brush", encodings=["x"])
-        overview = (
-            fm.Chart(df)
-            .mark_point()
-            .encode(x=fm.X("t"), y=fm.Y("b"))
-            .add_selection(brush)
-        )
-        detail = (
-            fm.Chart(df)
-            .mark_point()
-            .encode(x=fm.X("t", scale={"domain": brush}), y=fm.Y("a"))
-        )
+        overview = fm.Chart(df).mark_point().encode(x=fm.X("t"), y=fm.Y("b")).add_selection(brush)
+        detail = fm.Chart(df).mark_point().encode(x=fm.X("t", scale={"domain": brush}), y=fm.Y("a"))
         return fm.hconcat(overview, detail)
 
     def test_domain_binding_in_embedded_config(self):
@@ -145,12 +134,7 @@ class TestCrossfilterArtifacts:
     def _composed(self):
         df = _df()
         brush = fm.selection_interval(name="brush", encodings=["x"])
-        overview = (
-            fm.Chart(df)
-            .mark_point()
-            .encode(x=fm.X("t"), y=fm.Y("b"))
-            .add_selection(brush)
-        )
+        overview = fm.Chart(df).mark_point().encode(x=fm.X("t"), y=fm.Y("b")).add_selection(brush)
         detail = (
             fm.Chart(df)
             .mark_point()
@@ -239,8 +223,8 @@ class TestParamFreeUnchanged:
         made clickable. We assert the config has no legend binding, which is the
         gate the JS checks.
         """
-        chart = fm.Chart(_cat_df()).mark_point().encode(
-            x=fm.X("t"), y=fm.Y("a"), color=fm.Color("cat")
+        chart = (
+            fm.Chart(_cat_df()).mark_point().encode(x=fm.X("t"), y=fm.Y("a"), color=fm.Color("cat"))
         )
         html = _html_for(chart)
         cfg = _embedded_interaction_config(html)

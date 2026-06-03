@@ -125,9 +125,20 @@ def _make_ordinal_df() -> pl.DataFrame:
     each area is visually distinct.
     """
     xs = [0.0, 1.0, 2.0, 3.0] * 3
-    ys = [1.0, 2.0, 3.0, 2.0,   # group 0
-          5.0, 6.0, 7.0, 6.0,   # group 1
-          9.0, 10.0, 11.0, 10.0]  # group 2
+    ys = [
+        1.0,
+        2.0,
+        3.0,
+        2.0,  # group 0
+        5.0,
+        6.0,
+        7.0,
+        6.0,  # group 1
+        9.0,
+        10.0,
+        11.0,
+        10.0,
+    ]  # group 2
     gs = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
     return pl.DataFrame({"x": xs, "y": ys, "g": gs})
 
@@ -138,9 +149,7 @@ def _make_quantitative_df() -> pl.DataFrame:
     Same shape as ordinal but the color field is Float64 to exercise the Q path.
     """
     xs = [0.0, 1.0, 2.0, 3.0] * 3
-    ys = [1.0, 2.0, 3.0, 2.0,
-          5.0, 6.0, 7.0, 6.0,
-          9.0, 10.0, 11.0, 10.0]
+    ys = [1.0, 2.0, 3.0, 2.0, 5.0, 6.0, 7.0, 6.0, 9.0, 10.0, 11.0, 10.0]
     gs = [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]
     return pl.DataFrame({"x": xs, "y": ys, "g": gs})
 
@@ -148,9 +157,7 @@ def _make_quantitative_df() -> pl.DataFrame:
 def _make_nominal_df() -> pl.DataFrame:
     """Three groups ['a', 'b', 'c'] as Utf8 — the pre-T11 nominal case."""
     xs = [0.0, 1.0, 2.0, 3.0] * 3
-    ys = [1.0, 2.0, 3.0, 2.0,
-          5.0, 6.0, 7.0, 6.0,
-          9.0, 10.0, 11.0, 10.0]
+    ys = [1.0, 2.0, 3.0, 2.0, 5.0, 6.0, 7.0, 6.0, 9.0, 10.0, 11.0, 10.0]
     gs = ["a", "a", "a", "a", "b", "b", "b", "b", "c", "c", "c", "c"]
     return pl.DataFrame({"x": xs, "y": ys, "g": gs})
 
@@ -167,12 +174,7 @@ def test_ordinal_area_no_colorbar():
     must show discrete swatches, not a gradient.
     """
     df = _make_ordinal_df()
-    svg = (
-        fm.Chart(df)
-        .mark_area()
-        .encode(x="x:Q", y="y:Q", color="g:O")
-        .show_svg()
-    )
+    svg = fm.Chart(df).mark_area().encode(x="x:Q", y="y:Q", color="g:O").show_svg()
     assert not _has_colorbar(svg), (
         "ordinal-color mark_area must NOT produce a gradient colorbar; "
         "expected discrete legend swatches.  Got linearGradient in SVG."
@@ -182,12 +184,7 @@ def test_ordinal_area_no_colorbar():
 def test_ordinal_area_has_discrete_legend_swatches():
     """An ordinal-color area must have legend circle swatches, one per group."""
     df = _make_ordinal_df()
-    svg = (
-        fm.Chart(df)
-        .mark_area()
-        .encode(x="x:Q", y="y:Q", color="g:O")
-        .show_svg()
-    )
+    svg = fm.Chart(df).mark_area().encode(x="x:Q", y="y:Q", color="g:O").show_svg()
     swatches = _legend_swatch_fill_rgbs(svg)
     assert len(swatches) >= 3, (
         f"expected >= 3 legend swatches for 3 groups; got {len(swatches)}: {swatches}"
@@ -205,12 +202,7 @@ def test_ordinal_area_fill_equals_swatch():
     Legend swatches use #rrggbb hex.  Comparison ignores alpha.
     """
     df = _make_ordinal_df()
-    svg = (
-        fm.Chart(df)
-        .mark_area()
-        .encode(x="x:Q", y="y:Q", color="g:O")
-        .show_svg()
-    )
+    svg = fm.Chart(df).mark_area().encode(x="x:Q", y="y:Q", color="g:O").show_svg()
     path_rgb = set(_closed_path_fill_rgbs(svg))
     swatch_rgb = set(_legend_swatch_fill_rgbs(svg))
 
@@ -244,12 +236,7 @@ def test_quantitative_area_no_colorbar():
     must resolve to a categorical scale (since area always groups discretely).
     """
     df = _make_quantitative_df()
-    svg = (
-        fm.Chart(df)
-        .mark_area()
-        .encode(x="x:Q", y="y:Q", color="g:Q")
-        .show_svg()
-    )
+    svg = fm.Chart(df).mark_area().encode(x="x:Q", y="y:Q", color="g:Q").show_svg()
     assert not _has_colorbar(svg), (
         "quantitative-color mark_area must NOT produce a gradient colorbar; "
         "expected discrete legend swatches.  Got linearGradient in SVG."
@@ -259,12 +246,7 @@ def test_quantitative_area_no_colorbar():
 def test_quantitative_area_fill_equals_swatch():
     """Quantitative-color area: path fill RGBs == legend swatch RGBs (set equality)."""
     df = _make_quantitative_df()
-    svg = (
-        fm.Chart(df)
-        .mark_area()
-        .encode(x="x:Q", y="y:Q", color="g:Q")
-        .show_svg()
-    )
+    svg = fm.Chart(df).mark_area().encode(x="x:Q", y="y:Q", color="g:Q").show_svg()
     path_rgb = set(_closed_path_fill_rgbs(svg))
     swatch_rgb = set(_legend_swatch_fill_rgbs(svg))
 
@@ -293,12 +275,7 @@ def test_nominal_area_fill_equals_swatch():
     This test guards the pre-existing nominal path against regression.
     """
     df = _make_nominal_df()
-    svg = (
-        fm.Chart(df)
-        .mark_area()
-        .encode(x="x:Q", y="y:Q", color="g:N")
-        .show_svg()
-    )
+    svg = fm.Chart(df).mark_area().encode(x="x:Q", y="y:Q", color="g:N").show_svg()
     path_rgb = set(_closed_path_fill_rgbs(svg))
     swatch_rgb = set(_legend_swatch_fill_rgbs(svg))
 
@@ -319,15 +296,8 @@ def test_nominal_area_fill_equals_swatch():
 def test_nominal_area_has_no_colorbar():
     """Nominal-color area must never show a gradient colorbar."""
     df = _make_nominal_df()
-    svg = (
-        fm.Chart(df)
-        .mark_area()
-        .encode(x="x:Q", y="y:Q", color="g:N")
-        .show_svg()
-    )
-    assert not _has_colorbar(svg), (
-        "nominal-color mark_area must not produce a gradient colorbar"
-    )
+    svg = fm.Chart(df).mark_area().encode(x="x:Q", y="y:Q", color="g:N").show_svg()
+    assert not _has_colorbar(svg), "nominal-color mark_area must not produce a gradient colorbar"
 
 
 # ---------------------------------------------------------------------------
@@ -342,12 +312,7 @@ def test_save_inspection_png():
     the PNG to confirm swatches visually match area fills.
     """
     df = _make_ordinal_df()
-    svg = (
-        fm.Chart(df)
-        .mark_area()
-        .encode(x="x:Q", y="y:Q", color="g:O")
-        .show_svg()
-    )
+    svg = fm.Chart(df).mark_area().encode(x="x:Q", y="y:Q", color="g:O").show_svg()
 
     out_dir = "/tmp/fa5-inspect"
     os.makedirs(out_dir, exist_ok=True)

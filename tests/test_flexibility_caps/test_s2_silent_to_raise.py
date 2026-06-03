@@ -73,9 +73,7 @@ def test_mark_point_bogus_shape_raises():
     This was a silent-failure: the bogus shape became a circle with no error.
     """
     with pytest.raises((ValueError, TypeError)) as exc_info:
-        fm.Chart(_DF).mark_point(shape="not_a_real_shape").encode(
-            x="x:Q", y="y:Q"
-        ).show_svg()
+        fm.Chart(_DF).mark_point(shape="not_a_real_shape").encode(x="x:Q", y="y:Q").show_svg()
 
     msg = str(exc_info.value).lower()
     assert "not_a_real_shape" in msg, (
@@ -102,9 +100,7 @@ def test_mark_point_bogus_shape_message_lists_valid_shapes():
     msg = str(exc_info.value)
     # At minimum, some well-known valid shapes should appear in the message.
     listed = any(s in msg for s in ("circle", "square", "diamond", "cross"))
-    assert listed, (
-        f"Error message must list valid shape names; got: {exc_info.value!r}"
-    )
+    assert listed, f"Error message must list valid shape names; got: {exc_info.value!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -168,9 +164,7 @@ def test_transform_stack_bogus_offset_message_lists_valid():
 
     msg = str(exc_info.value)
     listed = any(s in msg for s in ("zero", "normalize", "center"))
-    assert listed, (
-        f"Error must list valid offsets; got: {exc_info.value!r}"
-    )
+    assert listed, f"Error must list valid offsets; got: {exc_info.value!r}"
 
 
 def test_transform_stack_offset_zero_still_works():

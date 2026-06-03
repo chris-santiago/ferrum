@@ -476,12 +476,7 @@ def test_dual_use_integer_column_ordinal_and_quantitative_point(
     string column and raise ``expected numeric column ... got Utf8``.  This test
     will FAIL under that regression.
     """
-    svg = (
-        fm.Chart(dual_use_df)
-        .mark_point()
-        .encode(x="yr:O", y="amt:Q", size="yr:Q")
-        .show_svg()
-    )
+    svg = fm.Chart(dual_use_df).mark_point().encode(x="yr:O", y="amt:Q", size="yr:Q").show_svg()
     circles = re.findall(r"<circle[^>]*/?>", svg)
     assert len(circles) >= 3, (
         f"Expected at least 3 circle marks (one per data row) for a chart using "
@@ -504,12 +499,7 @@ def test_dual_use_integer_column_ordinal_and_quantitative_bar(
 
     This test will FAIL under a reintroduced column-global cast.
     """
-    svg = (
-        fm.Chart(dual_use_df)
-        .mark_bar()
-        .encode(x="yr:O", y="amt:Q", color="yr:Q")
-        .show_svg()
-    )
+    svg = fm.Chart(dual_use_df).mark_bar().encode(x="yr:O", y="amt:Q", color="yr:Q").show_svg()
     bars = _colored_bar_rects(svg)
     assert len(bars) == 3, (
         f"Expected 3 bars (one per row) for a chart using 'yr' as both :O (x) "

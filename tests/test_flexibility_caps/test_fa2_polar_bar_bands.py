@@ -74,7 +74,9 @@ def _arc_sweep_radians(path_d: str) -> float:
     """
     # Extract: outer_r from first A command, (ox0,oy0) from M, (ox1,oy1) from A endpoint.
     m_match = re.match(r"M\s*([\d.]+)\s+([\d.]+)", path_d.strip())
-    a_match = re.search(r"A\s*([\d.]+)\s+[\d.]+\s+[\d.]+\s+[01]\s+[01]\s+([\d.]+)\s+([\d.]+)", path_d)
+    a_match = re.search(
+        r"A\s*([\d.]+)\s+[\d.]+\s+[\d.]+\s+[01]\s+[01]\s+([\d.]+)\s+([\d.]+)", path_d
+    )
     if m_match is None or a_match is None:
         return math.nan
     ox0 = float(m_match.group(1))
@@ -163,8 +165,7 @@ class TestFA2PolarBarBands:
             "(double-transform bug: the wedge path coordinates are distorted)."
         )
         assert abs(sweeps[0] - sweeps[1]) < 0.05, (
-            f"Wedge sweeps differ: {[math.degrees(s) for s in sweeps]}°. "
-            "Both should be 180°."
+            f"Wedge sweeps differ: {[math.degrees(s) for s in sweeps]}°. Both should be 180°."
         )
 
     def test_two_cat_each_sweep_is_pi(self, two_cat_df: pl.DataFrame) -> None:

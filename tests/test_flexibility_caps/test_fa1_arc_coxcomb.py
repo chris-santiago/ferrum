@@ -65,7 +65,9 @@ def _arc_sweep_radians(path_d: str) -> float:
     exceeds 2r by > 1% (indicating corrupt geometry from a bad transform).
     """
     m_match = re.match(r"M\s*([\d.]+)\s+([\d.]+)", path_d.strip())
-    a_match = re.search(r"A\s*([\d.]+)\s+[\d.]+\s+[\d.]+\s+[01]\s+[01]\s+([\d.]+)\s+([\d.]+)", path_d)
+    a_match = re.search(
+        r"A\s*([\d.]+)\s+[\d.]+\s+[\d.]+\s+[01]\s+[01]\s+([\d.]+)\s+([\d.]+)", path_d
+    )
     if m_match is None or a_match is None:
         return math.nan
     ox0 = float(m_match.group(1))
@@ -186,8 +188,7 @@ class TestFA1ArcNominalTheta:
         r_min, r_max = sorted(radii)
         ratio = r_max / r_min
         assert abs(ratio - 2.0) < 0.3, (
-            f"Radius ratio = {ratio:.2f}, expected ~2.0 (val=10 vs val=20). "
-            f"Radii: {radii}"
+            f"Radius ratio = {ratio:.2f}, expected ~2.0 (val=10 vs val=20). Radii: {radii}"
         )
 
     def test_arc_sweeps_are_equal(self, two_cat_df: pl.DataFrame) -> None:
@@ -225,9 +226,7 @@ class TestFA1ArcNominalTheta:
         assert len(paths) == 4
 
         sweeps = [_arc_sweep_radians(d) for d in paths]
-        assert all(math.isfinite(s) for s in sweeps), (
-            f"NaN sweeps in 4-cat arc: {sweeps}"
-        )
+        assert all(math.isfinite(s) for s in sweeps), f"NaN sweeps in 4-cat arc: {sweeps}"
 
         half_pi = math.pi / 2.0
         for i, sweep in enumerate(sweeps):

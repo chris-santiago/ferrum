@@ -664,10 +664,7 @@ def test_faceted_independent_y_respects_format_override(
     (at least one tick label contains "%").
     """
     if not hasattr(
-        fm.Chart(scale_resolution_df)
-        .mark_point()
-        .encode(x="x:Q", y="y:Q")
-        .facet(col="group"),
+        fm.Chart(scale_resolution_df).mark_point().encode(x="x:Q", y="y:Q").facet(col="group"),
         "share_scale",
     ):
         pytest.skip("share_scale not available — skipping format-override test")
@@ -688,8 +685,7 @@ def test_faceted_independent_y_respects_format_override(
             y_labels_raw.append(content.strip())
 
     assert y_labels_raw, (
-        "No y-axis tick labels found in the independent-y SVG.  "
-        "Cannot verify format override."
+        "No y-axis tick labels found in the independent-y SVG.  Cannot verify format override."
     )
 
     # With format=".0%", at least one tick label must contain a percent sign.

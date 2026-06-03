@@ -516,6 +516,5 @@ def test_y_axis_title_custom_appears(simple_df: pl.DataFrame) -> None:
         f"axis title texts: {titles}"
     )
     assert "miles_per_gallon" not in titles, (
-        "Field name must not appear when Axis(title=) is set; "
-        f"axis title texts: {titles}"
+        f"Field name must not appear when Axis(title=) is set; axis title texts: {titles}"
     )

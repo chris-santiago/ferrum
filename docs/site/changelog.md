@@ -4,6 +4,21 @@ All notable changes to Ferrum are documented here.
 
 ## Unreleased
 
+*No unreleased changes.*
+
+## 0.15.0
+
+*2026-06-02*
+
+### Added
+
+- Reactive parameters: `fm.param`, `fm.when`, and unified `selection_interval`/`selection_point`, with `bind="legend"` toggles. Parameters drive `scale.domain`, `transform_filter`, and conditional encodings; they statically resolve to their initial value for SVG export and power a live WASM/JS runtime in interactive HTML (domain rescale, crossfilter, legend toggling)
+- Polar `theta2`/`radius2` second extents with radial stacking, enabling annular wedges, coxcombs, and sunburst-style charts
+- Figure-level `title`/`subtitle`/`caption` on composite charts via `.properties()`, rendered once around the composite rather than per panel
+- Typed continuous scales (`LinearScale`, `LogScale`, etc.) auto-infer their domain from the data, matching the dict form
+- `resolve=` on `vconcat`/`hconcat`; `pairplot` shares a single color domain across panels
+- 2-D density (`kde_2d` / `mark_contour`) splits by categorical hue, drawing one contour set per group
+
 ### Changed
 
 - **Breaking:** `transform_window(..., frame=(preceding, following))` now follows the documented Vega/Altair convention, where a negative `preceding` counts rows *before* the current row. A trailing window is `frame=(-k, 0)` (the `k` preceding rows through the current row). The sign was previously inverted, so trailing rolling aggregates silently produced all-null or forward-looking results. Pipelines that compensated for the inverted sign must drop the workaround.
@@ -14,6 +29,19 @@ All notable changes to Ferrum are documented here.
 - `mark_bar`/`mark_area` honor a second positional extent (`y2`/`x2`) for candlestick, floating, and diverging bars; `mark_bar(zero=False)` opts out of the zero-anchored y-domain
 - Integer and nominal columns render on categorical channels (integer-keyed heatmaps, nominal bar `y`) and stack correctly; integer storage still defaults to quantitative
 - Annotation span `label_position` (`top`/`middle`/`bottom`) is honored; unsupported `stack=` on non-stackable marks warns instead of silently dropping marks; empty facet partitions name the dropped key in the warning
+- Two-way faceting (`.facet(row=, col=)`) renders a true grid with per-partition transforms, layered marks, and independent/shared scales — the row dimension was previously dropped
+- Silent failures across the render pipeline now surface as warnings or errors instead of producing blank or wrong output
+- `mark_line` `detail=` groups by non-Utf8 columns; axis titles use the source field name rather than the internal transform column
+- `mark_violin` and `mark_area` honor color/hue instead of collapsing groups; per-layer `aggregate=` and `bin=` are no longer dropped on layered charts; `transform_top_k` aggregates integer columns instead of counting rows
+- `fm.when` numeric conditionals apply instead of silently no-op'ing; radial bars stack outward and `stack=` is normalized across `x`/`y`/`theta`/`radius`
+- `mark_arc` with nominal theta renders a Nightingale coxcomb; polar bars render equal full-circle angular bands; `stat_aggregate` and all stat transforms accept integer/uint/bool groupby keys; ordinal-color area legend swatches match fills; box-inner layers color-encode by hue
+- `title=None` and `Axis(title="")` truly suppress axis titles; annotations anchor to categorical/ordinal axes
+- errorbar/errorband compute per-hue extents instead of pooling across groups; unsupported mark shapes and stack offsets raise instead of silently defaulting
+- Zoomed lines and areas stay clipped within their panel in interactive exports; two-way facet row-strip labels render on the right edge
+
+### Other
+
+- Expanded the docs-site Showcase with composed charts unlocked by the flexibility work; flattened the Gallery/Showcase navigation
 
 ## 0.14.0
 
