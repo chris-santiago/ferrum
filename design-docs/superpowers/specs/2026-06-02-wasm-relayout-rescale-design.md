@@ -190,3 +190,18 @@ do not. Wheel/pan continue to write the GPU affine directly.
   glyph path instead of GPU-drawn text). This must be resolved before the axis-text
   portion of re-layout is designed in the plan; it does not affect the crate
   extraction, payload format, or trigger wiring, which proceed regardless.
+- **Reconsider Option 1 (screen-space line width) as the lighter fix — added 2026-06-03.**
+  v0.15.1 browser validation of the INT-1 cross-panel rescale fix showed that the
+  *uniform* zoom/magnify path (sx==sy) renders lines cleanly (they only thicken
+  evenly), and the "ribbon" appears *exclusively* under the *non-uniform* rescale
+  affine (sx≠sy). This localizes the defect to the non-uniform case and is strong
+  evidence that an affine-invariant **screen-space line width** in the mesh shader —
+  i.e. apply the per-vertex width offset *after* the affine so it is not stretched by
+  the non-uniform scale — would resolve FA-16 on its own, without the full panel
+  re-layout. Option 1 is more surgical than the re-layout this spec currently prefers
+  (it touches only line/area mesh width, not tick/label spacing or curve resampling).
+  Trade-off: Option 1 fixes only stroke width (ticks/labels under the affine remain
+  approximate), whereas re-layout fixes everything; but if the brushed-detail axis
+  fidelity is acceptable, Option 1 is the cheaper path. Evaluate Option 1 first when
+  FA-16 is picked up; reserve the re-layout for when correct ticks/labels/resampling at
+  the rescaled domain are also required.
