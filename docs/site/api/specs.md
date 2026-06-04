@@ -1,11 +1,12 @@
-# Repeat
+# Specs
 
-`Repeat` for faceted repeat patterns.
+Low-level serialized specs — `ChartSpec`, `EncodingSpec`.
 
 ::: ferrum
     options:
       members:
-        - Repeat
+        - ChartSpec
+        - EncodingSpec
       show_root_heading: false
       show_root_toc_entry: false
       filters: ["!^_"]

@@ -1,19 +1,21 @@
-# ferrum.composition
+# Composition
 
-Compound view classes for combining multiple charts into a single output.
+`HConcatChart`, `VConcatChart`, `LayerChart`, `hconcat`, `vconcat`, `concat`.
 
-This module provides:
-
-- **HConcatChart** / **VConcatChart** -- horizontal and vertical concatenation (`|` and `&` operators)
-- **LayerChart** -- overlay multiple charts on shared axes (class-based `+` alternative)
-- **ConcatChart** -- wrapping grid layout with configurable column count
-- **JointChart** -- central plot with marginal distributions
-- **RepeatChart** -- template chart repeated across field combinations
-- **ClusterMapChart** -- clustered heatmap with dendrograms
-
-::: ferrum.composition
+::: ferrum
     options:
-      members_order: source
+      members:
+        - ClusterMapChart
+        - ConcatChart
+        - HConcatChart
+        - JointChart
+        - LayerChart
+        - RepeatChart
+        - VConcatChart
+        - concat
+        - hconcat
+        - vconcat
       show_root_heading: false
       show_root_toc_entry: false
       filters: ["!^_"]
+      members_order: source

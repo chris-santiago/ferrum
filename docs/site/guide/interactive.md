@@ -218,7 +218,7 @@ Clicking a point in the scatter selects all marks that share the same `category`
 
 ## Listening for selections in Python
 
-For programmatic responses to user interaction, register a callback with [`on_selection_change`][ferrum._interactive.InteractiveChart.on_selection_change]:
+For programmatic responses to user interaction, register a callback with `on_selection_change`:
 
 ```python
 import ferrum as fm

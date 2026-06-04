@@ -32,7 +32,7 @@ If you think in `ggplot() + geom_*() + facet_*()`, the translation to Ferrum is 
 | `stat_density()` | [`.mark_density()`][ferrum.Chart.mark_density] | — |
 | `facet_wrap(~var)` | [`.encode(facet="var")`][ferrum.Chart.encode] | Faceting is an encoding channel. |
 | `facet_grid(row~col)` | [`.encode(facet_row="row", facet_col="col")`][ferrum.Chart.encode] | — |
-| `scale_x_log10()` | `.encode(x=`[`fm.X`][ferrum.X]`("x", scale=`[`fm.Scale`][ferrum.Scale]`(type="log")))` | Scales are values, not global functions. |
+| `scale_x_log10()` | `.encode(x=`[`fm.X`][ferrum.X]`("x", scale=`[`fm.LogScale`][ferrum.LogScale]`()))` | Scales are values, not global functions. |
 | `coord_flip()` | [`.coord("flip")`][ferrum.Chart.coord] | — |
 | `labs(title=, x=, y=)` | [`.labs(x=, y=, title=)`][ferrum.Chart.labs] | Post-hoc axis label shortcut. Also `.properties(title=)` for chart title only. |
 | `xlim()` / `ylim()` | [`.xlim(lo, hi)`][ferrum.Chart.xlim] / [`.ylim(lo, hi)`][ferrum.Chart.ylim] | Axis limit shortcuts. Also `fm.X("field", scale=fm.LinearScale(domain=[lo, hi]))`. |
@@ -126,7 +126,7 @@ plotnine delegates statistical computation to scipy and statsmodels via matplotl
 | Faceting | `facet_wrap`, `facet_grid` | `facet`, `facet_row`, `facet_col` encoding channels |
 | Composition | `+` (layers only) | `+` layer, `\|` [`hconcat`][ferrum.hconcat], `&` [`vconcat`][ferrum.vconcat], [`RepeatChart`][ferrum.RepeatChart], [`JointChart`][ferrum.JointChart] |
 | Coordinates | `coord_flip`, `coord_fixed`, `coord_cartesian`, `coord_polar` | `"flip"`, `"polar"`, `"theta"`, `"radial"` |
-| Scales | Full ggplot2 scale system | Typed scale values with [`fm.Scale(type=, domain=, range=)`][ferrum.Scale] |
+| Scales | Full ggplot2 scale system | Typed scale values like [`fm.LinearScale`][ferrum.LinearScale] / [`fm.LogScale`][ferrum.LogScale] (`domain=`, `range=`) |
 | Themes | ggplot2 theme system (bw, classic, minimal, etc.) | 12 built-in themes (Paper Ink, Slate Citrus, Dark, Publication, Economist, etc.). See [Themes](../guide/themes.md). |
 | Interactivity | matplotlib backends only | WASM/GPU renderer with selections, zoom/pan, linked views via [`.interactive()`][ferrum.Chart.interactive] |
 | Model diagnostics | — | 44 helpers, 28 visualizer classes ([ROC][ferrum.roc_chart], [PR][ferrum.pr_chart], [confusion matrix][ferrum.confusion_matrix_chart], [SHAP][ferrum.shap_beeswarm_chart], [PDP][ferrum.pdp_chart], etc.) via [`ModelSource`][ferrum.ModelSource] |

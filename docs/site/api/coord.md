@@ -1,9 +1,16 @@
-# ferrum.coord
+# Coord
 
-Coordinate system classes that control how positional encodings map to the plot area.
+Coordinate systems — Cartesian, flip, polar, geo, fixed.
 
-::: ferrum.coord
+::: ferrum
     options:
-      members_order: source
+      members:
+        - CoordCartesian
+        - CoordFixed
+        - CoordFlip
+        - CoordGeo
+        - CoordPolar
       show_root_heading: false
       show_root_toc_entry: false
+      filters: ["!^_"]
+      members_order: source

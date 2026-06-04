@@ -1,13 +1,12 @@
-# ferrum.legend
+# Legend
 
-Per-channel legend configuration.
+`Legend` value class for legend configuration.
 
-The `Legend` dataclass controls legend appearance — title, orientation, direction,
-symbols, gradients, and positioning. Pass a `Legend` instance to an encoding
-channel's `legend=` parameter, or use `legend=False` to suppress the legend.
-
-::: ferrum.legend.Legend
+::: ferrum
     options:
+      members:
+        - Legend
+      show_root_heading: false
+      show_root_toc_entry: false
+      filters: ["!^_"]
       members_order: source
-      show_root_heading: true
-      show_root_toc_entry: true

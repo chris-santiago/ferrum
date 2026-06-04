@@ -1,10 +1,12 @@
-# ferrum.chart
+# Chart
 
-The core chart value class.
+The `Chart` class — declaration, encoding, theming, and rendering.
 
-::: ferrum.chart
+::: ferrum
     options:
-      members_order: source
+      members:
+        - Chart
       show_root_heading: false
       show_root_toc_entry: false
       filters: ["!^_"]
+      members_order: source

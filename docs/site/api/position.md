@@ -1,10 +1,15 @@
-# ferrum.position
+# Position
 
-Position adjustment strategies for overlapping marks.
+Position adjustments — `Dodge`, `Stack`, `Jitter`, `Identity`.
 
-::: ferrum.position
+::: ferrum
     options:
-      members_order: source
+      members:
+        - Dodge
+        - Identity
+        - Jitter
+        - Stack
       show_root_heading: false
       show_root_toc_entry: false
       filters: ["!^_"]
+      members_order: source

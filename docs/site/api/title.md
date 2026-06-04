@@ -1,10 +1,12 @@
-# ferrum.title
+# Title
 
-Structured title configuration.
+`Title` value class for figure titles.
 
-::: ferrum.title
+::: ferrum
     options:
-      members_order: source
+      members:
+        - Title
       show_root_heading: false
       show_root_toc_entry: false
       filters: ["!^_"]
+      members_order: source

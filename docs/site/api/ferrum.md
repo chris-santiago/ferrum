@@ -1,9 +1,8 @@
-# ferrum
+# API Reference has moved
 
-Top-level public surface of the `ferrum` package.
+<meta http-equiv="refresh" content="0; url=../ferrum-toc/">
 
-::: ferrum
-    options:
-      members_order: source
-      show_root_heading: false
-      show_root_toc_entry: false
+The monolithic API page has been split into focused per-topic pages for faster
+loading. You are being redirected to the **[API Reference](ferrum-toc.md)**.
+
+If you are not redirected automatically, follow the link above.

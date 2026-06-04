@@ -1,9 +1,12 @@
-# ferrum.render_config
+# Render Config
 
-Per-chart rendering policy configuration for auto-raster behavior.
+`RenderConfig` for auto-raster, scale, and output tuning.
 
-::: ferrum.render_config
+::: ferrum
     options:
-      members_order: source
+      members:
+        - RenderConfig
       show_root_heading: false
       show_root_toc_entry: false
+      filters: ["!^_"]
+      members_order: source

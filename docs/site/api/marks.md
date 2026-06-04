@@ -1,37 +1,62 @@
 # Marks
 
-Marks are the visual primitives of a ferrum chart. Each mark method is
-called on a `Chart` instance and returns the chart for fluent chaining.
+Marks are the visual primitives of a chart — each is a `.mark_*()` method on `Chart`. Full signatures are on the [Chart](chart.md) page; this is a quick index.
 
-All mark methods accept keyword arguments that control visual properties
-(color, size, opacity, stroke, etc.) as constants. To map these properties
-from data columns, use [encoding channels](encoding.md) instead.
-
-This holds for statistical and composite marks too (`mark_density`, `mark_smooth`,
-`mark_boxplot`, …): their transform kwargs (`bandwidth`, `ci`, `bin_count`, …) and
-the constant mark-style kwargs are independent, and style applies to every layer the
-mark emits. See [Marks & Encodings](../guide/marks-encodings.md#friendly-kwarg-aliases).
-
-## Usage
-
-```python
-import ferrum as fm
-
-chart = (
-    fm.Chart(df)
-    .mark_point(size=60, opacity=0.8)
-    .encode(x="weight", y="horsepower", color="origin")
-)
-```
-
-## Mark reference
-
-::: ferrum.chart.Chart
-    options:
-      members_order: source
-      show_root_heading: false
-      show_root_toc_entry: false
-      filters: ["^mark_"]
-      show_labels: false
-      group_by_category: false
-      heading_level: 3
+| Mark |
+|---|
+| [`mark_alpha_selection`][ferrum.Chart.mark_alpha_selection] |
+| [`mark_arc`][ferrum.Chart.mark_arc] |
+| [`mark_area`][ferrum.Chart.mark_area] |
+| [`mark_bar`][ferrum.Chart.mark_bar] |
+| [`mark_boxen`][ferrum.Chart.mark_boxen] |
+| [`mark_boxplot`][ferrum.Chart.mark_boxplot] |
+| [`mark_calibration`][ferrum.Chart.mark_calibration] |
+| [`mark_circle`][ferrum.Chart.mark_circle] |
+| [`mark_class_prediction_error`][ferrum.Chart.mark_class_prediction_error] |
+| [`mark_confusion`][ferrum.Chart.mark_confusion] |
+| [`mark_contour`][ferrum.Chart.mark_contour] |
+| [`mark_cv_scores`][ferrum.Chart.mark_cv_scores] |
+| [`mark_decision_boundary`][ferrum.Chart.mark_decision_boundary] |
+| [`mark_density`][ferrum.Chart.mark_density] |
+| [`mark_discrimination_threshold`][ferrum.Chart.mark_discrimination_threshold] |
+| [`mark_errorband`][ferrum.Chart.mark_errorband] |
+| [`mark_errorbar`][ferrum.Chart.mark_errorbar] |
+| [`mark_function`][ferrum.Chart.mark_function] |
+| [`mark_gain`][ferrum.Chart.mark_gain] |
+| [`mark_geoshape`][ferrum.Chart.mark_geoshape] |
+| [`mark_hex`][ferrum.Chart.mark_hex] |
+| [`mark_histogram`][ferrum.Chart.mark_histogram] |
+| [`mark_image`][ferrum.Chart.mark_image] |
+| [`mark_importance`][ferrum.Chart.mark_importance] |
+| [`mark_intercluster_distance`][ferrum.Chart.mark_intercluster_distance] |
+| [`mark_label`][ferrum.Chart.mark_label] |
+| [`mark_learning_curve`][ferrum.Chart.mark_learning_curve] |
+| [`mark_lift`][ferrum.Chart.mark_lift] |
+| [`mark_line`][ferrum.Chart.mark_line] |
+| [`mark_parallel_coordinates`][ferrum.Chart.mark_parallel_coordinates] |
+| [`mark_pca_scree`][ferrum.Chart.mark_pca_scree] |
+| [`mark_pdp`][ferrum.Chart.mark_pdp] |
+| [`mark_point`][ferrum.Chart.mark_point] |
+| [`mark_pr`][ferrum.Chart.mark_pr] |
+| [`mark_prediction_error`][ferrum.Chart.mark_prediction_error] |
+| [`mark_qq`][ferrum.Chart.mark_qq] |
+| [`mark_rank1d`][ferrum.Chart.mark_rank1d] |
+| [`mark_rank2d`][ferrum.Chart.mark_rank2d] |
+| [`mark_raster`][ferrum.Chart.mark_raster] |
+| [`mark_rect`][ferrum.Chart.mark_rect] |
+| [`mark_residuals`][ferrum.Chart.mark_residuals] |
+| [`mark_ribbon`][ferrum.Chart.mark_ribbon] |
+| [`mark_roc`][ferrum.Chart.mark_roc] |
+| [`mark_rule`][ferrum.Chart.mark_rule] |
+| [`mark_segment`][ferrum.Chart.mark_segment] |
+| [`mark_shap_bar`][ferrum.Chart.mark_shap_bar] |
+| [`mark_shap_beeswarm`][ferrum.Chart.mark_shap_beeswarm] |
+| [`mark_shap_waterfall`][ferrum.Chart.mark_shap_waterfall] |
+| [`mark_silhouette`][ferrum.Chart.mark_silhouette] |
+| [`mark_smooth`][ferrum.Chart.mark_smooth] |
+| [`mark_square`][ferrum.Chart.mark_square] |
+| [`mark_swarm`][ferrum.Chart.mark_swarm] |
+| [`mark_text`][ferrum.Chart.mark_text] |
+| [`mark_tick`][ferrum.Chart.mark_tick] |
+| [`mark_validation_curve`][ferrum.Chart.mark_validation_curve] |
+| [`mark_violin`][ferrum.Chart.mark_violin] |
