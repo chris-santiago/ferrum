@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json as _json
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -94,7 +95,7 @@ def _apply_resolve(charts: list, resolve: Optional[Dict[str, str]]) -> list:
 class _ChartLike(ConfigureMixin):
     """Common rendering plumbing shared by every composition wrapper.
 
-    Concrete subclasses must implement :meth:`show_svg`, :attr:`charts`,
+    Concrete subclasses must implement :meth:`to_svg`, :attr:`charts`,
     :meth:`theme`, :meth:`properties`, and :meth:`__repr__`.  This base
     centralizes the save / show / Jupyter-display / PNG-stub boilerplate
     that previously drifted across five copies (K2 / K3 / K11 / K15).
@@ -106,8 +107,8 @@ class _ChartLike(ConfigureMixin):
     (earlier entries in ``_configure`` are overridden by later ones).
     """
 
-    def show_svg(self) -> str:  # pragma: no cover - abstract
-        raise NotImplementedError(f"{type(self).__name__} must implement show_svg")
+    def to_svg(self) -> str:  # pragma: no cover - abstract
+        raise NotImplementedError(f"{type(self).__name__} must implement to_svg")
 
     def interactive(self, *, toolbar: bool = True):
         """Return an interactive rendering of this composition.
@@ -136,11 +137,11 @@ class _ChartLike(ConfigureMixin):
 
     def show(self) -> None:
         """Print the SVG markup to stdout."""
-        print(self.show_svg())
+        print(self.to_svg())
 
     def _repr_svg_(self) -> str:
         """Return SVG for Jupyter inline display."""
-        return self.show_svg()
+        return self.to_svg()
 
     def _repr_mimebundle_(self, include=None, exclude=None) -> dict:
         """Return a Jupyter MIME bundle for rich display.
@@ -149,13 +150,14 @@ class _ChartLike(ConfigureMixin):
         methods when both exist, so providing it lets front-ends negotiate
         formats without falling back to text repr.
         """
-        return {"image/svg+xml": self.show_svg()}
+        return {"image/svg+xml": self.to_svg()}
 
-    def show_png(self, *, scale: float = 2.0) -> bytes:
-        """Render to PNG bytes.
+    def to_png(self, *, scale: float = 2.0) -> bytes:
+        """Return the composition rendered as PNG bytes.
 
-        Rasterises the SVG produced by ``show_svg()`` through the Rust
-        resvg pipeline — the same rasteriser ``Chart.show_png()`` uses.
+        This **returns** the PNG-encoded image data; it does not display the
+        composition.  Rasterises the SVG produced by :meth:`to_svg` through
+        the Rust resvg pipeline — the same rasteriser ``Chart.to_png()`` uses.
 
         Parameters
         ----------
@@ -172,7 +174,87 @@ class _ChartLike(ConfigureMixin):
         """
         from ferrum._core import rasterize_svg
 
-        return bytes(rasterize_svg(self.show_svg(), scale=scale))
+        return bytes(rasterize_svg(self.to_svg(), scale=scale))
+
+    def to_html(self, *, embed_wasm: bool = True, toolbar: bool = True) -> str:
+        """Return the composition as a self-contained interactive HTML document.
+
+        This **returns** the HTML markup; it does not display the composition
+        or write it to disk.  The returned string is byte-identical to what
+        ``save(path)`` writes for an ``.html`` destination — it embeds the
+        WASM-backed interactive renderer rather than a static SVG snapshot.
+
+        Parameters
+        ----------
+        embed_wasm : bool, default True
+            When True, the WASM binary is base64-inlined for single-file
+            distribution.  When False, the document references an adjacent
+            ``ferrum_wasm_bg.wasm`` sidecar that must be served alongside it.
+        toolbar : bool, default True
+            When False, the interactive toolbar (zoom / pan controls, export
+            button) is hidden in the rendered HTML.
+
+        Returns
+        -------
+        str
+            A complete, self-contained interactive HTML document.
+        """
+        from ferrum._html import assemble_html
+
+        from ferrum.display import _extract_title_text
+
+        ic = self.interactive(toolbar=toolbar)
+        title = _extract_title_text(getattr(self, "_title", None))
+        return assemble_html(
+            ic._scene_json,
+            packed_data=ic._packed_data,
+            title=title,
+            embed_wasm=embed_wasm,
+            toolbar=toolbar,
+        )
+
+    def show_svg(self) -> str:
+        """Render the composition to an SVG string.
+
+        .. deprecated:: 0.16.0
+            Use :meth:`to_svg` instead.  ``show_svg`` will be removed in a
+            future release.  It now forwards to :meth:`to_svg`.
+
+        Returns
+        -------
+        str
+            SVG markup for the composition.
+        """
+        warnings.warn(
+            f"{type(self).__name__}.show_svg() is deprecated; use .to_svg() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.to_svg()
+
+    def show_png(self, *, scale: float = 2.0) -> bytes:
+        """Render the composition to PNG bytes.
+
+        .. deprecated:: 0.16.0
+            Use :meth:`to_png` instead.  ``show_png`` will be removed in a
+            future release.  It now forwards to :meth:`to_png`.
+
+        Parameters
+        ----------
+        scale : float, default 2.0
+            Pixel-density multiplier applied to the SVG's intrinsic dimensions.
+
+        Returns
+        -------
+        bytes
+            PNG image as raw bytes.
+        """
+        warnings.warn(
+            f"{type(self).__name__}.show_png() is deprecated; use .to_png() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.to_png(scale=scale)
 
     def save(
         self,
@@ -211,11 +293,11 @@ class _ChartLike(ConfigureMixin):
         dest = Path(path)
         fmt = format or dest.suffix.lstrip(".")
         if fmt == "svg":
-            dest.write_text(self.show_svg(), encoding="utf-8")
+            dest.write_text(self.to_svg(), encoding="utf-8")
         elif fmt == "png":
-            dest.write_bytes(self.show_png(scale=scale))
+            dest.write_bytes(self.to_png(scale=scale))
         elif fmt == "pdf":
-            save_chart_svg(self.show_svg(), str(dest), scale=scale)
+            save_chart_svg(self.to_svg(), str(dest), scale=scale)
         elif fmt == "html":
             ic = self.interactive(toolbar=toolbar)
             ic.save(str(dest), **kwargs)
@@ -543,7 +625,7 @@ class HConcatChart(_CompositeBase):
         charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
         return _merge_child_scenes(charts, self.spacing, layout="horizontal")
 
-    def show_svg(self) -> str:
+    def to_svg(self) -> str:
         """Render the horizontally concatenated charts to an SVG string.
 
         Returns
@@ -554,7 +636,7 @@ class HConcatChart(_CompositeBase):
         from ferrum._core import compose_svg_horizontal
 
         charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
-        svgs = [c.show_svg() for c in charts]
+        svgs = [c.to_svg() for c in charts]
         return compose_svg_horizontal(
             svgs,
             spacing=self.spacing,
@@ -626,7 +708,7 @@ class VConcatChart(_CompositeBase):
         charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
         return _merge_child_scenes(charts, self.spacing, layout="vertical")
 
-    def show_svg(self) -> str:
+    def to_svg(self) -> str:
         """Render the vertically concatenated charts to an SVG string.
 
         Returns
@@ -637,7 +719,7 @@ class VConcatChart(_CompositeBase):
         from ferrum._core import compose_svg_vertical
 
         charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
-        svgs = [c.show_svg() for c in charts]
+        svgs = [c.to_svg() for c in charts]
         return compose_svg_vertical(
             svgs,
             spacing=self.spacing,
@@ -781,7 +863,7 @@ class JointChart(_ChartLike):
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) by merging child scenes in a 2x2 grid.
 
-        Grid layout mirrors the SVG path (``show_svg``):
+        Grid layout mirrors the SVG path (``to_svg``):
           - top marginal  at (row=0, col=0)
           - center        at (row=1, col=0)
           - right marginal at (row=1, col=1)
@@ -813,7 +895,7 @@ class JointChart(_ChartLike):
 
         return _merge_child_scenes_nonuniform_grid(cells, self.spacing)
 
-    def show_svg(self) -> str:
+    def to_svg(self) -> str:
         """Render the joint chart to an SVG string.
 
         Returns
@@ -835,9 +917,9 @@ class JointChart(_ChartLike):
         right = self._inject_parent_config(self.right) if self.right is not None else None
         top_chart = top.axis(show=False) if top is not None else None
         right_chart = right.axis(show=False) if right is not None else None
-        top_svg = top_chart.show_svg() if top_chart is not None else None
-        right_svg = right_chart.show_svg() if right_chart is not None else None
-        cells = [top_svg, None, center.show_svg(), right_svg]
+        top_svg = top_chart.to_svg() if top_chart is not None else None
+        right_svg = right_chart.to_svg() if right_chart is not None else None
+        cells = [top_svg, None, center.to_svg(), right_svg]
         marginal_share = 1.0 / (self.ratio + 1)
         center_share = self.ratio / (self.ratio + 1)
         return compose_svg_grid(
@@ -1002,7 +1084,7 @@ class RepeatChart(_ChartLike):
           the template on ``row_field == col_field`` cells.
         - 1-D wrap (only one of *row* or *column* set): the populated
           field list, paired with ``None`` on the missing axis.  Geometry
-          is applied by :meth:`show_svg` driven by ``columns``.
+          is applied by :meth:`to_svg` driven by ``columns``.
         - Layer-only (``layer=`` set, *row* and *column* both ``None``):
           a single cell containing all layers.
 
@@ -1237,7 +1319,7 @@ class RepeatChart(_ChartLike):
             n_cols, _ = self._wrap_dimensions(len(expanded_charts))
         return _merge_child_scenes_grid(expanded_charts, self.spacing, columns=n_cols)
 
-    def show_svg(self) -> str:
+    def to_svg(self) -> str:
         """Render the repeated grid to an SVG string.
 
         Returns
@@ -1264,13 +1346,13 @@ class RepeatChart(_ChartLike):
             for row_field, col_field, chart in cells:
                 ri = self.row.index(row_field)
                 ci = self.column.index(col_field)
-                grid[ri * n_cols + ci] = chart.show_svg()
+                grid[ri * n_cols + ci] = chart.to_svg()
         else:
             n_cells = len(cells)
             n_cols, n_rows = self._wrap_dimensions(n_cells)
             grid = [None] * (n_rows * n_cols)
             for idx, (_, _, chart) in enumerate(cells):
-                grid[idx] = chart.show_svg()
+                grid[idx] = chart.to_svg()
         return compose_svg_grid(
             grid,
             rows=n_rows,
@@ -1430,7 +1512,7 @@ class ClusterMapChart(_ChartLike):
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) by merging child scenes in a 2x2 grid.
 
-        Grid layout mirrors the SVG path (``show_svg``):
+        Grid layout mirrors the SVG path (``to_svg``):
           - col_dendrogram at (row=0, col=1) -- above heatmap
           - row_dendrogram at (row=1, col=0) -- left of heatmap
           - heatmap        at (row=1, col=1) -- main content
@@ -1473,7 +1555,7 @@ class ClusterMapChart(_ChartLike):
 
         return _merge_child_scenes_nonuniform_grid(cells, self.spacing)
 
-    def show_svg(self) -> str:
+    def to_svg(self) -> str:
         """Render the cluster map to an SVG string.
 
         Returns
@@ -1510,9 +1592,9 @@ class ClusterMapChart(_ChartLike):
             if self.row_dendrogram is not None
             else None
         )
-        col_svg = col_dendro.show_svg() if col_dendro is not None else None
-        row_svg = row_dendro.show_svg() if row_dendro is not None else None
-        cells = [None, col_svg, row_svg, heatmap.show_svg()]
+        col_svg = col_dendro.to_svg() if col_dendro is not None else None
+        row_svg = row_dendro.to_svg() if row_dendro is not None else None
+        cells = [None, col_svg, row_svg, heatmap.to_svg()]
         return compose_svg_grid(
             cells,
             rows=2,
@@ -1625,7 +1707,7 @@ class LayerChart(_ChartLike):
         merged = self._build_merged()
         return _render_scene(merged)
 
-    def show_svg(self) -> str:
+    def to_svg(self) -> str:
         """Render the layered charts to an SVG string.
 
         Merges all layers using the ``Chart + Chart`` operator which
@@ -1638,7 +1720,7 @@ class LayerChart(_ChartLike):
             SVG markup with all layers rendered in a single plot area.
         """
         merged = self._build_merged()
-        return merged.show_svg()
+        return merged.to_svg()
 
     def _build_merged(self):
         """Merge member charts into a single multi-layer Chart via ``+``.
@@ -1740,7 +1822,7 @@ class ConcatChart(_CompositeBase):
         n_cols = min(n_cols, len(render_charts))
         return _merge_child_scenes_grid(render_charts, self.spacing, columns=n_cols)
 
-    def show_svg(self) -> str:
+    def to_svg(self) -> str:
         """Render the concatenated charts to an SVG string.
 
         Returns
@@ -1760,7 +1842,7 @@ class ConcatChart(_CompositeBase):
 
         grid: list = [None] * (n_rows * n_cols)
         for idx, chart in enumerate(render_charts):
-            grid[idx] = chart.show_svg()
+            grid[idx] = chart.to_svg()
 
         return compose_svg_grid(
             grid,

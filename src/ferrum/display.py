@@ -62,9 +62,9 @@ def save_chart(
     path = Path(path)
     fmt = format or path.suffix.lstrip(".").lower()
     if fmt == "svg":
-        path.write_text(chart.show_svg())
+        path.write_text(chart.to_svg())
     elif fmt == "png":
-        path.write_bytes(chart.show_png(scale=scale))
+        path.write_bytes(chart.to_png(scale=scale))
     elif fmt == "html":
         scene_json, packed_data = _render_scene_json(chart)
         from ferrum._html import assemble_html, _copy_wasm_sidecar
@@ -85,7 +85,7 @@ def save_chart(
         scene_json, _ = _render_scene_json(chart)
         path.write_text(scene_json)
     elif fmt == "pdf":
-        save_chart_svg(chart.show_svg(), str(path), scale=scale)
+        save_chart_svg(chart.to_svg(), str(path), scale=scale)
     elif fmt == "":
         raise ValueError(f"save({str(path)!r}) requires a format= or a path with extension.")
     else:
@@ -118,13 +118,13 @@ def show_chart(chart: "Chart") -> None:
         try:
             from IPython.display import display, SVG
 
-            display(SVG(chart.show_svg()))
+            display(SVG(chart.to_svg()))
             return
         except Exception:
             pass
     # Browser fallback: write temp HTML, open in browser
     with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False) as f:
-        f.write(_wrap_svg_in_html(chart.show_svg(), title=_extract_title_text(chart._title)))
+        f.write(_wrap_svg_in_html(chart.to_svg(), title=_extract_title_text(chart._title)))
         url = f"file://{f.name}"
     webbrowser.open(url)
 
@@ -175,7 +175,7 @@ def save_chart_svg(svg: str, path: str, *, scale: float = 2.0) -> None:
     Parameters
     ----------
     svg : str
-        Complete SVG document string (as returned by ``show_svg()``).
+        Complete SVG document string (as returned by ``to_svg()``).
     path : str
         Destination file path for the PDF output.
     scale : float, default 2.0

@@ -17,7 +17,7 @@ class RenderConfig:
 
     For one-off overrides, prefer the ``raster=`` keyword on output
     methods (``chart.show(raster=False)``, ``chart.save(..., raster=False)``,
-    ``chart.show_svg(raster=False)``).  Use ``RenderConfig`` when you want
+    ``chart.to_svg(raster=False)``).  Use ``RenderConfig`` when you want
     to bake the policy into the chart object itself.
 
     Parameters

@@ -751,7 +751,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
     >>> import polars as pl
     >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
     >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y")
-    >>> svg = chart.show_svg()
+    >>> svg = chart.to_svg()
     """
 
     __slots__ = (
@@ -2909,7 +2909,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         render_config : RenderConfig or None, optional
             Rendering policy configuration. Controls auto-raster threshold
             and behavior. For one-off overrides prefer the ``raster=``
-            keyword on ``.show()`` / ``.save()`` / ``.show_svg()`` instead.
+            keyword on ``.show()`` / ``.save()`` / ``.to_svg()`` instead.
 
         Returns
         -------
