@@ -9,6 +9,11 @@ last such bare identifier in the block names the variable that gets rendered.
 The variable must resolve to an object with a ``to_png`` method; blocks where
 it does not (or where no bare identifier is found) are skipped silently.
 
+All code blocks within a single page share one namespace (executed in document
+order), so continuation snippets that reference variables defined in earlier
+blocks work correctly — exactly as a reader running the page top-to-bottom
+would experience. Blocks from different pages never share state.
+
 Usage:
     uv run scripts/generate-guide-pngs.py
 """
@@ -17,7 +22,6 @@ from __future__ import annotations
 
 import re
 import traceback
-import types
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -54,21 +58,14 @@ def extract_blocks(md_text: str) -> list[tuple[str, str | None]]:
     return blocks
 
 
-def run_block(code: str, var_name: str) -> bytes | None:
-    """Run a code block and return PNG bytes, or None if var is not a chart.
+def exec_block(code: str, ns: dict) -> None:
+    """Exec a code block into the shared page namespace.
 
-    Returns None when the named variable does not have a ``to_png`` method,
-    which causes the caller to skip the block silently.
+    Uses plain ``exec`` so that top-level assignments are written into ``ns``
+    (the globals dict) and remain visible to subsequent blocks on the same page.
     """
-    ns: dict = {}
     compiled = compile(code, "<guide-block>", "exec")
-    # Using types.FunctionType to create an isolated execution context
-    fn = types.FunctionType(compiled, ns)
-    fn()
-    chart_obj = ns[var_name]
-    if not hasattr(chart_obj, "to_png"):
-        return None
-    return chart_obj.to_png()
+    exec(compiled, ns)  # noqa: S102
 
 
 def main() -> None:
@@ -85,6 +82,10 @@ def main() -> None:
         print(f"\n{page_name} ({len(blocks)} blocks)")
         chart_idx = 0
 
+        # One shared namespace per page so continuation blocks can reference
+        # variables defined by earlier blocks, mirroring a top-to-bottom read.
+        page_ns: dict = {}
+
         for code, var_name in blocks:
             if var_name is None:
                 continue
@@ -95,12 +96,14 @@ def main() -> None:
             out_path = img_dir / out_name
 
             try:
-                png = run_block(code, var_name)
-                if png is None:
-                    # Bare identifier resolved to a non-chart object; skip silently.
+                exec_block(code, page_ns)
+                chart_obj = page_ns.get(var_name)
+                if chart_obj is None or not hasattr(chart_obj, "to_png"):
+                    # Bare identifier resolved to a non-chart object or is absent; skip silently.
                     chart_idx -= 1
                     total -= 1
                     continue
+                png = chart_obj.to_png()
                 out_path.write_bytes(png)
                 print(f"  [OK]   {out_name} ({len(png)} bytes)")
                 ok += 1
