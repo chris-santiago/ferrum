@@ -193,10 +193,7 @@ def test_mark_label_manual_override_bypasses_avoidance(label_df):
     The SVG must contain every label text value and render without error.
     """
     svg = (
-        fm.Chart(label_df)
-        .mark_label(dx=5.0, dy=-15.0)
-        .encode(x="x", y="y", text="label")
-        .to_svg()
+        fm.Chart(label_df).mark_label(dx=5.0, dy=-15.0).encode(x="x", y="y", text="label").to_svg()
     )
     assert "<svg" in svg
     for lbl in ("first", "second", "third"):

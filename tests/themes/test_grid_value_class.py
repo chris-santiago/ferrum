@@ -294,9 +294,7 @@ def test_minor_true_categorical_x_no_extra_vertical_lines():
     t_minor2 = fm.Theme(grid=Grid(major=True, minor=True))
     t_no_minor2 = fm.Theme(grid=Grid(major=True, minor=False))
     svg_minor2 = fm.Chart(df2).mark_point().encode(x="cat", y="cat2").theme(t_minor2).to_svg()
-    svg_no_minor2 = (
-        fm.Chart(df2).mark_point().encode(x="cat", y="cat2").theme(t_no_minor2).to_svg()
-    )
+    svg_no_minor2 = fm.Chart(df2).mark_point().encode(x="cat", y="cat2").theme(t_no_minor2).to_svg()
     assert svg_minor2.count("<line") == svg_no_minor2.count("<line"), (
         "Both-categorical chart should have the same number of <line> elements "
         "with minor=True and minor=False — neither axis has a continuum to subdivide."

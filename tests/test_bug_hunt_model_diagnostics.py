@@ -896,9 +896,7 @@ def test_prediction_error_chart_reference_line_present():
     a diagonal reference line element."""
     y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.2])
-    svg = ferrum.prediction_error_chart(
-        y_true=y_true, y_pred=y_pred, reference_line=True
-    ).to_svg()
+    svg = ferrum.prediction_error_chart(y_true=y_true, y_pred=y_pred, reference_line=True).to_svg()
     assert "<svg" in svg
     # Reference line is rendered as a line or path element
     assert "<line" in svg or "<path" in svg

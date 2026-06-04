@@ -141,10 +141,7 @@ class TestSortSVGOrder:
         """sort='ascending' → tick labels appear in a-b-c order, not insertion order."""
         svg_default = fm.Chart(_cat_df()).mark_bar().encode(x=fm.X("cat"), y="val").to_svg()
         svg_asc = (
-            fm.Chart(_cat_df())
-            .mark_bar()
-            .encode(x=fm.X("cat", sort="ascending"), y="val")
-            .to_svg()
+            fm.Chart(_cat_df()).mark_bar().encode(x=fm.X("cat", sort="ascending"), y="val").to_svg()
         )
         labels_asc = [l for l in _extract_tick_labels(svg_asc) if l in ("a", "b", "c")]
         assert labels_asc == ["a", "b", "c"], (
@@ -175,10 +172,7 @@ class TestSortSVGOrder:
     def test_sort_ascending_differs_from_descending_in_svg(self):
         """Ascending and descending produce DIFFERENT SVG tick orders (both implemented)."""
         svg_asc = (
-            fm.Chart(_cat_df())
-            .mark_bar()
-            .encode(x=fm.X("cat", sort="ascending"), y="val")
-            .to_svg()
+            fm.Chart(_cat_df()).mark_bar().encode(x=fm.X("cat", sort="ascending"), y="val").to_svg()
         )
         svg_desc = (
             fm.Chart(_cat_df())
@@ -574,9 +568,7 @@ class TestLegendKwargsSVGPosition:
                 "val": [0.1, 0.25, 0.5, 0.75, 0.9],
             }
         )
-        svg_default = (
-            fm.Chart(df).mark_point().encode(x="x", y="y", color=fm.Color("val")).to_svg()
-        )
+        svg_default = fm.Chart(df).mark_point().encode(x="x", y="y", color=fm.Color("val")).to_svg()
         svg_pct = (
             fm.Chart(df)
             .mark_point()

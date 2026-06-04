@@ -389,9 +389,7 @@ class TestBaselineOnText:
                 "label": ["X", "Y"],
             }
         )
-        svg = (
-            fm.Chart(df).mark_text(baseline="middle").encode(x="x", y="y", text="label").to_svg()
-        )
+        svg = fm.Chart(df).mark_text(baseline="middle").encode(x="x", y="y", text="label").to_svg()
         assert "dominant-baseline" in svg
 
 
@@ -942,9 +940,7 @@ class TestRound2Fixes:
         X, y = make_classification(n_samples=50, n_features=5, n_informative=3, random_state=42)
         model = RandomForestClassifier(n_estimators=10, random_state=42).fit(X, y)
 
-        svg_arctic = fm.confusion_matrix_chart(
-            model, X, y, theme=fm.themes.arctic_signal
-        ).to_svg()
+        svg_arctic = fm.confusion_matrix_chart(model, X, y, theme=fm.themes.arctic_signal).to_svg()
         svg_paper = fm.confusion_matrix_chart(model, X, y, theme=fm.themes.paper_ink).to_svg()
         assert "<svg" in svg_arctic
         assert svg_arctic != svg_paper, (
@@ -1425,9 +1421,7 @@ class TestQqHexIntegerCoercion:
 
     def test_mark_hex_int_aggregate_field_renders(self):
         """mark_hex with an integer aggregate field coerces and renders."""
-        df = pl.DataFrame(
-            {"x": list(range(40)), "y": list(range(40, 80)), "w": list(range(40))}
-        )
+        df = pl.DataFrame({"x": list(range(40)), "y": list(range(40, 80)), "w": list(range(40))})
         svg = fm.Chart(df).mark_hex(aggregate="mean", field="w").encode(x="x", y="y").to_svg()
         assert svg.lstrip().startswith("<svg")
 
@@ -1486,7 +1480,9 @@ class TestJointplotHist:
     def test_jointplot_hist_with_xlim_ylim_renders(self):
         """The xlim/ylim scale-domain branch of kind='hist' renders correctly."""
         df = _spread_df()
-        svg = fm.jointplot(df, x="x", y="y", kind="hist", xlim=(-3.0, 3.0), ylim=(-3.0, 3.0)).to_svg()
+        svg = fm.jointplot(
+            df, x="x", y="y", kind="hist", xlim=(-3.0, 3.0), ylim=(-3.0, 3.0)
+        ).to_svg()
         assert svg.lstrip().startswith("<svg"), "Expected SVG output with xlim/ylim"
         assert svg.count("<rect") > 10, (
             f"Expected >10 <rect> elements with xlim/ylim, got {svg.count('<rect')}"

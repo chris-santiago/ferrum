@@ -414,9 +414,7 @@ def test_detail_bool_splits_into_two_polylines(
     TODAY: 1 polyline (two groups merged).
     AFTER FIX: 2 polylines (True group, False group).
     """
-    svg = (
-        fm.Chart(two_group_bool_df).mark_line().encode(x="x:Q", y="y:Q", detail="flag:N").to_svg()
-    )
+    svg = fm.Chart(two_group_bool_df).mark_line().encode(x="x:Q", y="y:Q", detail="flag:N").to_svg()
     n = _polyline_count(svg)
     assert n == 2, (
         f"encode(detail='flag:N') with a Boolean column must produce 2 polylines, "

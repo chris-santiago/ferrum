@@ -128,9 +128,7 @@ class TestResidplot:
 
     def test_mark_suppress_reference(self, scatter_df):
         default_svg = fm.residplot(scatter_df, x="x", y="y").to_svg()
-        suppressed_svg = fm.residplot(
-            scatter_df, x="x", y="y", mark={"reference": False}
-        ).to_svg()
+        suppressed_svg = fm.residplot(scatter_df, x="x", y="y", mark={"reference": False}).to_svg()
         default_dashes = default_svg.count("stroke-dasharray")
         suppressed_dashes = suppressed_svg.count("stroke-dasharray")
         assert suppressed_dashes < default_dashes

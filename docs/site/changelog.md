@@ -4,13 +4,25 @@ All notable changes to Ferrum are documented here.
 
 ## Unreleased
 
-### Changed
+*No unreleased changes.*
 
-- Renamed the output converters `Chart.show_svg()` → [`Chart.to_svg()`][ferrum.Chart.to_svg] and `Chart.show_png()` → [`Chart.to_png()`][ferrum.Chart.to_png], establishing a clear convention across the export surface: `to_*` returns an in-memory value, [`save(path)`][ferrum.Chart.save] writes to disk, and [`show()`][ferrum.Chart.show] displays. The old names remain as deprecated aliases that emit a `DeprecationWarning` and will be removed in a future release.
+## 0.16.0
+
+*2026-06-04*
 
 ### Added
 
 - [`Chart.to_html()`][ferrum.Chart.to_html] returns the self-contained interactive HTML page as a string, byte-identical to what `save("out.html")` writes. It accepts the same `embed_wasm=`, `toolbar=`, and `raster=` keywords as the HTML save path. This completes the `to_*` converter family (`to_svg`, `to_png`, `to_html`).
+
+### Changed
+
+- Renamed the output converters `Chart.show_svg()` → [`Chart.to_svg()`][ferrum.Chart.to_svg] and `Chart.show_png()` → [`Chart.to_png()`][ferrum.Chart.to_png], establishing a clear convention across the export surface: `to_*` returns an in-memory value, [`save(path)`][ferrum.Chart.save] writes to disk, and [`show()`][ferrum.Chart.show] displays. The old `show_svg`/`show_png` names remain as deprecated aliases that emit a `DeprecationWarning` and will be removed after 0.16.0.
+
+### Fixed
+
+- Statistical transforms now accept **integer columns**. `mark_density` (1-D and 2-D KDE), `mark_qq`, `mark_hex`, and 2-D binning previously raised `column '<x>' must be Float64` on integer data (counts, ages, years, ranks); they now coerce numeric columns to floating point. Genuinely non-numeric columns still raise a clear error.
+- [`jointplot(kind="hist")`][ferrum.jointplot] now renders a 2-D histogram instead of raising `unknown column 'bin_x_start'`. The center panel is encoded against the correct `Bin2D` output columns (`x_lo`/`x_hi`/`y_lo`/`y_hi`/`count`) so the bins tile the plane instead of collapsing.
+- Removed two panic-prone internal downcasts in the 2-D binning transform; bad input now returns a normal error rather than risking a panic.
 
 ## 0.15.3
 

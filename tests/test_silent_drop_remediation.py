@@ -105,10 +105,7 @@ class TestSort:
     def test_sort_ascending_gives_alpha_order(self):
         """sort='ascending' → ticks appear in alphabetical order."""
         svg = (
-            fm.Chart(_cat_df())
-            .mark_bar()
-            .encode(x=fm.X("cat", sort="ascending"), y="val")
-            .to_svg()
+            fm.Chart(_cat_df()).mark_bar().encode(x=fm.X("cat", sort="ascending"), y="val").to_svg()
         )
         labels = _extract_text_labels(svg)
         cat_labels = [l for l in labels if l in ("a", "b", "c")]
@@ -352,9 +349,7 @@ class TestFormatType:
 
     def test_format_dot2f_produces_two_decimal_places(self):
         """format='.2f' → x tick labels show exactly 2 decimal places (e.g. '1.00')."""
-        svg = (
-            fm.Chart(_numeric_df()).mark_point().encode(x=fm.X("x", format=".2f"), y="y").to_svg()
-        )
+        svg = fm.Chart(_numeric_df()).mark_point().encode(x=fm.X("x", format=".2f"), y="y").to_svg()
         labels = _extract_text_labels(svg)
         two_decimal = [l for l in labels if re.fullmatch(r"\d+\.\d{2}", l)]
         assert two_decimal, (
@@ -1045,9 +1040,7 @@ class TestStrokeDashSVG:
     def test_scatter_stroke_dash_index_1_is_dashed(self):
         """stroke_dash index 1 → stroke-dasharray='6,3'."""
         df = pl.DataFrame({"x": [1.0], "y": [1.0], "sd": [1.0]})
-        svg = (
-            fm.Chart(df).mark_point(filled=False).encode(x="x", y="y", stroke_dash="sd").to_svg()
-        )
+        svg = fm.Chart(df).mark_point(filled=False).encode(x="x", y="y", stroke_dash="sd").to_svg()
         assert 'stroke-dasharray="6,3"' in svg, (
             f"Expected stroke-dasharray=6,3 for index 1; got:\n{svg[:2000]}"
         )
@@ -1055,9 +1048,7 @@ class TestStrokeDashSVG:
     def test_scatter_stroke_dash_index_2_is_dotted(self):
         """stroke_dash index 2 → stroke-dasharray='2,3'."""
         df = pl.DataFrame({"x": [1.0], "y": [1.0], "sd": [2.0]})
-        svg = (
-            fm.Chart(df).mark_point(filled=False).encode(x="x", y="y", stroke_dash="sd").to_svg()
-        )
+        svg = fm.Chart(df).mark_point(filled=False).encode(x="x", y="y", stroke_dash="sd").to_svg()
         assert 'stroke-dasharray="2,3"' in svg, (
             f"Expected stroke-dasharray=2,3 for index 2; got:\n{svg[:2000]}"
         )
@@ -1065,9 +1056,7 @@ class TestStrokeDashSVG:
     def test_scatter_stroke_dash_index_3_is_dash_dot(self):
         """stroke_dash index 3 → stroke-dasharray='6,3,2,3'."""
         df = pl.DataFrame({"x": [1.0], "y": [1.0], "sd": [3.0]})
-        svg = (
-            fm.Chart(df).mark_point(filled=False).encode(x="x", y="y", stroke_dash="sd").to_svg()
-        )
+        svg = fm.Chart(df).mark_point(filled=False).encode(x="x", y="y", stroke_dash="sd").to_svg()
         assert 'stroke-dasharray="6,3,2,3"' in svg, (
             f"Expected stroke-dasharray=6,3,2,3 for index 3; got:\n{svg[:2000]}"
         )
@@ -1187,10 +1176,7 @@ class TestFillOpacitySVG:
             }
         )
         svg = (
-            fm.Chart(df)
-            .mark_point()
-            .encode(x="x", y="y", fill_opacity="fo", opacity="op")
-            .to_svg()
+            fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo", opacity="op").to_svg()
         )
         assert "<svg" in svg
         # fill-opacity attribute appears (from fill_opacity channel)
@@ -1306,16 +1292,12 @@ def _text_df_singleline() -> pl.DataFrame:
 class TestMarkTextMultiline:
     def test_multiline_text_produces_tspan_elements(self):
         """mark_text with \\n in content produces <tspan> children in the SVG."""
-        svg = (
-            fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").to_svg()
-        )
+        svg = fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").to_svg()
         assert "<tspan" in svg, "Expected <tspan> elements for multiline text; got:\n" + svg[:3000]
 
     def test_each_newline_line_is_separate_tspan(self):
         """Each line separated by \\n becomes its own <tspan> element."""
-        svg = (
-            fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").to_svg()
-        )
+        svg = fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").to_svg()
         # "hello\nworld" → 2 tspans; "foo\nbar\nbaz" → 3 tspans; total = 5
         tspan_count = svg.count("<tspan")
         assert tspan_count >= 5, (
@@ -1329,9 +1311,7 @@ class TestMarkTextMultiline:
 
     def test_subsequent_tspans_have_dy_attribute(self):
         """Non-first <tspan> elements carry a dy attribute for line spacing."""
-        svg = (
-            fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").to_svg()
-        )
+        svg = fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").to_svg()
         # Look for tspan elements with dy="1.2em"
         dy_matches = re.findall(r'<tspan[^>]*dy="1\.2em"', svg)
         assert len(dy_matches) >= 1, (
@@ -1340,9 +1320,7 @@ class TestMarkTextMultiline:
 
     def test_first_tspan_has_dy_zero(self):
         """First <tspan> of each multiline text block has dy='0'."""
-        svg = (
-            fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").to_svg()
-        )
+        svg = fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").to_svg()
         dy_zero = re.findall(r'<tspan[^>]*dy="0"', svg)
         assert len(dy_zero) >= 1, (
             f'Expected at least one <tspan dy="0"> for the first line; got:\n{svg[:3000]}'
@@ -1351,10 +1329,7 @@ class TestMarkTextMultiline:
     def test_singleline_text_does_not_wrap_in_tspan(self):
         """Single-line text content is emitted directly inside <text>, not in <tspan>."""
         svg = (
-            fm.Chart(_text_df_singleline())
-            .mark_text()
-            .encode(x="x", y="y", text="label")
-            .to_svg()
+            fm.Chart(_text_df_singleline()).mark_text().encode(x="x", y="y", text="label").to_svg()
         )
         assert "<tspan" not in svg, (
             f"Single-line text should NOT be wrapped in <tspan>; got:\n{svg[:3000]}"

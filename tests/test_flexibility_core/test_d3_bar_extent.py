@@ -373,9 +373,7 @@ def test_bar_diverging_mixed_sign_crosses_zero(diverging_df: pl.DataFrame) -> No
 
     Also: binding y2=2 must change the SVG relative to not binding y2.
     """
-    svg_with_y2 = (
-        fm.Chart(diverging_df).mark_bar().encode(x="cat:N", y="lo:Q", y2="hi:Q").to_svg()
-    )
+    svg_with_y2 = fm.Chart(diverging_df).mark_bar().encode(x="cat:N", y="lo:Q", y2="hi:Q").to_svg()
     svg_no_y2 = fm.Chart(diverging_df).mark_bar().encode(x="cat:N", y="lo:Q").to_svg()
 
     data_rects = _rects(svg_with_y2)
@@ -449,9 +447,7 @@ def test_bar_zero_false_suppresses_baseline_anchor(zero_anchor_df: pl.DataFrame)
     an axis domain that excludes 0.
     """
     svg_true = fm.Chart(zero_anchor_df).mark_bar().encode(x="cat:N", y="val:Q").to_svg()
-    svg_false = (
-        fm.Chart(zero_anchor_df).mark_bar(zero=False).encode(x="cat:N", y="val:Q").to_svg()
-    )
+    svg_false = fm.Chart(zero_anchor_df).mark_bar(zero=False).encode(x="cat:N", y="val:Q").to_svg()
 
     ticks_true = _y_axis_tick_labels(svg_true)
     ticks_false = _y_axis_tick_labels(svg_false)

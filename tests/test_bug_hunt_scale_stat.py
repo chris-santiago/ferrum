@@ -294,11 +294,7 @@ def test_transform_sample_zero_size():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]})
     # sample with n > data length should return all rows
     svg = (
-        fr.Chart(df)
-        .transform(fr.transform_sample(100))
-        .mark_point()
-        .encode(x="x", y="y")
-        .to_svg()
+        fr.Chart(df).transform(fr.transform_sample(100)).mark_point().encode(x="x", y="y").to_svg()
     )
     assert "<svg" in svg
 
@@ -1112,11 +1108,7 @@ def test_configure_padding_explicit_values_reflected():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
     svg_default = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     svg_padded = (
-        fr.Chart(df)
-        .mark_point()
-        .encode(x="x", y="y")
-        .configure_padding(left=100, top=100)
-        .to_svg()
+        fr.Chart(df).mark_point().encode(x="x", y="y").configure_padding(left=100, top=100).to_svg()
     )
     # Both should be valid SVGs
     assert "<svg" in svg_default

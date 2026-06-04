@@ -106,9 +106,7 @@ def test_d1_declared_domain_overrides_data_appearance_order() -> None:
         domain=["A", "B", "C"],
         range=["#cccccc", "#e4572e", "#cccccc"],
     )
-    svg = (
-        fm.Chart(df).mark_bar().encode(x="c:N", y="y:Q", color=Color("c:N", scale=scale)).to_svg()
-    )
+    svg = fm.Chart(df).mark_bar().encode(x="c:N", y="y:Q", color=Color("c:N", scale=scale)).to_svg()
     # Both colors must appear.
     svg_lower = svg.lower()
     assert "e4572e" in svg_lower, "accent color #e4572e must appear in SVG"
@@ -269,9 +267,7 @@ def test_d3_temporal_format_month_year(monthly_date_df: pl.DataFrame) -> None:
 
 def test_d3_tick_count_limits_temporal_ticks(long_monthly_date_df: pl.DataFrame) -> None:
     """Axis(tick_count=4) on a 30-month :T axis produces far fewer labels than default."""
-    svg_default = (
-        fm.Chart(long_monthly_date_df).mark_line().encode(x="date:T", y="val:Q").to_svg()
-    )
+    svg_default = fm.Chart(long_monthly_date_df).mark_line().encode(x="date:T", y="val:Q").to_svg()
     svg_limited = (
         fm.Chart(long_monthly_date_df)
         .mark_line()
@@ -1201,9 +1197,7 @@ def test_d8_no_axis_kwarg_renders_normally(_d8_df: pl.DataFrame) -> None:
 
 def test_d8_chart_axis_method_still_works(_d8_df: pl.DataFrame) -> None:
     """Chart.axis(x=False) must still suppress the x-axis regardless of encoding."""
-    svg = (
-        fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q")).axis(x=False).to_svg()
-    )
+    svg = fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q")).axis(x=False).to_svg()
     texts = _d8_tick_texts(svg)
     assert "a" not in texts, f"Chart.axis(x=False) must suppress x-axis; got {texts}"
     assert "b" in texts, f"y-axis must still render after Chart.axis(x=False); got {texts}"
@@ -1631,10 +1625,7 @@ def test_t9_shape_legend_title_and_category_labels_present(_t9_df: pl.DataFrame)
     every distinct category in the data.
     """
     svg = (
-        fm.Chart(_t9_df)
-        .mark_point()
-        .encode(x="x:Q", y="y:Q", shape=fm.Shape("region:N"))
-        .to_svg()
+        fm.Chart(_t9_df).mark_point().encode(x="x:Q", y="y:Q", shape=fm.Shape("region:N")).to_svg()
     )
     texts = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
 
@@ -1722,10 +1713,7 @@ def test_t9_color_only_legend_unchanged(_t9_df: pl.DataFrame) -> None:
     color legend rendering path.
     """
     svg = (
-        fm.Chart(_t9_df)
-        .mark_point()
-        .encode(x="x:Q", y="y:Q", color=fm.Color("region:N"))
-        .to_svg()
+        fm.Chart(_t9_df).mark_point().encode(x="x:Q", y="y:Q", color=fm.Color("region:N")).to_svg()
     )
     texts = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
 
@@ -2409,9 +2397,7 @@ def test_rf2_boxen_sort_descending_pandas(sort_boxen_pandas_df) -> None:
     )
 
     # Check 3: sorted SVG differs from unsorted.
-    svg_no_sort = (
-        fm.Chart(sort_boxen_pandas_df).mark_boxen().encode(x="cat:N", y="val:Q").to_svg()
-    )
+    svg_no_sort = fm.Chart(sort_boxen_pandas_df).mark_boxen().encode(x="cat:N", y="val:Q").to_svg()
     assert svg_desc != svg_no_sort, (
         "boxen sort='-y' on pandas input must produce a different SVG than no-sort"
     )

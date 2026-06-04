@@ -300,9 +300,7 @@ def test_x_title_omitted_shows_field_name(simple_df: pl.DataFrame) -> None:
     This is the existing default behavior and must remain GREEN both before
     and after the C1 fix.
     """
-    svg = (
-        fm.Chart(simple_df).mark_point().encode(x=X("horsepower"), y="miles_per_gallon").to_svg()
-    )
+    svg = fm.Chart(simple_df).mark_point().encode(x=X("horsepower"), y="miles_per_gallon").to_svg()
     titles = _axis_title_texts(svg)
 
     assert "horsepower" in titles, (
@@ -313,9 +311,7 @@ def test_x_title_omitted_shows_field_name(simple_df: pl.DataFrame) -> None:
 
 def test_y_title_omitted_shows_field_name(simple_df: pl.DataFrame) -> None:
     """Y('miles_per_gallon') with no title kwarg must render field name as axis title."""
-    svg = (
-        fm.Chart(simple_df).mark_point().encode(x="horsepower", y=Y("miles_per_gallon")).to_svg()
-    )
+    svg = fm.Chart(simple_df).mark_point().encode(x="horsepower", y=Y("miles_per_gallon")).to_svg()
     titles = _axis_title_texts(svg)
 
     assert "miles_per_gallon" in titles, (

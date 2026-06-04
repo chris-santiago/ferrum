@@ -730,10 +730,7 @@ def test_heatmap_with_text_encoding():
         }
     )
     svg = (
-        fr.Chart(df)
-        .mark_rect()
-        .encode(x="row:N", y="col:N", color="val:Q", text="val:Q")
-        .to_svg()
+        fr.Chart(df).mark_rect().encode(x="row:N", y="col:N", color="val:Q", text="val:Q").to_svg()
     )
     assert svg.startswith("<svg")
     assert "NaN" not in svg

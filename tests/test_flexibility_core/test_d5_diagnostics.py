@@ -299,11 +299,7 @@ def test_window_frame_negative_preceding_yaxis_spans_data_range(
         frame=(-2, 0),
     )
     svg = (
-        fm.Chart(window_df)
-        .mark_point()
-        .encode(x="idx:Q", y="rolling_mean:Q")
-        .transform(t)
-        .to_svg()
+        fm.Chart(window_df).mark_point().encode(x="idx:Q", y="rolling_mean:Q").transform(t).to_svg()
     )
 
     y_max = _y_axis_max(svg)

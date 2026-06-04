@@ -193,9 +193,7 @@ def test_string_keyed_heatmap_ordinal_renders_all_cells(
 
     Expected: 9 colored cell rects.
     """
-    svg = (
-        fm.Chart(str_heatmap_3x3).mark_rect().encode(x="col:O", y="row:O", color="val:Q").to_svg()
-    )
+    svg = fm.Chart(str_heatmap_3x3).mark_rect().encode(x="col:O", y="row:O", color="val:Q").to_svg()
     cells = _colored_rects(svg)
     assert len(cells) == 9, (
         f"Expected 9 colored cell rects for a 3×3 string-keyed heatmap "
@@ -218,9 +216,7 @@ def test_string_keyed_heatmap_nominal_renders_all_cells(
 
     Bug indicator: ``ValueError`` raised, or 0 cells if it silently blanks.
     """
-    svg = (
-        fm.Chart(str_heatmap_3x3).mark_rect().encode(x="col:N", y="row:N", color="val:Q").to_svg()
-    )
+    svg = fm.Chart(str_heatmap_3x3).mark_rect().encode(x="col:N", y="row:N", color="val:Q").to_svg()
     cells = _colored_rects(svg)
     assert len(cells) == 9, (
         f"Expected 9 colored cell rects for a 3×3 string-keyed heatmap "

@@ -190,9 +190,7 @@ def test_per_chart_theme_overrides_default_in_svg():
     default_bg = "#1a1a2e"
     chart_bg = "#ffffff"
     with set_default_theme(Theme(background=default_bg)):
-        svg = (
-            Chart(df).mark_point().encode(x="a", y="b").theme(Theme(background=chart_bg)).to_svg()
-        )
+        svg = Chart(df).mark_point().encode(x="a", y="b").theme(Theme(background=chart_bg)).to_svg()
     assert chart_bg in svg, "Per-chart theme background must appear in SVG"
     assert default_bg not in svg, "Default theme background must be overridden"
 
