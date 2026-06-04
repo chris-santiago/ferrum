@@ -116,6 +116,21 @@ impl ZoomPanState {
     }
 }
 
+/// Select the affine transform a given panel's marks should be drawn with.
+///
+/// Returns `transforms[panel_id]` when present, otherwise the identity
+/// transform. This is the per-panel render path's byte-stability anchor: at
+/// rest every panel maps to identity, so the per-panel uniform path produces
+/// the same affine the former single mark uniform did. Out-of-range ids never
+/// panic — they fall back to identity. Factored out here (host-compiled) so the
+/// panel → affine selection is unit-testable without a GPU device.
+pub(crate) fn select_panel_transform(transforms: &[Affine2], panel_id: usize) -> Affine2 {
+    transforms
+        .get(panel_id)
+        .copied()
+        .unwrap_or_else(Affine2::identity)
+}
+
 pub(crate) fn tick_level_for_zoom(zoom: f64) -> usize {
     if zoom < 0.5 {
         0
@@ -423,6 +438,52 @@ mod tests {
         assert!((y - 20.0).abs() < 1e-10);
     }
 
+    // ── FA-18: per-panel mark transform selection ────────────────────────────
+
+    /// The selector must pick each panel's OWN affine: a non-uniform rescale
+    /// (sx ≠ sy) on one panel must not leak into a sibling that is at identity.
+    /// This is the core invariant that stops sibling shear during a reactive
+    /// domain rescale.
+    #[test]
+    fn select_panel_transform_picks_per_panel_affine() {
+        // Panel 0: identity. Panel 1: non-uniform rescale (sx != sy), like an
+        // x-only domain rescale written by `apply_reactive_rescale`.
+        let rescaled = Affine2 { sx: 3.0, sy: 1.0, tx: -40.0, ty: 0.0 };
+        let transforms = vec![Affine2::identity(), rescaled];
+
+        let t0 = select_panel_transform(&transforms, 0);
+        assert!(
+            (t0.sx - 1.0).abs() < 1e-9 && (t0.sy - 1.0).abs() < 1e-9,
+            "panel 0 must stay identity, got sx={} sy={}", t0.sx, t0.sy
+        );
+
+        let t1 = select_panel_transform(&transforms, 1);
+        assert!((t1.sx - 3.0).abs() < 1e-9, "panel 1 sx must be the rescale, got {}", t1.sx);
+        assert!((t1.sy - 1.0).abs() < 1e-9, "panel 1 sy must be 1.0 (x-only rescale), got {}", t1.sy);
+        assert!((t1.tx - (-40.0)).abs() < 1e-9, "panel 1 tx must be the rescale offset, got {}", t1.tx);
+
+        // Out-of-range panel_id falls back to identity (never panics).
+        let t_oob = select_panel_transform(&transforms, 9);
+        assert!(
+            (t_oob.sx - 1.0).abs() < 1e-9 && (t_oob.sy - 1.0).abs() < 1e-9,
+            "out-of-range panel must fall back to identity"
+        );
+    }
+
+    /// At rest (all panels identity) the per-panel selection yields identity
+    /// for every slot, so the rendered affine matches the former single-uniform
+    /// path exactly — the byte-stability anchor.
+    #[test]
+    fn select_panel_transform_identity_at_rest() {
+        let transforms = vec![Affine2::identity(); 3];
+        for panel_id in 0..3 {
+            let t = select_panel_transform(&transforms, panel_id);
+            assert!((t.sx - 1.0).abs() < 1e-9, "slot {panel_id} sx");
+            assert!((t.sy - 1.0).abs() < 1e-9, "slot {panel_id} sy");
+            assert!(t.tx.abs() < 1e-9 && t.ty.abs() < 1e-9, "slot {panel_id} translation");
+        }
+    }
+
     #[test]
     fn zoom_increases_scale() {
         let config = InteractionConfig::default();
@@ -558,6 +619,80 @@ mod tests {
         assert!((t.sy - 1.5).abs() < 1e-10);
         assert!((t.tx - 42.0).abs() < 1e-10);
         assert!((t.ty - (-17.0)).abs() < 1e-10);
+    }
+
+    // ── FA-20: set_absolute targets the correct panel on multi-panel charts ──
+
+    /// `set_absolute(1, …)` must write panel 1's transform and leave panel 0
+    /// at identity — the exact routing that `set_transform(panel_id, …)` relies
+    /// on in the WASM method.
+    #[test]
+    fn fa20_set_absolute_non_zero_panel_leaves_panel0_at_identity() {
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(2, &config);
+
+        // Apply an absolute transform to panel 1 only.
+        state.set_absolute(1, 3.0, 120.0, -50.0);
+
+        // Panel 0 must remain identity.
+        let t0 = &state.transforms[0];
+        assert!(
+            (t0.sx - 1.0).abs() < 1e-10,
+            "panel 0 sx must stay 1.0, got {}",
+            t0.sx
+        );
+        assert!(
+            (t0.sy - 1.0).abs() < 1e-10,
+            "panel 0 sy must stay 1.0, got {}",
+            t0.sy
+        );
+        assert!(t0.tx.abs() < 1e-10, "panel 0 tx must stay 0, got {}", t0.tx);
+        assert!(t0.ty.abs() < 1e-10, "panel 0 ty must stay 0, got {}", t0.ty);
+
+        // Panel 1 must reflect the absolute values (scale clamped to range).
+        let t1 = &state.transforms[1];
+        assert!(
+            (t1.sx - 3.0).abs() < 1e-10,
+            "panel 1 sx must be 3.0, got {}",
+            t1.sx
+        );
+        assert!(
+            (t1.sy - t1.sx).abs() < 1e-10,
+            "panel 1 sy must equal sx (uniform), got {} vs {}",
+            t1.sy,
+            t1.sx
+        );
+        assert!(
+            (t1.tx - 120.0).abs() < 1e-10,
+            "panel 1 tx must be 120.0, got {}",
+            t1.tx
+        );
+        assert!(
+            (t1.ty - (-50.0)).abs() < 1e-10,
+            "panel 1 ty must be -50.0, got {}",
+            t1.ty
+        );
+    }
+
+    /// Calling `set_absolute` on panel 1 then panel 0 independently must leave
+    /// each panel with its own transform — no cross-panel contamination.
+    #[test]
+    fn fa20_set_absolute_independent_panels_do_not_contaminate_each_other() {
+        let config = InteractionConfig::default();
+        let mut state = ZoomPanState::new(2, &config);
+
+        state.set_absolute(0, 2.0, 10.0, 20.0);
+        state.set_absolute(1, 4.0, 30.0, 40.0);
+
+        let t0 = &state.transforms[0];
+        assert!((t0.sx - 2.0).abs() < 1e-10, "panel 0 sx");
+        assert!((t0.tx - 10.0).abs() < 1e-10, "panel 0 tx");
+        assert!((t0.ty - 20.0).abs() < 1e-10, "panel 0 ty");
+
+        let t1 = &state.transforms[1];
+        assert!((t1.sx - 4.0).abs() < 1e-10, "panel 1 sx");
+        assert!((t1.tx - 30.0).abs() < 1e-10, "panel 1 tx");
+        assert!((t1.ty - 40.0).abs() < 1e-10, "panel 1 ty");
     }
 
     /// B1 regression: When zoomed 2x with translation, canvas-space coordinates

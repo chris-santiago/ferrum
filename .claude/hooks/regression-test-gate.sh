@@ -23,6 +23,17 @@ fi
 if printf '%s' "$STAGED" | grep -qE '(^tests/.*\.py$|^crates/.*/tests/)'; then
   HAS_TESTS=true
 fi
+# Rust inline tests: ferrum-core/ferrum-wasm keep their tests in `src/*.rs`
+# `#[cfg(test)]` modules (project convention, see CLAUDE.md), not under
+# `crates/*/tests/`. Treat a staged Rust source file whose cached diff adds a
+# `#[test]` or `#[cfg(test)]` line as test coverage. Fixed directory pathspecs
+# (quoted) so this does not depend on shell word-splitting behaviour.
+if ! $HAS_TESTS && printf '%s' "$STAGED" | grep -qE '^crates/ferrum-(core|wasm)/src/.*\.rs$'; then
+  if git diff --cached -- 'crates/ferrum-core/src' 'crates/ferrum-wasm/src' \
+      | grep -qE '^\+.*#\[(test|cfg\(test\))'; then
+    HAS_TESTS=true
+  fi
+fi
 
 $HAS_SOURCE || exit 0
 $HAS_TESTS && exit 0

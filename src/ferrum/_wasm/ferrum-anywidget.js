@@ -497,6 +497,13 @@ async function _render(container, sceneJson, adapter) {
   // select mode to be active by default — without it the brush filter blocks
   // all drag events in pan mode and the user never gets a rescale affordance.
   const hasDomainRescale = (cfg.param_bindings || []).some(b => b.role === 'domain');
+  // Focus+context zoom semantics (FA-20): on a chart with a domain-role binding,
+  // wheel/pan/box-zoom act on the FOCUS panel (the rescale target named in the
+  // binding), and a box-zoom drawn on a non-focus (context/overview) panel routes
+  // through the rescale path instead of zooming that panel. Charts with no domain
+  // binding keep focusPanel 0 — single-panel and generic multi-panel are unchanged.
+  const _domainBinding = (cfg.param_bindings || []).find(b => b.role === 'domain');
+  const focusPanel = _domainBinding ? (_domainBinding.panel | 0) : 0;
 
   // ── GPU init (may fail when WebGPU/WebGL context limit exceeded) ──
   // Effective DPR after clamping to GPU max texture size. Stored in
@@ -569,7 +576,7 @@ async function _render(container, sceneJson, adapter) {
       if (!renderer) return;
       const { k, x, y } = event.transform;
       try {
-        const textJson = renderer.setTransform(k, x, y);
+        const textJson = renderer.setTransform(focusPanel, k, x, y);
         _placeTextSvg(svgEl, JSON.parse(textJson));
         // Update only the data group's transform — no re-injection.
         if (_rawOverlay) {
@@ -581,7 +588,7 @@ async function _render(container, sceneJson, adapter) {
       // Debounced adapter callback for Jupyter zoom rebuild.
       clearTimeout(_zoomDebounceId);
       _zoomDebounceId = setTimeout(() => {
-        adapter.onZoomChange({ '0': { k, x, y } });
+        adapter.onZoomChange({ [focusPanel]: { k, x, y } });
       }, 400);
     });
 
@@ -730,13 +737,35 @@ async function _render(container, sceneJson, adapter) {
         const [[x0, y0], [x1, y1]] = event.selection;
 
         if (currentMode === 'boxzoom') {
-          // Compute zoom transform to fit the selected rectangle.
-          const plotW = w, plotH = h;
-          const selW = x1 - x0, selH = y1 - y0;
-          const k = Math.min(plotW / selW, plotH / selH);
-          const tx = -x0 * k, ty = -y0 * k;
-          select(chartWrapper).call(zoomBehavior.transform,
-            zoomIdentity.translate(tx, ty).scale(k));
+          if (_domainBinding && panelIdx !== focusPanel) {
+            // FA-20: a box-zoom drawn on a context/overview panel rescales the
+            // focus panel — semantically identical to brushing that x-range —
+            // rather than zooming the context panel (which, after FA-18's
+            // per-panel transforms, would otherwise misroute to the focus).
+            try {
+              const result = JSON.parse(renderer.handleDrag(panelIdx, x0, y0, x1, y1));
+              adapter.onSelectionChange(result.selection);
+              if (result.rescaled != null && result.rescaled_text) {
+                _placeTextSvg(svgEl, result.rescaled_text);
+              }
+              if (container._ferrumWireLegend) container._ferrumWireLegend();
+            } catch (err) {
+              console.warn('[ferrum] boxzoom rescale error:', err);
+            }
+          } else {
+            // Box-zoom the focus panel (or any chart without focus+context):
+            // fit the selected rectangle. Panel-relative when a focus panel is
+            // known; the full-chart fit (ox/oy = 0, plotW/H = w/h) is preserved
+            // verbatim for non-focus+context charts so single-panel is unchanged.
+            const fitW = _domainBinding ? pa.w : w;
+            const fitH = _domainBinding ? pa.h : h;
+            const ox = _domainBinding ? pa.x : 0;
+            const oy = _domainBinding ? pa.y : 0;
+            const k = Math.min(fitW / (x1 - x0), fitH / (y1 - y0));
+            const tx = ox - x0 * k, ty = oy - y0 * k;
+            select(chartWrapper).call(zoomBehavior.transform,
+              zoomIdentity.translate(tx, ty).scale(k));
+          }
           // Clear the brush.
           select(this).call(brushBehavior.move, null);
         } else if (currentMode === 'select') {
@@ -762,7 +791,7 @@ async function _render(container, sceneJson, adapter) {
               // Plain crossfilter/selection drag: preserve the current zoom by
               // re-asserting it (unchanged behavior for non-rescale charts).
               const t = zoomTransform(chartWrapper);
-              const textJson = renderer.setTransform(t.k, t.x, t.y);
+              const textJson = renderer.setTransform(focusPanel, t.k, t.x, t.y);
               _placeTextSvg(svgEl, JSON.parse(textJson));
               // Raw overlay already injected; only update data group transform.
               if (_rawOverlay) {

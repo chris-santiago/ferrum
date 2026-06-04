@@ -4,6 +4,10 @@
 pub mod conditional;
 pub mod error;
 pub mod hit_test;
+// MSAA sample-count selection (FA-19). Pure logic consumed by the wasm32 GPU
+// context; gated to wasm32+test so the host build does not flag it as dead.
+#[cfg(any(target_arch = "wasm32", test))]
+pub mod msaa;
 // Reactive-parameter runtime (D6): consumed by the wasm32 `WasmRenderer`; its
 // pure pixel↔data helpers are also unit-tested on the host. Gated to those two
 // targets so the non-test host build does not flag the wasm-only helpers as
@@ -38,7 +42,7 @@ use crate::gpu::GpuContext;
 #[cfg(target_arch = "wasm32")]
 use crate::pipelines::RenderPipelines;
 #[cfg(target_arch = "wasm32")]
-use crate::render::{GpuBuffers, Uniforms};
+use crate::render::GpuBuffers;
 #[cfg(target_arch = "wasm32")]
 use crate::scene_load::SceneData;
 #[cfg(target_arch = "wasm32")]
@@ -85,7 +89,7 @@ impl WasmRenderer {
     pub async fn create(canvas: HtmlCanvasElement) -> Result<WasmRenderer, JsValue> {
         console_error_panic_hook::set_once();
         let gpu = gpu::init_gpu(canvas).await.map_err(JsValue::from)?;
-        let pipelines = RenderPipelines::new(&gpu.device, gpu.format);
+        let pipelines = RenderPipelines::new(&gpu.device, gpu.format, gpu.sample_count);
         Ok(WasmRenderer {
             gpu,
             pipelines,
@@ -204,6 +208,7 @@ impl WasmRenderer {
                 packed_batch_meta: tr.new_data.packed_batch_meta.clone(),
                 draw_commands: tr.new_data.draw_commands.clone(),
                 mark_mesh_panels: tr.new_data.mark_mesh_panels.clone(),
+                panel_count: tr.new_data.panel_count,
             };
             let buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &lerped_data);
             render::render_frame(&self.gpu, &self.pipelines, &buffers, lerped_data.background)
@@ -359,26 +364,33 @@ impl WasmRenderer {
     pub fn reset_zoom(&mut self, panel_id: u32) -> Result<String, JsValue> {
         let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
         self.zoom.reset(panel_id as usize);
-        let uniforms = Uniforms::identity(loaded.data.width, loaded.data.height);
-        loaded.buffers.upload_uniforms(&self.gpu, &uniforms);
+        // Re-upload every panel's affine (the reset panel is now identity;
+        // siblings keep whatever zoom/pan state they had) so resetting one
+        // panel does not disturb the others.
+        loaded.buffers.upload_panel_transforms(
+            &self.gpu,
+            loaded.data.width,
+            loaded.data.height,
+            &self.zoom.transforms,
+        );
         render::render_frame(&self.gpu, &self.pipelines, &loaded.buffers, loaded.data.background)
             .map_err(JsValue::from)?;
         Ok(text_json::build_text_json(&loaded.data))
     }
 
-    /// Set an absolute zoom+pan transform from D3-zoom.
+    /// Set an absolute zoom+pan transform from D3-zoom for the given panel.
     ///
-    /// `k` is the uniform scale factor; `tx`/`ty` are the translation offsets.
+    /// `panel_id` identifies the panel to zoom (0-indexed); `k` is the uniform
+    /// scale factor; `tx`/`ty` are the translation offsets.
     /// This replaces the accumulated state from `onWheel`/`onPan` and is the
     /// entry point for HTML-export zoom driven by D3's `d3.zoom()`.
     ///
-    /// Operates on panel 0 (single-panel charts; multi-panel support later).
     /// Returns updated text-element JSON so the JS overlay can reposition labels.
     #[wasm_bindgen(js_name = "setTransform")]
-    pub fn set_transform(&mut self, k: f32, tx: f32, ty: f32) -> Result<String, JsValue> {
+    pub fn set_transform(&mut self, panel_id: u32, k: f32, tx: f32, ty: f32) -> Result<String, JsValue> {
         let Some(_loaded) = &self.loaded else { return Ok("[]".to_string()); };
-        self.zoom.set_absolute(0, k as f64, tx as f64, ty as f64);
-        self.upload_transform_and_render(0)
+        self.zoom.set_absolute(panel_id as usize, k as f64, tx as f64, ty as f64);
+        self.upload_transform_and_render(panel_id as usize)
     }
 
     #[wasm_bindgen(js_name = "maxTextureSize")]
@@ -392,6 +404,9 @@ impl WasmRenderer {
         self.gpu
             .surface
             .configure(&self.gpu.device, &self.gpu.config);
+        // FA-19: keep the MSAA target sized to the surface (this is also the
+        // PNG-capture path that resizes the canvas to 2× DPR).
+        self.gpu.rebuild_msaa_view();
         let _ = self.render_frame_js();
     }
 
@@ -1052,6 +1067,7 @@ mod tests {
             packed_batch_meta: packed_meta,
             draw_commands: vec![],
             mark_mesh_panels: vec![],
+            panel_count: 1,
         };
 
         // Build spatial index with packed data.
