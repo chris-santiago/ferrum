@@ -13,8 +13,8 @@ def _chart() -> fm.Chart:
 
 
 def test_grid_true_emits_gridlines() -> None:
-    svg_on = _chart().theme(fm.Theme(grid=True, grid_color="#ff00ff")).show_svg()
-    svg_off = _chart().theme(fm.Theme(grid=False)).show_svg()
+    svg_on = _chart().theme(fm.Theme(grid=True, grid_color="#ff00ff")).to_svg()
+    svg_off = _chart().theme(fm.Theme(grid=False)).to_svg()
     # Magenta grid color flows through to the SVG only when grid=True.
     assert "#ff00ff" in svg_on.lower()
     assert "#ff00ff" not in svg_off.lower()
@@ -23,12 +23,12 @@ def test_grid_true_emits_gridlines() -> None:
 
 
 def test_grid_dash_emits_stroke_dasharray() -> None:
-    svg = _chart().theme(fm.Theme(grid=True, grid_dash=[3.0, 3.0])).show_svg()
+    svg = _chart().theme(fm.Theme(grid=True, grid_dash=[3.0, 3.0])).to_svg()
     assert "stroke-dasharray" in svg
 
 
 def test_grid_opacity_emits_stroke_opacity() -> None:
-    svg = _chart().theme(fm.Theme(grid=True, grid_opacity=0.3)).show_svg()
+    svg = _chart().theme(fm.Theme(grid=True, grid_opacity=0.3)).to_svg()
     assert "stroke-opacity" in svg
 
 
@@ -44,7 +44,7 @@ def test_grid_lines_align_with_tick_count() -> None:
         .mark_point()
         .encode(x="x", y="y")
         .theme(fm.Theme(grid=True, grid_color="#abcdef"))
-        .show_svg()
+        .to_svg()
     )
     # Count how many magenta grid lines were emitted.
     magenta_count = on.lower().count('stroke="#abcdef"')

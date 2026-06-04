@@ -78,7 +78,7 @@ class TestShapBeeswarmScale:
     def test_5k_samples_renders(self):
         model, X, y = _make_regression(5_000)
         chart = fm.shap_beeswarm_chart(model, X, y, random_state=0)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         circles = svg.count("<circle ")
         assert circles >= 5_000, f"Expected ≥5k circles; got {circles}"
@@ -86,14 +86,14 @@ class TestShapBeeswarmScale:
     def test_5k_samples_under_10_seconds(self):
         model, X, y = _make_regression(5_000)
         t0 = time.monotonic()
-        fm.shap_beeswarm_chart(model, X, y, random_state=0).show_svg()
+        fm.shap_beeswarm_chart(model, X, y, random_state=0).to_svg()
         elapsed = time.monotonic() - t0
         assert elapsed < 10.0, f"5k beeswarm took {elapsed:.2f}s (limit 10s)"
 
     def test_10k_samples_renders(self):
         model, X, y = _make_regression(10_000)
         chart = fm.shap_beeswarm_chart(model, X, y, random_state=0)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         circles = svg.count("<circle ")
         assert circles >= 10_000, f"Expected ≥10k circles; got {circles}"
@@ -101,14 +101,14 @@ class TestShapBeeswarmScale:
     def test_10k_samples_under_20_seconds(self):
         model, X, y = _make_regression(10_000)
         t0 = time.monotonic()
-        fm.shap_beeswarm_chart(model, X, y, random_state=0).show_svg()
+        fm.shap_beeswarm_chart(model, X, y, random_state=0).to_svg()
         elapsed = time.monotonic() - t0
         assert elapsed < 20.0, f"10k beeswarm took {elapsed:.2f}s (limit 20s)"
 
     def test_5k_max_display_limits_features(self):
         """max_display=5 with 20 features: only 5k × 5 = 25k circles."""
         model, X, y = _make_regression(5_000)
-        svg = fm.shap_beeswarm_chart(model, X, y, max_display=5, random_state=0).show_svg()
+        svg = fm.shap_beeswarm_chart(model, X, y, max_display=5, random_state=0).to_svg()
         circles = svg.count("<circle ")
         assert 25_000 <= circles <= 26_000, (
             f"Expected ~25k circles for max_display=5; got {circles}"
@@ -117,7 +117,7 @@ class TestShapBeeswarmScale:
     def test_5k_classifier_renders(self):
         """Binary classification SHAP at scale."""
         model, X, y = _make_classification(5_000)
-        svg = fm.shap_beeswarm_chart(model, X, y, random_state=0).show_svg()
+        svg = fm.shap_beeswarm_chart(model, X, y, random_state=0).to_svg()
         assert "<svg" in svg
         circles = svg.count("<circle ")
         assert circles >= 5_000
@@ -134,7 +134,7 @@ class TestShapBarScale:
 
     def test_5k_samples_renders(self):
         model, X, y = _make_regression(5_000)
-        svg = fm.shap_bar_chart(model, X, y, random_state=0).show_svg()
+        svg = fm.shap_bar_chart(model, X, y, random_state=0).to_svg()
         assert "<svg" in svg
         rects = svg.count("<rect ")
         assert rects >= 5, f"Expected ≥5 bars; got {rects}"
@@ -142,14 +142,14 @@ class TestShapBarScale:
     def test_10k_samples_under_15_seconds(self):
         model, X, y = _make_regression(10_000)
         t0 = time.monotonic()
-        fm.shap_bar_chart(model, X, y, random_state=0).show_svg()
+        fm.shap_bar_chart(model, X, y, random_state=0).to_svg()
         elapsed = time.monotonic() - t0
         assert elapsed < 15.0, f"10k bar chart took {elapsed:.2f}s (limit 15s)"
 
     def test_10k_svg_compact(self):
         """Bar chart SVG should be compact regardless of sample count."""
         model, X, y = _make_regression(10_000)
-        svg = fm.shap_bar_chart(model, X, y, random_state=0).show_svg()
+        svg = fm.shap_bar_chart(model, X, y, random_state=0).to_svg()
         size_kb = len(svg) / 1024
         assert size_kb < 1000, f"Bar chart SVG is {size_kb:.0f}KB (limit 1MB)"
 
@@ -165,20 +165,20 @@ class TestShapWaterfallScale:
 
     def test_10k_samples_renders(self):
         model, X, y = _make_regression(10_000)
-        svg = fm.shap_waterfall_chart(model, X, y, sample_idx=0, random_state=0).show_svg()
+        svg = fm.shap_waterfall_chart(model, X, y, sample_idx=0, random_state=0).to_svg()
         assert "<svg" in svg
 
     def test_10k_under_15_seconds(self):
         model, X, y = _make_regression(10_000)
         t0 = time.monotonic()
-        fm.shap_waterfall_chart(model, X, y, sample_idx=0, random_state=0).show_svg()
+        fm.shap_waterfall_chart(model, X, y, sample_idx=0, random_state=0).to_svg()
         elapsed = time.monotonic() - t0
         assert elapsed < 15.0, f"10k waterfall took {elapsed:.2f}s (limit 15s)"
 
     def test_10k_svg_compact(self):
         """Waterfall is a fixed-size chart; SVG should be compact."""
         model, X, y = _make_regression(10_000)
-        svg = fm.shap_waterfall_chart(model, X, y, sample_idx=0, random_state=0).show_svg()
+        svg = fm.shap_waterfall_chart(model, X, y, sample_idx=0, random_state=0).to_svg()
         size_kb = len(svg) / 1024
         assert size_kb < 1000, f"Waterfall SVG is {size_kb:.0f}KB (limit 1MB)"
 
@@ -203,7 +203,7 @@ class TestICEScale:
             kind="individual",
             random_state=0,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         polylines = svg.count("<polyline ")
         expected = 2_000 * 3
@@ -222,7 +222,7 @@ class TestICEScale:
             grid_resolution=50,
             kind="individual",
             random_state=0,
-        ).show_svg()
+        ).to_svg()
         elapsed = time.monotonic() - t0
         assert elapsed < 10.0, f"2k ICE (3 features) took {elapsed:.2f}s (limit 10s)"
 
@@ -238,7 +238,7 @@ class TestICEScale:
             kind="individual",
             random_state=0,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         polylines = svg.count("<polyline ")
         expected = 5_000 * 5
@@ -257,7 +257,7 @@ class TestICEScale:
             grid_resolution=50,
             kind="individual",
             random_state=0,
-        ).show_svg()
+        ).to_svg()
         elapsed = time.monotonic() - t0
         assert elapsed < 30.0, f"5k ICE (5 features) took {elapsed:.2f}s (limit 30s)"
 
@@ -272,7 +272,7 @@ class TestICEScale:
             grid_resolution=50,
             kind="individual",
             random_state=0,
-        ).show_svg()
+        ).to_svg()
         size_mb = len(svg) / (1024 * 1024)
         assert size_mb < 50, f"5k ICE SVG is {size_mb:.1f}MB (limit 50MB)"
 
@@ -297,7 +297,7 @@ class TestPDPScale:
             kind="average",
             random_state=0,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         polylines = svg.count("<polyline ")
         assert polylines == 5, f"Expected 5 polylines (1 per feature); got {polylines}"
@@ -313,7 +313,7 @@ class TestPDPScale:
             grid_resolution=100,
             kind="average",
             random_state=0,
-        ).show_svg()
+        ).to_svg()
         elapsed = time.monotonic() - t0
         assert elapsed < 15.0, f"10k PDP (10 features, grid=100) took {elapsed:.2f}s (limit 15s)"
 
@@ -328,7 +328,7 @@ class TestPDPScale:
             grid_resolution=100,
             kind="average",
             random_state=0,
-        ).show_svg()
+        ).to_svg()
         size_kb = len(svg) / 1024
         assert size_kb < 1000, f"PDP average SVG is {size_kb:.0f}KB (limit 1MB)"
 
@@ -353,7 +353,7 @@ class TestPDPBothScale:
             kind="both",
             random_state=0,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         polylines = svg.count("<polyline ")
         expected = 3 * (2_000 + 1)
@@ -372,7 +372,7 @@ class TestPDPBothScale:
             grid_resolution=50,
             kind="both",
             random_state=0,
-        ).show_svg()
+        ).to_svg()
         elapsed = time.monotonic() - t0
         assert elapsed < 10.0, f"2k PDP both (3 feat) took {elapsed:.2f}s (limit 10s)"
 
@@ -387,7 +387,7 @@ class TestPDPBothScale:
             kind="both",
             random_state=0,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         polylines = svg.count("<polyline ")
         expected = 5 * (5_000 + 1)
@@ -408,7 +408,7 @@ class TestPDPBothScale:
             center=True,
             random_state=0,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         polylines = svg.count("<polyline ")
         expected = 3 * (5_000 + 1)
@@ -435,7 +435,7 @@ class TestHighGridResolution:
             kind="individual",
             random_state=0,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         polylines = svg.count("<polyline ")
         assert polylines == 2_000 * 3
@@ -451,7 +451,7 @@ class TestHighGridResolution:
             grid_resolution=200,
             kind="individual",
             random_state=0,
-        ).show_svg()
+        ).to_svg()
         elapsed = time.monotonic() - t0
         assert elapsed < 15.0, f"2k ICE grid=200 (3 feat) took {elapsed:.2f}s (limit 15s)"
 
@@ -495,7 +495,7 @@ class TestBeeswarmRenderScale:
             .properties(width=600, height=400)
         )
         t0 = time.monotonic()
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         elapsed = time.monotonic() - t0
         assert "<svg" in svg
         assert elapsed < 10.0, f"50k beeswarm render took {elapsed:.2f}s (limit 10s)"
@@ -510,7 +510,7 @@ class TestBeeswarmRenderScale:
             .properties(width=600, height=400)
         )
         t0 = time.monotonic()
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         elapsed = time.monotonic() - t0
         assert "<svg" in svg
         assert elapsed < 15.0, f"100k beeswarm render took {elapsed:.2f}s (limit 15s)"
@@ -524,7 +524,7 @@ class TestBeeswarmRenderScale:
             .encode(x="shap_value:Q", y="feature:N")
             .properties(width=600, height=400)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         size_mb = len(svg) / (1024 * 1024)
         assert size_mb < 100, f"50k beeswarm SVG is {size_mb:.1f}MB (limit 100MB)"
 
@@ -575,7 +575,7 @@ class TestICERenderScale:
             .properties(width=400, height=300)
         )
         t0 = time.monotonic()
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         elapsed = time.monotonic() - t0
         assert "<svg" in svg
         polylines = svg.count("<polyline ")
@@ -593,7 +593,7 @@ class TestICERenderScale:
             .properties(width=300, height=200)
         )
         t0 = time.monotonic()
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         elapsed = time.monotonic() - t0
         assert "<svg" in svg
         assert elapsed < 15.0, f"50k ICE (faceted) took {elapsed:.2f}s (limit 15s)"
@@ -606,7 +606,7 @@ class TestICERenderScale:
             .mark_line(opacity=0.2)
             .encode(x="feature_value:Q", y="pd_value:Q", detail="_sample_id_str:N")
             .properties(width=400, height=300)
-            .show_svg()
+            .to_svg()
         )
         size_mb = len(svg) / (1024 * 1024)
         assert size_mb < 100, f"10k ICE panel SVG is {size_mb:.1f}MB (limit 100MB)"

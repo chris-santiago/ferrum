@@ -138,7 +138,7 @@ class TestFA2PolarBarBands:
             .mark_bar()
             .encode(x="cat:N", y="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert len(paths) == 2, (
@@ -153,7 +153,7 @@ class TestFA2PolarBarBands:
             .mark_bar()
             .encode(x="cat:N", y="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert len(paths) == 2, f"Expected 2 paths, got {len(paths)}"
@@ -175,7 +175,7 @@ class TestFA2PolarBarBands:
             .mark_bar()
             .encode(x="cat:N", y="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert len(paths) == 2, f"Expected 2 paths"
@@ -199,7 +199,7 @@ class TestFA2PolarBarBands:
             .mark_bar()
             .encode(x="cat:N", y="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         sweeps = [_arc_sweep_radians(d) for d in paths]
@@ -219,7 +219,7 @@ class TestFA2PolarBarBands:
             .mark_bar()
             .encode(x="cat:N", y="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert len(paths) == 4, (
@@ -233,7 +233,7 @@ class TestFA2PolarBarBands:
             .mark_bar()
             .encode(x="cat:N", y="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert len(paths) == 4, f"Expected 4 paths"
@@ -258,7 +258,7 @@ class TestFA2PolarBarBands:
             .mark_bar()
             .encode(x="cat:N", y="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         sweeps = [_arc_sweep_radians(d) for d in paths]
@@ -275,7 +275,7 @@ class TestFA2PolarBarBands:
             .mark_bar()
             .encode(x="cat:N", y="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert len(paths) == 2

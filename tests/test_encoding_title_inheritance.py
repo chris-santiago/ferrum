@@ -32,7 +32,7 @@ class TestSingleLayerTitle:
             fm.Chart(df)
             .mark_point()
             .encode(x=fm.X("a", title="Custom X"), y=fm.Y("b", title="Custom Y"))
-            .show_svg()
+            .to_svg()
         )
         assert "Custom X" in svg
         assert "Custom Y" in svg
@@ -55,7 +55,7 @@ class TestMultiLayerTitleInheritance:
                 x=fm.X("group", title="Category"),
                 y=fm.Y("value", title="Measurement"),
             )
-            .show_svg()
+            .to_svg()
         )
         assert "Category" in svg
         assert "Measurement" in svg
@@ -69,7 +69,7 @@ class TestMultiLayerTitleInheritance:
         X, y = load_breast_cancer(return_X_y=True)
         Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.3, random_state=0)
         model = LogisticRegression(max_iter=2000, random_state=0).fit(Xtr, ytr)
-        svg = fm.roc_chart(model, Xte, yte).show_svg()
+        svg = fm.roc_chart(model, Xte, yte).to_svg()
         assert "False Positive Rate" in svg
         assert "True Positive Rate" in svg
         assert ">fpr<" not in svg
@@ -84,6 +84,6 @@ class TestMultiLayerTitleInheritance:
         X, y = load_breast_cancer(return_X_y=True)
         Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.3, random_state=0)
         model = LogisticRegression(max_iter=2000, random_state=0).fit(Xtr, ytr)
-        svg = fm.pr_chart(model, Xte, yte).show_svg()
+        svg = fm.pr_chart(model, Xte, yte).to_svg()
         assert "Recall" in svg
         assert "Precision" in svg

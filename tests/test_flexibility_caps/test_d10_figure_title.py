@@ -128,7 +128,7 @@ def test_d10_t1_vconcat_figure_title_subtitle_caption_appear_once(two_charts):
         subtitle="Figure Subtitle",
         caption="Figure Caption",
     )
-    svg = composed.show_svg()
+    svg = composed.to_svg()
 
     assert svg.count("Figure Title") == 1, (
         f"Expected figure title to appear exactly once; got {svg.count('Figure Title')} copies. "
@@ -158,7 +158,7 @@ def test_d10_t2_hconcat_figure_title_subtitle_caption_appear_once(two_charts):
         subtitle="Figure Subtitle",
         caption="Figure Caption",
     )
-    svg = composed.show_svg()
+    svg = composed.to_svg()
 
     assert svg.count("Figure Title") == 1, (
         f"Expected figure title once in hconcat; got {svg.count('Figure Title')} copies."
@@ -187,7 +187,7 @@ def test_d10_t3_title_appears_once_with_three_panels():
     from ferrum.composition import VConcatChart
 
     composed = VConcatChart(charts).properties(title="Three-Panel Title")
-    svg = composed.show_svg()
+    svg = composed.to_svg()
 
     assert svg.count("Three-Panel Title") == 1, (
         f"Three-panel vconcat: expected title once, got {svg.count('Three-Panel Title')} copies. "
@@ -209,7 +209,7 @@ def test_d10_t4_per_panel_titles_survive_figure_title(two_charts_with_panel_titl
     """
     c1, c2 = two_charts_with_panel_titles
     composed = (c1 & c2).properties(title="Figure Title")
-    svg = composed.show_svg()
+    svg = composed.to_svg()
 
     # Figure-level title wraps the whole figure (once).
     assert svg.count("Figure Title") == 1, (
@@ -246,7 +246,7 @@ def test_d10_t5_facet_figure_title_subtitle_caption_appear_once(facet_chart):
         subtitle="Facet Subtitle",
         caption="Facet Caption",
     )
-    svg = composed.show_svg()
+    svg = composed.to_svg()
 
     assert svg.count("Facet Figure Title") == 1, (
         f"Expected facet figure title once; got {svg.count('Facet Figure Title')} copies."
@@ -274,7 +274,7 @@ def test_d10_t6_subtitle_on_composite_properties_does_not_raise(two_charts):
     c1, c2 = two_charts
     # Must not raise.
     result = (c1 & c2).properties(subtitle="A subtitle")
-    svg = result.show_svg()
+    svg = result.to_svg()
     assert "A subtitle" in svg, "subtitle text must appear in the rendered SVG"
 
 
@@ -293,7 +293,7 @@ def test_d10_t7_caption_on_composite_properties_does_not_raise(two_charts):
     c1, c2 = two_charts
     # Must not raise.
     result = (c1 & c2).properties(caption="A caption note")
-    svg = result.show_svg()
+    svg = result.to_svg()
     assert "A caption note" in svg, "caption text must appear in the rendered SVG"
 
 
@@ -314,7 +314,7 @@ def test_d10_t8_figure_title_appears_before_panel_content(two_charts_with_panel_
     """
     c1, c2 = two_charts_with_panel_titles
     composed = (c1 & c2).properties(title="Figure Title")
-    svg = composed.show_svg()
+    svg = composed.to_svg()
 
     assert "Figure Title" in svg, "Figure Title must be present"
     assert "Panel A" in svg, "Panel A must be present"
@@ -351,7 +351,7 @@ def test_d10_t9_caption_appears_after_all_panel_content(two_charts_with_panel_ti
     c1, c2 = two_charts_with_panel_titles
     # Must not raise TypeError.
     composed = (c1 & c2).properties(title="Figure Title", caption="Source: test data")
-    svg = composed.show_svg()
+    svg = composed.to_svg()
 
     assert "Figure Title" in svg, "Figure Title must be present"
     assert "Source: test data" in svg, "Caption text must be present"
@@ -391,7 +391,7 @@ def test_d10_t10_concat_chart_figure_chrome_appears_once(two_charts):
         subtitle="Concat Subtitle",
         caption="Concat Caption",
     )
-    svg = composed.show_svg()
+    svg = composed.to_svg()
 
     assert svg.count("Concat Title") == 1, (
         f"Expected figure title once in ConcatChart; got {svg.count('Concat Title')} copies."
@@ -424,7 +424,7 @@ def test_d10_t11_concat_chart_chrome_survives_rebuild(two_charts):
         .properties(title="Survive Title", caption="Survive Caption")
         .theme(fm.themes.dark)
     )
-    svg = composed.show_svg()
+    svg = composed.to_svg()
 
     assert "Survive Title" in svg, "Figure title was lost after .theme() rebuild on ConcatChart."
     assert "Survive Caption" in svg, (
@@ -440,14 +440,14 @@ def test_d10_t11_concat_chart_chrome_survives_rebuild(two_charts):
 def test_d10_t12_empty_dataset_caption_survives():
     """A chart with an empty dataset still renders the caption from .properties(caption=).
 
-    Previously the empty-dataset fast-path in Chart.show_svg returned the
+    Previously the empty-dataset fast-path in Chart.to_svg returned the
     placeholder SVG before reaching the caption post-wrap, so the caption
     was silently dropped.  The fix applies the same caption wrap to the
     empty-dataset branch.
     """
     df = pl.DataFrame({"x": pl.Series([], dtype=pl.Int64), "y": pl.Series([], dtype=pl.Int64)})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y").properties(caption="Source: empty data")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
 
     assert "Source: empty data" in svg, (
         "Caption was silently dropped for an empty dataset. "
@@ -463,7 +463,7 @@ def test_d10_t12b_empty_dataset_no_caption_path_unchanged():
     """
     df = pl.DataFrame({"x": pl.Series([], dtype=pl.Int64), "y": pl.Series([], dtype=pl.Int64)})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
 
     assert "<!-- empty dataset -->" in svg, (
         "Empty-dataset placeholder comment must be present when no caption is set."

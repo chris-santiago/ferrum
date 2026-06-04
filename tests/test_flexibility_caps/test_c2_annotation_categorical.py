@@ -133,7 +133,7 @@ def test_annotate_vline_categorical_renders_in_svg(cat_df: pl.DataFrame) -> None
     base = fm.Chart(cat_df).mark_bar().encode(x="cat:N", y="val:Q")
     ann = annotate_vline("cat_b", stroke="#ff0000")
     composed = base + ann
-    svg = composed.show_svg()
+    svg = composed.to_svg()
     assert _has_any_rule(svg), (
         "SVG must contain at least one <line> element after layering a "
         "categorical annotate_vline.  Check that the annotation node is "
@@ -146,7 +146,7 @@ def test_annotate_text_categorical_renders_in_svg(cat_df: pl.DataFrame) -> None:
     base = fm.Chart(cat_df).mark_bar().encode(x="cat:N", y="val:Q")
     ann = annotate_text("cat_a", 1.5, "peak")
     composed = base + ann
-    svg = composed.show_svg()
+    svg = composed.to_svg()
     # The word "peak" must appear in the SVG text nodes.
     texts = _text_contents(svg)
     assert "peak" in texts, f"Expected annotation text 'peak' in SVG text nodes, got: {texts}"
@@ -168,7 +168,7 @@ def test_annotate_vline_categorical_position_is_not_center(cat_df: pl.DataFrame)
         base = fm.Chart(cat_df).mark_bar().encode(x="cat:N", y="val:Q")
         ann = annotate_vline(cat, stroke=ANNOTATION_STROKE)
         composed = base + ann
-        svg = composed.show_svg()
+        svg = composed.to_svg()
         # Extract x1 from <line> elements with the annotation stroke color only.
         matches = re.findall(
             rf'<line[^>]+stroke="{re.escape(ANNOTATION_STROKE)}"[^>]*x1="([^"]+)"'
@@ -243,7 +243,7 @@ def test_annotate_text_px_norm_renders_in_svg(cat_df: pl.DataFrame) -> None:
     base = fm.Chart(cat_df).mark_bar().encode(x="cat:N", y="val:Q")
     ann = annotate_text(x=fm.px(40), y=fm.norm(0.5), text="px-norm label")
     composed = base + ann
-    svg = composed.show_svg()
+    svg = composed.to_svg()
     texts = _text_contents(svg)
     assert "px-norm label" in texts, (
         f"Expected 'px-norm label' in SVG text nodes after px/norm annotation, got: {texts}"
@@ -255,7 +255,7 @@ def test_annotate_vline_px_renders_in_svg(cat_df: pl.DataFrame) -> None:
     base = fm.Chart(cat_df).mark_bar().encode(x="cat:N", y="val:Q")
     ann = annotate_vline(x=fm.px(50), stroke="#0f0")
     composed = base + ann
-    svg = composed.show_svg()
+    svg = composed.to_svg()
     assert _has_any_rule(svg), "No <line> element found in SVG for annotate_vline with px() coord."
 
 
@@ -274,7 +274,7 @@ def test_annotate_vline_iso_date_string_still_works(temporal_df: pl.DataFrame) -
     ann = annotate_vline("2020-01-02", stroke="#00f")
     composed = base + ann
     # Must not raise
-    svg = composed.show_svg()
+    svg = composed.to_svg()
     assert _has_any_rule(svg), (
         "ISO-8601 date string annotation must render a <line> element.  "
         "Regression: was working before C2 changes."
@@ -286,7 +286,7 @@ def test_annotate_text_iso_date_string_still_works(temporal_df: pl.DataFrame) ->
     base = fm.Chart(temporal_df).mark_line().encode(x="date:T", y="val:Q")
     ann = annotate_text("2020-01-02", 2.0, "midpoint")
     composed = base + ann
-    svg = composed.show_svg()
+    svg = composed.to_svg()
     texts = _text_contents(svg)
     assert "midpoint" in texts, (
         f"ISO date string annotation text 'midpoint' not in SVG, got: {texts}"
@@ -298,7 +298,7 @@ def test_annotate_hline_numeric_still_works(temporal_df: pl.DataFrame) -> None:
     base = fm.Chart(temporal_df).mark_line().encode(x="date:T", y="val:Q")
     ann = annotate_hline(y=2.0, stroke="red")
     composed = base + ann
-    svg = composed.show_svg()
+    svg = composed.to_svg()
     assert _has_any_rule(svg), "Numeric annotate_hline must still render after C2 changes."
 
 
@@ -318,8 +318,8 @@ def test_non_iso_string_on_temporal_axis_does_not_raise(temporal_df: pl.DataFram
     ann = annotate_vline("peak_date")
     composed = base + ann
     with pytest.warns(UserWarning, match="peak_date"):
-        svg = composed.show_svg()
-    assert isinstance(svg, str), "show_svg must return a string"
+        svg = composed.to_svg()
+    assert isinstance(svg, str), "to_svg must return a string"
 
 
 # ---------------------------------------------------------------------------

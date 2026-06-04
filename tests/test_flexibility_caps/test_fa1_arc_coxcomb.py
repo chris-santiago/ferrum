@@ -123,7 +123,7 @@ class TestFA1ArcNominalTheta:
             .mark_arc()
             .encode(theta="cat:N", radius="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert paths, (
@@ -140,7 +140,7 @@ class TestFA1ArcNominalTheta:
             .mark_arc()
             .encode(theta="cat:N", radius="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert len(paths) == 2, (
@@ -154,7 +154,7 @@ class TestFA1ArcNominalTheta:
             .mark_arc()
             .encode(theta="cat:N", radius="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert len(paths) == 4, (
@@ -171,7 +171,7 @@ class TestFA1ArcNominalTheta:
             .mark_arc()
             .encode(theta="cat:N", radius="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert len(paths) == 2, f"Expected 2 paths, got {len(paths)}"
@@ -198,7 +198,7 @@ class TestFA1ArcNominalTheta:
             .mark_arc()
             .encode(theta="cat:N", radius="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert len(paths) == 2
@@ -220,7 +220,7 @@ class TestFA1ArcNominalTheta:
             .mark_arc()
             .encode(theta="cat:N", radius="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert len(paths) == 4
@@ -241,7 +241,7 @@ class TestFA1ArcNominalTheta:
             .mark_arc()
             .encode(theta="cat:N", radius="val:Q")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         sweeps = [_arc_sweep_radians(d) for d in paths]

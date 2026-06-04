@@ -75,10 +75,10 @@ def test_coord_flip_changes_output(df, mark_method):
     enc = cfg["encoding"]
 
     base_chart = getattr(fm.Chart(df), mark_method)().encode(**enc)
-    base_svg = base_chart.show_svg()
+    base_svg = base_chart.to_svg()
 
     flipped_chart = getattr(fm.Chart(df), mark_method)().encode(**enc).coord(fm.CoordFlip())
-    flipped_svg = flipped_chart.show_svg()
+    flipped_svg = flipped_chart.to_svg()
 
     assert base_svg != flipped_svg, (
         f"{mark_method}: SVG unchanged after coord_flip — flip may be silently ignored"
@@ -92,7 +92,7 @@ def test_coord_flip_preserves_marks(df, mark_method):
     enc = cfg["encoding"]
 
     flipped_chart = getattr(fm.Chart(df), mark_method)().encode(**enc).coord(fm.CoordFlip())
-    flipped_svg = flipped_chart.show_svg()
+    flipped_svg = flipped_chart.to_svg()
 
     assert "<svg" in flipped_svg, f"{mark_method}: coord_flip produced invalid SVG (no <svg root)"
 

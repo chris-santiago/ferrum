@@ -96,11 +96,11 @@ class TestJointChart:
         assert spec["share"]["x"] == ["center", "top"]
         assert spec["share"]["y"] == ["center"]
 
-    def test_show_svg_renders_after_task_12(self, df_xy):
+    def test_to_svg_renders_after_task_12(self, df_xy):
         center = fe.Chart(df_xy).mark_point().encode(x="x", y="y")
         top = fe.Chart(df_xy).mark_histogram().encode(x="x")
         jc = fe.JointChart(center, top=top)
-        out = jc.show_svg()
+        out = jc.to_svg()
         assert out.startswith("<svg")
         assert "</svg>" in out
 

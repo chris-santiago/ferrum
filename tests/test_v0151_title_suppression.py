@@ -226,7 +226,7 @@ class TestAxisRenderTitleSuppression:
             fm.Chart(simple_df)
             .mark_point()
             .encode(x=fm.X("horsepower", axis=Axis()), y="mpg")
-            .show_svg()
+            .to_svg()
         )
         texts = _svg_texts(svg)
         assert "horsepower" in texts, (
@@ -239,7 +239,7 @@ class TestAxisRenderTitleSuppression:
             fm.Chart(simple_df)
             .mark_point()
             .encode(x=fm.X("horsepower", axis=Axis(title=None)), y="mpg")
-            .show_svg()
+            .to_svg()
         )
         texts = _svg_texts(svg)
         assert "horsepower" not in texts, (
@@ -253,7 +253,7 @@ class TestAxisRenderTitleSuppression:
             fm.Chart(simple_df)
             .mark_point()
             .encode(x=fm.X("horsepower", axis=Axis(title=None)), y="mpg")
-            .show_svg()
+            .to_svg()
         )
         empty_nodes = re.findall(r"<text[^>]*>\s*</text>", svg)
         assert not empty_nodes, (
@@ -267,7 +267,7 @@ class TestAxisRenderTitleSuppression:
             fm.Chart(simple_df)
             .mark_point()
             .encode(x=fm.X("horsepower", axis=Axis(title="Engine Power")), y="mpg")
-            .show_svg()
+            .to_svg()
         )
         texts = _svg_texts(svg)
         assert "Engine Power" in texts, (
@@ -281,7 +281,7 @@ class TestAxisRenderTitleSuppression:
             fm.Chart(simple_df)
             .mark_point()
             .encode(x="horsepower", y=fm.Y("mpg", axis=Axis(title=None)))
-            .show_svg()
+            .to_svg()
         )
         texts = _svg_texts(svg)
         assert "mpg" not in texts, (
@@ -310,7 +310,7 @@ class TestLegendRenderTitleSuppression:
             fm.Chart(simple_df)
             .mark_point()
             .encode(x="horsepower", y="mpg", color=fm.Color("origin", legend=Legend()))
-            .show_svg()
+            .to_svg()
         )
         texts = _svg_texts(svg)
         assert "origin" in texts, (
@@ -323,7 +323,7 @@ class TestLegendRenderTitleSuppression:
             fm.Chart(simple_df)
             .mark_point()
             .encode(x="horsepower", y="mpg", color=fm.Color("origin", legend=Legend(title=None)))
-            .show_svg()
+            .to_svg()
         )
         texts = _svg_texts(svg)
         assert "origin" not in texts, (
@@ -337,7 +337,7 @@ class TestLegendRenderTitleSuppression:
             fm.Chart(simple_df)
             .mark_point()
             .encode(x="horsepower", y="mpg", color=fm.Color("origin", legend=Legend(title=None)))
-            .show_svg()
+            .to_svg()
         )
         empty_nodes = re.findall(r"<text[^>]*>\s*</text>", svg)
         assert not empty_nodes, (
@@ -355,7 +355,7 @@ class TestLegendRenderTitleSuppression:
                 y="mpg",
                 color=fm.Color("origin", legend=Legend(title="Region")),
             )
-            .show_svg()
+            .to_svg()
         )
         texts = _svg_texts(svg)
         assert "Region" in texts, f"Legend(title='Region') must show that title; texts: {texts}"
@@ -375,7 +375,7 @@ class TestLegendRenderTitleSuppression:
             fm.Chart(simple_df)
             .mark_point()
             .encode(x="horsepower", y="mpg", color=fm.Color("origin", title=None))
-            .show_svg()
+            .to_svg()
         )
         texts = _svg_texts(svg)
         # The field name appears as the legend title (channel title kwarg does not

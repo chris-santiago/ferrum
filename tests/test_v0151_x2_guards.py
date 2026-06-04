@@ -67,7 +67,7 @@ def test_mark_area_with_x2_raises():
         )
     )
     with pytest.raises(ValueError, match="mark_area") as exc_info:
-        chart.show_svg()
+        chart.to_svg()
     msg = str(exc_info.value)
     assert "x2" in msg, f"error message should name the channel 'x2'; got: {msg!r}"
 
@@ -84,7 +84,7 @@ def test_mark_area_with_x2_error_names_alternative():
         )
     )
     with pytest.raises(ValueError) as exc_info:
-        chart.show_svg()
+        chart.to_svg()
     msg = str(exc_info.value)
     # The hint should guide users toward y2 or mark_rect.
     has_alternative = "y2" in msg or "mark_rect" in msg or "rect" in msg.lower()
@@ -109,7 +109,7 @@ def test_mark_bar_with_x2_and_y2_raises():
         )
     )
     with pytest.raises(ValueError, match="mark_bar") as exc_info:
-        chart.show_svg()
+        chart.to_svg()
     msg = str(exc_info.value)
     assert "x2" in msg, f"error message should name 'x2'; got: {msg!r}"
     assert "y2" in msg, f"error message should name 'y2'; got: {msg!r}"
@@ -128,7 +128,7 @@ def test_mark_bar_with_x2_and_y2_error_names_mark_rect():
         )
     )
     with pytest.raises(ValueError) as exc_info:
-        chart.show_svg()
+        chart.to_svg()
     msg = str(exc_info.value)
     assert "mark_rect" in msg or "rect" in msg.lower(), (
         f"error should name 'mark_rect' as the alternative; got: {msg!r}"
@@ -158,7 +158,7 @@ def test_mark_bar_with_only_y2_renders(tmp_path):
             y2="y_hi",
         )
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg"), "mark_bar with y2 only must render valid SVG"
     assert "<rect" in svg, "mark_bar with y2 only must emit rect elements"
 
@@ -181,7 +181,7 @@ def test_mark_bar_with_only_x2_renders():
             y=fr.Y("count", type="quantitative"),
         )
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg"), "mark_bar with x2 only must render valid SVG"
     assert "<rect" in svg, "mark_bar with x2 only must emit rect elements"
 
@@ -197,6 +197,6 @@ def test_mark_area_with_y2_renders():
             y2="hi",
         )
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg"), "mark_area with y2 must render valid SVG"
     assert "<path" in svg, "mark_area with y2 must emit path elements"

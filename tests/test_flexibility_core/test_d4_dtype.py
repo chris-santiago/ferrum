@@ -127,7 +127,7 @@ def test_integer_keyed_heatmap_ordinal_renders_all_cells(
         fm.Chart(int_heatmap_3x3)
         .mark_rect()
         .encode(x="col_id:O", y="row_id:O", color="val:Q")
-        .show_svg()
+        .to_svg()
     )
     cells = _colored_rects(svg)
     assert len(cells) == 9, (
@@ -153,7 +153,7 @@ def test_integer_keyed_heatmap_nominal_renders_all_cells(
         fm.Chart(int_heatmap_3x3)
         .mark_rect()
         .encode(x="col_id:N", y="row_id:N", color="val:Q")
-        .show_svg()
+        .to_svg()
     )
     cells = _colored_rects(svg)
     assert len(cells) == 9, (
@@ -194,7 +194,7 @@ def test_string_keyed_heatmap_ordinal_renders_all_cells(
     Expected: 9 colored cell rects.
     """
     svg = (
-        fm.Chart(str_heatmap_3x3).mark_rect().encode(x="col:O", y="row:O", color="val:Q").show_svg()
+        fm.Chart(str_heatmap_3x3).mark_rect().encode(x="col:O", y="row:O", color="val:Q").to_svg()
     )
     cells = _colored_rects(svg)
     assert len(cells) == 9, (
@@ -219,7 +219,7 @@ def test_string_keyed_heatmap_nominal_renders_all_cells(
     Bug indicator: ``ValueError`` raised, or 0 cells if it silently blanks.
     """
     svg = (
-        fm.Chart(str_heatmap_3x3).mark_rect().encode(x="col:N", y="row:N", color="val:Q").show_svg()
+        fm.Chart(str_heatmap_3x3).mark_rect().encode(x="col:N", y="row:N", color="val:Q").to_svg()
     )
     cells = _colored_rects(svg)
     assert len(cells) == 9, (
@@ -261,7 +261,7 @@ def test_mark_bar_nominal_y_renders_one_bar_per_category(
 
     Bug indicator: ``ValueError`` raised.
     """
-    svg = fm.Chart(categorical_bar_df).mark_bar().encode(y="category:N", x="value:Q").show_svg()
+    svg = fm.Chart(categorical_bar_df).mark_bar().encode(y="category:N", x="value:Q").to_svg()
     bars = _colored_bar_rects(svg)
     assert len(bars) == 4, (
         f"Expected 4 bars (one per category) for a horizontal bar chart with "
@@ -281,7 +281,7 @@ def test_mark_bar_ordinal_y_renders_one_bar_per_category(
 
     Bug indicator: ``ValueError`` raised.
     """
-    svg = fm.Chart(categorical_bar_df).mark_bar().encode(y="category:O", x="value:Q").show_svg()
+    svg = fm.Chart(categorical_bar_df).mark_bar().encode(y="category:O", x="value:Q").to_svg()
     bars = _colored_bar_rects(svg)
     assert len(bars) == 4, (
         f"Expected 4 bars (one per category) for a horizontal bar chart with "
@@ -317,7 +317,7 @@ def test_integer_column_no_suffix_treated_as_quantitative(
     This assertion exists to lock in the default inference behavior so that
     it cannot be silently changed by the D4 dtype-normalization fix.
     """
-    svg = fm.Chart(int_scatter_df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fm.Chart(int_scatter_df).mark_point().encode(x="x", y="y").to_svg()
     circles = re.findall(r"<circle[^>]*/?>", svg)
     assert len(circles) == 5, (
         f"Expected 5 circle marks for a 5-row scatter with integer columns "
@@ -334,7 +334,7 @@ def test_integer_column_explicit_Q_treated_as_quantitative(
 
     All 5 rows must appear as circle marks.
     """
-    svg = fm.Chart(int_scatter_df).mark_point().encode(x="x:Q", y="y:Q").show_svg()
+    svg = fm.Chart(int_scatter_df).mark_point().encode(x="x:Q", y="y:Q").to_svg()
     circles = re.findall(r"<circle[^>]*/?>", svg)
     assert len(circles) == 5, (
         f"Expected 5 circle marks for a 5-row scatter with integer columns "
@@ -351,8 +351,8 @@ def test_integer_no_suffix_equals_explicit_Q(
     This confirms that the default type inference for integer storage is
     quantitative (continuous), matching Altair.
     """
-    svg_no_suffix = fm.Chart(int_scatter_df).mark_point().encode(x="x", y="y").show_svg()
-    svg_explicit_q = fm.Chart(int_scatter_df).mark_point().encode(x="x:Q", y="y:Q").show_svg()
+    svg_no_suffix = fm.Chart(int_scatter_df).mark_point().encode(x="x", y="y").to_svg()
+    svg_explicit_q = fm.Chart(int_scatter_df).mark_point().encode(x="x:Q", y="y:Q").to_svg()
     assert svg_no_suffix == svg_explicit_q, (
         "Integer columns with no type suffix produced different SVG from the "
         "same columns declared as :Q.  The default type inference for integers "
@@ -395,7 +395,7 @@ def test_stack_accepts_integer_measure_without_error(
         fm.Chart(int_stacked_bar_df)
         .mark_bar(position=fm.Stack())
         .encode(x="category:N", y="count:Q", color="segment:N")
-        .show_svg()
+        .to_svg()
     )
     bars = _colored_bar_rects(svg)
     assert len(bars) == 4, (
@@ -421,13 +421,13 @@ def test_stack_integer_measure_matches_float_measure(
         fm.Chart(int_stacked_bar_df)
         .mark_bar(position=fm.Stack())
         .encode(x="category:N", y="count:Q", color="segment:N")
-        .show_svg()
+        .to_svg()
     )
     svg_float = (
         fm.Chart(df_float)
         .mark_bar(position=fm.Stack())
         .encode(x="category:N", y="count:Q", color="segment:N")
-        .show_svg()
+        .to_svg()
     )
 
     bars_int = _colored_bar_rects(svg_int)
@@ -476,7 +476,7 @@ def test_dual_use_integer_column_ordinal_and_quantitative_point(
     string column and raise ``expected numeric column ... got Utf8``.  This test
     will FAIL under that regression.
     """
-    svg = fm.Chart(dual_use_df).mark_point().encode(x="yr:O", y="amt:Q", size="yr:Q").show_svg()
+    svg = fm.Chart(dual_use_df).mark_point().encode(x="yr:O", y="amt:Q", size="yr:Q").to_svg()
     circles = re.findall(r"<circle[^>]*/?>", svg)
     assert len(circles) >= 3, (
         f"Expected at least 3 circle marks (one per data row) for a chart using "
@@ -499,7 +499,7 @@ def test_dual_use_integer_column_ordinal_and_quantitative_bar(
 
     This test will FAIL under a reintroduced column-global cast.
     """
-    svg = fm.Chart(dual_use_df).mark_bar().encode(x="yr:O", y="amt:Q", color="yr:Q").show_svg()
+    svg = fm.Chart(dual_use_df).mark_bar().encode(x="yr:O", y="amt:Q", color="yr:Q").to_svg()
     bars = _colored_bar_rects(svg)
     assert len(bars) == 3, (
         f"Expected 3 bars (one per row) for a chart using 'yr' as both :O (x) "

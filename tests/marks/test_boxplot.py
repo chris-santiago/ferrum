@@ -42,7 +42,7 @@ def test_boxplot_horizontal_swaps_x_y(df):
 
 def test_boxplot_render_smoke(df):
     chart = fe.Chart(df).mark_boxplot().encode(x="group", y="value")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<?xml") or svg.startswith("<svg")
 
 
@@ -53,8 +53,8 @@ def test_boxplot_width_sets_box_band_size(df):
     chart_default = fe.Chart(df).mark_boxplot().encode(x="group", y="value")
 
     # Should render without error.
-    svg_narrow = chart_narrow.show_svg()
-    svg_default = chart_default.show_svg()
+    svg_narrow = chart_narrow.to_svg()
+    svg_default = chart_default.to_svg()
     assert "<svg" in svg_narrow or svg_narrow.startswith("<?xml"), (
         "width=0.3 should produce valid SVG"
     )

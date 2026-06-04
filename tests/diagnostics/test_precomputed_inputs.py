@@ -107,7 +107,7 @@ def regression_precomputed(regression_data):
 
 
 def _svg(chart) -> str:
-    return chart.show_svg()
+    return chart.to_svg()
 
 
 # ---------------------------------------------------------------------------

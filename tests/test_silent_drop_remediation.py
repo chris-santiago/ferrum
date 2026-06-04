@@ -92,7 +92,7 @@ class TestSort:
             fm.Chart(_cat_df())
             .mark_bar()
             .encode(x=fm.X("cat", sort="descending"), y="val")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         labels = _extract_text_labels(svg)
@@ -108,7 +108,7 @@ class TestSort:
             fm.Chart(_cat_df())
             .mark_bar()
             .encode(x=fm.X("cat", sort="ascending"), y="val")
-            .show_svg()
+            .to_svg()
         )
         labels = _extract_text_labels(svg)
         cat_labels = [l for l in labels if l in ("a", "b", "c")]
@@ -122,7 +122,7 @@ class TestSort:
             fm.Chart(_cat_df())
             .mark_bar()
             .encode(x=fm.X("cat", sort=["b", "a", "c"]), y="val")
-            .show_svg()
+            .to_svg()
         )
         labels = _extract_text_labels(svg)
         cat_labels = [l for l in labels if l in ("a", "b", "c")]
@@ -132,7 +132,7 @@ class TestSort:
 
     def test_sort_list_partial_order_appends_remainder(self):
         """sort=['c'] → c first, then remaining in original order."""
-        svg = fm.Chart(_cat_df()).mark_bar().encode(x=fm.X("cat", sort=["c"]), y="val").show_svg()
+        svg = fm.Chart(_cat_df()).mark_bar().encode(x=fm.X("cat", sort=["c"]), y="val").to_svg()
         labels = _extract_text_labels(svg)
         cat_labels = [l for l in labels if l in ("a", "b", "c")]
         # c first, then b and a in their original encounter order (b then a)
@@ -155,7 +155,7 @@ class TestStack:
                 y=fm.Y("val", stack="normalize"),
                 color="g",
             )
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         # With normalize, the y-axis should show ticks at 0 to 1.
@@ -180,7 +180,7 @@ class TestStack:
                 y=fm.Y("val", stack="zero"),
                 color="g",
             )
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         # The stacked chart should contain 4 rect elements (2 groups × 2 cats)
@@ -196,27 +196,27 @@ class TestStack:
                 y=fm.Y("val", stack="center"),
                 color="g",
             )
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
     def test_stack_none_leaves_heights_unchanged(self):
         """stack=None → bars are NOT stacked (chart-level position not set)."""
         # Without stacking, bars from different groups overlap.
-        svg = fm.Chart(_group_bar_df()).mark_bar().encode(x="cat", y="val", color="g").show_svg()
+        svg = fm.Chart(_group_bar_df()).mark_bar().encode(x="cat", y="val", color="g").to_svg()
         assert "<svg" in svg
 
     def test_stack_invalid_value_raises_value_error(self):
         """stack='bogus' → ValueError at desugar/build time."""
         # The validate_stack helper should reject unknown values.
-        # The error must happen at construction or show_svg time.
+        # The error must happen at construction or to_svg time.
         with pytest.raises((ValueError, Exception)):
             # Build chart with invalid stack and attempt to render
             fm.Chart(_group_bar_df()).mark_bar().encode(
                 x="cat",
                 y=fm.Y("val", stack="bogus"),
                 color="g",
-            ).show_svg()
+            ).to_svg()
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +234,7 @@ class TestAxisDict:
                 x=fm.X("x", axis={"ticks": False}),
                 y="y",
             )
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         # With ticks=False there should be no tick line elements on x-axis.
@@ -257,7 +257,7 @@ class TestAxisDict:
                 x=fm.X("cat", axis={"label_angle": -45}),
                 y="val",
             )
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         # -45 rotation should appear as rotate(-45) in transform attribute
@@ -268,12 +268,12 @@ class TestAxisDict:
     def test_labels_false_hides_tick_labels(self):
         """axis={'labels': False} → no tick label text visible."""
         # When labels=False, tick label text elements should be suppressed.
-        svg_with_labels = fm.Chart(_numeric_df()).mark_point().encode(x="x", y="y").show_svg()
+        svg_with_labels = fm.Chart(_numeric_df()).mark_point().encode(x="x", y="y").to_svg()
         svg_no_labels = (
             fm.Chart(_numeric_df())
             .mark_point()
             .encode(x=fm.X("x", axis={"labels": False}), y="y")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg_no_labels
         # With labels=False there should be fewer text elements.
@@ -292,7 +292,7 @@ class TestAxisDict:
                 x=fm.X("x", axis={"title": "My Custom X"}),
                 y="y",
             )
-            .show_svg()
+            .to_svg()
         )
         assert "My Custom X" in svg, "axis={'title': 'My Custom X'} should appear in SVG"
 
@@ -306,7 +306,7 @@ class TestAxisDict:
                 x=fm.X("x", axis={"grid": False}),
                 y="y",
             )
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -326,7 +326,7 @@ class TestFormatType:
                 x=fm.X("x", format=".1f", format_type="number"),
                 y="y",
             )
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         # With .1f format, x tick labels should contain decimal forms
@@ -346,14 +346,14 @@ class TestFormatType:
                 x=fm.X("x", format_type="number"),
                 y="y",
             )
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
     def test_format_dot2f_produces_two_decimal_places(self):
         """format='.2f' → x tick labels show exactly 2 decimal places (e.g. '1.00')."""
         svg = (
-            fm.Chart(_numeric_df()).mark_point().encode(x=fm.X("x", format=".2f"), y="y").show_svg()
+            fm.Chart(_numeric_df()).mark_point().encode(x=fm.X("x", format=".2f"), y="y").to_svg()
         )
         labels = _extract_text_labels(svg)
         two_decimal = [l for l in labels if re.fullmatch(r"\d+\.\d{2}", l)]
@@ -364,7 +364,7 @@ class TestFormatType:
     def test_format_percent_produces_percent_labels(self):
         """format='.1%' → x tick labels include '%' suffix (e.g. '10.0%')."""
         df = pl.DataFrame({"x": [0.1, 0.2, 0.3, 0.4, 0.5], "y": [1, 2, 3, 4, 5]})
-        svg = fm.Chart(df).mark_point().encode(x=fm.X("x", format=".1%"), y="y").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x=fm.X("x", format=".1%"), y="y").to_svg()
         labels = _extract_text_labels(svg)
         pct_labels = [l for l in labels if "%" in l]
         assert pct_labels, (
@@ -376,7 +376,7 @@ class TestFormatType:
     def test_format_comma_produces_thousands_separator(self):
         """format=',' → x tick labels have thousands commas (e.g. '1,000')."""
         df = pl.DataFrame({"x": [1000.0, 2000.0, 3000.0], "y": [1, 2, 3]})
-        svg = fm.Chart(df).mark_point().encode(x=fm.X("x", format=","), y="y").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x=fm.X("x", format=","), y="y").to_svg()
         labels = _extract_text_labels(svg)
         comma_labels = [l for l in labels if "," in l and l.replace(",", "").isdigit()]
         assert comma_labels, (
@@ -401,7 +401,7 @@ class TestImpute:
                 y=fm.Y("y", impute={"method": "value", "value": 0}),
                 color="group",
             )
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         # Imputation adds a row at x=2 for group b (which was missing).
@@ -435,7 +435,7 @@ class TestImpute:
                 y=fm.Y("y", impute={"method": "value"}),  # missing 'value'
                 color="group",
             )
-            .show_svg()
+            .to_svg()
         )
         # Currently succeeds (no-op impute), which is acceptable behavior.
         assert "<svg" in svg
@@ -460,7 +460,7 @@ class TestLegendKwargs:
             fm.Chart(df)
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("g", legend={"orient": "bottom"}))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -477,7 +477,7 @@ class TestLegendKwargs:
             fm.Chart(df)
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("g", legend={"direction": "horizontal"}))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -494,7 +494,7 @@ class TestLegendKwargs:
             fm.Chart(df)
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("species", legend={"title": "My Legend"}))
-            .show_svg()
+            .to_svg()
         )
         assert "My Legend" in svg, "legend={'title': 'My Legend'} should appear in SVG"
 
@@ -535,7 +535,7 @@ class TestLegendKwargsExtended:
             fm.Chart(self._continuous_df())
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("val", legend={"tickCount": 3}))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -545,7 +545,7 @@ class TestLegendKwargsExtended:
             fm.Chart(self._continuous_df())
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("val", legend={"tickCount": 3}))
-            .show_svg()
+            .to_svg()
         )
         # Default colorbar has 5 ticks; with tickCount=3 it should have ≤ 3.
         # Count text elements that appear inside the legend area — use the
@@ -554,7 +554,7 @@ class TestLegendKwargsExtended:
             fm.Chart(self._continuous_df())
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("val"))
-            .show_svg()
+            .to_svg()
         )
         default_texts = len(re.findall(r"<text", default_svg))
         limited_texts = len(re.findall(r"<text", svg))
@@ -571,7 +571,7 @@ class TestLegendKwargsExtended:
             fm.Chart(self._categorical_df())
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("g", legend={"labelFontSize": 14}))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -581,7 +581,7 @@ class TestLegendKwargsExtended:
             fm.Chart(self._categorical_df())
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("g", legend={"labelFontSize": 14}))
-            .show_svg()
+            .to_svg()
         )
         # Font size may appear as font-size="14" or as part of a style attribute.
         assert "14" in svg, "Expected font size 14 to appear in SVG for labelFontSize=14"
@@ -594,7 +594,7 @@ class TestLegendKwargsExtended:
             fm.Chart(self._continuous_df())
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("val", legend={"gradientLength": 200}))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -604,7 +604,7 @@ class TestLegendKwargsExtended:
             fm.Chart(self._continuous_df())
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("val", legend={"gradientLength": 80}))
-            .show_svg()
+            .to_svg()
         )
         # The gradient rect uses fill="url(#ferrum-colorbar-0)"; extract its height.
         gradient_rect = re.search(r'<rect[^>]+fill="url\(#ferrum-colorbar[^"]*\)"[^>]*>', short_svg)
@@ -626,7 +626,7 @@ class TestLegendKwargsExtended:
             fm.Chart(self._continuous_df())
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("val", legend={"gradientThickness": 30}))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -638,7 +638,7 @@ class TestLegendKwargsExtended:
             fm.Chart(self._categorical_df())
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("g", legend={"direction": "horizontal"}))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -648,7 +648,7 @@ class TestLegendKwargsExtended:
             fm.Chart(self._categorical_df())
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("g", legend={"direction": "vertical"}))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -660,7 +660,7 @@ class TestLegendKwargsExtended:
             fm.Chart(self._categorical_df())
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("g", legend={"type": "symbol"}))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -670,7 +670,7 @@ class TestLegendKwargsExtended:
             fm.Chart(self._continuous_df())
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("val", legend={"type": "gradient"}))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         # The colorbar uses a linearGradient — verify it appears.
@@ -690,7 +690,7 @@ class TestLegendKwargsExtended:
                 y="y",
                 color=fm.Color("val", legend={"values": ["low", "mid", "high"]}),
             )
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -704,7 +704,7 @@ class TestLegendKwargsExtended:
                 y="y",
                 color=fm.Color("val", legend={"values": ["low", "high"]}),
             )
-            .show_svg()
+            .to_svg()
         )
         assert "low" in svg, "Expected 'low' in SVG from legend values"
         assert "high" in svg, "Expected 'high' in SVG from legend values"
@@ -728,7 +728,7 @@ class TestLegendKwargsExtended:
                     },
                 ),
             )
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -745,7 +745,7 @@ class TestHistogramMultiple:
             fm.Chart(_hist_df())
             .mark_histogram(groupby="g", multiple="stack")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         # Stacked bars should have at least 2 rects (2 groups)
@@ -757,7 +757,7 @@ class TestHistogramMultiple:
             fm.Chart(_hist_df())
             .mark_histogram(groupby="g", multiple="dodge")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         # Dodge produces bars for each group within each bin
@@ -769,7 +769,7 @@ class TestHistogramMultiple:
             fm.Chart(_hist_df())
             .mark_histogram(groupby="g", multiple="fill")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -779,14 +779,14 @@ class TestHistogramMultiple:
             fm.Chart(_hist_df())
             .mark_histogram(groupby="g", multiple="layer")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
     def test_histogram_multiple_invalid_raises_value_error(self):
         """mark_histogram(multiple='bogus') raises ValueError."""
         with pytest.raises(ValueError, match="multiple"):
-            (fm.Chart(_hist_df()).mark_histogram(multiple="bogus").encode(x="x").show_svg())
+            (fm.Chart(_hist_df()).mark_histogram(multiple="bogus").encode(x="x").to_svg())
 
 
 class TestDensityMultiple:
@@ -796,7 +796,7 @@ class TestDensityMultiple:
             fm.Chart(_hist_df())
             .mark_density(groupby="g", multiple="stack")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -806,7 +806,7 @@ class TestDensityMultiple:
             fm.Chart(_hist_df())
             .mark_density(groupby="g", multiple="fill")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -816,7 +816,7 @@ class TestDensityMultiple:
             fm.Chart(_hist_df())
             .mark_density(groupby="g", multiple="dodge")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -852,7 +852,7 @@ class TestTruncateFalse:
         # We can check this by verifying the chart spec has x_range set on SmoothSpec.
         chart = fm.Chart(df).mark_smooth(method="lm").encode(x="x", y="y")
         # Just verify it renders
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_lmplot_truncate_true_still_works(self):
@@ -895,7 +895,7 @@ class TestChartDataNone:
             )
             .encode(x="x", y="y")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_layer_with_data_accepted_by_chart_layer_method(self):
@@ -918,7 +918,7 @@ class TestChartDataNone:
         chart = fm.Chart(data=None).mark_point().encode(x="x", y="y")
         # Rendering should fail because there's no data
         with pytest.raises((ValueError, Exception)):
-            chart.show_svg()
+            chart.to_svg()
 
     def test_error_message_updated_from_phase_8a(self):
         """The old 'Phase 8a' error message is gone."""
@@ -963,14 +963,14 @@ class TestStrokeWidthSVG:
 
     def test_scatter_stroke_width_encodes_without_error(self):
         """encode(stroke_width='sw') on a scatter chart renders without error."""
-        svg = fm.Chart(_stroke_df()).mark_point().encode(x="x", y="y", stroke_width="sw").show_svg()
+        svg = fm.Chart(_stroke_df()).mark_point().encode(x="x", y="y", stroke_width="sw").to_svg()
         assert "<svg" in svg
         assert "<circle" in svg
 
     def test_line_stroke_width_encodes_without_error(self):
         """encode(stroke_width='sw') on a line chart renders without error."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [1.0, 4.0, 9.0, 16.0, 25.0]})
-        svg = fm.Chart(df).mark_line().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_line().encode(x="x", y="y").to_svg()
         assert "<svg" in svg
         # Line marks emit polyline or path elements
         assert "<polyline" in svg or "<path" in svg
@@ -991,7 +991,7 @@ class TestStrokeOpacitySVG:
             fm.Chart(_stroke_df())
             .mark_point(filled=False)
             .encode(x="x", y="y", stroke_opacity="so")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         assert "stroke-opacity" in svg, (
@@ -1004,7 +1004,7 @@ class TestStrokeOpacitySVG:
             fm.Chart(_stroke_df())
             .mark_point(filled=False)
             .encode(x="x", y="y", stroke_opacity="so")
-            .show_svg()
+            .to_svg()
         )
         # Extract stroke-opacity values from SVG
         vals = re.findall(r'stroke-opacity="([^"]+)"', svg)
@@ -1033,7 +1033,7 @@ class TestStrokeDashSVG:
             fm.Chart(df_solid)
             .mark_point(filled=False)
             .encode(x="x", y="y", stroke_dash="sd")
-            .show_svg()
+            .to_svg()
         )
         # Index 0 = solid: stroke-dasharray should NOT appear for mark elements
         # (it may appear for gridlines but not on circles)
@@ -1046,7 +1046,7 @@ class TestStrokeDashSVG:
         """stroke_dash index 1 → stroke-dasharray='6,3'."""
         df = pl.DataFrame({"x": [1.0], "y": [1.0], "sd": [1.0]})
         svg = (
-            fm.Chart(df).mark_point(filled=False).encode(x="x", y="y", stroke_dash="sd").show_svg()
+            fm.Chart(df).mark_point(filled=False).encode(x="x", y="y", stroke_dash="sd").to_svg()
         )
         assert 'stroke-dasharray="6,3"' in svg, (
             f"Expected stroke-dasharray=6,3 for index 1; got:\n{svg[:2000]}"
@@ -1056,7 +1056,7 @@ class TestStrokeDashSVG:
         """stroke_dash index 2 → stroke-dasharray='2,3'."""
         df = pl.DataFrame({"x": [1.0], "y": [1.0], "sd": [2.0]})
         svg = (
-            fm.Chart(df).mark_point(filled=False).encode(x="x", y="y", stroke_dash="sd").show_svg()
+            fm.Chart(df).mark_point(filled=False).encode(x="x", y="y", stroke_dash="sd").to_svg()
         )
         assert 'stroke-dasharray="2,3"' in svg, (
             f"Expected stroke-dasharray=2,3 for index 2; got:\n{svg[:2000]}"
@@ -1066,7 +1066,7 @@ class TestStrokeDashSVG:
         """stroke_dash index 3 → stroke-dasharray='6,3,2,3'."""
         df = pl.DataFrame({"x": [1.0], "y": [1.0], "sd": [3.0]})
         svg = (
-            fm.Chart(df).mark_point(filled=False).encode(x="x", y="y", stroke_dash="sd").show_svg()
+            fm.Chart(df).mark_point(filled=False).encode(x="x", y="y", stroke_dash="sd").to_svg()
         )
         assert 'stroke-dasharray="6,3,2,3"' in svg, (
             f"Expected stroke-dasharray=6,3,2,3 for index 3; got:\n{svg[:2000]}"
@@ -1085,13 +1085,13 @@ class TestAngleSVG:
     def test_scatter_angle_45_emits_rotate(self):
         """encode(angle='ang') with ang=45 → transform='rotate(45 ...)' in SVG."""
         df = pl.DataFrame({"x": [1.0], "y": [1.0], "ang": [45.0]})
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y", angle="ang").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y", angle="ang").to_svg()
         assert "rotate(45" in svg, f"Expected rotate(45 ...) transform in SVG; got:\n{svg[:2000]}"
 
     def test_scatter_angle_zero_does_not_emit_transform(self):
         """encode(angle='ang') with ang=0 → no rotate transform attribute emitted."""
         df = pl.DataFrame({"x": [1.0], "y": [1.0], "ang": [0.0]})
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y", angle="ang").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y", angle="ang").to_svg()
         # Row with angle=0.0 should not emit a rotate transform on that element
         circles = re.findall(r"<circle[^/]*/?>", svg)
         for c in circles:
@@ -1099,7 +1099,7 @@ class TestAngleSVG:
 
     def test_scatter_angle_varies_per_row(self):
         """Different angle values per row → distinct rotate(...) transforms in SVG."""
-        svg = fm.Chart(_stroke_df()).mark_point().encode(x="x", y="y", angle="ang").show_svg()
+        svg = fm.Chart(_stroke_df()).mark_point().encode(x="x", y="y", angle="ang").to_svg()
         # rows 1 and 2 have angle=45, 90 → rotates should appear
         assert "rotate(45" in svg, "Expected rotate(45 ...) for row 1"
         assert "rotate(90" in svg, "Expected rotate(90 ...) for row 2"
@@ -1136,7 +1136,7 @@ class TestFillOpacitySVG:
                 "fo": [0.3, 0.6, 0.9],
             }
         )
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo").to_svg()
         assert "<svg" in svg
         assert "fill-opacity" in svg, "Expected fill-opacity attribute in SVG; got:\n" + svg[:2000]
 
@@ -1149,7 +1149,7 @@ class TestFillOpacitySVG:
                 "fo": [0.3, 0.6, 0.9],
             }
         )
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo").to_svg()
         vals = re.findall(r'fill-opacity="([^"]+)"', svg)
         float_vals = [float(v) for v in vals]
         per_row_vals = [v for v in float_vals if v < 1.0]
@@ -1166,7 +1166,7 @@ class TestFillOpacitySVG:
                 "fo": [1.0, 1.0, 1.0],
             }
         )
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo").to_svg()
         assert "fill-opacity" not in svg, (
             "fill-opacity=1.0 should not emit attribute; got:\n" + svg[:2000]
         )
@@ -1190,7 +1190,7 @@ class TestFillOpacitySVG:
             fm.Chart(df)
             .mark_point()
             .encode(x="x", y="y", fill_opacity="fo", opacity="op")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         # fill-opacity attribute appears (from fill_opacity channel)
@@ -1207,7 +1207,7 @@ class TestFillOpacitySVG:
                 "fo": [0.4, 0.7, 0.9],
             }
         )
-        svg = fm.Chart(df).mark_bar().encode(x="cat", y="val", fill_opacity="fo").show_svg()
+        svg = fm.Chart(df).mark_bar().encode(x="cat", y="val", fill_opacity="fo").to_svg()
         assert "fill-opacity" in svg, (
             "Expected fill-opacity attribute on bar rects; got:\n" + svg[:2000]
         )
@@ -1221,7 +1221,7 @@ class TestFillOpacitySVG:
                 "fo": [0.5, 0.5, 0.5],
             }
         )
-        svg = fm.Chart(df).mark_line().encode(x="x", y="y", fill_opacity="fo").show_svg()
+        svg = fm.Chart(df).mark_line().encode(x="x", y="y", fill_opacity="fo").to_svg()
         assert "<svg" in svg, "Line chart should render"
 
     def test_rule_fill_opacity_emits_attribute(self):
@@ -1232,7 +1232,7 @@ class TestFillOpacitySVG:
                 "fo": [0.3, 0.6, 0.9],
             }
         )
-        svg = fm.Chart(df).mark_rule().encode(y="y", fill_opacity="fo").show_svg()
+        svg = fm.Chart(df).mark_rule().encode(y="y", fill_opacity="fo").to_svg()
         assert "<svg" in svg, "Rule chart should render"
 
     def test_fill_opacity_clamps_to_valid_range(self):
@@ -1244,7 +1244,7 @@ class TestFillOpacitySVG:
                 "fo": [-0.5, 1.5, 0.5],
             }
         )
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo").to_svg()
         vals = re.findall(r'fill-opacity="([^"]+)"', svg)
         float_vals = [float(v) for v in vals]
         for v in float_vals:
@@ -1259,7 +1259,7 @@ class TestFillOpacitySVG:
                 "fo": [0.0, 0.0],
             }
         )
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo").to_svg()
         assert "fill-opacity" in svg, "fill-opacity=0.0 should be emitted; got:\n" + svg[:2000]
 
     def test_fill_opacity_multilayer(self):
@@ -1271,7 +1271,7 @@ class TestFillOpacitySVG:
                 "fo": [0.3, 0.6, 0.9],
             }
         )
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill_opacity="fo").to_svg()
         vals = re.findall(r'fill-opacity="([^"]+)"', svg)
         assert len(vals) >= 2, f"Expected multiple fill-opacity values; got {vals}"
 
@@ -1307,14 +1307,14 @@ class TestMarkTextMultiline:
     def test_multiline_text_produces_tspan_elements(self):
         """mark_text with \\n in content produces <tspan> children in the SVG."""
         svg = (
-            fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").show_svg()
+            fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").to_svg()
         )
         assert "<tspan" in svg, "Expected <tspan> elements for multiline text; got:\n" + svg[:3000]
 
     def test_each_newline_line_is_separate_tspan(self):
         """Each line separated by \\n becomes its own <tspan> element."""
         svg = (
-            fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").show_svg()
+            fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").to_svg()
         )
         # "hello\nworld" → 2 tspans; "foo\nbar\nbaz" → 3 tspans; total = 5
         tspan_count = svg.count("<tspan")
@@ -1330,7 +1330,7 @@ class TestMarkTextMultiline:
     def test_subsequent_tspans_have_dy_attribute(self):
         """Non-first <tspan> elements carry a dy attribute for line spacing."""
         svg = (
-            fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").show_svg()
+            fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").to_svg()
         )
         # Look for tspan elements with dy="1.2em"
         dy_matches = re.findall(r'<tspan[^>]*dy="1\.2em"', svg)
@@ -1341,7 +1341,7 @@ class TestMarkTextMultiline:
     def test_first_tspan_has_dy_zero(self):
         """First <tspan> of each multiline text block has dy='0'."""
         svg = (
-            fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").show_svg()
+            fm.Chart(_text_df_multiline()).mark_text().encode(x="x", y="y", text="label").to_svg()
         )
         dy_zero = re.findall(r'<tspan[^>]*dy="0"', svg)
         assert len(dy_zero) >= 1, (
@@ -1354,7 +1354,7 @@ class TestMarkTextMultiline:
             fm.Chart(_text_df_singleline())
             .mark_text()
             .encode(x="x", y="y", text="label")
-            .show_svg()
+            .to_svg()
         )
         assert "<tspan" not in svg, (
             f"Single-line text should NOT be wrapped in <tspan>; got:\n{svg[:3000]}"
@@ -1371,7 +1371,7 @@ class TestMarkTextMultiline:
                 "label": ["foo\nbar\nbaz"],
             }
         )
-        svg = fm.Chart(df).mark_text().encode(x="x", y="y", text="label").show_svg()
+        svg = fm.Chart(df).mark_text().encode(x="x", y="y", text="label").to_svg()
         tspan_count = svg.count("<tspan")
         assert tspan_count == 3, (
             f"Expected exactly 3 <tspan> elements for 3-line text; got {tspan_count}:\n"
@@ -1408,7 +1408,7 @@ class TestCoordFlipViolin:
 
     def test_violin_normal_orientation_has_filled_paths(self):
         """mark_violin() without CoordFlip produces filled <path> or <polygon> elements."""
-        svg = fm.Chart(_violin_df()).mark_violin().encode(x="cat", y="val").show_svg()
+        svg = fm.Chart(_violin_df()).mark_violin().encode(x="cat", y="val").to_svg()
         assert "<svg" in svg
         path_count = svg.count("<path") + svg.count("<polygon")
         assert path_count >= 1, (
@@ -1422,7 +1422,7 @@ class TestCoordFlipViolin:
             .mark_violin()
             .encode(x="cat", y="val")
             .coord(fm.CoordFlip())
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         path_count = svg.count("<path") + svg.count("<polygon")
@@ -1433,13 +1433,13 @@ class TestCoordFlipViolin:
 
     def test_violin_coord_flip_element_count_matches_normal(self):
         """Flipped violin must not drop elements relative to normal orientation."""
-        svg_normal = fm.Chart(_violin_df()).mark_violin().encode(x="cat", y="val").show_svg()
+        svg_normal = fm.Chart(_violin_df()).mark_violin().encode(x="cat", y="val").to_svg()
         svg_flipped = (
             fm.Chart(_violin_df())
             .mark_violin()
             .encode(x="cat", y="val")
             .coord(fm.CoordFlip())
-            .show_svg()
+            .to_svg()
         )
         normal_paths = svg_normal.count("<path") + svg_normal.count("<polygon")
         flipped_paths = svg_flipped.count("<path") + svg_flipped.count("<polygon")
@@ -1454,7 +1454,7 @@ class TestCoordFlipBoxplot:
 
     def test_boxplot_normal_orientation_has_data_rects(self):
         """mark_boxplot() without CoordFlip produces >=2 <rect> elements."""
-        svg = fm.Chart(_violin_df()).mark_boxplot().encode(x="cat", y="val").show_svg()
+        svg = fm.Chart(_violin_df()).mark_boxplot().encode(x="cat", y="val").to_svg()
         assert "<svg" in svg
         rect_count = svg.count("<rect")
         assert rect_count >= 2, (
@@ -1468,7 +1468,7 @@ class TestCoordFlipBoxplot:
             .mark_boxplot()
             .encode(x="cat", y="val")
             .coord(fm.CoordFlip())
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         rect_count = svg.count("<rect")
@@ -1479,13 +1479,13 @@ class TestCoordFlipBoxplot:
 
     def test_boxplot_coord_flip_rect_count_matches_normal(self):
         """Flipped boxplot must not drop rect elements relative to normal orientation."""
-        svg_normal = fm.Chart(_violin_df()).mark_boxplot().encode(x="cat", y="val").show_svg()
+        svg_normal = fm.Chart(_violin_df()).mark_boxplot().encode(x="cat", y="val").to_svg()
         svg_flipped = (
             fm.Chart(_violin_df())
             .mark_boxplot()
             .encode(x="cat", y="val")
             .coord(fm.CoordFlip())
-            .show_svg()
+            .to_svg()
         )
         normal_rects = svg_normal.count("<rect")
         flipped_rects = svg_flipped.count("<rect")

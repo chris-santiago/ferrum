@@ -280,7 +280,7 @@ def test_kwarg_reaches_svg(case, simple_df, bar_df):
         encode_kwargs = {"x": "x", "y": "y"}
 
     chart = getattr(fm.Chart(df), mark_method)(**kwargs).encode(**encode_kwargs)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
 
     if callable(svg_check):
         assert svg_check(svg), f"{mark_method}({kwargs}) assertion failed: {desc}"
@@ -297,8 +297,8 @@ def test_kwarg_reaches_svg(case, simple_df, bar_df):
 
 def test_area_opacity_kwarg(simple_df):
     """mark_area(opacity=0.1) should produce a MORE translucent fill than default."""
-    default_svg = fm.Chart(simple_df).mark_area().encode(x="x", y="y").show_svg()
-    custom_svg = fm.Chart(simple_df).mark_area(opacity=0.1).encode(x="x", y="y").show_svg()
+    default_svg = fm.Chart(simple_df).mark_area().encode(x="x", y="y").to_svg()
+    custom_svg = fm.Chart(simple_df).mark_area(opacity=0.1).encode(x="x", y="y").to_svg()
     # Extract the alpha value from the first rgba() fill in each SVG.
     default_alpha = _extract_fill_alpha(default_svg)
     custom_alpha = _extract_fill_alpha(custom_svg)
@@ -323,7 +323,7 @@ def _extract_fill_alpha(svg: str) -> float | None:
 
 def test_smooth_ci_produces_ribbon(simple_df):
     """mark_smooth(ci=0.95) should emit a ribbon layer with translucent fill."""
-    svg = fm.Chart(simple_df).mark_smooth(ci=0.95).encode(x="x", y="y").show_svg()
+    svg = fm.Chart(simple_df).mark_smooth(ci=0.95).encode(x="x", y="y").to_svg()
     assert "<svg" in svg, "should produce valid SVG"
     # The ribbon layer emits a <path> with an rgba() fill (translucent).
     assert _has_translucent_fill(svg), (
@@ -345,7 +345,7 @@ def test_parallel_coordinates_alpha(simple_df):
             "sample_id": ["s0", "s0", "s1", "s1", "s2", "s2"],
         }
     )
-    svg = fm.Chart(df).mark_parallel_coordinates(alpha=0.3, color_field=None).show_svg()
+    svg = fm.Chart(df).mark_parallel_coordinates(alpha=0.3, color_field=None).to_svg()
     assert "<svg" in svg, "should produce valid SVG"
     # Polylines should have translucent stroke (rgba).
     assert _has_translucent_stroke(svg), (
@@ -360,7 +360,7 @@ def test_parallel_coordinates_alpha(simple_df):
 
 def test_lmplot_line_kws_stroke_width(simple_df):
     """lmplot(line_kws={'stroke_width': 3}) forwards stroke_width to SVG."""
-    svg = fm.lmplot(simple_df, x="x", y="y", line_kws={"stroke_width": 3}).show_svg()
+    svg = fm.lmplot(simple_df, x="x", y="y", line_kws={"stroke_width": 3}).to_svg()
     assert 'stroke-width="3"' in svg, (
         "lmplot line_kws={'stroke_width': 3} should produce stroke-width='3' in SVG"
     )
@@ -368,7 +368,7 @@ def test_lmplot_line_kws_stroke_width(simple_df):
 
 def test_heatmap_annot_emits_text(heatmap_df):
     """heatmap(annot=True) should emit <text> elements for cell annotations."""
-    svg = fm.heatmap(heatmap_df, annot=True).show_svg()
+    svg = fm.heatmap(heatmap_df, annot=True).to_svg()
     assert "<svg" in svg, "should produce valid SVG"
     # Count mark-text elements: they have font-family and are NOT axis labels.
     # Heatmap has 3 rows x 3 columns = 9 cells minimum.
@@ -384,7 +384,7 @@ def test_heatmap_annot_emits_text(heatmap_df):
 
 def test_lmplot_scatter_kws_opacity(simple_df):
     """lmplot(scatter_kws={'opacity': 0.3}) forwards opacity to scatter points."""
-    svg = fm.lmplot(simple_df, x="x", y="y", scatter_kws={"opacity": 0.3}).show_svg()
+    svg = fm.lmplot(simple_df, x="x", y="y", scatter_kws={"opacity": 0.3}).to_svg()
     # Scatter points should have rgba fill with alpha ~ 0.3.
     circles = re.findall(r'<circle[^>]+fill="([^"]+)"', svg)
     translucent = [c for c in circles if "rgba(" in c]
@@ -400,7 +400,7 @@ def test_lmplot_scatter_kws_opacity(simple_df):
 
 def test_point_fill_override(simple_df):
     """mark_point(fill='#ff0000') should produce red-filled circles."""
-    svg = fm.Chart(simple_df).mark_point(fill="#ff0000").encode(x="x", y="y").show_svg()
+    svg = fm.Chart(simple_df).mark_point(fill="#ff0000").encode(x="x", y="y").to_svg()
     # fill should contain the red color (either #ff0000 or rgb form).
     assert "ff0000" in svg.lower() or "255,0,0" in svg, (
         "mark_point(fill='#ff0000') should produce red fill in SVG"
@@ -409,7 +409,7 @@ def test_point_fill_override(simple_df):
 
 def test_line_stroke_override(simple_df):
     """mark_line(stroke='#00ff00') should produce green stroke."""
-    svg = fm.Chart(simple_df).mark_line(stroke="#00ff00").encode(x="x", y="y").show_svg()
+    svg = fm.Chart(simple_df).mark_line(stroke="#00ff00").encode(x="x", y="y").to_svg()
     assert "00ff00" in svg.lower() or "0,255,0" in svg, (
         "mark_line(stroke='#00ff00') should produce green stroke in SVG"
     )
@@ -417,7 +417,7 @@ def test_line_stroke_override(simple_df):
 
 def test_rule_stroke_override(simple_df):
     """mark_rule(stroke='#aaaaaa') should produce grey stroke."""
-    svg = fm.Chart(simple_df).mark_rule(stroke="#aaaaaa").encode(x="x", y="y").show_svg()
+    svg = fm.Chart(simple_df).mark_rule(stroke="#aaaaaa").encode(x="x", y="y").to_svg()
     assert "aaaaaa" in svg.lower(), "mark_rule(stroke='#aaaaaa') should produce grey stroke in SVG"
 
 
@@ -429,8 +429,8 @@ def test_rule_stroke_override(simple_df):
 def test_text_dx_shifts_x_positions(simple_df):
     """mark_text(dx=10) should shift mark-text x positions by 10px vs default."""
     encode = {"x": "x", "y": "y", "text": "label"}
-    svg_default = fm.Chart(simple_df).mark_text().encode(**encode).show_svg()
-    svg_dx = fm.Chart(simple_df).mark_text(dx=10).encode(**encode).show_svg()
+    svg_default = fm.Chart(simple_df).mark_text().encode(**encode).to_svg()
+    svg_dx = fm.Chart(simple_df).mark_text(dx=10).encode(**encode).to_svg()
 
     def _mark_text_x_positions(svg: str) -> list[float]:
         # Mark texts use the theme font_color (#1f2937), not the axis label
@@ -452,7 +452,7 @@ def test_text_dx_shifts_x_positions(simple_df):
 
 def test_line_interpolate_step(simple_df):
     """mark_line(interpolate='step') should produce step-shaped paths (H/V commands)."""
-    svg = fm.Chart(simple_df).mark_line(interpolate="step").encode(x="x", y="y").show_svg()
+    svg = fm.Chart(simple_df).mark_line(interpolate="step").encode(x="x", y="y").to_svg()
     # Step interpolation emits a <path> with H and V commands rather than a
     # <polyline>.
     assert "<path" in svg, "mark_line(interpolate='step') should emit <path> element"
@@ -471,7 +471,7 @@ def test_line_interpolate_step(simple_df):
 
 def test_line_stroke_cap(simple_df):
     """mark_line(stroke_cap='round') wraps line in <g stroke-linecap='round'>."""
-    svg = fm.Chart(simple_df).mark_line(stroke_cap="round").encode(x="x", y="y").show_svg()
+    svg = fm.Chart(simple_df).mark_line(stroke_cap="round").encode(x="x", y="y").to_svg()
     assert 'stroke-linecap="round"' in svg, (
         "mark_line(stroke_cap='round') should emit stroke-linecap attribute"
     )
@@ -479,7 +479,7 @@ def test_line_stroke_cap(simple_df):
 
 def test_area_stroke_join(simple_df):
     """mark_area(stroke_join='round') wraps area in <g stroke-linejoin='round'>."""
-    svg = fm.Chart(simple_df).mark_area(stroke_join="round").encode(x="x", y="y").show_svg()
+    svg = fm.Chart(simple_df).mark_area(stroke_join="round").encode(x="x", y="y").to_svg()
     assert 'stroke-linejoin="round"' in svg, (
         "mark_area(stroke_join='round') should emit stroke-linejoin attribute"
     )

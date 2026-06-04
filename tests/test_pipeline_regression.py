@@ -80,7 +80,7 @@ class TestScaleZero:
                 x="cat",
                 y=fm.Y("val", scale={"type": "linear", "zero": True}),
             )
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         # The renderer should include a "0" tick label on the y-axis.
@@ -91,7 +91,7 @@ class TestScaleZero:
     def test_bar_chart_without_scale_zero_still_renders(self):
         """Control: bar chart without scale zero still renders cleanly."""
         df = _bar_df()
-        svg = fm.Chart(df).mark_bar().encode(x="cat", y="val").show_svg()
+        svg = fm.Chart(df).mark_bar().encode(x="cat", y="val").to_svg()
         assert "<svg" in svg
 
 
@@ -106,7 +106,7 @@ class TestTitleSpec:
             fm.Chart(_numeric_df(), title=fm.Title("Test", anchor="middle"))
             .mark_point()
             .encode(x="x", y="y")
-            .show_svg()
+            .to_svg()
         )
         assert 'text-anchor="middle"' in svg
 
@@ -115,7 +115,7 @@ class TestTitleSpec:
             fm.Chart(_numeric_df(), title=fm.Title("Test", color="#ff0000"))
             .mark_point()
             .encode(x="x", y="y")
-            .show_svg()
+            .to_svg()
         )
         assert "#ff0000" in svg
 
@@ -124,7 +124,7 @@ class TestTitleSpec:
             fm.Chart(_numeric_df(), title=fm.Title("Test", font_size=20))
             .mark_point()
             .encode(x="x", y="y")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -133,7 +133,7 @@ class TestTitleSpec:
             fm.Chart(_numeric_df(), title=fm.Title("Test", font_weight="bold"))
             .mark_point()
             .encode(x="x", y="y")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -152,7 +152,7 @@ class TestTitleSpec:
             )
             .mark_point()
             .encode(x="x", y="y")
-            .show_svg()
+            .to_svg()
         )
         assert 'text-anchor="middle"' in svg
         assert "#ff0000" in svg
@@ -175,7 +175,7 @@ class TestEncodingAxis:
                 fm.Chart(_numeric_df())
                 .mark_point()
                 .encode(x=fm.X("x", axis={"labels": False}), y="y")
-                .show_svg()
+                .to_svg()
             )
         assert "<svg" in svg
         # axis= is now honored — no warning should be emitted.
@@ -197,7 +197,7 @@ class TestEncodingSort:
             fm.Chart(_bar_df())
             .mark_bar()
             .encode(x=fm.X("cat", sort="descending"), y="val")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -219,7 +219,7 @@ class TestEncodingFormat:
                 fm.Chart(_numeric_df())
                 .mark_point()
                 .encode(x=fm.X("x", format=".1f"), y="y")
-                .show_svg()
+                .to_svg()
             )
         assert "<svg" in svg
         # format= is now honored — no warning should be emitted.
@@ -239,13 +239,13 @@ class TestLegendDisabled:
         """Passing legend=False to Color should suppress the legend in the SVG."""
         df = _color_df()
         # With legend
-        svg_with = fm.Chart(df).mark_point().encode(x="x", y="y", color=fm.Color("g")).show_svg()
+        svg_with = fm.Chart(df).mark_point().encode(x="x", y="y", color=fm.Color("g")).to_svg()
         # Without legend
         svg_without = (
             fm.Chart(df)
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("g", legend=False))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg_without
         # Both render; legend-suppressed SVG should be shorter (no legend group).
@@ -260,7 +260,7 @@ class TestLegendDisabled:
             fm.Chart(df)
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("g", legend=None))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -278,7 +278,7 @@ class TestFontWeightBodyText:
             .mark_point()
             .encode(x="x", y="y")
             .theme(fm.Theme(font_weight="bold"))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         assert "font-weight" in svg, (
@@ -310,7 +310,7 @@ class TestDivergingScheme:
             .mark_rect()
             .encode(x="col", y="row", color="val")
             .theme(fm.themes.arctic_signal)
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         # SVG with arctic_signal (blue_to_violet diverging) should differ from
@@ -320,7 +320,7 @@ class TestDivergingScheme:
             .mark_rect()
             .encode(x="col", y="row", color="val")
             .theme(fm.Theme(diverging_scheme="rdbu"))
-            .show_svg()
+            .to_svg()
         )
         assert svg != svg_other, (
             "arctic_signal theme should produce different colors than rdbu diverging scheme"
@@ -341,7 +341,7 @@ class TestReferenceLineColor:
             .mark_rule()
             .encode(x="x", y="y")
             .theme(fm.Theme(reference_line_color="#ff0000"))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
         assert "#ff0000" in svg or "ff0000" in svg.lower(), (
@@ -355,7 +355,7 @@ class TestReferenceLineColor:
             .mark_rule()
             .encode(x="x", y="y")
             .theme(fm.Theme(reference_line_color="#aaaaaa", reference_line_dash=[4, 2]))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg
 
@@ -375,7 +375,7 @@ class TestBaselineOnText:
                 "label": ["A", "B", "C"],
             }
         )
-        svg = fm.Chart(df).mark_text(baseline="top").encode(x="x", y="y", text="label").show_svg()
+        svg = fm.Chart(df).mark_text(baseline="top").encode(x="x", y="y", text="label").to_svg()
         assert "<svg" in svg
         assert "dominant-baseline" in svg, (
             "Expected 'dominant-baseline' attribute when baseline='top' is set"
@@ -390,7 +390,7 @@ class TestBaselineOnText:
             }
         )
         svg = (
-            fm.Chart(df).mark_text(baseline="middle").encode(x="x", y="y", text="label").show_svg()
+            fm.Chart(df).mark_text(baseline="middle").encode(x="x", y="y", text="label").to_svg()
         )
         assert "dominant-baseline" in svg
 
@@ -410,13 +410,13 @@ class TestLayerSerialization:
             }
         )
         svg_with_legend = (
-            fm.Chart(df).mark_boxplot().encode(x="g", y="y", color=fm.Color("g")).show_svg()
+            fm.Chart(df).mark_boxplot().encode(x="g", y="y", color=fm.Color("g")).to_svg()
         )
         svg_without_legend = (
             fm.Chart(df)
             .mark_boxplot()
             .encode(x="g", y="y", color=fm.Color("g", legend=False))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg_without_legend
         assert len(svg_without_legend) < len(svg_with_legend), (
@@ -431,7 +431,7 @@ class TestLayerSerialization:
                 "y": [1.0, 3.0, 2.0, 4.0],
             }
         )
-        svg = fm.Chart(df).mark_boxplot().encode(x="g", y="y").show_svg()
+        svg = fm.Chart(df).mark_boxplot().encode(x="g", y="y").to_svg()
         assert "<svg" in svg
         # Boxplot emits at least a rect and a rule, so multiple elements.
         assert "<rect" in svg or "<line" in svg
@@ -492,7 +492,7 @@ class TestEncodingTitleInheritance:
 
         X, y = make_classification(n_samples=100, n_features=4, random_state=0)
         model = LogisticRegression(max_iter=200).fit(X, y)
-        svg = fm.roc_chart(model, X, y).show_svg()
+        svg = fm.roc_chart(model, X, y).to_svg()
         assert "<svg" in svg
         # The axis label should be "False Positive Rate", not ">fpr<" or ">tpr<".
         assert "False Positive Rate" in svg, (
@@ -515,13 +515,13 @@ class TestDesugarsRaiseValueError:
         """mark_density(kernel='banana') should raise ValueError."""
         df = _numeric_df()
         with pytest.raises(ValueError, match="not supported"):
-            fm.Chart(df).mark_density(kernel="banana").encode(x="x").show_svg()
+            fm.Chart(df).mark_density(kernel="banana").encode(x="x").to_svg()
 
     def test_histogram_right_true_raises_value_error(self):
         """mark_histogram(right=True) should raise ValueError."""
         df = _numeric_df()
         with pytest.raises(ValueError, match="right"):
-            fm.Chart(df).mark_histogram(right=True).encode(x="x").show_svg()
+            fm.Chart(df).mark_histogram(right=True).encode(x="x").to_svg()
 
 
 # ---------------------------------------------------------------------------
@@ -533,7 +533,7 @@ class TestMarkKwargs:
     def test_interpolate_step_emits_step_path(self):
         """mark_line(interpolate='step') should produce H or V commands in the path."""
         df = _numeric_df()
-        svg = fm.Chart(df).mark_line(interpolate="step").encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_line(interpolate="step").encode(x="x", y="y").to_svg()
         assert "<svg" in svg
         # Step interpolation produces horizontal (H) and vertical (V) path segments.
         assert "H" in svg or "V" in svg, "Expected H or V path commands for step interpolation"
@@ -541,25 +541,25 @@ class TestMarkKwargs:
     def test_stroke_cap_round_emits_stroke_linecap(self):
         """mark_line(stroke_cap='round') should emit stroke-linecap='round'."""
         df = _numeric_df()
-        svg = fm.Chart(df).mark_line(stroke_cap="round").encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_line(stroke_cap="round").encode(x="x", y="y").to_svg()
         assert 'stroke-linecap="round"' in svg
 
     def test_stroke_join_bevel_emits_stroke_linejoin(self):
         """mark_line(stroke_join='bevel') should emit stroke-linejoin='bevel'."""
         df = _numeric_df()
-        svg = fm.Chart(df).mark_line(stroke_join="bevel").encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_line(stroke_join="bevel").encode(x="x", y="y").to_svg()
         assert 'stroke-linejoin="bevel"' in svg
 
     def test_filled_false_emits_fill_none_on_circles(self):
         """mark_point(filled=False) should emit fill='none' on circles."""
         df = _numeric_df()
-        svg = fm.Chart(df).mark_point(filled=False).encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_point(filled=False).encode(x="x", y="y").to_svg()
         assert 'fill="none"' in svg
 
     def test_shape_square_emits_rect_elements(self):
         """mark_point(shape='square') should use <rect> instead of <circle>."""
         df = _numeric_df()
-        svg = fm.Chart(df).mark_point(shape="square").encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_point(shape="square").encode(x="x", y="y").to_svg()
         assert "<rect" in svg, "Expected <rect> elements for square shape"
 
     def test_limit_on_text_truncates_long_labels(self):
@@ -571,7 +571,7 @@ class TestMarkKwargs:
                 "label": ["Hello World", "Short"],
             }
         )
-        svg = fm.Chart(df).mark_text(limit=5).encode(x="x", y="y", text="label").show_svg()
+        svg = fm.Chart(df).mark_text(limit=5).encode(x="x", y="y", text="label").to_svg()
         assert "<svg" in svg
         # Truncated text should include an ellipsis character.
         assert "…" in svg, "Expected ellipsis '…' in SVG when limit is exceeded"
@@ -579,13 +579,13 @@ class TestMarkKwargs:
     def test_band_size_on_tick_renders(self):
         """mark_tick(band_size=0.5) should render without error."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
-        svg = fm.Chart(df).mark_tick(band_size=0.5).encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_tick(band_size=0.5).encode(x="x", y="y").to_svg()
         assert "<svg" in svg
 
     def test_area_with_line_true_has_multiple_paths(self):
         """mark_area(line=True) should produce at least two <path> elements."""
         df = _numeric_df()
-        svg = fm.Chart(df).mark_area(line=True).encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_area(line=True).encode(x="x", y="y").to_svg()
         assert "<svg" in svg
         path_count = svg.count("<path ")
         assert path_count >= 2, (
@@ -602,7 +602,7 @@ class TestMarkKwargs:
         """mark_bar(orient='horizontal') should produce a valid SVG."""
         # Use two numeric columns — the coord flip swaps axes in the renderer.
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-        svg = fm.Chart(df).mark_bar(orient="horizontal").encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_bar(orient="horizontal").encode(x="x", y="y").to_svg()
         assert "<svg" in svg
         assert "<rect" in svg
 
@@ -616,7 +616,7 @@ class TestEncodingChannels:
     def test_tooltip_channel_accepted_and_emits_title_elements(self):
         """encode(tooltip=Tooltip('g')) should produce <title> elements in SVG."""
         df = _simple_df()
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y", tooltip=fm.Tooltip("g")).show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y", tooltip=fm.Tooltip("g")).to_svg()
         assert "<svg" in svg
         assert "<title>" in svg, "Expected <title> elements for tooltip encoding"
 
@@ -629,7 +629,7 @@ class TestEncodingChannels:
                 "url": ["http://a.com", "http://b.com", "http://c.com"],
             }
         )
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y", href=fm.Href("url")).show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y", href=fm.Href("url")).to_svg()
         assert "<svg" in svg
         assert "<a" in svg, "Expected <a> elements for href encoding"
 
@@ -650,7 +650,7 @@ class TestEncodingChannels:
                 fm.Chart(df)
                 .mark_point()
                 .encode(x="x", y="y", description=fm.Description("g"))
-                .show_svg()
+                .to_svg()
             )
         assert "<svg" in svg
         user_warnings = [
@@ -668,7 +668,7 @@ class TestEncodingChannels:
         df = _simple_df()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill=fm.Fill("g")).show_svg()
+            svg = fm.Chart(df).mark_point().encode(x="x", y="y", fill=fm.Fill("g")).to_svg()
         assert "<svg" in svg
         fill_warnings = [
             w
@@ -685,7 +685,7 @@ class TestEncodingChannels:
         df = _simple_df()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            svg = fm.Chart(df).mark_line().encode(x="x", y="y", detail=fm.Detail("g")).show_svg()
+            svg = fm.Chart(df).mark_line().encode(x="x", y="y", detail=fm.Detail("g")).to_svg()
         assert "<svg" in svg
         detail_warnings = [
             w
@@ -791,9 +791,9 @@ class TestRound2Fixes:
         )
 
     def test_contour_spec_renders_without_error(self):
-        """mark_contour().show_svg() completes without raising."""
+        """mark_contour().to_svg() completes without raising."""
         df = _bivariate_df()
-        svg = fm.Chart(df).mark_contour().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_contour().encode(x="x", y="y").to_svg()
         assert "<svg" in svg
 
     # --- Contour smooth ---------------------------------------------------
@@ -829,14 +829,14 @@ class TestRound2Fixes:
     def test_raster_renders_image_element(self):
         """mark_raster() SVG must contain an <image> element (raster pixel data)."""
         df = _bivariate_df()
-        svg = fm.Chart(df).mark_raster().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_raster().encode(x="x", y="y").to_svg()
         assert "<image" in svg, "Expected <image> element in raster SVG"
 
     def test_raster_cmap_plasma_differs_from_default(self):
         """mark_raster(cmap='plasma') produces SVG different from default cmap."""
         df = _bivariate_df()
-        svg_default = fm.Chart(df).mark_raster().encode(x="x", y="y").show_svg()
-        svg_plasma = fm.Chart(df).mark_raster(cmap="plasma").encode(x="x", y="y").show_svg()
+        svg_default = fm.Chart(df).mark_raster().encode(x="x", y="y").to_svg()
+        svg_plasma = fm.Chart(df).mark_raster(cmap="plasma").encode(x="x", y="y").to_svg()
         assert "<image" in svg_plasma, "Expected <image> element in plasma raster SVG"
         assert svg_default != svg_plasma, (
             "cmap='plasma' should produce different raster output than default"
@@ -851,7 +851,7 @@ class TestRound2Fixes:
         categorical grouping column maps to y.
         """
         df = _group_df()
-        svg = fm.Chart(df).mark_swarm(orient="horizontal").encode(x="val", y="group").show_svg()
+        svg = fm.Chart(df).mark_swarm(orient="horizontal").encode(x="val", y="group").to_svg()
         assert "<svg" in svg, "Expected valid SVG for horizontal swarm"
 
     # --- Errorbar cap width (V3) -----------------------------------------
@@ -863,7 +863,7 @@ class TestRound2Fixes:
         guard is that the chart renders at all after the V3 band_size fix.
         """
         df = _group_df()
-        svg = fm.Chart(df).mark_errorbar(extent="ci").encode(x="group", y="val").show_svg()
+        svg = fm.Chart(df).mark_errorbar(extent="ci").encode(x="group", y="val").to_svg()
         assert "<svg" in svg, "Expected valid SVG for errorbar chart"
 
     # --- Histogram axis label (V4-V5) ------------------------------------
@@ -872,7 +872,7 @@ class TestRound2Fixes:
         """mark_histogram().encode(x='my_variable') must show 'my_variable' in
         the SVG, not the internal bin column name 'bin_start'."""
         df = pl.DataFrame({"my_variable": [float(i) for i in range(1, 21)]})
-        svg = fm.Chart(df).mark_histogram().encode(x="my_variable").show_svg()
+        svg = fm.Chart(df).mark_histogram().encode(x="my_variable").to_svg()
         assert "my_variable" in svg, "Expected original field name 'my_variable' in histogram SVG"
         assert "bin_start" not in svg, (
             "Internal column name 'bin_start' must not appear in histogram SVG"
@@ -889,7 +889,7 @@ class TestRound2Fixes:
                 "value": [float(i) for i in range(20)],
             }
         )
-        svg = fm.catplot(df, x="group", y="value", kind="box").show_svg()
+        svg = fm.catplot(df, x="group", y="value", kind="box").to_svg()
         assert "<svg" in svg, "Expected valid SVG for catplot box"
         assert "lower_whisker" not in svg, (
             "Internal column 'lower_whisker' must not appear in catplot box SVG"
@@ -944,8 +944,8 @@ class TestRound2Fixes:
 
         svg_arctic = fm.confusion_matrix_chart(
             model, X, y, theme=fm.themes.arctic_signal
-        ).show_svg()
-        svg_paper = fm.confusion_matrix_chart(model, X, y, theme=fm.themes.paper_ink).show_svg()
+        ).to_svg()
+        svg_paper = fm.confusion_matrix_chart(model, X, y, theme=fm.themes.paper_ink).to_svg()
         assert "<svg" in svg_arctic
         assert svg_arctic != svg_paper, (
             "arctic_signal and paper_ink themes must produce different confusion matrix SVGs"
@@ -976,7 +976,7 @@ class TestRound2Fixes:
         X_df = pd.DataFrame(X, columns=feature_names)
         model = RandomForestClassifier(n_estimators=10, random_state=42).fit(X_df, y)
 
-        svg = fm.importance_chart(model, X_df, y, top_k=3).show_svg()
+        svg = fm.importance_chart(model, X_df, y, top_k=3).to_svg()
         names_in_svg = [name for name in feature_names if name in svg]
         assert len(names_in_svg) == 3, (
             f"Expected exactly 3 feature names in importance_chart(top_k=3) SVG; "
@@ -1008,7 +1008,7 @@ class TestRound2Fixes:
         X_df = pd.DataFrame(X, columns=feature_names)
         model = RandomForestClassifier(n_estimators=10, random_state=42).fit(X_df, y)
 
-        svg = fm.shap_beeswarm_chart(model, X_df, y, max_display=3).show_svg()
+        svg = fm.shap_beeswarm_chart(model, X_df, y, max_display=3).to_svg()
         names_in_svg = [name for name in feature_names if name in svg]
         assert len(names_in_svg) == 3, (
             f"Expected exactly 3 feature names in shap_beeswarm_chart(max_display=3) SVG; "
@@ -1028,7 +1028,7 @@ class TestRound2Fixes:
         X, y = make_classification(n_samples=50, n_features=5, n_informative=3, random_state=42)
         model = RandomForestClassifier(n_estimators=10, random_state=42).fit(X, y)
 
-        svg = fm.confusion_matrix_chart(model, X, y).show_svg()
+        svg = fm.confusion_matrix_chart(model, X, y).to_svg()
         text_matches = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
         # Proportions are formatted as decimals (e.g. "1.00", "0.00"); find at
         # least one cell value that is neither a pure integer nor a colorbar tick.
@@ -1049,8 +1049,8 @@ import re as _re
 class TestRound3Fixes:
     # --- H1: contour renders (not blank) ------------------------------------
 
-    def test_contour_show_svg_completes_without_error(self):
-        """mark_contour().show_svg() must not raise.
+    def test_contour_to_svg_completes_without_error(self):
+        """mark_contour().to_svg() must not raise.
 
         The polygon renderer currently produces an empty clip group for small
         bivariate samples; the regression guard is that the chart call
@@ -1058,7 +1058,7 @@ class TestRound3Fixes:
         tick labels.  The spec-level polygon assertion lives in Round2.
         """
         df = _bivariate_df()
-        svg = fm.Chart(df).mark_contour().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_contour().encode(x="x", y="y").to_svg()
         assert "<svg" in svg, "Expected valid SVG for contour chart"
         # Axis lines confirm the chart structure was rendered (not a trivial stub).
         assert "<line" in svg, "Expected axis <line> elements in contour SVG"
@@ -1073,7 +1073,7 @@ class TestRound3Fixes:
                 "val": [1.0, 2.0, 3.0, 1.5, 2.5, 3.5, 0.5, 2.2, 3.1, 1.8],
             }
         )
-        svg = fm.Chart(df).mark_tick().encode(x="val", y="cat").show_svg()
+        svg = fm.Chart(df).mark_tick().encode(x="val", y="cat").to_svg()
         assert "<svg" in svg, "Expected valid SVG for tick strip plot"
         # Tick marks render as <line> elements.
         assert "<line" in svg, "Expected <line> elements in tick strip plot SVG"
@@ -1087,7 +1087,7 @@ class TestRound3Fixes:
         broken (all cells mapped to the same bin value or the same palette stop).
         """
         df = _bivariate_df(n=100)
-        svg = fm.Chart(df).mark_hex().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_hex().encode(x="x", y="y").to_svg()
         assert "<svg" in svg, "Expected valid SVG for hex density chart"
         # hex cells are emitted as <path> elements with fill attributes.
         fill_colors = _re.findall(r'fill="(#[0-9a-fA-F]{6})"', svg)
@@ -1112,7 +1112,7 @@ class TestRound3Fixes:
                 "y": (rng.uniform(0.0, 10.0, 30) + rng.normal(0.0, 1.0, 30)).tolist(),
             }
         )
-        svg = fm.Chart(df).mark_point().mark_smooth().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_point().mark_smooth().encode(x="x", y="y").to_svg()
         assert "<circle" in svg, "Expected <circle> elements (scatter layer) in scatter+smooth SVG"
         has_line = "<path" in svg or "<polyline" in svg
         assert has_line, (
@@ -1130,7 +1130,7 @@ class TestRound3Fixes:
                 "measurement": rng.normal(0.0, 1.0, 30).tolist(),
             }
         )
-        svg = fm.Chart(df).mark_violin().encode(x="cat", y="measurement").show_svg()
+        svg = fm.Chart(df).mark_violin().encode(x="cat", y="measurement").to_svg()
         assert "measurement" in svg, "Expected user field name 'measurement' in violin SVG y-axis"
         assert "violin_y" not in svg, (
             "Internal column name 'violin_y' must not appear in violin SVG"
@@ -1156,7 +1156,7 @@ class TestRound3Fixes:
             columns=[f"f{i}" for i in range(6)],
         )
         pca = PCA(n_components=4).fit(X_df)
-        svg = fm.pca_scree_chart(pca, X_df).show_svg()
+        svg = fm.pca_scree_chart(pca, X_df).to_svg()
         assert "<svg" in svg, "Expected valid SVG for pca_scree_chart"
 
         # Extract text content from all <text> elements.
@@ -1208,7 +1208,7 @@ class TestRound3Fixes:
         """
         rng = __import__("numpy").random.default_rng(42)
         df = pl.DataFrame({"val": rng.normal(0.0, 1.0, 30).tolist()})
-        svg = fm.Chart(df).mark_qq().encode(x="val").show_svg()
+        svg = fm.Chart(df).mark_qq().encode(x="val").to_svg()
         assert "<svg" in svg, "Expected valid SVG for QQ plot"
         assert "Theoretical Quantiles" in svg, (
             "Expected 'Theoretical Quantiles' axis label in QQ plot SVG"
@@ -1247,13 +1247,13 @@ class TestTickRug:
     def test_x_rug_renders_without_error(self):
         """mark_tick().encode(x=...) must render without ValueError."""
         df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0]})
-        svg = fm.Chart(df).mark_tick().encode(x="val").show_svg()
+        svg = fm.Chart(df).mark_tick().encode(x="val").to_svg()
         assert "<svg" in svg
 
     def test_x_rug_produces_vertical_tick_lines(self):
         """x-rug ticks must be short vertical lines going UP from the plot baseline."""
         df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0]})
-        svg = fm.Chart(df).mark_tick().encode(x="val").show_svg()
+        svg = fm.Chart(df).mark_tick().encode(x="val").to_svg()
         lines = self._rug_lines(svg)
         # x-rug ticks: vertical (x1≈x2), short dy, going UP (y2<y1 means into plot area).
         # X-axis tick marks go DOWN (y2>y1, outside plot) — excluded by y1>y2 filter.
@@ -1263,13 +1263,13 @@ class TestTickRug:
     def test_y_rug_renders_without_error(self):
         """mark_tick().encode(y=...) must render without ValueError."""
         df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0]})
-        svg = fm.Chart(df).mark_tick().encode(y="val").show_svg()
+        svg = fm.Chart(df).mark_tick().encode(y="val").to_svg()
         assert "<svg" in svg
 
     def test_y_rug_produces_horizontal_tick_lines(self):
         """y-rug ticks must be short horizontal lines extending INTO the plot area."""
         df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0]})
-        svg = fm.Chart(df).mark_tick().encode(y="val").show_svg()
+        svg = fm.Chart(df).mark_tick().encode(y="val").to_svg()
         lines = self._rug_lines(svg)
         # y-rug ticks: horizontal (y1≈y2), short dx, and going RIGHT (x2>x1 means into plot).
         # Y-axis tick marks go LEFT (x2<x1) — excluded by x2>x1 filter.
@@ -1279,7 +1279,7 @@ class TestTickRug:
     def test_y_rug_ticks_at_left_axis_edge(self):
         """y-rug tick lines must start at the left axis boundary and go right."""
         df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0]})
-        svg = fm.Chart(df).mark_tick().encode(y="val").show_svg()
+        svg = fm.Chart(df).mark_tick().encode(y="val").to_svg()
         lines = self._rug_lines(svg)
         rug = [l for l in lines if abs(l[1] - l[3]) < 0.5 and 1 < (l[2] - l[0]) < 30]
         assert len(rug) == 5
@@ -1296,13 +1296,13 @@ class TestTickRug:
                 "val": [1.0, 2.0, 1.5, 2.5, 1.2],
             }
         )
-        svg = fm.Chart(df).mark_tick().encode(x="val", y="cat").show_svg()
+        svg = fm.Chart(df).mark_tick().encode(x="val", y="cat").to_svg()
         assert "<svg" in svg
         assert "<line" in svg
 
 
 class TestRasterOverride:
-    """Test the raster= parameter on show_svg/show_png/show/save."""
+    """Test the raster= parameter on to_svg/to_png/show/save."""
 
     @pytest.fixture()
     def chart(self):
@@ -1323,19 +1323,19 @@ class TestRasterOverride:
         """raster=None returns the chart unchanged (no clone)."""
         assert chart._with_raster_override(None) is chart
 
-    def test_show_svg_raster_false_produces_circles(self, chart):
-        """show_svg(raster=False) renders per-element circles, not raster."""
-        svg = chart.show_svg(raster=False)
+    def test_to_svg_raster_false_produces_circles(self, chart):
+        """to_svg(raster=False) renders per-element circles, not raster."""
+        svg = chart.to_svg(raster=False)
         assert "<circle" in svg or 'cx="' in svg
 
-    def test_show_svg_raster_true_substitutes_raster(self, chart):
-        """show_svg(raster=True) on a 3-row chart produces a raster image."""
-        svg = chart.show_svg(raster=True)
+    def test_to_svg_raster_true_substitutes_raster(self, chart):
+        """to_svg(raster=True) on a 3-row chart produces a raster image."""
+        svg = chart.to_svg(raster=True)
         assert "<image" in svg
 
-    def test_show_png_raster_kwarg_accepted(self, chart):
-        """show_png(raster=False) produces valid PNG."""
-        png = chart.show_png(raster=False)
+    def test_to_png_raster_kwarg_accepted(self, chart):
+        """to_png(raster=False) produces valid PNG."""
+        png = chart.to_png(raster=False)
         assert png[:4] == b"\x89PNG"
 
     def test_save_raster_kwarg_accepted(self, chart, tmp_path):
@@ -1348,5 +1348,5 @@ class TestRasterOverride:
     def test_original_chart_not_mutated(self, chart):
         """The raster= override does not mutate the original chart."""
         original_config = chart._render_config
-        chart.show_svg(raster=False)
+        chart.to_svg(raster=False)
         assert chart._render_config is original_config

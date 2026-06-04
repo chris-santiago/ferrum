@@ -27,7 +27,7 @@ chart = (
         size="petal_width",
     )
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Scatter with color and size](img/recipes_01.png)
@@ -50,7 +50,7 @@ chart = (
     .mark_histogram(bin_count=20, groupby="species")
     .encode(x="sepal_length", color="species:N")
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Histogram with hue](img/recipes_02.png)
@@ -73,7 +73,7 @@ chart = (
     .mark_density(bandwidth="scott", groupby="species")
     .encode(x="sepal_length", color="species:N")
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Per-group KDE](img/recipes_03.png)
@@ -104,7 +104,7 @@ trend = (
     .encode(x="sepal_length", y="petal_length", color="species:N")
 )
 chart = points + trend
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Scatter + per-group smooth](img/recipes_04.png)
@@ -135,7 +135,7 @@ fit = (
     .encode(x="sepal_length", y="petal_length")
 )
 chart = points + fit
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Scatter + smooth with CI](img/recipes_05.png)
@@ -160,7 +160,7 @@ chart = (
     .mark_bar()
     .encode(x="species:N", y="sepal_length", color="species:N")
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Bar chart with color](img/recipes_06.png)
@@ -188,7 +188,7 @@ chart = fm.RepeatChart(
     row=["sepal_length", "petal_length"],
     column=["sepal_width", "petal_width"],
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Pairwise scatter grid](img/recipes_07.png)
@@ -224,7 +224,7 @@ rug = (
     .encode(x="sepal_length", color="species:N")
 )
 chart = points + smooth + rug
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Three-layer scatter](img/recipes_08.png)
@@ -255,7 +255,7 @@ roc = fm.roc_chart(model, X_test, y_test)
 cm = fm.confusion_matrix_chart(model, X_test, y_test)
 importances = fm.importance_chart(model, X_test, y_test)
 report = (roc | cm) & importances
-assert report.show_svg().startswith("<svg")
+assert report.to_svg().startswith("<svg")
 ```
 
 ![Multi-panel model report](img/recipes_09.png)
@@ -286,7 +286,7 @@ lr = LogisticRegression(max_iter=500, random_state=42).fit(X_train, y_train)
 roc_rf = fm.roc_chart(rf, X_test, y_test).properties(title="Random Forest")
 roc_lr = fm.roc_chart(lr, X_test, y_test).properties(title="Logistic Regression")
 chart = (roc_rf | roc_lr).theme(fm.themes.publication)
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Two-model ROC comparison](img/recipes_10.png)
@@ -308,7 +308,7 @@ chart = (
     .encode(x="category:N", y="value")
     .coord(fm.CoordFlip())
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Horizontal bars with CoordFlip](img/recipes_11.png)
@@ -345,7 +345,7 @@ label = (
 )
 
 chart = scatter + hline + vline + label
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Annotations](img/recipes_12.png)
@@ -367,7 +367,7 @@ chart = (
     .encode(x="x", y="y")
     .properties(width=600, height=400)
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Chart sizing](img/recipes_13.png)
@@ -391,7 +391,7 @@ chart = (
         y="count",
     )
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Custom category order](img/recipes_14.png)
@@ -417,7 +417,7 @@ chart = (
     .mark_line()
     .encode(x="date:T", y="revenue")
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Time-series line chart](img/recipes_15.png)
@@ -446,7 +446,7 @@ chart = (
     .mark_point()
     .encode(x="x", y="ratio", color="group:N")
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Filtered scatter with derived column](img/recipes_16.png)
@@ -472,7 +472,7 @@ for mark_fn in [fm.Chart.mark_point, fm.Chart.mark_line, fm.Chart.mark_area, fm.
     charts.append(c)
 
 grid = fm.ConcatChart(*charts, columns=2, spacing=15.0)
-assert grid.show_svg().startswith("<svg")
+assert grid.to_svg().startswith("<svg")
 ```
 
 ![ConcatChart wrapping grid](img/recipes_17.png)
@@ -501,7 +501,7 @@ chart = (
         color=fm.Color("species:N", legend=fm.Legend(orient="bottom", columns=3, title="Species")),
     )
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Custom axis and legend](img/recipes_18.png)
@@ -532,7 +532,7 @@ chart = (
         color="continent:N",
     )
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Power-scaled bubble chart](img/recipes_19.png)

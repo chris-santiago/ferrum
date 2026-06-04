@@ -156,7 +156,7 @@ def test_binning_layer_renders_without_error():
     binned = fm.Chart(df).mark_bar().encode(x=fm.X("v", bin=True), y="count")
     raw = fm.Chart(df).mark_point().encode(x="v", y="v")
 
-    svg = (binned + raw).show_svg()
+    svg = (binned + raw).to_svg()
     assert svg.lstrip().startswith("<")
 
 

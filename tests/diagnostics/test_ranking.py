@@ -115,7 +115,7 @@ def test_rank2d_invalid_algorithm():
 def test_rank_chart_1d_shapiro_renders():
     df = load_dataset("regression").select(_REGRESSION_FEATURES)
     chart = ferrum.rank_chart(df, rank="1d", algorithm="shapiro")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg and "</svg>" in svg
     # One bar per feature.
     assert svg.count("<rect") >= len(_REGRESSION_FEATURES)
@@ -129,14 +129,14 @@ def test_rank_chart_1d_variance_top_k():
         algorithm="variance",
         top_k=3,
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
 def test_rank_chart_2d_pearson_renders():
     df = load_dataset("regression").select(_REGRESSION_FEATURES)
     chart = ferrum.rank_chart(df, rank="2d", algorithm="pearson")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # 5x5 = 25 cells × {1 rect + 1 text}.
     assert svg.count("<rect") >= 25
@@ -145,7 +145,7 @@ def test_rank_chart_2d_pearson_renders():
 def test_rank_chart_2d_kendall_renders():
     df = load_dataset("regression").select(_REGRESSION_FEATURES)
     chart = ferrum.rank_chart(df, rank="2d", algorithm="kendall")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -153,8 +153,8 @@ def test_rank_chart_2d_no_annot():
     df = load_dataset("regression").select(_REGRESSION_FEATURES)
     chart_annot = ferrum.rank_chart(df, rank="2d", annot=True)
     chart_plain = ferrum.rank_chart(df, rank="2d", annot=False)
-    svg_annot = chart_annot.show_svg()
-    svg_plain = chart_plain.show_svg()
+    svg_annot = chart_annot.to_svg()
+    svg_plain = chart_plain.to_svg()
     # Annotated version has more <text> elements (one per cell beyond axis labels).
     assert svg_annot.count("<text") > svg_plain.count("<text")
 
@@ -173,7 +173,7 @@ def test_parallel_coordinates_with_hue_renders():
         hue="y",
         rescale="minmax",
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     n_samples = df.height
     assert svg.count("<polyline") == n_samples
@@ -187,7 +187,7 @@ def test_parallel_coordinates_no_hue_renders():
         hue=None,
         alpha=0.3,
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert svg.count("<polyline") == df.height
 
@@ -200,7 +200,7 @@ def test_parallel_coordinates_zscore_rescale():
         hue="y",
         rescale="zscore",
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -231,14 +231,14 @@ def test_rank_chart_1d_from_numpy_array():
     rng = np.random.RandomState(0)
     X = rng.randn(100, 5)
     chart = ferrum.rank_chart(X, rank="1d", algorithm="shapiro")
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_parallel_coordinates_from_numpy_array():
     rng = np.random.RandomState(0)
     X = rng.randn(50, 4)
     chart = ferrum.parallel_coordinates_chart(X)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert svg.count("<polyline") == 50
 
@@ -250,7 +250,7 @@ def test_rank1d_visualizer_shapiro():
     X = load_dataset("regression").select(_REGRESSION_FEATURES)
     viz = ferrum.Rank1DVisualizer(algorithm="shapiro").fit(X)
     assert "top_feature_score=" in repr(viz)
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_rank1d_visualizer_covariance_requires_y():
@@ -282,7 +282,7 @@ def test_parallel_coordinates_visualizer():
     assert viz._fitted
     assert "n_samples=" in repr(viz)
     assert viz._metrics["n_samples"] == df.height
-    svg = viz.show().show_svg()
+    svg = viz.show().to_svg()
     assert svg.count("<polyline") == df.height
 
 
@@ -296,7 +296,7 @@ def test_parallel_coordinates_visualizer_y_attached_as_hue():
     y = df["y"]
     viz = ferrum.ParallelCoordinatesVisualizer().fit(X, y)
     assert viz._fitted
-    svg = viz.show().show_svg()
+    svg = viz.show().to_svg()
     # n_classes distinct color groups should mean >=2 stroke colors
     # in the SVG (mark_parallel_coordinates groups polylines by hue).
     assert svg.count("<polyline") == df.height
@@ -311,7 +311,7 @@ def test_parallel_coordinates_alpha_reaches_svg():
         hue="y",
         alpha=0.3,
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     # Opacity is baked into the RGBA stroke color (e.g. rgba(37,99,235,0.302)).
     # Verify at least one polyline carries a stroke with alpha < 1.
     import re

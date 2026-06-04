@@ -47,8 +47,8 @@ def test_stack_changes_svg(grouped_df: pl.DataFrame, mark_method: str, encoding:
     base = fm.Chart(grouped_df)
     mark_fn = getattr(base, mark_method)
 
-    svg_without = mark_fn().encode(**encoding).show_svg()
-    svg_with = mark_fn(position=Stack()).encode(**encoding).show_svg()
+    svg_without = mark_fn().encode(**encoding).to_svg()
+    svg_with = mark_fn(position=Stack()).encode(**encoding).to_svg()
 
     assert svg_without != svg_with, (
         f"{mark_method} + Stack() did not change SVG output; "
@@ -72,8 +72,8 @@ def test_dodge_changes_svg(grouped_df: pl.DataFrame, mark_method: str, encoding:
     base = fm.Chart(grouped_df)
     mark_fn = getattr(base, mark_method)
 
-    svg_without = mark_fn().encode(**encoding).show_svg()
-    svg_with = mark_fn(position=Dodge()).encode(**encoding).show_svg()
+    svg_without = mark_fn().encode(**encoding).to_svg()
+    svg_with = mark_fn(position=Dodge()).encode(**encoding).to_svg()
 
     assert svg_without != svg_with, (
         f"{mark_method} + Dodge() did not change SVG output; "
@@ -97,8 +97,8 @@ def test_jitter_changes_svg(grouped_df: pl.DataFrame, mark_method: str, encoding
     base = fm.Chart(grouped_df)
     mark_fn = getattr(base, mark_method)
 
-    svg_without = mark_fn().encode(**encoding).show_svg()
-    svg_with = mark_fn(position=Jitter(seed=42)).encode(**encoding).show_svg()
+    svg_without = mark_fn().encode(**encoding).to_svg()
+    svg_with = mark_fn(position=Jitter(seed=42)).encode(**encoding).to_svg()
 
     assert svg_without != svg_with, (
         f"{mark_method} + Jitter() did not change SVG output; "
@@ -121,13 +121,13 @@ _STACK_OFFSETS = [
 def test_stack_offset_differs_from_no_position(grouped_df: pl.DataFrame, offset: str) -> None:
     """Each Stack offset variant must produce SVG different from unpositioned bars."""
     svg_without = (
-        fm.Chart(grouped_df).mark_bar().encode(x="cat:N", y="val:Q", color="grp:N").show_svg()
+        fm.Chart(grouped_df).mark_bar().encode(x="cat:N", y="val:Q", color="grp:N").to_svg()
     )
     svg_with = (
         fm.Chart(grouped_df)
         .mark_bar(position=Stack(offset=offset))
         .encode(x="cat:N", y="val:Q", color="grp:N")
-        .show_svg()
+        .to_svg()
     )
 
     assert svg_without != svg_with, (
@@ -151,13 +151,13 @@ def test_stack_offsets_differ_from_each_other(
         fm.Chart(grouped_df)
         .mark_bar(position=Stack(offset=offset_a))
         .encode(x="cat:N", y="val:Q", color="grp:N")
-        .show_svg()
+        .to_svg()
     )
     svg_b = (
         fm.Chart(grouped_df)
         .mark_bar(position=Stack(offset=offset_b))
         .encode(x="cat:N", y="val:Q", color="grp:N")
-        .show_svg()
+        .to_svg()
     )
 
     assert svg_a != svg_b, (
@@ -181,12 +181,12 @@ def test_stack_offsets_differ_from_each_other(
 )
 def test_jitter_axis_changes_svg(grouped_df: pl.DataFrame, axis: str) -> None:
     """Each Jitter axis setting must alter SVG vs. unpositioned marks."""
-    svg_without = fm.Chart(grouped_df).mark_point().encode(x="num:Q", y="val:Q").show_svg()
+    svg_without = fm.Chart(grouped_df).mark_point().encode(x="num:Q", y="val:Q").to_svg()
     svg_with = (
         fm.Chart(grouped_df)
         .mark_point(position=Jitter(axis=axis, seed=42))
         .encode(x="num:Q", y="val:Q")
-        .show_svg()
+        .to_svg()
     )
 
     assert svg_without != svg_with, f"Jitter(axis={axis!r}) did not change SVG output."
@@ -203,13 +203,13 @@ def test_dodge_padding_changes_svg(grouped_df: pl.DataFrame) -> None:
         fm.Chart(grouped_df)
         .mark_bar(position=Dodge(padding=0.0))
         .encode(x="cat:N", y="val:Q", color="grp:N")
-        .show_svg()
+        .to_svg()
     )
     svg_wide = (
         fm.Chart(grouped_df)
         .mark_bar(position=Dodge(padding=0.5))
         .encode(x="cat:N", y="val:Q", color="grp:N")
-        .show_svg()
+        .to_svg()
     )
 
     assert svg_narrow != svg_wide, (

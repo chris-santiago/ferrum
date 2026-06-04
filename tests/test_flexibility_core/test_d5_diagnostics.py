@@ -223,7 +223,7 @@ def test_window_frame_negative_preceding_is_not_all_nan(window_df: pl.DataFrame)
             text=Text("rolling_mean", format=".2f"),
         )
         .transform(t)
-        .show_svg()
+        .to_svg()
     )
 
     mark_values = _mark_text_values(svg)
@@ -265,7 +265,7 @@ def test_window_frame_negative_preceding_values_are_correct(window_df: pl.DataFr
             text=Text("rolling_mean", format=".2f"),
         )
         .transform(t)
-        .show_svg()
+        .to_svg()
     )
 
     mark_values = sorted(_mark_text_values(svg))
@@ -303,7 +303,7 @@ def test_window_frame_negative_preceding_yaxis_spans_data_range(
         .mark_point()
         .encode(x="idx:Q", y="rolling_mean:Q")
         .transform(t)
-        .show_svg()
+        .to_svg()
     )
 
     y_max = _y_axis_max(svg)
@@ -354,7 +354,7 @@ def test_y_stack_normalize_on_mark_line_emits_warning() -> None:
             fm.Chart(df)
             .mark_line()
             .encode(x="x:Q", y=fm.Y("val:Q", stack="normalize"), color="grp:N")
-            .show_svg()
+            .to_svg()
         )
 
     stack_warnings = [
@@ -403,7 +403,7 @@ def test_y_stack_normalize_on_mark_line_does_not_drop_marks() -> None:
         fm.Chart(df)
         .mark_line()
         .encode(x="x:Q", y=fm.Y("val:Q", stack="normalize"), color="grp:N")
-        .show_svg()
+        .to_svg()
     )
 
     polylines = _mark_polylines(svg)
@@ -437,12 +437,12 @@ def test_y_stack_normalize_on_mark_line_differs_from_no_stack() -> None:
         }
     )
 
-    svg_no_stack = fm.Chart(df).mark_line().encode(x="x:Q", y="val:Q", color="grp:N").show_svg()
+    svg_no_stack = fm.Chart(df).mark_line().encode(x="x:Q", y="val:Q", color="grp:N").to_svg()
     svg_with_stack = (
         fm.Chart(df)
         .mark_line()
         .encode(x="x:Q", y=fm.Y("val:Q", stack="normalize"), color="grp:N")
-        .show_svg()
+        .to_svg()
     )
 
     polylines_no_stack = _mark_polylines(svg_no_stack)
@@ -494,7 +494,7 @@ def test_layered_y_stack_normalize_on_mark_line_emits_warning() -> None:
 
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
 
     # (a) A warning naming ``stack`` or ``normalize`` must be emitted.
     stack_warnings = [
@@ -549,7 +549,7 @@ def test_layered_bar_stack_guard_does_not_fire() -> None:
 
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
 
     # The guard must not fire for a stackable mark: no "stack ignored" warning.
     stack_dropped_warnings = [
@@ -627,7 +627,7 @@ def test_empty_facet_partition_emits_warning(sparse_grid_df: pl.DataFrame) -> No
             .mark_point()
             .encode(x="x:Q", y="y:Q")
             .facet(row="row_cat", col="col_cat")
-            .show_svg()
+            .to_svg()
         )
 
     # At least one warning must identify the missing partition.
@@ -682,11 +682,11 @@ def test_empty_facet_partition_warning_is_emitted_at_all(
             .mark_point()
             .encode(x="x:Q", y="y:Q")
             .facet(row="row_cat", col="col_cat")
-            .show_svg()
+            .to_svg()
         )
 
     # The chart must render without exception and show the 3 data groups.
-    assert svg, "Chart.show_svg() returned empty output for sparse grid facet."
+    assert svg, "Chart.to_svg() returned empty output for sparse grid facet."
 
     import re
 
@@ -729,7 +729,7 @@ def _render_span_with_label_position(
         label="target zone",
         label_position=label_position,
     )
-    return fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").__add__(Annotate([span])).show_svg()
+    return fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").__add__(Annotate([span])).to_svg()
 
 
 def test_span_label_position_changes_rendered_y_or_warns() -> None:

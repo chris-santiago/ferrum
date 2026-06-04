@@ -34,7 +34,7 @@ def test_ribbon_opacity_threaded(df):
 
 def test_ribbon_render_smoke(df):
     chart = fe.Chart(df).mark_ribbon().encode(x="t", y="lo", y2="hi")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "<path" in svg  # ribbon emits a path
 

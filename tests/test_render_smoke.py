@@ -555,7 +555,7 @@ def test_smoke_renders(case_id: str, factory) -> None:
     Catches: ValueError, TypeError, RenderError, spec-construction failures,
     and any other exception that surfaces during chart build or SVG render.
     """
-    svg = factory().show_svg()
+    svg = factory().to_svg()
     assert "<svg" in svg, f"[{case_id}] expected a valid SVG document; got {svg[:120]!r}"
     # A non-empty chart always exceeds 500 characters (axes + at least one mark element).
     assert len(svg) > 500, (
@@ -795,7 +795,7 @@ def test_smoke_structural(case_id: str, factory) -> None:
     if case_id in _XFAIL_IDS:
         pytest.skip(f"xfail case {case_id!r} — structural checks skipped")
 
-    svg = factory().show_svg()
+    svg = factory().to_svg()
 
     # --- per-mark checks ---
     prefix = case_id.split("/")[0]

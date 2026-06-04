@@ -29,13 +29,13 @@ def multi_source():
 
 def test_mark_roc_renders_binary(binary_source):
     roc = binary_source.roc_curve()
-    svg = ferrum.Chart(roc).mark_roc().show_svg()
+    svg = ferrum.Chart(roc).mark_roc().to_svg()
     assert "<svg" in svg
 
 
 def test_mark_roc_renders_multiclass(multi_source):
     roc = multi_source.roc_curve()
-    svg = ferrum.Chart(roc).mark_roc().show_svg()
+    svg = ferrum.Chart(roc).mark_roc().to_svg()
     assert "<svg" in svg
 
 
@@ -52,7 +52,7 @@ def test_mark_roc_annotate_auc_renders_text_label(binary_source):
     svg = ferrum.roc_chart(
         binary_source,
         annotate_auc=True,
-    ).show_svg()
+    ).to_svg()
     assert "<svg" in svg
     assert "<text" in svg
     # The formatted "AUC = 0." literal should appear in the SVG text.
@@ -61,7 +61,7 @@ def test_mark_roc_annotate_auc_renders_text_label(binary_source):
 
 def test_mark_pr_renders(binary_source):
     pr = binary_source.pr_curve()
-    svg = ferrum.Chart(pr).mark_pr().show_svg()
+    svg = ferrum.Chart(pr).mark_pr().to_svg()
     assert "<svg" in svg
 
 
@@ -70,7 +70,7 @@ def test_mark_pr_iso_lines_renders_4_iso_curves(binary_source):
     plus a text-label layer with the F-value at each curve's rightmost
     point. The chart builder owns the iso-row injection; the desugar
     emits one extra dashed line layer + one text layer."""
-    svg = ferrum.pr_chart(binary_source, iso_lines=True).show_svg()
+    svg = ferrum.pr_chart(binary_source, iso_lines=True).to_svg()
     assert "<svg" in svg
     for f in ("F=0.2", "F=0.4", "F=0.6", "F=0.8"):
         assert f in svg, f"iso label {f!r} missing from SVG"
@@ -79,7 +79,7 @@ def test_mark_pr_iso_lines_renders_4_iso_curves(binary_source):
 def test_mark_pr_annotate_ap_renders_text_label(binary_source):
     """annotate_ap=True emits a per-class text layer at fixed (x, y)
     with the formatted AP value, color-coded to match each curve."""
-    svg = ferrum.pr_chart(binary_source, annotate_ap=True).show_svg()
+    svg = ferrum.pr_chart(binary_source, annotate_ap=True).to_svg()
     assert "<svg" in svg
     assert "AP = 0." in svg
 
@@ -91,26 +91,26 @@ def test_mark_pr_annotate_ap_and_iso_lines_compose(binary_source):
         binary_source,
         annotate_ap=True,
         iso_lines=True,
-    ).show_svg()
+    ).to_svg()
     assert "AP = 0." in svg
     assert "F=0.6" in svg
 
 
 def test_mark_calibration_renders(binary_source):
     cal = binary_source.calibration_curve(n_bins=10)
-    svg = ferrum.Chart(cal).mark_calibration().show_svg()
+    svg = ferrum.Chart(cal).mark_calibration().to_svg()
     assert "<svg" in svg
 
 
 def test_mark_gain_renders(binary_source):
     gain = binary_source.cumulative_gain()
-    svg = ferrum.Chart(gain).mark_gain().show_svg()
+    svg = ferrum.Chart(gain).mark_gain().to_svg()
     assert "<svg" in svg
 
 
 def test_mark_lift_renders(binary_source):
     lift = binary_source.lift_curve()
-    svg = ferrum.Chart(lift).mark_lift().show_svg()
+    svg = ferrum.Chart(lift).mark_lift().to_svg()
     assert "<svg" in svg
 
 
@@ -122,7 +122,7 @@ def test_mark_discrimination_threshold_renders(binary_source):
         variable_name="metric",
         value_name="value",
     )
-    svg = ferrum.Chart(long).mark_discrimination_threshold().show_svg()
+    svg = ferrum.Chart(long).mark_discrimination_threshold().to_svg()
     assert "<svg" in svg
 
 
@@ -137,7 +137,7 @@ def test_mark_discrimination_threshold_renders_threshold_line(binary_source):
         binary_source,
         threshold_line=True,
         n_thresholds=20,
-    ).show_svg()
+    ).to_svg()
     assert "<svg" in svg
     # mark_rule emits an SVG <line> element for the vertical span.
     assert "<line " in svg
@@ -147,7 +147,7 @@ def test_mark_discrimination_threshold_renders_threshold_line(binary_source):
 
 
 def test_roc_chart_figure_function(binary_source):
-    svg = ferrum.roc_chart(binary_source).show_svg()
+    svg = ferrum.roc_chart(binary_source).to_svg()
     assert "<svg" in svg
 
 
@@ -158,12 +158,12 @@ def test_roc_chart_from_model():
         model,
         df.select(["f0", "f1", "f2", "f3"]),
         df["y"],
-    ).show_svg()
+    ).to_svg()
     assert "<svg" in svg
 
 
 def test_pr_chart_figure_function(binary_source):
-    svg = ferrum.pr_chart(binary_source).show_svg()
+    svg = ferrum.pr_chart(binary_source).to_svg()
     assert "<svg" in svg
 
 
@@ -175,7 +175,7 @@ def test_pr_chart_per_class_false_routes_to_macro(multi_source):
     discard bug fixed in the post-merge cleanup sweep.
     """
     chart = ferrum.pr_chart(multi_source, per_class=False)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # Verify the underlying DataFrame holds one summary class (the macro
     # summary) rather than several per-class curves.
@@ -193,7 +193,7 @@ def test_pr_chart_per_class_false_micro(multi_source):
 
 
 def test_calibration_chart_figure_function(binary_source):
-    svg = ferrum.calibration_chart(binary_source, n_bins=5).show_svg()
+    svg = ferrum.calibration_chart(binary_source, n_bins=5).to_svg()
     assert "<svg" in svg
 
 
@@ -208,16 +208,16 @@ def test_calibration_chart_multi_model_compared_source_passthrough():
     X = df.select(["f0", "f1", "f2", "f3"])
     cms = ferrum.ModelSource.compare({"a": model, "b": model}, X, df["y"])
     chart = ferrum.calibration_chart(cms)
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_gain_chart_figure_function(binary_source):
-    svg = ferrum.gain_chart(binary_source).show_svg()
+    svg = ferrum.gain_chart(binary_source).to_svg()
     assert "<svg" in svg
 
 
 def test_lift_chart_figure_function(binary_source):
-    svg = ferrum.lift_chart(binary_source).show_svg()
+    svg = ferrum.lift_chart(binary_source).to_svg()
     assert "<svg" in svg
 
 
@@ -225,7 +225,7 @@ def test_discrimination_threshold_chart_figure_function(binary_source):
     svg = ferrum.discrimination_threshold_chart(
         binary_source,
         n_thresholds=20,
-    ).show_svg()
+    ).to_svg()
     assert "<svg" in svg
 
 
@@ -241,7 +241,7 @@ def test_roc_visualizer():
     )
     assert "auc_mean=" in repr(viz)
     assert 0.0 <= viz._metrics["auc_mean"] <= 1.0
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_roc_visualizer_score():
@@ -262,7 +262,7 @@ def test_pr_visualizer():
     )
     assert "ap_mean=" in repr(viz)
     assert 0.0 <= viz._metrics["ap_mean"] <= 1.0
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_calibration_visualizer():
@@ -274,7 +274,7 @@ def test_calibration_visualizer():
     )
     assert "calibration_error=" in repr(viz)
     assert viz._metrics["calibration_error"] >= 0.0
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_calibration_visualizer_multi_model_variadic():
@@ -287,7 +287,7 @@ def test_calibration_visualizer_multi_model_variadic():
     X = df.select(["f0", "f1", "f2", "f3"])
     viz = ferrum.CalibrationVisualizer(model, model, n_bins=5).fit(X, df["y"])
     assert "calibration_error=" in repr(viz)
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_discrimination_threshold_visualizer():
@@ -300,7 +300,7 @@ def test_discrimination_threshold_visualizer():
     assert "best_threshold=" in repr(viz)
     assert 0.0 <= viz._metrics["best_threshold"] <= 1.0
     assert 0.0 <= viz._metrics["best_f1"] <= 1.0
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_discrimination_threshold_visualizer_threshold_line():
@@ -315,7 +315,7 @@ def test_discrimination_threshold_visualizer_threshold_line():
         n_thresholds=20,
         threshold_line=True,
     ).fit(df.select(["f0", "f1", "f2", "f3"]), df["y"])
-    svg = viz.show().show_svg()
+    svg = viz.show().to_svg()
     # mark_rule emits an SVG <line> for the vertical span.
     assert "<line " in svg
 
@@ -356,7 +356,7 @@ def test_confusion_matrix_caching(binary_source):
 
 def test_mark_confusion_renders(binary_source):
     cm = binary_source.confusion_matrix(normalize="true")
-    svg = ferrum.Chart(cm).mark_confusion(normalize="true").show_svg()
+    svg = ferrum.Chart(cm).mark_confusion(normalize="true").to_svg()
     assert "<svg" in svg
     # Annotated by default — text labels appear (data labels + axis labels).
     assert svg.count("<text ") >= 4
@@ -364,7 +364,7 @@ def test_mark_confusion_renders(binary_source):
 
 def test_mark_confusion_annotate_off(binary_source):
     cm = binary_source.confusion_matrix(normalize=None)
-    svg = ferrum.Chart(cm).mark_confusion(annotate=False).show_svg()
+    svg = ferrum.Chart(cm).mark_confusion(annotate=False).to_svg()
     assert "<svg" in svg
 
 
@@ -376,7 +376,7 @@ def test_confusion_matrix_chart_binary():
         df.select(["f0", "f1", "f2", "f3"]),
         df["y"],
     )
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_confusion_matrix_chart_multiclass():
@@ -388,7 +388,7 @@ def test_confusion_matrix_chart_multiclass():
         df["y"],
         normalize="true",
     )
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 # --- 10c: class prediction error (Task 19) ----------------------------
@@ -396,7 +396,7 @@ def test_confusion_matrix_chart_multiclass():
 
 def test_mark_class_prediction_error_renders(multi_source):
     cm = multi_source.confusion_matrix(normalize=None)
-    svg = ferrum.Chart(cm).mark_class_prediction_error().show_svg()
+    svg = ferrum.Chart(cm).mark_class_prediction_error().to_svg()
     assert "<svg" in svg
 
 
@@ -408,7 +408,7 @@ def test_class_prediction_error_chart_multiclass():
         df.select(["f0", "f1", "f2", "f3"]),
         df["y"],
     )
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_class_prediction_error_chart_normalized():
@@ -420,7 +420,7 @@ def test_class_prediction_error_chart_normalized():
         df["y"],
         normalize=True,
     )
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 # --- 10c: visualizers (Task 20) ---------------------------------------
@@ -435,7 +435,7 @@ def test_confusion_matrix_visualizer():
     )
     assert "accuracy=" in repr(viz)
     assert 0.0 <= viz._metrics["accuracy"] <= 1.0
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_classification_report_visualizer():
@@ -447,7 +447,7 @@ def test_classification_report_visualizer():
     )
     assert "f1_macro=" in repr(viz)
     assert 0.0 <= viz._metrics["f1_macro"] <= 1.0
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_class_prediction_error_visualizer():
@@ -458,7 +458,7 @@ def test_class_prediction_error_visualizer():
         df["y"],
     )
     assert "accuracy=" in repr(viz)
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_class_balance_visualizer_y_only():
@@ -468,7 +468,7 @@ def test_class_balance_visualizer_y_only():
     assert "imbalance_ratio=" in repr(viz)
     assert viz._metrics["n_classes"] >= 2.0
     assert viz._metrics["imbalance_ratio"] >= 1.0
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_class_balance_visualizer_xy_signature():
@@ -476,7 +476,7 @@ def test_class_balance_visualizer_xy_signature():
     # sklearn-shape .fit(X, y) should also work; X is ignored.
     X = df.select(["f0", "f1", "f2", "f3"])
     viz = ferrum.ClassBalanceVisualizer().fit(X, df["y"])
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 # ---------------------------------------------------------------------------
@@ -489,18 +489,18 @@ def test_classification_report_chart_returns_chart():
     df = load_dataset("multiclass_classification")
     X = df.select(["f0", "f1", "f2", "f3"])
     chart = ferrum.classification_report_chart(model, X, df["y"])
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_class_balance_chart_returns_chart():
     df = load_dataset("multiclass_classification")
     chart = ferrum.class_balance_chart(df["y"])
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_class_balance_chart_accepts_list():
     chart = ferrum.class_balance_chart([0, 1, 1, 2, 0, 2, 2])
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_class_balance_chart_bars_colored_by_class():
@@ -508,6 +508,6 @@ def test_class_balance_chart_bars_colored_by_class():
     import re
 
     chart = ferrum.class_balance_chart([0, 1, 1, 2, 0, 2, 2])
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     fills = set(re.findall(r'fill="(#[0-9a-fA-F]{6})"', svg))
     assert len(fills) >= 3, f"Expected ≥3 distinct fill colors for 3 classes; got {fills}"

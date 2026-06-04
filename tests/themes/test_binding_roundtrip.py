@@ -21,7 +21,7 @@ def base_chart() -> fm.Chart:
 
 
 def _render(chart: fm.Chart, **theme_kwargs: object) -> str:
-    return chart.theme(fm.Theme(**theme_kwargs)).show_svg()
+    return chart.theme(fm.Theme(**theme_kwargs)).to_svg()
 
 
 # Tight assertions — consumers already wired pre-T1.
@@ -46,7 +46,7 @@ def test_background_color_canonical_reaches_svg(base_chart: fm.Chart) -> None:
 def test_invalid_hex_raises(base_chart: fm.Chart) -> None:
     chart = base_chart.theme(fm.Theme(mark_color="not-a-hex"))
     with pytest.raises(ValueError):
-        chart.show_svg()
+        chart.to_svg()
 
 
 # Loose assertions — consumers land in T2/T3; for T1 we just verify the key
@@ -109,19 +109,19 @@ def test_key_roundtrips_without_crash(base_chart: fm.Chart, key: str, value: obj
 def test_invalid_title_anchor_raises(base_chart: fm.Chart) -> None:
     chart = base_chart.theme(fm.Theme(title_anchor="bogus"))
     with pytest.raises(ValueError) as excinfo:
-        chart.show_svg()
+        chart.to_svg()
     assert "title_anchor must be one of" in str(excinfo.value)
 
 
 def test_invalid_legend_orient_raises(base_chart: fm.Chart) -> None:
     chart = base_chart.theme(fm.Theme(legend_orient="diagonal"))
     with pytest.raises(ValueError) as excinfo:
-        chart.show_svg()
+        chart.to_svg()
     assert "legend_orient must be one of" in str(excinfo.value)
 
 
 def test_invalid_legend_direction_raises(base_chart: fm.Chart) -> None:
     chart = base_chart.theme(fm.Theme(legend_direction="vertical-ish"))
     with pytest.raises(ValueError) as excinfo:
-        chart.show_svg()
+        chart.to_svg()
     assert "legend_direction must be one of" in str(excinfo.value)

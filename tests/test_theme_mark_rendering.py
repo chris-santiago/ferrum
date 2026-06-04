@@ -59,7 +59,7 @@ def _render_with_theme(chart_fn, theme=None):
     chart = chart_fn()
     if theme is not None:
         chart = chart.theme(theme)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg"), "SVG output must start with <svg"
     return svg
 

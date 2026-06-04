@@ -92,7 +92,7 @@ def test_configure_preserved_through_layer_add():
     # Both configure layers should be present
     assert len(layered._configure) == 2
     # Render should succeed without error
-    svg = layered.show_svg()
+    svg = layered.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -105,7 +105,7 @@ def test_configure_on_hconcat_fans_out_to_sub_charts():
     c1 = Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-30))
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     combined = c1 | c2
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     _assert_valid_svg(svg)
     # The composed SVG should include both sub-charts
     assert svg.count('transform="translate(') >= 2
@@ -117,7 +117,7 @@ def test_configure_on_vconcat_fans_out():
     c1 = Chart(df).mark_point().encode(x="x", y="y").configure(legend=LegendConfig(orient="bottom"))
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     combined = c1 & c2
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -136,7 +136,7 @@ def test_configure_stacking_multiple_layers():
         .configure(padding=PaddingConfig(top=20))
     )
     assert len(c._configure) == 3
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -183,7 +183,7 @@ def test_secondary_y_preserved_through_layer():
     c = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z", color="red")
     assert len(c._structural) == 1
     assert isinstance(c._structural[0], SecondaryY)
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -193,7 +193,7 @@ def test_break_axis_preserved_through_layer():
     c = Chart(df).mark_point().encode(x="x", y="y") + BreakAxis(axis="y", gap=(15, 45))
     assert len(c._structural) == 1
     assert isinstance(c._structural[0], BreakAxis)
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -206,7 +206,7 @@ def test_inset_preserved_through_layer():
     )
     assert len(c._structural) == 1
     assert isinstance(c._structural[0], Inset)
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -230,7 +230,7 @@ def test_chart_with_configure_and_structural_renders():
     c = Chart(df).mark_point().encode(x="x", y="y").configure(
         axis=AxisConfig(label_angle=-30)
     ) + SecondaryY("z", color="red")
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -243,7 +243,7 @@ def test_chart_with_structural_in_hconcat():
     c1 = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z")
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     combined = c1 | c2
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -326,7 +326,7 @@ def test_inset_pixel_coord_bounds_raises_type_error():
         chart=inset_chart, bounds=(px(10), px(10), px(100), px(100))
     )
     with pytest.raises(TypeError, match="px"):
-        c.show_svg()
+        c.to_svg()
 
 
 def test_inset_norm_coord_bounds_accepted():
@@ -341,7 +341,7 @@ def test_inset_norm_coord_bounds_accepted():
     c = Chart(df).mark_point().encode(x="x", y="y") + Inset(
         chart=inset_chart, bounds=(norm(0.5), norm(0.1), norm(0.9), norm(0.5))
     )
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -353,7 +353,7 @@ def test_inset_norm_coord_bounds_accepted():
 def test_hconcat_with_zero_row_chart():
     """HConcatChart where one chart has 0 rows should produce valid SVG.
 
-    Targets _render.py show_svg lines 426-431: empty dataset path.
+    Targets _render.py to_svg lines 426-431: empty dataset path.
     """
     df_empty = pl.DataFrame(
         {"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)}
@@ -362,7 +362,7 @@ def test_hconcat_with_zero_row_chart():
     c1 = Chart(df_empty).mark_point().encode(x="x", y="y")
     c2 = Chart(df_normal).mark_point().encode(x="x", y="y")
     combined = c1 | c2
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     # Should at least be well-formed SVG (the empty sub-chart produces a minimal SVG)
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -377,7 +377,7 @@ def test_vconcat_with_zero_row_chart():
     c1 = Chart(df_normal).mark_point().encode(x="x", y="y")
     c2 = Chart(df_empty).mark_point().encode(x="x", y="y")
     combined = c1 & c2
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -396,7 +396,7 @@ def test_layer_chart_with_zero_row_chart():
     c2 = Chart(df_empty).mark_line().encode(x="x", y="y")
     # LayerChart's _build_merged will call c1 + c2 which concats data
     lc = LayerChart(c1, c2)
-    svg = lc.show_svg()
+    svg = lc.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -406,7 +406,7 @@ def test_concat_chart_single_chart():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     c = Chart(df).mark_point().encode(x="x", y="y")
     cc = ConcatChart(c)
-    svg = cc.show_svg()
+    svg = cc.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -436,12 +436,12 @@ def test_layer_chart_zero_charts_raises():
 def test_hconcat_with_nan_values_no_nan_in_svg():
     """NaN values in data should not produce NaN in composed SVG.
 
-    Targets the rendering path: _render.py show_svg -> render_svg (Rust).
+    Targets the rendering path: _render.py to_svg -> render_svg (Rust).
     """
     df = pl.DataFrame({"x": [1.0, float("nan"), 3.0], "y": [4.0, 5.0, float("nan")]})
     c1 = Chart(df).mark_point().encode(x="x", y="y")
     c2 = Chart(df).mark_line().encode(x="x", y="y")
-    svg = (c1 | c2).show_svg()
+    svg = (c1 | c2).to_svg()
     # NaN in data is ok but should not leak into SVG attribute values
     # (coordinates, viewBox, transform values)
     assert svg.startswith("<svg") or svg.startswith("<?xml")
@@ -455,7 +455,7 @@ def test_null_values_in_composed_chart():
     df = pl.DataFrame({"x": [1.0, None, 3.0], "y": [None, 5.0, 6.0]})
     c1 = Chart(df).mark_point().encode(x="x", y="y")
     c2 = Chart(df).mark_line().encode(x="x", y="y")
-    svg = (c1 | c2).show_svg()
+    svg = (c1 | c2).to_svg()
     assert "<svg" in svg
 
 
@@ -471,7 +471,7 @@ def test_all_null_column_in_composed_chart():
     c2 = Chart(df).mark_line().encode(x="x", y="y")
     # This may produce an empty-looking chart, but should not panic
     try:
-        svg = (c1 | c2).show_svg()
+        svg = (c1 | c2).to_svg()
         assert "<svg" in svg
     except Exception as exc:
         # If it raises, the error should be legible, not a Rust panic
@@ -518,7 +518,7 @@ def test_infinity_values_in_composed_chart():
     c1 = Chart(df).mark_point().encode(x="x", y="y")
     c2 = Chart(df).mark_line().encode(x="x", y="y")
     try:
-        svg = (c1 | c2).show_svg()
+        svg = (c1 | c2).to_svg()
         # If it renders, check for Infinity leaking into SVG
         if "Infinity" in svg:
             pass  # This is a potential bug - rendering with Infinity coords
@@ -531,7 +531,7 @@ def test_very_large_float_data_no_overflow():
     df = pl.DataFrame({"x": [1e200, 2e200, 3e200], "y": [4e200, 5e200, 6e200]})
     c1 = Chart(df).mark_point().encode(x="x", y="y")
     c2 = Chart(df).mark_line().encode(x="x", y="y")
-    svg = (c1 | c2).show_svg()
+    svg = (c1 | c2).to_svg()
     _assert_valid_svg(svg)
 
 
@@ -539,7 +539,7 @@ def test_very_small_float_data_no_underflow():
     """Very small positive float values should not cause issues."""
     df = pl.DataFrame({"x": [1e-200, 2e-200, 3e-200], "y": [4e-200, 5e-200, 6e-200]})
     c = Chart(df).mark_point().encode(x="x", y="y")
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -557,7 +557,7 @@ def test_integer_columns_in_composed_chart():
     assert df["x"].dtype == pl.Int64
     c1 = Chart(df).mark_point().encode(x="x", y="y")
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
-    svg = (c1 | c2).show_svg()
+    svg = (c1 | c2).to_svg()
     _assert_valid_svg(svg)
 
 
@@ -566,7 +566,7 @@ def test_boolean_column_as_encoding():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "flag": [True, False, True]})
     c = Chart(df).mark_point().encode(x="x", y="flag")
     try:
-        svg = c.show_svg()
+        svg = c.to_svg()
         assert "<svg" in svg
     except Exception as exc:
         assert "panic" not in str(exc).lower(), f"Rust panic: {exc}"
@@ -582,7 +582,7 @@ def test_mixed_type_columns_in_layer():
     c1 = Chart(df1).mark_point().encode(x="x", y="y")
     c2 = Chart(df2).mark_line().encode(x="x", y="y")
     layered = c1 + c2
-    svg = layered.show_svg()
+    svg = layered.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -599,7 +599,7 @@ def test_layer_chart_single_chart_renders():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     c = Chart(df).mark_point().encode(x="x", y="y")
     lc = LayerChart(c)
-    svg = lc.show_svg()
+    svg = lc.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -608,7 +608,7 @@ def test_layer_chart_many_layers():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     charts = [Chart(df).mark_point().encode(x="x", y="y") for _ in range(10)]
     lc = LayerChart(*charts)
-    svg = lc.show_svg()
+    svg = lc.to_svg()
     _assert_valid_svg(svg)
     assert len(lc.charts) == 10
 
@@ -618,19 +618,19 @@ def test_concat_chart_columns_1_wrapping():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     charts = [Chart(df).mark_point().encode(x="x", y="y") for _ in range(3)]
     cc = ConcatChart(*charts, columns=1)
-    svg = cc.show_svg()
+    svg = cc.to_svg()
     _assert_valid_svg(svg)
 
 
 def test_concat_chart_columns_exceeds_count():
     """ConcatChart with columns > len(charts) should not error.
 
-    Targets ConcatChart.show_svg lines 1423-1424: n_cols = min(n_cols, n_cells).
+    Targets ConcatChart.to_svg lines 1423-1424: n_cols = min(n_cols, n_cells).
     """
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     charts = [Chart(df).mark_point().encode(x="x", y="y") for _ in range(2)]
     cc = ConcatChart(*charts, columns=10)
-    svg = cc.show_svg()
+    svg = cc.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -664,7 +664,7 @@ def test_hconcat_nested_in_vconcat():
     result = (c1 | c2) & c3
     assert isinstance(result, VConcatChart)
     assert isinstance(result.charts[0], HConcatChart)
-    svg = result.show_svg()
+    svg = result.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -677,7 +677,7 @@ def test_deeply_nested_composition():
     c4 = Chart(df).mark_point().encode(x="x", y="y")
     result = ((c1 | c2) & c3) | c4
     assert isinstance(result, HConcatChart)
-    svg = result.show_svg()
+    svg = result.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -825,12 +825,12 @@ def test_cluster_map_dendrogram_ratio_negative_raises():
 def test_cluster_map_heatmap_only_renders():
     """ClusterMapChart with no dendrograms renders as a simple grid.
 
-    Targets ClusterMapChart.show_svg where both col_svg and row_svg are None.
+    Targets ClusterMapChart.to_svg where both col_svg and row_svg are None.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     hm = Chart(df).mark_point().encode(x="x", y="y")
     cm = ClusterMapChart(hm)
-    svg = cm.show_svg()
+    svg = cm.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -870,26 +870,26 @@ def test_cluster_map_rebuild_with_charts():
 def test_joint_chart_with_top_only_renders():
     """JointChart with only top marginal (no right) renders valid SVG.
 
-    Targets JointChart.show_svg where right_chart is None but top_chart is not.
+    Targets JointChart.to_svg where right_chart is None but top_chart is not.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [6.0, 7.0, 8.0, 9.0, 10.0]})
     center = Chart(df).mark_point().encode(x="x", y="y")
     top = Chart(df).mark_point().encode(x="x", y="y")
     joint = JointChart(center, top=top)
-    svg = joint.show_svg()
+    svg = joint.to_svg()
     _assert_valid_svg(svg)
 
 
 def test_joint_chart_with_right_only_renders():
     """JointChart with only right marginal (no top) renders valid SVG.
 
-    Targets JointChart.show_svg where top_chart is None but right_chart is not.
+    Targets JointChart.to_svg where top_chart is None but right_chart is not.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [6.0, 7.0, 8.0, 9.0, 10.0]})
     center = Chart(df).mark_point().encode(x="x", y="y")
     right = Chart(df).mark_point().encode(x="x", y="y")
     joint = JointChart(center, right=right)
-    svg = joint.show_svg()
+    svg = joint.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -912,14 +912,14 @@ def test_joint_chart_properties_only_affects_center():
 def test_joint_chart_very_large_ratio():
     """JointChart with very large ratio (marginals become tiny).
 
-    Targets JointChart.show_svg: marginal_share = 1/(ratio+1) which becomes
+    Targets JointChart.to_svg: marginal_share = 1/(ratio+1) which becomes
     very small but should not cause division by zero or NaN.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     center = Chart(df).mark_point().encode(x="x", y="y")
     top = Chart(df).mark_point().encode(x="x", y="y")
     joint = JointChart(center, top=top, ratio=1000)
-    svg = joint.show_svg()
+    svg = joint.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1242,7 +1242,7 @@ def test_coord_flip_in_hconcat():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     c1 = Chart(df).mark_bar().encode(x="x", y="y").coord(fr.CoordFlip())
     c2 = Chart(df).mark_point().encode(x="x", y="y")
-    svg = (c1 | c2).show_svg()
+    svg = (c1 | c2).to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1256,7 +1256,7 @@ def test_coord_cartesian_xlim_ylim_in_vconcat():
         .coord(fr.CoordCartesian(xlim=(0, 5), ylim=(0, 10)))
     )
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
-    svg = (c1 & c2).show_svg()
+    svg = (c1 & c2).to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1322,7 +1322,7 @@ def test_single_row_df_in_hconcat():
     df = pl.DataFrame({"x": [1.0], "y": [2.0]})
     c1 = Chart(df).mark_point().encode(x="x", y="y")
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
-    svg = (c1 | c2).show_svg()
+    svg = (c1 | c2).to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1334,7 +1334,7 @@ def test_all_identical_values_in_composed_chart():
     df = pl.DataFrame({"x": [5.0, 5.0, 5.0], "y": [3.0, 3.0, 3.0]})
     c1 = Chart(df).mark_point().encode(x="x", y="y")
     c2 = Chart(df).mark_line().encode(x="x", y="y")
-    svg = (c1 | c2).show_svg()
+    svg = (c1 | c2).to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1458,7 +1458,7 @@ def test_concat_chart_shared_scale_renders():
     c1 = Chart(df1).mark_point().encode(x="x", y="y")
     c2 = Chart(df2).mark_point().encode(x="x", y="y")
     cc = ConcatChart(c1, c2, resolve={"x": "shared"})
-    svg = cc.show_svg()
+    svg = cc.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1472,7 +1472,7 @@ def test_concat_chart_shared_unbound_channel_is_noop():
     c2 = Chart(df).mark_point().encode(x="x", y="y")
     # Share "color" channel which nobody binds
     cc = ConcatChart(c1, c2, resolve={"color": "shared"})
-    svg = cc.show_svg()
+    svg = cc.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1487,7 +1487,7 @@ def test_hconcat_zero_spacing():
     c1 = Chart(df).mark_point().encode(x="x", y="y")
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     combined = HConcatChart([c1, c2], spacing=0.0)
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1497,7 +1497,7 @@ def test_vconcat_zero_spacing():
     c1 = Chart(df).mark_point().encode(x="x", y="y")
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     combined = VConcatChart([c1, c2], spacing=0.0)
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1515,7 +1515,7 @@ def test_layer_chart_with_title():
     c1 = Chart(df).mark_point().encode(x="x", y="y")
     c2 = Chart(df).mark_line().encode(x="x", y="y")
     lc = LayerChart(c1, c2, title="My Layered Chart")
-    svg = lc.show_svg()
+    svg = lc.to_svg()
     _assert_valid_svg(svg)
     assert "My Layered Chart" in svg
 
@@ -1530,7 +1530,7 @@ def test_layer_chart_resolve_shared():
     c1 = Chart(df1).mark_point().encode(x="x", y="y")
     c2 = Chart(df2).mark_line().encode(x="x", y="y")
     lc = LayerChart(c1, c2, resolve={"x": "shared"})
-    svg = lc.show_svg()
+    svg = lc.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1701,22 +1701,22 @@ def test_resolve_chart_config_structural_serialized():
 # ---------------------------------------------------------------------------
 
 
-def test_hconcat_show_svg_produces_composed_output():
-    """End-to-end: (c1 | c2).show_svg() composes through Rust compositor."""
+def test_hconcat_to_svg_produces_composed_output():
+    """End-to-end: (c1 | c2).to_svg() composes through Rust compositor."""
     df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
     c1 = Chart(df).mark_point().encode(x="a", y="b")
     c2 = Chart(df).mark_line().encode(x="a", y="b")
-    svg = (c1 | c2).show_svg()
+    svg = (c1 | c2).to_svg()
     _assert_valid_svg(svg)
     assert svg.count('transform="translate(') >= 2
 
 
-def test_vconcat_show_svg_produces_composed_output():
-    """End-to-end: (c1 & c2).show_svg() composes through Rust compositor."""
+def test_vconcat_to_svg_produces_composed_output():
+    """End-to-end: (c1 & c2).to_svg() composes through Rust compositor."""
     df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
     c1 = Chart(df).mark_point().encode(x="a", y="b")
     c2 = Chart(df).mark_bar().encode(x="a", y="b")
-    svg = (c1 & c2).show_svg()
+    svg = (c1 & c2).to_svg()
     _assert_valid_svg(svg)
     assert svg.count('transform="translate(') >= 2
 
@@ -1731,7 +1731,7 @@ def test_hconcat_single_chart_svg_is_valid():
     df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
     c = Chart(df).mark_point().encode(x="x", y="y")
     combined = HConcatChart([c])
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1740,7 +1740,7 @@ def test_vconcat_single_chart_svg_is_valid():
     df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
     c = Chart(df).mark_point().encode(x="x", y="y")
     combined = VConcatChart([c])
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1749,7 +1749,7 @@ def test_hconcat_many_charts_renders():
     df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
     charts = [Chart(df).mark_point().encode(x="x", y="y") for _ in range(5)]
     combined = HConcatChart(charts)
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     _assert_valid_svg(svg)
     assert svg.count('transform="translate(') >= 5
 
@@ -1759,7 +1759,7 @@ def test_hconcat_no_viewbox_nan():
     df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
     c1 = Chart(df).mark_point().encode(x="x", y="y")
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
-    svg = (c1 | c2).show_svg()
+    svg = (c1 | c2).to_svg()
     if 'viewBox="' in svg:
         idx = svg.index('viewBox="') + 9
         end = svg.index('"', idx)
@@ -1774,7 +1774,7 @@ def test_hconcat_custom_spacing_renders():
     c1 = Chart(df).mark_point().encode(x="x", y="y")
     c2 = Chart(df).mark_point().encode(x="x", y="y")
     combined = HConcatChart([c1, c2], spacing=50.0)
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1784,7 +1784,7 @@ def test_vconcat_custom_spacing_renders():
     c1 = Chart(df).mark_point().encode(x="x", y="y")
     c2 = Chart(df).mark_point().encode(x="x", y="y")
     combined = VConcatChart([c1, c2], spacing=50.0)
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1870,7 +1870,7 @@ def test_joint_chart_center_only_renders():
     df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
     center = Chart(df).mark_point().encode(x="x", y="y")
     joint = JointChart(center)
-    svg = joint.show_svg()
+    svg = joint.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1887,7 +1887,7 @@ def test_configure_axis_method_creates_configure_layer():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     c = Chart(df).mark_point().encode(x="x", y="y").configure_axis(label_angle=-45)
     assert len(c._configure) >= 1
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1896,7 +1896,7 @@ def test_configure_legend_method():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0], "c": ["a", "b"]})
     c = Chart(df).mark_point().encode(x="x", y="y", color="c").configure_legend(orient="bottom")
     assert len(c._configure) >= 1
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1905,7 +1905,7 @@ def test_configure_grid_method():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     c = Chart(df).mark_point().encode(x="x", y="y").configure_grid(y=True, color="#eee")
     assert len(c._configure) >= 1
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1914,7 +1914,7 @@ def test_configure_padding_method():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     c = Chart(df).mark_point().encode(x="x", y="y").configure_padding(top=50, left=30)
     assert len(c._configure) >= 1
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1923,7 +1923,7 @@ def test_configure_color_method():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0], "c": ["a", "b"]})
     c = Chart(df).mark_point().encode(x="x", y="y", color="c").configure_color(scheme="tableau10")
     assert len(c._configure) >= 1
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1937,7 +1937,7 @@ def test_configure_title_method():
         .configure_title(font_size=20, anchor="start")
     )
     assert len(c._configure) >= 1
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
     assert "My Chart" in svg
 
@@ -1969,7 +1969,7 @@ def test_faceted_chart_with_configure():
         .facet(col="grp")
         .configure(axis=AxisConfig(label_angle=-30))
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -1992,7 +1992,7 @@ def test_faceted_chart_with_structural():
     chart = Chart(df).mark_point().encode(x="x", y="y").facet(col="grp") + SecondaryY(
         "z", color="red"
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2010,7 +2010,7 @@ def test_configure_cascade_through_hconcat_inside_vconcat():
     """Configure on sub-charts survives deeply nested ((c1|c2) & c3) rendering.
 
     Targets: Each sub-chart's _resolve_chart_config is called independently in
-    show_svg() because HConcat/VConcat call show_svg() on each child. The
+    to_svg() because HConcat/VConcat call to_svg() on each child. The
     configure should be present on c1 and c3 but not c2.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
@@ -2023,7 +2023,7 @@ def test_configure_cascade_through_hconcat_inside_vconcat():
         .configure(grid=GridConfig(color="#ccc", width=2.0))
     )
     nested = (c1 | c2) & c3
-    svg = nested.show_svg()
+    svg = nested.to_svg()
     _assert_valid_svg(svg)
     # Verify that the nested composition has the right structure
     assert isinstance(nested, VConcatChart)
@@ -2046,7 +2046,7 @@ def test_configure_survives_theme_propagation_on_nested_composition():
     # After theme propagation, each chart should still have its configure
     assert len(themed.charts[0]._configure) == 1
     assert len(themed.charts[1]._configure) == 1
-    svg = themed.show_svg()
+    svg = themed.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2064,7 +2064,7 @@ def test_configure_survives_properties_propagation():
     # c1 should still have its configure after properties
     assert len(updated.charts[0]._configure) == 1
     assert updated.charts[0]._width == 800
-    svg = updated.show_svg()
+    svg = updated.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2085,7 +2085,7 @@ def test_configure_cascade_three_levels_of_layer_add():
     assert "axis" in merged
     assert "grid" in merged
     assert "padding" in merged
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2104,7 +2104,7 @@ def test_configure_on_layerchart_survives_rebuild():
     assert isinstance(rebuilt, LayerChart)
     assert len(rebuilt.charts[0]._configure) == 1
     assert len(rebuilt.charts[1]._configure) == 1
-    svg = rebuilt.show_svg()
+    svg = rebuilt.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2126,7 +2126,7 @@ def test_configure_on_concat_chart_survives_rebuild():
     assert isinstance(rebuilt, ConcatChart)
     assert len(rebuilt.charts[0]._configure) == 1
     assert len(rebuilt.charts[1]._configure) == 1
-    svg = rebuilt.show_svg()
+    svg = rebuilt.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2138,7 +2138,7 @@ def test_configure_on_concat_chart_survives_rebuild():
 def test_annotations_in_hconcat_sub_charts_render():
     """Annotations on sub-charts within HConcat should appear in the composed SVG.
 
-    Targets: Each sub-chart in HConcat calls its own show_svg() which
+    Targets: Each sub-chart in HConcat calls its own to_svg() which
     goes through _render_inputs -> _resolve_chart_config -> annotations.
     """
     from ferrum.annotation.primitives import text
@@ -2147,7 +2147,7 @@ def test_annotations_in_hconcat_sub_charts_render():
     c1 = Chart(df).mark_point().encode(x="x", y="y") + text(2.0, 5.0, "Left Panel")
     c2 = Chart(df).mark_bar().encode(x="x", y="y") + text(2.0, 5.0, "Right Panel")
     combined = c1 | c2
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     _assert_valid_svg(svg)
     assert "Left Panel" in svg
     assert "Right Panel" in svg
@@ -2156,7 +2156,7 @@ def test_annotations_in_hconcat_sub_charts_render():
 def test_annotations_in_vconcat_sub_charts_render():
     """Annotations on sub-charts within VConcat should appear in the composed SVG.
 
-    Targets: Each sub-chart in VConcat calls its own show_svg() which
+    Targets: Each sub-chart in VConcat calls its own to_svg() which
     goes through _render_inputs -> _resolve_chart_config -> annotations.
     """
     from ferrum.annotation.primitives import text
@@ -2165,7 +2165,7 @@ def test_annotations_in_vconcat_sub_charts_render():
     c1 = Chart(df).mark_point().encode(x="x", y="y") + text(2.0, 5.0, "Top Panel")
     c2 = Chart(df).mark_bar().encode(x="x", y="y") + text(2.0, 5.0, "Bottom Panel")
     combined = c1 & c2
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     _assert_valid_svg(svg)
     assert "Top Panel" in svg
     assert "Bottom Panel" in svg
@@ -2184,7 +2184,7 @@ def test_annotations_accumulate_across_three_layers():
     c3 = Chart(df).mark_point().encode(x="x", y="y") + rect(1.0, 4.0, 2.0, 5.0, fill="#eee")
     combined = c1 + c2 + c3
     assert len(combined._annotations) == 3
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     _assert_valid_svg(svg)
     assert "A" in svg
 
@@ -2202,7 +2202,7 @@ def test_annotations_survive_theme_on_composition():
     hc = c1 | c2
     themed = hc.theme(fr.themes.dark)
     assert len(themed.charts[0]._annotations) == 1
-    svg = themed.show_svg()
+    svg = themed.to_svg()
     _assert_valid_svg(svg)
     assert "Annotated" in svg
 
@@ -2220,7 +2220,7 @@ def test_annotations_survive_properties_on_composition():
     vc = c1 & c2
     updated = vc.properties(width=900)
     assert len(updated.charts[0]._annotations) == 1
-    svg = updated.show_svg()
+    svg = updated.to_svg()
     _assert_valid_svg(svg)
     assert "Persists" in svg
 
@@ -2237,7 +2237,7 @@ def test_annotation_in_layer_chart_renders():
     c1 = Chart(df).mark_point().encode(x="x", y="y") + text(2.0, 5.0, "Layer1")
     c2 = Chart(df).mark_line().encode(x="x", y="y") + text(1.0, 4.0, "Layer2")
     lc = LayerChart(c1, c2)
-    svg = lc.show_svg()
+    svg = lc.to_svg()
     _assert_valid_svg(svg)
     # Both annotations should be present
     assert "Layer1" in svg
@@ -2310,7 +2310,7 @@ def test_format_preset_in_faceted_chart_renders():
         .facet(col="grp")
         .configure_axis(label_format="currency")
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2450,7 +2450,7 @@ def test_per_axis_configure_in_hconcat_renders():
         )
     )
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
-    svg = (c1 | c2).show_svg()
+    svg = (c1 | c2).to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2462,13 +2462,13 @@ def test_per_axis_configure_in_hconcat_renders():
 def test_structural_in_vconcat_sub_chart_renders():
     """A chart with BreakAxis inside a VConcat renders valid SVG.
 
-    Targets: sub-chart's show_svg calls _resolve_chart_config which
+    Targets: sub-chart's to_svg calls _resolve_chart_config which
     serializes structural features, then passes them to render_svg.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 50.0, 6.0]})
     c1 = Chart(df).mark_point().encode(x="x", y="y") + BreakAxis(axis="y", gap=(15, 45))
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
-    svg = (c1 & c2).show_svg()
+    svg = (c1 & c2).to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2484,7 +2484,7 @@ def test_structural_survives_theme_on_composition():
     themed = hc.theme(fr.themes.dark)
     assert len(themed.charts[0]._structural) == 1
     assert isinstance(themed.charts[0]._structural[0], SecondaryY)
-    svg = themed.show_svg()
+    svg = themed.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2499,7 +2499,7 @@ def test_structural_survives_properties_on_composition():
     vc = c1 & c2
     updated = vc.properties(width=800)
     assert len(updated.charts[0]._structural) == 1
-    svg = updated.show_svg()
+    svg = updated.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2507,7 +2507,7 @@ def test_inset_in_hconcat_sub_chart_renders():
     """A chart with an Inset inside HConcat renders valid SVG.
 
     Targets: sub-chart rendering calls _serialize_structural for Inset
-    which recursively renders the inset chart's show_svg().
+    which recursively renders the inset chart's to_svg().
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     inset_chart = Chart(df).mark_point().encode(x="x", y="y")
@@ -2515,7 +2515,7 @@ def test_inset_in_hconcat_sub_chart_renders():
         chart=inset_chart, bounds=(0.6, 0.1, 0.95, 0.45)
     )
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
-    svg = (c1 | c2).show_svg()
+    svg = (c1 | c2).to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2529,7 +2529,7 @@ def test_secondary_y_in_layer_chart_renders():
     c1 = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z", color="red")
     c2 = Chart(df).mark_line().encode(x="x", y="y")
     lc = LayerChart(c1, c2)
-    svg = lc.show_svg()
+    svg = lc.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2550,7 +2550,7 @@ def test_configure_color_range_renders():
         .encode(x="x", y="y", color="c")
         .configure(color=ColorConfig(range=["#ff0000", "#00ff00", "#0000ff"]))
     )
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2574,7 +2574,7 @@ def test_configure_color_domain_renders():  # BUG: ColorConfig domain with strin
         .encode(x="x", y="y", color="c")
         .configure(color=ColorConfig(domain=["a", "b", "c"], range=["red", "green", "blue"]))
     )
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2588,7 +2588,7 @@ def test_configure_color_in_hconcat_renders():
         .configure(color=ColorConfig(scheme="tableau10"))
     )
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
-    svg = (c1 | c2).show_svg()
+    svg = (c1 | c2).to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2610,7 +2610,7 @@ def test_configure_grid_band_colors_renders():
         .encode(x="x", y="y")
         .configure(grid=GridConfig(y=True, band_colors=["#f0f0f0", "#ffffff"]))
     )
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2654,7 +2654,7 @@ def test_padding_explicit_sides_renders():
         .encode(x="x", y="y")
         .configure(padding=PaddingConfig(top=50, right=30, bottom=50, left=30, auto=False))
     )
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2721,7 +2721,7 @@ def test_chart_with_all_three_config_domains_renders():
     assert "axis" in merged
     assert "annotations" in merged
     assert "structural" in merged
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
     assert "Peak" in svg
 
@@ -2742,7 +2742,7 @@ def test_chart_with_all_domains_in_hconcat():
     c2 = Chart(df).mark_bar().encode(x="x", y="y").configure(grid=GridConfig(color="#ddd")) + text(
         2.0, 5.0, "Chart2"
     )
-    svg = (c1 | c2).show_svg()
+    svg = (c1 | c2).to_svg()
     _assert_valid_svg(svg)
     assert "Chart1" in svg
     assert "Chart2" in svg
@@ -2756,7 +2756,7 @@ def test_chart_with_all_domains_in_hconcat():
 def test_repeat_chart_with_configure_on_template_renders():
     """RepeatChart template with configure() should propagate to all cells.
 
-    Targets RepeatChart.show_svg -> expand -> _resolve_template -> _clone
+    Targets RepeatChart.to_svg -> expand -> _resolve_template -> _clone
     which copies _configure from the template.
     """
     df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]})
@@ -2771,7 +2771,7 @@ def test_repeat_chart_with_configure_on_template_renders():
     # Each cell should inherit the template's configure
     for _, _, chart in cells:
         assert len(chart._configure) >= 1
-    svg = rc.show_svg()
+    svg = rc.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2790,7 +2790,7 @@ def test_repeat_chart_with_annotation_on_template_renders():
     cells = rc.expand()
     for _, _, chart in cells:
         assert len(chart._annotations) >= 1
-    svg = rc.show_svg()
+    svg = rc.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2802,7 +2802,7 @@ def test_repeat_chart_with_annotation_on_template_renders():
 def test_joint_chart_with_configure_on_center_renders():
     """JointChart with configure() on center chart should render valid SVG.
 
-    Targets JointChart.show_svg: center chart's show_svg calls
+    Targets JointChart.to_svg: center chart's to_svg calls
     _resolve_chart_config which includes the configure.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [6.0, 7.0, 8.0, 9.0, 10.0]})
@@ -2810,7 +2810,7 @@ def test_joint_chart_with_configure_on_center_renders():
     top = Chart(df).mark_point().encode(x="x", y="y")
     right = Chart(df).mark_point().encode(x="x", y="y")
     joint = JointChart(center, top=top, right=right)
-    svg = joint.show_svg()
+    svg = joint.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2827,7 +2827,7 @@ def test_joint_chart_rebuild_preserves_configure():
     themed = joint.theme(fr.themes.dark)
     assert len(themed.center._configure) == 1
     assert len(themed.top._configure) == 1
-    svg = themed.show_svg()
+    svg = themed.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2839,13 +2839,13 @@ def test_joint_chart_rebuild_preserves_configure():
 def test_cluster_map_with_configure_on_heatmap_renders():
     """ClusterMapChart with configure() on heatmap renders valid SVG.
 
-    Targets ClusterMapChart.show_svg: heatmap.show_svg calls
+    Targets ClusterMapChart.to_svg: heatmap.to_svg calls
     _resolve_chart_config with the configure.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     hm = Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-30))
     cm = ClusterMapChart(hm)
-    svg = cm.show_svg()
+    svg = cm.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2856,7 +2856,7 @@ def test_cluster_map_rebuild_preserves_configure():
     cm = ClusterMapChart(hm, dendrogram_ratio=0.2)
     themed = cm.theme(fr.themes.dark)
     assert len(themed.heatmap._configure) == 1
-    svg = themed.show_svg()
+    svg = themed.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2875,7 +2875,7 @@ def test_concat_chart_with_configure_and_resolve_renders():
     c1 = Chart(df1).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-30))
     c2 = Chart(df2).mark_point().encode(x="x", y="y").configure(grid=GridConfig(y=True))
     cc = ConcatChart(c1, c2, resolve={"x": "shared"})
-    svg = cc.show_svg()
+    svg = cc.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2909,7 +2909,7 @@ def test_axis_config_domain_min_max_renders():
         .encode(x="x", y="y")
         .configure(axis=AxisConfig(domain_min=0.0, domain_max=10.0))
     )
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -2984,7 +2984,7 @@ def test_axis_config_tick_values_renders():
         .encode(x="x", y="y")
         .configure(axis=AxisConfig(tick_values=[1.0, 2.0, 3.0]))
     )
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -3094,7 +3094,7 @@ def test_break_axis_all_styles_render():
         c = Chart(df).mark_point().encode(x="x", y="y") + BreakAxis(
             axis="y", gap=(15, 45), break_style=style
         )
-        svg = c.show_svg()
+        svg = c.to_svg()
         _assert_valid_svg(svg)
 
 
@@ -3116,7 +3116,7 @@ def test_inset_with_connect_to_renders():
         connect_to=(2.0, 5.0),
         connect_style="lines",
     )
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -3130,7 +3130,7 @@ def test_inset_with_connect_style_bracket_renders():
         connect_to=(2.0, 5.0),
         connect_style="bracket",
     )
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -3143,7 +3143,7 @@ def test_inset_with_connect_style_none_renders():
         bounds=(0.6, 0.1, 0.95, 0.45),
         connect_style="none",
     )
-    svg = c.show_svg()
+    svg = c.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -3455,7 +3455,7 @@ def test_faceted_chart_with_configure_axis_format_preset_renders():
         .facet(col="grp")
         .configure_axis(label_format="percent")
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -3486,7 +3486,7 @@ def test_faceted_chart_with_grid_config_renders():
         .facet(col="grp")
         .configure_grid(y=True, color="#ddd")
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -3517,7 +3517,7 @@ def test_faceted_chart_with_padding_config_renders():
         .facet(col="grp")
         .configure_padding(top=30, left=40)
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     _assert_valid_svg(svg)
 
 
@@ -3534,7 +3534,7 @@ def test_hconcat_single_category_color():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "c": ["only", "only", "only"]})
     c1 = Chart(df).mark_point().encode(x="x", y="y", color="c")
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
-    svg = (c1 | c2).show_svg()
+    svg = (c1 | c2).to_svg()
     _assert_valid_svg(svg)
 
 

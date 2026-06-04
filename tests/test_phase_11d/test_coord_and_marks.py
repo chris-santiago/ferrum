@@ -42,7 +42,7 @@ def test_coord_cartesian_xlim_renders(scatter_df):
         .mark_point()
         .encode(x="x", y="y")
         .coord(fm.CoordCartesian(xlim=(0.0, 6.0)))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     # Verify coord spec round-trips
@@ -63,7 +63,7 @@ def test_coord_cartesian_ylim_renders(scatter_df):
         .mark_point()
         .encode(x="x", y="y")
         .coord(fm.CoordCartesian(ylim=(0.0, 10.0)))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -74,7 +74,7 @@ def test_coord_cartesian_expand_false(scatter_df):
         .mark_point()
         .encode(x="x", y="y")
         .coord(fm.CoordCartesian(expand=False))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -85,7 +85,7 @@ def test_coord_cartesian_clip_false(scatter_df):
         .mark_point()
         .encode(x="x", y="y")
         .coord(fm.CoordCartesian(clip=False))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -99,7 +99,7 @@ def test_coord_fixed_ratio_one_renders(scatter_df):
         .mark_point()
         .encode(x="x", y="y")
         .coord(fm.CoordFixed(ratio=1.0))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -126,7 +126,7 @@ def test_mark_arc_pie_renders(pie_df):
         .mark_arc()
         .encode(x="value", color="category")
         .coord(fm.CoordPolar(theta="x"))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -155,7 +155,7 @@ def test_mark_arc_spec_contains_polar_coord(pie_df):
 
 
 def test_mark_label_renders(label_df):
-    svg = fm.Chart(label_df).mark_label().encode(x="x", y="y", text="label").show_svg()
+    svg = fm.Chart(label_df).mark_label().encode(x="x", y="y", text="label").to_svg()
     assert "<svg" in svg
 
 
@@ -180,7 +180,7 @@ def test_mark_label_dense_no_crash():
             "label": labels,
         }
     )
-    svg = fm.Chart(df).mark_label().encode(x="x:Q", y="y:Q", text="label").show_svg()
+    svg = fm.Chart(df).mark_label().encode(x="x:Q", y="y:Q", text="label").to_svg()
     assert "<svg" in svg
     # Each single-character label must appear in the SVG as label text content.
     for lbl in labels:
@@ -196,7 +196,7 @@ def test_mark_label_manual_override_bypasses_avoidance(label_df):
         fm.Chart(label_df)
         .mark_label(dx=5.0, dy=-15.0)
         .encode(x="x", y="y", text="label")
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     for lbl in ("first", "second", "third"):
@@ -246,7 +246,7 @@ def test_mark_geoshape_with_geo_coord_renders():
         .mark_geoshape()
         .encode(color="name")
         .coord(fm.CoordGeo(projection="equirectangular"))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -284,7 +284,7 @@ def test_mark_label_collision_avoidance_produces_spread_positions():
             "label": labels,
         }
     )
-    svg = fm.Chart(df).mark_label().encode(x="x:Q", y="y:Q", text="label").show_svg()
+    svg = fm.Chart(df).mark_label().encode(x="x:Q", y="y:Q", text="label").to_svg()
     # Extract y coordinates of <text> elements — match only numeric y="NNN.NNN" values
     y_vals = [float(m) for m in re.findall(r'<text[^>]+\by="(-?[\d.]+)"', svg)]
     # With 8 labels at the same point, collision avoidance must place them
@@ -311,7 +311,7 @@ def test_mark_image_url_tiles_render_image_elements():
             "url": [f"data:image/png;base64,{_TINY_PNG_B64}"] * 3,
         }
     )
-    svg = fm.Chart(df).mark_image().encode(x="x:Q", y="y:Q", url="url").show_svg()
+    svg = fm.Chart(df).mark_image().encode(x="x:Q", y="y:Q", url="url").to_svg()
     assert "<svg" in svg
     assert "<image" in svg, "Expected <image> elements in SVG for mark_image URL tiles"
 
@@ -324,7 +324,7 @@ def test_mark_raster_still_works_after_image_rewrite():
     df = pl.DataFrame(
         {"x": rng.uniform(0, 10, 300).tolist(), "y": rng.uniform(0, 10, 300).tolist()}
     )
-    svg = fm.Chart(df).mark_raster().encode(x="x:Q", y="y:Q").show_svg()
+    svg = fm.Chart(df).mark_raster().encode(x="x:Q", y="y:Q").to_svg()
     assert "<svg" in svg
     assert "<image" in svg, (
         "mark_raster must still produce an <image> element after image.rs rewrite"

@@ -91,7 +91,7 @@ class TestDisplot:
 
     def test_renders_e2e(self, iris_like):
         chart = fe.displot(iris_like, x="sepal_length", kind="hist")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_invalid_kind_errors(self, iris_like):
@@ -111,7 +111,7 @@ class TestDisplot:
         kde_t = next(t for t in d.get("transforms", []) if t.get("type") == "kde")
         assert kde_t.get("groupby") == "species"
         # End-to-end render must not raise and must produce SVG.
-        assert "<svg" in chart.show_svg()
+        assert "<svg" in chart.to_svg()
 
     def test_mark_density_groupby_passthrough(self, iris_like):
         # Direct API path mirrors the displot wiring.
@@ -275,7 +275,7 @@ class TestLmplot:
 
     def test_lm_show_metrics_emits_text(self, reg_data):
         chart = fe.lmplot(reg_data, x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "R²" in svg
         assert "RMSE" in svg
 
@@ -365,7 +365,7 @@ class TestLmplot:
 
     def test_renders_e2e(self, reg_data):
         chart = fe.lmplot(reg_data, x="x", y="y", method="lm", ci=None)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
 
@@ -420,7 +420,7 @@ class TestResidplot:
         # robust+annotations path now ships R²/RMSE/MAE alongside Huber
         # residuals.
         chart = fe.residplot(reg_data, x="x", y="y", robust=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "R²" in svg
         assert "#8a8a8a" in svg
 
@@ -465,17 +465,17 @@ class TestResidplot:
 
     def test_renders_e2e(self, reg_data):
         chart = fe.residplot(reg_data, x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_show_metrics_emits_corner_annotation(self, reg_data):
         chart = fe.residplot(reg_data, x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "R²" in svg
 
     def test_zero_line_renders_dashed_rule(self, reg_data):
         chart = fe.residplot(reg_data, x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         # Dashed rule at y=0 ships in stroke #8a8a8a per the
         # _inject_metrics_corner / _inject_zero_reference idiom.
         assert "#8a8a8a" in svg
@@ -738,7 +738,7 @@ class TestClustermap:
             }
         )
         cm = fe.clustermap(all_numeric)
-        svg = cm.show_svg()
+        svg = cm.to_svg()
         assert svg.startswith("<svg") or "<svg" in svg[:200]
 
 

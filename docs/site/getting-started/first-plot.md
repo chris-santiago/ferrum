@@ -26,12 +26,12 @@ chart = (
     .mark_point()
     .encode(x="sepal_length", y="petal_length", color="species:N")
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Iris scatter plot](img/first-plot_01.png)
 
-That's the whole thing: `Chart(data)` binds your DataFrame, `.mark_point()` picks the geometry, `.encode(...)` maps columns to visual channels. The result is a [`Chart`][ferrum.Chart] object — call [`.show_svg()`][ferrum.Chart.show_svg] to render it, [`.save()`][ferrum.Chart.save] to write it to disk, or just display it in a Jupyter notebook (where it renders automatically).
+That's the whole thing: `Chart(data)` binds your DataFrame, `.mark_point()` picks the geometry, `.encode(...)` maps columns to visual channels. The result is a [`Chart`][ferrum.Chart] object — call [`.to_svg()`][ferrum.Chart.to_svg] to render it, [`.save()`][ferrum.Chart.save] to write it to disk, or just display it in a Jupyter notebook (where it renders automatically).
 
 ## Add a trend line
 
@@ -57,7 +57,7 @@ trend = (
     .encode(x="sepal_length", y="petal_length", color="species:N")
 )
 chart = points + trend
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 `groupby="species"` tells the smoother to fit a separate curve per group rather than one curve through all points. See the [Marks reference](../api/marks.md) for the full parameter list on each mark.
@@ -84,7 +84,7 @@ chart = (
     .mark_boxplot()
     .encode(x="species:N", y="sepal_length", color="species:N")
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Boxplot by species](img/first-plot_03.png)
@@ -108,7 +108,7 @@ chart = (
     .encode(x="sepal_length", y="petal_length", color="species:N")
     .theme(fm.themes.publication)
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Publication theme](img/first-plot_04.png)
@@ -136,14 +136,14 @@ chart = (
     .encode(x="sepal_length", y="petal_length", color="species:N")
     .labs(x="Sepal length (cm)", y="Petal length (cm)", title="Iris — sepal vs. petal")
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 To clip the axis range without modifying the encoding, use `.xlim()` and `.ylim()`:
 
 ```python
 chart = chart.xlim(4.5, 7.5).ylim(1.0, 6.5)
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 Both are shortcuts: `.labs()` is equivalent to setting `title=` on each channel object; `.xlim()` / `.ylim()` are equivalent to `scale=fm.LinearScale(domain=[lo, hi])` on the positional channel. They are there for when you want the result quickly without remembering the full API path.

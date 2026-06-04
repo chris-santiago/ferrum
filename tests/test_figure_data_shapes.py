@@ -75,7 +75,7 @@ def wide_df():
 
 def _produces_svg(chart) -> None:
     """Assert chart renders to valid SVG without crashing."""
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg, "Expected SVG output containing '<svg' tag"
 
 
@@ -83,7 +83,7 @@ def _empty_input_safe(fn, *args, **kwargs) -> None:
     """Assert zero-row input either produces SVG or raises clean ValueError."""
     try:
         chart = fn(*args, **kwargs)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         # Either empty SVG or valid SVG is acceptable
         assert isinstance(svg, str)
     except (ValueError, RuntimeError):

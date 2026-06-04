@@ -22,7 +22,7 @@ class TestBarContinuousX:
         """Bars should render with non-zero width when x is continuous."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [10.0, 20.0, 15.0, 25.0, 30.0]})
         chart = fm.Chart(df).mark_bar().encode(x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         n_rects = _count_rects(svg)
         assert n_rects >= 5, f"Expected ≥5 visible bars, got {n_rects}"
 
@@ -30,7 +30,7 @@ class TestBarContinuousX:
         """Bar width should be derived from minimum spacing between x values."""
         df = pl.DataFrame({"x": [0.0, 1.0, 2.0, 3.0], "y": [5.0, 10.0, 15.0, 20.0]})
         chart = fm.Chart(df).mark_bar().encode(x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         import re
 
         # Extract widths from data-bar rects (those inside the mark <g> group,
@@ -54,7 +54,7 @@ class TestBarContinuousX:
         """Bars with irregular x spacing should use min-spacing as width."""
         df = pl.DataFrame({"x": [1.0, 2.0, 5.0, 10.0], "y": [10.0, 20.0, 30.0, 40.0]})
         chart = fm.Chart(df).mark_bar().encode(x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         n_rects = _count_rects(svg)
         assert n_rects >= 4, f"Expected ≥4 visible bars, got {n_rects}"
 
@@ -62,7 +62,7 @@ class TestBarContinuousX:
         """A single data point should still produce a visible bar."""
         df = pl.DataFrame({"x": [5.0], "y": [20.0]})
         chart = fm.Chart(df).mark_bar().encode(x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         n_rects = _count_rects(svg)
         assert n_rects >= 1, f"Expected ≥1 visible bar, got {n_rects}"
 
@@ -76,7 +76,7 @@ class TestBarContinuousX:
             }
         )
         chart = fm.Chart(df).mark_bar().encode(x="x", y="y", color="cat:N")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         n_rects = _count_rects(svg)
         assert n_rects >= 4, f"Expected ≥4 visible bars, got {n_rects}"
 
@@ -89,7 +89,7 @@ class TestBarContinuousX:
             }
         )
         chart = fm.Chart(df).mark_bar().encode(x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         n_rects = _count_rects(svg)
         assert n_rects >= 3, f"Expected ≥3 visible bars (NaN row skipped), got {n_rects}"
 
@@ -102,7 +102,7 @@ class TestBarContinuousX:
             }
         )
         chart = fm.Chart(df).mark_bar().encode(x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         n_rects = _count_rects(svg)
         assert n_rects >= 4, f"Expected ≥4 visible bars, got {n_rects}"
 
@@ -110,7 +110,7 @@ class TestBarContinuousX:
         """Regression: horizontal bars via CoordFlip with continuous y, no y2."""
         df = pl.DataFrame({"x": [10.0, 20.0, 15.0], "y": [1.0, 2.0, 3.0]})
         chart = fm.Chart(df).mark_bar().encode(x="x", y="y").coord(fm.CoordFlip())
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         n_rects = _count_rects(svg)
         assert n_rects >= 3, f"Expected ≥3 visible bars with CoordFlip, got {n_rects}"
@@ -119,5 +119,5 @@ class TestBarContinuousX:
         """Explicit x2 (histogram bins) must still work as before."""
         df = pl.DataFrame({"x": [0.0, 1.0, 2.0], "x2": [1.0, 2.0, 3.0], "y": [5.0, 10.0, 15.0]})
         chart = fm.Chart(df).mark_bar().encode(x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")

@@ -43,7 +43,7 @@ def test_quantitative_default_inset_keeps_marks_inside_plot_edge() -> None:
     are configured (640×480 as of 2026-05-20).
     """
     df = pl.DataFrame({"x": [1.0, 5.0], "y": [1.0, 5.0]})
-    svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     width = _svg_width(svg)
     xs, _ = _xs_ys(svg)
     assert len(xs) == 2
@@ -70,8 +70,8 @@ def test_explicit_domain_suppresses_padding() -> None:
             y="y",
         )
     )
-    xs_d, _ = _xs_ys(chart_default.show_svg())
-    xs_e, _ = _xs_ys(chart_explicit_domain.show_svg())
+    xs_d, _ = _xs_ys(chart_default.to_svg())
+    xs_e, _ = _xs_ys(chart_explicit_domain.to_svg())
     # Explicit-domain leftmost mark should sit closer to the plot's left edge
     # than the implicit default's leftmost mark — padding is suppressed.
     # Note: when range is explicit too (as here), the scale uses that range
@@ -90,7 +90,7 @@ def test_padding_zero_disables_band() -> None:
             x=fm.X("x", scale=fm.LinearScale(domain=[1.0, 3.0], range=[0.0, 1.0], padding=0.0)),
             y="y",
         )
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -109,14 +109,14 @@ def test_padding_custom_value_honored() -> None:
     )
     # The padded SVG renders; deeper geometric assertions live in the cargo
     # tests where scale ranges are observable directly.
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
 def test_categorical_axis_unaffected() -> None:
     """Categorical bars span their slots — T4 padding does not apply."""
     df = pl.DataFrame({"cat": ["a", "b", "c"], "count": [10, 20, 30]})
-    svg = fm.Chart(df).mark_bar().encode(x="cat", y="count").show_svg()
+    svg = fm.Chart(df).mark_bar().encode(x="cat", y="count").to_svg()
     assert "<svg" in svg
     # Sanity: three bars rendered.
     assert svg.count("<rect") >= 3
@@ -125,7 +125,7 @@ def test_categorical_axis_unaffected() -> None:
 def test_no_scale_default_5pct_renders() -> None:
     """The implicit-default path emits gridlines + inset marks without error."""
     df = pl.DataFrame({"x": [0.0, 100.0], "y": [0.0, 100.0]})
-    svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     # Gridlines present (themes-T3); marks inset away from edges (themes-T4).
     assert svg.count("<line") > 4

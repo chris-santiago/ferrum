@@ -124,7 +124,7 @@ def test_boxplot_structural_marks_use_label_color_not_mark_color():
         }
     )
     chart = fr.Chart(df).mark_boxplot().encode(x="cat:N", y="val", color="cat:N")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     # Default Paper Ink label_color must appear as stroke on structural lines
     label_color = "#6b7280"
     assert label_color in svg, (
@@ -145,7 +145,7 @@ def test_boxplot_whisker_is_solid_not_dashed():
         }
     )
     chart = fr.Chart(df).mark_boxplot().encode(x="cat:N", y="val")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     # Dashed lines use stroke-dasharray; solid lines must not have it for whiskers.
     # If reference_line_dash is not cleared, SVG will contain stroke-dasharray attributes.
     # This test verifies whiskers are solid.

@@ -48,7 +48,7 @@ def test_polars_categorical_renders_svg():
             "cat": pl.Series(["a", "b", "a"], dtype=pl.Categorical),
         }
     )
-    svg = fm.Chart(df).mark_point().encode(x="x", y="y", color="cat").show_svg()
+    svg = fm.Chart(df).mark_point().encode(x="x", y="y", color="cat").to_svg()
     assert "<svg" in svg
 
 
@@ -127,7 +127,7 @@ class TestNarwhalsPandasIngestion:
         df = pd.DataFrame({"x": [1, 2, 3], "y": [4.0, 5.0, 6.0]})
         import ferrum as fm
 
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
         assert "<svg" in svg
         assert "<circle" in svg or 'cx="' in svg
 
@@ -147,14 +147,14 @@ class TestNarwhalsPandasIngestion:
         df = pd.DataFrame({"x": pd.array([], dtype="float64"), "y": pd.array([], dtype="float64")})
         import ferrum as fm
 
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
         assert "<svg" in svg
 
     def test_pandas_single_row(self, pd):
         df = pd.DataFrame({"x": [42.0], "y": [99.0]})
         import ferrum as fm
 
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
         assert "<circle" in svg or 'cx="' in svg
 
     def test_pandas_nullable_int(self, pd):
@@ -205,7 +205,7 @@ class TestNarwhalsPandasIngestion:
         )
         import ferrum as fm
 
-        svg = fm.Chart(df).mark_line().encode(x="date", y="y").show_svg()
+        svg = fm.Chart(df).mark_line().encode(x="date", y="y").to_svg()
         assert "<svg" in svg
 
     def test_pandas_mixed_dtypes(self, pd):
@@ -231,7 +231,7 @@ class TestNarwhalsPandasIngestion:
         )
         import ferrum as fm
 
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y", color="group").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y", color="group").to_svg()
         assert "<svg" in svg
 
     def test_pandas_with_nan_values(self, pd):
@@ -243,7 +243,7 @@ class TestNarwhalsPandasIngestion:
         df = pd.DataFrame({"x": [1.0, float("nan"), 3.0], "y": [4.0, 5.0, float("nan")]})
         import ferrum as fm
 
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
         assert "<svg" in svg
 
     def test_pandas_multiindex_columns_flattened(self, pd):
@@ -273,7 +273,7 @@ class TestNarwhalsPandasIngestion:
         df = pd.DataFrame({"category": ["a", "b", "c"], "value": [10, 20, 15]})
         import ferrum as fm
 
-        svg = fm.Chart(df).mark_bar().encode(x="category", y="value").show_svg()
+        svg = fm.Chart(df).mark_bar().encode(x="category", y="value").to_svg()
         assert "<svg" in svg
         assert "<rect" in svg
 
@@ -281,7 +281,7 @@ class TestNarwhalsPandasIngestion:
         df = pd.DataFrame({"x": [1, 2, 3, 4], "y": [1.0, 4.0, 2.0, 3.0]})
         import ferrum as fm
 
-        svg = fm.Chart(df).mark_line().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_line().encode(x="x", y="y").to_svg()
         assert "<svg" in svg
 
 
@@ -333,7 +333,7 @@ def test_polars_duration_renders():
     )
     import ferrum as fm
 
-    svg = fm.Chart(df).mark_point().encode(x="dur", y="y").show_svg()
+    svg = fm.Chart(df).mark_point().encode(x="dur", y="y").to_svg()
     assert "<svg" in svg
 
 
@@ -359,7 +359,7 @@ def test_pyarrow_date32_renders():
 
     arr = pa.array([0, 1, 100], type=pa.date32())
     tbl = pa.table({"d": arr, "y": [1.0, 2.0, 3.0]})
-    svg = fm.Chart(tbl).mark_point().encode(x="d", y="y").show_svg()
+    svg = fm.Chart(tbl).mark_point().encode(x="d", y="y").to_svg()
     assert "<svg" in svg
 
 

@@ -84,21 +84,21 @@ def test_compare_X_y_resolve_from_first_source():
 def test_compare_dict_positional_via_roc_chart():
     X, y, m = _binary_setup()
     chart = ferrum.roc_chart({"alpha": m, "beta": m}, X, y)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
 def test_compare_kwarg_route_via_roc_chart():
     X, y, m = _binary_setup()
     chart = ferrum.roc_chart(m, X, y, compare={"alt": m})
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
 def test_compare_kwarg_route_via_pr_chart():
     X, y, m = _binary_setup()
     chart = ferrum.pr_chart(m, X, y, compare={"alt": m})
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -116,13 +116,13 @@ def test_compare_calibration_compare_kwarg():
     """
     X, y, m = _binary_setup()
     chart = ferrum.calibration_chart(m, X, y, compare={"alt": m})
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_compare_calibration_dict_positional():
     X, y, m = _binary_setup()
     chart = ferrum.calibration_chart({"alpha": m, "beta": m}, X=X, y=y)
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_compared_source_passthrough_via_figure():
@@ -130,7 +130,7 @@ def test_compared_source_passthrough_via_figure():
     X, y, m = _binary_setup()
     cms = ferrum.ModelSource.compare({"a": m, "b": m}, X, y)
     chart = ferrum.roc_chart(cms)
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 # ---------------------------------------------------------------------------

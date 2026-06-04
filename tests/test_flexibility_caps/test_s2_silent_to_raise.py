@@ -73,7 +73,7 @@ def test_mark_point_bogus_shape_raises():
     This was a silent-failure: the bogus shape became a circle with no error.
     """
     with pytest.raises((ValueError, TypeError)) as exc_info:
-        fm.Chart(_DF).mark_point(shape="not_a_real_shape").encode(x="x:Q", y="y:Q").show_svg()
+        fm.Chart(_DF).mark_point(shape="not_a_real_shape").encode(x="x:Q", y="y:Q").to_svg()
 
     msg = str(exc_info.value).lower()
     assert "not_a_real_shape" in msg, (
@@ -114,19 +114,19 @@ def test_mark_point_valid_shape_does_not_raise(shape_name):
     # mark_point(shape=...) construction must not raise.
     chart = fm.Chart(_DF).mark_point(shape=shape_name).encode(x="x:Q", y="y:Q")
     # Rendering must also succeed.
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg, f"Expected non-empty SVG for shape={shape_name!r}"
 
 
 def test_mark_circle_shorthand_still_works():
     """mark_circle() (shape='circle' shorthand) must still render without error."""
-    svg = fm.Chart(_DF).mark_circle().encode(x="x:Q", y="y:Q").show_svg()
+    svg = fm.Chart(_DF).mark_circle().encode(x="x:Q", y="y:Q").to_svg()
     assert svg, "mark_circle() must produce non-empty SVG"
 
 
 def test_mark_square_shorthand_still_works():
     """mark_square() (shape='square' shorthand) must still render without error."""
-    svg = fm.Chart(_DF).mark_square().encode(x="x:Q", y="y:Q").show_svg()
+    svg = fm.Chart(_DF).mark_square().encode(x="x:Q", y="y:Q").to_svg()
     assert svg, "mark_square() must produce non-empty SVG"
 
 
@@ -175,7 +175,7 @@ def test_transform_stack_offset_zero_still_works():
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .transform(fm.transform_stack("val", groupby=["cat"], offset="zero"))
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg, "offset='zero' must produce non-empty SVG"
 
 
@@ -187,7 +187,7 @@ def test_transform_stack_offset_normalize_still_works():
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .transform(fm.transform_stack("val", groupby=["cat"], offset="normalize"))
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg, "offset='normalize' must produce non-empty SVG"
 
 
@@ -199,5 +199,5 @@ def test_transform_stack_offset_center_still_works():
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .transform(fm.transform_stack("val", groupby=["cat"], offset="center"))
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg, "offset='center' must produce non-empty SVG"

@@ -111,7 +111,7 @@ def test_contour_x_axis_title_is_source_field(bivariate_df: pl.DataFrame) -> Non
     Fix: use ``X("contour_x", title=x_field)`` (or equivalent) in the layer
     encoding, as ``desugar_errorband`` does for ``Y("lower", title=y_field)``.
     """
-    svg = fm.Chart(bivariate_df).mark_contour(fill=True).encode(x="temp", y="depth").show_svg()
+    svg = fm.Chart(bivariate_df).mark_contour(fill=True).encode(x="temp", y="depth").to_svg()
     titles = _axis_title_texts(svg)
 
     assert "contour_x" not in titles, (
@@ -135,7 +135,7 @@ def test_contour_y_axis_title_is_source_field(bivariate_df: pl.DataFrame) -> Non
     Root cause: same as x — ``desugar_contour()`` ~line 112 in
     ``src/ferrum/marks/heavy_stat.py``.
     """
-    svg = fm.Chart(bivariate_df).mark_contour(fill=True).encode(x="temp", y="depth").show_svg()
+    svg = fm.Chart(bivariate_df).mark_contour(fill=True).encode(x="temp", y="depth").to_svg()
     titles = _axis_title_texts(svg)
 
     assert "contour_y" not in titles, (
@@ -156,7 +156,7 @@ def test_contour_isoline_x_axis_title_is_source_field(bivariate_df: pl.DataFrame
     ``encoding={"x": "contour_x", "y": "contour_y", ...}`` on the segment
     layer — the same internal leak as isoband mode.
     """
-    svg = fm.Chart(bivariate_df).mark_contour(fill=False).encode(x="temp", y="depth").show_svg()
+    svg = fm.Chart(bivariate_df).mark_contour(fill=False).encode(x="temp", y="depth").to_svg()
     titles = _axis_title_texts(svg)
 
     assert "contour_x" not in titles, (
@@ -184,7 +184,7 @@ def test_hex_x_axis_title_is_source_field(bivariate_df: pl.DataFrame) -> None:
     ~line 635 — no ``title=x_field`` on the x encoding spec.
     Fix: use ``X("hex_x", title=x_field)`` in the layer encoding.
     """
-    svg = fm.Chart(bivariate_df).mark_hex(bin_size=5.0).encode(x="temp", y="depth").show_svg()
+    svg = fm.Chart(bivariate_df).mark_hex(bin_size=5.0).encode(x="temp", y="depth").to_svg()
     titles = _axis_title_texts(svg)
 
     assert "hex_x" not in titles, (
@@ -208,7 +208,7 @@ def test_hex_y_axis_title_is_source_field(bivariate_df: pl.DataFrame) -> None:
     Root cause: same as x — ``desugar_hex()`` ~line 635 in
     ``src/ferrum/marks/heavy_stat.py``.
     """
-    svg = fm.Chart(bivariate_df).mark_hex(bin_size=5.0).encode(x="temp", y="depth").show_svg()
+    svg = fm.Chart(bivariate_df).mark_hex(bin_size=5.0).encode(x="temp", y="depth").to_svg()
     titles = _axis_title_texts(svg)
 
     assert "hex_y" not in titles, (
@@ -244,7 +244,7 @@ def test_contour_explicit_axis_title_overrides_source_field(
         fm.Chart(bivariate_df)
         .mark_contour(fill=True)
         .encode(x=X("temp", title="Temperature (°C)"), y="depth")
-        .show_svg()
+        .to_svg()
     )
     titles = _axis_title_texts(svg)
 
@@ -271,7 +271,7 @@ def test_hex_explicit_axis_title_overrides_source_field(
         fm.Chart(bivariate_df)
         .mark_hex(bin_size=5.0)
         .encode(x="temp", y=Y("depth", title="Ocean Depth (m)"))
-        .show_svg()
+        .to_svg()
     )
     titles = _axis_title_texts(svg)
 

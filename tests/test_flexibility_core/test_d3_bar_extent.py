@@ -285,9 +285,9 @@ def test_bar_candlestick_body_spans_open_to_close(
     binding y2 — the two SVGs must differ.
     """
     svg_with_y2 = (
-        fm.Chart(candlestick_df).mark_bar().encode(x="cat:N", y="open:Q", y2="close:Q").show_svg()
+        fm.Chart(candlestick_df).mark_bar().encode(x="cat:N", y="open:Q", y2="close:Q").to_svg()
     )
-    svg_no_y2 = fm.Chart(candlestick_df).mark_bar().encode(x="cat:N", y="open:Q").show_svg()
+    svg_no_y2 = fm.Chart(candlestick_df).mark_bar().encode(x="cat:N", y="open:Q").to_svg()
 
     baseline = _baseline_y(svg_with_y2)
     data_rects = _rects(svg_with_y2)
@@ -327,7 +327,7 @@ def test_bar_floating_gap_off_baseline(float_bar_df: pl.DataFrame) -> None:
     This is the "floating/gap bar" case: both extents are positive, so a
     correctly rendered bar is entirely lifted off the axis.
     """
-    svg = fm.Chart(float_bar_df).mark_bar().encode(x="cat:N", y="lo:Q", y2="hi:Q").show_svg()
+    svg = fm.Chart(float_bar_df).mark_bar().encode(x="cat:N", y="lo:Q", y2="hi:Q").to_svg()
 
     baseline = _baseline_y(svg)
     data_rects = _rects(svg)
@@ -374,9 +374,9 @@ def test_bar_diverging_mixed_sign_crosses_zero(diverging_df: pl.DataFrame) -> No
     Also: binding y2=2 must change the SVG relative to not binding y2.
     """
     svg_with_y2 = (
-        fm.Chart(diverging_df).mark_bar().encode(x="cat:N", y="lo:Q", y2="hi:Q").show_svg()
+        fm.Chart(diverging_df).mark_bar().encode(x="cat:N", y="lo:Q", y2="hi:Q").to_svg()
     )
-    svg_no_y2 = fm.Chart(diverging_df).mark_bar().encode(x="cat:N", y="lo:Q").show_svg()
+    svg_no_y2 = fm.Chart(diverging_df).mark_bar().encode(x="cat:N", y="lo:Q").to_svg()
 
     data_rects = _rects(svg_with_y2)
 
@@ -448,9 +448,9 @@ def test_bar_zero_false_suppresses_baseline_anchor(zero_anchor_df: pl.DataFrame)
     'zero' is not an accepted kwarg.  After the fix, it must render and produce
     an axis domain that excludes 0.
     """
-    svg_true = fm.Chart(zero_anchor_df).mark_bar().encode(x="cat:N", y="val:Q").show_svg()
+    svg_true = fm.Chart(zero_anchor_df).mark_bar().encode(x="cat:N", y="val:Q").to_svg()
     svg_false = (
-        fm.Chart(zero_anchor_df).mark_bar(zero=False).encode(x="cat:N", y="val:Q").show_svg()
+        fm.Chart(zero_anchor_df).mark_bar(zero=False).encode(x="cat:N", y="val:Q").to_svg()
     )
 
     ticks_true = _y_axis_tick_labels(svg_true)
@@ -494,7 +494,7 @@ def test_bar_default_zero_true_still_anchors_at_baseline(
 
     Observable check: all data bars' bottoms coincide with the axis baseline.
     """
-    svg = fm.Chart(zero_anchor_df).mark_bar().encode(x="cat:N", y="val:Q").show_svg()
+    svg = fm.Chart(zero_anchor_df).mark_bar().encode(x="cat:N", y="val:Q").to_svg()
 
     baseline = _baseline_y(svg)
     data_rects = _rects(svg)
@@ -534,8 +534,8 @@ def test_area_y2_forms_band_not_baseline_fill(area_band_df: pl.DataFrame) -> Non
     NOTE: If assertion 2 is too fragile (floating-point variation), the test
     falls back to assertion 1 alone as the minimum observable change.
     """
-    svg_no_y2 = fm.Chart(area_band_df).mark_area().encode(x="x:Q", y="lo:Q").show_svg()
-    svg_with_y2 = fm.Chart(area_band_df).mark_area().encode(x="x:Q", y="lo:Q", y2="hi:Q").show_svg()
+    svg_no_y2 = fm.Chart(area_band_df).mark_area().encode(x="x:Q", y="lo:Q").to_svg()
+    svg_with_y2 = fm.Chart(area_band_df).mark_area().encode(x="x:Q", y="lo:Q", y2="hi:Q").to_svg()
 
     paths_no_y2 = _area_paths(svg_no_y2)
     paths_with_y2 = _area_paths(svg_with_y2)

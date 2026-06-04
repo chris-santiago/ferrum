@@ -85,7 +85,7 @@ class TestHConcatChartResolve:
     def test_hconcat_resolve_shared_svg_renders(self, chart_left, chart_right):
         """HConcatChart with resolve=shared renders without error."""
         rc = HConcatChart([chart_left, chart_right], resolve={"color": "shared"})
-        svg = rc.show_svg()
+        svg = rc.to_svg()
         assert "<svg" in svg
 
     def test_hconcat_resolve_unifies_color_domain(self, df_two_groups):
@@ -149,7 +149,7 @@ class TestVConcatChartResolve:
     def test_vconcat_resolve_shared_svg_renders(self, chart_top, chart_bottom):
         """VConcatChart with resolve=shared renders without error."""
         rc = VConcatChart([chart_top, chart_bottom], resolve={"color": "shared"})
-        svg = rc.show_svg()
+        svg = rc.to_svg()
         assert "<svg" in svg
 
     def test_vconcat_resolve_unifies_color_domain(self, df_two_groups):
@@ -214,13 +214,13 @@ class TestFreeFunctions:
     def test_hconcat_free_function_shared_svg_renders(self, chart_left, chart_right):
         """fm.hconcat(..., resolve=...) renders without error."""
         rc = fm.hconcat(chart_left, chart_right, resolve={"color": "shared"})
-        svg = rc.show_svg()
+        svg = rc.to_svg()
         assert "<svg" in svg
 
     def test_vconcat_free_function_shared_svg_renders(self, chart_top, chart_bottom):
         """fm.vconcat(..., resolve=...) renders without error."""
         rc = fm.vconcat(chart_top, chart_bottom, resolve={"color": "shared"})
-        svg = rc.show_svg()
+        svg = rc.to_svg()
         assert "<svg" in svg
 
 
@@ -282,7 +282,7 @@ class TestPairplotSharedColorDomain:
             vars=["sepal_length", "sepal_width"],
             hue="species",
         )
-        svg = rc.show_svg()
+        svg = rc.to_svg()
         assert "<svg" in svg
 
 
@@ -297,14 +297,14 @@ class TestRegressionNoResolve:
     def test_hconcat_no_resolve_svg(self, chart_left, chart_right):
         """HConcatChart without resolve= still renders valid SVG."""
         rc = fm.hconcat(chart_left, chart_right)
-        svg = rc.show_svg()
+        svg = rc.to_svg()
         assert "<svg" in svg
         assert "</svg>" in svg
 
     def test_vconcat_no_resolve_svg(self, chart_top, chart_bottom):
         """VConcatChart without resolve= still renders valid SVG."""
         rc = fm.vconcat(chart_top, chart_bottom)
-        svg = rc.show_svg()
+        svg = rc.to_svg()
         assert "<svg" in svg
         assert "</svg>" in svg
 

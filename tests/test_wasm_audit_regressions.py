@@ -221,7 +221,7 @@ def test_svg_render_no_tooltip_injection():
 
     df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
     chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     # SVG should not contain tooltip-related data attributes
     assert "data-tooltip" not in svg
 

@@ -125,7 +125,7 @@ def test_encode_with_explicit_log_scale_renders_log_axis():
             x=X("x", scale=LogScale(domain=[1.0, 1000.0], range=[0.0, 600.0], base=10.0)),
             y="y",
         )
-        .show_svg()
+        .to_svg()
     )
 
     # Extract text-element labels from the SVG (strip font/base64 blobs).

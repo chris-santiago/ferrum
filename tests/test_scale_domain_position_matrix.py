@@ -136,7 +136,7 @@ def test_stack_with_domain_override_no_crash(
     """Stack + explicit domain override must not crash and must produce valid SVG."""
     base = fm.Chart(grouped_df)
     mark_fn = getattr(base, mark_method)
-    svg = mark_fn(position=Stack()).encode(**encoding).coord(coord).show_svg()
+    svg = mark_fn(position=Stack()).encode(**encoding).coord(coord).to_svg()
     assert "<svg" in svg, f"{mark_method} + Stack + {coord} did not produce valid SVG"
 
 
@@ -147,7 +147,7 @@ def test_stack_histogram_with_ylim(numeric_df: pl.DataFrame) -> None:
         .mark_histogram(position=Stack())
         .encode(x="val:Q", color="grp:N")
         .coord(CoordCartesian(ylim=(0, 10)))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -185,7 +185,7 @@ def test_dodge_with_domain_override_no_crash(
     """Dodge + explicit domain override must not crash and must produce valid SVG."""
     base = fm.Chart(grouped_df)
     mark_fn = getattr(base, mark_method)
-    svg = mark_fn(position=Dodge()).encode(**encoding).coord(coord).show_svg()
+    svg = mark_fn(position=Dodge()).encode(**encoding).coord(coord).to_svg()
     assert "<svg" in svg, f"{mark_method} + Dodge + {coord} did not produce valid SVG"
 
 
@@ -196,7 +196,7 @@ def test_dodge_boxplot_with_ylim(boxplot_df: pl.DataFrame) -> None:
         .mark_boxplot(position=Dodge())
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .coord(CoordCartesian(ylim=(0, 12)))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -255,7 +255,7 @@ def test_jitter_with_domain_override_no_crash(
     """Jitter + explicit domain override must not crash and must produce valid SVG."""
     base = fm.Chart(grouped_df)
     mark_fn = getattr(base, mark_method)
-    svg = mark_fn(position=jitter).encode(**encoding).coord(coord).show_svg()
+    svg = mark_fn(position=jitter).encode(**encoding).coord(coord).to_svg()
     assert "<svg" in svg, f"{mark_method} + {jitter} + {coord} did not produce valid SVG"
 
 
@@ -272,14 +272,14 @@ def test_stack_changes_svg_with_ylim(grouped_df: pl.DataFrame) -> None:
         .mark_bar()
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .coord(coord)
-        .show_svg()
+        .to_svg()
     )
     svg_with = (
         fm.Chart(grouped_df)
         .mark_bar(position=Stack())
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .coord(coord)
-        .show_svg()
+        .to_svg()
     )
     assert svg_without != svg_with, "Stack() did not change SVG output when ylim is set"
 
@@ -292,14 +292,14 @@ def test_dodge_changes_svg_with_ylim(grouped_df: pl.DataFrame) -> None:
         .mark_bar()
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .coord(coord)
-        .show_svg()
+        .to_svg()
     )
     svg_with = (
         fm.Chart(grouped_df)
         .mark_bar(position=Dodge())
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .coord(coord)
-        .show_svg()
+        .to_svg()
     )
     assert svg_without != svg_with, "Dodge() did not change SVG output when ylim is set"
 
@@ -308,14 +308,14 @@ def test_jitter_changes_svg_with_ylim(grouped_df: pl.DataFrame) -> None:
     """mark_point with Jitter vs no-position should produce different SVG even with ylim."""
     coord = CoordCartesian(ylim=(0, 8))
     svg_without = (
-        fm.Chart(grouped_df).mark_point().encode(x="num:Q", y="val:Q").coord(coord).show_svg()
+        fm.Chart(grouped_df).mark_point().encode(x="num:Q", y="val:Q").coord(coord).to_svg()
     )
     svg_with = (
         fm.Chart(grouped_df)
         .mark_point(position=Jitter(seed=42))
         .encode(x="num:Q", y="val:Q")
         .coord(coord)
-        .show_svg()
+        .to_svg()
     )
     assert svg_without != svg_with, "Jitter() did not change SVG output when ylim is set"
 
@@ -356,7 +356,7 @@ def test_wide_domain_with_position_no_crash(
     """Very wide domain (much larger than data) + position must not crash."""
     base = fm.Chart(grouped_df)
     mark_fn = getattr(base, mark_method)
-    svg = mark_fn(position=position).encode(**encoding).coord(coord).show_svg()
+    svg = mark_fn(position=position).encode(**encoding).coord(coord).to_svg()
     assert "<svg" in svg
 
 
@@ -372,7 +372,7 @@ def test_negative_ylim_with_stacked_positive_data(grouped_df: pl.DataFrame) -> N
         .mark_bar(position=Stack())
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .coord(CoordCartesian(ylim=(-5, 5)))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -384,7 +384,7 @@ def test_very_wide_domain_with_stack(grouped_df: pl.DataFrame) -> None:
         .mark_bar(position=Stack())
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .coord(CoordCartesian(ylim=(0, 10000)))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -396,7 +396,7 @@ def test_both_xlim_and_ylim_with_stack(grouped_df: pl.DataFrame) -> None:
         .mark_bar(position=Stack())
         .encode(x="num:Q", y="val:Q", color="grp:N")
         .coord(CoordCartesian(xlim=(0, 10), ylim=(0, 15)))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -408,7 +408,7 @@ def test_both_xlim_and_ylim_with_dodge(grouped_df: pl.DataFrame) -> None:
         .mark_bar(position=Dodge())
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .coord(CoordCartesian(xlim=(0, 10), ylim=(0, 8)))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -420,7 +420,7 @@ def test_zero_width_ylim_with_position(grouped_df: pl.DataFrame) -> None:
         .mark_bar(position=Stack())
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .coord(CoordCartesian(ylim=(3, 3.5)))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -433,7 +433,7 @@ def test_inverted_ylim_with_stack(grouped_df: pl.DataFrame) -> None:
             .mark_bar(position=Stack())
             .encode(x="cat:N", y="val:Q", color="grp:N")
             .coord(CoordCartesian(ylim=(10, 0)))
-            .show_svg()
+            .to_svg()
         )
         # If it doesn't crash, it should still produce valid SVG
         assert "<svg" in svg
@@ -449,7 +449,7 @@ def test_stack_normalize_with_ylim(grouped_df: pl.DataFrame) -> None:
         .mark_bar(position=Stack(offset="normalize"))
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .coord(CoordCartesian(ylim=(0, 1.5)))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -461,7 +461,7 @@ def test_stack_center_with_ylim(grouped_df: pl.DataFrame) -> None:
         .mark_bar(position=Stack(offset="center"))
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .coord(CoordCartesian(ylim=(-10, 10)))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -473,7 +473,7 @@ def test_dodge_with_expand_false(grouped_df: pl.DataFrame) -> None:
         .mark_bar(position=Dodge())
         .encode(x="cat:N", y="val:Q", color="grp:N")
         .coord(CoordCartesian(ylim=(0, 8), expand=False))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -485,6 +485,6 @@ def test_jitter_with_clip_false(grouped_df: pl.DataFrame) -> None:
         .mark_point(position=Jitter(seed=42))
         .encode(x="num:Q", y="val:Q")
         .coord(CoordCartesian(ylim=(2, 5), clip=False))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg

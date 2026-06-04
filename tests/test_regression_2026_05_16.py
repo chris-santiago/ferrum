@@ -48,7 +48,7 @@ class TestScaleRangeOptional:
                 y="y",
             )
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.strip().startswith("<svg")
         assert len(svg) > 100
 
@@ -66,7 +66,7 @@ class TestScaleRangeOptional:
                 y="y",
             )
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.strip().startswith("<svg")
         assert len(svg) > 100
 
@@ -103,12 +103,12 @@ class TestRuleLayerColumnRename:
         scatter, rule, _, _ = scatter_and_rule
 
         # Baseline: count <line elements in scatter-only SVG (axis ticks etc.)
-        svg_scatter = scatter.show_svg()
+        svg_scatter = scatter.to_svg()
         baseline_lines = len(re.findall(r"<line ", svg_scatter))
 
         # Layered: should have exactly 1 additional <line from the rule
         layered = scatter + rule
-        svg_layered = layered.show_svg()
+        svg_layered = layered.to_svg()
         layered_lines = len(re.findall(r"<line ", svg_layered))
 
         rule_lines = layered_lines - baseline_lines
@@ -139,7 +139,7 @@ class TestRuleLayerColumnRename:
         text = fm.Chart(df_text).mark_text().encode(x="x", y="y", text="label")
         layered = scatter + text
 
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert svg.strip().startswith("<svg")
         assert len(svg) > 100
 
@@ -212,7 +212,7 @@ class TestChainedLayerFix:
         scatter, hline, vline, _, _ = four_layer_chart
 
         layered = scatter + hline + vline
-        svg = layered.show_svg()
+        svg = layered.to_svg()
 
         assert svg.strip().startswith("<svg")
         dashed_lines = len(re.findall(r"<line[^>]*stroke-dasharray[^>]*>", svg))
@@ -225,7 +225,7 @@ class TestChainedLayerFix:
         scatter, hline, vline, label, _ = four_layer_chart
 
         layered = scatter + hline + vline + label
-        svg = layered.show_svg()
+        svg = layered.to_svg()
 
         assert svg.strip().startswith("<svg")
         assert len(svg) > 100
@@ -239,7 +239,7 @@ class TestChainedLayerFix:
         scatter, hline, vline, label, df = four_layer_chart
 
         layered = scatter + hline + vline + label
-        svg = layered.show_svg()
+        svg = layered.to_svg()
 
         circles = len(re.findall(r"<circle", svg))
         assert circles == len(df), (

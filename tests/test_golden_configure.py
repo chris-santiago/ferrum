@@ -85,31 +85,31 @@ class TestAnnotationGoldens:
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + text(
             3.0, 25.0, "Peak", font_size=14
         )
-        _check_or_update("annotation_text.svg", chart.show_svg())
+        _check_or_update("annotation_text.svg", chart.to_svg())
 
     def test_line_annotation(self, sample_df):
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + line(
             1.0, 20.0, 5.0, 20.0, stroke="#e45756", stroke_width=2
         )
-        _check_or_update("annotation_line.svg", chart.show_svg())
+        _check_or_update("annotation_line.svg", chart.to_svg())
 
     def test_rect_annotation(self, sample_df):
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + rect(
             2.0, 10.0, 4.0, 30.0, fill="#4c78a8", opacity=0.2
         )
-        _check_or_update("annotation_rect.svg", chart.show_svg())
+        _check_or_update("annotation_rect.svg", chart.to_svg())
 
     def test_arrow_annotation(self, sample_df):
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + arrow(
             2.0, 28.0, 3.0, 25.0, stroke="#333"
         )
-        _check_or_update("annotation_arrow.svg", chart.show_svg())
+        _check_or_update("annotation_arrow.svg", chart.to_svg())
 
     def test_span_annotation(self, sample_df):
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + span(
             "x", 2.0, 4.0, fill="#f58518", opacity=0.15
         )
-        _check_or_update("annotation_span.svg", chart.show_svg())
+        _check_or_update("annotation_span.svg", chart.to_svg())
 
     def test_multiple_annotations(self, sample_df):
         annotations = Annotate(
@@ -120,19 +120,19 @@ class TestAnnotationGoldens:
             ]
         )
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + annotations
-        _check_or_update("annotation_multiple.svg", chart.show_svg())
+        _check_or_update("annotation_multiple.svg", chart.to_svg())
 
     def test_pixel_coord_annotation(self, sample_df):
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + text(
             px(50), px(30), "Fixed position"
         )
-        _check_or_update("annotation_pixel_coords.svg", chart.show_svg())
+        _check_or_update("annotation_pixel_coords.svg", chart.to_svg())
 
     def test_norm_coord_annotation(self, sample_df):
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + text(
             norm(0.5), norm(0.1), "Center-top"
         )
-        _check_or_update("annotation_norm_coords.svg", chart.show_svg())
+        _check_or_update("annotation_norm_coords.svg", chart.to_svg())
 
 
 # ---------------------------------------------------------------------------
@@ -145,32 +145,32 @@ class TestStructuralGoldens:
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + SecondaryY(
             "revenue", color="#e45756"
         )
-        _check_or_update("structural_secondary_y.svg", chart.show_svg())
+        _check_or_update("structural_secondary_y.svg", chart.to_svg())
 
     def test_break_axis_slash(self, sample_df):
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + BreakAxis(
             axis="y", gap=(18, 22), break_style="slash"
         )
-        _check_or_update("structural_break_axis_slash.svg", chart.show_svg())
+        _check_or_update("structural_break_axis_slash.svg", chart.to_svg())
 
     def test_break_axis_zigzag(self, sample_df):
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + BreakAxis(
             axis="y", gap=(18, 22), break_style="zigzag"
         )
-        _check_or_update("structural_break_axis_zigzag.svg", chart.show_svg())
+        _check_or_update("structural_break_axis_zigzag.svg", chart.to_svg())
 
     def test_break_axis_wave(self, sample_df):
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + BreakAxis(
             axis="y", gap=(18, 22), break_style="wave"
         )
-        _check_or_update("structural_break_axis_wave.svg", chart.show_svg())
+        _check_or_update("structural_break_axis_wave.svg", chart.to_svg())
 
     def test_inset(self, sample_df):
         inset_chart = fm.Chart(sample_df).mark_point().encode(x="x", y="revenue")
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y") + Inset(
             chart=inset_chart, bounds=(0.6, 0.1, 0.95, 0.45)
         )
-        _check_or_update("structural_inset.svg", chart.show_svg())
+        _check_or_update("structural_inset.svg", chart.to_svg())
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +186,7 @@ class TestConfigureGoldens:
             .encode(x="category:N", y="y")
             .configure_axis(label_angle=-45)
         )
-        _check_or_update("configure_axis_rotation.svg", chart.show_svg())
+        _check_or_update("configure_axis_rotation.svg", chart.to_svg())
 
     def test_configure_grid(self, sample_df):
         chart = (
@@ -195,7 +195,7 @@ class TestConfigureGoldens:
             .encode(x="x", y="y")
             .configure_grid(y=True, color="#ddd")
         )
-        _check_or_update("configure_grid.svg", chart.show_svg())
+        _check_or_update("configure_grid.svg", chart.to_svg())
 
     def test_grid_minor(self, sample_df):
         """Minor gridlines via ferrum.Grid (item 18) on a continuous chart.
@@ -210,7 +210,7 @@ class TestConfigureGoldens:
             grid=fm.Grid(major=True, minor=True, minor_color="#e8e8e8")
         )
         chart = fm.Chart(sample_df).mark_point().encode(x="x", y="y").theme(theme)
-        _check_or_update("grid_minor.svg", chart.show_svg())
+        _check_or_update("grid_minor.svg", chart.to_svg())
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +262,7 @@ class TestCompositeMarkStyleGoldens:
             .encode(x="value:Q", color="group:N")
             .properties(width=400, height=250)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "rgba(" in svg, "Expected rgba() fill in SVG for translucent density areas"
         _check_or_update("density_styled.svg", svg)
 
@@ -285,4 +285,4 @@ class TestCombinedGolden:
             + line(1.0, 20.0, 5.0, 20.0, stroke="#999", dash=[4, 2])
             + SecondaryY("revenue", mark="line", color="#e45756")
         )
-        _check_or_update("combined_full.svg", chart.show_svg())
+        _check_or_update("combined_full.svg", chart.to_svg())

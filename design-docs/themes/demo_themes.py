@@ -147,7 +147,7 @@ def build_line(theme: Any) -> bytes:
         .properties(title="Multi-Series Trends", width=480, height=300)
         .theme(theme)
     )
-    return chart.show_png()
+    return chart.to_png()
 
 
 def build_scatter(theme: Any) -> bytes:
@@ -163,7 +163,7 @@ def build_scatter(theme: Any) -> bytes:
         .properties(title="Cluster Scatter", width=480, height=300)
         .theme(theme)
     )
-    return chart.show_png()
+    return chart.to_png()
 
 
 def build_bar(theme: Any) -> bytes:
@@ -179,7 +179,7 @@ def build_bar(theme: Any) -> bytes:
         .properties(title="Regional Sales by Quarter", width=480, height=300)
         .theme(theme)
     )
-    return chart.show_png()
+    return chart.to_png()
 
 
 def build_heatmap(theme: Any) -> bytes:
@@ -192,7 +192,7 @@ def build_heatmap(theme: Any) -> bytes:
         fmt=".2f",
         theme=theme,
     ).properties(title="Feature Correlation Matrix", width=420, height=360)
-    return chart.show_png()
+    return chart.to_png()
 
 
 def build_boxplot(theme: Any) -> bytes:
@@ -207,7 +207,7 @@ def build_boxplot(theme: Any) -> bytes:
         .properties(title="Distribution by Group", width=480, height=300)
         .theme(theme)
     )
-    return chart.show_png()
+    return chart.to_png()
 
 
 def build_faceted(theme: Any) -> bytes:
@@ -223,7 +223,7 @@ def build_faceted(theme: Any) -> bytes:
         .properties(title="Dose-Response (Faceted)", width=480, height=300)
         .theme(theme)
     )
-    return chart.show_png()
+    return chart.to_png()
 
 
 def build_histogram(theme: Any) -> bytes:
@@ -239,7 +239,7 @@ def build_histogram(theme: Any) -> bytes:
         .properties(title="Distribution Histogram", width=480, height=300)
         .theme(theme)
     )
-    return chart.show_png()
+    return chart.to_png()
 
 
 # ── chart registry ────────────────────────────────────────────────────────────

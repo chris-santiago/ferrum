@@ -41,8 +41,8 @@ class TestInsetConnectToDataCoordinates:
             chart=inset, bounds=(0.6, 0.1, 0.9, 0.4), connect_to=(5, 2)
         )
 
-        svg1 = chart1.show_svg()
-        svg2 = chart2.show_svg()
+        svg1 = chart1.to_svg()
+        svg2 = chart2.to_svg()
         # Different x-axis domains mean x=5 maps to different pixel positions.
         # If connect_to were treated as raw pixels, the connector endpoint would
         # be identical and the SVGs would be the same (modulo data marks).
@@ -58,7 +58,7 @@ class TestInsetConnectToDataCoordinates:
         chart = fm.Chart(df).mark_point().encode(x="x", y="y") + Inset(
             chart=inset, bounds=(0.6, 0.1, 0.9, 0.4)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
 
 
@@ -78,7 +78,7 @@ class TestCalloutLeaderLine:
 
         df = pl.DataFrame({"x": [1, 2, 3], "y": [10, 20, 30]})
         chart = fm.Chart(df).mark_point().encode(x="x", y="y") + callout(x=2.0, y=20.0, text="Note")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<line " in svg, (
             "callout with default arrow='curved' must produce a <line> element "
             "for the leader line — the arrow='curved' value was previously not "
@@ -97,8 +97,8 @@ class TestCalloutLeaderLine:
             x=2.0, y=20.0, text="A", arrow="none"
         )
 
-        svg_with = chart_with.show_svg()
-        svg_without = chart_without.show_svg()
+        svg_with = chart_with.to_svg()
+        svg_without = chart_without.to_svg()
         assert svg_with != svg_without, (
             "callout with arrow='none' must produce a different SVG than the default "
             "arrow='curved' — the leader line should be absent with arrow='none'"
@@ -119,7 +119,7 @@ class TestBreakAxisMarkRepositioning:
         """
         df = pl.DataFrame({"x": [1, 2, 3], "y": [5.0, 50.0, 95.0]})
         chart = fm.Chart(df).mark_point().encode(x="x", y="y") + BreakAxis(axis="y", gap=(20, 80))
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         # The mark at y=50 (inside the gap 20–80) must be hidden.
         # Rust uses the sentinel -99999 for off-screen/hidden marks.
         assert "-99999" in svg, (
@@ -135,10 +135,10 @@ class TestBreakAxisMarkRepositioning:
         """
         df = pl.DataFrame({"x": [1, 2, 3, 4], "y": [5.0, 15.0, 85.0, 95.0]})
 
-        svg_normal = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+        svg_normal = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
         svg_break = (
             fm.Chart(df).mark_point().encode(x="x", y="y") + BreakAxis(axis="y", gap=(20, 80))
-        ).show_svg()
+        ).to_svg()
 
         assert svg_normal != svg_break, (
             "A chart with BreakAxis must produce a different SVG than the same "
@@ -158,8 +158,8 @@ class TestConfigureMethodsAffectOutput:
         """Regression: configure_grid(color=) must embed the color in the SVG."""
         df = pl.DataFrame({"x": [1, 2, 3], "y": [10, 20, 30]})
         base = fm.Chart(df).mark_point().encode(x="x", y="y")
-        svg_without = base.show_svg()
-        svg_with = base.configure_grid(x=True, y=True, color="#ff0000").show_svg()
+        svg_without = base.to_svg()
+        svg_with = base.configure_grid(x=True, y=True, color="#ff0000").to_svg()
 
         assert svg_without != svg_with, "configure_grid must change the rendered SVG"
         assert "ff0000" in svg_with.lower(), (
@@ -173,8 +173,8 @@ class TestConfigureMethodsAffectOutput:
         """Regression: configure_legend(orient='bottom') must reposition the legend."""
         df = pl.DataFrame({"x": [1, 2, 3, 4], "y": [10, 20, 30, 40], "g": ["a", "b", "a", "b"]})
         chart = fm.Chart(df).mark_point().encode(x="x", y="y", color="g")
-        svg_right = chart.show_svg()
-        svg_bottom = chart.configure_legend(orient="bottom").show_svg()
+        svg_right = chart.to_svg()
+        svg_bottom = chart.configure_legend(orient="bottom").to_svg()
 
         assert svg_right != svg_bottom, (
             "configure_legend(orient='bottom') must produce a different SVG "
@@ -185,8 +185,8 @@ class TestConfigureMethodsAffectOutput:
         """Regression: configure_padding must affect chart geometry."""
         df = pl.DataFrame({"x": [1, 2, 3], "y": [10, 20, 30]})
         base = fm.Chart(df).mark_point().encode(x="x", y="y")
-        svg_default = base.show_svg()
-        svg_padded = base.configure_padding(left=100, top=100, auto=False).show_svg()
+        svg_default = base.to_svg()
+        svg_padded = base.configure_padding(left=100, top=100, auto=False).to_svg()
 
         assert svg_default != svg_padded, (
             "configure_padding(left=100, top=100) must change chart geometry "
@@ -197,8 +197,8 @@ class TestConfigureMethodsAffectOutput:
         """Regression: configure_color(scheme=) must change the categorical palette."""
         df = pl.DataFrame({"x": [1, 2, 3, 4], "y": [10, 20, 30, 40], "g": ["a", "b", "c", "d"]})
         chart = fm.Chart(df).mark_point().encode(x="x", y="y", color="g")
-        svg_default = chart.show_svg()
-        svg_set2 = chart.configure_color(scheme="set2").show_svg()
+        svg_default = chart.to_svg()
+        svg_set2 = chart.configure_color(scheme="set2").to_svg()
 
         assert svg_default != svg_set2, (
             "configure_color(scheme='set2') must produce different mark colors "
@@ -209,8 +209,8 @@ class TestConfigureMethodsAffectOutput:
         """Regression: configure_axis(label_font_size=) must change tick label sizes."""
         df = pl.DataFrame({"x": [1, 2, 3], "y": [10, 20, 30]})
         base = fm.Chart(df).mark_point().encode(x="x", y="y")
-        svg_default = base.show_svg()
-        svg_large = base.configure_axis(label_font_size=20).show_svg()
+        svg_default = base.to_svg()
+        svg_large = base.configure_axis(label_font_size=20).to_svg()
 
         assert svg_default != svg_large, (
             "configure_axis(label_font_size=20) must produce different SVG "
@@ -221,8 +221,8 @@ class TestConfigureMethodsAffectOutput:
         """Regression: configure_title(font_size=) must change title appearance."""
         df = pl.DataFrame({"x": [1, 2, 3], "y": [10, 20, 30]})
         chart = fm.Chart(df).mark_point().encode(x="x", y="y").labs(title="Hello")
-        svg_default = chart.show_svg()
-        svg_big = chart.configure_title(font_size=30).show_svg()
+        svg_default = chart.to_svg()
+        svg_big = chart.configure_title(font_size=30).to_svg()
 
         assert svg_default != svg_big, (
             "configure_title(font_size=30) must produce a different SVG "
@@ -261,8 +261,8 @@ class TestConfigureCascadePrecedence:
             .configure_grid(color="#ff0000")
         )
 
-        svg_theme = chart_theme_only.show_svg()
-        svg_override = chart_with_override.show_svg()
+        svg_theme = chart_theme_only.to_svg()
+        svg_override = chart_with_override.to_svg()
 
         # configure's red must appear in the override chart
         assert "ff0000" in svg_override.lower(), (
@@ -291,7 +291,7 @@ class TestAnnotationTextFontFamily:
 
         df = pl.DataFrame({"x": [1, 2, 3], "y": [10, 20, 30]})
         chart = fm.Chart(df).mark_point().encode(x="x", y="y") + ann.text(2.0, 20.0, "Hello")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "Hello" in svg
         assert 'font-family=""' not in svg, "font-family must not be empty"
 
@@ -311,7 +311,7 @@ class TestInsetNormCoordSerialization:
         chart = fm.Chart(df).mark_point().encode(x="x", y="y") + fm.Inset(
             chart=inset_chart, bounds=(norm(0.6), norm(0.1), norm(0.95), norm(0.45))
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
 
 
@@ -344,7 +344,7 @@ class TestBreakAxisAxisLabelsPreserved:
         chart = fm.Chart(df).mark_bar().encode(x="category:N", y="value") + fm.BreakAxis(
             axis="y", gap=(100, 400)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         texts = _text_nodes(svg)
         for label in ("A", "B", "C"):
             assert label in texts, (
@@ -359,7 +359,7 @@ class TestBreakAxisAxisLabelsPreserved:
         chart = fm.Chart(df).mark_bar().encode(x="category:N", y="value") + fm.BreakAxis(
             axis="y", gap=(100, 400)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         texts = _text_nodes(svg)
         assert "category" in texts, (
             "x-axis title 'category' must appear in the SVG when a y-axis BreakAxis "
@@ -372,7 +372,7 @@ class TestBreakAxisAxisLabelsPreserved:
         chart = fm.Chart(df).mark_bar().encode(x="x", y="value") + fm.BreakAxis(
             axis="x", gap=(1.5, 2.5)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         texts = _text_nodes(svg)
         assert "value" in texts, (
             "y-axis title 'value' must appear in the SVG when an x-axis BreakAxis "
@@ -389,11 +389,11 @@ class TestBreakAxisAxisLabelsPreserved:
         import re
 
         df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [40.0, 500.0, 60.0]})
-        svg_no_break = fm.Chart(df).mark_bar().encode(x="cat:N", y="val").show_svg()
+        svg_no_break = fm.Chart(df).mark_bar().encode(x="cat:N", y="val").to_svg()
         svg_break = (
             fm.Chart(df).mark_bar().encode(x="cat:N", y="val")
             + fm.BreakAxis(axis="y", gap=(100, 400))
-        ).show_svg()
+        ).to_svg()
 
         def y_tick_positions(svg):
             return [
@@ -423,7 +423,7 @@ class TestBreakAxisAxisLabelsPreserved:
         chart = fm.Chart(df).mark_bar().encode(x="category:N", y="value") + fm.BreakAxis(
             axis="y", gap=(100, 400)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         displaced = re.findall(r'<text[^>]*y="-99999[^"]*"[^>]*>([^<]+)</text>', svg)
         x_labels_displaced = [t for t in displaced if t in ("A", "B", "C", "D", "category")]
         assert not x_labels_displaced, (
@@ -458,7 +458,7 @@ class TestSecondaryYRightMarginReserved:
         chart = fm.Chart(df).mark_bar().encode(x="x", y="sales") + fm.SecondaryY(
             field="growth_rate", mark="line"
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         texts = _text_nodes(svg)
         # The secondary axis tick labels are derived from growth_rate values.
         # At least one negative-valued label must appear (proving y2 is rendered).
@@ -483,7 +483,7 @@ class TestSecondaryYRightMarginReserved:
         chart = fm.Chart(df).mark_bar().encode(x="x", y="sales") + fm.SecondaryY(
             field="growth_rate", mark="line"
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
 
         vb_match = re.search(r'viewBox="0 0 ([0-9.]+)', svg)
         assert vb_match, "SVG must have a numeric viewBox width"
@@ -522,8 +522,8 @@ class TestSecondaryYRightMarginReserved:
             }
         )
         base = fm.Chart(df).mark_bar().encode(x="x", y="sales")
-        svg_without = base.show_svg()
-        svg_with = (base + fm.SecondaryY(field="growth_rate", mark="line")).show_svg()
+        svg_without = base.to_svg()
+        svg_with = (base + fm.SecondaryY(field="growth_rate", mark="line")).to_svg()
 
         def rightmost_x_tick(svg: str) -> float:
             # x-axis tick for "5" (the max x value) uses text-anchor="middle"

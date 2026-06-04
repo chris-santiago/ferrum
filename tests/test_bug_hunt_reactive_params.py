@@ -64,7 +64,7 @@ class TestDomainParamValueKinds:
             .encode(x=fm.X("t", scale={"domain": fm.param("d", value=[0, 100])}), y=fm.Y("a"))
         )
         b = fm.Chart(df).mark_point().encode(x=fm.X("t"), y=fm.Y("a"))
-        cx_a, cx_b = _cx(a.show_svg()), _cx(b.show_svg())
+        cx_a, cx_b = _cx(a.to_svg()), _cx(b.to_svg())
         assert cx_a and cx_b
         assert max(cx_a) < max(cx_b)
 
@@ -76,7 +76,7 @@ class TestDomainParamValueKinds:
             .mark_point()
             .encode(x=fm.X("t", scale={"domain": fm.param("d", value="hello")}), y=fm.Y("a"))
         )
-        svg = c.show_svg()
+        svg = c.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -88,7 +88,7 @@ class TestDomainParamValueKinds:
             .mark_point()
             .encode(x=fm.X("t", scale={"domain": fm.param("d", value=True)}), y=fm.Y("a"))
         )
-        svg = c.show_svg()
+        svg = c.to_svg()
         assert "<svg" in svg and "NaN" not in svg
 
     def test_scalar_numeric_value_falls_back_to_auto_infer(self):
@@ -101,7 +101,7 @@ class TestDomainParamValueKinds:
         )
         auto = fm.Chart(df).mark_point().encode(x=fm.X("t"), y=fm.Y("a"))
         # scalar value must NOT be treated as a domain; should match auto-infer.
-        assert _cx(forced.show_svg()) == _cx(auto.show_svg())
+        assert _cx(forced.to_svg()) == _cx(auto.to_svg())
 
     def test_single_element_array_falls_back(self):
         """A 1-element array (< 2) → numeric_domain None → auto-infer; no NaN."""
@@ -111,7 +111,7 @@ class TestDomainParamValueKinds:
             .mark_point()
             .encode(x=fm.X("t", scale={"domain": fm.param("d", value=[42])}), y=fm.Y("a"))
         )
-        svg = c.show_svg()
+        svg = c.to_svg()
         assert "<svg" in svg and "NaN" not in svg
 
     def test_string_list_domain_no_nan(self):
@@ -122,7 +122,7 @@ class TestDomainParamValueKinds:
             .mark_point()
             .encode(x=fm.X("t", scale={"domain": fm.param("d", value=["a", "b"])}), y=fm.Y("a"))
         )
-        svg = c.show_svg()
+        svg = c.to_svg()
         assert "<svg" in svg and "NaN" not in svg
 
 
@@ -135,7 +135,7 @@ class TestDomainParamDegenerate:
             .mark_point()
             .encode(x=fm.X("t", scale={"domain": fm.param("d", value=[100, 0])}), y=fm.Y("a"))
         )
-        svg = c.show_svg()
+        svg = c.to_svg()
         assert "NaN" not in svg
         assert _cx(svg)
 
@@ -147,7 +147,7 @@ class TestDomainParamDegenerate:
             .mark_point()
             .encode(x=fm.X("t", scale={"domain": fm.param("d", value=[5, 5])}), y=fm.Y("a"))
         )
-        svg = c.show_svg()
+        svg = c.to_svg()
         assert "NaN" not in svg
         assert "<svg" in svg
 
@@ -159,7 +159,7 @@ class TestDomainParamDegenerate:
             .mark_point()
             .encode(x=fm.X("t", scale={"domain": fm.param("d", value=[0, 1e300])}), y=fm.Y("a"))
         )
-        svg = c.show_svg()
+        svg = c.to_svg()
         assert "NaN" not in svg
         assert "Infinity" not in svg
 
@@ -171,7 +171,7 @@ class TestDomainParamDegenerate:
             .mark_point()
             .encode(x=fm.X("t", scale={"domain": fm.param("d", value=[0, 100])}), y=fm.Y("a"))
         )
-        svg = c.show_svg()
+        svg = c.to_svg()
         assert "<svg" in svg and "NaN" not in svg
 
     def test_color_channel_domain_param_substituted(self):
@@ -186,7 +186,7 @@ class TestDomainParamDegenerate:
                 color=fm.Color("a", scale={"domain": fm.param("cd", value=[0, 1000])}),
             )
         )
-        svg = c.show_svg()
+        svg = c.to_svg()
         assert "<svg" in svg and "NaN" not in svg
 
 
@@ -208,7 +208,7 @@ class TestDomainParamInfNaN:
         # ferrum error that names the parameter / domain. A raw serde
         # "expected value at line 1 column N" is neither.
         try:
-            svg = c.show_svg()
+            svg = c.to_svg()
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
             assert "expected value at line" not in msg, (
@@ -230,7 +230,7 @@ class TestDomainParamInfNaN:
             )
         )
         try:
-            svg = c.show_svg()
+            svg = c.to_svg()
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
             assert "expected value at line" not in msg, (
@@ -269,7 +269,7 @@ class TestParamCollection:
         # A cross-kind collision (Selection + VariableParameter sharing "dup")
         # must raise ValueError at serialization time — never silently diverge.
         with pytest.raises(ValueError, match="collision"):
-            chart.show_svg()
+            chart.to_svg()
 
     # BUG: add_params with a non-Parameter argument (e.g. a typo'd string or a
     # raw dict) is silently dropped by _collect_params' isinstance(p, Parameter)
@@ -303,7 +303,7 @@ class TestParamCollection:
         c = fm.Chart(df).mark_point().encode(x="t", y="a").add_params(fm.param("orphan", value=5))
         params = _params_of(c.to_spec())
         assert any(p["name"] == "orphan" for p in params)
-        assert "<svg" in c.show_svg()
+        assert "<svg" in c.to_svg()
 
     def test_multiple_distinct_params(self):
         """Multiple distinct params all appear, none dropped."""
@@ -350,7 +350,7 @@ class TestTransformFilterStatic:
             .transform(fm.transform_filter(brush))
             .add_selection(brush)
         )
-        svg = c.show_svg()
+        svg = c.to_svg()
         assert svg.count("<circle") == 3, "param filter must keep all rows statically"
 
     def test_variable_param_filter_marker(self):
@@ -369,7 +369,7 @@ class TestTransformFilterStatic:
             .transform(fm.transform_filter(brush))
             .add_selection(brush)
         )
-        assert "NaN" not in c.show_svg()
+        assert "NaN" not in c.to_svg()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -389,7 +389,7 @@ class TestConditionalStatic:
             .mark_point()
             .encode(x="t", y="a", color=sel.when(fm.Color("c")).otherwise(value("#cccccc")))
         )
-        svg = c.show_svg()
+        svg = c.to_svg()
         assert "<svg" in svg
         assert svg.count("<circle") == 3
 
@@ -470,7 +470,7 @@ class TestConditionalStatic:
             .mark_point()
             .encode(x="t", y="a", color=sel.when(fm.Color("c")).otherwise(value("#cccccc")))
         )
-        assert "NaN" not in c.show_svg()
+        assert "NaN" not in c.to_svg()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -69,7 +69,7 @@ def test_nine_snake_case_categories_no_elision() -> None:
     )
 
     chart = fm.Chart(df).mark_bar().encode(x="preamble:N", y="value:Q")
-    svg = chart.properties(width=600, height=400).show_svg()
+    svg = chart.properties(width=600, height=400).to_svg()
 
     assert "<svg" in svg, "Expected a valid SVG document"
 
@@ -117,7 +117,7 @@ def test_faceted_chart_single_y_title() -> None:
         .encode(x="x:N", y="y:Q")
         .facet("group", ncols=2)
         .labs(y="My Y Title")
-        .show_svg()
+        .to_svg()
     )
 
     assert "<svg" in svg, "Expected a valid SVG document"
@@ -142,7 +142,7 @@ def test_cull_threshold_theme_parameter() -> None:
     theme = fm.Theme(cull_threshold=5)
 
     df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
-    svg = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").theme(theme).show_svg()
+    svg = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").theme(theme).to_svg()
 
     assert "<svg" in svg, "Expected a valid SVG document"
     assert len(svg) > 200, "SVG suspiciously small — chart may not have rendered"
@@ -169,7 +169,7 @@ def test_rotated_labels_not_clipped() -> None:
         .mark_bar()
         .encode(x="category:N", y="value:Q")
         .properties(width=400, height=300)
-        .show_svg()
+        .to_svg()
     )
 
     assert "<svg" in svg, "Expected a valid SVG document"

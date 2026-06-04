@@ -99,7 +99,7 @@ def test_importance_chart_figure_function():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.importance_chart(model, X, df["y"])
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # 5 features → 5 horizontal bars + chart-border / clip rects.
     assert svg.count("<rect ") >= 5
@@ -119,7 +119,7 @@ def test_importance_chart_vertical_orient():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.importance_chart(model, X, df["y"], orient="vertical")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -135,7 +135,7 @@ def test_mark_importance_invalid_orient():
         }
     )
     with pytest.raises(ValueError, match="orient="):
-        ferrum.Chart(df).mark_importance(orient="diagonal").show_svg()
+        ferrum.Chart(df).mark_importance(orient="diagonal").to_svg()
 
 
 # --- FeatureImportancesVisualizer ---------------------------------------
@@ -148,7 +148,7 @@ def test_feature_importances_visualizer_fit_and_repr():
     viz = ferrum.FeatureImportancesVisualizer(model).fit(X, df["y"])
     assert "top_feature_importance" in repr(viz)
     chart = viz.show()
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_feature_importances_visualizer_unfit_raises():
@@ -168,7 +168,7 @@ def test_feature_importances_visualizer_permutation():
         random_state=0,
     ).fit(X, df["y"])
     chart = viz.show()
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 # --- ModelSource.shap_values() -----------------------------------------
@@ -235,7 +235,7 @@ def test_shap_values_caches():
 def test_shap_chart_beeswarm():
     source, _, _ = _ridge_source()
     chart = ferrum.shap_chart(source, kind="beeswarm")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # 200 samples × 5 features = 1000 points.
     assert svg.count("<circle ") == 1000
@@ -244,13 +244,13 @@ def test_shap_chart_beeswarm():
 def test_shap_chart_bar():
     source, _, _ = _ridge_source()
     chart = ferrum.shap_chart(source, kind="bar")
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_shap_chart_waterfall():
     source, _, _ = _ridge_source()
     chart = ferrum.shap_chart(source, kind="waterfall", sample_idx=3)
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_shap_chart_waterfall_requires_sample_idx():
@@ -276,7 +276,7 @@ def test_shap_beeswarm_chart_per_class_multiclass():
     """per_class=True on a multi-class classifier facets by class_label."""
     source = _multiclass_source()
     chart = ferrum.shap_beeswarm_chart(source, per_class=True)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # Per-class beeswarm renders one panel per class; n_circles equals
     # n_samples * n_features * n_classes.
@@ -288,13 +288,13 @@ def test_shap_beeswarm_chart_per_class_multiclass():
 def test_shap_bar_chart_per_class_multiclass():
     source = _multiclass_source()
     chart = ferrum.shap_bar_chart(source, per_class=True)
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_shap_waterfall_chart_per_class_multiclass():
     source = _multiclass_source()
     chart = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=True)
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_shap_chart_invalid_kind():
@@ -316,7 +316,7 @@ def test_mark_shap_waterfall_requires_sample_idx():
         }
     )
     with pytest.raises(ValueError, match="sample_idx"):
-        ferrum.Chart(df).mark_shap_waterfall().show_svg()
+        ferrum.Chart(df).mark_shap_waterfall().to_svg()
 
 
 # --- SHAPVisualizer -----------------------------------------------------
@@ -328,7 +328,7 @@ def test_shap_visualizer_beeswarm_default():
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     viz = ferrum.SHAPVisualizer(model).fit(X, df["y"])
     assert "top_abs_shap" in repr(viz)
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_shap_visualizer_waterfall_requires_sample_idx():
@@ -499,7 +499,7 @@ def test_partial_dependence_individual_returns_per_sample_rows():
 def test_pdp_chart_single_feature():
     model, X, y = _rf_xy()
     chart = ferrum.pdp_chart(model, X, y, features=["f0"], grid_resolution=20)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert svg.count("<polyline ") == 1
 
@@ -513,7 +513,7 @@ def test_pdp_chart_multiple_features():
         features=["f0", "f1", "f2"],
         grid_resolution=20,
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     # One polyline per feature.
     assert svg.count("<polyline ") == 3
 
@@ -536,7 +536,7 @@ def test_pdp_chart_individual_renders_ice_per_sample():
         grid_resolution=10,
         kind="individual",
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     # n_samples polylines for the single feature panel.
     assert svg.count("<polyline ") == X.height
 
@@ -553,7 +553,7 @@ def test_pdp_chart_both_renders_ice_plus_average():
         grid_resolution=10,
         kind="both",
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     # 2 features * (n_samples ICE + 1 average) polylines.
     assert svg.count("<polyline ") == 2 * (X.height + 1)
 

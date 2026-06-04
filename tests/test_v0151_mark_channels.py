@@ -85,7 +85,7 @@ def test_polar_bar_honors_stroke_width_encoding():
         )
         .coord(fr.CoordPolar(theta="x"))
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg"), "render must produce valid SVG"
 
     # At least one path element must carry a stroke-width attribute.
@@ -120,7 +120,7 @@ def test_polar_bar_honors_fill_opacity_encoding():
         )
         .coord(fr.CoordPolar(theta="x"))
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg")
 
     fo_values = _path_fill_opacities(svg)
@@ -152,7 +152,7 @@ def test_polar_bar_emits_tooltip_data():
         )
         .coord(fr.CoordPolar(theta="x"))
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg")
     # Tooltip presence: the SVG layer or interactive layer must carry the label
     # content in a data-tooltip attribute or <title> element.
@@ -190,7 +190,7 @@ def test_rect_quantitative_range_honors_stroke_width_encoding():
             stroke_width="sw",
         )
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg")
 
     sw_values = _rect_stroke_widths(svg)
@@ -226,7 +226,7 @@ def test_rect_quantitative_range_honors_fill_opacity_encoding():
             fill_opacity="fo",
         )
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg")
 
     fo_values = _rect_fill_opacities(svg)
@@ -259,7 +259,7 @@ def test_rect_ordinal_range_honors_stroke_width_encoding():
             stroke_width="sw",
         )
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg")
 
     sw_values = _rect_stroke_widths(svg)
@@ -292,7 +292,7 @@ def test_rect_ordinal_range_honors_fill_opacity_encoding():
             fill_opacity="fo",
         )
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg")
 
     fo_values = _rect_fill_opacities(svg)
@@ -333,7 +333,7 @@ def test_arc_nominal_theta_href_passes_through():
         )
         .coord(fr.CoordPolar(theta="x"))
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg")
 
     hrefs = _link_hrefs(svg)
@@ -360,7 +360,7 @@ def test_arc_nominal_theta_tooltip_still_works():
         )
         .coord(fr.CoordPolar(theta="x"))
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg")
 
     tooltip_data = _data_tooltip_attrs(svg)

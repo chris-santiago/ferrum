@@ -139,12 +139,12 @@ class TestSortSVGOrder:
 
     def test_sort_ascending_produces_alpha_order_in_svg(self):
         """sort='ascending' → tick labels appear in a-b-c order, not insertion order."""
-        svg_default = fm.Chart(_cat_df()).mark_bar().encode(x=fm.X("cat"), y="val").show_svg()
+        svg_default = fm.Chart(_cat_df()).mark_bar().encode(x=fm.X("cat"), y="val").to_svg()
         svg_asc = (
             fm.Chart(_cat_df())
             .mark_bar()
             .encode(x=fm.X("cat", sort="ascending"), y="val")
-            .show_svg()
+            .to_svg()
         )
         labels_asc = [l for l in _extract_tick_labels(svg_asc) if l in ("a", "b", "c")]
         assert labels_asc == ["a", "b", "c"], (
@@ -165,7 +165,7 @@ class TestSortSVGOrder:
             fm.Chart(_cat_df())
             .mark_bar()
             .encode(x=fm.X("cat", sort="descending"), y="val")
-            .show_svg()
+            .to_svg()
         )
         labels = [l for l in _extract_tick_labels(svg) if l in ("a", "b", "c")]
         assert labels == ["c", "b", "a"], (
@@ -178,13 +178,13 @@ class TestSortSVGOrder:
             fm.Chart(_cat_df())
             .mark_bar()
             .encode(x=fm.X("cat", sort="ascending"), y="val")
-            .show_svg()
+            .to_svg()
         )
         svg_desc = (
             fm.Chart(_cat_df())
             .mark_bar()
             .encode(x=fm.X("cat", sort="descending"), y="val")
-            .show_svg()
+            .to_svg()
         )
         asc_labels = [l for l in _extract_tick_labels(svg_asc) if l in ("a", "b", "c")]
         desc_labels = [l for l in _extract_tick_labels(svg_desc) if l in ("a", "b", "c")]
@@ -198,7 +198,7 @@ class TestSortSVGOrder:
             fm.Chart(_cat_df())
             .mark_bar()
             .encode(x=fm.X("cat", sort=["c", "a", "b"]), y="val")
-            .show_svg()
+            .to_svg()
         )
         labels = [l for l in _extract_tick_labels(svg) if l in ("a", "b", "c")]
         assert labels == ["c", "a", "b"], (
@@ -207,12 +207,12 @@ class TestSortSVGOrder:
 
     def test_sort_list_differs_from_unsorted(self):
         """sort=['c','a','b'] produces DIFFERENT SVG than no-sort (confirming wired)."""
-        svg_no_sort = fm.Chart(_cat_df()).mark_bar().encode(x=fm.X("cat"), y="val").show_svg()
+        svg_no_sort = fm.Chart(_cat_df()).mark_bar().encode(x=fm.X("cat"), y="val").to_svg()
         svg_sort = (
             fm.Chart(_cat_df())
             .mark_bar()
             .encode(x=fm.X("cat", sort=["c", "a", "b"]), y="val")
-            .show_svg()
+            .to_svg()
         )
         no_sort_labels = [l for l in _extract_tick_labels(svg_no_sort) if l in ("a", "b", "c")]
         sort_labels = [l for l in _extract_tick_labels(svg_sort) if l in ("a", "b", "c")]
@@ -253,10 +253,10 @@ class TestStackSVGPositions:
             fm.Chart(_group_bar_df())
             .mark_bar()
             .encode(x="cat", y=fm.Y("val", stack="zero"), color="g")
-            .show_svg()
+            .to_svg()
         )
         svg_unstacked = (
-            fm.Chart(_group_bar_df()).mark_bar().encode(x="cat", y="val", color="g").show_svg()
+            fm.Chart(_group_bar_df()).mark_bar().encode(x="cat", y="val", color="g").to_svg()
         )
 
         # GAP: Y(stack='zero') encoding-level stacking is not wired in
@@ -275,7 +275,7 @@ class TestStackSVGPositions:
             fm.Chart(_group_bar_df())
             .mark_bar()
             .encode(x="cat", y=fm.Y("val", stack="normalize"), color="g")
-            .show_svg()
+            .to_svg()
         )
         labels = _extract_tick_labels(svg)
         numeric_labels = []
@@ -297,7 +297,7 @@ class TestStackSVGPositions:
                 x="cat",
                 y=fm.Y("val", stack="bogus"),
                 color="g",
-            ).show_svg()
+            ).to_svg()
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +318,7 @@ class TestAxisDictSVGStructure:
             fm.Chart(pl.DataFrame({"cat": ["a", "b", "c", "d"], "val": [1.0, 2.0, 3.0, 4.0]}))
             .mark_bar()
             .encode(x=fm.X("cat", axis={"label_angle": -45}), y="val")
-            .show_svg()
+            .to_svg()
         )
         assert "rotate(-45" in svg, (
             f"axis={{'label_angle': -45}} should produce rotate(-45 ...) in SVG;\n"
@@ -331,13 +331,13 @@ class TestAxisDictSVGStructure:
             fm.Chart(pl.DataFrame({"cat": ["a", "b", "c", "d"], "val": [1.0, 2.0, 3.0, 4.0]}))
             .mark_bar()
             .encode(x="cat", y="val")
-            .show_svg()
+            .to_svg()
         )
         svg_rotated = (
             fm.Chart(pl.DataFrame({"cat": ["a", "b", "c", "d"], "val": [1.0, 2.0, 3.0, 4.0]}))
             .mark_bar()
             .encode(x=fm.X("cat", axis={"label_angle": -45}), y="val")
-            .show_svg()
+            .to_svg()
         )
         rotate_default = svg_default.count("rotate(-45")
         rotate_angled = svg_rotated.count("rotate(-45")
@@ -348,12 +348,12 @@ class TestAxisDictSVGStructure:
 
     def test_labels_false_reduces_text_elements(self):
         """axis={'labels': False} → fewer <text> elements than default (labels hidden)."""
-        svg_with = fm.Chart(_numeric_df()).mark_point().encode(x="x", y="y").show_svg()
+        svg_with = fm.Chart(_numeric_df()).mark_point().encode(x="x", y="y").to_svg()
         svg_without = (
             fm.Chart(_numeric_df())
             .mark_point()
             .encode(x=fm.X("x", axis={"labels": False}), y="y")
-            .show_svg()
+            .to_svg()
         )
         count_with = svg_with.count("<text")
         count_without = svg_without.count("<text")
@@ -364,12 +364,12 @@ class TestAxisDictSVGStructure:
 
     def test_ticks_false_reduces_line_elements(self):
         """axis={'ticks': False} → fewer <line> elements (tick marks removed)."""
-        svg_with = fm.Chart(_numeric_df()).mark_point().encode(x="x", y="y").show_svg()
+        svg_with = fm.Chart(_numeric_df()).mark_point().encode(x="x", y="y").to_svg()
         svg_without = (
             fm.Chart(_numeric_df())
             .mark_point()
             .encode(x=fm.X("x", axis={"ticks": False}), y="y")
-            .show_svg()
+            .to_svg()
         )
         count_with = svg_with.count("<line")
         count_without = svg_without.count("<line")
@@ -384,7 +384,7 @@ class TestAxisDictSVGStructure:
             fm.Chart(_numeric_df())
             .mark_point()
             .encode(x=fm.X("x", axis={"title": "MyCustomAxisTitle"}), y="y")
-            .show_svg()
+            .to_svg()
         )
         assert "MyCustomAxisTitle" in svg, (
             "axis={'title': 'MyCustomAxisTitle'} string must appear in SVG"
@@ -406,7 +406,7 @@ class TestFormatTypeSVGLabels:
             fm.Chart(_numeric_df())
             .mark_point()
             .encode(x=fm.X("x", format=".2f", format_type="number"), y="y")
-            .show_svg()
+            .to_svg()
         )
         labels = _extract_tick_labels(svg)
         decimal_labels = [l for l in labels if "." in l and re.match(r"^-?\d+\.\d+$", l.strip())]
@@ -422,13 +422,13 @@ class TestFormatTypeSVGLabels:
             fm.Chart(pl.DataFrame({"x": [1000.0, 2000.0, 3000.0], "y": [1.0, 2.0, 3.0]}))
             .mark_point()
             .encode(x="x", y="y")
-            .show_svg()
+            .to_svg()
         )
         svg_formatted = (
             fm.Chart(pl.DataFrame({"x": [1000.0, 2000.0, 3000.0], "y": [1.0, 2.0, 3.0]}))
             .mark_point()
             .encode(x=fm.X("x", format=".1f", format_type="number"), y="y")
-            .show_svg()
+            .to_svg()
         )
         # The formatted version should contain ".0" suffixes on tick labels
         assert ".0" in svg_formatted or "1000.0" in svg_formatted or "2000.0" in svg_formatted, (
@@ -454,7 +454,7 @@ class TestImputeSVGStructure:
         The line for group b should have MORE points with impute.
         """
         svg_no_impute = (
-            fm.Chart(_sparse_df()).mark_line().encode(x="x", y="y", color="group").show_svg()
+            fm.Chart(_sparse_df()).mark_line().encode(x="x", y="y", color="group").to_svg()
         )
         svg_imputed = (
             fm.Chart(_sparse_df())
@@ -464,7 +464,7 @@ class TestImputeSVGStructure:
                 y=fm.Y("y", impute={"method": "value", "value": 0}),
                 color="group",
             )
-            .show_svg()
+            .to_svg()
         )
 
         # Both should render
@@ -494,7 +494,7 @@ class TestImputeSVGStructure:
                 y=fm.Y("y", impute={"method": "value", "value": 0}),
                 color="group",
             )
-            .show_svg()
+            .to_svg()
         )
         pts_all = _extract_polyline_points(svg_imputed)
         # We have 2 groups. The imputed group (b) should have 3 points.
@@ -537,12 +537,12 @@ class TestLegendKwargsSVGPosition:
         """
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0], "g": ["a", "b", "c"]})
 
-        svg_right = fm.Chart(df).mark_point().encode(x="x", y="y", color="g").show_svg()
+        svg_right = fm.Chart(df).mark_point().encode(x="x", y="y", color="g").to_svg()
         svg_bottom = (
             fm.Chart(df)
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("g", legend={"orient": "bottom"}))
-            .show_svg()
+            .to_svg()
         )
 
         # Both should render
@@ -560,7 +560,7 @@ class TestLegendKwargsSVGPosition:
             fm.Chart(df)
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("species", legend={"title": "My Legend"}))
-            .show_svg()
+            .to_svg()
         )
         assert "My Legend" in svg, "legend={'title': 'My Legend'} should appear verbatim in SVG"
 
@@ -575,13 +575,13 @@ class TestLegendKwargsSVGPosition:
             }
         )
         svg_default = (
-            fm.Chart(df).mark_point().encode(x="x", y="y", color=fm.Color("val")).show_svg()
+            fm.Chart(df).mark_point().encode(x="x", y="y", color=fm.Color("val")).to_svg()
         )
         svg_pct = (
             fm.Chart(df)
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("val", legend={"format": ".0%"}))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg_pct
         assert svg_default != svg_pct, (
@@ -601,12 +601,12 @@ class TestLegendKwargsSVGPosition:
                 "g": ["a", "b", "c", "d"],
             }
         )
-        svg_default = fm.Chart(df).mark_point().encode(x="x", y="y", color="g").show_svg()
+        svg_default = fm.Chart(df).mark_point().encode(x="x", y="y", color="g").to_svg()
         svg_2col = (
             fm.Chart(df)
             .mark_point()
             .encode(x="x", y="y", color=fm.Color("g", legend={"columns": 2}))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg_2col
         assert svg_default != svg_2col, (
@@ -633,13 +633,13 @@ class TestHistogramMultipleSVGStructure:
             fm.Chart(_hist_df())
             .mark_histogram(groupby="g", multiple="layer")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         svg_dodge = (
             fm.Chart(_hist_df())
             .mark_histogram(groupby="g", multiple="dodge")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         rects_layer = _extract_rect_coords(svg_layer)
         rects_dodge = _extract_rect_coords(svg_dodge)
@@ -684,13 +684,13 @@ class TestHistogramMultipleSVGStructure:
             fm.Chart(df)
             .mark_histogram(groupby="g", bin_count=3, multiple="layer")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         svg_stack = (
             fm.Chart(df)
             .mark_histogram(groupby="g", bin_count=3, multiple="stack")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         rects_layer = _extract_rect_coords(svg_layer)
         rects_stack = _extract_rect_coords(svg_stack)
@@ -725,13 +725,13 @@ class TestHistogramMultipleSVGStructure:
             fm.Chart(_hist_df())
             .mark_histogram(groupby="g", multiple="layer")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         svg_stack = (
             fm.Chart(_hist_df())
             .mark_histogram(groupby="g", multiple="stack")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         # GAP: desugar_histogram must pass shared_extent=True to Bin for
         # multiple='stack' so all groups share the same bin edges. Without
@@ -748,13 +748,13 @@ class TestHistogramMultipleSVGStructure:
             fm.Chart(_hist_df())
             .mark_histogram(groupby="g", multiple="layer")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         svg_fill = (
             fm.Chart(_hist_df())
             .mark_histogram(groupby="g", multiple="fill")
             .encode(x="x", color="g")
-            .show_svg()
+            .to_svg()
         )
         rects_layer = _extract_rect_coords(svg_layer)
         rects_fill = _extract_rect_coords(svg_fill)
@@ -773,7 +773,7 @@ class TestHistogramMultipleSVGStructure:
     def test_invalid_multiple_raises_value_error(self):
         """multiple='bogus' raises ValueError at render time."""
         with pytest.raises(ValueError, match="multiple"):
-            fm.Chart(_hist_df()).mark_histogram(multiple="bogus").encode(x="x").show_svg()
+            fm.Chart(_hist_df()).mark_histogram(multiple="bogus").encode(x="x").to_svg()
 
 
 # ---------------------------------------------------------------------------
@@ -798,15 +798,15 @@ class TestTruncateFalseNoRaise:
         """lmplot(truncate=False) renders without raising ValueError."""
         svg = fm.lmplot(_reg_df(), x="x", y="y", truncate=False)
         assert svg is not None
-        # The return is a Chart object; calling show_svg() renders it
-        rendered = svg.show_svg()
+        # The return is a Chart object; calling to_svg() renders it
+        rendered = svg.to_svg()
         assert "<svg" in rendered, "lmplot(truncate=False) must render to SVG"
 
     def test_regplot_truncate_false_no_longer_raises(self):
         """regplot(truncate=False) renders without raising ValueError."""
         chart = fm.regplot(_reg_df(), x="x", y="y", truncate=False)
         assert chart is not None
-        rendered = chart.show_svg()
+        rendered = chart.to_svg()
         assert "<svg" in rendered, "regplot(truncate=False) must render to SVG"
 
     def test_truncate_false_produces_same_or_different_fit_from_true(self):
@@ -819,8 +819,8 @@ class TestTruncateFalseNoRaise:
         chart_true = fm.lmplot(_reg_df(), x="x", y="y", truncate=True)
         chart_false = fm.lmplot(_reg_df(), x="x", y="y", truncate=False)
 
-        svg_true = chart_true.show_svg()
-        svg_false = chart_false.show_svg()
+        svg_true = chart_true.to_svg()
+        svg_false = chart_false.to_svg()
 
         assert "<svg" in svg_true
         assert "<svg" in svg_false
@@ -844,8 +844,8 @@ class TestTruncateFalseNoRaise:
         chart_false = fm.lmplot(
             _reg_df(), x="x", y="y", truncate=False, ci=None, show_metrics=False
         )
-        svg_true = chart_true.show_svg()
-        svg_false = chart_false.show_svg()
+        svg_true = chart_true.to_svg()
+        svg_false = chart_false.to_svg()
 
         # GAP: x_range is computed in lmplot (regression.py:535-549) but
         # never passed to any mark_smooth() call at lines 578-609.
@@ -884,7 +884,7 @@ class TestChartDataNoneSVGRendering:
             )
             .encode(x="x", y="y")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
         # Should have circle elements (from point mark) and line/polyline (from line mark)
@@ -916,8 +916,8 @@ class TestChartDataNoneSVGRendering:
             .encode(x="x", y="y")
         )
 
-        svg_single = chart_single.show_svg()
-        svg_merged = chart_merged.show_svg()
+        svg_single = chart_single.to_svg()
+        svg_merged = chart_merged.to_svg()
 
         # Both should render
         assert "<svg" in svg_single
@@ -938,7 +938,7 @@ class TestChartDataNoneSVGRendering:
         """Chart(data=None) with no layer data raises at render time, not construction."""
         chart = fm.Chart(data=None).mark_point().encode(x="x", y="y")
         with pytest.raises(Exception):
-            chart.show_svg()
+            chart.to_svg()
 
 
 # ---------------------------------------------------------------------------
@@ -956,14 +956,14 @@ class TestChartDescription:
 
     def test_description_emitted_as_desc_element(self):
         """properties(description=...) emits <desc>...</desc> inside the root <svg>."""
-        svg = self._base_chart().properties(description="Test description").show_svg()
+        svg = self._base_chart().properties(description="Test description").to_svg()
         assert "<desc>Test description</desc>" in svg, (
             f"Expected '<desc>Test description</desc>' in SVG; got:\n{svg[:500]}"
         )
 
     def test_description_appears_near_start_of_svg(self):
         """<desc> is a direct child of <svg>, before any mark geometry."""
-        svg = self._base_chart().properties(description="Accessibility text").show_svg()
+        svg = self._base_chart().properties(description="Accessibility text").to_svg()
         svg_open = svg.index("<svg ")
         desc_pos = svg.index("<desc>")
         first_circle = svg.find("<circle")
@@ -974,7 +974,7 @@ class TestChartDescription:
 
     def test_description_xml_escaped(self):
         """Special XML characters in description are escaped correctly."""
-        svg = self._base_chart().properties(description="A & B <test>").show_svg()
+        svg = self._base_chart().properties(description="A & B <test>").to_svg()
         # XML-escaped form
         assert "A &amp; B &lt;test&gt;" in svg, (
             f"Expected XML-escaped description in SVG; got:\n{svg[:500]}"
@@ -984,7 +984,7 @@ class TestChartDescription:
 
     def test_no_description_emits_no_root_desc(self):
         """A chart without .properties(description=) emits no <desc> at root level."""
-        svg = self._base_chart().show_svg()
+        svg = self._base_chart().to_svg()
         # There must be no chart-level <desc>; per-mark descriptions are inside <g> wrappers,
         # not at the root level immediately after <svg>.
         # The simplest check: no <desc> element at all.
@@ -997,14 +997,14 @@ class TestChartDescription:
         svg = (
             self._base_chart()
             .properties(description="Chart with \"quotes\" & 'apostrophes'")
-            .show_svg()
+            .to_svg()
         )
         assert "<desc>" in svg
         assert "&amp;" in svg
 
     def test_description_empty_string_not_emitted(self):
         """Empty string description → no <desc> emitted (falsy value)."""
-        svg = self._base_chart().properties(description="").show_svg()
+        svg = self._base_chart().properties(description="").to_svg()
         assert "<desc>" not in svg, "Empty description should not emit <desc>"
 
     def test_description_coexists_with_encoding_desc(self):
@@ -1021,7 +1021,7 @@ class TestChartDescription:
             .mark_point()
             .encode(x="x", y="y", description=fm.Description("d"))
             .properties(description="Chart-level description")
-            .show_svg()
+            .to_svg()
         )
         assert "Chart-level description" in svg
         desc_count = svg.count("<desc>")

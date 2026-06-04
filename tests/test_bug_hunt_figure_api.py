@@ -147,7 +147,7 @@ class TestConfigureAxisFormatPresets:
             .encode(x="x", y="y")
             .configure_axis(label_format="percent")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -159,7 +159,7 @@ class TestConfigureAxisFormatPresets:
             .encode(x="x", y="y")
             .configure_axis(label_format_raw=".3f")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -189,7 +189,7 @@ class TestConfigureAxisDomainAndTicks:
             .encode(x="x", y="y")
             .configure_axis(domain_min=-10, domain_max=20)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -207,7 +207,7 @@ class TestConfigureAxisDomainAndTicks:
             .encode(x="x", y="y")
             .configure_axis(tick_values=[1.0, 3.0, 5.0])
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -219,7 +219,7 @@ class TestConfigureAxisDomainAndTicks:
             .encode(x="x", y="y")
             .configure_axis(nice=True, zero=True)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_empty_tick_values_list(self, simple_df):
@@ -261,14 +261,14 @@ class TestRelplotStyleSize:
     def test_relplot_scatter_style_renders_svg(self, hue_df):
         """relplot scatter with style should render valid SVG."""
         chart = fm.relplot(hue_df, x="x", y="y", hue="group", style="group")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_relplot_line_style_renders_svg(self, hue_df):
         """relplot line with style should render valid SVG."""
         chart = fm.relplot(hue_df, x="x", y="y", hue="group", style="group", kind="line")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -311,7 +311,7 @@ class TestCatplotOrderHueOrder:
     def test_catplot_order_renders_svg(self, cat_float_df):
         """catplot with explicit order should produce valid SVG."""
         chart = fm.catplot(cat_float_df, x="group", y="value", kind="strip", order=["b", "a"])
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -334,21 +334,21 @@ class TestCatplotOrientH:
         from ferrum.coord import CoordFlip
 
         assert isinstance(chart._coord, CoordFlip) or chart._coord == "flip"
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_catplot_violin_orient_h(self, cat_float_df):
         """catplot(kind='violin', orient='h') should render valid SVG."""
         chart = fm.catplot(cat_float_df, x="value", y="group", kind="violin", orient="h")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_catplot_swarm_orient_h(self, cat_float_df):
         """catplot(kind='swarm', orient='h') should render valid SVG."""
         chart = fm.catplot(cat_float_df, x="value", y="group", kind="swarm", orient="h")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -367,7 +367,7 @@ class TestDisplotMultiple:
         """displot(multiple='fill') should produce a stacked normalized histogram.
         distribution.py line 54: Stack(by=hue, offset='normalize')."""
         chart = fm.displot(iris_df, x="sepal_length", hue="species", multiple="fill")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -375,14 +375,14 @@ class TestDisplotMultiple:
         """displot(multiple='dodge') should produce side-by-side bars.
         distribution.py line 52: Dodge(by=hue)."""
         chart = fm.displot(iris_df, x="sepal_length", hue="species", multiple="dodge")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_displot_stack_multiple(self, iris_df):
         """displot(multiple='stack') should produce stacked histogram."""
         chart = fm.displot(iris_df, x="sepal_length", hue="species", multiple="stack")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -401,28 +401,28 @@ class TestLmplotMethods:
         """lmplot(method='loess') should render valid SVG.
         regression.py lines 600-609: mark_smooth(method='loess')."""
         chart = fm.lmplot(simple_df, x="x", y="y", method="loess", ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_lmplot_lm_with_ci(self, simple_df):
         """lmplot(method='lm', ci=95) should produce a chart with confidence band."""
         chart = fm.lmplot(simple_df, x="x", y="y", method="lm", ci=95, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_lmplot_lm_ci_none(self, simple_df):
         """lmplot(method='lm', ci=None) should produce chart without band."""
         chart = fm.lmplot(simple_df, x="x", y="y", method="lm", ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_lmplot_with_hue(self, hue_df):
         """lmplot with hue should produce per-group fit lines.
         regression.py lines 559-585: hue routing for lm/loess methods."""
         chart = fm.lmplot(hue_df, x="x", y="y", hue="group", ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -430,7 +430,7 @@ class TestLmplotMethods:
         """lmplot(scatter=False) should render only the fit line.
         regression.py line 647: scatter_layer is None."""
         chart = fm.lmplot(simple_df, x="x", y="y", scatter=False, ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_lmplot_invalid_method_raises(self, simple_df):
@@ -444,7 +444,7 @@ class TestLmplotMethods:
         chart = fm.lmplot(
             simple_df, x="x", y="y", method="lm", order=2, ci=None, show_metrics=False
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -461,20 +461,20 @@ class TestRegplot:
     def test_regplot_basic(self, simple_df):
         """regplot should produce same result as lmplot without faceting."""
         chart = fm.regplot(simple_df, x="x", y="y", ci=None)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_regplot_with_scatter_kws(self, simple_df):
         """regplot with scatter_kws should forward them to mark_point."""
         chart = fm.regplot(simple_df, x="x", y="y", ci=None, scatter_kws={"opacity": 0.3})
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_regplot_with_line_kws(self, simple_df):
         """regplot with line_kws should forward them to the fit line."""
         chart = fm.regplot(simple_df, x="x", y="y", ci=None, line_kws={"stroke_width": 3})
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
 
@@ -489,20 +489,20 @@ class TestResidplot:
     def test_residplot_basic(self, simple_df):
         """residplot should produce a scatter of residuals."""
         chart = fm.residplot(simple_df, x="x", y="y", show_metrics=False, zero_line=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_residplot_with_zero_line(self, simple_df):
         """residplot(zero_line=True) should produce a layered chart with rule overlay."""
         chart = fm.residplot(simple_df, x="x", y="y", show_metrics=False, zero_line=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_residplot_with_lowess(self, simple_df):
         """residplot(lowess=True) should overlay a LOESS smoother."""
         chart = fm.residplot(simple_df, x="x", y="y", show_metrics=False, lowess=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_residplot_with_label(
@@ -512,14 +512,14 @@ class TestResidplot:
         chart = fm.residplot(
             simple_df, x="x", y="y", label="series A", show_metrics=False, zero_line=False
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_residplot_dropna_true(self):
         """residplot(dropna=True) should drop null rows before fitting."""
         df = pl.DataFrame({"x": [1.0, None, 3.0, 4.0], "y": [2.0, 4.0, None, 8.0]})
         chart = fm.residplot(df, x="x", y="y", dropna=True, show_metrics=False, zero_line=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
 
@@ -545,7 +545,7 @@ class TestConfigureGridAndPadding:
             .encode(x="x", y="y")
             .configure_grid(band_colors=["#f0f0f0", "#ffffff"])
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_padding_config_auto_false(self):
@@ -563,7 +563,7 @@ class TestConfigureGridAndPadding:
             .encode(x="x", y="y")
             .configure_padding(auto=False, top=5, right=5, bottom=5, left=5)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
 
@@ -660,7 +660,7 @@ class TestConfigureAxisSingleAxis:
             .encode(x="x", y="y")
             .configure_axis(x=False, label_angle=-45)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -740,7 +740,7 @@ class TestAnnotationsRenderedInSvg:
         """A text annotation at a data coordinate should produce text elements in SVG."""
         chart = fm.Chart(simple_df).mark_point().encode(x="x", y="y")
         chart = chart + ann.text(3.0, 3.0, "Annotation Text")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         # The annotation text should appear somewhere in the SVG output
         assert "Annotation Text" in svg
@@ -749,7 +749,7 @@ class TestAnnotationsRenderedInSvg:
         """A line annotation should add a line/path element to the SVG."""
         chart = fm.Chart(simple_df).mark_point().encode(x="x", y="y")
         chart = chart + ann.line(1.0, 1.0, 5.0, 5.0, stroke="red")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         # No NaN should leak from annotation coordinates
         assert "NaN" not in svg
@@ -758,7 +758,7 @@ class TestAnnotationsRenderedInSvg:
         """A rect annotation should add a rect element to the SVG."""
         chart = fm.Chart(simple_df).mark_point().encode(x="x", y="y")
         chart = chart + ann.rect(1.0, 1.0, 4.0, 4.0, fill="lightblue", opacity=0.3)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -776,20 +776,20 @@ class TestCatplotSeed:
     def test_catplot_strip_with_seed_renders(self, cat_float_df):
         """catplot(kind='strip', seed=42) should produce valid SVG."""
         chart = fm.catplot(cat_float_df, x="group", y="value", kind="strip", seed=42)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_catplot_strip_two_seeds_produce_same_svg(self, cat_float_df):
         """Same seed should produce identical SVGs (deterministic jitter)."""
-        svg1 = fm.catplot(cat_float_df, x="group", y="value", kind="strip", seed=123).show_svg()
-        svg2 = fm.catplot(cat_float_df, x="group", y="value", kind="strip", seed=123).show_svg()
+        svg1 = fm.catplot(cat_float_df, x="group", y="value", kind="strip", seed=123).to_svg()
+        svg2 = fm.catplot(cat_float_df, x="group", y="value", kind="strip", seed=123).to_svg()
         assert svg1 == svg2
 
     def test_catplot_strip_different_seeds_differ(self, cat_float_df):
         """Different seeds should produce different SVGs (non-trivial jitter)."""
-        svg1 = fm.catplot(cat_float_df, x="group", y="value", kind="strip", seed=1).show_svg()
-        svg2 = fm.catplot(cat_float_df, x="group", y="value", kind="strip", seed=999).show_svg()
+        svg1 = fm.catplot(cat_float_df, x="group", y="value", kind="strip", seed=1).to_svg()
+        svg2 = fm.catplot(cat_float_df, x="group", y="value", kind="strip", seed=999).to_svg()
         # They might differ in point positions if jitter is non-trivial
         # If both are identical, jitter is either disabled or seed is ignored
         # We just assert both are valid
@@ -814,7 +814,7 @@ class TestNanInHueColumn:
             }
         )
         chart = fm.displot(df, x="val", hue="grp")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_relplot_nan_in_hue(self, hue_df):
@@ -823,7 +823,7 @@ class TestNanInHueColumn:
             pl.when(pl.col("group") == "A").then(None).otherwise(pl.col("group")).alias("group")
         )
         chart = fm.relplot(df, x="x", y="y", hue="group")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_lmplot_nan_in_hue(self):
@@ -836,7 +836,7 @@ class TestNanInHueColumn:
             }
         )
         chart = fm.lmplot(df, x="x", y="y", hue="grp", ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
 
@@ -856,7 +856,7 @@ class TestConfigureOnComposedCharts:
         right = fm.Chart(simple_df).mark_bar().encode(x="x", y="y")
         composed = left | right
         sized = composed.properties(width=400, height=300)
-        svg = sized.show_svg()
+        svg = sized.to_svg()
         assert "<svg" in svg
 
     def test_vconcat_shows_valid_svg(self, simple_df):
@@ -864,7 +864,7 @@ class TestConfigureOnComposedCharts:
         top = fm.Chart(simple_df).mark_point().encode(x="x", y="y")
         bottom = fm.Chart(simple_df).mark_bar().encode(x="x", y="y")
         composed = top & bottom
-        svg = composed.show_svg()
+        svg = composed.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -891,7 +891,7 @@ class TestMarkLinePointOverlay:
     def test_mark_line_point_true_renders_svg(self, simple_df):
         """mark_line(point=True) should render valid SVG with both line and circle elements."""
         chart = fm.Chart(simple_df).mark_line(point=True).encode(x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
         # Should contain both line/path elements and circle elements
@@ -905,7 +905,7 @@ class TestMarkLinePointOverlay:
             .encode(x="x", y="y")
             .configure_axis(label_angle=-30)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
 
@@ -921,7 +921,7 @@ class TestAllNullColumn:
         """displot with an all-null x column should produce valid SVG, not crash."""
         df = pl.DataFrame({"x": pl.Series([None, None, None], dtype=pl.Float64)})
         chart = fm.displot(df, x="x")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_catplot_all_null_value_column(self):
@@ -933,7 +933,7 @@ class TestAllNullColumn:
             }
         )
         chart = fm.catplot(df, x="group", y="value", kind="strip")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_relplot_all_null_y_column(self):
@@ -945,7 +945,7 @@ class TestAllNullColumn:
             }
         )
         chart = fm.relplot(df, x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
 
@@ -976,7 +976,7 @@ class TestConfigureColorDomainRange:
             .encode(x="x", y="y", color="group")
             .configure_color(domain=["A", "B", "C"], range=["#ff0000", "#00ff00", "#0000ff"])
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1009,7 +1009,7 @@ class TestOverrideConfigureRenderedSvg:
             .override(width=500)
             .configure_axis(label_angle=-45)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1024,7 +1024,7 @@ class TestOverrideConfigureRenderedSvg:
             .configure_legend(orient="bottom")
             .configure_grid(x=True, color="#eee")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         config = chart._resolve_chart_config()
         assert "axis" in config
@@ -1046,7 +1046,7 @@ class TestCatplotCount:
         """catplot(kind='count') should produce a bar chart with counts."""
         df = pl.DataFrame({"cat": ["a", "b", "a", "c", "b", "b", "a"]})
         chart = fm.catplot(df, x="cat", kind="count")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
         # Should have bar/rect elements
@@ -1056,7 +1056,7 @@ class TestCatplotCount:
         """catplot(kind='count', orient='h') should flip axes."""
         df = pl.DataFrame({"cat": ["a", "b", "a", "c", "b", "b", "a"]})
         chart = fm.catplot(df, y="cat", kind="count", orient="h")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
 
@@ -1076,7 +1076,7 @@ class TestDisplotOverlays:
         """displot(kind='hist', kde=True) should layer a density curve on the histogram.
         distribution.py line 271-276: kde=True and kind != 'kde'."""
         chart = fm.displot(iris_df, x="sepal_length", kde=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1084,7 +1084,7 @@ class TestDisplotOverlays:
         """displot(kind='hist', rug=True) should layer tick marks on the histogram.
         distribution.py line 277-279: rug=True and kind != 'rug'."""
         chart = fm.displot(iris_df, x="sepal_length", rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1093,7 +1093,7 @@ class TestDisplotOverlays:
     ):  # BUG: stat_kde column not found — same root cause as kde=True overlay
         """displot(kde=True, rug=True) should layer both KDE and rug on histogram."""
         chart = fm.displot(iris_df, x="sepal_length", kde=True, rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1119,7 +1119,7 @@ class TestCatplotDodge:
             }
         )
         chart = fm.catplot(df, x="cat", y="val", hue="grp", kind="strip", dodge=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1133,7 +1133,7 @@ class TestCatplotDodge:
             }
         )
         chart = fm.catplot(df, x="cat", y="val", hue="grp", kind="bar", dodge=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1151,7 +1151,7 @@ class TestDisplotFaceting:
     def test_displot_facet_col(self, iris_df):
         """displot with col= should produce a faceted chart."""
         chart = fm.displot(iris_df, x="sepal_length", col="species")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1165,7 +1165,7 @@ class TestDisplotFaceting:
             }
         )
         chart = fm.displot(df, x="val", col="col_var", row="row_var")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_catplot_facet_col(self, cat_float_df):
@@ -1174,7 +1174,7 @@ class TestDisplotFaceting:
             pl.when(pl.col("value") > 7).then(pl.lit("hi")).otherwise(pl.lit("lo")).alias("split")
         )
         chart = fm.catplot(df, x="group", y="value", kind="strip", col="split")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
 
@@ -1205,7 +1205,7 @@ class TestMarkShortcuts:
     def test_mark_circle_renders(self, simple_df):
         """mark_circle should render valid SVG."""
         chart = fm.Chart(simple_df).mark_circle(size=80).encode(x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1250,7 +1250,7 @@ class TestXlimYlim:
     def test_xlim_ylim_renders(self, simple_df):
         """Chart with both xlim and ylim should render valid SVG."""
         chart = fm.Chart(simple_df).mark_point().encode(x="x", y="y").xlim(0, 10).ylim(0, 10)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1270,7 +1270,7 @@ class TestDisplotLogScale:
         distribution.py line 308: X(x, scale={'type': 'log'})."""
         df = pl.DataFrame({"x": [0.1, 1.0, 10.0, 100.0, 1000.0]})
         chart = fm.displot(df, x="x", log_scale=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1289,7 +1289,7 @@ class TestCatplotCompositeWithConfigure:
         """catplot(kind='boxen') + configure_axis should produce valid SVG."""
         chart = fm.catplot(cat_float_df, x="group", y="value", kind="boxen")
         chart = chart.configure_axis(label_angle=-45)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1297,7 +1297,7 @@ class TestCatplotCompositeWithConfigure:
         """catplot(kind='violin') + configure_legend should produce valid SVG."""
         chart = fm.catplot(cat_float_df, x="group", y="value", kind="violin")
         chart = chart.configure_legend(orient="bottom")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1315,7 +1315,7 @@ class TestDisplotCumulative:
     def test_displot_hist_cumulative(self, iris_df):
         """displot(kind='hist', cumulative=True) should produce cumulative histogram."""
         chart = fm.displot(iris_df, x="sepal_length", cumulative=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1324,7 +1324,7 @@ class TestDisplotCumulative:
         Note: cumulative is passed to mark_density kwargs but may not be
         explicitly wired; test that it does not crash."""
         chart = fm.displot(iris_df, x="sepal_length", kind="kde", cumulative=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
 
@@ -1341,7 +1341,7 @@ class TestLmplotXJitter:
     def test_lmplot_with_x_jitter(self, simple_df):
         """lmplot(x_jitter=0.3) should apply Jitter to the scatter layer."""
         chart = fm.lmplot(simple_df, x="x", y="y", x_jitter=0.3, ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1358,7 +1358,7 @@ class TestSingleValueColumns:
         """KDE with a single unique value (degenerate bandwidth estimation)."""
         df = pl.DataFrame({"x": [5.0] * 30})
         chart = fm.displot(df, x="x", kind="kde")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1366,7 +1366,7 @@ class TestSingleValueColumns:
         """relplot with constant x column (degenerate x domain)."""
         df = pl.DataFrame({"x": [3.0] * 10, "y": [float(i) for i in range(10)]})
         chart = fm.relplot(df, x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1374,7 +1374,7 @@ class TestSingleValueColumns:
         """relplot with constant y column (degenerate y domain)."""
         df = pl.DataFrame({"x": [float(i) for i in range(10)], "y": [7.0] * 10})
         chart = fm.relplot(df, x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1393,7 +1393,7 @@ class TestLmplotLogx:
         """lmplot(logx=True) should set x encoding to log scale."""
         df = pl.DataFrame({"x": [0.1, 1.0, 10.0, 100.0, 1000.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]})
         chart = fm.lmplot(df, x="x", y="y", logx=True, ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1412,7 +1412,7 @@ class TestCatplotJitterFalse:
         """catplot(kind='strip', jitter=False) should use Identity position.
         distribution.py line 552: mark_point(position=Identity())."""
         chart = fm.catplot(cat_float_df, x="group", y="value", kind="strip", jitter=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1449,7 +1449,7 @@ class TestAxisMethod:
     def test_axis_false_renders_svg(self, simple_df):
         """Chart with axis(show=False) should still render valid SVG."""
         chart = fm.Chart(simple_df).mark_point().encode(x="x", y="y").axis(show=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1505,7 +1505,7 @@ class TestDisplotStatDensity:
     def test_displot_stat_density(self, iris_df):
         """displot(stat='density') should normalize the histogram to a probability density."""
         chart = fm.displot(iris_df, x="sepal_length", stat="density")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1523,13 +1523,13 @@ class TestCatplotPointBar:
     def test_catplot_point_kind(self, cat_float_df):
         """catplot(kind='point') should render mark_point."""
         chart = fm.catplot(cat_float_df, x="group", y="value", kind="point")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_catplot_bar_kind(self, cat_float_df):
         """catplot(kind='bar') should render mark_bar."""
         chart = fm.catplot(cat_float_df, x="group", y="value", kind="bar")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "<rect" in svg
 
@@ -1546,14 +1546,14 @@ class TestInfinityInFigureFunctions:
         """displot with inf in the data should not produce Infinity in SVG."""
         df = pl.DataFrame({"x": [1.0, 2.0, float("inf"), 4.0, 5.0]})
         chart = fm.displot(df, x="x")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_relplot_with_neg_inf(self):
         """relplot with -inf in y should not crash."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, float("-inf"), 3.0]})
         chart = fm.relplot(df, x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
 
@@ -1569,7 +1569,7 @@ class TestMixedIntFloatColumns:
         """displot with pure integer column should work via CDI coercion."""
         df = pl.DataFrame({"x": [1, 2, 3, 4, 5, 3, 2, 4, 3, 2]})
         chart = fm.displot(df, x="x")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1577,7 +1577,7 @@ class TestMixedIntFloatColumns:
         """relplot with integer x and y columns should work."""
         df = pl.DataFrame({"x": [1, 2, 3, 4, 5], "y": [5, 4, 3, 2, 1]})
         chart = fm.relplot(df, x="x", y="y")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1587,7 +1587,7 @@ class TestMixedIntFloatColumns:
         """lmplot with integer columns should not crash the Smooth transform."""
         df = pl.DataFrame({"x": [1, 2, 3, 4, 5], "y": [2, 4, 5, 4, 5]})
         chart = fm.lmplot(df, x="x", y="y", ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 

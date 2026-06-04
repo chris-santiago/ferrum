@@ -33,7 +33,7 @@ class TestMarkSegment:
             }
         )
         chart = fe.Chart(df).mark_segment().encode(x="x", y="y", x2="x2", y2="y2")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         # Two segments → at least 2 <line> elements (or path equivalents).
         assert svg.count("<line") + svg.count("<path") >= 2
@@ -66,7 +66,7 @@ class TestMarkBoxen:
 
     def test_mark_boxen_renders(self, df_grouped):
         chart = fe.Chart(df_grouped).mark_boxen().encode(x="g", y="v")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_mark_boxen_spec_has_letter_value_transform(self, df_grouped):

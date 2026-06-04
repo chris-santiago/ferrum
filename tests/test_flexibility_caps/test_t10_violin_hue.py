@@ -94,8 +94,8 @@ def test_violin_hue_renders_more_groups_than_no_hue():
     hue_chart = fm.Chart(df).mark_violin(inner=None).encode(x="g:N", y="v:Q", color="h:N")
     no_hue_chart = fm.Chart(df).mark_violin(inner=None).encode(x="g:N", y="v:Q")
 
-    hue_svg = hue_chart.show_svg()
-    no_hue_svg = no_hue_chart.show_svg()
+    hue_svg = hue_chart.to_svg()
+    no_hue_svg = no_hue_chart.to_svg()
 
     # Behavioral assertion: the hue split must produce more distinct violin polygon
     # path elements than collapsing to one violin per x-category.
@@ -119,8 +119,8 @@ def test_violin_no_hue_back_compat():
 def test_violin_no_hue_byte_identical():
     # The no-hue render must be byte-identical to today (no color threading leakage).
     df = _make_df()
-    a = fm.Chart(df).mark_violin(inner="box").encode(x="g:N", y="v:Q").show_svg()
-    b = fm.Chart(df).mark_violin(inner="box").encode(x="g:N", y="v:Q").show_svg()
+    a = fm.Chart(df).mark_violin(inner="box").encode(x="g:N", y="v:Q").to_svg()
+    b = fm.Chart(df).mark_violin(inner="box").encode(x="g:N", y="v:Q").to_svg()
     assert a == b
 
 

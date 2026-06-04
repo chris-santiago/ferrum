@@ -60,13 +60,13 @@ class TestColorEncodingFaceted:
     def test_color_nominal_facet_col(self, df, mark_method):
         chart = getattr(Chart(df).encode(x="x:Q", y="y:Q", color="grp:N"), mark_method)()
         chart = chart.facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
     def test_color_quantitative_facet_col(self, df):
         chart = Chart(df).encode(x="x:Q", y="y:Q", color="size_val:Q").mark_point().facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
@@ -81,7 +81,7 @@ class TestSizeEncodingFaceted:
 
     def test_size_alone_facet_col(self, df):
         chart = Chart(df).encode(x="x:Q", y="y:Q", size="size_val:Q").mark_point().facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
@@ -92,7 +92,7 @@ class TestSizeEncodingFaceted:
             .mark_point()
             .facet(col="cat")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
@@ -112,7 +112,7 @@ class TestOpacityEncodingFaceted:
             .mark_point()
             .facet(col="cat")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
@@ -123,7 +123,7 @@ class TestOpacityEncodingFaceted:
             .mark_bar()
             .facet(col="row_cat")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
@@ -138,7 +138,7 @@ class TestShapeEncodingFaceted:
 
     def test_shape_alone_facet_col(self, df):
         chart = Chart(df).encode(x="x:Q", y="y:Q", shape="grp:N").mark_point().facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
@@ -149,7 +149,7 @@ class TestShapeEncodingFaceted:
             .mark_point()
             .facet(col="cat")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
@@ -166,28 +166,28 @@ class TestThemeOverridesEncodingFacet:
         return Chart(df).encode(x="x:Q", y="y:Q", color="grp:N").mark_point().facet(col="cat")
 
     def test_color_scheme_override(self, df):
-        default_svg = self._base_chart(df).show_svg()
-        themed_svg = self._base_chart(df).theme(Theme(color_scheme="tableau10")).show_svg()
+        default_svg = self._base_chart(df).to_svg()
+        themed_svg = self._base_chart(df).theme(Theme(color_scheme="tableau10")).to_svg()
         assert themed_svg.startswith("<svg")
         # A different color scheme should produce different SVG
         assert default_svg != themed_svg
 
     def test_point_size_override(self, df):
-        default_svg = self._base_chart(df).show_svg()
-        themed_svg = self._base_chart(df).theme(Theme(point_size=100)).show_svg()
+        default_svg = self._base_chart(df).to_svg()
+        themed_svg = self._base_chart(df).theme(Theme(point_size=100)).to_svg()
         assert themed_svg.startswith("<svg")
         assert default_svg != themed_svg
 
     def test_opacity_override(self, df):
         base = Chart(df).encode(x="x:Q", y="y:Q").mark_point().facet(col="cat")
-        default_svg = base.show_svg()
-        themed_svg = base.theme(Theme(opacity=0.3)).show_svg()
+        default_svg = base.to_svg()
+        themed_svg = base.theme(Theme(opacity=0.3)).to_svg()
         assert themed_svg.startswith("<svg")
         assert default_svg != themed_svg
 
     def test_mark_color_override_bar(self, df):
         base = Chart(df).encode(x="cat:N", y="y:Q", color="grp:N").mark_bar().facet(col="row_cat")
-        themed_svg = base.theme(Theme(mark_color="#ff0000")).show_svg()
+        themed_svg = base.theme(Theme(mark_color="#ff0000")).to_svg()
         assert themed_svg.startswith("<svg")
         # mark_color may or may not override when color encoding is present,
         # but at minimum it should render without error
@@ -219,8 +219,8 @@ class TestEncodingOverridesTheme:
             .facet(col="cat")
             .theme(Theme(mark_color="#ff0000"))
         )
-        svg_theme = theme_only.show_svg()
-        svg_enc = encoding_version.show_svg()
+        svg_theme = theme_only.to_svg()
+        svg_enc = encoding_version.to_svg()
         assert svg_theme.startswith("<svg")
         assert svg_enc.startswith("<svg")
         # Color encoding should produce a different SVG (multiple colors vs one)
@@ -235,7 +235,7 @@ class TestEncodingOverridesTheme:
             .facet(col="cat")
             .theme(Theme(point_size=10))
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
@@ -256,7 +256,7 @@ class TestFacetModeVariants:
             .facet(row="cat")
             .theme(Theme(point_size=50))
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
@@ -268,7 +268,7 @@ class TestFacetModeVariants:
             .facet(row="row_cat", col="cat")
             .theme(Theme(color_scheme="set2"))
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
@@ -280,7 +280,7 @@ class TestFacetModeVariants:
             .facet(col="cat", ncols=2)
             .theme(Theme(background="#f0f0f0"))
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
@@ -296,7 +296,7 @@ class TestEdgeCases:
     def test_many_color_categories_faceted(self, df):
         """5 color categories across 3 facet panels renders fine."""
         chart = Chart(df).encode(x="x:Q", y="y:Q", color="grp:N").mark_point().facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
@@ -309,7 +309,7 @@ class TestEdgeCases:
             .mark_point()
             .facet(col="single")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
@@ -318,7 +318,7 @@ class TestEdgeCases:
         chart = (
             Chart(df).encode(x="x:Q", y="y:Q", color="opacity_val:Q").mark_point().facet(col="cat")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500
 
@@ -337,6 +337,6 @@ class TestEdgeCases:
             .facet(col="cat")
             .theme(Theme(color_scheme="dark2", background="#fafafa"))
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 500

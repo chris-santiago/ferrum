@@ -331,7 +331,7 @@ def test_hconcat_both_children_have_annotations():
 def test_hline_annotation_produces_valid_svg():
     """chart + annotate_hline must produce valid SVG (no NaN, no empty)."""
     chart = _base_chart() + fr.annotate_hline(y=3.0, stroke="red")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert isinstance(svg, str)
     assert len(svg) > 0
     assert svg.startswith("<svg")
@@ -342,7 +342,7 @@ def test_hline_annotation_produces_valid_svg():
 def test_vline_annotation_produces_valid_svg():
     """chart + annotate_vline must produce valid SVG."""
     chart = _base_chart() + fr.annotate_vline(x=2.0, stroke="blue")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert isinstance(svg, str)
     assert svg.startswith("<svg")
     assert "NaN" not in svg
@@ -351,7 +351,7 @@ def test_vline_annotation_produces_valid_svg():
 def test_text_annotation_produces_valid_svg():
     """chart + annotate_text must produce valid SVG."""
     chart = _base_chart() + fr.annotate_text(x=2.0, y=4.0, text="peak")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert isinstance(svg, str)
     assert svg.startswith("<svg")
     assert "NaN" not in svg
@@ -360,7 +360,7 @@ def test_text_annotation_produces_valid_svg():
 def test_rect_annotation_produces_valid_svg():
     """chart + annotate_rect must produce valid SVG."""
     chart = _base_chart() + fr.annotate_rect(x1=1.0, x2=3.0, y1=2.0, y2=6.0, fill="yellow")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert isinstance(svg, str)
     assert svg.startswith("<svg")
     assert "NaN" not in svg
@@ -369,7 +369,7 @@ def test_rect_annotation_produces_valid_svg():
 def test_abline_annotation_produces_valid_svg():
     """chart + annotate_abline must produce valid SVG."""
     chart = _base_chart() + fr.annotate_abline(slope=1.0, intercept=0.0, stroke="gray")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert isinstance(svg, str)
     assert svg.startswith("<svg")
     assert "NaN" not in svg
@@ -383,7 +383,7 @@ def test_multiple_annotations_svg_no_duplicates():
         + fr.annotate_vline(x=2.0, stroke="blue")
         + fr.annotate_text(x=2.0, y=4.0, text="peak")
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "NaN" not in svg
     # The SVG should render the base chart's marks plus annotation overlays.
     # The key invariant: no duplicate rule marks from the annotation helpers.
@@ -653,7 +653,7 @@ def test_annotate_arrow_without_label():
     # annotate_arrow does NOT use _annotation_primitive; it returns a segment chart.
     # Verify it composes via the normal chart path.
     combined = _base_chart() + arrow
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     assert isinstance(svg, str)
     assert "NaN" not in svg
 
@@ -754,11 +754,11 @@ def test_annotate_rect_with_nan_coords():  # BUG: NaN in annotation rect coords 
 def test_svg_point_count_unchanged_after_annotation():
     """Adding an annotation must not change the number of data marks in SVG."""
     base = _base_chart()
-    svg_base = base.show_svg()
+    svg_base = base.to_svg()
     base_circles = svg_base.count("<circle")
 
     annotated = base + fr.annotate_hline(y=3.0)
-    svg_annotated = annotated.show_svg()
+    svg_annotated = annotated.to_svg()
     annotated_circles = svg_annotated.count("<circle")
 
     assert annotated_circles == base_circles, (
@@ -850,14 +850,14 @@ def test_three_annotation_charts_compose():  # BUG: Only last annotation uses pr
 def test_annotate_hline_nan_crashes_svg():  # BUG: NaN in annotation y causes ValueError: Python json.dumps(NaN) produces invalid JSON for Rust serde_json
     """annotate_hline(y=NaN) must not crash the SVG render path."""
     chart = _base_chart() + fr.annotate_hline(y=float("nan"))
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert isinstance(svg, str)
 
 
 def test_annotate_hline_inf_crashes_svg():  # BUG: Infinity in annotation y causes ValueError: Python json.dumps(Infinity) produces invalid JSON for Rust serde_json
     """annotate_hline(y=inf) must not crash the SVG render path."""
     chart = _base_chart() + fr.annotate_hline(y=float("inf"))
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert isinstance(svg, str)
 
 

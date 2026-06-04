@@ -14,7 +14,7 @@ def test_direct_label_endpoint_emits_text_at_max_x_per_series():
     )
     base = Chart(df).encode(x="x", y="y", color="split").mark_line()
     chart = _direct_label_endpoint(base, label_field="split")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert ">train<" in svg
     assert ">val<" in svg
 

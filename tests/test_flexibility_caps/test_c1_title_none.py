@@ -101,7 +101,7 @@ def test_x_title_none_suppresses_axis_title(simple_df: pl.DataFrame) -> None:
         fm.Chart(simple_df)
         .mark_point()
         .encode(x=X("horsepower", title=None), y="miles_per_gallon")
-        .show_svg()
+        .to_svg()
     )
     titles = _axis_title_texts(svg)
 
@@ -117,7 +117,7 @@ def test_x_title_none_emits_no_empty_text_node(simple_df: pl.DataFrame) -> None:
         fm.Chart(simple_df)
         .mark_point()
         .encode(x=X("horsepower", title=None), y="miles_per_gallon")
-        .show_svg()
+        .to_svg()
     )
     assert not _has_empty_text_node(svg), (
         "X('horsepower', title=None) must not emit an empty <text> node in the SVG"
@@ -134,13 +134,13 @@ def test_x_title_none_reclaims_bottom_margin(simple_df: pl.DataFrame) -> None:
         fm.Chart(simple_df)
         .mark_point()
         .encode(x=X("horsepower", title="HP"), y="miles_per_gallon")
-        .show_svg()
+        .to_svg()
     )
     svg_none = (
         fm.Chart(simple_df)
         .mark_point()
         .encode(x=X("horsepower", title=None), y="miles_per_gallon")
-        .show_svg()
+        .to_svg()
     )
     rect_with = _panel_rect(svg_with)
     rect_none = _panel_rect(svg_none)
@@ -164,7 +164,7 @@ def test_y_title_none_suppresses_axis_title(simple_df: pl.DataFrame) -> None:
         fm.Chart(simple_df)
         .mark_point()
         .encode(x="horsepower", y=Y("miles_per_gallon", title=None))
-        .show_svg()
+        .to_svg()
     )
     titles = _axis_title_texts(svg)
 
@@ -180,7 +180,7 @@ def test_y_title_none_emits_no_empty_text_node(simple_df: pl.DataFrame) -> None:
         fm.Chart(simple_df)
         .mark_point()
         .encode(x="horsepower", y=Y("miles_per_gallon", title=None))
-        .show_svg()
+        .to_svg()
     )
     assert not _has_empty_text_node(svg), (
         "Y('miles_per_gallon', title=None) must not emit an empty <text> node in the SVG"
@@ -197,13 +197,13 @@ def test_y_title_none_reclaims_left_margin(simple_df: pl.DataFrame) -> None:
         fm.Chart(simple_df)
         .mark_point()
         .encode(x="horsepower", y=Y("miles_per_gallon", title="MPG"))
-        .show_svg()
+        .to_svg()
     )
     svg_none = (
         fm.Chart(simple_df)
         .mark_point()
         .encode(x="horsepower", y=Y("miles_per_gallon", title=None))
-        .show_svg()
+        .to_svg()
     )
     rect_with = _panel_rect(svg_with)
     rect_none = _panel_rect(svg_none)
@@ -227,7 +227,7 @@ def test_both_title_none_suppresses_both_axis_titles(simple_df: pl.DataFrame) ->
         fm.Chart(simple_df)
         .mark_point()
         .encode(x=X("horsepower", title=None), y=Y("miles_per_gallon", title=None))
-        .show_svg()
+        .to_svg()
     )
     titles = _axis_title_texts(svg)
 
@@ -245,7 +245,7 @@ def test_both_title_none_emits_no_empty_text_nodes(simple_df: pl.DataFrame) -> N
         fm.Chart(simple_df)
         .mark_point()
         .encode(x=X("horsepower", title=None), y=Y("miles_per_gallon", title=None))
-        .show_svg()
+        .to_svg()
     )
     assert not _has_empty_text_node(svg), (
         "Both title=None must not emit any empty <text> nodes in the SVG"
@@ -265,7 +265,7 @@ def test_both_title_none_reclaims_both_margins(simple_df: pl.DataFrame) -> None:
             x=X("horsepower", title="HP"),
             y=Y("miles_per_gallon", title="MPG"),
         )
-        .show_svg()
+        .to_svg()
     )
     svg_none = (
         fm.Chart(simple_df)
@@ -274,7 +274,7 @@ def test_both_title_none_reclaims_both_margins(simple_df: pl.DataFrame) -> None:
             x=X("horsepower", title=None),
             y=Y("miles_per_gallon", title=None),
         )
-        .show_svg()
+        .to_svg()
     )
     rect_both = _panel_rect(svg_both)
     rect_none = _panel_rect(svg_none)
@@ -301,7 +301,7 @@ def test_x_title_omitted_shows_field_name(simple_df: pl.DataFrame) -> None:
     and after the C1 fix.
     """
     svg = (
-        fm.Chart(simple_df).mark_point().encode(x=X("horsepower"), y="miles_per_gallon").show_svg()
+        fm.Chart(simple_df).mark_point().encode(x=X("horsepower"), y="miles_per_gallon").to_svg()
     )
     titles = _axis_title_texts(svg)
 
@@ -314,7 +314,7 @@ def test_x_title_omitted_shows_field_name(simple_df: pl.DataFrame) -> None:
 def test_y_title_omitted_shows_field_name(simple_df: pl.DataFrame) -> None:
     """Y('miles_per_gallon') with no title kwarg must render field name as axis title."""
     svg = (
-        fm.Chart(simple_df).mark_point().encode(x="horsepower", y=Y("miles_per_gallon")).show_svg()
+        fm.Chart(simple_df).mark_point().encode(x="horsepower", y=Y("miles_per_gallon")).to_svg()
     )
     titles = _axis_title_texts(svg)
 
@@ -335,7 +335,7 @@ def test_x_custom_title_appears(simple_df: pl.DataFrame) -> None:
         fm.Chart(simple_df)
         .mark_point()
         .encode(x=X("horsepower", title="Engine Power"), y="miles_per_gallon")
-        .show_svg()
+        .to_svg()
     )
     titles = _axis_title_texts(svg)
 
@@ -355,7 +355,7 @@ def test_y_custom_title_appears(simple_df: pl.DataFrame) -> None:
         fm.Chart(simple_df)
         .mark_point()
         .encode(x="horsepower", y=Y("miles_per_gallon", title="Fuel Economy"))
-        .show_svg()
+        .to_svg()
     )
     titles = _axis_title_texts(svg)
 
@@ -387,7 +387,7 @@ def test_x_axis_title_empty_suppresses_axis_title(simple_df: pl.DataFrame) -> No
         fm.Chart(simple_df)
         .mark_point()
         .encode(x=X("horsepower", axis=fm.Axis(title="")), y="miles_per_gallon")
-        .show_svg()
+        .to_svg()
     )
     titles = _axis_title_texts(svg)
 
@@ -403,7 +403,7 @@ def test_x_axis_title_empty_emits_no_empty_text_node(simple_df: pl.DataFrame) ->
         fm.Chart(simple_df)
         .mark_point()
         .encode(x=X("horsepower", axis=fm.Axis(title="")), y="miles_per_gallon")
-        .show_svg()
+        .to_svg()
     )
     assert not _has_empty_text_node(svg), (
         "X('horsepower', axis=fm.Axis(title='')) must not emit an empty <text> node"
@@ -416,13 +416,13 @@ def test_x_axis_title_empty_reclaims_bottom_margin(simple_df: pl.DataFrame) -> N
         fm.Chart(simple_df)
         .mark_point()
         .encode(x=X("horsepower", title="HP"), y="miles_per_gallon")
-        .show_svg()
+        .to_svg()
     )
     svg_empty = (
         fm.Chart(simple_df)
         .mark_point()
         .encode(x=X("horsepower", axis=fm.Axis(title="")), y="miles_per_gallon")
-        .show_svg()
+        .to_svg()
     )
     rect_with = _panel_rect(svg_with)
     rect_empty = _panel_rect(svg_empty)
@@ -441,7 +441,7 @@ def test_y_axis_title_empty_suppresses_axis_title(simple_df: pl.DataFrame) -> No
         fm.Chart(simple_df)
         .mark_point()
         .encode(x="horsepower", y=Y("miles_per_gallon", axis=fm.Axis(title="")))
-        .show_svg()
+        .to_svg()
     )
     titles = _axis_title_texts(svg)
 
@@ -457,13 +457,13 @@ def test_y_axis_title_empty_reclaims_left_margin(simple_df: pl.DataFrame) -> Non
         fm.Chart(simple_df)
         .mark_point()
         .encode(x="horsepower", y=Y("miles_per_gallon", title="MPG"))
-        .show_svg()
+        .to_svg()
     )
     svg_empty = (
         fm.Chart(simple_df)
         .mark_point()
         .encode(x="horsepower", y=Y("miles_per_gallon", axis=fm.Axis(title="")))
-        .show_svg()
+        .to_svg()
     )
     rect_with = _panel_rect(svg_with)
     rect_empty = _panel_rect(svg_empty)
@@ -487,7 +487,7 @@ def test_x_axis_title_custom_appears(simple_df: pl.DataFrame) -> None:
         fm.Chart(simple_df)
         .mark_point()
         .encode(x=X("horsepower", axis=fm.Axis(title="Engine Power")), y="miles_per_gallon")
-        .show_svg()
+        .to_svg()
     )
     titles = _axis_title_texts(svg)
 
@@ -507,7 +507,7 @@ def test_y_axis_title_custom_appears(simple_df: pl.DataFrame) -> None:
         fm.Chart(simple_df)
         .mark_point()
         .encode(x="horsepower", y=Y("miles_per_gallon", axis=fm.Axis(title="Fuel Economy")))
-        .show_svg()
+        .to_svg()
     )
     titles = _axis_title_texts(svg)
 

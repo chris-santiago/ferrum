@@ -51,7 +51,7 @@ def _base_chart() -> fm.Chart:
 
 def test_all_eight_themes_produce_distinct_svgs() -> None:
     chart = _base_chart()
-    svgs = {name: chart.theme(theme).show_svg() for name, theme in THEMES.items()}
+    svgs = {name: chart.theme(theme).to_svg() for name, theme in THEMES.items()}
     hashes = {name: hashlib.sha256(svg.encode()).hexdigest()[:16] for name, svg in svgs.items()}
     assert len(set(hashes.values())) == 8, (
         f"expected 8 distinct theme hashes, got duplicates: {hashes}"
@@ -62,7 +62,7 @@ def test_all_eight_themes_produce_distinct_svgs() -> None:
 def test_each_theme_golden(name: str) -> None:
     chart = _base_chart()
     theme = THEMES[name]
-    svg = chart.theme(theme).show_svg()
+    svg = chart.theme(theme).to_svg()
     golden_path = _GOLDEN_ROOT / f"{name}.svg"
     if _REGENERATE or not golden_path.exists():
         golden_path.parent.mkdir(parents=True, exist_ok=True)

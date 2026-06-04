@@ -7,7 +7,7 @@ Covers:
 - Theme background preserved in scene JSON (P4)
 - Composition `.interactive()` returns InteractiveChart (P5)
 - Composition `.save("out.html")` produces valid HTML (P6)
-- Composition `show_svg()` unchanged (P7)
+- Composition `to_svg()` unchanged (P7)
 - InteractiveChart preserves packed data (P8)
 - Selection spec serialization round-trip (P9)
 - Conditional encoding in scene JSON (P10)
@@ -25,7 +25,7 @@ Covers:
 - LayerChart .interactive() returns InteractiveChart (P22)
 - HConcatChart .interactive() correct x-offsets (P23)
 - VConcatChart .interactive() correct y-offsets (P24)
-- Composition show_svg() identical before/after .interactive() (P25)
+- Composition to_svg() identical before/after .interactive() (P25)
 - Composition .save(format="html") via _ChartLike.save() (P26)
 - Both point and interval selections in scene JSON (P27)
 - Conditional encoding structure in scene JSON (P28)
@@ -180,20 +180,20 @@ def test_p6_composition_save_html_produces_valid_file(tmp_path):
     assert "loadScene" in content, "HTML must contain loadScene call"
 
 
-# ── P7. Composition show_svg() unchanged ─────────────────────────────────────
+# ── P7. Composition to_svg() unchanged ───────────────────────────────────────
 
 
-def test_p7_composition_show_svg_unchanged():
-    """Composing two charts with | and calling show_svg() must return valid
+def test_p7_composition_to_svg_unchanged():
+    """Composing two charts with | and calling to_svg() must return valid
     SVG markup.  This locks that the SVG path is not broken by interactive
     changes."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     left = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
     right = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
     composed = left | right
-    svg = composed.show_svg()
+    svg = composed.to_svg()
     assert isinstance(svg, str)
-    assert "<svg" in svg, "show_svg() must return SVG markup"
+    assert "<svg" in svg, "to_svg() must return SVG markup"
 
 
 # ── P8. InteractiveChart preserves packed data ───────────────────────────────
@@ -573,21 +573,21 @@ def test_p24_vconcat_interactive_correct_y_offsets():
     )
 
 
-# ── P25. Composition show_svg() identical before/after .interactive() ──────
+# ── P25. Composition to_svg() identical before/after .interactive() ────────
 
 
 def test_p25_composition_svg_unaffected_by_interactive():
     """Calling .interactive() on a composition must not mutate the composition
-    or change the SVG output from show_svg()."""
+    or change the SVG output from to_svg()."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     left = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
     right = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
     composed = left | right
-    svg_before = composed.show_svg()
+    svg_before = composed.to_svg()
     _ = composed.interactive()
-    svg_after = composed.show_svg()
+    svg_after = composed.to_svg()
     assert svg_before == svg_after, (
-        "show_svg() must produce identical output before and after .interactive()"
+        "to_svg() must produce identical output before and after .interactive()"
     )
 
 

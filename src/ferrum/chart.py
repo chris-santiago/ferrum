@@ -751,7 +751,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
     >>> import polars as pl
     >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
     >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y")
-    >>> svg = chart.show_svg()
+    >>> svg = chart.to_svg()
     """
 
     __slots__ = (
@@ -2909,7 +2909,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         render_config : RenderConfig or None, optional
             Rendering policy configuration. Controls auto-raster threshold
             and behavior. For one-off overrides prefer the ``raster=``
-            keyword on ``.show()`` / ``.save()`` / ``.show_svg()`` instead.
+            keyword on ``.show()`` / ``.save()`` / ``.to_svg()`` instead.
 
         Returns
         -------
@@ -3693,6 +3693,14 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
 
     def to_json(self, *, indent=None) -> str:
         """Serialise the chart specification to a JSON string.
+
+        .. note::
+            Unlike :meth:`to_svg`, :meth:`to_png`, and :meth:`to_html` — which
+            return *rendered* output — ``to_json`` returns the chart
+            **specification** (the declaration you built), not the rendered
+            scene graph.  ``save(path)`` with a ``.json`` extension writes the
+            rendered scene graph instead, which is a different artifact.  For
+            the specification as a Python value, see :meth:`to_dict`.
 
         Calls ``to_spec()`` to build the ``ChartSpec`` and then serialises it
         via the Rust ``serde_json`` encoder.  When ``indent`` is given the

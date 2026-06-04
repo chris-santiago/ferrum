@@ -32,7 +32,7 @@ df = pl.DataFrame({"x": [1, 2, 3, 4], "y": [2, 4, 3, 5], "group": ["a", "a", "b"
 
 chart = fm.Chart(df).mark_point().encode(x="x", y="y", color="group:N")
 chart.save("scatter.svg")
-chart.show_png()  # raster output, no display server needed
+chart.to_png()  # raster output, no display server needed
 ```
 
 ## Key features

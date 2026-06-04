@@ -233,7 +233,7 @@ def test_theme_bool_grid_false():
 
 def test_theme_bool_grid_reaches_rust():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 4.0, 9.0]})
-    svg = fm.Chart(df).mark_point().encode(x="x", y="y").theme(Theme(grid=False)).show_svg()
+    svg = fm.Chart(df).mark_point().encode(x="x", y="y").theme(Theme(grid=False)).to_svg()
     assert svg.startswith("<svg")
 
 
@@ -246,7 +246,7 @@ def _continuous_chart(minor: bool) -> str:
     """Render a continuous (linear) scatter chart with or without minor gridlines."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [1.0, 4.0, 9.0, 16.0, 25.0]})
     t = fm.Theme(grid=Grid(major=True, minor=minor, minor_color="#abcdef"))
-    return fm.Chart(df).mark_point().encode(x="x", y="y").theme(t).show_svg()
+    return fm.Chart(df).mark_point().encode(x="x", y="y").theme(t).to_svg()
 
 
 def test_minor_true_continuous_more_lines_than_minor_false():
@@ -293,9 +293,9 @@ def test_minor_true_categorical_x_no_extra_vertical_lines():
     df2 = pl.DataFrame({"cat": ["a", "b", "c"], "cat2": ["x", "y", "z"], "v": [1, 2, 3]})
     t_minor2 = fm.Theme(grid=Grid(major=True, minor=True))
     t_no_minor2 = fm.Theme(grid=Grid(major=True, minor=False))
-    svg_minor2 = fm.Chart(df2).mark_point().encode(x="cat", y="cat2").theme(t_minor2).show_svg()
+    svg_minor2 = fm.Chart(df2).mark_point().encode(x="cat", y="cat2").theme(t_minor2).to_svg()
     svg_no_minor2 = (
-        fm.Chart(df2).mark_point().encode(x="cat", y="cat2").theme(t_no_minor2).show_svg()
+        fm.Chart(df2).mark_point().encode(x="cat", y="cat2").theme(t_no_minor2).to_svg()
     )
     assert svg_minor2.count("<line") == svg_no_minor2.count("<line"), (
         "Both-categorical chart should have the same number of <line> elements "
@@ -312,5 +312,5 @@ def test_grid_object_theme_reaches_rust():
     """Grid value object must not cause a serde/render error at the Rust boundary."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 4.0, 9.0]})
     t = fm.Theme(grid=Grid(minor=True, color="#f0f0f0"))
-    svg = fm.Chart(df).mark_point().encode(x="x", y="y").theme(t).show_svg()
+    svg = fm.Chart(df).mark_point().encode(x="x", y="y").theme(t).to_svg()
     assert svg.startswith("<svg")

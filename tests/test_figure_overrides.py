@@ -119,8 +119,8 @@ class TestMarkSuppression:
         model, X, y = clf_data
         default = fm.calibration_chart(model, X, y)
         suppressed = fm.calibration_chart(model, X, y, mark={"point": False})
-        svg_default = default.show_svg()
-        svg_suppressed = suppressed.show_svg()
+        svg_default = default.to_svg()
+        svg_suppressed = suppressed.to_svg()
         assert svg_default != svg_suppressed
 
 
@@ -196,7 +196,7 @@ class TestEncodeOverrides:
             y,
             encode={"x": fm.X("mean_predicted", title="P(positive)")},
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "P(positive)" in svg
 
     def test_unmentioned_channels_preserved(self, clf_data):
@@ -208,8 +208,8 @@ class TestEncodeOverrides:
             y,
             encode={"x": fm.X("mean_predicted", title="Custom")},
         )
-        default_svg = default.show_svg()
-        overridden_svg = overridden.show_svg()
+        default_svg = default.to_svg()
+        overridden_svg = overridden.to_svg()
         assert "Fraction of positives" in overridden_svg
         assert "Custom" in overridden_svg
 
@@ -223,19 +223,19 @@ class TestPropertiesOverrides:
     def test_override_width(self, clf_data):
         model, X, y = clf_data
         chart = fm.calibration_chart(model, X, y, properties={"width": 800})
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert 'width="800"' in svg
 
     def test_title_preserved_when_only_width_set(self, clf_data):
         model, X, y = clf_data
         chart = fm.calibration_chart(model, X, y, properties={"width": 800})
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "Calibration" in svg
 
     def test_override_title(self, clf_data):
         model, X, y = clf_data
         chart = fm.calibration_chart(model, X, y, properties={"title": "My Custom Title"})
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "My Custom Title" in svg
 
 
@@ -261,7 +261,7 @@ class TestLayersOverride:
         model, X, y = clf_data
         default = fm.calibration_chart(model, X, y)
         overridden = fm.calibration_chart(model, X, y, layers=[])
-        assert default.show_svg() == overridden.show_svg()
+        assert default.to_svg() == overridden.to_svg()
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +279,7 @@ class TestEndToEnd:
             mark={"point": False},
             properties={"width": 600},
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert 'width="600"' in svg
         assert "point" not in chart.layer_names
 
@@ -291,7 +291,7 @@ class TestEndToEnd:
             y,
             encode={"x": fm.X("fpr", title="Custom FPR")},
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "Custom FPR" in svg
 
     def test_residuals_with_extra_layer(self, reg_data):
@@ -302,7 +302,7 @@ class TestEndToEnd:
             y,
             layers=[Layer(mark="rule", encoding={"y": "residual"})],
         )
-        assert chart.show_svg()
+        assert chart.to_svg()
 
     def test_confusion_matrix_override(self, clf_data):
         model, X, y = clf_data
@@ -313,7 +313,7 @@ class TestEndToEnd:
             mark={"label": False},
             properties={"title": "Custom CM"},
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "Custom CM" in svg
 
     def test_importance_suppress_errorbar(self, clf_data):
@@ -392,31 +392,31 @@ class TestSvgRoundTrip:
 
     def test_suppress_point_removes_circles(self, clf_data):
         model, X, y = clf_data
-        default_svg = fm.calibration_chart(model, X, y).show_svg()
-        suppressed_svg = fm.calibration_chart(model, X, y, mark={"point": False}).show_svg()
+        default_svg = fm.calibration_chart(model, X, y).to_svg()
+        suppressed_svg = fm.calibration_chart(model, X, y, mark={"point": False}).to_svg()
         assert _circle_count(default_svg) > _circle_count(suppressed_svg)
 
     def test_mark_stroke_width_reaches_svg(self, clf_data):
         model, X, y = clf_data
-        svg = fm.calibration_chart(model, X, y, mark={"line": {"stroke_width": 5}}).show_svg()
+        svg = fm.calibration_chart(model, X, y, mark={"line": {"stroke_width": 5}}).to_svg()
         assert 'stroke-width="5"' in svg
 
     def test_mark_stroke_dash_reaches_svg(self, clf_data):
         model, X, y = clf_data
         svg = fm.calibration_chart(
             model, X, y, mark={"reference": {"stroke_dash": [8, 4]}}
-        ).show_svg()
+        ).to_svg()
         assert _has_dasharray(svg, "8,4")
 
     def test_mark_opacity_reaches_svg(self, clf_data):
         model, X, y = clf_data
-        svg = fm.calibration_chart(model, X, y, mark={"point": {"opacity": 0.2}}).show_svg()
+        svg = fm.calibration_chart(model, X, y, mark={"point": {"opacity": 0.2}}).to_svg()
         assert "rgba(" in svg
 
     def test_point_size_override_changes_radius(self, clf_data):
         model, X, y = clf_data
-        small_svg = fm.calibration_chart(model, X, y, mark={"point": {"size": 10}}).show_svg()
-        big_svg = fm.calibration_chart(model, X, y, mark={"point": {"size": 200}}).show_svg()
+        small_svg = fm.calibration_chart(model, X, y, mark={"point": {"size": 10}}).to_svg()
+        big_svg = fm.calibration_chart(model, X, y, mark={"point": {"size": 200}}).to_svg()
         small_r = [float(m) for m in re.findall(r'<circle[^>]+r="([^"]+)"', small_svg)]
         big_r = [float(m) for m in re.findall(r'<circle[^>]+r="([^"]+)"', big_svg)]
         assert small_r and big_r
@@ -429,31 +429,31 @@ class TestSvgRoundTrip:
             X,
             y,
             encode={"x": fm.X("fpr", title="My Custom FPR")},
-        ).show_svg()
+        ).to_svg()
         assert "My Custom FPR" in svg
 
     def test_properties_width_reaches_svg(self, clf_data):
         model, X, y = clf_data
-        svg = fm.calibration_chart(model, X, y, properties={"width": 900}).show_svg()
+        svg = fm.calibration_chart(model, X, y, properties={"width": 900}).to_svg()
         assert 'width="900"' in svg
 
     def test_properties_title_reaches_svg(self, clf_data):
         model, X, y = clf_data
-        svg = fm.calibration_chart(model, X, y, properties={"title": "Round-Trip Title"}).show_svg()
+        svg = fm.calibration_chart(model, X, y, properties={"title": "Round-Trip Title"}).to_svg()
         assert "Round-Trip Title" in svg
 
     def test_confusion_suppress_label_removes_text(self, clf_data):
         model, X, y = clf_data
-        default_svg = fm.confusion_matrix_chart(model, X, y).show_svg()
-        suppressed_svg = fm.confusion_matrix_chart(model, X, y, mark={"label": False}).show_svg()
+        default_svg = fm.confusion_matrix_chart(model, X, y).to_svg()
+        suppressed_svg = fm.confusion_matrix_chart(model, X, y, mark={"label": False}).to_svg()
         default_texts = default_svg.count("<text ")
         suppressed_texts = suppressed_svg.count("<text ")
         assert suppressed_texts < default_texts
 
     def test_roc_suppress_reference_removes_diagonal(self, clf_data):
         model, X, y = clf_data
-        default_svg = fm.roc_chart(model, X, y).show_svg()
-        suppressed_svg = fm.roc_chart(model, X, y, mark={"reference": False}).show_svg()
+        default_svg = fm.roc_chart(model, X, y).to_svg()
+        suppressed_svg = fm.roc_chart(model, X, y, mark={"reference": False}).to_svg()
         default_dashes = default_svg.count("stroke-dasharray")
         suppressed_dashes = suppressed_svg.count("stroke-dasharray")
         assert suppressed_dashes < default_dashes
@@ -466,7 +466,7 @@ class TestSvgRoundTrip:
             y,
             panels="single",
             mark={"reference": {"stroke_width": 3}},
-        ).show_svg()
+        ).to_svg()
         assert 'stroke-width="3"' in svg
 
     def test_importance_bar_opacity_reaches_svg(self, clf_data):
@@ -476,7 +476,7 @@ class TestSvgRoundTrip:
         X = rng.randn(80, 4)
         y = (X[:, 0] > 0).astype(int)
         model = RandomForestClassifier(n_estimators=10, random_state=0).fit(X, y)
-        svg = fm.importance_chart(model, X, y, mark={"bar": {"opacity": 0.3}}).show_svg()
+        svg = fm.importance_chart(model, X, y, mark={"bar": {"opacity": 0.3}}).to_svg()
         assert "rgba(" in svg
 
 
@@ -495,12 +495,12 @@ class TestEdgeCases:
             mark={"line": False, "reference": False, "point": False},
         )
         assert chart.layer_names == []
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_empty_dict_overrides_are_noop(self, clf_data):
         model, X, y = clf_data
-        default_svg = fm.calibration_chart(model, X, y).show_svg()
+        default_svg = fm.calibration_chart(model, X, y).to_svg()
         overridden_svg = fm.calibration_chart(
             model,
             X,
@@ -509,7 +509,7 @@ class TestEdgeCases:
             encode={},
             properties={},
             layers=[],
-        ).show_svg()
+        ).to_svg()
         assert default_svg == overridden_svg
 
     def test_none_suppresses_like_false(self, clf_data):
@@ -529,7 +529,7 @@ class TestEdgeCases:
         resolved = chart._resolve_pending()
         line_layer = next(ly for ly in resolved._layers if ly.name == "line")
         assert line_layer.mark_kwargs["stroke_width"] == 4
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert 'stroke-width="4"' in svg
 
     def test_all_four_overrides_combined(self, clf_data):
@@ -543,7 +543,7 @@ class TestEdgeCases:
             properties={"width": 700, "title": "Combined Test"},
             layers=[Layer(mark="rule", encoding={"y": "fraction_positive"})],
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "point" not in chart.layer_names
         assert "P(+)" in svg
         assert 'width="700"' in svg
@@ -552,7 +552,7 @@ class TestEdgeCases:
     def test_post_hoc_chaining_after_override(self, clf_data):
         model, X, y = clf_data
         chart = fm.calibration_chart(model, X, y, mark={"point": False}).properties(width=500)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert 'width="500"' in svg
         assert "point" not in chart.layer_names
 
@@ -569,7 +569,7 @@ class TestEdgeCases:
             mark={"reference": False},
             properties={"title": "Multi-model ROC"},
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "Multi-model ROC" in svg
 
     def test_compound_view_fanout(self, reg_data):
@@ -580,18 +580,18 @@ class TestEdgeCases:
             y,
             mark={"reference": {"stroke_width": 4}},
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert 'stroke-width="4"' in svg
 
     def test_suppress_on_compound_view_child(self, reg_data):
         model, X, y = reg_data
-        default_svg = fm.residuals_chart(model, X, y).show_svg()
+        default_svg = fm.residuals_chart(model, X, y).to_svg()
         suppressed_svg = fm.residuals_chart(
             model,
             X,
             y,
             mark={"reference": False},
-        ).show_svg()
+        ).to_svg()
         default_dashes = default_svg.count("stroke-dasharray")
         suppressed_dashes = suppressed_svg.count("stroke-dasharray")
         assert suppressed_dashes < default_dashes

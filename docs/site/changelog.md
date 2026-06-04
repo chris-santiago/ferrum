@@ -4,7 +4,13 @@ All notable changes to Ferrum are documented here.
 
 ## Unreleased
 
-*No unreleased changes.*
+### Changed
+
+- Renamed the output converters `Chart.show_svg()` → [`Chart.to_svg()`][ferrum.Chart.to_svg] and `Chart.show_png()` → [`Chart.to_png()`][ferrum.Chart.to_png], establishing a clear convention across the export surface: `to_*` returns an in-memory value, [`save(path)`][ferrum.Chart.save] writes to disk, and [`show()`][ferrum.Chart.show] displays. The old names remain as deprecated aliases that emit a `DeprecationWarning` and will be removed in a future release.
+
+### Added
+
+- [`Chart.to_html()`][ferrum.Chart.to_html] returns the self-contained interactive HTML page as a string, byte-identical to what `save("out.html")` writes. It accepts the same `embed_wasm=`, `toolbar=`, and `raster=` keywords as the HTML save path. This completes the `to_*` converter family (`to_svg`, `to_png`, `to_html`).
 
 ## 0.15.3
 

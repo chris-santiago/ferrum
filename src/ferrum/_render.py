@@ -548,7 +548,7 @@ class _RenderMixin:
                     )
                 return float(c)
 
-            inset_svg = feat.chart.show_svg()
+            inset_svg = feat.chart.to_svg()
             d = {
                 "type": "inset",
                 "svg": inset_svg,
@@ -597,8 +597,12 @@ class _RenderMixin:
         chart_config_dict = chart._resolve_chart_config()
         return spec, data, viewport, theme_dict, chart_config_dict
 
-    def show_svg(self, *, raster: bool | None = None) -> str:
-        """Render the chart to an SVG string.
+    def to_svg(self, *, raster: bool | None = None) -> str:
+        """Return the chart rendered as an SVG string.
+
+        This **returns** the SVG markup; it does not display the chart.
+        Use :meth:`show` to display inline or in a browser, or
+        :meth:`save` to write to disk.
 
         Parameters
         ----------
@@ -618,7 +622,7 @@ class _RenderMixin:
         >>> import ferrum as fm
         >>> import polars as pl
         >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
-        >>> svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+        >>> svg = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
         >>> svg.startswith("<svg")
         True
         """
@@ -656,8 +660,11 @@ class _RenderMixin:
             svg = compose_svg_vertical([svg], spacing=0.0, caption=figure_caption)
         return svg
 
-    def show_png(self, *, raster: bool | None = None, scale: float = 2.0) -> bytes:
-        """Render the chart to PNG bytes.
+    def to_png(self, *, raster: bool | None = None, scale: float = 2.0) -> bytes:
+        """Return the chart rendered as PNG bytes.
+
+        This **returns** the PNG-encoded image data; it does not display the
+        chart.  Use :meth:`show` to display, or :meth:`save` to write to disk.
 
         Parameters
         ----------
@@ -680,14 +687,123 @@ class _RenderMixin:
         >>> import ferrum as fm
         >>> import polars as pl
         >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
-        >>> png = fm.Chart(df).mark_point().encode(x="x", y="y").show_png()
+        >>> png = fm.Chart(df).mark_point().encode(x="x", y="y").to_png()
         >>> png[:4] == b'\\x89PNG'
         True
         """
         from ferrum._core import rasterize_svg
 
-        svg = self.show_svg(raster=raster)
+        svg = self.to_svg(raster=raster)
         return bytes(rasterize_svg(svg, scale=scale))
+
+    def to_html(
+        self,
+        *,
+        embed_wasm: bool = True,
+        toolbar: bool = True,
+        raster: bool | None = None,
+    ) -> str:
+        """Return the chart as a self-contained interactive HTML document.
+
+        This **returns** the HTML markup; it does not display the chart or
+        write it to disk.  The returned string is byte-identical to what
+        ``save(path)`` writes for an ``.html`` destination — it embeds the
+        WASM-backed interactive renderer rather than a static SVG snapshot.
+        Because it bundles that renderer, the document is substantially larger
+        than a static export; for a lightweight static image use
+        :meth:`to_svg` / :meth:`to_png`.
+
+        Parameters
+        ----------
+        embed_wasm : bool, default True
+            When True, the WASM binary is base64-inlined for single-file
+            distribution.  When False, the document references an adjacent
+            ``ferrum_wasm_bg.wasm`` sidecar that must be served alongside it.
+        toolbar : bool, default True
+            When False, the interactive toolbar (zoom / pan controls, export
+            button) is hidden in the rendered HTML.
+        raster : bool or None, default None
+            Override the auto-raster policy for this render only.
+            ``False`` forces per-element rendering.  ``True`` forces raster.
+            ``None`` uses the chart's ``RenderConfig`` policy.
+
+        Returns
+        -------
+        str
+            A complete, self-contained interactive HTML document.
+
+        Examples
+        --------
+        >>> import ferrum as fm
+        >>> import polars as pl
+        >>> df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+        >>> html = fm.Chart(df).mark_point().encode(x="x", y="y").to_html()
+        >>> html.lstrip().startswith("<!")
+        True
+        """
+        from ferrum._html import assemble_html
+        from ferrum.display import _extract_title_text, _render_scene_json
+
+        chart = self._with_raster_override(raster)
+        scene_json, packed_data = _render_scene_json(chart)
+        title = _extract_title_text(chart._title)
+        return assemble_html(
+            scene_json,
+            packed_data=packed_data,
+            title=title,
+            embed_wasm=embed_wasm,
+            toolbar=toolbar,
+        )
+
+    def show_svg(self, *, raster: bool | None = None) -> str:
+        """Render the chart to an SVG string.
+
+        .. deprecated:: 0.16.0
+            Use :meth:`to_svg` instead.  ``show_svg`` will be removed in a
+            future release.  It now forwards to :meth:`to_svg`.
+
+        Parameters
+        ----------
+        raster : bool or None, default None
+            Override the auto-raster policy for this render only.
+
+        Returns
+        -------
+        str
+            SVG markup for the chart.
+        """
+        warnings.warn(
+            "Chart.show_svg() is deprecated; use Chart.to_svg() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.to_svg(raster=raster)
+
+    def show_png(self, *, raster: bool | None = None, scale: float = 2.0) -> bytes:
+        """Render the chart to PNG bytes.
+
+        .. deprecated:: 0.16.0
+            Use :meth:`to_png` instead.  ``show_png`` will be removed in a
+            future release.  It now forwards to :meth:`to_png`.
+
+        Parameters
+        ----------
+        raster : bool or None, default None
+            Override the auto-raster policy for this render only.
+        scale : float, default 2.0
+            Pixel-density multiplier applied to the chart's intrinsic dimensions.
+
+        Returns
+        -------
+        bytes
+            PNG-encoded image data.
+        """
+        warnings.warn(
+            "Chart.show_png() is deprecated; use Chart.to_png() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.to_png(raster=raster, scale=scale)
 
     def save(
         self,
@@ -766,7 +882,7 @@ class _RenderMixin:
     def _repr_svg_(self) -> str | None:
         """Jupyter SVG rich display hook."""
         try:
-            return self.show_svg()
+            return self.to_svg()
         except Exception:
             _logger.debug("Chart._repr_svg_ failed; falling back to __repr__", exc_info=True)
             return None
@@ -774,7 +890,7 @@ class _RenderMixin:
     def _repr_html_(self) -> str | None:
         """Jupyter HTML rich display hook -- wraps SVG in a <div>."""
         try:
-            return f"<div>{self.show_svg()}</div>"
+            return f"<div>{self.to_svg()}</div>"
         except Exception:
             _logger.debug("Chart._repr_html_ failed; falling back to __repr__", exc_info=True)
             return None
