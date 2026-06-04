@@ -6,6 +6,16 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.15.3
+
+*2026-06-03*
+
+### Fixed
+
+- Interactive (WASM) reactive **domain-rescale** (focus+context brushing) no longer shears sibling panels or makes the overview line disappear during the brush. Each panel's marks now render with their own transform, so rescaling one panel leaves the others untouched.
+- Interactive **box-zoom** (magnifying-glass tool) on a focus+context overview now rescales the detail panel instead of making it vanish. Wheel, pan, and box-zoom operate on the focus panel; a box-zoom drawn on the overview drives the detail's domain like a brush.
+- Interactive **axis lines and stroked marks are antialiased** via 4× MSAA on the render pass, removing the occasional 1px axis-line seam/gap where ticks cross the baseline or adjacent facet panels meet. Silently falls back to the previous (non-MSAA) path on GPUs/browsers without 4× support — no regression there.
+
 ## 0.15.2
 
 *2026-06-03*
