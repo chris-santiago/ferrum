@@ -709,6 +709,9 @@ class _RenderMixin:
         write it to disk.  The returned string is byte-identical to what
         ``save(path)`` writes for an ``.html`` destination — it embeds the
         WASM-backed interactive renderer rather than a static SVG snapshot.
+        Because it bundles that renderer, the document is substantially larger
+        than a static export; for a lightweight static image use
+        :meth:`to_svg` / :meth:`to_png`.
 
         Parameters
         ----------

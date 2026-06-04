@@ -3694,6 +3694,14 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
     def to_json(self, *, indent=None) -> str:
         """Serialise the chart specification to a JSON string.
 
+        .. note::
+            Unlike :meth:`to_svg`, :meth:`to_png`, and :meth:`to_html` — which
+            return *rendered* output — ``to_json`` returns the chart
+            **specification** (the declaration you built), not the rendered
+            scene graph.  ``save(path)`` with a ``.json`` extension writes the
+            rendered scene graph instead, which is a different artifact.  For
+            the specification as a Python value, see :meth:`to_dict`.
+
         Calls ``to_spec()`` to build the ``ChartSpec`` and then serialises it
         via the Rust ``serde_json`` encoder.  When ``indent`` is given the
         compact JSON is reformatted via ``json.loads`` / ``json.dumps`` on the
