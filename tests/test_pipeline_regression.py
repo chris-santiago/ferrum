@@ -1491,3 +1491,12 @@ class TestJointplotHist:
         assert svg.count("<rect") > 10, (
             f"Expected >10 <rect> elements with xlim/ylim, got {svg.count('<rect')}"
         )
+
+    def test_jointplot_hist_renders_on_int_columns(self):
+        """Regression: kind='hist' on integer x/y exercises both the encoding
+        fix and the stat_bin_2d integer coercion end-to-end (previously broken
+        by the 'bin_x_start' encoding bug AND the int-rejection bug)."""
+        df = pl.DataFrame({"x": list(range(200)), "y": [(v * 7) % 50 for v in range(200)]})
+        svg = fm.jointplot(df, x="x", y="y", kind="hist").to_svg()
+        assert svg.lstrip().startswith("<svg")
+        assert svg.count("<rect") > 10
