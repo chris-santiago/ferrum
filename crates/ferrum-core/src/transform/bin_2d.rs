@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::scale::ticks::sturges_floor;
+use crate::transform::numeric_util::coerce_to_float64;
 
 // ---------------------------------------------------------------------------
 // Spec types
@@ -122,13 +123,6 @@ pub(crate) fn apply(spec: &Bin2DSpec, batch: &RecordBatch) -> PyResult<RecordBat
             schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
         ))
     })?;
-    if schema.field(xi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_bin_2d: column '{}' must be Float64; got {:?}",
-            spec.x,
-            schema.field(xi).data_type()
-        )));
-    }
 
     // Validate y column.
     let yi = schema.index_of(&spec.y).map_err(|_| {
@@ -138,24 +132,10 @@ pub(crate) fn apply(spec: &Bin2DSpec, batch: &RecordBatch) -> PyResult<RecordBat
             schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
         ))
     })?;
-    if schema.field(yi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_bin_2d: column '{}' must be Float64; got {:?}",
-            spec.y,
-            schema.field(yi).data_type()
-        )));
-    }
 
-    let xa = batch
-        .column(xi)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("dtype check above guarantees Float64Array");
-    let ya = batch
-        .column(yi)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("dtype check above guarantees Float64Array");
+    // Coerce both axes to Float64 (integer/Float32 columns are accepted).
+    let xa = coerce_to_float64(batch.column(xi), "stat_bin_2d", &spec.x)?;
+    let ya = coerce_to_float64(batch.column(yi), "stat_bin_2d", &spec.y)?;
 
     // Drop rows where either x or y is null or NaN.
     let mut xs: Vec<f64> = Vec::with_capacity(xa.len());
@@ -602,6 +582,82 @@ mod tests {
         let counts = col_i64(&out, "count");
         let total: i64 = (0..out.num_rows()).map(|i| counts.value(i)).sum();
         assert_eq!(total, 2, "x=2.0 outside extent_x=(0,1) should be dropped; total={total}");
+    }
+
+    // Int64 x AND y must be coerced to Float64, not rejected.
+    #[test]
+    fn test_bin2d_int64_xy_columns_are_coerced() {
+        use arrow::array::Int64Array;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Int64, true),
+            Field::new("y", DataType::Int64, true),
+        ]));
+        let xs: Vec<i64> = (0..9).map(|i| i % 3).collect();
+        let ys: Vec<i64> = (0..9).map(|i| i / 3).collect();
+        let int_batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(xs.clone())),
+                Arc::new(Int64Array::from(ys.clone())),
+            ],
+        )
+        .unwrap();
+        let float_batch = make_xy_batch(
+            xs.iter().map(|&v| v as f64).collect(),
+            ys.iter().map(|&v| v as f64).collect(),
+        );
+        let spec = Bin2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bins_x: BinSpec2DAxis::Fixed { n: 3 },
+            bins_y: BinSpec2DAxis::Fixed { n: 3 },
+            extent_x: None,
+            extent_y: None,
+            cumulative: true,
+            name: None,
+        };
+        let int_out = apply(&spec, &int_batch).expect("Int64 bin_2d should succeed");
+        let float_out = apply(&spec, &float_batch).unwrap();
+        assert_eq!(int_out.num_rows(), float_out.num_rows());
+        let ic = col_i64(&int_out, "count");
+        let fc = col_i64(&float_out, "count");
+        for i in 0..int_out.num_rows() {
+            assert_eq!(ic.value(i), fc.value(i), "count[{i}] mismatch");
+        }
+    }
+
+    #[test]
+    fn test_bin2d_string_column_still_errors() {
+        use arrow::array::StringArray;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Utf8, true),
+            Field::new("y", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            ],
+        )
+        .unwrap();
+        let spec = Bin2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bins_x: BinSpec2DAxis::Fixed { n: 2 },
+            bins_y: BinSpec2DAxis::Fixed { n: 2 },
+            extent_x: None,
+            extent_y: None,
+            cumulative: false,
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        assert!(
+            err.to_string().contains("must be numeric"),
+            "err: {err}"
+        );
     }
 
     // Test 5: Empty input → empty output with correct schema.

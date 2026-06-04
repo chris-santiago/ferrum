@@ -2,7 +2,66 @@
 //!
 //! Kept `pub(crate)` — not part of the public API surface.
 
-use arrow::array::{Array, Float64Array};
+use arrow::array::{Array, ArrayRef, Float64Array};
+use arrow::datatypes::DataType;
+use pyo3::exceptions::PyValueError;
+use pyo3::PyResult;
+
+/// Coerce a numeric Arrow column to a `Float64Array`.
+///
+/// - If the column is already Float64, it is downcast and cloned.
+/// - If the column is any other numeric type (Int8/16/32/64, UInt8/16/32/64,
+///   Float16/Float32), it is cast to Float64 via the arrow-cast kernel.
+/// - Any non-numeric type (e.g. Utf8) is rejected with a clear `PyValueError`.
+///
+/// `ctx` is the transform-name prefix (e.g. `"stat_kde"`) and `field` is the
+/// column name, both used only in error messages. This lets KDE and other
+/// numeric transforms accept integer-typed columns instead of hard-erroring.
+pub(crate) fn coerce_to_float64(
+    col: &ArrayRef,
+    ctx: &str,
+    field: &str,
+) -> PyResult<Float64Array> {
+    match col.data_type() {
+        DataType::Float64 => col
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .cloned()
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "{ctx}: expected Float64Array for column '{field}'"
+                ))
+            }),
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64
+        | DataType::Float16
+        | DataType::Float32 => {
+            let casted = arrow::compute::cast(col, &DataType::Float64).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "{ctx}: could not cast column '{field}' to Float64: {e}"
+                ))
+            })?;
+            casted
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .cloned()
+                .ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "{ctx}: cast to Float64 failed for column '{field}'"
+                    ))
+                })
+        }
+        other => Err(PyValueError::new_err(format!(
+            "{ctx}: column '{field}' must be numeric, got {other:?}"
+        ))),
+    }
+}
 
 /// Extract clean `f64` values from a Float64Array, dropping null and NaN entries.
 ///
@@ -64,7 +123,7 @@ pub(crate) fn quantile_sorted(sorted: &[f64], p: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::Float64Array;
+    use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array, StringArray, UInt64Array};
     use std::sync::Arc;
 
     fn arr_from_options(vals: Vec<Option<f64>>) -> Float64Array {
@@ -176,6 +235,57 @@ mod tests {
         let data = [3.0f64, 7.0, 11.0];
         assert_eq!(quantile_sorted(&data, 0.0), 3.0);
         assert_eq!(quantile_sorted(&data, 1.0), 11.0);
+    }
+
+    // ---------- coerce_to_float64 ----------
+
+    #[test]
+    fn coerce_float64_passthrough() {
+        let col: ArrayRef = Arc::new(Float64Array::from(vec![1.5, 2.5, 3.5]));
+        let out = coerce_to_float64(&col, "ctx", "f").unwrap();
+        assert_eq!(out.values(), &[1.5, 2.5, 3.5]);
+    }
+
+    #[test]
+    fn coerce_int64_casts() {
+        let col: ArrayRef = Arc::new(Int64Array::from(vec![1_i64, 2, 3]));
+        let out = coerce_to_float64(&col, "ctx", "f").unwrap();
+        assert_eq!(out.values(), &[1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn coerce_int32_casts() {
+        let col: ArrayRef = Arc::new(Int32Array::from(vec![10_i32, 20]));
+        let out = coerce_to_float64(&col, "ctx", "f").unwrap();
+        assert_eq!(out.values(), &[10.0, 20.0]);
+    }
+
+    #[test]
+    fn coerce_uint64_casts() {
+        let col: ArrayRef = Arc::new(UInt64Array::from(vec![5_u64, 6]));
+        let out = coerce_to_float64(&col, "ctx", "f").unwrap();
+        assert_eq!(out.values(), &[5.0, 6.0]);
+    }
+
+    #[test]
+    fn coerce_preserves_nulls() {
+        let col: ArrayRef = Arc::new(Int64Array::from(vec![Some(1_i64), None, Some(3)]));
+        let out = coerce_to_float64(&col, "ctx", "f").unwrap();
+        assert!(!out.is_null(0));
+        assert!(out.is_null(1));
+        assert_eq!(out.value(0), 1.0);
+        assert_eq!(out.value(2), 3.0);
+    }
+
+    #[test]
+    fn coerce_string_rejected() {
+        pyo3::Python::initialize();
+        let col: ArrayRef = Arc::new(StringArray::from(vec!["a", "b"]));
+        let err = coerce_to_float64(&col, "stat_kde", "x").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("must be numeric"), "err: {msg}");
+        assert!(msg.contains("stat_kde"), "err should carry ctx: {msg}");
+        assert!(msg.contains("'x'"), "err should carry field: {msg}");
     }
 
     #[test]

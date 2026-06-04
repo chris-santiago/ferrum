@@ -1350,3 +1350,153 @@ class TestRasterOverride:
         original_config = chart._render_config
         chart.to_svg(raster=False)
         assert chart._render_config is original_config
+
+
+class TestKdeIntegerCoercion:
+    """Regression: mark_density / KDE transforms hard-errored on integer columns.
+
+    Before the fix, stat_kde (1D) and stat_kde_2d rejected any column whose
+    arrow dtype was not Float64 with "column '<x>' must be Float64", so
+    mark_density on Int64 data (ages, counts, years, range(...)) raised a
+    ValueError instead of rendering. The fix coerces numeric columns to Float64
+    in the transform; genuinely non-numeric columns must still raise.
+    """
+
+    def test_mark_density_1d_renders_on_int_column(self):
+        """1D KDE on an Int64 column renders instead of raising."""
+        df = pl.DataFrame({"x": list(range(50))})
+        svg = fm.Chart(df).mark_density().encode(x="x").to_svg()
+        assert svg.lstrip().startswith("<svg")
+        assert "<path" in svg
+
+    def test_mark_density_2d_renders_on_int_columns(self):
+        """2D KDE on Int64 x and y renders instead of raising."""
+        df = pl.DataFrame({"x": list(range(50)), "y": list(range(50, 100))})
+        svg = fm.Chart(df).mark_density().encode(x="x", y="y").to_svg()
+        assert svg.lstrip().startswith("<svg")
+
+    def test_mark_density_int_matches_float(self):
+        """Int input produces the same density output as the equivalent floats."""
+        ints = list(range(50))
+        svg_int = fm.Chart(pl.DataFrame({"x": ints})).mark_density().encode(x="x").to_svg()
+        svg_float = (
+            fm.Chart(pl.DataFrame({"x": [float(v) for v in ints]}))
+            .mark_density()
+            .encode(x="x")
+            .to_svg()
+        )
+        assert svg_int == svg_float
+
+    def test_mark_density_renders_on_non_int_numeric_column(self):
+        """A non-Int64 integer dtype (UInt) also coerces and renders."""
+        df = pl.DataFrame({"x": pl.Series(list(range(50)), dtype=pl.UInt32)})
+        svg = fm.Chart(df).mark_density().encode(x="x").to_svg()
+        assert svg.lstrip().startswith("<svg")
+
+    def test_mark_density_string_column_still_raises(self):
+        """A genuinely non-numeric (Utf8) field must still raise, not coerce."""
+        df = pl.DataFrame({"x": ["a", "b", "c", "d"] * 10})
+        with pytest.raises(Exception, match="numeric|Float64"):
+            fm.Chart(df).mark_density().encode(x="x").to_svg()
+
+
+class TestQqHexIntegerCoercion:
+    """Regression: stat_qq and stat_hex hard-errored on integer columns.
+
+    Same root cause as the KDE fix — these transforms rejected any non-Float64
+    column with "column '<x>' must be Float64", so mark_qq / mark_hex on integer
+    data raised instead of rendering. The fix routes them through
+    numeric_util::coerce_to_float64. (stat_bin_2d shares the fix and is covered
+    by a Rust unit test; its only Python entry point, jointplot(kind="hist"),
+    has a separate pre-existing bug unrelated to dtype.)
+    """
+
+    def test_mark_qq_renders_on_int_column(self):
+        """mark_qq on an Int64 column renders instead of raising."""
+        df = pl.DataFrame({"val": [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]})
+        svg = fm.Chart(df).mark_qq().encode(x="val").to_svg()
+        assert svg.lstrip().startswith("<svg")
+
+    def test_mark_hex_renders_on_int_columns(self):
+        """mark_hex on Int64 x and y renders instead of raising."""
+        df = pl.DataFrame({"x": list(range(40)), "y": list(range(40, 80))})
+        svg = fm.Chart(df).mark_hex().encode(x="x", y="y").to_svg()
+        assert svg.lstrip().startswith("<svg")
+
+    def test_mark_hex_int_aggregate_field_renders(self):
+        """mark_hex with an integer aggregate field coerces and renders."""
+        df = pl.DataFrame(
+            {"x": list(range(40)), "y": list(range(40, 80)), "w": list(range(40))}
+        )
+        svg = fm.Chart(df).mark_hex(aggregate="mean", field="w").encode(x="x", y="y").to_svg()
+        assert svg.lstrip().startswith("<svg")
+
+    def test_mark_qq_string_column_still_raises(self):
+        """A non-numeric qq field must still raise, not coerce."""
+        df = pl.DataFrame({"val": ["a", "b", "c", "d"] * 5})
+        with pytest.raises(Exception, match="numeric|Float64"):
+            fm.Chart(df).mark_qq().encode(x="val").to_svg()
+
+
+# ---------------------------------------------------------------------------
+# TestJointplotHist: regression for bin_x_start / bin_y_start wrong column names
+# ---------------------------------------------------------------------------
+
+
+def _spread_df(n: int = 250, seed: int = 0) -> pl.DataFrame:
+    """Bivariate dataset with enough rows to fill multiple 2D histogram bins."""
+    rng = __import__("numpy").random.default_rng(seed)
+    return pl.DataFrame(
+        {
+            "x": rng.normal(0.0, 1.5, n).tolist(),
+            "y": rng.normal(0.0, 1.5, n).tolist(),
+        }
+    )
+
+
+class TestJointplotHist:
+    """Regression: jointplot(kind='hist') encoded wrong Bin2D output columns.
+
+    The hist branch was encoding x='bin_x_start'/y='bin_y_start' but Bin2D
+    emits [x_lo, x_hi, y_lo, y_hi, count].  This caused a ValueError ("unknown
+    column 'bin_x_start'") for all dtypes.  The fix is to use all four corner
+    columns (x='x_lo', x2='x_hi', y='y_lo', y2='y_hi') so tiles are full-width
+    rectangles, not degenerate points.
+    """
+
+    def test_jointplot_hist_renders_svg(self):
+        """jointplot(kind='hist') must render without raising ValueError."""
+        df = _spread_df()
+        svg = fm.jointplot(df, x="x", y="y", kind="hist").to_svg()
+        assert svg.lstrip().startswith("<svg"), "Expected SVG output"
+
+    def test_jointplot_hist_has_many_rects(self):
+        """The center panel must contain a healthy number of <rect> tiles.
+
+        With correct x_lo/x_hi/y_lo/y_hi encoding, Bin2D produces a grid of
+        filled rectangles (>10).  With the old degenerate encoding, only ~3
+        rects appear.
+        """
+        df = _spread_df()
+        svg = fm.jointplot(df, x="x", y="y", kind="hist").to_svg()
+        assert svg.count("<rect") > 10, (
+            f"Expected >10 <rect> elements in hist jointplot SVG, got {svg.count('<rect')}"
+        )
+
+    def test_jointplot_hist_with_xlim_ylim_renders(self):
+        """The xlim/ylim scale-domain branch of kind='hist' renders correctly."""
+        df = _spread_df()
+        svg = fm.jointplot(df, x="x", y="y", kind="hist", xlim=(-3.0, 3.0), ylim=(-3.0, 3.0)).to_svg()
+        assert svg.lstrip().startswith("<svg"), "Expected SVG output with xlim/ylim"
+        assert svg.count("<rect") > 10, (
+            f"Expected >10 <rect> elements with xlim/ylim, got {svg.count('<rect')}"
+        )
+
+    def test_jointplot_hist_renders_on_int_columns(self):
+        """Regression: kind='hist' on integer x/y exercises both the encoding
+        fix and the stat_bin_2d integer coercion end-to-end (previously broken
+        by the 'bin_x_start' encoding bug AND the int-rejection bug)."""
+        df = pl.DataFrame({"x": list(range(200)), "y": [(v * 7) % 50 for v in range(200)]})
+        svg = fm.jointplot(df, x="x", y="y", kind="hist").to_svg()
+        assert svg.lstrip().startswith("<svg")
+        assert svg.count("<rect") > 10

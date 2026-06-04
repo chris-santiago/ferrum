@@ -200,18 +200,7 @@ pub(crate) fn apply(spec: &QQSpec, batch: &RecordBatch) -> PyResult<RecordBatch>
             "stat_qq: column '{}' not found",
             spec.field
         )))?;
-    if schema.field(v_idx).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_qq: column '{}' must be Float64",
-            spec.field
-        )));
-    }
-    let v_arr = batch
-        .column(v_idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_qq: expected Float64Array for column '{}'", spec.field)))?;
+    let v_arr = coerce_to_float64(batch.column(v_idx), "stat_qq", &spec.field)?;
 
     // Filter null/NaN sample values.
     let mut samples: Vec<f64> = (0..v_arr.len())
@@ -341,7 +330,7 @@ pub(crate) fn secondary_outputs(
     Ok(vec![("qq_line".to_string(), line_batch)])
 }
 
-use crate::transform::numeric_util::quantile_sorted;
+use crate::transform::numeric_util::{coerce_to_float64, quantile_sorted};
 
 // ---------- PyO3 wrapper ----------
 
@@ -562,6 +551,64 @@ mod tests {
         // Endpoints should span theoretical min/max.
         assert!((x_start - 0.1).abs() < 1e-12);
         assert!((x_end - 0.9).abs() < 1e-12);
+    }
+
+    #[test]
+    fn qq_int64_column_is_coerced() {
+        // Int64 input must be coerced to Float64, not rejected. Output must
+        // match a Float64 batch of the same values bit-for-bit.
+        use arrow::array::Int64Array;
+        pyo3::Python::initialize();
+        let vals_i: Vec<i64> = vec![0, 1, -1, 2, -2];
+        let vals_f: Vec<f64> = vals_i.iter().map(|&v| v as f64).collect();
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+        let int_batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vals_i))]).unwrap();
+        let float_batch = batch_field("v", vals_f);
+        let spec = QQSpec {
+            field: "v".into(),
+            distribution: "normal".into(),
+            dequantize: false,
+            emit_line: false,
+            seed: 0,
+            name: None,
+        };
+        let int_out = apply(&spec, &int_batch).expect("Int64 QQ should succeed");
+        let float_out = apply(&spec, &float_batch).unwrap();
+        assert_eq!(int_out.num_rows(), 5);
+        let it = col(&int_out, "theoretical");
+        let ft = col(&float_out, "theoretical");
+        let is = col(&int_out, "sample");
+        let fs = col(&float_out, "sample");
+        for i in 0..5 {
+            assert_eq!(it[i].to_bits(), ft[i].to_bits(), "theoretical[{i}] mismatch");
+            assert_eq!(is[i].to_bits(), fs[i].to_bits(), "sample[{i}] mismatch");
+        }
+    }
+
+    #[test]
+    fn qq_string_column_still_errors() {
+        use arrow::array::StringArray;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec!["a", "b", "c"]))],
+        )
+        .unwrap();
+        let spec = QQSpec {
+            field: "v".into(),
+            distribution: "normal".into(),
+            dequantize: false,
+            emit_line: false,
+            seed: 0,
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        assert!(
+            err.to_string().contains("must be numeric"),
+            "err: {err}"
+        );
     }
 
     #[test]

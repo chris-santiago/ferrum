@@ -60,19 +60,12 @@ fn apply_one_group(
     let idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!("stat_kde: column '{}' not found", spec.field))
     })?;
-    if schema.field(idx).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_kde: column '{}' must be Float64",
-            spec.field
-        )));
-    }
-    let arr = batch
-        .column(idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_kde: expected Float64Array for column '{}'", spec.field)))?;
-    let clean = crate::transform::numeric_util::clean_float64_values(arr, only_indices);
+    let arr = crate::transform::numeric_util::coerce_to_float64(
+        batch.column(idx),
+        "stat_kde",
+        &spec.field,
+    )?;
+    let clean = crate::transform::numeric_util::clean_float64_values(&arr, only_indices);
 
     let (lo, hi) = match spec.extent {
         Some((a, b)) => (a, b),
@@ -170,7 +163,12 @@ fn apply_grouped(
     } else {
         let field_idx = schema.index_of(&spec.field).ok();
         field_idx.and_then(|fi| {
-            let arr = batch.column(fi).as_any().downcast_ref::<Float64Array>()?;
+            let arr = crate::transform::numeric_util::coerce_to_float64(
+                batch.column(fi),
+                "stat_kde",
+                &spec.field,
+            )
+            .ok()?;
             let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
                 if arr.is_null(i) { return (lo, hi); }
                 let v = arr.value(i);
@@ -727,6 +725,98 @@ mod tests {
         };
         let err = apply(&spec, &batch).unwrap_err();
         assert!(err.to_string().contains("ghost"), "err: {err}");
+    }
+
+    #[test]
+    fn test_kde_int64_column_is_coerced() {
+        // Int64 input must be coerced to Float64, not rejected. The density
+        // output must match a Float64 batch of the same values bit-for-bit.
+        use arrow::array::Int64Array;
+        pyo3::Python::initialize();
+        let vals_i: Vec<i64> = (0..10).collect();
+        let vals_f: Vec<f64> = vals_i.iter().map(|&v| v as f64).collect();
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, true)]));
+        let int_batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vals_i))]).unwrap();
+        let float_batch = batch_with("x", vals_f);
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            shared_extent: false,
+            n: 16,
+            extent: None,
+            cumulative: false,
+            kernel: default_kernel(),
+            groupby: None,
+            name: None,
+        };
+        let int_out = apply(&spec, &int_batch).expect("Int64 KDE should succeed");
+        let float_out = apply(&spec, &float_batch).unwrap();
+        assert_eq!(int_out.num_rows(), 16);
+        let id = col(&int_out, "density");
+        let fd = col(&float_out, "density");
+        let iv = col(&int_out, "value");
+        let fv = col(&float_out, "value");
+        for i in 0..16 {
+            assert_eq!(iv[i].to_bits(), fv[i].to_bits(), "value[{i}] mismatch");
+            assert_eq!(id[i].to_bits(), fd[i].to_bits(), "density[{i}] mismatch");
+        }
+    }
+
+    #[test]
+    fn test_kde_int32_column_is_coerced() {
+        // Prove general numeric coercion (not just Int64).
+        use arrow::array::Int32Array;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int32Array::from(vec![0_i32, 1, 2, 3, 4]))],
+        )
+        .unwrap();
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            shared_extent: false,
+            n: 8,
+            extent: None,
+            cumulative: false,
+            kernel: default_kernel(),
+            groupby: None,
+            name: None,
+        };
+        let out = apply(&spec, &batch).expect("Int32 KDE should succeed");
+        assert_eq!(out.num_rows(), 8);
+    }
+
+    #[test]
+    fn test_kde_string_column_still_errors() {
+        // Negative test: a genuinely non-numeric column must STILL error.
+        use arrow::array::StringArray;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec!["a", "b", "c"]))],
+        )
+        .unwrap();
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            shared_extent: false,
+            n: 8,
+            extent: None,
+            cumulative: false,
+            kernel: default_kernel(),
+            groupby: None,
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("must be numeric"), "err: {msg}");
     }
 
     #[test]

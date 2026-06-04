@@ -966,11 +966,11 @@ def jointplot(
         for k in ("bins_x", "bins_y"):
             if k in jk:
                 bin2d_kwargs[k] = jk.pop(k)
-        hist_enc: dict = {"x": "bin_x_start", "y": "bin_y_start", "color": "count"}
+        hist_enc: dict = {"x": "x_lo", "x2": "x_hi", "y": "y_lo", "y2": "y_hi", "color": "count"}
         if xlim is not None:
-            hist_enc["x"] = _X("bin_x_start", scale={"domain": list(xlim)})
+            hist_enc["x"] = _X("x_lo", scale={"domain": list(xlim)})
         if ylim is not None:
-            hist_enc["y"] = _Y("bin_y_start", scale={"domain": list(ylim)})
+            hist_enc["y"] = _Y("y_lo", scale={"domain": list(ylim)})
         center = (
             Chart(data).transform(Bin2D(x=x, y=y, **bin2d_kwargs)).mark_rect().encode(**hist_enc)
         )

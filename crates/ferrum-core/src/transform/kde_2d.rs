@@ -69,34 +69,20 @@ fn apply_one_group(
     let xi = schema.index_of(&spec.x).map_err(|_| {
         PyValueError::new_err(format!("stat_kde_2d: column '{}' not found", spec.x))
     })?;
-    if schema.field(xi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_kde_2d: column '{}' must be Float64",
-            spec.x
-        )));
-    }
     let yi = schema.index_of(&spec.y).map_err(|_| {
         PyValueError::new_err(format!("stat_kde_2d: column '{}' not found", spec.y))
     })?;
-    if schema.field(yi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_kde_2d: column '{}' must be Float64",
-            spec.y
-        )));
-    }
 
-    let xa = batch
-        .column(xi)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_kde_2d: expected Float64Array for column '{}'", spec.x)))?;
-    let ya = batch
-        .column(yi)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_kde_2d: expected Float64Array for column '{}'", spec.y)))?;
+    let xa = crate::transform::numeric_util::coerce_to_float64(
+        batch.column(xi),
+        "stat_kde_2d",
+        &spec.x,
+    )?;
+    let ya = crate::transform::numeric_util::coerce_to_float64(
+        batch.column(yi),
+        "stat_kde_2d",
+        &spec.y,
+    )?;
 
     let mut xs: Vec<f64> = Vec::with_capacity(xa.len());
     let mut ys: Vec<f64> = Vec::with_capacity(ya.len());
@@ -635,6 +621,69 @@ mod tests {
 
         assert_eq!(u32_at(&out, "nx"), n as u32);
         assert_eq!(u32_at(&out, "ny"), n as u32);
+    }
+
+    #[test]
+    fn kde_2d_int64_columns_are_coerced() {
+        // Int64 x and y must be coerced to Float64, not rejected.
+        use arrow::array::Int64Array;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Int64, true),
+            Field::new("y", DataType::Int64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![0_i64, 1, 0, 1, 2])),
+                Arc::new(Int64Array::from(vec![0_i64, 0, 1, 1, 2])),
+            ],
+        )
+        .unwrap();
+        let n = 8;
+        let spec = Kde2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n,
+            extent: None,
+            groupby: None,
+            name: None,
+        };
+        let out = apply(&spec, &batch).expect("Int64 KDE2D should succeed");
+        assert_eq!(out.num_rows(), 1);
+        let density = list_f64_at(&out, "density");
+        assert_eq!(density.len(), n * n);
+    }
+
+    #[test]
+    fn kde_2d_string_column_still_errors() {
+        // Negative test: a non-numeric x column must STILL error.
+        use arrow::array::StringArray;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Utf8, true),
+            Field::new("y", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let spec = Kde2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n: 8,
+            extent: None,
+            groupby: None,
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        assert!(err.to_string().contains("must be numeric"), "err: {err}");
     }
 
     #[test]
