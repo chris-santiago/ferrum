@@ -57,6 +57,32 @@ Pass extra pytest args via `nox -s test -- -k test_name`.
 
 ---
 
+## API reference pages
+
+The split API reference pages under `docs/site/api/` (`chart.md`, `marks.md`,
+`composition.md`, `statistics.md`, etc.) are **generated** by
+`scripts/gen_api_pages.py` — do not hand-edit them. Run it after any change to the
+public API surface (new/renamed/moved `ferrum.__all__` symbol, new submodule):
+
+```
+unset CONDA_PREFIX && uv run --no-sync python scripts/gen_api_pages.py        # write pages
+unset CONDA_PREFIX && uv run --no-sync python scripts/gen_api_pages.py --check # report partition only
+```
+
+It partitions `ferrum.__all__` by each symbol's *defining* module (`obj.__module__`)
+and emits each page as `::: ferrum` with an explicit `members:` list, so the pages
+own the canonical **`ferrum.X`** anchors that the docs' `[ferrum.X]` autorefs target.
+This is load-bearing: the old monolithic `api/ferrum.md` (`::: ferrum`) is retired to
+a redirect stub precisely because it owned every `ferrum.X` anchor and forced every
+cross-reference onto one too-large-to-render page. If you add a public symbol whose
+defining module isn't mapped, the script prints it under `UNHOMED` — add a rule (or a
+new page in `PAGES`) and update the nav in `zensical.toml` + the `api/ferrum-toc.md`
+table. Verify with a **cache-cleared** build (`rm -rf site .cache && zensical build`),
+since autoref "unresolved" warnings are non-deterministic two-pass false positives —
+trust the final HTML (`grep 'href=.*api/ferrum/#' site/` should return nothing).
+
+---
+
 ## Releasing
 
 Use the `/release` skill. It bumps the version in `pyproject.toml` and `Cargo.toml`, generates a changelog from conventional commits, updates `docs/site/changelog.md`, and creates a GitHub release after confirmation. The `publish.yaml` workflow then builds manylinux/macOS/Windows wheels via `maturin-action` and publishes to PyPI via trusted OIDC publishing.
@@ -154,6 +180,7 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 | Code archaeology skill | `.claude/skills/code-archaeology/` |
 | **Code archaeology report** | **`design-docs/superpowers/followups/2026-05-15-code-archaeology.md`** |
 | Docs audit skill | `.claude/skills/audit-docs/` |
+| **API reference page generator** | **`scripts/gen_api_pages.py`** |
 | Regression test skill | `.claude/skills/regression-test/` |
 | Release skill | `.claude/skills/release/` |
 | Nox sessions | `noxfile.py` |
