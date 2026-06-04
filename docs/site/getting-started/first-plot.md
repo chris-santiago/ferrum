@@ -26,7 +26,7 @@ chart = (
     .mark_point()
     .encode(x="sepal_length", y="petal_length", color="species:N")
 )
-assert chart.to_svg().startswith("<svg")
+chart
 ```
 
 ![Iris scatter plot](img/first-plot_01.png)
@@ -57,7 +57,7 @@ trend = (
     .encode(x="sepal_length", y="petal_length", color="species:N")
 )
 chart = points + trend
-assert chart.to_svg().startswith("<svg")
+chart
 ```
 
 `groupby="species"` tells the smoother to fit a separate curve per group rather than one curve through all points. See the [Marks reference](../api/marks.md) for the full parameter list on each mark.
@@ -84,7 +84,7 @@ chart = (
     .mark_boxplot()
     .encode(x="species:N", y="sepal_length", color="species:N")
 )
-assert chart.to_svg().startswith("<svg")
+chart
 ```
 
 ![Boxplot by species](img/first-plot_03.png)
@@ -108,7 +108,7 @@ chart = (
     .encode(x="sepal_length", y="petal_length", color="species:N")
     .theme(fm.themes.publication)
 )
-assert chart.to_svg().startswith("<svg")
+chart
 ```
 
 ![Publication theme](img/first-plot_04.png)
@@ -136,14 +136,14 @@ chart = (
     .encode(x="sepal_length", y="petal_length", color="species:N")
     .labs(x="Sepal length (cm)", y="Petal length (cm)", title="Iris — sepal vs. petal")
 )
-assert chart.to_svg().startswith("<svg")
+chart
 ```
 
 To clip the axis range without modifying the encoding, use `.xlim()` and `.ylim()`:
 
 ```python
 chart = chart.xlim(4.5, 7.5).ylim(1.0, 6.5)
-assert chart.to_svg().startswith("<svg")
+chart
 ```
 
 Both are shortcuts: `.labs()` is equivalent to setting `title=` on each channel object; `.xlim()` / `.ylim()` are equivalent to `scale=fm.LinearScale(domain=[lo, hi])` on the positional channel. They are there for when you want the result quickly without remembering the full API path.

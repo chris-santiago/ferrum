@@ -54,7 +54,7 @@ chart = (
     .encode(x="sepal_length", y="petal_length", color="species:N")
     .theme(fm.themes.slate_citrus)
 )
-assert chart.to_svg().startswith("<svg")
+chart
 ```
 
 ![Slate Citrus theme](img/themes_01.png)
@@ -265,7 +265,7 @@ chart = (
     .mark_point()
     .encode(x="sepal_length", y="petal_length", color="species:N")
 )
-assert chart.to_svg().startswith("<svg")
+chart
 fm.set_default_theme(fm.themes.default)
 ```
 
@@ -300,7 +300,7 @@ with fm.theme_context(fm.themes.publication):
         .mark_point()
         .encode(x="sepal_length", y="petal_length", color="species:N")
     )
-    assert publication_chart.to_svg().startswith("<svg")
+    publication_chart
 assert fm.get_default_theme() == fm.themes.default
 ```
 
@@ -356,7 +356,7 @@ chart = (
     .encode(x="sepal_length", y="petal_length")
     .theme(brand)
 )
-assert chart.to_svg().startswith("<svg")
+chart
 ```
 
 ![Custom brand theme](img/themes_04.png)

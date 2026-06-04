@@ -42,7 +42,7 @@ trend = (
     .encode(x="sepal_length", y="petal_length", color="species:N")
 )
 layered = points + trend
-assert layered.to_svg().startswith("<svg")
+layered
 ```
 
 ![Layered scatter + trend](img/composition_01.png)
@@ -84,7 +84,7 @@ distribution = (
     .encode(x="species:N", y="sepal_length")
 )
 side_by_side = scatter | distribution
-assert side_by_side.to_svg().startswith("<svg")
+side_by_side
 ```
 
 ![Horizontal concat](img/composition_02.png)
@@ -103,7 +103,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
 scatter = fm.Chart(iris).mark_point().encode(x="sepal_length", y="petal_length", color="species:N")
 distribution = fm.Chart(iris).mark_boxplot().encode(x="species:N", y="sepal_length")
 stacked = scatter & distribution
-assert stacked.to_svg().startswith("<svg")
+stacked
 ```
 
 ![Vertical concat](img/composition_03.png)
@@ -125,7 +125,7 @@ a = fm.Chart(iris).mark_point().encode(x="sepal_length", y="petal_length")
 b = fm.Chart(iris).mark_point().encode(x="sepal_width", y="petal_width")
 c = fm.Chart(iris).mark_histogram().encode(x="sepal_length")
 trio = fm.HConcatChart([a, b, c], spacing=24.0)
-assert trio.to_svg().startswith("<svg")
+trio
 ```
 
 ![Three-chart HConcat](img/composition_04.png)
@@ -149,7 +149,7 @@ a = fm.Chart(iris).mark_point().encode(x="sepal_length", y="petal_length")
 b = fm.Chart(iris).mark_histogram().encode(x="sepal_length")
 c = fm.Chart(iris).mark_boxplot().encode(x="species:N", y="sepal_length")
 row = fm.hconcat(a, b, c, spacing=20.0)
-assert row.to_svg().startswith("<svg")
+row
 ```
 
 ![fm.hconcat convenience](img/composition_05.png)
@@ -172,7 +172,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
 chart_a = fm.Chart(iris).mark_point().encode(x="sepal_length", y="petal_length")
 chart_b = fm.Chart(iris).mark_point().encode(x="sepal_width", y="petal_width")
 combined = (chart_a | chart_b).share_scale(x="shared")
-assert combined.to_svg().startswith("<svg")
+combined
 ```
 
 ![Shared scales](img/composition_08.png)
@@ -201,7 +201,7 @@ center = (
 )
 top = fm.Chart(iris).mark_histogram().encode(x="sepal_length")
 joint = fm.JointChart(center, top=top)
-assert joint.to_svg().startswith("<svg")
+joint
 ```
 
 ![JointChart with marginal](img/composition_06.png)
@@ -235,7 +235,7 @@ grid = fm.RepeatChart(
     row=["sepal_length", "petal_length"],
     column=["sepal_width", "petal_width"],
 )
-assert grid.to_svg().startswith("<svg")
+grid
 ```
 
 ![RepeatChart 2x2 grid](img/composition_07.png)
@@ -333,7 +333,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
 scatter = fm.Chart(iris).mark_point(opacity=0.6).encode(x="sepal_length", y="petal_length", color="species:N")
 trend = fm.Chart(iris).mark_smooth(groupby="species").encode(x="sepal_length", y="petal_length", color="species:N")
 overlay = fm.LayerChart(scatter, trend)
-assert overlay.to_svg().startswith("<svg")
+overlay
 ```
 
 ![LayerChart: scatter + smooth overlay](img/composition_layerchart.png)
@@ -358,7 +358,7 @@ charts = [
     for col in ["sepal_length", "sepal_width", "petal_width"]
 ]
 grid = fm.ConcatChart(*charts, columns=2, spacing=15.0)
-assert grid.to_svg().startswith("<svg")
+grid
 ```
 
 ![ConcatChart: 3 panels in a 2-column wrapping grid](img/composition_concatchart.png)

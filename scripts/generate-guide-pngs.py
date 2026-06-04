@@ -1,7 +1,13 @@
 """Generate PNGs from guide-page code blocks for inline docs images.
 
-Reads each markdown file, extracts python code blocks that produce charts
-(detected by `assert <var>.to_svg()`), runs them, and saves PNGs.
+Reads each markdown file, extracts python code blocks that produce charts,
+runs them, and saves PNGs.
+
+A code block is treated as a chart block when it ends with a bare identifier
+line (the notebook display idiom, e.g. just ``chart`` on its own line). The
+last such bare identifier in the block names the variable that gets rendered.
+The variable must resolve to an object with a ``to_png`` method; blocks where
+it does not (or where no bare identifier is found) are skipped silently.
 
 Usage:
     uv run scripts/generate-guide-pngs.py
@@ -28,24 +34,31 @@ PAGES = [
     (GUIDE_DIR / "recipes.md", GUIDE_DIR / "img"),
 ]
 
+# Matches a line that is exactly a bare Python identifier (optionally indented).
+_BARE_IDENT_RE = re.compile(r"^[ \t]*([A-Za-z_]\w*)[ \t]*$", re.MULTILINE)
+
 
 def extract_blocks(md_text: str) -> list[tuple[str, str | None]]:
-    """Extract python code blocks. Returns list of (code, chart_var_name | None)."""
+    """Extract python code blocks. Returns list of (code, chart_var_name | None).
+
+    The chart variable is the last bare-identifier line in the block. If no
+    such line exists, the second element is None and the block will be skipped.
+    """
     blocks = []
     pattern = re.compile(r"```python\n(.*?)```", re.DOTALL)
     for match in pattern.finditer(md_text):
         code = match.group(1)
-        m = re.search(r"assert\s+(\w+)\.to_svg\(\)", code)
-        var_name = m.group(1) if m else None
+        matches = _BARE_IDENT_RE.findall(code)
+        var_name = matches[-1] if matches else None
         blocks.append((code, var_name))
     return blocks
 
 
-def run_block(code: str, var_name: str) -> bytes:
-    """Run a code block and return the PNG bytes from the chart variable.
+def run_block(code: str, var_name: str) -> bytes | None:
+    """Run a code block and return PNG bytes, or None if var is not a chart.
 
-    This runs trusted documentation code blocks from our own repo — the same
-    blocks that pytest-codeblocks already validates in CI.
+    Returns None when the named variable does not have a ``to_png`` method,
+    which causes the caller to skip the block silently.
     """
     ns: dict = {}
     compiled = compile(code, "<guide-block>", "exec")
@@ -53,10 +66,13 @@ def run_block(code: str, var_name: str) -> bytes:
     fn = types.FunctionType(compiled, ns)
     fn()
     chart_obj = ns[var_name]
+    if not hasattr(chart_obj, "to_png"):
+        return None
     return chart_obj.to_png()
 
 
 def main() -> None:
+    """Run the PNG generator for all guide pages."""
     total = 0
     ok = 0
 
@@ -80,6 +96,11 @@ def main() -> None:
 
             try:
                 png = run_block(code, var_name)
+                if png is None:
+                    # Bare identifier resolved to a non-chart object; skip silently.
+                    chart_idx -= 1
+                    total -= 1
+                    continue
                 out_path.write_bytes(png)
                 print(f"  [OK]   {out_name} ({len(png)} bytes)")
                 ok += 1

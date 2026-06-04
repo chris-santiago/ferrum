@@ -27,7 +27,7 @@ X_train, X_test, y_train, y_test = train_test_split(data.data, data.target, rand
 model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X_train, y_train)
 
 roc = fm.roc_chart(model, X_test, y_test)
-assert roc.to_svg().startswith("<svg")
+roc
 ```
 
 ![ROC curve](img/model-diagnostics_01.png)
@@ -45,7 +45,7 @@ X_train, X_test, y_train, y_test = train_test_split(data.data, data.target, rand
 model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X_train, y_train)
 
 cm = fm.confusion_matrix_chart(model, X_test, y_test, normalize="true")
-assert cm.to_svg().startswith("<svg")
+cm
 ```
 
 ![Confusion matrix](img/model-diagnostics_02.png)
@@ -63,7 +63,7 @@ X_train, X_test, y_train, y_test = train_test_split(data.data, data.target, rand
 model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X_train, y_train)
 
 importances = fm.importance_chart(model, X_test, y_test)
-assert importances.to_svg().startswith("<svg")
+importances
 ```
 
 ![Feature importance](img/model-diagnostics_03.png)
@@ -103,7 +103,7 @@ roc = fm.roc_chart(source)
 cm = fm.confusion_matrix_chart(source)
 importances = fm.importance_chart(source)
 report = (roc | cm) & importances
-assert report.to_svg().startswith("<svg")
+report
 ```
 
 ![Three-panel diagnostic report](img/model-diagnostics_04.png)
@@ -133,7 +133,7 @@ rf = RandomForestClassifier(n_estimators=20, random_state=0).fit(X_train, y_trai
 lr = LogisticRegression(max_iter=500, random_state=0).fit(X_train, y_train)
 
 chart = fm.roc_chart(rf, X_test, y_test, compare={"Logistic Regression": lr})
-assert chart.to_svg().startswith("<svg")
+chart
 ```
 
 ![Multi-model ROC comparison](img/model-diagnostics_07.png)
@@ -150,7 +150,7 @@ cms = fm.ModelSource.compare(
 roc = fm.roc_chart(cms)
 cal = fm.calibration_chart(cms)
 report = roc | cal
-assert report.to_svg().startswith("<svg")
+report
 ```
 
 [`ComparedModelSource`][ferrum.ComparedModelSource] computes derived data once per model and stamps a `model` column on the concatenated output, so charts can route `color="model"` automatically.
@@ -176,7 +176,7 @@ y_pred = model.predict(X_test)
 roc = fm.roc_chart(y_true=y_test, y_pred=y_proba)
 cm = fm.confusion_matrix_chart(y_true=y_test, y_pred=y_pred)
 report = roc | cm
-assert report.to_svg().startswith("<svg")
+report
 ```
 
 The two paths are mutually exclusive — pass either `model, X, y` or `y_true=, y_pred=`, not both.
@@ -214,7 +214,7 @@ model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X_train, y_t
 visualizer = fm.ROCVisualizer(model)
 visualizer.fit(X_train, y_train).score(X_test, y_test)
 chart = visualizer.show()
-assert chart.to_svg().startswith("<svg")
+chart
 ```
 
 ![ROC via visualizer](img/model-diagnostics_05.png)
@@ -277,7 +277,7 @@ chart = fm.roc_chart(
     mark={"line": {"stroke_width": 3}},
     properties={"title": "ROC — Random Forest"},
 )
-assert chart.to_svg().startswith("<svg")
+chart
 ```
 
 ![ROC with overrides](img/model-diagnostics_06.png)
