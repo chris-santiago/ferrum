@@ -144,9 +144,9 @@ takes only `scale`, not `raster`, matching today's `show_png`).
   deprecation path covered by its own test).
 - Docstrings for `to_*` state "returns … does not display"; `show_*` docstrings
   note the deprecation and the replacement.
-- Guide docs and recipe/example scripts reference `to_svg`/`to_png`/`to_html`; no
-  `show_svg`/`show_png` remain in prose or runnable examples except where
-  illustrating the deprecation.
+- Guide docs, `README.md`, and recipe/example/demo scripts reference
+  `to_svg`/`to_png`/`to_html`; no `show_svg`/`show_png` remain in prose or runnable
+  examples except where illustrating the deprecation.
 - `ferrum-spec.md` updated (dated note) to document the `to_*` surface and the
   deprecated aliases.
 
@@ -172,8 +172,26 @@ takes only `scale`, not `raster`, matching today's `show_png`).
   (mention `to_html` as the string form of the interactive export),
   `guide/{marks-encodings,figure-helpers,recipes,themes,model-diagnostics,
   composition}.md`, `getting-started/first-plot.md`, `changelog.md`.
-- **Recipe/example scripts (5):** `scripts/{generate-showcase-pngs,
+- **README:** `README.md` quick-start example (`chart.show_png()`) → `to_png()`.
+- **Recipe/example/demo scripts (8):** `scripts/{generate-showcase-pngs,
   render-recipe-pngs,generate-guide-pngs,gen_concept_pngs,profile_scatter}.py`
-  switch `show_png`/`show_svg` → `to_png`/`to_svg`.
+  plus the runnable demos `design-docs/demos/{demo_grammar_marks,demo_diagnostics}.py`
+  and `design-docs/themes/demo_themes.py` switch `show_png`/`show_svg` →
+  `to_png`/`to_svg`.
+- **Internal automation instructions:** `.claude/skills/ferrum-docstrings/SKILL.md`
+  (lists `show_svg`/`show_png` as "the output methods" — update to `to_*` so future
+  docstring work names the canonical methods) and `.claude/agents/viz-power-user.md`
+  (render-via-`show_svg()` instruction → `to_svg()`).
+- **Audit-gallery panels (decision):** the 40 `.claude/skills/audit-gallery/plots/*/
+  ferrum_panel.py` files (+ 10 `TODO.md` notes + `audit.py`) keep calling
+  `show_svg`/`show_png`. They ride
+  the deprecated aliases until alias removal — **out of scope for this change** (they
+  would otherwise emit `DeprecationWarning` per run; acceptable for internal tooling,
+  swept when the aliases are removed). Documented here so the warning surface is not
+  an undocumented surprise.
+- **Out of scope (historical records):** `design-docs/superpowers/{plans,specs,
+  audits}/*` are dated artifacts and are **not** rewritten. Rust doc-comments naming
+  `show_svg()` (`crates/ferrum-core/src/render/{png,binding}.rs`) are cosmetic and
+  left for an opportunistic touch (renderers are unchanged per §3).
 - **Tests (~139 files):** mechanically migrate output-assertion calls to `to_*`
   (scriptable), leaving one dedicated deprecation test on the `show_*` aliases.
