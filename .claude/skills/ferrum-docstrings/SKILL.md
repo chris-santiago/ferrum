@@ -156,7 +156,7 @@ When you add a new public class or function to `ferrum.__all__`:
 ## Ferrum-specific style notes
 
 - **Method naming**: marks are `mark_point`, `mark_line`, etc. — NOT `point`, `line`.
-- **Output methods**: `show_svg`, `show_png`, `save` — NOT `render_svg` on Chart objects (that's a free function in `_core`).
+- **Output methods**: `to_svg`, `to_png`, `to_html`, `save` — NOT `render_svg` on Chart objects (that's a free function in `_core`). (`show_svg`/`show_png` are deprecated aliases of `to_svg`/`to_png`.)
 - **Composition operators**: `|` is HConcat, `&` is VConcat, `+` is overlay/layer. Don't confuse "concatenation" with "overlay" in docstrings.
 - **Coord declarations**: `CoordFlip` works in Phase 8a+; `CoordPolar`/`Geo`/`Fixed`/`Cartesian` raise `NotImplementedError` and are deferred.
 - **Determinism**: any randomness uses seeded ChaCha8 RNG (per project CLAUDE.md). Document `seed` params honestly.

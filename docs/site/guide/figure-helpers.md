@@ -49,7 +49,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
     species=pl.Series([raw.target_names[t] for t in raw.target])
 )
 chart = fm.displot(iris, x="sepal_length", kind="hist")
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![displot histogram](img/figure-helpers_01.png)
@@ -70,7 +70,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
     species=pl.Series([raw.target_names[t] for t in raw.target])
 )
 chart = fm.catplot(iris, x="species", y="sepal_length", kind="box")
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![catplot box](img/figure-helpers_02.png)
@@ -91,7 +91,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
     species=pl.Series([raw.target_names[t] for t in raw.target])
 )
 chart = fm.relplot(iris, x="sepal_length", y="petal_length", hue="species", kind="scatter")
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![relplot scatter](img/figure-helpers_03.png)
@@ -112,7 +112,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
     species=pl.Series([raw.target_names[t] for t in raw.target])
 )
 chart = fm.lmplot(iris, x="sepal_length", y="petal_length")
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![lmplot](img/figure-helpers_04.png)
@@ -129,7 +129,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
     species=pl.Series([raw.target_names[t] for t in raw.target])
 )
 chart = fm.regplot(iris, x="sepal_length", y="petal_length", method="lm", ci=95)
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![regplot](img/figure-helpers_11.png)
@@ -146,7 +146,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
     species=pl.Series([raw.target_names[t] for t in raw.target])
 )
 chart = fm.residplot(iris, x="sepal_length", y="petal_length")
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![residplot](img/figure-helpers_05.png)
@@ -167,7 +167,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
     species=pl.Series([raw.target_names[t] for t in raw.target])
 )
 chart = fm.pairplot(iris, vars=["sepal_length", "petal_length"], hue="species")
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![pairplot](img/figure-helpers_06.png)
@@ -189,7 +189,7 @@ table = pl.DataFrame({
     "d": rng.standard_normal(6),
 })
 chart = fm.heatmap(table, annot=True, cmap="blues")
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![heatmap](img/figure-helpers_07.png)
@@ -210,7 +210,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
     species=pl.Series([raw.target_names[t] for t in raw.target])
 )
 chart = fm.jointplot(iris, x="sepal_length", y="petal_length", kind="scatter", marginal_kind="hist")
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![jointplot](img/figure-helpers_08.png)
@@ -231,7 +231,7 @@ df = pl.DataFrame({"actual": rng.uniform(0, 10, 60).tolist(), "predicted": rng.u
 scatter = fm.Chart(df).mark_point(opacity=0.7).encode(x="actual:Q", y="predicted:Q")
 perfect_fit = fm.annotate_abline(slope=1, intercept=0, stroke="red", stroke_dash=[4, 2])
 chart = scatter + perfect_fit
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 The reference line is a useful overlay on predicted-vs-actual plots (identity line at slope=1, intercept=0), residual diagnostics (zero reference line at slope=0), or any chart that needs a visual reference. Optional keyword arguments `stroke=`, `stroke_width=`, and `stroke_dash=` control the line appearance.
@@ -250,7 +250,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
     species=pl.Series([raw.target_names[t] for t in raw.target])
 )
 chart = fm.displot(iris, x="sepal_length", kind="hist").properties(title="Sepal length distribution")
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![displot with title](img/figure-helpers_09.png)
@@ -294,7 +294,7 @@ iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_leng
 fit = fm.lmplot(iris, x="sepal_length", y="petal_length")
 distribution = fm.displot(iris, x="sepal_length", kind="hist")
 report = fit | distribution
-assert report.show_svg().startswith("<svg")
+assert report.to_svg().startswith("<svg")
 ```
 
 ![lmplot | displot composition](img/figure-helpers_10.png)

@@ -33,7 +33,7 @@ chart.interactive()
 
 <iframe src="../assets/demos/01_basic_interactive.html" width="100%" height="450" style="border:1px solid #e0e0e0; border-radius:4px;" loading="lazy"></iframe>
 
-The chart object is unchanged — `.interactive()` switches the render target from SVG to a WASM canvas widget. The same chart still works with `.show_svg()`, `.save("out.svg")`, and every other static render path. Selections and zoom/pan are silently ignored in static output.
+The chart object is unchanged — `.interactive()` switches the render target from SVG to a WASM canvas widget. The same chart still works with `.to_svg()`, `.save("out.svg")`, and every other static render path. Selections and zoom/pan are silently ignored in static output.
 
 ## Selections
 
@@ -306,6 +306,12 @@ chart.interactive().save("dashboard.html")
 
 The HTML file inlines the WASM renderer and the scene data — no external dependencies, no server required. Open it in any modern browser.
 
+When you need the page as a string rather than a file (templating, serving from a web app, embedding in another document), [`.to_html()`][ferrum.Chart.to_html] returns the byte-identical HTML in memory — the string twin of `.save("dashboard.html")`:
+
+```python
+html = chart.interactive().to_html()
+```
+
 ## Performance at scale
 
 The interactive renderer uses two optimizations that keep large charts responsive:
@@ -317,7 +323,7 @@ These are transparent — you don't need to opt in. A 1M-point scatter with tool
 
 ## Static fallback
 
-A chart with selections renders normally in static output — `.show_svg()`, `.save("plot.png")`, `.save("plot.svg")` all work. Selections, conditional encodings, and zoom/pan are silently ignored. This means you can build one chart that serves both a notebook dashboard (interactive) and a report figure (static) without maintaining two specs.
+A chart with selections renders normally in static output — `.to_svg()`, `.save("plot.png")`, `.save("plot.svg")` all work. Selections, conditional encodings, and zoom/pan are silently ignored. This means you can build one chart that serves both a notebook dashboard (interactive) and a report figure (static) without maintaining two specs.
 
 ## Where to go next
 

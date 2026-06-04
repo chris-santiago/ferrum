@@ -1525,16 +1525,40 @@ RenderConfig(
 
 #### Chart output methods
 
+The output surface follows one convention: `to_*` returns an in-memory value,
+`show()` displays, `save(path)` writes to disk.
+
 ```
-chart.show(*, renderer=None)                  # auto-detect environment
-chart.show_svg() -> str
-chart.show_png() -> bytes
-chart.show_html() -> str
+chart.show(*, renderer=None)                  # auto-detect environment, display
+chart.to_svg() -> str                         # in-memory SVG markup
+chart.to_png() -> bytes                        # in-memory PNG bytes
+chart.to_html() -> str                         # in-memory interactive HTML
+                                               #   (byte-identical to save('.html'))
 chart.to_spec() -> ChartSpec                  # internal dataclass
 chart.to_json(*, indent=None) -> str
 chart.save(path, *, format=None, **render_kwargs)
 chart.pipe(fn, *args, **kwargs) -> Any        # apply a function to self
 ```
+
+These methods exist on `Chart` and on every composition view (`HConcatChart`,
+`VConcatChart`, `LayerChart`, `ConcatChart`, `JointChart`, `RepeatChart`,
+`ClusterMapChart`). On composition views `to_png` is scale-only (it accepts
+`scale=` but no `raster` argument).
+
+**Deprecated aliases.** `show_svg()` and `show_png()` are retained as deprecated
+aliases that forward to `to_svg()` / `to_png()` and emit a `DeprecationWarning`.
+They are slated for removal after `0.16.0`. New code should call `to_svg()` /
+`to_png()` / `to_html()`.
+
+> **Note (2026-06-04):** The in-memory output methods were renamed
+> `show_svg()` -> `to_svg()` and `show_png()` -> `to_png()`, and `to_html() -> str`
+> was added (returns the interactive HTML string, byte-identical to
+> `save('.html')`). This unifies the surface on the `to_*` = in-memory-value
+> convention, leaving `show()` for display and `save(path)` for disk. The old
+> `show_svg`/`show_png` names remain as deprecated aliases that forward to the
+> new methods and emit a `DeprecationWarning`; they are slated for removal after
+> `0.16.0`. The rename applies to `Chart` and all composition views; on
+> composition views `to_png` is scale-only (no `raster` argument).
 
 #### Environment detection order for `.show()`
 

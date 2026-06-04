@@ -22,7 +22,7 @@ chart = (
     .mark_point()
     .encode(x="sepal_length", y="petal_length", color="species:N")
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Basic scatter](img/marks-encodings_01.png)
@@ -121,7 +121,7 @@ chart = (
         color=fm.Color("species", type="N", title="Species"),
     )
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Explicit encoding](img/marks-encodings_02.png)
@@ -213,7 +213,7 @@ chart = (
         y="score:Q",
     )
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Log scale axis](img/marks-encodings_10.png)
@@ -237,7 +237,7 @@ chart = (
         y="petal_length:Q",
     )
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Axis limits](img/marks-encodings_11.png)
@@ -347,7 +347,7 @@ chart = (
         size="sepal_width",
     )
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Scatter with size](img/marks-encodings_03.png)
@@ -413,7 +413,7 @@ chart = (
     .mark_density(bandwidth="scott")
     .encode(x="sepal_length")
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![KDE density](img/marks-encodings_04.png)
@@ -438,7 +438,7 @@ chart = (
     .mark_smooth(method="loess", groupby="species")
     .encode(x="sepal_length", y="petal_length", color="species:N")
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Grouped LOESS](img/marks-encodings_05.png)
@@ -474,7 +474,7 @@ chart = (
     .mark_boxplot()
     .encode(x="species:N", y="sepal_length")
 )
-assert chart.show_svg().startswith("<svg")
+assert chart.to_svg().startswith("<svg")
 ```
 
 ![Boxplot by species](img/marks-encodings_06.png)
@@ -632,7 +632,7 @@ trend = (
     .encode(x="sepal_length", y="petal_length", color="species:N")
 )
 combined = points + trend
-assert combined.show_svg().startswith("<svg")
+assert combined.to_svg().startswith("<svg")
 ```
 
 ![Points + LOESS trend](img/marks-encodings_07.png)

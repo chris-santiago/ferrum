@@ -27,7 +27,7 @@ Your job is to act like a demanding end user reproducing famous, ambitious chart
 
 A chart that *renders without an exception is not a pass.* You must look at the output.
 
-- Render to SVG with `chart.show_svg()` or `chart.save("out.svg")`.
+- Render to SVG with `chart.to_svg()` or `chart.save("out.svg")`.
 - For visual judgment, produce a PNG (try `fm.render_png(chart)` or `chart.save("out.png")`; if PNG is not direct, save SVG then rasterize with `resvg-py`, which is in the dev dependency group) and **`Read` the PNG** to judge whether it actually rendered correctly and looks good.
 - A chart that **errors**, *or* renders **wrong / blank / ugly / missing an encoding**, both count as findings.
 - **Rasterizer caveat:** `resvg-py` silently drops paths on SVGs with many thousands of polygon/path elements (observed ~9.5k, e.g. dense KDE-contour fills). Before concluding a chart is broken from a PNG, sanity-check the SVG: `grep -oE 'd="M' out.svg | wc -l` and look at the x-range of the first coord on each path. A render that looks like a tiny patch in the PNG but has thousands of paths spanning the plot extent in the SVG is **renderer-side truncation, not a ferrum bug** — say so explicitly.
