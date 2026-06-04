@@ -1398,3 +1398,41 @@ class TestKdeIntegerCoercion:
         df = pl.DataFrame({"x": ["a", "b", "c", "d"] * 10})
         with pytest.raises(Exception, match="numeric|Float64"):
             fm.Chart(df).mark_density().encode(x="x").to_svg()
+
+
+class TestQqHexIntegerCoercion:
+    """Regression: stat_qq and stat_hex hard-errored on integer columns.
+
+    Same root cause as the KDE fix — these transforms rejected any non-Float64
+    column with "column '<x>' must be Float64", so mark_qq / mark_hex on integer
+    data raised instead of rendering. The fix routes them through
+    numeric_util::coerce_to_float64. (stat_bin_2d shares the fix and is covered
+    by a Rust unit test; its only Python entry point, jointplot(kind="hist"),
+    has a separate pre-existing bug unrelated to dtype.)
+    """
+
+    def test_mark_qq_renders_on_int_column(self):
+        """mark_qq on an Int64 column renders instead of raising."""
+        df = pl.DataFrame({"val": [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]})
+        svg = fm.Chart(df).mark_qq().encode(x="val").to_svg()
+        assert svg.lstrip().startswith("<svg")
+
+    def test_mark_hex_renders_on_int_columns(self):
+        """mark_hex on Int64 x and y renders instead of raising."""
+        df = pl.DataFrame({"x": list(range(40)), "y": list(range(40, 80))})
+        svg = fm.Chart(df).mark_hex().encode(x="x", y="y").to_svg()
+        assert svg.lstrip().startswith("<svg")
+
+    def test_mark_hex_int_aggregate_field_renders(self):
+        """mark_hex with an integer aggregate field coerces and renders."""
+        df = pl.DataFrame(
+            {"x": list(range(40)), "y": list(range(40, 80)), "w": list(range(40))}
+        )
+        svg = fm.Chart(df).mark_hex(aggregate="mean", field="w").encode(x="x", y="y").to_svg()
+        assert svg.lstrip().startswith("<svg")
+
+    def test_mark_qq_string_column_still_raises(self):
+        """A non-numeric qq field must still raise, not coerce."""
+        df = pl.DataFrame({"val": ["a", "b", "c", "d"] * 5})
+        with pytest.raises(Exception, match="numeric|Float64"):
+            fm.Chart(df).mark_qq().encode(x="val").to_svg()

@@ -27,6 +27,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::transform::numeric_util::coerce_to_float64;
+
 fn default_aggregate() -> String {
     "count".into()
 }
@@ -89,26 +91,14 @@ fn cube_round(q_frac: f64, r_frac: f64) -> (i64, i64) {
 }
 
 pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    // 1. Validate columns exist + Float64.
+    // 1. Validate columns exist + coerce to Float64.
     let schema = batch.schema();
     let xi = schema
         .index_of(&spec.x)
         .map_err(|_| PyValueError::new_err(format!("stat_hex: column '{}' not found", spec.x)))?;
-    if schema.field(xi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_hex: column '{}' must be Float64",
-            spec.x
-        )));
-    }
     let yi = schema
         .index_of(&spec.y)
         .map_err(|_| PyValueError::new_err(format!("stat_hex: column '{}' not found", spec.y)))?;
-    if schema.field(yi).data_type() != &DataType::Float64 {
-        return Err(PyValueError::new_err(format!(
-            "stat_hex: column '{}' must be Float64",
-            spec.y
-        )));
-    }
 
     // Validate aggregate.
     let agg = spec.aggregate.as_str();
@@ -126,42 +116,19 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         )));
     }
 
-    // Validate field column if present.
-    let field_arr: Option<&Float64Array> = match &spec.field {
+    // Validate + coerce field column if present (owned Float64Array).
+    let field_arr: Option<Float64Array> = match &spec.field {
         None => None,
         Some(name) => {
             let fi = schema.index_of(name).map_err(|_| {
                 PyValueError::new_err(format!("stat_hex: column '{}' not found", name))
             })?;
-            if schema.field(fi).data_type() != &DataType::Float64 {
-                return Err(PyValueError::new_err(format!(
-                    "stat_hex: column '{}' must be Float64",
-                    name
-                )));
-            }
-            Some(
-                batch
-                    .column(fi)
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .ok_or_else(|| PyValueError::new_err(format!(
-                        "stat_hex: expected Float64Array for field column '{}'", name)))?,
-            )
+            Some(coerce_to_float64(batch.column(fi), "stat_hex", name)?)
         }
     };
 
-    let xa = batch
-        .column(xi)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_hex: expected Float64Array for column '{}'", spec.x)))?;
-    let ya = batch
-        .column(yi)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_hex: expected Float64Array for column '{}'", spec.y)))?;
+    let xa = coerce_to_float64(batch.column(xi), "stat_hex", &spec.x)?;
+    let ya = coerce_to_float64(batch.column(yi), "stat_hex", &spec.y)?;
 
     // Filter (x, y) pairs: drop null/NaN. Capture field in lockstep when present.
     // For "mean"/"sum", drop rows where field is null/NaN as well.
@@ -178,7 +145,7 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
         if xv.is_nan() || yv.is_nan() {
             continue;
         }
-        let fv = match field_arr {
+        let fv = match &field_arr {
             None => 0.0,
             Some(fa) => {
                 if fa.is_null(i) {
@@ -629,6 +596,103 @@ mod tests {
         // dx=0.4, dy=0.2, dz=0.4 → dx>dy true, dx>dz false; dy>dz false → rz = -rx-ry = 1.
         let (q, r) = cube_round(0.4, 0.4);
         assert_eq!((q, r), (0, 1), "cube_round(0.4, 0.4) → (q=0, r=1) per RBG");
+    }
+
+    #[test]
+    fn hex_int64_xy_columns_are_coerced() {
+        // Int64 x AND y must be coerced, not rejected. Output schema unchanged.
+        use arrow::array::Int64Array;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Int64, true),
+            Field::new("y", DataType::Int64, true),
+        ]));
+        let xs: Vec<i64> = vec![0, 0, 0, 5, 5, 5];
+        let ys: Vec<i64> = vec![0, 0, 0, 5, 5, 5];
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(xs)),
+                Arc::new(Int64Array::from(ys)),
+            ],
+        )
+        .unwrap();
+        let spec = HexSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bin_size: Some(1.0),
+            aggregate: "count".into(),
+            field: None,
+            name: None,
+        };
+        let out = apply(&spec, &b).expect("Int64 hex should succeed");
+        assert_eq!(out.num_columns(), 4);
+        assert!(out.num_rows() > 0);
+        assert_eq!(out.num_rows() % 6, 0);
+    }
+
+    #[test]
+    fn hex_int64_aggregate_field_is_coerced() {
+        // aggregate="mean" with an Int64 `field` column exercises the owned-field path.
+        use arrow::array::Int64Array;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("v", DataType::Int64, true),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Int64Array::from(vec![10_i64, 20, 30])),
+            ],
+        )
+        .unwrap();
+        let spec = HexSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bin_size: Some(1.0),
+            aggregate: "mean".into(),
+            field: Some("v".into()),
+            name: None,
+        };
+        let out = apply(&spec, &b).expect("Int64 field hex should succeed");
+        assert_eq!(out.num_columns(), 4);
+        assert!(out.num_rows() > 0);
+        assert_eq!(out.num_rows() % 6, 0);
+    }
+
+    #[test]
+    fn hex_string_column_still_errors() {
+        use arrow::array::StringArray;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Utf8, true),
+            Field::new("y", DataType::Float64, true),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b"])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            ],
+        )
+        .unwrap();
+        let spec = HexSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bin_size: Some(1.0),
+            aggregate: "count".into(),
+            field: None,
+            name: None,
+        };
+        let err = apply(&spec, &b).unwrap_err();
+        assert!(
+            err.to_string().contains("must be numeric"),
+            "err: {err}"
+        );
     }
 
     #[test]
