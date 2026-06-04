@@ -83,7 +83,7 @@ def test_chart_to_json_round_trip():
 def test_chart_data_input_pyarrow_table():
     tbl = pa.table({"a": [1, 2], "b": [3, 4]})
     c = Chart(tbl).mark_point().encode(x="a", y="b")
-    # show_svg actually exercises the coerce path; smoke-test only here
+    # to_svg actually exercises the coerce path; smoke-test only here
     spec = c.to_spec()
     assert spec.mark == "point"
 
@@ -109,7 +109,7 @@ def test_chart_data_input_numpy_1d_raises():
     np = pytest.importorskip("numpy")
     arr = np.array([1, 2, 3])
     with pytest.raises(TypeError, match="1D numpy"):
-        Chart(arr).mark_point().show_svg()  # show_svg triggers coerce
+        Chart(arr).mark_point().to_svg()  # to_svg triggers coerce
 
 
 def test_chart_properties_sets_metadata():
@@ -209,7 +209,7 @@ def test_layered_smooth_renders_paths():
     points = Chart(df).mark_point().encode(x="x", y="y")
     trend = Chart(df).mark_smooth(method="lm").encode(x="x", y="y")
     chart = points + trend
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     # ferrum renders line marks as <polyline>, not <path>.
     line_count = svg.count("<polyline")
     assert line_count > 0, (
@@ -240,7 +240,7 @@ def test_layered_smooth_scatter_count_matches_original_data():
     )
     points = Chart(df).mark_point().encode(x="x", y="y")
     trend = Chart(df).mark_smooth(method="lm").encode(x="x", y="y")
-    svg = (points + trend).show_svg()
+    svg = (points + trend).to_svg()
     circle_count = svg.count("<circle")
     assert circle_count == n, (
         f"Expected {n} scatter circles (original row count), got {circle_count}.\n"
@@ -268,7 +268,7 @@ def test_layered_smooth_real_column_names_do_not_crash():
     )
     points = Chart(df).mark_point().encode(x="sepal_length", y="petal_length")
     trend = Chart(df).mark_smooth(method="lm").encode(x="sepal_length", y="petal_length")
-    svg = (points + trend).show_svg()  # must not raise
+    svg = (points + trend).to_svg()  # must not raise
     assert svg.count("<circle") == n, f"Expected {n} scatter circles, got {svg.count('<circle')}."
     assert svg.count("<polyline") > 0, "Expected at least one smooth trend line."
 
@@ -305,7 +305,7 @@ def test_layered_smooth_grouped_by_color_correct_counts():
         .mark_smooth(method="lm", groupby="species")
         .encode(x="x", y="y", color="species:N")
     )
-    svg = (points + trend).show_svg()
+    svg = (points + trend).to_svg()
     # The SVG also contains 3 legend circles (one per group), so total
     # circles = data circles + legend circles.
     n_groups = 3

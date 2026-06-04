@@ -164,7 +164,7 @@ def test_detail_string_splits_into_n_polylines(
 
     This test is GREEN today — baseline for regression.
     """
-    svg = fm.Chart(three_group_str_df).mark_line().encode(x="x:Q", y="y:Q", detail="g:N").show_svg()
+    svg = fm.Chart(three_group_str_df).mark_line().encode(x="x:Q", y="y:Q", detail="g:N").to_svg()
     n = _polyline_count(svg)
     assert n == 3, (
         "encode(detail='g:N') with 3 string groups must produce 3 polylines, "
@@ -185,13 +185,13 @@ def test_detail_string_via_detail_class(
     This test is GREEN today — baseline for regression.
     """
     svg_shorthand = (
-        fm.Chart(three_group_str_df).mark_line().encode(x="x:Q", y="y:Q", detail="g:N").show_svg()
+        fm.Chart(three_group_str_df).mark_line().encode(x="x:Q", y="y:Q", detail="g:N").to_svg()
     )
     svg_class = (
         fm.Chart(three_group_str_df)
         .mark_line()
         .encode(x="x:Q", y="y:Q", detail=Detail("g"))
-        .show_svg()
+        .to_svg()
     )
     n_shorthand = _polyline_count(svg_shorthand)
     n_class = _polyline_count(svg_class)
@@ -212,7 +212,7 @@ def test_detail_string_no_color_legend(
 
     This test is GREEN today — baseline for regression.
     """
-    svg = fm.Chart(three_group_str_df).mark_line().encode(x="x:Q", y="y:Q", detail="g:N").show_svg()
+    svg = fm.Chart(three_group_str_df).mark_line().encode(x="x:Q", y="y:Q", detail="g:N").to_svg()
     for label in ("a", "b", "c"):
         assert not _has_legend_label(svg, label), (
             f"Group label '{label}' appeared as an SVG text node.  "
@@ -246,7 +246,7 @@ def test_detail_string_color_legend_only_for_color_channel(
         fm.Chart(df)
         .mark_line()
         .encode(x="x:Q", y="y:Q", color="class_:N", detail="sample_id:N")
-        .show_svg()
+        .to_svg()
     )
     # Color legend entries must appear.
     assert _has_legend_label(svg, "A"), (
@@ -283,7 +283,7 @@ def test_detail_string_parallel_coordinates_style(
         fm.Chart(parallel_coords_df)
         .mark_line()
         .encode(x="feature:N", y="value:Q", detail="sample_id:N")
-        .show_svg()
+        .to_svg()
     )
     n = _polyline_count(svg)
     assert n == 5, (
@@ -324,7 +324,7 @@ def test_detail_integer_splits_into_n_polylines(
     TODAY: ``_polyline_count(svg) == 1`` (tangled).
     AFTER FIX: ``_polyline_count(svg) == 3``.
     """
-    svg = fm.Chart(three_group_int_df).mark_line().encode(x="x:Q", y="y:Q", detail="g:N").show_svg()
+    svg = fm.Chart(three_group_int_df).mark_line().encode(x="x:Q", y="y:Q", detail="g:N").to_svg()
     n = _polyline_count(svg)
     assert n == 3, (
         f"encode(detail='g:N') with an Int64 column and 3 groups must produce "
@@ -349,7 +349,7 @@ def test_detail_integer_no_color_legend(
     TODAY: only 1 polyline is produced (detail is a no-op for Int64).
     AFTER FIX: 3 polylines, no legend labels for group values 1/2/3.
     """
-    svg = fm.Chart(three_group_int_df).mark_line().encode(x="x:Q", y="y:Q", detail="g:N").show_svg()
+    svg = fm.Chart(three_group_int_df).mark_line().encode(x="x:Q", y="y:Q", detail="g:N").to_svg()
     n = _polyline_count(svg)
     assert n == 3, (
         f"Int64 detail column must split into 3 polylines, got {n}.  "
@@ -380,9 +380,9 @@ def test_detail_integer_interleaved_rows_still_groups_correctly(
     whereas 3 correct polylines each contain 3 collinear points.
     """
     svg_with_detail = (
-        fm.Chart(three_group_int_df).mark_line().encode(x="x:Q", y="y:Q", detail="g:N").show_svg()
+        fm.Chart(three_group_int_df).mark_line().encode(x="x:Q", y="y:Q", detail="g:N").to_svg()
     )
-    svg_no_detail = fm.Chart(three_group_int_df).mark_line().encode(x="x:Q", y="y:Q").show_svg()
+    svg_no_detail = fm.Chart(three_group_int_df).mark_line().encode(x="x:Q", y="y:Q").to_svg()
     n_detail = _polyline_count(svg_with_detail)
     n_no_detail = _polyline_count(svg_no_detail)
     # Without detail: exactly 1 tangled polyline.
@@ -415,7 +415,7 @@ def test_detail_bool_splits_into_two_polylines(
     AFTER FIX: 2 polylines (True group, False group).
     """
     svg = (
-        fm.Chart(two_group_bool_df).mark_line().encode(x="x:Q", y="y:Q", detail="flag:N").show_svg()
+        fm.Chart(two_group_bool_df).mark_line().encode(x="x:Q", y="y:Q", detail="flag:N").to_svg()
     )
     n = _polyline_count(svg)
     assert n == 2, (

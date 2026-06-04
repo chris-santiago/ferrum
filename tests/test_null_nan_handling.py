@@ -104,7 +104,7 @@ def test_null_x_no_crash(mark_name: str) -> None:
     """Marks render without crashing when x column contains nulls."""
     # All marks can use df_with_nulls (it has both cat and numeric columns)
     chart = _build_chart(mark_name, df_with_nulls)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     _assert_valid_svg(svg, f"null_x/{mark_name}")
 
 
@@ -117,7 +117,7 @@ def test_null_x_no_crash(mark_name: str) -> None:
 def test_null_y_no_crash(mark_name: str) -> None:
     """Marks render without crashing when y column contains nulls."""
     chart = _build_chart(mark_name, df_with_nulls)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     _assert_valid_svg(svg, f"null_y/{mark_name}")
 
 
@@ -134,7 +134,7 @@ _NAN_MARKS = [m for m in ALL_MARKS if m not in _CAT_MARKS]
 def test_nan_x_no_crash(mark_name: str) -> None:
     """Marks render without crashing when x column contains NaN."""
     chart = _build_chart(mark_name, df_with_nans)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     _assert_valid_svg(svg, f"nan_x/{mark_name}")
 
 
@@ -147,7 +147,7 @@ def test_nan_x_no_crash(mark_name: str) -> None:
 def test_nan_y_no_crash(mark_name: str) -> None:
     """Marks render without crashing when y column contains NaN."""
     chart = _build_chart(mark_name, df_with_nans)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     _assert_valid_svg(svg, f"nan_y/{mark_name}")
 
 
@@ -169,7 +169,7 @@ def test_all_null_no_crash(mark_name: str) -> None:
     mark_method = getattr(chart, mark_name)
     chart = mark_method()
     chart = chart.encode(**enc_kwargs)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     _assert_valid_svg(svg, f"all_null/{mark_name}")
 
 
@@ -201,5 +201,5 @@ def test_null_in_channel_no_crash(mark_name: str, enc_kwargs: dict) -> None:
     mark_method = getattr(chart, mark_name)
     chart = mark_method()
     chart = chart.encode(**enc_kwargs)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     _assert_valid_svg(svg, f"null_channel/{mark_name}")

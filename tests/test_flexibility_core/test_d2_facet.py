@@ -231,7 +231,7 @@ def test_two_way_facet_produces_nine_panels(grid_3x3_df: pl.DataFrame) -> None:
         .mark_point()
         .encode(x="x:Q", y="y:Q")
         .facet(row="row_cat", col="col_cat")
-        .show_svg()
+        .to_svg()
     )
 
     circle_count = _circles(svg)
@@ -271,7 +271,7 @@ def test_two_way_facet_explicit_nrows_ncols(grid_3x3_df: pl.DataFrame) -> None:
         .mark_point()
         .encode(x="x:Q", y="y:Q")
         .facet(row="row_cat", col="col_cat", nrows=3, ncols=3)
-        .show_svg()
+        .to_svg()
     )
 
     circle_count = _circles(svg)
@@ -309,14 +309,14 @@ def test_two_way_facet_row_labels_absent_from_col_only_facet(
         .mark_point()
         .encode(x="x:Q", y="y:Q")
         .facet(row="row_cat", col="col_cat")
-        .show_svg()
+        .to_svg()
     )
     svg_col_only = (
         fm.Chart(grid_3x3_df)
         .mark_point()
         .encode(x="x:Q", y="y:Q")
         .facet(col="col_cat", ncols=3)
-        .show_svg()
+        .to_svg()
     )
 
     labels_grid = _panel_strip_labels(svg_grid)
@@ -367,7 +367,7 @@ def test_faceted_density_peak_differs_between_panels(
     Observable check: the KDE path peak x-position must DIFFER between the two
     panels (by at least 100 pixels on a 640-pixel canvas).
     """
-    svg = fm.Chart(bimodal_facet_df).mark_density().encode(x="val:Q").facet(col="group").show_svg()
+    svg = fm.Chart(bimodal_facet_df).mark_density().encode(x="val:Q").facet(col="group").to_svg()
 
     panel_paths = _paths(svg)
     assert len(panel_paths) >= 2, (
@@ -414,7 +414,7 @@ def test_faceted_density_both_panels_have_marks(bimodal_facet_df: pl.DataFrame) 
     This is a looser guard than test_faceted_density_peak_differs_between_panels
     and will catch the case where panels are entirely empty.
     """
-    svg = fm.Chart(bimodal_facet_df).mark_density().encode(x="val:Q").facet(col="group").show_svg()
+    svg = fm.Chart(bimodal_facet_df).mark_density().encode(x="val:Q").facet(col="group").to_svg()
 
     panel_labels = [l for l in _panel_strip_labels(svg) if l in ("low", "high")]
     assert "low" in panel_labels and "high" in panel_labels, (
@@ -462,7 +462,7 @@ def test_faceted_layered_chart_second_layer_visible(
     layer1 = fm.Chart(df_a).mark_point().encode(x="x:Q", y="y:Q")
     layer2 = fm.Chart(df_b).mark_point().encode(x="highlight_x:Q", y="highlight_y:Q")
 
-    svg = (layer1 + layer2).facet(col="group").show_svg()
+    svg = (layer1 + layer2).facet(col="group").to_svg()
 
     circle_count = _circles(svg)
     assert circle_count == 6, (
@@ -501,7 +501,7 @@ def test_faceted_layered_chart_second_layer_present_per_panel(
     layer1 = fm.Chart(df_a).mark_point().encode(x="x:Q", y="y:Q")
     layer2 = fm.Chart(df_b).mark_point().encode(x="highlight_x:Q", y="highlight_y:Q")
 
-    svg = (layer1 + layer2).facet(col="group").show_svg()
+    svg = (layer1 + layer2).facet(col="group").to_svg()
 
     labels = _panel_strip_labels(svg)
     assert "A" in labels and "B" in labels, (
@@ -589,8 +589,8 @@ def test_faceted_independent_y_produces_distinct_tick_domains(
             "test_faceted_chart_has_share_scale_method) first."
         )
 
-    svg_independent = faceted.share_scale(y="independent").show_svg()
-    svg_shared = faceted.show_svg()  # default is shared
+    svg_independent = faceted.share_scale(y="independent").to_svg()
+    svg_shared = faceted.to_svg()  # default is shared
 
     ticks_independent = _y_tick_labels(svg_independent)
     ticks_shared = _y_tick_labels(svg_shared)
@@ -675,7 +675,7 @@ def test_faceted_independent_y_respects_format_override(
         .encode(x="x:Q", y=fm.Y("y", format=".0%"))
         .facet(col="group")
         .share_scale(y="independent")
-        .show_svg()
+        .to_svg()
     )
 
     # Collect all text elements with text-anchor="end" (y-axis labels).
@@ -723,7 +723,7 @@ def test_faceted_shared_y_produces_identical_per_panel_domains(
         .mark_point()
         .encode(x="x:Q", y="y:Q")
         .facet(col="group")
-        .show_svg()
+        .to_svg()
     )
 
     float_ticks = [float(t) for t in _y_tick_labels(svg)]

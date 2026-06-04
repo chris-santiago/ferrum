@@ -56,7 +56,7 @@ def test_type_underscore_validation_fires():
 def test_aggregate_auto_groupby_renders():
     """encode(x='cat:N', y='mean(val):Q') does not crash and renders bars."""
     df = pl.DataFrame({"cat": ["a", "b", "a", "b"], "val": [1.0, 2.0, 3.0, 4.0]})
-    svg = fm.Chart(df).mark_bar().encode(x="cat:N", y="mean(val):Q").show_svg()
+    svg = fm.Chart(df).mark_bar().encode(x="cat:N", y="mean(val):Q").to_svg()
     assert "<rect" in svg, "No <rect> elements — bars were not rendered"
 
 
@@ -70,14 +70,14 @@ def test_aggregate_auto_groupby_multiple_dims():
         }
     )
     # Two non-aggregate fields → groupby should be ['cat', 'grp']
-    svg = fm.Chart(df).mark_bar().encode(x="cat:N", y="mean(val):Q", color="grp:N").show_svg()
+    svg = fm.Chart(df).mark_bar().encode(x="cat:N", y="mean(val):Q", color="grp:N").to_svg()
     assert "<rect" in svg
 
 
 def test_aggregate_auto_groupby_count_shorthand():
     """encode(x='cat:N', y='count():Q') does not crash."""
     df = pl.DataFrame({"cat": ["a", "b", "a", "b", "a"]})
-    svg = fm.Chart(df).mark_bar().encode(x="cat:N", y="count():Q").show_svg()
+    svg = fm.Chart(df).mark_bar().encode(x="cat:N", y="count():Q").to_svg()
     assert "<rect" in svg
 
 
@@ -90,7 +90,7 @@ def test_explicit_groupby_not_overridden():
         .mark_bar()
         .encode(x="cat:N", y="val:Q")
         .transform(fm.Aggregate([fm.AggregateOp("val", "mean", "val")], groupby=["cat"]))
-        .show_svg()
+        .to_svg()
     )
     assert "<rect" in svg
 
@@ -223,7 +223,7 @@ def test_axis_labels_remapping_renders():
             y="val:Q",
         )
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "Alpha" in svg
     assert "Beta" in svg
@@ -241,7 +241,7 @@ def test_axis_labels_remapping_partial():
             y="val:Q",
         )
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "Alpha" in svg
     # b and c should still appear as-is
@@ -252,12 +252,12 @@ def test_axis_labels_remapping_partial():
 def test_axis_labels_bool_still_works():
     """Axis(labels=False) still suppresses tick labels (existing behaviour)."""
     df = pl.DataFrame({"cat": ["a", "b"], "val": [1.0, 2.0]})
-    svg_with = fm.Chart(df).mark_bar().encode(x="cat:N", y="val:Q").show_svg()
+    svg_with = fm.Chart(df).mark_bar().encode(x="cat:N", y="val:Q").to_svg()
     svg_without = (
         fm.Chart(df)
         .mark_bar()
         .encode(x=fm.X("cat:N", axis=fm.Axis(labels=False)), y="val:Q")
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg_with
     assert "<svg" in svg_without
@@ -285,7 +285,7 @@ def test_annotate_abline_renders():
     scatter = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
     line = fm.annotate_abline(slope=2.0, intercept=0.0, stroke="red")
     combined = scatter + line
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     assert "<svg" in svg
 
 
@@ -299,7 +299,7 @@ def test_annotate_abline_stroke_in_spec():
 def test_annotate_abline_standalone_renders():
     """annotate_abline can render as a standalone chart (not only layered)."""
     line = fm.annotate_abline(slope=1.0, intercept=0.0, stroke="#333333")
-    svg = line.show_svg()
+    svg = line.to_svg()
     assert "<svg" in svg
 
 
@@ -308,7 +308,7 @@ def test_annotate_abline_stroke_dash():
     df = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0]})
     scatter = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
     line = fm.annotate_abline(slope=1.0, intercept=0.0, stroke_dash=[4, 4])
-    svg = (scatter + line).show_svg()
+    svg = (scatter + line).to_svg()
     assert "<svg" in svg
 
 
@@ -317,7 +317,7 @@ def test_annotate_abline_identity_line():
     df = pl.DataFrame({"x": [0.0, 0.5, 1.0], "y": [0.1, 0.4, 0.9]})
     chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
     line = fm.annotate_abline(slope=1.0, intercept=0.0, stroke="gray")
-    svg = (chart + line).show_svg()
+    svg = (chart + line).to_svg()
     assert "<svg" in svg
 
 
@@ -330,7 +330,7 @@ def test_labs_title():
     """labs(title=) sets the chart title visible in the SVG."""
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y").labs(title="My Title")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "My Title" in svg
 
 
@@ -338,7 +338,7 @@ def test_labs_axis_labels():
     """labs(x=, y=) sets axis title labels visible in the SVG."""
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y").labs(x="Custom X", y="Custom Y")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "Custom X" in svg
     assert "Custom Y" in svg
 
@@ -347,7 +347,7 @@ def test_labs_subtitle():
     """labs(subtitle=) sets the chart subtitle visible in the SVG."""
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y").labs(subtitle="A subtitle")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "A subtitle" in svg
 
 
@@ -362,7 +362,7 @@ def test_labs_preserves_existing_channel_type():
     """labs(x=) on a typed channel keeps the type encoding intact."""
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     chart = fm.Chart(df).mark_point().encode(x=fm.X("x", type="Q"), y="y").labs(x="X Axis Label")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "X Axis Label" in svg
 
 
@@ -371,7 +371,7 @@ def test_labs_x_on_channel_without_existing_encoding():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     # x is encoded via shorthand; labs sets an explicit title override
     chart = fm.Chart(df).mark_point().encode(x="x", y="y").labs(x="My X")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "My X" in svg
 
 
@@ -392,7 +392,7 @@ def test_xlim_ylim_renders():
     """xlim() and ylim() produce a chart that renders without error."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y").xlim(0, 10).ylim(0, 20)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -483,7 +483,7 @@ def test_config_defaults_render():
     """A chart renders using config width/height when no explicit dimensions set."""
     df = pl.DataFrame({"x": [1.0], "y": [2.0]})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -495,7 +495,7 @@ def test_config_override_used_in_render():
     chart = fm.Chart(df).mark_point().encode(x="x", y="y")
 
     with fc.defaults(width=800, height=600):
-        svg = chart.show_svg()
+        svg = chart.to_svg()
 
     # SVG should declare the overridden dimensions
     assert 'width="800"' in svg
@@ -508,7 +508,7 @@ def test_config_default_dimensions_match_config_module():
 
     df = pl.DataFrame({"x": [1.0], "y": [2.0]})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
 
     expected_width = str(int(fc.get("width")))
     expected_height = str(int(fc.get("height")))
@@ -587,7 +587,7 @@ def test_css_named_color_in_theme():
         .mark_point()
         .encode(x="x", y="y")
         .theme(fm.Theme(mark_color="steelblue"))
-        .show_svg()
+        .to_svg()
     )
     assert "4682b4" in svg
 
@@ -600,7 +600,7 @@ def test_css_named_color_cornflowerblue():
         .mark_point()
         .encode(x="x", y="y")
         .theme(fm.Theme(mark_color="cornflowerblue"))
-        .show_svg()
+        .to_svg()
     )
     assert "6495ed" in svg
 
@@ -611,7 +611,7 @@ def test_css_named_color_invalid_gives_helpful_error():
     with pytest.raises(ValueError, match="CSS color name"):
         fm.Chart(df).mark_point().encode(x="x", y="y").theme(
             fm.Theme(mark_color="notacolor")
-        ).show_svg()
+        ).to_svg()
 
 
 def test_mark_tick_ordinal_y_only():
@@ -619,14 +619,14 @@ def test_mark_tick_ordinal_y_only():
     tick.rs only handled quantitative y (y-rug). Now ordinal-y-only emits
     horizontal crossbars."""
     df = pl.DataFrame({"cat": ["a", "b", "c"]})
-    svg = fm.Chart(df).mark_tick().encode(y="cat:N").show_svg()
+    svg = fm.Chart(df).mark_tick().encode(y="cat:N").to_svg()
     assert svg.count("<line") >= 3
 
 
 def test_mark_tick_ordinal_x_only():
     """Regression: same fix also added ordinal-x-only vertical crossbars."""
     df = pl.DataFrame({"cat": ["a", "b", "c"]})
-    svg = fm.Chart(df).mark_tick().encode(x="cat:N").show_svg()
+    svg = fm.Chart(df).mark_tick().encode(x="cat:N").to_svg()
     assert svg.count("<line") >= 3
 
 
@@ -634,7 +634,7 @@ def test_point_shape_vline():
     """Regression: mark_point(shape='|') fell back to circle because
     ShapeKind had no VLine variant."""
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-    svg = fm.Chart(df).mark_point(shape="|").encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_point(shape="|").encode(x="x", y="y").to_svg()
     assert "<line" in svg
     assert "<circle" not in svg
 
@@ -642,7 +642,7 @@ def test_point_shape_vline():
 def test_point_shape_hline():
     """Regression: mark_point(shape='-') fell back to circle."""
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
-    svg = fm.Chart(df).mark_point(shape="-").encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_point(shape="-").encode(x="x", y="y").to_svg()
     assert "<line" in svg
     assert "<circle" not in svg
 
@@ -650,7 +650,7 @@ def test_point_shape_hline():
 def test_point_shape_vline_alias():
     """Regression: 'vline' string alias for '|' shape."""
     df = pl.DataFrame({"x": [1.0], "y": [2.0]})
-    svg = fm.Chart(df).mark_point(shape="vline").encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_point(shape="vline").encode(x="x", y="y").to_svg()
     assert "<line" in svg
 
 
@@ -658,7 +658,7 @@ def test_mark_smooth_method_linear():
     """Regression: mark_smooth(method='linear') crashed because smooth.rs only
     accepted 'lm' and 'loess'. Now 'linear' is an alias for 'lm'."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [2.0, 4.0, 6.0, 8.0]})
-    svg = fm.Chart(df).mark_smooth(method="linear").encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_smooth(method="linear").encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     assert "<path" in svg or "d=" in svg
 
@@ -666,14 +666,14 @@ def test_mark_smooth_method_linear():
 def test_mark_smooth_method_quadratic():
     """Regression: 'quadratic' is a new polynomial degree-2 method."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [1.0, 4.0, 9.0, 16.0]})
-    svg = fm.Chart(df).mark_smooth(method="quadratic").encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_smooth(method="quadratic").encode(x="x", y="y").to_svg()
     assert "<svg" in svg
 
 
 def test_mark_smooth_method_lm_still_works():
     """Regression: original 'lm' method must still work after alias additions."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 6.0]})
-    svg = fm.Chart(df).mark_smooth(method="lm").encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_smooth(method="lm").encode(x="x", y="y").to_svg()
     assert "<svg" in svg
 
 
@@ -684,7 +684,7 @@ def test_non_int64_nominal_pyarrow():
     import pyarrow as pa
 
     tbl = pa.table({"cat": pa.array([1, 2, 1, 2], type=pa.int32()), "y": [10.0, 20.0, 30.0, 40.0]})
-    svg = fm.Chart(tbl).mark_bar().encode(x="cat:N", y="y:Q").show_svg()
+    svg = fm.Chart(tbl).mark_bar().encode(x="cat:N", y="y:Q").to_svg()
     assert "<rect" in svg
 
 
@@ -693,7 +693,7 @@ def test_non_int64_nominal_uint8():
     import pyarrow as pa
 
     tbl = pa.table({"g": pa.array([0, 1, 0, 1], type=pa.uint8()), "v": [1.0, 2.0, 3.0, 4.0]})
-    svg = fm.Chart(tbl).mark_bar().encode(x="g:N", y="v:Q").show_svg()
+    svg = fm.Chart(tbl).mark_bar().encode(x="g:N", y="v:Q").to_svg()
     assert "<rect" in svg
 
 
@@ -701,14 +701,14 @@ def test_aggregate_variance():
     """Regression: encode(y='variance(val):Q') crashed because AggFn only had
     6 variants. Now variance/stdev/q1/q3/distinct are supported."""
     df = pl.DataFrame({"cat": ["a", "a", "b", "b"], "val": [1.0, 3.0, 10.0, 20.0]})
-    svg = fm.Chart(df).mark_bar().encode(x="cat:N", y="variance(val):Q").show_svg()
+    svg = fm.Chart(df).mark_bar().encode(x="cat:N", y="variance(val):Q").to_svg()
     assert "<rect" in svg
 
 
 def test_aggregate_stdev():
     """Regression: stdev aggregate function."""
     df = pl.DataFrame({"cat": ["a", "a", "b", "b"], "val": [1.0, 3.0, 10.0, 20.0]})
-    svg = fm.Chart(df).mark_bar().encode(x="cat:N", y="stdev(val):Q").show_svg()
+    svg = fm.Chart(df).mark_bar().encode(x="cat:N", y="stdev(val):Q").to_svg()
     assert "<rect" in svg
 
 
@@ -720,8 +720,8 @@ def test_aggregate_q1_q3():
             "val": [1.0, 2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0],
         }
     )
-    svg_q1 = fm.Chart(df).mark_bar().encode(x="cat:N", y="q1(val):Q").show_svg()
-    svg_q3 = fm.Chart(df).mark_bar().encode(x="cat:N", y="q3(val):Q").show_svg()
+    svg_q1 = fm.Chart(df).mark_bar().encode(x="cat:N", y="q1(val):Q").to_svg()
+    svg_q3 = fm.Chart(df).mark_bar().encode(x="cat:N", y="q3(val):Q").to_svg()
     assert "<rect" in svg_q1
     assert "<rect" in svg_q3
 
@@ -729,7 +729,7 @@ def test_aggregate_q1_q3():
 def test_aggregate_distinct():
     """Regression: distinct aggregate function (count unique)."""
     df = pl.DataFrame({"cat": ["a", "a", "b", "b", "b"], "val": [1.0, 1.0, 2.0, 3.0, 3.0]})
-    svg = fm.Chart(df).mark_bar().encode(x="cat:N", y="distinct(val):Q").show_svg()
+    svg = fm.Chart(df).mark_bar().encode(x="cat:N", y="distinct(val):Q").to_svg()
     assert "<rect" in svg
 
 
@@ -738,7 +738,7 @@ def test_kde_kernel_epanechnikov():
     because desugar_density rejected non-gaussian AND never forwarded kernel
     to Kde(). Both are now fixed."""
     df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0, 3.0, 2.5]})
-    svg = fm.Chart(df).mark_density(kernel="epanechnikov").encode(x="val:Q").show_svg()
+    svg = fm.Chart(df).mark_density(kernel="epanechnikov").encode(x="val:Q").to_svg()
     assert "<svg" in svg
     assert "<path" in svg or "d=" in svg
 
@@ -746,21 +746,21 @@ def test_kde_kernel_epanechnikov():
 def test_kde_kernel_tophat():
     """Regression: tophat (uniform) kernel."""
     df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0]})
-    svg = fm.Chart(df).mark_density(kernel="tophat").encode(x="val:Q").show_svg()
+    svg = fm.Chart(df).mark_density(kernel="tophat").encode(x="val:Q").to_svg()
     assert "<svg" in svg
 
 
 def test_kde_kernel_cosine():
     """Regression: cosine kernel."""
     df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0]})
-    svg = fm.Chart(df).mark_density(kernel="cosine").encode(x="val:Q").show_svg()
+    svg = fm.Chart(df).mark_density(kernel="cosine").encode(x="val:Q").to_svg()
     assert "<svg" in svg
 
 
 def test_kde_kernel_gaussian_still_default():
     """Regression: default kernel (gaussian) must still work."""
     df = pl.DataFrame({"val": [1.0, 2.0, 3.0, 4.0, 5.0]})
-    svg = fm.Chart(df).mark_density().encode(x="val:Q").show_svg()
+    svg = fm.Chart(df).mark_density().encode(x="val:Q").to_svg()
     assert "<svg" in svg
 
 
@@ -768,4 +768,4 @@ def test_kde_kernel_invalid_rejected():
     """Regression: unknown kernel names should raise ValueError."""
     df = pl.DataFrame({"val": [1.0, 2.0, 3.0]})
     with pytest.raises(ValueError, match="not supported"):
-        fm.Chart(df).mark_density(kernel="banana").encode(x="val:Q").show_svg()
+        fm.Chart(df).mark_density(kernel="banana").encode(x="val:Q").to_svg()

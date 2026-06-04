@@ -31,17 +31,17 @@ def chart_b(sample_df):
 class TestLayerChart:
     """Tests for LayerChart composition class."""
 
-    def test_show_svg_produces_valid_svg(self, chart_a, chart_b):
-        """LayerChart.show_svg() produces SVG without error."""
+    def test_to_svg_produces_valid_svg(self, chart_a, chart_b):
+        """LayerChart.to_svg() produces SVG without error."""
         layered = fm.LayerChart(chart_a, chart_b)
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert svg.startswith("<svg")
         assert "</svg>" in svg
 
     def test_single_chart(self, chart_a):
         """LayerChart with a single chart works."""
         layered = fm.LayerChart(chart_a)
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert "<svg" in svg
 
     def test_chart_plus_produces_layered_chart(self, chart_a, chart_b):
@@ -49,14 +49,14 @@ class TestLayerChart:
         result = chart_a + chart_b
         # Existing behavior: __add__ produces a Chart, not a LayerChart
         assert isinstance(result, fm.Chart)
-        svg = result.show_svg()
+        svg = result.to_svg()
         assert "<svg" in svg
 
     def test_layer_function(self, chart_a, chart_b):
         """fm.layer() convenience function produces a LayerChart."""
         layered = fm.layer(chart_a, chart_b)
         assert isinstance(layered, fm.LayerChart)
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert "<svg" in svg
 
     def test_theme_propagation(self, chart_a, chart_b):
@@ -64,7 +64,7 @@ class TestLayerChart:
         layered = fm.LayerChart(chart_a, chart_b)
         themed = layered.theme(fm.themes.dark)
         assert isinstance(themed, fm.LayerChart)
-        svg = themed.show_svg()
+        svg = themed.to_svg()
         assert "<svg" in svg
 
     def test_properties_propagation(self, chart_a, chart_b):
@@ -72,7 +72,7 @@ class TestLayerChart:
         layered = fm.LayerChart(chart_a, chart_b)
         resized = layered.properties(width=800, height=600)
         assert isinstance(resized, fm.LayerChart)
-        svg = resized.show_svg()
+        svg = resized.to_svg()
         assert "<svg" in svg
 
     def test_save_svg(self, chart_a, chart_b, tmp_path):
@@ -95,13 +95,13 @@ class TestLayerChart:
         c1 = fm.Chart(sample_df).mark_point().encode(x="x", y="y")
         c2 = fm.Chart(sample_df).mark_line().encode(x="x", y="y")
         layered = fm.LayerChart(c1, c2, resolve={"color": "independent"})
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert "<svg" in svg
 
     def test_title_parameter(self, chart_a, chart_b):
         """LayerChart accepts title= parameter."""
         layered = fm.LayerChart(chart_a, chart_b, title="My Layer")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert "<svg" in svg
 
     def test_empty_raises(self):
@@ -132,7 +132,7 @@ class TestLayerChart:
         c1 = fm.Chart(df1).mark_point().encode(x="x", y="y")
         c2 = fm.Chart(df2).mark_line().encode(x="x", y="y")
         layered = fm.LayerChart(c1, c2)
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert "<svg" in svg
 
 
@@ -147,7 +147,7 @@ class TestConcatChart:
     def test_single_row(self, chart_a, chart_b):
         """ConcatChart with columns=None renders a single row."""
         grid = fm.ConcatChart(chart_a, chart_b)
-        svg = grid.show_svg()
+        svg = grid.to_svg()
         assert svg.startswith("<svg")
         assert "</svg>" in svg
 
@@ -159,7 +159,7 @@ class TestConcatChart:
             fm.Chart(sample_df).mark_bar().encode(x="x", y="y"),
         ]
         grid = fm.ConcatChart(*charts, columns=2)
-        svg = grid.show_svg()
+        svg = grid.to_svg()
         assert "<svg" in svg
 
     def test_columns_none_single_row(self, sample_df):
@@ -172,7 +172,7 @@ class TestConcatChart:
         grid = fm.ConcatChart(*charts)
         # columns=None defaults to len(charts) → single row
         assert grid.columns is None
-        svg = grid.show_svg()
+        svg = grid.to_svg()
         assert "<svg" in svg
 
     def test_theme_propagation(self, chart_a, chart_b):
@@ -180,7 +180,7 @@ class TestConcatChart:
         grid = fm.ConcatChart(chart_a, chart_b, columns=2)
         themed = grid.theme(fm.themes.dark)
         assert isinstance(themed, fm.ConcatChart)
-        svg = themed.show_svg()
+        svg = themed.to_svg()
         assert "<svg" in svg
 
     def test_properties_propagation(self, chart_a, chart_b):
@@ -188,7 +188,7 @@ class TestConcatChart:
         grid = fm.ConcatChart(chart_a, chart_b)
         resized = grid.properties(width=400, height=300)
         assert isinstance(resized, fm.ConcatChart)
-        svg = resized.show_svg()
+        svg = resized.to_svg()
         assert "<svg" in svg
 
     def test_save_svg(self, chart_a, chart_b, tmp_path):
@@ -214,14 +214,14 @@ class TestConcatChart:
             fm.Chart(sample_df).mark_line().encode(x="x", y="y"),
         ]
         grid = fm.ConcatChart(*charts, columns=2, resolve={"x": "shared"})
-        svg = grid.show_svg()
+        svg = grid.to_svg()
         assert "<svg" in svg
 
     def test_concat_function(self, chart_a, chart_b):
         """fm.concat() convenience function produces a ConcatChart."""
         grid = fm.concat(chart_a, chart_b, columns=2)
         assert isinstance(grid, fm.ConcatChart)
-        svg = grid.show_svg()
+        svg = grid.to_svg()
         assert "<svg" in svg
 
     def test_empty_raises(self):
@@ -243,7 +243,7 @@ class TestConcatChart:
         """ConcatChart respects spacing parameter."""
         grid = fm.ConcatChart(chart_a, chart_b, spacing=20.0)
         assert grid.spacing == 20.0
-        svg = grid.show_svg()
+        svg = grid.to_svg()
         assert "<svg" in svg
 
     def test_or_operator(self, chart_a, chart_b):

@@ -6,7 +6,7 @@ group_key (FA-7 unified keying), top_k (T9 int aggregation), data_stack/
 data_window (S2 offset error + D5 frame sign), and kde_2d/contour (C5/FA-8
 per-hue 2-D density).
 
-These run the transforms end-to-end through ``Chart(...).transform(...).show_svg()``
+These run the transforms end-to-end through ``Chart(...).transform(...).to_svg()``
 because the Rust transform internals are ``pub(crate)`` and not reachable from a
 Python or integration-test boundary except through the render pipeline. Each test
 reads back axis tick labels / element structure to detect data corruption that a
@@ -30,7 +30,7 @@ from ferrum.transforms import transform_stack, transform_top_k, transform_window
 
 
 def _svg(chart) -> str:
-    return chart.show_svg()
+    return chart.to_svg()
 
 
 def _texts(svg: str) -> list[str]:

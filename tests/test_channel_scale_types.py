@@ -35,7 +35,7 @@ def df():
 
 def _render(chart) -> str:
     """Render a chart to SVG and return the string."""
-    return chart.show_svg()
+    return chart.to_svg()
 
 
 def _is_valid_svg(svg: str) -> bool:

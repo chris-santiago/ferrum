@@ -110,13 +110,13 @@ def test_sequential_viridis_differs_from_default(linear_df: pl.DataFrame) -> Non
         fm.Chart(linear_df)
         .mark_point()
         .encode(x="x:Q", y="y:Q", color=Color("val:Q", scale=fm.SequentialScale(scheme="viridis")))
-        .show_svg()
+        .to_svg()
     )
     svg_magma = (
         fm.Chart(linear_df)
         .mark_point()
         .encode(x="x:Q", y="y:Q", color=Color("val:Q", scale=fm.SequentialScale(scheme="magma")))
-        .show_svg()
+        .to_svg()
     )
 
     fills_viridis = _mark_fills(svg_viridis)
@@ -151,7 +151,7 @@ def test_sequential_viridis_has_characteristic_purple_at_min(
         fm.Chart(linear_df)
         .mark_point()
         .encode(x="x:Q", y="y:Q", color=Color("val:Q", scale=fm.SequentialScale(scheme="viridis")))
-        .show_svg()
+        .to_svg()
     )
     fills = _mark_fills(svg)
 
@@ -187,7 +187,7 @@ def test_sequential_viridis_has_characteristic_yellow_at_max(
         fm.Chart(linear_df)
         .mark_point()
         .encode(x="x:Q", y="y:Q", color=Color("val:Q", scale=fm.SequentialScale(scheme="viridis")))
-        .show_svg()
+        .to_svg()
     )
     fills = _mark_fills(svg)
 
@@ -268,7 +268,7 @@ def test_sequential_scheme_fills_match_palette_endpoints(
             y="y:Q",
             color=Color("val:Q", scale=fm.SequentialScale(scheme=scheme)),
         )
-        .show_svg()
+        .to_svg()
     )
     fills = _mark_fills(svg)
 
@@ -306,7 +306,7 @@ def test_sequential_different_schemes_produce_different_svgs(
                 y="y:Q",
                 color=Color("val:Q", scale=fm.SequentialScale(scheme=scheme)),
             )
-            .show_svg()
+            .to_svg()
         )
 
     scheme_list = list(svgs.keys())
@@ -346,7 +346,7 @@ def test_diverging_rdbu_differs_from_default(diverging_df: pl.DataFrame) -> None
             y="y:Q",
             color=Color("val:Q", scale=fm.DivergingScale(scheme="rdbu", domain=[-2.0, 0.0, 2.0])),
         )
-        .show_svg()
+        .to_svg()
     )
     svg_default_diverging = (
         fm.Chart(diverging_df)
@@ -357,7 +357,7 @@ def test_diverging_rdbu_differs_from_default(diverging_df: pl.DataFrame) -> None
             # No scheme: uses theme default (blue_to_red)
             color=Color("val:Q", scale=fm.DivergingScale(domain=[-2.0, 0.0, 2.0])),
         )
-        .show_svg()
+        .to_svg()
     )
 
     fills_rdbu = _mark_fills(svg_rdbu)
@@ -394,7 +394,7 @@ def test_diverging_rdbu_has_red_endpoint(diverging_df: pl.DataFrame) -> None:
             y="y:Q",
             color=Color("val:Q", scale=fm.DivergingScale(scheme="rdbu", domain=[-2.0, 0.0, 2.0])),
         )
-        .show_svg()
+        .to_svg()
     )
     fills = _mark_fills(svg)
 
@@ -426,7 +426,7 @@ def test_diverging_rdbu_has_blue_endpoint(diverging_df: pl.DataFrame) -> None:
             y="y:Q",
             color=Color("val:Q", scale=fm.DivergingScale(scheme="rdbu", domain=[-2.0, 0.0, 2.0])),
         )
-        .show_svg()
+        .to_svg()
     )
     fills = _mark_fills(svg)
 
@@ -469,7 +469,7 @@ def test_diverging_domain_clamping_collapses_out_of_range_to_endpoint(
             y="y:Q",
             color=Color("val:Q", scale=fm.DivergingScale(scheme="rdbu", domain=[-1.0, 0.0, 1.0])),
         )
-        .show_svg()
+        .to_svg()
     )
     # Wide domain [-2, 0, 2]: all 7 values map to distinct positions
     svg_wide = (
@@ -480,7 +480,7 @@ def test_diverging_domain_clamping_collapses_out_of_range_to_endpoint(
             y="y:Q",
             color=Color("val:Q", scale=fm.DivergingScale(scheme="rdbu", domain=[-2.0, 0.0, 2.0])),
         )
-        .show_svg()
+        .to_svg()
     )
 
     # With the narrow domain, ±2 values clamp to the same color as ±1,
@@ -543,7 +543,7 @@ def test_sequential_scale_scheme_matches_encoding_level_scheme(
             y="y:Q",
             color=Color("val:Q", scale=fm.SequentialScale(scheme="viridis")),
         )
-        .show_svg()
+        .to_svg()
     )
     svg_shorthand = (
         fm.Chart(linear_df)
@@ -553,7 +553,7 @@ def test_sequential_scale_scheme_matches_encoding_level_scheme(
             y="y:Q",
             color=Color("val:Q", scheme="viridis"),
         )
-        .show_svg()
+        .to_svg()
     )
 
     fills_scale = _mark_fills(svg_scale)
@@ -585,7 +585,7 @@ def test_diverging_scale_scheme_matches_encoding_level_scheme(
             y="y:Q",
             color=Color("val:Q", scale=fm.DivergingScale(scheme="rdbu", domain=[-2.0, 0.0, 2.0])),
         )
-        .show_svg()
+        .to_svg()
     )
     svg_shorthand = (
         fm.Chart(diverging_df)
@@ -595,7 +595,7 @@ def test_diverging_scale_scheme_matches_encoding_level_scheme(
             y="y:Q",
             color=Color("val:Q", scheme="rdbu"),
         )
-        .show_svg()
+        .to_svg()
     )
 
     fills_scale = _mark_fills(svg_scale)
@@ -630,7 +630,7 @@ def cool_blue_fills(linear_df: pl.DataFrame) -> set[str]:
             y="y:Q",
             color=Color("val:Q", scale=fm.SequentialScale(scheme="cool_blue")),
         )
-        .show_svg()
+        .to_svg()
     )
     return _mark_fills(svg)
 
@@ -705,7 +705,7 @@ def test_spec_sequential_schemes_render_characteristic_hues(
             y="y:Q",
             color=Color("val:Q", scale=fm.SequentialScale(scheme=scheme)),
         )
-        .show_svg()
+        .to_svg()
     )
     fills = _mark_fills(svg)
 
@@ -811,7 +811,7 @@ def test_diverging_noncentral_midpoint_is_neutral(
                 scale=fm.DivergingScale(scheme="rdbu", domain=[-1.0, 0.5, 1.0]),
             ),
         )
-        .show_svg()
+        .to_svg()
     )
 
     fills_ordered = _fills_by_cx(svg)

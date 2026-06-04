@@ -137,7 +137,7 @@ def test_unknown_kwarg_after_alias_resolution():
 def test_mark_line_point_true():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [3.0, 4.0, 5.0]})
     chart = fm.Chart(df).mark_line(point=True).encode(x="x", y="y")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     # Points rendered (circles in SVG)
     assert "<circle" in svg, "Expected <circle elements for overlaid points"
     # Line rendered (path or polyline)
@@ -149,7 +149,7 @@ def test_mark_line_point_true():
 def test_mark_line_point_false_no_circles():
     """point=False (or absent) must not overlay points."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [3.0, 4.0, 5.0]})
-    svg = fm.Chart(df).mark_line().encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_line().encode(x="x", y="y").to_svg()
     assert "<circle" not in svg
 
 
@@ -157,7 +157,7 @@ def test_mark_line_kwargs_still_forwarded_with_point():
     """Other kwargs like stroke_width are forwarded when point=True."""
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     # Should not raise and should render
-    svg = fm.Chart(df).mark_line(point=True, stroke_width=3).encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_line(point=True, stroke_width=3).encode(x="x", y="y").to_svg()
     assert "<circle" in svg
 
 
@@ -168,13 +168,13 @@ def test_mark_line_kwargs_still_forwarded_with_point():
 
 def test_mark_circle():
     df = pl.DataFrame({"x": [1.0], "y": [2.0]})
-    svg = fm.Chart(df).mark_circle().encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_circle().encode(x="x", y="y").to_svg()
     assert "<circle" in svg
 
 
 def test_mark_square():
     df = pl.DataFrame({"x": [1.0], "y": [2.0]})
-    svg = fm.Chart(df).mark_square().encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_square().encode(x="x", y="y").to_svg()
     assert "<rect" in svg
 
 
@@ -182,24 +182,24 @@ def test_mark_circle_passes_kwargs():
     """mark_circle should forward kwargs (e.g. size, opacity) to mark_point."""
     df = pl.DataFrame({"x": [1.0], "y": [2.0]})
     # Should not raise
-    svg = fm.Chart(df).mark_circle(size=100, opacity=0.5).encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_circle(size=100, opacity=0.5).encode(x="x", y="y").to_svg()
     assert "<circle" in svg
 
 
 def test_mark_square_passes_kwargs():
     df = pl.DataFrame({"x": [1.0], "y": [2.0]})
-    svg = fm.Chart(df).mark_square(size=100).encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_square(size=100).encode(x="x", y="y").to_svg()
     assert "<rect" in svg
 
 
 def test_mark_circle_alias_kwargs():
     """mark_circle should also accept alias kwargs like color."""
     df = pl.DataFrame({"x": [1.0], "y": [2.0]})
-    svg = fm.Chart(df).mark_circle(color="red").encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_circle(color="red").encode(x="x", y="y").to_svg()
     assert "<circle" in svg
 
 
 def test_mark_circle_unknown_kwarg_errors():
     df = pl.DataFrame({"x": [1.0], "y": [2.0]})
     with pytest.raises(TypeError, match="banana"):
-        fm.Chart(df).mark_circle(banana=True).encode(x="x", y="y").show_svg()
+        fm.Chart(df).mark_circle(banana=True).encode(x="x", y="y").to_svg()

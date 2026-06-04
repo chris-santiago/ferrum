@@ -160,7 +160,7 @@ class TestMarkDensityStyle:
             .mark_density(multiple="layer", opacity=0.4)
             .encode(x="value:Q", color="group:N")
             .properties(width=400, height=250)
-            .show_svg()
+            .to_svg()
         )
         assert "rgba(" in svg, "Expected rgba() fill in SVG but got none"
         # Match alpha component 0.4 (may be formatted as 0.400, 0.4, etc.)

@@ -113,11 +113,11 @@ def test_channel_affects_output(df, mark_method, channel):
     base_enc = cfg["base_encoding"]
 
     base_chart = getattr(fm.Chart(df), mark_method)().encode(**base_enc)
-    base_svg = base_chart.show_svg()
+    base_svg = base_chart.to_svg()
 
     extra_encoding = {**base_enc, **CHANNEL_ENCODINGS[channel]}
     channel_chart = getattr(fm.Chart(df), mark_method)().encode(**extra_encoding)
-    channel_svg = channel_chart.show_svg()
+    channel_svg = channel_chart.to_svg()
 
     assert base_svg != channel_svg, (
         f"{mark_method} + {channel}: SVG unchanged — channel may be silently dropped"
@@ -133,5 +133,5 @@ def test_all_channels_no_crash(df, mark_method):
         all_encodings.update(CHANNEL_ENCODINGS[ch])
 
     chart = getattr(fm.Chart(df), mark_method)().encode(**all_encodings)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg

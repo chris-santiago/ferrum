@@ -46,7 +46,7 @@ def _rust_metrics_text(seed: int = 0) -> str:
         .encode(x="x", y="_metrics_y", text="_metrics_text")
         .transform(Smooth(x="x", y="y", method="lm", ci=0.95, inject_metrics=True, output="fitted"))
     )
-    svg = (line_layer + text_layer).show_svg()
+    svg = (line_layer + text_layer).to_svg()
     # With multiline tspan support, metric text may be split across <tspan>
     # elements. Extract both plain <text>content</text> and <text><tspan>...
     # </tspan></text> forms, joining tspan lines with \n.

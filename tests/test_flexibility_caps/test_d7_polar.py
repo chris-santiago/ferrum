@@ -245,7 +245,7 @@ class TestD7StackedRadialBars:
             .mark_bar(position=Stack())
             .encode(x="direction:N", y="value:Q", color="category:N")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg, "stacked polar bar did not produce valid SVG"
 
@@ -277,7 +277,7 @@ class TestD7StackedRadialBars:
             .mark_bar(position=Stack())
             .encode(x="direction:N", y="value:Q", color="category:N")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _arc_paths(svg)
         assert paths, (
@@ -328,7 +328,7 @@ class TestD7StackedRadialBars:
             .mark_bar(position=Stack())
             .encode(x="direction:N", y="value:Q", color="category:N")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _arc_paths(svg)
         assert paths, "no arc paths in single-direction stacked polar SVG"
@@ -454,7 +454,7 @@ class TestD7AnnularWedge:
                 color="category:N",
             )
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg, "annular wedge chart did not produce valid SVG"
 
@@ -486,7 +486,7 @@ class TestD7AnnularWedge:
                 color="category:N",
             )
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _arc_paths(svg)
         assert paths, "no arc paths in annular wedge SVG"
@@ -535,7 +535,7 @@ class TestD7AnnularWedge:
                 color="category:N",
             )
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _arc_paths(svg)
         assert paths, "no arc paths in SVG — cannot check angular span"
@@ -593,7 +593,7 @@ class TestD7Sunburst:
                 color="label:N",
             )
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _arc_paths(svg)
         assert len(paths) == 6, (
@@ -628,7 +628,7 @@ class TestD7Sunburst:
                 color="label:N",
             )
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _arc_paths(svg)
         assert paths, "no arc paths in sunburst SVG"

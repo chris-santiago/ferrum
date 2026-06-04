@@ -20,14 +20,14 @@ import ferrum as fm
 
 def _renders(chart) -> None:
     """Assert chart produces valid SVG without crashing."""
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
 def _graceful_failure(chart) -> None:
     """Assert edge-case chart either renders or raises a clean error."""
     try:
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert isinstance(svg, str)
     except (ValueError, RuntimeError):
         pass  # Clean error is acceptable for degenerate input.
@@ -181,7 +181,7 @@ class TestConstantValues:
             .transform(fm.Glm(x="x", y="y", family="gaussian"))
         )
         with pytest.raises(ValueError, match="singular|zero variance"):
-            chart.show_svg()
+            chart.to_svg()
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +231,7 @@ class TestAllNullNaN:
             .transform(fm.Glm(x="x", y="y", family="gaussian"))
         )
         with pytest.raises(ValueError, match="non-null observations"):
-            chart.show_svg()
+            chart.to_svg()
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +309,7 @@ class TestLogistic:
             fm.Chart(df).mark_smooth().encode(x="x:Q", y="y:Q").transform(fm.Logistic(x="x", y="y"))
         )
         with pytest.raises(ValueError, match="singular"):
-            chart.show_svg()
+            chart.to_svg()
 
     def test_logistic_all_one(self):
         """All y=1 should raise (no separation possible)."""
@@ -318,7 +318,7 @@ class TestLogistic:
             fm.Chart(df).mark_smooth().encode(x="x:Q", y="y:Q").transform(fm.Logistic(x="x", y="y"))
         )
         with pytest.raises(ValueError, match="singular"):
-            chart.show_svg()
+            chart.to_svg()
 
     def test_logistic_single_unique_x(self):
         """Constant x with mixed y should raise (singular design)."""
@@ -327,7 +327,7 @@ class TestLogistic:
             fm.Chart(df).mark_smooth().encode(x="x:Q", y="y:Q").transform(fm.Logistic(x="x", y="y"))
         )
         with pytest.raises(ValueError, match="singular|zero variance"):
-            chart.show_svg()
+            chart.to_svg()
 
     def test_logistic_valid_overlapping(self):
         """Non-degenerate binary target with overlap should render."""

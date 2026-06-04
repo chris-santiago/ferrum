@@ -77,11 +77,11 @@ def iris_df():
 
 class TestLmplot:
     def test_properties_width_reaches_svg(self, scatter_df):
-        svg = fm.lmplot(scatter_df, x="x", y="y", properties={"width": 800}).show_svg()
+        svg = fm.lmplot(scatter_df, x="x", y="y", properties={"width": 800}).to_svg()
         assert 'width="800"' in svg
 
     def test_properties_title_reaches_svg(self, scatter_df):
-        svg = fm.lmplot(scatter_df, x="x", y="y", properties={"title": "LM Custom"}).show_svg()
+        svg = fm.lmplot(scatter_df, x="x", y="y", properties={"title": "LM Custom"}).to_svg()
         assert "LM Custom" in svg
 
     def test_encode_override_title(self, scatter_df):
@@ -90,11 +90,11 @@ class TestLmplot:
             x="x",
             y="y",
             encode={"x": fm.X("x", title="My X Axis")},
-        ).show_svg()
+        ).to_svg()
         assert "My X Axis" in svg
 
     def test_empty_overrides_noop(self, scatter_df):
-        default = fm.lmplot(scatter_df, x="x", y="y").show_svg()
+        default = fm.lmplot(scatter_df, x="x", y="y").to_svg()
         overridden = fm.lmplot(
             scatter_df,
             x="x",
@@ -103,7 +103,7 @@ class TestLmplot:
             encode={},
             properties={},
             layers=[],
-        ).show_svg()
+        ).to_svg()
         assert default == overridden
 
     def test_mark_override_stroke_width(self, scatter_df):
@@ -112,7 +112,7 @@ class TestLmplot:
             x="x",
             y="y",
             mark={"line": {"stroke_width": 5}},
-        ).show_svg()
+        ).to_svg()
         assert 'stroke-width="5"' in svg
 
 
@@ -123,21 +123,21 @@ class TestLmplot:
 
 class TestResidplot:
     def test_properties_reaches_svg(self, scatter_df):
-        svg = fm.residplot(scatter_df, x="x", y="y", properties={"width": 700}).show_svg()
+        svg = fm.residplot(scatter_df, x="x", y="y", properties={"width": 700}).to_svg()
         assert 'width="700"' in svg
 
     def test_mark_suppress_reference(self, scatter_df):
-        default_svg = fm.residplot(scatter_df, x="x", y="y").show_svg()
+        default_svg = fm.residplot(scatter_df, x="x", y="y").to_svg()
         suppressed_svg = fm.residplot(
             scatter_df, x="x", y="y", mark={"reference": False}
-        ).show_svg()
+        ).to_svg()
         default_dashes = default_svg.count("stroke-dasharray")
         suppressed_dashes = suppressed_svg.count("stroke-dasharray")
         assert suppressed_dashes < default_dashes
 
     def test_mark_suppress_metrics(self, scatter_df):
-        default_svg = fm.residplot(scatter_df, x="x", y="y").show_svg()
-        suppressed_svg = fm.residplot(scatter_df, x="x", y="y", mark={"metrics": False}).show_svg()
+        default_svg = fm.residplot(scatter_df, x="x", y="y").to_svg()
+        suppressed_svg = fm.residplot(scatter_df, x="x", y="y", mark={"metrics": False}).to_svg()
         default_texts = default_svg.count("<text ")
         suppressed_texts = suppressed_svg.count("<text ")
         assert suppressed_texts < default_texts
@@ -148,7 +148,7 @@ class TestResidplot:
             x="x",
             y="y",
             encode={"x": fm.X("x", title="Predictor")},
-        ).show_svg()
+        ).to_svg()
         assert "Predictor" in svg
 
 
@@ -159,15 +159,15 @@ class TestResidplot:
 
 class TestDisplot:
     def test_properties_width(self, scatter_df):
-        svg = fm.displot(scatter_df, x="x", properties={"width": 600}).show_svg()
+        svg = fm.displot(scatter_df, x="x", properties={"width": 600}).to_svg()
         assert 'width="600"' in svg
 
     def test_properties_title(self, scatter_df):
-        svg = fm.displot(scatter_df, x="x", properties={"title": "Dist Custom"}).show_svg()
+        svg = fm.displot(scatter_df, x="x", properties={"title": "Dist Custom"}).to_svg()
         assert "Dist Custom" in svg
 
     def test_empty_overrides_noop(self, scatter_df):
-        default = fm.displot(scatter_df, x="x").show_svg()
+        default = fm.displot(scatter_df, x="x").to_svg()
         overridden = fm.displot(
             scatter_df,
             x="x",
@@ -175,7 +175,7 @@ class TestDisplot:
             encode={},
             properties={},
             layers=[],
-        ).show_svg()
+        ).to_svg()
         assert default == overridden
 
 
@@ -186,7 +186,7 @@ class TestDisplot:
 
 class TestCatplot:
     def test_properties_width(self, cat_df):
-        svg = fm.catplot(cat_df, x="category", y="value", properties={"width": 600}).show_svg()
+        svg = fm.catplot(cat_df, x="category", y="value", properties={"width": 600}).to_svg()
         assert 'width="600"' in svg
 
     def test_properties_title(self, cat_df):
@@ -195,7 +195,7 @@ class TestCatplot:
             x="category",
             y="value",
             properties={"title": "Cat Custom"},
-        ).show_svg()
+        ).to_svg()
         assert "Cat Custom" in svg
 
 
@@ -206,16 +206,16 @@ class TestCatplot:
 
 class TestHeatmap:
     def test_properties_title(self, heatmap_df):
-        svg = fm.heatmap(heatmap_df, properties={"title": "Heat Custom"}).show_svg()
+        svg = fm.heatmap(heatmap_df, properties={"title": "Heat Custom"}).to_svg()
         assert "Heat Custom" in svg
 
     def test_mark_flat_kwarg_on_single_mark(self, heatmap_df):
-        svg = fm.heatmap(heatmap_df, annot=False, mark={"opacity": 0.5}).show_svg()
+        svg = fm.heatmap(heatmap_df, annot=False, mark={"opacity": 0.5}).to_svg()
         assert "rgba(" in svg
 
     def test_annot_false_vs_true_fewer_texts(self, heatmap_df):
-        no_annot = fm.heatmap(heatmap_df, annot=False).show_svg()
-        with_annot = fm.heatmap(heatmap_df, annot=True).show_svg()
+        no_annot = fm.heatmap(heatmap_df, annot=False).to_svg()
+        with_annot = fm.heatmap(heatmap_df, annot=True).to_svg()
         assert no_annot.count("<text ") < with_annot.count("<text ")
 
 
@@ -228,7 +228,7 @@ class TestPairplot:
     def test_properties_title(self, iris_df):
         chart = fm.pairplot(iris_df, vars=["sl", "sw"])
         updated = chart.properties(title="Pair Custom")
-        svg = updated.show_svg()
+        svg = updated.to_svg()
         assert "Pair Custom" in svg
 
     def test_override_properties_on_pairplot(self, iris_df):
@@ -236,7 +236,7 @@ class TestPairplot:
             iris_df,
             vars=["sl", "sw"],
             properties={"title": "Pairplot Override"},
-        ).show_svg()
+        ).to_svg()
         assert "Pairplot Override" in svg
 
 
@@ -252,7 +252,7 @@ class TestJointplot:
             x="x",
             y="y",
             properties={"title": "Joint Custom"},
-        ).show_svg()
+        ).to_svg()
         assert "Joint Custom" in svg
 
 
@@ -263,7 +263,7 @@ class TestJointplot:
 
 class TestClustermap:
     def test_properties_title(self, heatmap_df):
-        svg = fm.clustermap(heatmap_df, properties={"title": "Cluster Custom"}).show_svg()
+        svg = fm.clustermap(heatmap_df, properties={"title": "Cluster Custom"}).to_svg()
         assert "Cluster Custom" in svg
 
 
@@ -282,7 +282,7 @@ class TestFigurePkgEdgeCases:
             encode={"x": fm.X("x", title="Overridden X")},
             properties={"width": 750, "title": "All Four"},
             layers=[Layer(mark="rule", encoding={"y": "y"})],
-        ).show_svg()
+        ).to_svg()
         assert 'stroke-width="4"' in svg
         assert "Overridden X" in svg
         assert 'width="750"' in svg
@@ -295,7 +295,7 @@ class TestFigurePkgEdgeCases:
             y="y",
             mark={"line": {"stroke_width": 3}},
         ).properties(width=500)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert 'width="500"' in svg
         assert 'stroke-width="3"' in svg
 
@@ -305,7 +305,7 @@ class TestFigurePkgEdgeCases:
             x="x",
             y="y",
             mark={"reference": False, "metrics": False},
-        ).show_svg()
+        ).to_svg()
         assert "<svg" in svg
         assert svg.count("stroke-dasharray") == 0
 
@@ -314,7 +314,7 @@ class TestFigurePkgEdgeCases:
             scatter_df,
             x="x",
             properties={"width": 800, "title": "Dist Combined"},
-        ).show_svg()
+        ).to_svg()
         assert 'width="800"' in svg
         assert "Dist Combined" in svg
 
@@ -332,8 +332,8 @@ class TestFigurePkgLayerNames:
         assert "line" in names
 
     def test_lmplot_suppress_scatter(self, scatter_df):
-        default_svg = fm.lmplot(scatter_df, x="x", y="y").show_svg()
-        suppressed_svg = fm.lmplot(scatter_df, x="x", y="y", mark={"scatter": False}).show_svg()
+        default_svg = fm.lmplot(scatter_df, x="x", y="y").to_svg()
+        suppressed_svg = fm.lmplot(scatter_df, x="x", y="y", mark={"scatter": False}).to_svg()
         default_circles = default_svg.count("<circle")
         suppressed_circles = suppressed_svg.count("<circle")
         assert suppressed_circles < default_circles
@@ -344,7 +344,7 @@ class TestFigurePkgLayerNames:
             x="x",
             y="y",
             mark={"line": {"stroke_width": 5}},
-        ).show_svg()
+        ).to_svg()
         assert 'stroke-width="5"' in svg
 
     def test_residplot_layer_names(self, scatter_df):
@@ -371,12 +371,12 @@ class TestFigurePkgLayerNames:
         assert "label" in names
 
     def test_heatmap_suppress_label_svg(self, heatmap_df):
-        default_svg = fm.heatmap(heatmap_df, annot=True).show_svg()
-        suppressed_svg = fm.heatmap(heatmap_df, annot=True, mark={"label": False}).show_svg()
+        default_svg = fm.heatmap(heatmap_df, annot=True).to_svg()
+        suppressed_svg = fm.heatmap(heatmap_df, annot=True, mark={"label": False}).to_svg()
         default_texts = default_svg.count("<text ")
         suppressed_texts = suppressed_svg.count("<text ")
         assert suppressed_texts < default_texts
 
     def test_heatmap_override_cells_opacity(self, heatmap_df):
-        svg = fm.heatmap(heatmap_df, annot=True, mark={"cells": {"opacity": 0.3}}).show_svg()
+        svg = fm.heatmap(heatmap_df, annot=True, mark={"cells": {"opacity": 0.3}}).to_svg()
         assert "rgba(" in svg

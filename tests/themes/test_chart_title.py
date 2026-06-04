@@ -8,14 +8,14 @@ import ferrum as fm
 def test_title_renders_as_text_element() -> None:
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y").properties(title="My Title")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert ">My Title<" in svg
 
 
 def test_no_title_renders_no_extra_text() -> None:
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
-    svg_with = fm.Chart(df).mark_point().encode(x="x", y="y").properties(title="X").show_svg()
-    svg_no = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg_with = fm.Chart(df).mark_point().encode(x="x", y="y").properties(title="X").to_svg()
+    svg_no = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     # Title-bearing SVG has more <text> elements.
     assert svg_with.count("<text") > svg_no.count("<text")
 
@@ -28,7 +28,7 @@ def test_title_anchor_start_emits_text_anchor_start() -> None:
         .encode(x="x", y="y")
         .properties(title="Hi")
         .theme(fm.Theme(title_anchor="start"))
-        .show_svg()
+        .to_svg()
     )
     # Find the title text element specifically: it's the one containing 'Hi'.
     # The text-anchor attr on that element should be 'start'.
@@ -52,7 +52,7 @@ def test_title_anchor_middle_emits_text_anchor_middle() -> None:
         .encode(x="x", y="y")
         .properties(title="Hi")
         .theme(fm.Theme(title_anchor="middle"))
-        .show_svg()
+        .to_svg()
     )
     idx = svg.find(">Hi<")
     text_start = svg.rfind("<text", 0, idx)
@@ -68,7 +68,7 @@ def test_title_uses_title_color() -> None:
         .encode(x="x", y="y")
         .properties(title="Hi")
         .theme(fm.Theme(title_color="#ff0000"))
-        .show_svg()
+        .to_svg()
     )
     idx = svg.find(">Hi<")
     text_start = svg.rfind("<text", 0, idx)
@@ -84,7 +84,7 @@ def test_title_uses_title_font_weight_when_not_normal() -> None:
         .encode(x="x", y="y")
         .properties(title="Hi")
         .theme(fm.Theme(title_font_weight="bold"))
-        .show_svg()
+        .to_svg()
     )
     idx = svg.find(">Hi<")
     text_start = svg.rfind("<text", 0, idx)

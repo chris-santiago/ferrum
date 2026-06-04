@@ -40,7 +40,7 @@ def test_configure_axis_domain_min_max_overrides_data():
         .mark_point()
         .encode(x="x", y="y")
         .configure_axis(domain_min=2.0, domain_max=8.0)
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -50,7 +50,7 @@ def test_configure_axis_domain_min_max_overrides_data():
 def test_configure_axis_domain_min_only():
     """configure_axis with only domain_min should override the lower bound."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(domain_min=-10.0).show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(domain_min=-10.0).to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -58,7 +58,7 @@ def test_configure_axis_domain_min_only():
 def test_configure_axis_domain_max_only():
     """configure_axis with only domain_max should override upper bound."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(domain_max=100.0).show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(domain_max=100.0).to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -69,7 +69,7 @@ def test_configure_axis_zero_includes_zero():
     Data [10, 20, 30] -> with zero=True the axis domain should start at 0.
     """
     df = pl.DataFrame({"x": [10.0, 20.0, 30.0], "y": [1.0, 2.0, 3.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(zero=True).show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(zero=True).to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -77,7 +77,7 @@ def test_configure_axis_zero_includes_zero():
 def test_configure_axis_nice_true():
     """configure_axis(nice=True) should round domain to nice values."""
     df = pl.DataFrame({"x": [0.13, 9.7], "y": [1.0, 2.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(nice=True).show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(nice=True).to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -90,7 +90,7 @@ def test_configure_axis_tick_values_explicit():
         .mark_point()
         .encode(x="x", y="y")
         .configure_axis(tick_values=[0.0, 2.5, 5.0, 7.5, 10.0])
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -107,7 +107,7 @@ def test_configure_axis_label_format_preset_currency():
         .mark_bar()
         .encode(x="x", y="y")
         .configure_axis(label_format="currency")
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -169,7 +169,7 @@ def test_configure_multiple_layers_merge():
         .configure_axis(label_angle=-45)
         .configure_grid(x=True, y=True)
         .configure_padding(top=20, bottom=20)
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -183,7 +183,7 @@ def test_configure_axis_x_only_selective():
         .mark_point()
         .encode(x="x", y="y")
         .configure_axis(x=True, y=False, label_angle=90)
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -198,7 +198,7 @@ def test_configure_on_empty_data():
         .encode(x="x", y="y")
         .configure_axis(domain_min=0.0, domain_max=10.0)
         .configure_grid(x=True, y=True, color="#ccc")
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -215,7 +215,7 @@ def test_configure_axis_domain_min_equals_domain_max():
         .mark_point()
         .encode(x="x", y="y")
         .configure_axis(domain_min=5.0, domain_max=5.0)
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -232,7 +232,7 @@ def test_configure_axis_domain_min_greater_than_max():
         .mark_point()
         .encode(x="x", y="y")
         .configure_axis(domain_min=10.0, domain_max=0.0)
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -251,7 +251,7 @@ def test_transform_filter_empty_result():
         .transform(fr.transform_filter("datum.x > 100"))
         .mark_point()
         .encode(x="x", y="y")
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -267,7 +267,7 @@ def test_transform_calculate_with_division_by_zero():
         .transform(fr.transform_calculate("z", "datum.y / 0"))
         .mark_point()
         .encode(x="x", y="z")
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     assert "Infinity" not in svg
@@ -281,7 +281,7 @@ def test_transform_fold_single_field():
         .transform(fr.transform_fold(["val1"]))
         .mark_bar()
         .encode(x="key", y="value")
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -298,7 +298,7 @@ def test_transform_sample_zero_size():
         .transform(fr.transform_sample(100))
         .mark_point()
         .encode(x="x", y="y")
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -317,7 +317,7 @@ def test_transform_filter_on_all_null_column():
         .transform(fr.transform_filter("datum.flag == 'yes'"))
         .mark_point()
         .encode(x="x", y="y")
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -880,7 +880,7 @@ def test_configure_with_all_nan_data():
         .mark_point()
         .encode(x="x", y="y")
         .configure_axis(domain_min=0.0, domain_max=10.0)
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -894,7 +894,7 @@ def test_configure_color_scheme_on_categorical():
         .mark_point()
         .encode(x="x", y="y", color="c")
         .configure_color(scheme="set2")
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -907,7 +907,7 @@ def test_configure_grid_band_colors():
         .mark_point()
         .encode(x="x", y="y")
         .configure_grid(x=True, y=True, band_colors=["#f0f0f0", "#ffffff"])
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
@@ -925,7 +925,7 @@ def test_histogram_with_domain_override():
         .mark_histogram()
         .encode(x="x")
         .configure_axis(domain_min=0.0, domain_max=5.0)
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -973,7 +973,7 @@ def test_configure_axis_domain_min_max_with_ordinal():
         .mark_bar()
         .encode(x="cat", y="val")
         .configure_axis(domain_min=0.0, domain_max=50.0)
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -993,7 +993,7 @@ def test_configure_on_layer_chart():  # BUG: LayerChart missing configure_axis m
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y1": [1.0, 2.0, 3.0], "y2": [3.0, 2.0, 1.0]})
     c1 = fr.Chart(df).mark_point().encode(x="x", y="y1")
     c2 = fr.Chart(df).mark_line().encode(x="x", y="y2")
-    svg = fr.layer(c1, c2).configure_axis(label_angle=-30).configure_grid(x=True, y=True).show_svg()
+    svg = fr.layer(c1, c2).configure_axis(label_angle=-30).configure_grid(x=True, y=True).to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1013,7 +1013,7 @@ def test_configure_on_facet():
         .encode(x="x", y="y")
         .facet("f")
         .configure_axis(domain_min=0.0, domain_max=5.0)
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -1037,7 +1037,7 @@ def test_histogram_grouped_shared_extent_with_configure():
         .mark_histogram(bin_count=4)
         .encode(x="x", color="g")
         .configure_axis(domain_min=0.0)
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -1101,7 +1101,7 @@ def test_axis_config_to_dict_raw_format_passthrough():
 def test_configure_axis_label_angle_reflected_in_svg():
     """Configuring label_angle=-45 should produce transform attributes in SVG."""
     df = pl.DataFrame({"x": ["alpha", "beta", "gamma"], "y": [1.0, 2.0, 3.0]})
-    svg = fr.Chart(df).mark_bar().encode(x="x", y="y").configure_axis(label_angle=-45).show_svg()
+    svg = fr.Chart(df).mark_bar().encode(x="x", y="y").configure_axis(label_angle=-45).to_svg()
     assert "<svg" in svg
     # A rotated label produces a transform="rotate(...)" attribute
     assert "rotate" in svg
@@ -1110,13 +1110,13 @@ def test_configure_axis_label_angle_reflected_in_svg():
 def test_configure_padding_explicit_values_reflected():
     """Explicit padding should change the plot-area position in SVG."""
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0]})
-    svg_default = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg_default = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     svg_padded = (
         fr.Chart(df)
         .mark_point()
         .encode(x="x", y="y")
         .configure_padding(left=100, top=100)
-        .show_svg()
+        .to_svg()
     )
     # Both should be valid SVGs
     assert "<svg" in svg_default
@@ -1176,7 +1176,7 @@ def test_all_null_y_linear_scale_renders():
             "y": pl.Series([None, None, None], dtype=pl.Float64),
         }
     )
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1189,7 +1189,7 @@ def test_all_null_x_column_renders():
             "y": [1.0, 2.0, 3.0],
         }
     )
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1202,7 +1202,7 @@ def test_all_null_both_axes_renders():
             "y": pl.Series([None, None, None], dtype=pl.Float64),
         }
     )
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1216,7 +1216,7 @@ def test_all_null_color_encoding_renders():
             "c": pl.Series([None, None, None], dtype=pl.Utf8),
         }
     )
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y", color="c").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y", color="c").to_svg()
     assert "<svg" in svg
 
 
@@ -1236,7 +1236,7 @@ def test_all_null_with_log_scale_renders():
             y=fr.Y("y", scale=fr.LogScale(domain=[1.0, 100.0], range=[0.0, 400.0])),
         )
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1250,7 +1250,7 @@ def test_nan_in_color_numeric_encoding():
             "c": [1.0, float("nan"), 3.0, float("nan")],
         }
     )
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y", color="c:Q").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y", color="c:Q").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1263,7 +1263,7 @@ def test_nan_mixed_with_valid_in_sort_key():
             "y": [30.0, 99.0, 10.0, 99.0, 20.0],
         }
     )
-    svg = fr.Chart(df).mark_line().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_line().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1271,7 +1271,7 @@ def test_nan_mixed_with_valid_in_sort_key():
 def test_single_value_domain_linear_renders():
     """All-identical x (domain collapse 5==5) should expand and render marks."""
     df = pl.DataFrame({"x": [5.0, 5.0, 5.0], "y": [1.0, 2.0, 3.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "NaN" not in svg
     assert svg.count("<circle") >= 1
 
@@ -1279,7 +1279,7 @@ def test_single_value_domain_linear_renders():
 def test_single_value_domain_zero_expands_to_neg1_pos1():
     """All x == 0.0 should expand domain to [-1,1] so marks render at center."""
     df = pl.DataFrame({"x": [0.0, 0.0, 0.0], "y": [1.0, 2.0, 3.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "NaN" not in svg
     assert svg.count("<circle") >= 1
 
@@ -1287,7 +1287,7 @@ def test_single_value_domain_zero_expands_to_neg1_pos1():
 def test_single_value_domain_both_axes():
     """All-identical on both axes should still produce marks."""
     df = pl.DataFrame({"x": [7.0, 7.0, 7.0], "y": [7.0, 7.0, 7.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "NaN" not in svg
     assert svg.count("<circle") >= 1
 
@@ -1295,7 +1295,7 @@ def test_single_value_domain_both_axes():
 def test_single_row_dataframe_linear():
     """Single-row DataFrame should render 1 mark."""
     df = pl.DataFrame({"x": [5.0], "y": [3.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "NaN" not in svg
     assert svg.count("<circle") >= 1
 
@@ -1303,7 +1303,7 @@ def test_single_row_dataframe_linear():
 def test_single_category_ordinal():
     """Single category in ordinal domain should render."""
     df = pl.DataFrame({"cat": ["only"], "y": [42.0]})
-    svg = fr.Chart(df).mark_bar().encode(x="cat", y="y").show_svg()
+    svg = fr.Chart(df).mark_bar().encode(x="cat", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1325,7 +1325,7 @@ def test_log_scale_very_small_positive_domain():
 def test_very_large_float_chart_renders():
     """Chart with 1e300-scale values should not crash."""
     df = pl.DataFrame({"x": [1e300, 2e300, 3e300], "y": [1.0, 2.0, 3.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1333,7 +1333,7 @@ def test_very_large_float_chart_renders():
 def test_very_small_positive_values_do_not_collapse_to_zero():
     """Data with 1e-15 differences should still produce distinct marks."""
     df = pl.DataFrame({"x": [1e-15, 2e-15, 3e-15], "y": [1.0, 2.0, 3.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
     assert svg.count("<circle") == 3
@@ -1349,7 +1349,7 @@ def test_negative_values_on_log_scale_chart():
             x=fr.X("x", scale=fr.LogScale(domain=[0.1, 100.0], range=[0.0, 500.0])),
             y="y",
         )
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -1359,7 +1359,7 @@ def test_negative_values_on_log_scale_chart():
 def test_integer_column_coerced_to_float():
     """Integer columns should auto-coerce and render."""
     df = pl.DataFrame({"x": [1, 2, 3, 4, 5], "y": [10, 20, 30, 40, 50]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "NaN" not in svg
     assert svg.count("<circle") == 5
 
@@ -1367,14 +1367,14 @@ def test_integer_column_coerced_to_float():
 def test_boolean_column_as_x():
     """Boolean column as x should render (treated as ordinal)."""
     df = pl.DataFrame({"x": [True, False, True, False], "y": [1.0, 2.0, 3.0, 4.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
 
 
 def test_int64_histogram():
     """Int64 column as histogram input should auto-cast to Float64."""
     df = pl.DataFrame({"x": pl.Series([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=pl.Int64)})
-    svg = fr.Chart(df).mark_histogram().encode(x="x").show_svg()
+    svg = fr.Chart(df).mark_histogram().encode(x="x").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1382,7 +1382,7 @@ def test_int64_histogram():
 def test_uint32_histogram():
     """UInt32 column should also auto-cast for histogram binning."""
     df = pl.DataFrame({"x": pl.Series([10, 20, 30, 40, 50], dtype=pl.UInt32)})
-    svg = fr.Chart(df).mark_histogram().encode(x="x").show_svg()
+    svg = fr.Chart(df).mark_histogram().encode(x="x").to_svg()
     assert "<svg" in svg
 
 
@@ -1394,14 +1394,14 @@ def test_zero_row_dataframe():
             "y": pl.Series([], dtype=pl.Float64),
         }
     )
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
 
 
 def test_zero_row_histogram():
     """Histogram with zero-row DataFrame should produce an SVG (not crash)."""
     df = pl.DataFrame({"x": pl.Series([], dtype=pl.Float64)})
-    svg = fr.Chart(df).mark_histogram().encode(x="x").show_svg()
+    svg = fr.Chart(df).mark_histogram().encode(x="x").to_svg()
     assert "<svg" in svg
 
 
@@ -1413,7 +1413,7 @@ def test_zero_row_with_ordinal_axis():
             "y": pl.Series([], dtype=pl.Float64),
         }
     )
-    svg = fr.Chart(df).mark_bar().encode(x="cat", y="y").show_svg()
+    svg = fr.Chart(df).mark_bar().encode(x="cat", y="y").to_svg()
     assert "<svg" in svg
 
 
@@ -1426,7 +1426,7 @@ def test_aggregate_empty_dataframe():
             "g": pl.Series([], dtype=pl.Utf8),
         }
     )
-    svg = fr.Chart(df).mark_bar().encode(x="g", y="y").show_svg()
+    svg = fr.Chart(df).mark_bar().encode(x="g", y="y").to_svg()
     assert "<svg" in svg
 
 
@@ -1444,7 +1444,7 @@ def test_aggregate_single_row_group():
         .mark_bar()
         .encode(x="g", y="mean_v")
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1463,7 +1463,7 @@ def test_aggregate_variance_single_element_group():
         .mark_bar()
         .encode(x="g", y="var_v")
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -1481,7 +1481,7 @@ def test_aggregate_stdev_single_element_group():
         .mark_bar()
         .encode(x="g", y="sd_v")
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -1504,7 +1504,7 @@ def test_aggregate_all_nan_group_produces_nan_result():
         .mark_bar()
         .encode(x="g", y="mean_v")
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -1522,7 +1522,7 @@ def test_aggregate_count_star_no_field():
         .mark_bar()
         .encode(x="g", y="n")
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1700,35 +1700,35 @@ def test_log_scale_negative_domain():
 def test_kde_single_point():
     """KDE with a single data point should produce SVG."""
     df = pl.DataFrame({"x": [7.0]})
-    svg = fr.Chart(df).mark_density().encode(x="x").show_svg()
+    svg = fr.Chart(df).mark_density().encode(x="x").to_svg()
     assert "<svg" in svg
 
 
 def test_kde_all_nan_values():
     """KDE with all NaN should produce SVG without crashing."""
     df = pl.DataFrame({"x": [float("nan"), float("nan"), float("nan")]})
-    svg = fr.Chart(df).mark_density().encode(x="x").show_svg()
+    svg = fr.Chart(df).mark_density().encode(x="x").to_svg()
     assert "<svg" in svg
 
 
 def test_kde_constant_values():
     """KDE with all-identical values (zero variance) should not crash."""
     df = pl.DataFrame({"x": [4.0] * 20})
-    svg = fr.Chart(df).mark_density().encode(x="x").show_svg()
+    svg = fr.Chart(df).mark_density().encode(x="x").to_svg()
     assert "<svg" in svg
 
 
 def test_smooth_single_data_point():
     """Smooth regression with 1 data point should not crash."""
     df = pl.DataFrame({"x": [1.0], "y": [2.0]})
-    svg = fr.Chart(df).mark_smooth().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_smooth().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
 
 
 def test_smooth_constant_y():
     """Smooth with constant y (horizontal line) should render without NaN."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [5.0, 5.0, 5.0, 5.0]})
-    svg = fr.Chart(df).mark_smooth().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_smooth().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1741,21 +1741,21 @@ def test_smooth_all_nan_y():
             "y": [float("nan"), float("nan"), float("nan"), float("nan")],
         }
     )
-    svg = fr.Chart(df).mark_smooth().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_smooth().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
 
 
 def test_smooth_constant_x_zero_variance():
     """Smooth with constant x (zero variance in predictor) should not crash."""
     df = pl.DataFrame({"x": [5.0, 5.0, 5.0, 5.0], "y": [1.0, 2.0, 3.0, 4.0]})
-    svg = fr.Chart(df).mark_smooth(method="lm").encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_smooth(method="lm").encode(x="x", y="y").to_svg()
     assert "<svg" in svg
 
 
 def test_smooth_two_points_perfect_fit():
     """Smooth with exactly 2 points should produce a perfect line."""
     df = pl.DataFrame({"x": [0.0, 10.0], "y": [0.0, 10.0]})
-    svg = fr.Chart(df).mark_smooth(method="lm").encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_smooth(method="lm").encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1763,21 +1763,21 @@ def test_smooth_two_points_perfect_fit():
 def test_histogram_all_null():
     """Histogram with all-null column should not crash."""
     df = pl.DataFrame({"x": pl.Series([None, None, None], dtype=pl.Float64)})
-    svg = fr.Chart(df).mark_histogram().encode(x="x").show_svg()
+    svg = fr.Chart(df).mark_histogram().encode(x="x").to_svg()
     assert "<svg" in svg
 
 
 def test_histogram_single_value():
     """Histogram with all-identical values should produce at least 1 bar."""
     df = pl.DataFrame({"x": [3.0, 3.0, 3.0, 3.0, 3.0]})
-    svg = fr.Chart(df).mark_histogram().encode(x="x").show_svg()
+    svg = fr.Chart(df).mark_histogram().encode(x="x").to_svg()
     assert "<svg" in svg
 
 
 def test_histogram_two_distinct_values():
     """Histogram with exactly 2 distinct values should produce bins."""
     df = pl.DataFrame({"x": [1.0, 10.0]})
-    svg = fr.Chart(df).mark_histogram().encode(x="x").show_svg()
+    svg = fr.Chart(df).mark_histogram().encode(x="x").to_svg()
     assert "<svg" in svg
 
 
@@ -1822,7 +1822,7 @@ def test_layer_chart_two_scales():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y1": [1.0, 2.0, 3.0], "y2": [100.0, 200.0, 300.0]})
     c1 = fr.Chart(df).mark_point().encode(x="x", y="y1")
     c2 = fr.Chart(df).mark_line().encode(x="x", y="y2")
-    svg = fr.layer(c1, c2).show_svg()
+    svg = fr.layer(c1, c2).to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1830,7 +1830,7 @@ def test_layer_chart_two_scales():
 def test_facet_single_panel():
     """Facet with a single unique value should produce 1 panel (not crash)."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "f": ["only", "only", "only"]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").facet("f").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").facet("f").to_svg()
     assert "<svg" in svg
 
 
@@ -1840,7 +1840,7 @@ def test_facet_many_panels():
     df = pl.DataFrame({"x": list(range(25)), "y": list(range(25)), "f": cats}).cast(
         {"x": pl.Float64, "y": pl.Float64}
     )
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").facet("f").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").facet("f").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1921,7 +1921,7 @@ def test_inset_frozen():
 def test_svg_viewbox_no_nan():
     """The viewBox attribute must never contain NaN, even with edge-case data."""
     df = pl.DataFrame({"x": [0.0, 0.0, 0.0], "y": [0.0, 0.0, 0.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     vb = re.search(r'viewBox="([^"]*)"', svg)
     assert vb is not None, "SVG must have a viewBox attribute"
     parts = vb.group(1).split()
@@ -1933,14 +1933,14 @@ def test_svg_viewbox_no_nan():
 def test_svg_no_infinity_in_coordinates():
     """SVG output must never contain 'Infinity' string in any attribute."""
     df = pl.DataFrame({"x": [1e300, -1e300], "y": [1.0, 2.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "Infinity" not in svg
 
 
 def test_svg_bar_count_matches_categories():
     """Bar chart should produce one <rect per category."""
     df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [10.0, 20.0, 30.0]})
-    svg = fr.Chart(df).mark_bar().encode(x="cat", y="val").show_svg()
+    svg = fr.Chart(df).mark_bar().encode(x="cat", y="val").to_svg()
     assert svg.count("<rect") >= 3
 
 
@@ -1952,7 +1952,7 @@ def test_mixed_null_non_null_drops_null_rows():
             "y": [10.0, None, 20.0, 30.0, 40.0],
         }
     )
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "NaN" not in svg
     assert svg.count("<circle") == 2
 
@@ -1960,5 +1960,5 @@ def test_mixed_null_non_null_drops_null_rows():
 def test_domain_zero_zero_no_division_by_zero():
     """When data domain is [0,0], the renderer must not produce NaN from 0/0."""
     df = pl.DataFrame({"x": [0.0, 0.0], "y": [0.0, 0.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "NaN" not in svg

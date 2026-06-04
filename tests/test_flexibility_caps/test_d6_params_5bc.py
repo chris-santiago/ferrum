@@ -120,7 +120,7 @@ class TestParamsSerialization:
             .mark_point()
             .encode(x=fm.X("t", scale={"domain": fm.param("d", value=[0, 100])}), y=fm.Y("a"))
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.lstrip().startswith("<")
         assert "<svg" in svg
 
@@ -150,7 +150,7 @@ class TestParamsSerialization:
             .transform(fm.transform_filter(brush))
             .add_selection(brush)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_add_params(self):
@@ -212,11 +212,11 @@ class TestStaticDomainSubstitution:
                 y=fm.Y("a"),
             )
         )
-        svg_a = chart_a.show_svg()
+        svg_a = chart_a.to_svg()
 
         # Chart B: X domain auto-inferred from data (~[10, 30]).
         chart_b = fm.Chart(df).mark_point().encode(x=fm.X("t"), y=fm.Y("a"))
-        svg_b = chart_b.show_svg()
+        svg_b = chart_b.to_svg()
 
         cx_a = self._cx_positions(svg_a)
         cx_b = self._cx_positions(svg_b)

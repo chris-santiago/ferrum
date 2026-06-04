@@ -169,7 +169,7 @@ def test_aggregating_layer_renders_without_error():
     mean_layer = fm.Chart(df).mark_line().encode(x="t", y=fm.Y("v", aggregate="mean"))
     max_layer = fm.Chart(df).mark_line().encode(x="t", y=fm.Y("v", aggregate="max"))
 
-    svg = (mean_layer + max_layer).show_svg()
+    svg = (mean_layer + max_layer).to_svg()
     assert svg.lstrip().startswith("<")
     assert "<path" in svg or "<polyline" in svg
 

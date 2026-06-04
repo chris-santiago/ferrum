@@ -7,8 +7,8 @@ import polars as pl
 
 
 def save_png(chart, path):
-    """Render chart to PNG using ferrum's built-in renderer at 2x scale."""
-    png_data = chart.show_png(scale=2.0)
+    """Render chart to PNG using ferrum's built-in renderer at 2x scale via to_png()."""
+    png_data = chart.to_png(scale=2.0)
     with open(path, "wb") as f:
         f.write(png_data)
     print(f"  OK: {path} ({len(png_data)} bytes)")

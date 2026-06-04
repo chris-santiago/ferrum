@@ -83,32 +83,32 @@ class TestSingleTransformFaceted:
 
     def test_smooth_facet_col(self, facet_df):
         chart = Chart(facet_df).mark_smooth().encode(x="x:Q", y="y:Q").facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
     def test_smooth_facet_row(self, facet_df):
         chart = Chart(facet_df).mark_smooth().encode(x="x:Q", y="y:Q").facet(row="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
     def test_smooth_facet_grid(self, facet_df):
         chart = Chart(facet_df).mark_smooth().encode(x="x:Q", y="y:Q").facet(row="grp", col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
     def test_density_facet_col(self, facet_df):
         chart = Chart(facet_df).mark_density().encode(x="x:Q").facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
     def test_histogram_facet_col(self, facet_df):
         chart = Chart(facet_df).mark_histogram().encode(x="x:Q").facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
     def test_boxplot_facet_col(self, facet_df):
         chart = Chart(facet_df).mark_boxplot().encode(x="grp:N", y="y:Q").facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
 
@@ -124,21 +124,21 @@ class TestMultiLayerTransformFaceted:
         points = Chart(facet_df).mark_point().encode(x="x:Q", y="y:Q")
         smooth = Chart(facet_df).mark_smooth().encode(x="x:Q", y="y:Q")
         layered = (points + smooth).facet(col="cat")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert _is_svg(svg)
 
     def test_point_plus_smooth_facet_grid(self, facet_df):
         points = Chart(facet_df).mark_point().encode(x="x:Q", y="y:Q")
         smooth = Chart(facet_df).mark_smooth().encode(x="x:Q", y="y:Q")
         layered = (points + smooth).facet(row="grp", col="cat")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert _is_svg(svg)
 
     def test_point_plus_density_facet_col(self, facet_df):
         points = Chart(facet_df).mark_point().encode(x="x:Q", y="y:Q")
         density = Chart(facet_df).mark_density().encode(x="x:Q")
         layered = (points + density).facet(col="cat")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert _is_svg(svg)
 
     def test_point_plus_histogram_facet_col(self, facet_df):
@@ -146,7 +146,7 @@ class TestMultiLayerTransformFaceted:
         points = Chart(facet_df).mark_point().encode(x="x:Q", y="y:Q")
         hist = Chart(facet_df).mark_histogram().encode(x="x:Q")
         layered = (points + hist).facet(col="cat")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert _is_svg(svg)
 
     def test_three_layers_point_smooth_rule_faceted(self, facet_df):
@@ -154,14 +154,14 @@ class TestMultiLayerTransformFaceted:
         smooth = Chart(facet_df).mark_smooth().encode(x="x:Q", y="y:Q")
         rule = Chart(facet_df).mark_rule().encode(y="y:Q")
         layered = (points + smooth + rule).facet(col="cat")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert _is_svg(svg)
 
     def test_point_smooth_method_lm_faceted(self, facet_df):
         points = Chart(facet_df).mark_point().encode(x="x:Q", y="y:Q")
         smooth = Chart(facet_df).mark_smooth(method="lm").encode(x="x:Q", y="y:Q")
         layered = (points + smooth).facet(col="cat")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert _is_svg(svg)
 
 
@@ -175,24 +175,24 @@ class TestFacetScopesTransform:
 
     def test_smooth_faceted_differs_from_single(self, facet_df):
         base = Chart(facet_df).mark_smooth().encode(x="x:Q", y="y:Q")
-        single_svg = base.show_svg()
-        faceted_svg = base.facet(col="cat").show_svg()
+        single_svg = base.to_svg()
+        faceted_svg = base.facet(col="cat").to_svg()
         assert _is_svg(single_svg)
         assert _is_svg(faceted_svg)
         assert single_svg != faceted_svg
 
     def test_density_faceted_differs_from_single(self, facet_df):
         base = Chart(facet_df).mark_density().encode(x="x:Q")
-        single_svg = base.show_svg()
-        faceted_svg = base.facet(col="cat").show_svg()
+        single_svg = base.to_svg()
+        faceted_svg = base.facet(col="cat").to_svg()
         assert _is_svg(single_svg)
         assert _is_svg(faceted_svg)
         assert single_svg != faceted_svg
 
     def test_histogram_faceted_differs_from_single(self, facet_df):
         base = Chart(facet_df).mark_histogram().encode(x="x:Q")
-        single_svg = base.show_svg()
-        faceted_svg = base.facet(col="cat").show_svg()
+        single_svg = base.to_svg()
+        faceted_svg = base.facet(col="cat").to_svg()
         assert _is_svg(single_svg)
         assert _is_svg(faceted_svg)
         assert single_svg != faceted_svg
@@ -211,7 +211,7 @@ class TestMultipleTransformLayers:
         smooth_loess = Chart(facet_df).mark_smooth(method="loess").encode(x="x:Q", y="y:Q")
         smooth_lm = Chart(facet_df).mark_smooth(method="lm").encode(x="x:Q", y="y:Q")
         layered = (smooth_loess + smooth_lm).facet(col="cat")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert _is_svg(svg)
 
     def test_smooth_loess_plus_smooth_lm_different_bw_faceted(self, facet_df):
@@ -219,7 +219,7 @@ class TestMultipleTransformLayers:
         smooth_narrow = Chart(facet_df).mark_smooth(bandwidth=0.3).encode(x="x:Q", y="y:Q")
         smooth_wide = Chart(facet_df).mark_smooth(bandwidth=0.9).encode(x="x:Q", y="y:Q")
         layered = (smooth_narrow + smooth_wide).facet(col="cat")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert _is_svg(svg)
 
     def test_point_plus_density_same_col_faceted(self, facet_df):
@@ -227,7 +227,7 @@ class TestMultipleTransformLayers:
         points = Chart(facet_df).mark_point().encode(x="x:Q", y="y:Q")
         density = Chart(facet_df).mark_density().encode(x="x:Q")
         layered = (points + density).facet(col="cat")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert _is_svg(svg)
 
 
@@ -247,7 +247,7 @@ class TestColorEncodingWithTransformFaceted:
             .encode(x="x:Q", y="y:Q", color="grp:N")
             .facet(col="cat")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
     def test_density_color_faceted(self, facet_df):
@@ -258,7 +258,7 @@ class TestColorEncodingWithTransformFaceted:
             .encode(x="x:Q", color="grp:N")
             .facet(col="cat")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
     def test_histogram_color_stack_faceted(self, facet_df):
@@ -269,7 +269,7 @@ class TestColorEncodingWithTransformFaceted:
             .encode(x="x:Q", color="grp:N")
             .facet(col="cat")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
     def test_point_plus_smooth_color_faceted(self, facet_df):
@@ -277,7 +277,7 @@ class TestColorEncodingWithTransformFaceted:
         points = Chart(facet_df).mark_point().encode(x="x:Q", y="y:Q", color="grp:N")
         smooth = Chart(facet_df).mark_smooth(groupby="grp").encode(x="x:Q", y="y:Q", color="grp:N")
         layered = (points + smooth).facet(col="cat")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert _is_svg(svg)
 
 
@@ -292,31 +292,31 @@ class TestEdgeCases:
     def test_facet_sparse_group_smooth(self, sparse_df):
         """Facet with one group having only 3 rows — smooth should still render."""
         chart = Chart(sparse_df).mark_smooth().encode(x="x:Q", y="y:Q").facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
     def test_facet_sparse_group_density(self, sparse_df):
         """Facet with one group having only 3 rows — density should still render."""
         chart = Chart(sparse_df).mark_density().encode(x="x:Q").facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
     def test_facet_sparse_group_histogram(self, sparse_df):
         """Facet with one group having only 3 rows — histogram should still render."""
         chart = Chart(sparse_df).mark_histogram().encode(x="x:Q").facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
     def test_many_panels_smooth(self, many_panel_df):
         """5 facet panels with smooth transform — no crash."""
         chart = Chart(many_panel_df).mark_smooth().encode(x="x:Q", y="y:Q").facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
     def test_many_panels_density(self, many_panel_df):
         """5 facet panels with density transform — no crash."""
         chart = Chart(many_panel_df).mark_density().encode(x="x:Q").facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
     def test_layered_mixed_transform_nontransform_faceted(self, facet_df):
@@ -324,13 +324,13 @@ class TestEdgeCases:
         plain_points = Chart(facet_df).mark_point().encode(x="x:Q", y="y:Q")
         transform_smooth = Chart(facet_df).mark_smooth().encode(x="x:Q", y="y:Q")
         layered = (plain_points + transform_smooth).facet(col="cat")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert _is_svg(svg)
 
     def test_facet_smooth_with_ci_band(self, facet_df):
         """Smooth with CI band (layered ribbon+line) faceted by col."""
         chart = Chart(facet_df).mark_smooth(ci=0.95).encode(x="x:Q", y="y:Q").facet(col="cat")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert _is_svg(svg)
 
     def test_facet_smooth_ci_plus_points(self, facet_df):
@@ -338,5 +338,5 @@ class TestEdgeCases:
         points = Chart(facet_df).mark_point().encode(x="x:Q", y="y:Q")
         smooth_ci = Chart(facet_df).mark_smooth(ci=0.95).encode(x="x:Q", y="y:Q")
         layered = (points + smooth_ci).facet(col="cat")
-        svg = layered.show_svg()
+        svg = layered.to_svg()
         assert _is_svg(svg)

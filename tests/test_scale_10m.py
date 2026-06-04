@@ -81,7 +81,7 @@ class TestScatter10M:
             .mark_point()
             .encode(x="x:Q", y="y:Q")
             .properties(width=400, height=300)
-            .show_svg()
+            .to_svg()
         )
         elapsed = time.monotonic() - t0
         assert "<svg" in svg
@@ -95,7 +95,7 @@ class TestScatter10M:
             .mark_point()
             .encode(x="x:Q", y="y:Q")
             .properties(width=400, height=300)
-            .show_svg()
+            .to_svg()
         )
         size_mb = len(svg) / (1024 * 1024)
         assert size_mb < 5, f"10M scatter SVG is {size_mb:.1f}MB; expected <5MB (auto-raster)"
@@ -105,7 +105,7 @@ class TestScatter10M:
         df = _df_quant(N)
         chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=400, height=300)
         with pytest.warns(UserWarning, match="Auto-raster"):
-            chart.show_svg()
+            chart.to_svg()
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +118,7 @@ class TestHistogram10M:
         """10M-row histogram renders in < 30s and produces >= 5 bins."""
         df = _df_quant(N)
         t0 = time.monotonic()
-        svg = fm.displot(df, x="x").properties(width=400, height=300).show_svg()
+        svg = fm.displot(df, x="x").properties(width=400, height=300).to_svg()
         elapsed = time.monotonic() - t0
         assert "<svg" in svg
         assert elapsed < 30.0, f"10M histogram took {elapsed:.2f}s (limit 30s)"
@@ -128,7 +128,7 @@ class TestHistogram10M:
     def test_svg_size(self):
         """Histogram output stays compact regardless of input size (binning aggregates)."""
         df = _df_quant(N)
-        svg = fm.displot(df, x="x").properties(width=400, height=300).show_svg()
+        svg = fm.displot(df, x="x").properties(width=400, height=300).to_svg()
         size_mb = len(svg) / (1024 * 1024)
         assert size_mb < 2, f"10M histogram SVG is {size_mb:.1f}MB; expected <2MB"
 
@@ -148,7 +148,7 @@ class TestHexbin10M:
             .mark_hex(aggregate="count")
             .encode(x="x:Q", y="y:Q")
             .properties(width=400, height=300)
-            .show_svg()
+            .to_svg()
         )
         elapsed = time.monotonic() - t0
         assert "<svg" in svg
@@ -162,7 +162,7 @@ class TestHexbin10M:
             .mark_hex(aggregate="count")
             .encode(x="x:Q", y="y:Q")
             .properties(width=400, height=300)
-            .show_svg()
+            .to_svg()
         )
         size_mb = len(svg) / (1024 * 1024)
         assert size_mb < 2, f"10M hexbin SVG is {size_mb:.1f}MB; expected <2MB"
@@ -183,7 +183,7 @@ class TestLine10M:
             .mark_line()
             .encode(x="t:Q", y="y:Q")
             .properties(width=400, height=300)
-            .show_svg()
+            .to_svg()
         )
         elapsed = time.monotonic() - t0
         assert "<svg" in svg
@@ -205,7 +205,7 @@ class TestArea10M:
             .mark_area()
             .encode(x="t:Q", y="y:Q")
             .properties(width=400, height=300)
-            .show_svg()
+            .to_svg()
         )
         elapsed = time.monotonic() - t0
         assert "<svg" in svg
@@ -230,7 +230,7 @@ class TestMemory10M:
         tracemalloc.start()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
-            chart.show_svg()
+            chart.to_svg()
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
         peak_gb = peak / (1024**3)

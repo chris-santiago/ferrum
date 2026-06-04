@@ -167,7 +167,7 @@ def test_class_balance_visualizer_empty_series_raises():
     viz = ferrum.ClassBalanceVisualizer()
     try:
         viz.fit([])
-        svg = viz.show().show_svg()
+        svg = viz.show().to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
     except (ValueError, ZeroDivisionError):
@@ -257,7 +257,7 @@ def test_precomputed_roc_with_extreme_scores():
     y_true = np.array([0, 0, 1, 1])
     y_pred = np.array([1e-300, 1e-100, 1e100, 1e300])
     chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -267,7 +267,7 @@ def test_precomputed_residuals_with_very_large_values():
     y_true = np.array([1e15, 2e15, 3e15])
     y_pred = np.array([1e15 + 1, 2e15 + 1, 3e15 + 1])
     chart = ferrum.residuals_chart(y_true=y_true, y_pred=y_pred, panels="single")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "Infinity" not in svg
 
@@ -358,7 +358,7 @@ def test_roc_chart_configure_axis():
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
     chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred)
     configured = chart.configure(axis=AxisConfig(label_angle=-45))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -371,7 +371,7 @@ def test_confusion_matrix_chart_configure_title():
     y_hard = np.array([0, 1, 0, 0, 1, 1])
     chart = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard)
     configured = chart.configure(title=TitleConfig(font_size=20))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -384,7 +384,7 @@ def test_residuals_chart_configure_legend():
     y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.2])
     chart = ferrum.residuals_chart(y_true=y_true, y_pred=y_pred, panels="single")
     configured = chart.configure(legend=LegendConfig(orient="bottom"))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -397,7 +397,7 @@ def test_pr_chart_configure_grid():
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
     chart = ferrum.pr_chart(y_true=y_true, y_pred=y_pred)
     configured = chart.configure(grid=GridConfig(dash=[4, 2]))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -410,7 +410,7 @@ def test_calibration_chart_configure_padding():
     y_pred = np.array([0.1, 0.2, 0.9, 0.7, 0.3, 0.8, 0.15, 0.85, 0.25, 0.6])
     chart = ferrum.calibration_chart(y_true=y_true, y_pred=y_pred)
     configured = chart.configure(padding=PaddingConfig(top=40))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -423,7 +423,7 @@ def test_gain_chart_configure_color():
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
     chart = ferrum.gain_chart(y_true=y_true, y_pred=y_pred)
     configured = chart.configure(color=ColorConfig(scheme="category10"))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -438,7 +438,7 @@ def test_importance_chart_configure():
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.importance_chart(model, X, df["y"])
     configured = chart.configure(axis=AxisConfig(label_angle=0))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -456,7 +456,7 @@ def test_discrimination_threshold_chart_configure_axis_and_grid():
         axis=AxisConfig(label_font_size=10),
         grid=GridConfig(width=0.5),
     )
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
     assert "Infinity" not in svg
@@ -473,7 +473,7 @@ def test_lift_chart_configure_title_and_color():
         title=TitleConfig(font_size=18),
         color=ColorConfig(scheme="dark2"),
     )
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -486,7 +486,7 @@ def test_class_prediction_error_chart_configure():
     y_pred = np.array([0, 1, 1, 0, 2, 2, 1, 1, 2])
     chart = ferrum.class_prediction_error_chart(y_true=y_true, y_pred=y_pred)
     configured = chart.configure(axis=AxisConfig(label_angle=45))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -502,7 +502,7 @@ def test_residuals_chart_multi_panel_configure():  # BUG: VConcatChart returned 
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.residuals_chart(model, X, df["y"], panels="auto")
     configured = chart.configure(axis=AxisConfig(tick_count=5))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -516,7 +516,7 @@ def test_prediction_error_chart_configure_with_ci():
     y_pred = np.array([1.2, 1.9, 3.1, 3.8, 5.2, 5.9, 7.3, 7.8])
     chart = ferrum.prediction_error_chart(y_true=y_true, y_pred=y_pred, ci=0.90)
     configured = chart.configure(padding=PaddingConfig(left=60))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -532,7 +532,7 @@ def test_roc_chart_annotate_auc_false_no_text_labels():
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
     chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred, annotate_auc=False)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # When annotate_auc=False, the formatted "AUC = 0." should NOT appear
     assert "AUC = 0." not in svg
@@ -543,7 +543,7 @@ def test_roc_chart_annotate_auc_true_has_text_labels():
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
     chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred, annotate_auc=True)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "<text" in svg
     # AUC annotation may appear as "AUC = X.XXX" or "(AUC = X.XXX)" in legend labels
@@ -555,7 +555,7 @@ def test_pr_chart_annotate_ap_false_no_text_labels():
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
     chart = ferrum.pr_chart(y_true=y_true, y_pred=y_pred, annotate_ap=False)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "AP = 0." not in svg
 
@@ -565,7 +565,7 @@ def test_pr_chart_annotate_ap_true_has_text_labels():
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
     chart = ferrum.pr_chart(y_true=y_true, y_pred=y_pred, annotate_ap=True)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "<text" in svg
     assert "AP = 0." in svg
@@ -577,7 +577,7 @@ def test_pr_chart_iso_lines_annotation_text():
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
     chart = ferrum.pr_chart(y_true=y_true, y_pred=y_pred, iso_lines=True)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # All four F-score labels should appear
     for f_label in ("F=0.2", "F=0.4", "F=0.6", "F=0.8"):
@@ -590,7 +590,7 @@ def test_pr_chart_annotate_ap_and_iso_lines_combined():
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
     chart = ferrum.pr_chart(y_true=y_true, y_pred=y_pred, annotate_ap=True, iso_lines=True)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "AP = 0." in svg
     assert "F=0.6" in svg
     assert "NaN" not in svg
@@ -607,7 +607,7 @@ def test_residuals_chart_annotate_metrics_false_no_corner():
         panels="single",
         annotate_metrics=False,
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # The corner annotation uses format_corner_metrics which includes "R" and "RMSE".
     # When annotate_metrics=False, _inject_metrics_corner is skipped so
@@ -626,7 +626,7 @@ def test_residuals_chart_annotate_metrics_true_has_r2():
         panels="single",
         annotate_metrics=True,
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # The metrics corner text layer should inject _metrics_text
     resolved = chart._resolve_pending()
@@ -639,7 +639,7 @@ def test_calibration_chart_annotate_brier_true_shows_brier_label():
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.2, 0.9, 0.7, 0.3, 0.8, 0.15, 0.85, 0.25, 0.6])
     chart = ferrum.calibration_chart(y_true=y_true, y_pred=y_pred, annotate_brier=True)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # The Brier annotation should contain "Brier" text somewhere
     assert "Brier" in svg or "brier" in svg.lower()
@@ -650,7 +650,7 @@ def test_calibration_chart_annotate_brier_false_no_brier_label():
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.2, 0.9, 0.7, 0.3, 0.8, 0.15, 0.85, 0.25, 0.6])
     chart = ferrum.calibration_chart(y_true=y_true, y_pred=y_pred, annotate_brier=False)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -672,7 +672,7 @@ def test_roc_chart_multiclass_annotate_auc_per_class_labels():
         ]
     )
     chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred, annotate_auc=True)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # Should have multiple AUC annotations (one per class)
     assert svg.count("AUC = ") >= 3
@@ -690,7 +690,7 @@ def test_discrimination_threshold_chart_threshold_line_annotation():
         threshold_line=True,
         n_thresholds=20,
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # mark_rule emits an SVG <line> element for the vertical span
     assert "<line " in svg
@@ -710,7 +710,7 @@ def test_roc_chart_with_format_preset_percent():
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
     chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred)
     configured = chart.configure(axis=AxisConfig(label_format="percent"))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -723,7 +723,7 @@ def test_confusion_matrix_chart_with_format_preset_integer():
     y_hard = np.array([0, 1, 0, 0, 1, 1])
     chart = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard)
     configured = chart.configure(axis=AxisConfig(label_format="integer"))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -736,7 +736,7 @@ def test_residuals_chart_with_format_preset_decimal():
     y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.2])
     chart = ferrum.residuals_chart(y_true=y_true, y_pred=y_pred, panels="single")
     configured = chart.configure(axis=AxisConfig(label_format="decimal"))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -766,7 +766,7 @@ def test_calibration_chart_with_format_preset_si():
     y_pred = np.array([0.1, 0.2, 0.9, 0.7, 0.3, 0.8, 0.15, 0.85, 0.25, 0.6])
     chart = ferrum.calibration_chart(y_true=y_true, y_pred=y_pred)
     configured = chart.configure(axis=AxisConfig(label_format="si"))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -779,7 +779,7 @@ def test_gain_chart_with_format_preset_percent_int():
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
     chart = ferrum.gain_chart(y_true=y_true, y_pred=y_pred)
     configured = chart.configure(axis=AxisConfig(label_format="percent_int"))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -795,7 +795,7 @@ def test_roc_chart_svg_has_valid_viewbox():
 
     y_true = np.array([0, 0, 1, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
-    svg = ferrum.roc_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    svg = ferrum.roc_chart(y_true=y_true, y_pred=y_pred).to_svg()
     assert "viewBox" in svg
     match = re.search(r'viewBox="([^"]*)"', svg)
     assert match is not None
@@ -811,7 +811,7 @@ def test_pr_chart_svg_has_line_elements():
     """PR chart SVG must contain line or path elements for the curve."""
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
-    svg = ferrum.pr_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    svg = ferrum.pr_chart(y_true=y_true, y_pred=y_pred).to_svg()
     # A PR curve is rendered as a <path> element
     assert "<path" in svg or "<polyline" in svg
 
@@ -820,7 +820,7 @@ def test_confusion_matrix_chart_has_rect_elements():
     """Confusion matrix SVG must have rect elements for the heatmap cells."""
     y_true = np.array([0, 1, 1, 0, 1, 0])
     y_hard = np.array([0, 1, 0, 0, 1, 1])
-    svg = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard).show_svg()
+    svg = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard).to_svg()
     # A 2x2 confusion matrix should have at least 4 rect elements
     assert svg.count("<rect") >= 4
 
@@ -829,7 +829,7 @@ def test_confusion_matrix_chart_has_text_annotations():
     """Confusion matrix SVG must have text elements for cell value annotations."""
     y_true = np.array([0, 1, 1, 0, 1, 0])
     y_hard = np.array([0, 1, 0, 0, 1, 1])
-    svg = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard).show_svg()
+    svg = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard).to_svg()
     # Annotated by default -- data labels + axis labels
     assert svg.count("<text") >= 4
 
@@ -840,7 +840,7 @@ def test_gain_chart_svg_no_nan_in_path_d():
 
     y_true = np.array([0, 0, 1, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
-    svg = ferrum.gain_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    svg = ferrum.gain_chart(y_true=y_true, y_pred=y_pred).to_svg()
     paths = re.findall(r'd="([^"]*)"', svg)
     for d in paths:
         assert "NaN" not in d, f"NaN found in path d-attribute: {d[:100]}"
@@ -853,7 +853,7 @@ def test_lift_chart_svg_no_nan_in_coordinates():
 
     y_true = np.array([0, 0, 1, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
-    svg = ferrum.lift_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    svg = ferrum.lift_chart(y_true=y_true, y_pred=y_pred).to_svg()
     # Check all numeric attribute values for NaN
     for attr in ("cx", "cy", "x1", "y1", "x2", "y2", "x", "y"):
         vals = re.findall(rf'{attr}="([^"]*)"', svg)
@@ -867,7 +867,7 @@ def test_calibration_chart_svg_has_diagonal_reference():
     from (0,0) to (1,1) showing perfect calibration."""
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.2, 0.9, 0.7, 0.3, 0.8, 0.15, 0.85, 0.25, 0.6])
-    svg = ferrum.calibration_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    svg = ferrum.calibration_chart(y_true=y_true, y_pred=y_pred).to_svg()
     assert "<svg" in svg
     # The reference line is rendered as a line or path element
     assert "<line" in svg or "<path" in svg
@@ -882,7 +882,7 @@ def test_residuals_chart_multipanel_has_multiple_svg_groups():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.residuals_chart(model, X, df["y"], panels="auto")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # The 4-panel layout should include recognizable panel titles
     # (at least "Residuals" and "Q" from "Normal Q-Q")
@@ -898,7 +898,7 @@ def test_prediction_error_chart_reference_line_present():
     y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.2])
     svg = ferrum.prediction_error_chart(
         y_true=y_true, y_pred=y_pred, reference_line=True
-    ).show_svg()
+    ).to_svg()
     assert "<svg" in svg
     # Reference line is rendered as a line or path element
     assert "<line" in svg or "<path" in svg
@@ -910,7 +910,7 @@ def test_prediction_error_chart_no_reference_line():
     y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.2])
     chart = ferrum.prediction_error_chart(y_true=y_true, y_pred=y_pred, reference_line=False)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "<circle" in svg
 
@@ -1155,7 +1155,7 @@ def test_precomputed_roc_chart_no_nan_in_svg():
     """Precomputed ROC chart SVG must not contain NaN or Infinity."""
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
-    svg = ferrum.roc_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    svg = ferrum.roc_chart(y_true=y_true, y_pred=y_pred).to_svg()
     assert "NaN" not in svg
     assert "Infinity" not in svg
     assert "viewBox" in svg
@@ -1165,7 +1165,7 @@ def test_precomputed_pr_chart_no_nan_in_svg():
     """Precomputed PR chart SVG must not contain NaN or Infinity."""
     y_true = np.array([0, 0, 1, 1, 0, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
-    svg = ferrum.pr_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    svg = ferrum.pr_chart(y_true=y_true, y_pred=y_pred).to_svg()
     assert "NaN" not in svg
     assert "Infinity" not in svg
 
@@ -1174,7 +1174,7 @@ def test_precomputed_confusion_matrix_chart_no_nan_in_svg():
     """Precomputed confusion matrix SVG must not contain NaN."""
     y_true = np.array([0, 1, 1, 0, 1, 0])
     y_hard = np.array([0, 1, 0, 0, 1, 1])
-    svg = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard).show_svg()
+    svg = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard).to_svg()
     assert "NaN" not in svg
     assert "Infinity" not in svg
 
@@ -1183,7 +1183,7 @@ def test_precomputed_gain_chart_no_nan_in_svg():
     """Precomputed gain chart SVG must not contain NaN."""
     y_true = np.array([0, 0, 1, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
-    svg = ferrum.gain_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    svg = ferrum.gain_chart(y_true=y_true, y_pred=y_pred).to_svg()
     assert "NaN" not in svg
 
 
@@ -1191,7 +1191,7 @@ def test_precomputed_lift_chart_no_nan_in_svg():
     """Precomputed lift chart SVG must not contain NaN."""
     y_true = np.array([0, 0, 1, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
-    svg = ferrum.lift_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    svg = ferrum.lift_chart(y_true=y_true, y_pred=y_pred).to_svg()
     assert "NaN" not in svg
 
 
@@ -1199,7 +1199,7 @@ def test_precomputed_discrimination_threshold_no_nan_in_svg():
     """Precomputed discrimination threshold chart SVG must not contain NaN."""
     y_true = np.array([0, 0, 1, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
-    svg = ferrum.discrimination_threshold_chart(y_true=y_true, y_pred=y_pred).show_svg()
+    svg = ferrum.discrimination_threshold_chart(y_true=y_true, y_pred=y_pred).to_svg()
     assert "NaN" not in svg
 
 
@@ -1402,9 +1402,9 @@ def test_residuals_visualizer_double_fit():
     model = _MinimalPredict()
     viz = ferrum.ResidualsVisualizer(model)
     viz.fit(X1, y1)
-    svg1 = viz.show().show_svg()
+    svg1 = viz.show().to_svg()
     viz.fit(X2, y2)
-    svg2 = viz.show().show_svg()
+    svg2 = viz.show().to_svg()
     assert "<svg" in svg1
     assert "<svg" in svg2
 
@@ -1417,7 +1417,7 @@ def test_roc_visualizer_double_fit():
     viz = ferrum.ROCVisualizer(model)
     viz.fit(X, y)
     viz.fit(X, y)
-    svg = viz.show().show_svg()
+    svg = viz.show().to_svg()
     assert "<svg" in svg
 
 
@@ -1464,7 +1464,7 @@ def test_precomputed_prediction_error_chart_produces_valid_svg():
     y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.2])
     chart = ferrum.prediction_error_chart(y_true=y_true, y_pred=y_pred)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
     assert "Infinity" not in svg
@@ -1476,7 +1476,7 @@ def test_precomputed_class_prediction_error_chart():
     y_true = np.array([0, 1, 2, 0, 1, 2, 0, 1, 2])
     y_pred = np.array([0, 1, 1, 0, 2, 2, 1, 1, 2])
     chart = ferrum.class_prediction_error_chart(y_true=y_true, y_pred=y_pred)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1694,7 +1694,7 @@ def test_roc_chart_configure_axis_with_annotate_auc():
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7, 0.15, 0.85])
     chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred, annotate_auc=True)
     configured = chart.configure(axis=AxisConfig(label_angle=-30, tick_count=4))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
     assert "AUC" in svg
@@ -1713,7 +1713,7 @@ def test_pr_chart_configure_with_iso_lines_and_ap():
         iso_lines=True,
     )
     configured = chart.configure(grid=GridConfig(color="#cccccc"))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "AP = 0." in svg
     assert "F=0.6" in svg
@@ -1733,7 +1733,7 @@ def test_residuals_chart_configure_axis_with_metrics_annotation():
         annotate_metrics=True,
     )
     configured = chart.configure(axis=AxisConfig(label_font_size=12))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1752,7 +1752,7 @@ def test_roc_visualizer_show_then_configure():
     viz = ferrum.ROCVisualizer(_PredictProba()).fit(X, y)
     chart = viz.show()
     configured = chart.configure(axis=AxisConfig(label_angle=-45))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1766,7 +1766,7 @@ def test_confusion_matrix_visualizer_show_then_configure():
     viz = ferrum.ConfusionMatrixVisualizer(_PredictProba()).fit(X, y)
     chart = viz.show()
     configured = chart.configure(title=TitleConfig(font_size=18))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1780,7 +1780,7 @@ def test_residuals_visualizer_show_then_configure():
     viz = ferrum.ResidualsVisualizer(_MinimalPredict()).fit(X, y)
     chart = viz.show()
     configured = chart.configure(padding=PaddingConfig(top=30))
-    svg = configured.show_svg()
+    svg = configured.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -2007,7 +2007,7 @@ def test_precomputed_roc_all_same_class_chart_renders():
     y_true = np.array([1, 1, 1, 1])
     y_pred = np.array([0.1, 0.3, 0.7, 0.9])
     chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg  # NaN in auc column should not leak to SVG coordinates
 
@@ -2086,7 +2086,7 @@ def test_configure_chained_twice_on_diagnostic_chart():
     chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred)
     c1 = chart.configure(axis=AxisConfig(label_angle=-45))
     c2 = c1.configure(title=TitleConfig(font_size=24))
-    svg = c2.show_svg()
+    svg = c2.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -2101,7 +2101,7 @@ def test_roc_chart_subtitle():
     y_true = np.array([0, 0, 1, 1, 0, 1])
     y_pred = np.array([0.1, 0.3, 0.9, 0.8, 0.2, 0.7])
     chart = ferrum.roc_chart(y_true=y_true, y_pred=y_pred, subtitle="Test Subtitle")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "Test Subtitle" in svg
 
@@ -2116,7 +2116,7 @@ def test_residuals_chart_subtitle():
         panels="single",
         subtitle="My Subtitle",
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "My Subtitle" in svg
 
@@ -2137,7 +2137,7 @@ def test_discrimination_threshold_chart_custom_metrics_subset():
         n_thresholds=10,
         metrics=("precision", "recall"),
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -2156,7 +2156,7 @@ def test_roc_chart_properties_override():
         y_pred=y_pred,
         properties={"width": 500, "height": 400},
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -2166,7 +2166,7 @@ def test_confusion_matrix_chart_normalize_all():
     y_true = np.array([0, 1, 1, 0, 1, 0])
     y_hard = np.array([0, 1, 0, 0, 1, 1])
     chart = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard, normalize="all")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -2176,7 +2176,7 @@ def test_confusion_matrix_chart_normalize_pred():
     y_true = np.array([0, 1, 1, 0, 1, 0])
     y_hard = np.array([0, 1, 0, 0, 1, 1])
     chart = ferrum.confusion_matrix_chart(y_true=y_true, y_pred=y_hard, normalize="pred")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 

@@ -137,7 +137,7 @@ def _check_or_update(name: str, svg: str) -> None:
 
 def test_displot_hist_golden(df_iris_like):
     chart = fe.displot(df_iris_like, x="sepal_length", kind="hist")
-    _check_or_update("displot_hist.svg", chart.show_svg())
+    _check_or_update("displot_hist.svg", chart.to_svg())
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +154,7 @@ def test_catplot_box_golden(df_iris_like):
         kind="box",
         dodge=True,
     )
-    _check_or_update("catplot_box.svg", chart.show_svg())
+    _check_or_update("catplot_box.svg", chart.to_svg())
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +164,7 @@ def test_catplot_box_golden(df_iris_like):
 
 def test_lmplot_lm_ci_golden(df_reg):
     chart = fe.lmplot(df_reg, x="x", y="y", method="lm", ci=95)
-    _check_or_update("lmplot_lm_ci.svg", chart.show_svg())
+    _check_or_update("lmplot_lm_ci.svg", chart.to_svg())
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +174,7 @@ def test_lmplot_lm_ci_golden(df_reg):
 
 def test_residplot_lowess_golden(df_reg):
     chart = fe.residplot(df_reg, x="x", y="y", lowess=True)
-    _check_or_update("residplot_lowess.svg", chart.show_svg())
+    _check_or_update("residplot_lowess.svg", chart.to_svg())
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +187,7 @@ def test_pairplot_3x3_golden(df_iris_like):
         df_iris_like,
         vars=["sepal_length", "sepal_width", "petal_length"],
     )
-    _check_or_update("pairplot_3x3.svg", rc.show_svg())
+    _check_or_update("pairplot_3x3.svg", rc.to_svg())
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +197,7 @@ def test_pairplot_3x3_golden(df_iris_like):
 
 def test_heatmap_annot_golden(df_heat):
     chart = fe.heatmap(df_heat, annot=True)
-    _check_or_update("heatmap_annot.svg", chart.show_svg())
+    _check_or_update("heatmap_annot.svg", chart.to_svg())
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +207,7 @@ def test_heatmap_annot_golden(df_heat):
 
 def test_clustermap_basic_golden(df_cluster):
     cm = fe.clustermap(df_cluster)
-    _check_or_update("clustermap_basic.svg", cm.show_svg())
+    _check_or_update("clustermap_basic.svg", cm.to_svg())
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +217,7 @@ def test_clustermap_basic_golden(df_cluster):
 
 def test_jointplot_kde_hist_golden(df_joint):
     jc = fe.jointplot(df_joint, x="x", y="y", kind="kde", marginal_kind="hist")
-    _check_or_update("jointplot_kde_hist.svg", jc.show_svg())
+    _check_or_update("jointplot_kde_hist.svg", jc.to_svg())
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +231,7 @@ def test_pairplot_3x3_hue_golden(df_iris_like):
         vars=["sepal_length", "sepal_width", "petal_length"],
         hue="species",
     )
-    _check_or_update("pairplot_3x3_hue.svg", rc.show_svg())
+    _check_or_update("pairplot_3x3_hue.svg", rc.to_svg())
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +246,7 @@ def test_clustermap_row_col_dendrograms_golden(df_cluster):
         metric="cosine",
         z_score="rows",
     )
-    _check_or_update("clustermap_row_col_dendrograms.svg", cm.show_svg())
+    _check_or_update("clustermap_row_col_dendrograms.svg", cm.to_svg())
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +256,7 @@ def test_clustermap_row_col_dendrograms_golden(df_cluster):
 
 def test_jointplot_kde_marginals_golden(df_joint):
     jc = fe.jointplot(df_joint, x="x", y="y", kind="kde", marginal_kind="kde")
-    _check_or_update("jointplot_kde_marginals.svg", jc.show_svg())
+    _check_or_update("jointplot_kde_marginals.svg", jc.to_svg())
 
 
 # ---------------------------------------------------------------------------
@@ -272,4 +272,4 @@ def test_displot_stacked_hist_golden(df_iris_like):
         kind="hist",
         multiple="stack",
     )
-    _check_or_update("displot_stacked_hist.svg", chart.show_svg())
+    _check_or_update("displot_stacked_hist.svg", chart.to_svg())

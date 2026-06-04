@@ -214,7 +214,7 @@ def try_render(name: str, fn) -> tuple[str, bytes | None, str | None]:
         if isinstance(result, bytes):
             png = result
         else:
-            png = result.show_png()
+            png = result.to_png()
         return name, png, None
     except Exception as exc:
         tb = traceback.format_exc()

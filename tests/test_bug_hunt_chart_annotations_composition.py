@@ -245,7 +245,7 @@ class TestAddAnnotationPrimitive:
         hline = annotate_hline(5.0, stroke="red")
         c = _simple_chart()
         result = hline + c
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
     def test_chart_plus_annotation_renders_valid_svg(self):
@@ -255,7 +255,7 @@ class TestAddAnnotationPrimitive:
         """
         c = _simple_chart()
         result = c + annotate_hline(5.0, stroke="red")
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
     def test_chart_plus_annotation_data_not_merged(self):
@@ -478,7 +478,7 @@ class TestConfigurePropagation:
         c1 = _simple_chart()
         c2 = _simple_chart(mark="bar")
         combined = (c1 | c2).configure_axis(label_angle=-45)
-        svg = combined.show_svg()
+        svg = combined.to_svg()
         _assert_valid_svg(svg)
 
     def test_configure_renders_through_vconcat(self):
@@ -486,7 +486,7 @@ class TestConfigurePropagation:
         c1 = _simple_chart()
         c2 = _simple_chart(mark="bar")
         combined = (c1 & c2).configure_grid(color="#ccc")
-        svg = combined.show_svg()
+        svg = combined.to_svg()
         _assert_valid_svg(svg)
 
     def test_configure_renders_through_concat_chart(self):
@@ -494,7 +494,7 @@ class TestConfigurePropagation:
         c1 = _simple_chart()
         c2 = _simple_chart(mark="bar")
         combined = ConcatChart(c1, c2).configure_legend(orient="bottom")
-        svg = combined.show_svg()
+        svg = combined.to_svg()
         _assert_valid_svg(svg)
 
 
@@ -611,28 +611,28 @@ class TestAnnotationInComposition:
         """Multiple annotations on a chart should all render."""
         c = _simple_chart()
         result = c + annotate_hline(5.0, stroke="red") + annotate_vline(2.0, stroke="blue")
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
     def test_chart_plus_abline_renders(self):
         """chart + annotate_abline() should render without NaN."""
         c = _simple_chart()
         result = c + annotate_abline(slope=1.0, intercept=0.0, stroke="gray")
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
     def test_chart_plus_annotate_text_renders(self):
         """chart + annotate_text() should render the text annotation."""
         c = _simple_chart()
         result = c + annotate_text(2.0, 5.0, "peak", font_size=14)
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
     def test_chart_plus_annotate_rect_renders(self):
         """chart + annotate_rect() should render the shaded region."""
         c = _simple_chart()
         result = c + annotate_rect(1.0, 4.0, 2.5, 5.5, fill="#ffcc00", opacity=0.2)
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
     def test_annotations_in_layered_chart_rendered(self):
@@ -643,7 +643,7 @@ class TestAnnotationInComposition:
         layered = c1 + c2
         result = layered + annotate_hline(5.0)
         assert len(result._annotations) == 1
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
     def test_annotation_on_chart_with_configure(self):
@@ -653,7 +653,7 @@ class TestAnnotationInComposition:
         result = result.configure_axis(label_angle=-30)
         assert len(result._annotations) == 1
         assert len(result._configure) == 1
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
 
@@ -714,7 +714,7 @@ class TestAnnotationEdgeCases:
         )
         c = Chart(df).mark_point().encode(x="x", y="y")
         result = c + annotate_hline(0.0)
-        svg = result.show_svg()
+        svg = result.to_svg()
         assert "<svg" in svg
 
     def test_single_row_chart_plus_annotation(self):
@@ -722,7 +722,7 @@ class TestAnnotationEdgeCases:
         df = pl.DataFrame({"x": [1.0], "y": [2.0]})
         c = Chart(df).mark_point().encode(x="x", y="y")
         result = c + annotate_hline(2.0) + annotate_vline(1.0)
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
     def test_all_identical_data_plus_annotation(self):
@@ -730,7 +730,7 @@ class TestAnnotationEdgeCases:
         df = pl.DataFrame({"x": [5.0, 5.0, 5.0], "y": [3.0, 3.0, 3.0]})
         c = Chart(df).mark_point().encode(x="x", y="y")
         result = c + annotate_hline(3.0) + annotate_vline(5.0)
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
     def test_nan_data_plus_annotation(self):
@@ -738,7 +738,7 @@ class TestAnnotationEdgeCases:
         df = pl.DataFrame({"x": [1.0, float("nan"), 3.0], "y": [4.0, 5.0, float("nan")]})
         c = Chart(df).mark_point().encode(x="x", y="y")
         result = c + annotate_hline(5.0)
-        svg = result.show_svg()
+        svg = result.to_svg()
         assert "<svg" in svg
 
     def test_null_data_plus_annotation(self):
@@ -746,7 +746,7 @@ class TestAnnotationEdgeCases:
         df = pl.DataFrame({"x": [1.0, None, 3.0], "y": [None, 5.0, 6.0]})
         c = Chart(df).mark_point().encode(x="x", y="y")
         result = c + annotate_hline(5.0)
-        svg = result.show_svg()
+        svg = result.to_svg()
         assert "<svg" in svg
 
     def test_annotate_hline_at_zero(self):
@@ -773,7 +773,7 @@ class TestAnnotationEdgeCases:
         assert ann._annotation_primitive is not None
         c = _simple_chart()
         result = c + ann
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
 
@@ -812,7 +812,7 @@ class TestJointChartConfigure:
         center = Chart(df).mark_point().encode(x="x", y="y")
         top = Chart(df).mark_point().encode(x="x", y="y")
         joint = JointChart(center, top=top).configure_axis(label_angle=-30)
-        svg = joint.show_svg()
+        svg = joint.to_svg()
         _assert_valid_svg(svg)
 
 
@@ -835,7 +835,7 @@ class TestConfigureCascade:
         c3 = Chart(df).mark_line().encode(x="x", y="y")
         inner = c1 | c2
         outer = (inner & c3).configure_axis(label_angle=-45)
-        svg = outer.show_svg()
+        svg = outer.to_svg()
         _assert_valid_svg(svg)
 
     def test_configure_on_both_levels(self):
@@ -848,7 +848,7 @@ class TestConfigureCascade:
         c2 = Chart(df).mark_bar().encode(x="x", y="y")
         inner = (c1 | c2).configure_axis(label_angle=0)  # inner level
         outer = VConcatChart([inner, _simple_chart(mark="line")]).configure_axis(label_angle=-45)
-        svg = outer.show_svg()
+        svg = outer.to_svg()
         _assert_valid_svg(svg)
 
 
@@ -905,7 +905,7 @@ class TestCompositionAfterAnnotation:
         assert isinstance(result, HConcatChart)
         # First chart should still have annotations
         assert len(result.charts[0]._annotations) == 1
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
     def test_vconcat_with_annotated_chart(self):
@@ -915,7 +915,7 @@ class TestCompositionAfterAnnotation:
         result = c1 & c2
         assert isinstance(result, VConcatChart)
         assert len(result.charts[0]._annotations) == 1
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
     def test_layer_chart_with_annotated_member(self):
@@ -923,7 +923,7 @@ class TestCompositionAfterAnnotation:
         c1 = _simple_chart() + annotate_hline(5.0)
         c2 = _simple_chart(mark="line")
         lc = LayerChart(c1, c2)
-        svg = lc.show_svg()
+        svg = lc.to_svg()
         _assert_valid_svg(svg)
 
     def test_concat_chart_with_annotated_member(self):
@@ -931,7 +931,7 @@ class TestCompositionAfterAnnotation:
         c1 = _simple_chart() + annotate_hline(5.0) + annotate_vline(2.0)
         c2 = _simple_chart(mark="bar")
         cc = ConcatChart(c1, c2)
-        svg = cc.show_svg()
+        svg = cc.to_svg()
         _assert_valid_svg(svg)
 
 
@@ -1218,7 +1218,7 @@ class TestMultipleAnnotations:
         c = c + annotate_rect(1, 4, 2.5, 5.5, fill="#eee")
         c = c + annotate_abline(slope=0.5, intercept=3.0, stroke="gray")
         assert len(c._annotations) == 5
-        svg = c.show_svg()
+        svg = c.to_svg()
         _assert_valid_svg(svg)
 
     def test_annotations_order_preserved(self):
@@ -1284,7 +1284,7 @@ class TestTypeBoundaryAnnotations:
         tbl = pa.table({"x": [1, 2, 3], "y": [4, 5, 6]})
         c = Chart(tbl).mark_point().encode(x="x", y="y")
         result = c + annotate_hline(5.0)
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
     def test_integer_data_with_annotation(self):
@@ -1293,7 +1293,7 @@ class TestTypeBoundaryAnnotations:
         assert df["x"].dtype == pl.Int64
         c = Chart(df).mark_point().encode(x="x", y="y")
         result = c + annotate_hline(5.0)
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)
 
     def test_string_x_column_with_annotation(self):
@@ -1301,5 +1301,5 @@ class TestTypeBoundaryAnnotations:
         df = pl.DataFrame({"x": ["a", "b", "c"], "y": [4.0, 5.0, 6.0]})
         c = Chart(df).mark_bar().encode(x="x", y="y")
         result = c + annotate_hline(5.0)
-        svg = result.show_svg()
+        svg = result.to_svg()
         _assert_valid_svg(svg)

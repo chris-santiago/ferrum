@@ -30,7 +30,7 @@ def df():
 
 def _renders(chart) -> str:
     """Assert that the chart renders to valid SVG and return it."""
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg, "SVG output missing <svg element"
     assert "NaN" not in svg, "SVG contains NaN values"
     return svg
@@ -38,7 +38,7 @@ def _renders(chart) -> str:
 
 def _svg_contains(chart, text: str) -> None:
     """Assert that the chart SVG contains the given text."""
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert text in svg, f"Expected '{text}' in SVG"
 
 

@@ -89,7 +89,7 @@ def test_dodge_renders_side_by_side(hue_field, categories):
     chart = (
         fe.Chart(df).mark_bar(position=Dodge(by=hue_field)).encode(x="cat", y="v", color=hue_field)
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # 3 categories × 2 groups = 6 rows → 6 bars.
     assert svg.count("<rect") >= 6
@@ -146,16 +146,16 @@ class TestJitter:
     def test_renders_with_explicit_seed_byte_identical(self):
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
         c = fe.Chart(df).mark_point(position=Jitter(width=0.3, seed=42)).encode(x="x", y="y")
-        a = c.show_svg()
-        b = c.show_svg()
+        a = c.to_svg()
+        b = c.to_svg()
         assert a == b  # identical seed → identical output
 
     def test_renders_with_seed_none_byte_identical(self):
         # seed=None falls back to xxh3 hash of (x, y) per row — also byte-deterministic.
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
         c = fe.Chart(df).mark_point(position=Jitter(width=0.3)).encode(x="x", y="y")
-        a = c.show_svg()
-        b = c.show_svg()
+        a = c.to_svg()
+        b = c.to_svg()
         assert a == b
 
     def test_different_seeds_produce_different_output(self):
@@ -164,13 +164,13 @@ class TestJitter:
             fe.Chart(df)
             .mark_point(position=Jitter(width=0.5, seed=1))
             .encode(x="x", y="y")
-            .show_svg()
+            .to_svg()
         )
         b = (
             fe.Chart(df)
             .mark_point(position=Jitter(width=0.5, seed=2))
             .encode(x="x", y="y")
-            .show_svg()
+            .to_svg()
         )
         assert a != b
 
@@ -239,7 +239,7 @@ class TestStack:
             }
         )
         chart = fe.Chart(df).mark_bar(position=Stack(by="g")).encode(x="x", y="y", color="g")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_stack_normalize_total_y_is_one(self):
@@ -255,7 +255,7 @@ class TestStack:
             .mark_bar(position=Stack(by="g", offset="normalize"))
             .encode(x="x", y="y", color="g")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
 

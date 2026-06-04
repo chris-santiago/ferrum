@@ -73,14 +73,14 @@ def bench_ferrum(n: int, *, force_raster: bool = False) -> dict:
     times_svg = []
     for _ in range(RUNS):
         t0 = time.perf_counter()
-        svg = _chart().show_svg()
+        svg = _chart().to_svg()
         times_svg.append(time.perf_counter() - t0)
     svg_path.write_text(svg)
 
     times_png = []
     for _ in range(RUNS):
         t0 = time.perf_counter()
-        png_bytes = _chart().show_png()
+        png_bytes = _chart().to_png()
         times_png.append(time.perf_counter() - t0)
     png_path.write_bytes(png_bytes)
 

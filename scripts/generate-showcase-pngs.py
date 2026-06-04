@@ -27,7 +27,7 @@ OUT_DIR = Path(__file__).resolve().parent.parent / "docs" / "site" / "gallery" /
 def _save(chart: fm.Chart, name: str) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     path = OUT_DIR / f"{name}.png"
-    path.write_bytes(chart.show_png())
+    path.write_bytes(chart.to_png())
     print(f"  [OK]  {name}.png ({path.stat().st_size} bytes)")
 
 

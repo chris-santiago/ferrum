@@ -370,7 +370,7 @@ class TestTransformIntegration:
             .encode(x="x", y="y")
             .transform(transform_filter("datum.x > 2"))
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         # Should have fewer points rendered (only x > 2 passes)
         # Basic sanity: SVG should contain circle elements for points
@@ -385,7 +385,7 @@ class TestTransformIntegration:
             .encode(x="x", y="z")
             .transform(transform_calculate("z", "datum.y * 2"))
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_fold_renders(self):
@@ -397,14 +397,14 @@ class TestTransformIntegration:
             .encode(x="key", y="value")
             .transform(transform_fold(["a", "b"]))
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_sample_renders(self):
         """A chart with transform_sample should render without error."""
         df = pl.DataFrame({"x": list(range(100)), "y": [float(i) for i in range(100)]})
         chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").transform(transform_sample(10))
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
 

@@ -10,7 +10,7 @@ def test_mark_smooth_ci_no_longer_warns():
     df = pl.DataFrame({"x": np.arange(20.0), "y": np.arange(20.0) + np.random.randn(20)})
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        fe.Chart(df).mark_smooth(ci=0.95).encode(x="x", y="y").show_svg()
+        fe.Chart(df).mark_smooth(ci=0.95).encode(x="x", y="y").to_svg()
     smooth_ci_warns = [
         x for x in w if "mark_smooth" in str(x.message) and "ci" in str(x.message).lower()
     ]

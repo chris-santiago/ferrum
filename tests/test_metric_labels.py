@@ -31,7 +31,7 @@ def _roc_data(label: str = "c0", scale: float = 1.0):
 def test_auc_label_default_format():
     df = _roc_data()
     chart = Chart(df).encode(x="fpr", y="tpr", color="class").mark_line() + AUCLabel()
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     # tpr = sqrt(fpr) → AUC = 2/3 → 0.667
     assert "AUC = 0.667" in svg or "AUC = 0.666" in svg
 
@@ -41,14 +41,14 @@ def test_auc_label_custom_format_and_prefix():
     chart = Chart(df).encode(x="fpr", y="tpr", color="class").mark_line() + AUCLabel(
         format=".2f", prefix="auc:"
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "auc:0.67" in svg
 
 
 def test_auc_label_multi_class_emits_one_per_class():
     df = pl.concat([_roc_data("c0"), _roc_data("c1")])
     chart = Chart(df).encode(x="fpr", y="tpr", color="class").mark_line() + AUCLabel()
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.count("AUC =") == 2
 
 
@@ -65,7 +65,7 @@ def _pr_data():
 def test_ap_label_default():
     df = _pr_data()
     chart = Chart(df).encode(x="recall", y="precision", color="class").mark_line() + APLabel()
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "AP = " in svg
 
 
@@ -82,7 +82,7 @@ def _calibration_data():
 def test_brier_label_default():
     df = _calibration_data()
     chart = Chart(df).encode(x="predicted", y="observed", color="model").mark_line() + BrierLabel()
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "Brier = " in svg
 
 
@@ -106,7 +106,7 @@ def test_outlier_label_threshold_3_emits_only_high_z():
     chart = Chart(df).encode(x="fitted", y="residual").mark_point() + OutlierLabel(
         threshold=3.0, field="residual", label_field="obs_id"
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     for idx in (100, 200, 300, 400, 500):
         assert f">id_{idx}<" in svg
 
@@ -126,7 +126,7 @@ def test_outlier_label_max_labels_caps():
     chart = Chart(df).encode(x="fitted", y="residual").mark_point() + OutlierLabel(
         threshold=3.0, field="residual", label_field="obs_id", max_labels=3
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     count = sum(1 for i in range(20) if f">id_{i}<" in svg)
     assert count == 3
 

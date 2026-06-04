@@ -40,7 +40,7 @@ class TestSmoothGroupby:
             .mark_smooth(method="lm", groupby="group")
             .encode(x="x", y="y", color="group")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 100
 
@@ -52,7 +52,7 @@ class TestSmoothGroupby:
             .mark_smooth(method="lm", groupby="group")
             .encode(x="x", y="y", color="group")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         # Multiple polyline elements indicate per-group lines rendered.
         polyline_count = svg.count("<polyline")
         assert polyline_count >= 2, (
@@ -66,7 +66,7 @@ class TestSmoothGroupby:
             .mark_smooth(method="lm", ci=0.95, groupby="group")
             .encode(x="x", y="y", color="group")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         # CI band (ribbon) and fit line both rendered.
         assert len(svg) > 200
@@ -78,7 +78,7 @@ class TestSmoothGroupby:
             .mark_smooth(method="loess", groupby="group")
             .encode(x="x", y="y", color="group")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
 
 
@@ -88,30 +88,30 @@ class TestLmplotHue:
     def test_lmplot_hue_renders(self, grouped_data):
         """lmplot(hue='group') renders without errors."""
         chart = fm.lmplot(grouped_data, x="x", y="y", hue="group")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
         assert len(svg) > 100
 
     def test_lmplot_hue_lm(self, grouped_data):
         """lmplot with method='lm' and hue renders per-group fit lines."""
         chart = fm.lmplot(grouped_data, x="x", y="y", hue="group", method="lm")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
 
     def test_lmplot_hue_loess(self, grouped_data):
         """lmplot with method='loess' and hue renders per-group fit lines."""
         chart = fm.lmplot(grouped_data, x="x", y="y", hue="group", method="loess")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
 
     def test_lmplot_hue_with_ci(self, grouped_data):
         """lmplot with hue and CI band renders."""
         chart = fm.lmplot(grouped_data, x="x", y="y", hue="group", ci=95)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
 
     def test_lmplot_hue_no_scatter(self, grouped_data):
         """lmplot with hue and scatter=False renders only fit lines."""
         chart = fm.lmplot(grouped_data, x="x", y="y", hue="group", scatter=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")

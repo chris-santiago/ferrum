@@ -45,7 +45,7 @@ class TestAxisConfigIntegration:
             .encode(x="x:N", y="y:Q")
             .configure_axis(y=True, x=False, label_format="currency")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "$" in svg, "Currency format should produce $ in tick labels"
 
     def test_label_format_raw(self) -> None:
@@ -57,18 +57,18 @@ class TestAxisConfigIntegration:
             .encode(x="x:N", y="y:Q")
             .configure_axis(y=True, x=False, label_format_raw=".0%")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "%" in svg, "Raw format .0% should produce % in tick labels"
 
     def test_tick_values(self, scatter_df: pl.DataFrame) -> None:
         """configure_axis(tick_values=[10, 30, 50]) should place ticks at exactly those values."""
-        chart_default = fm.Chart(scatter_df).mark_point().encode(x="x", y="y").show_svg()
+        chart_default = fm.Chart(scatter_df).mark_point().encode(x="x", y="y").to_svg()
         chart_custom = (
             fm.Chart(scatter_df)
             .mark_point()
             .encode(x="x", y="y")
             .configure(axis_y=AxisConfig(tick_values=[10, 30, 50]))
-            .show_svg()
+            .to_svg()
         )
         assert chart_default != chart_custom, "Custom tick_values should change SVG"
         # The specific values should appear as tick labels
@@ -79,8 +79,8 @@ class TestAxisConfigIntegration:
     def test_title_font_size(self, scatter_df: pl.DataFrame) -> None:
         """configure_axis(title_font_size=20) should change axis title rendering."""
         base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y").labs(y="Values")
-        svg_default = base.show_svg()
-        svg_large = base.configure_axis(title_font_size=20).show_svg()
+        svg_default = base.to_svg()
+        svg_large = base.configure_axis(title_font_size=20).to_svg()
         assert svg_default != svg_large, "title_font_size should change SVG"
 
     def test_title_color(self, scatter_df: pl.DataFrame) -> None:
@@ -92,14 +92,14 @@ class TestAxisConfigIntegration:
             .labs(y="Values")
             .configure_axis(title_color="#ff0000")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "ff0000" in svg.lower(), "Title color #ff0000 should appear in SVG"
 
     def test_title_padding(self, scatter_df: pl.DataFrame) -> None:
         """configure_axis(title_padding=30) should change layout."""
         base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y").labs(y="Values")
-        svg_default = base.show_svg()
-        svg_padded = base.configure_axis(title_padding=30).show_svg()
+        svg_default = base.to_svg()
+        svg_padded = base.configure_axis(title_padding=30).to_svg()
         assert svg_default != svg_padded, "title_padding should change SVG layout"
 
 
@@ -118,7 +118,7 @@ class TestColorConfigIntegration:
             .encode(x="x", y="y", color="g:N")
             .configure_color(range=custom_colors)
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         # At least one of the custom colors should appear in the SVG
         found = any(c[1:].lower() in svg.lower() for c in custom_colors)
         assert found, f"At least one of {custom_colors} should appear in SVG"
@@ -127,8 +127,8 @@ class TestColorConfigIntegration:
         """configure_color(domain=[0, 100]) should change color scale mapping."""
         df = pl.DataFrame({"x": [1, 2, 3], "y": [10, 50, 90], "v": [10.0, 50.0, 90.0]})
         base = fm.Chart(df).mark_point().encode(x="x", y="y", color="v:Q")
-        svg_default = base.show_svg()
-        svg_custom = base.configure_color(domain=[0, 100]).show_svg()
+        svg_default = base.to_svg()
+        svg_custom = base.configure_color(domain=[0, 100]).to_svg()
         assert svg_default != svg_custom, "Custom color domain should change SVG"
 
 
@@ -142,8 +142,8 @@ class TestLegendConfigIntegration:
         """configure_legend(gradient_length=200) should change legend size."""
         df = pl.DataFrame({"x": [1, 2, 3], "y": [10, 50, 90], "v": [10.0, 50.0, 90.0]})
         base = fm.Chart(df).mark_point().encode(x="x", y="y", color="v:Q")
-        svg_default = base.show_svg()
-        svg_long = base.configure_legend(gradient_length=200).show_svg()
+        svg_default = base.to_svg()
+        svg_long = base.configure_legend(gradient_length=200).to_svg()
         assert svg_default != svg_long, "gradient_length should change SVG"
 
 
@@ -161,7 +161,7 @@ class TestGridConfigIntegration:
             .encode(x="x", y="y")
             .configure_grid(y=True, band_colors=["#f0f0f0", "#ffffff"])
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "f0f0f0" in svg.lower(), "Band color should appear in SVG"
 
 
@@ -178,7 +178,7 @@ class TestRenderingCorrectness:
         chart = fm.Chart(scatter_df).mark_point().encode(x="x", y="y") + ann.rect(
             1, 10, 5, 50, fill="#ff0000", opacity=0.2
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "fill-opacity" in svg, "Rect annotation should have fill-opacity attribute in SVG"
 
     def test_break_axis_bars_visible(self) -> None:
@@ -192,7 +192,7 @@ class TestRenderingCorrectness:
         chart = fm.Chart(df).mark_bar().encode(x="server:N", y="response_ms:Q") + fm.BreakAxis(
             axis="y", gap=(80, 1180), break_style="zigzag"
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         # Should have rect elements for bars (not all hidden at -99999)
         rects = re.findall(r"<rect [^>]*>", svg)
         visible_rects = [r for r in rects if "-99999" not in r]

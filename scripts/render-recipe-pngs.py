@@ -1,7 +1,7 @@
 """Render all customization recipe scripts to PNG for documentation.
 
 Imports each recipe module, finds the top-level ``chart`` variable, calls
-``show_png(scale=2.0)``, and writes the result to ``docs/site/assets/recipes/``.
+``to_png(scale=2.0)``, and writes the result to ``docs/site/assets/recipes/``.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def run_recipe(script_path: Path) -> None:
         print(f"  SKIP {script_path.name}: no 'chart' variable")
         return
 
-    png_bytes = chart.show_png(scale=2.0)
+    png_bytes = chart.to_png(scale=2.0)
     out_path = OUTPUT_DIR / f"{script_path.stem}.png"
     out_path.write_bytes(png_bytes)
     print(f"  OK   {out_path.relative_to(REPO_ROOT)} ({len(png_bytes):,} bytes)")

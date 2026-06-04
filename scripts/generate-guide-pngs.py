@@ -1,7 +1,7 @@
 """Generate PNGs from guide-page code blocks for inline docs images.
 
 Reads each markdown file, extracts python code blocks that produce charts
-(detected by `assert <var>.show_svg()`), runs them, and saves PNGs.
+(detected by `assert <var>.to_svg()`), runs them, and saves PNGs.
 
 Usage:
     uv run scripts/generate-guide-pngs.py
@@ -35,7 +35,7 @@ def extract_blocks(md_text: str) -> list[tuple[str, str | None]]:
     pattern = re.compile(r"```python\n(.*?)```", re.DOTALL)
     for match in pattern.finditer(md_text):
         code = match.group(1)
-        m = re.search(r"assert\s+(\w+)\.show_svg\(\)", code)
+        m = re.search(r"assert\s+(\w+)\.to_svg\(\)", code)
         var_name = m.group(1) if m else None
         blocks.append((code, var_name))
     return blocks
@@ -53,7 +53,7 @@ def run_block(code: str, var_name: str) -> bytes:
     fn = types.FunctionType(compiled, ns)
     fn()
     chart_obj = ns[var_name]
-    return chart_obj.show_png()
+    return chart_obj.to_png()
 
 
 def main() -> None:

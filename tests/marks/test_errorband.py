@@ -39,5 +39,5 @@ def test_errorband_ribbon_has_y2(df):
 
 def test_errorband_render_smoke(df):
     chart = fe.Chart(df).mark_errorband().encode(x="x", y="y")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg

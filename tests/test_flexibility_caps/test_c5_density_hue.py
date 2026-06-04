@@ -165,7 +165,7 @@ class TestMarkContourGroupby:
             .mark_contour(groupby="g", fill=True, thresholds=3)
             .encode(x="x", y="y", color="g")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_mark_contour_grouped_has_content(self, df_two_clusters):
@@ -179,7 +179,7 @@ class TestMarkContourGroupby:
             .mark_contour(groupby="g", fill=True, thresholds=3)
             .encode(x="x", y="y", color="g")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         # Segment marks render as <line> elements; paths/polygons are for no-hue fills
         has_geometry = "<path" in svg or "<polygon" in svg or "<line" in svg
         assert has_geometry, "Grouped mark_contour must produce geometry elements"
@@ -207,7 +207,7 @@ class TestJointplotKdeHue:
     def test_jointplot_kde_hue_renders_svg(self, df_two_clusters):
         """jointplot(kind='kde', hue=...) renders valid SVG."""
         chart = fm.jointplot(df_two_clusters, x="x", y="y", kind="kde", hue="g")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "</svg>" in svg
 
@@ -227,7 +227,7 @@ class TestJointplotKdeHue:
         Grouped contours use segment marks which render as ``<line>`` in SVG.
         """
         chart = fm.jointplot(df_two_clusters, x="x", y="y", kind="kde", hue="g")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         # Segment marks produce <line> elements; paths/polygons for no-hue fills
         has_geometry = "<path" in svg or "<polygon" in svg or "<line" in svg
         assert has_geometry, "jointplot kde hue must render geometry (lines/paths/polygons)"
@@ -251,13 +251,13 @@ class TestJointplotKdeNoHueRegression:
     def test_no_hue_jointplot_kde_renders(self, df_no_hue):
         """jointplot(kind='kde') without hue renders without error."""
         chart = fm.jointplot(df_no_hue, x="x", y="y", kind="kde")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_no_hue_jointplot_kde_has_geometry(self, df_no_hue):
         """No-hue jointplot kde center produces rendered geometry."""
         chart = fm.jointplot(df_no_hue, x="x", y="y", kind="kde")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<path" in svg or "<polygon" in svg
 
     def test_no_hue_center_colors_by_level_value(self, df_no_hue):
@@ -286,7 +286,7 @@ class TestGroupedContourVisualSmoke:
             .mark_contour(groupby="g", fill=True, thresholds=3)
             .encode(x="x", y="y", color="g")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         # Look for at least 2 distinct fill colors that are not the same
         fills = re.findall(r'fill="([^"]+)"', svg)
         # Filter out background and non-data fills
@@ -303,7 +303,7 @@ class TestGroupedContourVisualSmoke:
     def test_jointplot_kde_hue_marginals_still_split(self, df_two_clusters):
         """Marginals still split by hue after center KDE groupby change."""
         chart = fm.jointplot(df_two_clusters, x="x", y="y", kind="kde", hue="g")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         # Should have multiple fill colors from the two marginal groups + center
         fills = re.findall(r'fill="([^"]+)"', svg)
         data_fills = [

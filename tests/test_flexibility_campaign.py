@@ -40,7 +40,7 @@ def test_d1_value_class_accent_color_present_in_svg(three_cat_df: pl.DataFrame) 
         fm.Chart(three_cat_df)
         .mark_bar()
         .encode(x="cat:N", y="val:Q", color=Color("cat:N", scale=scale))
-        .show_svg()
+        .to_svg()
     )
     assert "e4572e" in svg, "accent color #e4572e must appear in SVG"
     assert "cccccc" in svg, "gray color #cccccc must appear in SVG"
@@ -63,7 +63,7 @@ def test_d1_dict_form_accent_color_present_in_svg(three_cat_df: pl.DataFrame) ->
                 },
             ),
         )
-        .show_svg()
+        .to_svg()
     )
     assert "e4572e" in svg, "accent color #e4572e must appear in SVG (dict form)"
     assert "cccccc" in svg, "gray color #cccccc must appear in SVG (dict form)"
@@ -79,7 +79,7 @@ def test_d1_named_css_colors_resolve_to_their_hex(three_cat_df: pl.DataFrame) ->
         fm.Chart(three_cat_df)
         .mark_bar()
         .encode(x="cat:N", y="val:Q", color=Color("cat:N", scale=scale))
-        .show_svg()
+        .to_svg()
     )
     assert "4682b4" in svg.lower(), "steelblue (#4682b4) must resolve and appear in SVG"
 
@@ -107,7 +107,7 @@ def test_d1_declared_domain_overrides_data_appearance_order() -> None:
         range=["#cccccc", "#e4572e", "#cccccc"],
     )
     svg = (
-        fm.Chart(df).mark_bar().encode(x="c:N", y="y:Q", color=Color("c:N", scale=scale)).show_svg()
+        fm.Chart(df).mark_bar().encode(x="c:N", y="y:Q", color=Color("c:N", scale=scale)).to_svg()
     )
     # Both colors must appear.
     svg_lower = svg.lower()
@@ -142,8 +142,8 @@ def corr_df() -> pl.DataFrame:
 
 def test_d4_heatmap_different_cmaps_produce_different_svg(corr_df: pl.DataFrame) -> None:
     """fm.heatmap with cmap='blues' and cmap='reds' produce distinct SVG output."""
-    svg_blues = fm.heatmap(corr_df, cmap="blues").show_svg()
-    svg_reds = fm.heatmap(corr_df, cmap="reds").show_svg()
+    svg_blues = fm.heatmap(corr_df, cmap="blues").to_svg()
+    svg_reds = fm.heatmap(corr_df, cmap="reds").to_svg()
     assert svg_blues != svg_reds, (
         "heatmap with cmap='blues' and cmap='reds' must render different SVG"
     )
@@ -207,7 +207,7 @@ def test_d3_numeric_grouping_format(two_cat_numeric_df: pl.DataFrame) -> None:
             x="cat:N",
             y=fm.Y("val:Q", axis=fm.Axis(label_format=",.0f")),
         )
-        .show_svg()
+        .to_svg()
     )
     tick_labels = _tick_texts(svg)
     assert "10,000" in tick_labels, f"expected '10,000' in tick labels; got {tick_labels}"
@@ -222,7 +222,7 @@ def test_d3_si_prefix_format(two_cat_large_df: pl.DataFrame) -> None:
             x="cat:N",
             y=fm.Y("val:Q", axis=fm.Axis(label_format="~s")),
         )
-        .show_svg()
+        .to_svg()
     )
     tick_labels = _tick_texts(svg)
     # At least one label must carry the 'M' (mega) SI suffix.
@@ -240,7 +240,7 @@ def test_d3_percent_format(two_cat_fraction_df: pl.DataFrame) -> None:
             x="cat:N",
             y=fm.Y("val:Q", axis=fm.Axis(label_format=".0%")),
         )
-        .show_svg()
+        .to_svg()
     )
     tick_labels = _tick_texts(svg)
     assert "50%" in tick_labels, f"expected '50%' in tick labels; got {tick_labels}"
@@ -255,7 +255,7 @@ def test_d3_temporal_format_month_year(monthly_date_df: pl.DataFrame) -> None:
             x=fm.X("date:T", axis=fm.Axis(label_format="%b %Y")),
             y="val:Q",
         )
-        .show_svg()
+        .to_svg()
     )
     tick_labels = _tick_texts(svg)
     # Must have at least one label matching the '<MonthAbbrev> <Year>' pattern.
@@ -270,7 +270,7 @@ def test_d3_temporal_format_month_year(monthly_date_df: pl.DataFrame) -> None:
 def test_d3_tick_count_limits_temporal_ticks(long_monthly_date_df: pl.DataFrame) -> None:
     """Axis(tick_count=4) on a 30-month :T axis produces far fewer labels than default."""
     svg_default = (
-        fm.Chart(long_monthly_date_df).mark_line().encode(x="date:T", y="val:Q").show_svg()
+        fm.Chart(long_monthly_date_df).mark_line().encode(x="date:T", y="val:Q").to_svg()
     )
     svg_limited = (
         fm.Chart(long_monthly_date_df)
@@ -279,7 +279,7 @@ def test_d3_tick_count_limits_temporal_ticks(long_monthly_date_df: pl.DataFrame)
             x=fm.X("date:T", axis=fm.Axis(tick_count=4)),
             y="val:Q",
         )
-        .show_svg()
+        .to_svg()
     )
 
     # Count date-like tick labels: text elements that contain a 4-digit year.
@@ -302,7 +302,7 @@ def test_d3_default_quantitative_axis_still_renders(
     two_cat_numeric_df: pl.DataFrame,
 ) -> None:
     """A quantitative axis with no label_format renders plain numeric labels (default path)."""
-    svg = fm.Chart(two_cat_numeric_df).mark_bar().encode(x="cat:N", y="val:Q").show_svg()
+    svg = fm.Chart(two_cat_numeric_df).mark_bar().encode(x="cat:N", y="val:Q").to_svg()
     tick_labels = _tick_texts(svg)
     # Expect plain integer-style labels (no commas, no percent, no SI suffix).
     numeric_labels = [t for t in tick_labels if re.match(r"^\d+$", t)]
@@ -373,13 +373,13 @@ def test_d2_color_scale_order_independent(
     )
 
     # Establish the ground-truth color set from highlight rendered alone.
-    standalone_colors = _polyline_strokes(highlight.show_svg())
+    standalone_colors = _polyline_strokes(highlight.to_svg())
     assert len(standalone_colors) == 2, (
         f"highlight standalone should produce exactly 2 distinct colors; got {standalone_colors}"
     )
 
-    svg_bh = (base + highlight).show_svg()
-    svg_hb = (highlight + base).show_svg()
+    svg_bh = (base + highlight).to_svg()
+    svg_hb = (highlight + base).to_svg()
 
     colors_bh = _polyline_strokes(svg_bh)
     colors_hb = _polyline_strokes(svg_hb)
@@ -424,7 +424,7 @@ def test_d2_color_scale_not_collapsed_to_single_theme_color(
         )
     )
 
-    svg = (base + highlight).show_svg()
+    svg = (base + highlight).to_svg()
     colors = _polyline_strokes(svg)
 
     # There must be at least 2 non-gray colors — one per highlight category.
@@ -450,12 +450,12 @@ def test_d2_annotation_does_not_supply_axis_titles() -> None:
         ("data + rect", data + rect),
         ("rect + data", rect + data),
     ]:
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "_x1" not in svg, f"{label}: internal annotation field '_x1' must not appear in SVG"
         assert "_y1" not in svg, f"{label}: internal annotation field '_y1' must not appear in SVG"
 
-    tick_labels_dr = _tick_texts((data + rect).show_svg())
-    tick_labels_rd = _tick_texts((rect + data).show_svg())
+    tick_labels_dr = _tick_texts((data + rect).to_svg())
+    tick_labels_rd = _tick_texts((rect + data).to_svg())
     # Both orderings must produce the same axis-label set.
     assert set(tick_labels_dr) == set(tick_labels_rd), (
         f"axis labels must be order-independent: "
@@ -473,7 +473,7 @@ def test_d2_annotation_hline_does_not_pollute_axes() -> None:
         ("data + hline", data + hline),
         ("hline + data", hline + data),
     ]:
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "_y" not in svg, f"{label}: internal annotation field '_y' must not appear in SVG"
 
 
@@ -527,7 +527,7 @@ def sort_composite_df() -> pl.DataFrame:
 
 def test_d5_primitive_bar_sort_descending(sort_bar_df: pl.DataFrame) -> None:
     """X('c:N', sort='-y') on a bar chart orders categories by descending sum(y)."""
-    svg = fm.Chart(sort_bar_df).mark_bar().encode(x=fm.X("c:N", sort="-y"), y="y:Q").show_svg()
+    svg = fm.Chart(sort_bar_df).mark_bar().encode(x=fm.X("c:N", sort="-y"), y="y:Q").to_svg()
     order = _x_cat_order(svg, {"A", "B", "X"})
     assert order == ["A", "B", "X"], (
         f"sort='-y' should produce descending order A > B > X; got {order}"
@@ -536,7 +536,7 @@ def test_d5_primitive_bar_sort_descending(sort_bar_df: pl.DataFrame) -> None:
 
 def test_d5_primitive_bar_sort_ascending(sort_bar_df: pl.DataFrame) -> None:
     """X('c:N', sort='y') on a bar chart orders categories by ascending sum(y)."""
-    svg = fm.Chart(sort_bar_df).mark_bar().encode(x=fm.X("c:N", sort="y"), y="y:Q").show_svg()
+    svg = fm.Chart(sort_bar_df).mark_bar().encode(x=fm.X("c:N", sort="y"), y="y:Q").to_svg()
     order = _x_cat_order(svg, {"A", "B", "X"})
     assert order == ["X", "B", "A"], (
         f"sort='y' should produce ascending order X < B < A; got {order}"
@@ -549,7 +549,7 @@ def test_d5_primitive_bar_sort_explicit_array(sort_bar_df: pl.DataFrame) -> None
         fm.Chart(sort_bar_df)
         .mark_bar()
         .encode(x=fm.X("c:N", sort=["A", "X", "B"]), y="y:Q")
-        .show_svg()
+        .to_svg()
     )
     order = _x_cat_order(svg, {"A", "B", "X"})
     assert order == ["A", "X", "B"], f"sort=['A','X','B'] should produce literal order; got {order}"
@@ -564,7 +564,7 @@ def test_d5_primitive_bar_sort_dict_form(sort_bar_df: pl.DataFrame) -> None:
             x=fm.X("c:N", sort={"field": "y", "op": "mean", "order": "descending"}),
             y="y:Q",
         )
-        .show_svg()
+        .to_svg()
     )
     order = _x_cat_order(svg, {"A", "B", "X"})
     assert order == ["A", "B", "X"], (
@@ -581,7 +581,7 @@ def test_d5_boxplot_sort_descending(sort_composite_df: pl.DataFrame) -> None:
         fm.Chart(sort_composite_df)
         .mark_boxplot()
         .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
-        .show_svg()
+        .to_svg()
     )
     order = _x_cat_order(svg, {"A", "B", "C"})
     assert order == ["A", "B", "C"], (
@@ -598,7 +598,7 @@ def test_d5_boxplot_sort_dict(sort_composite_df: pl.DataFrame) -> None:
             x=fm.X("cat:N", sort={"field": "val", "op": "mean", "order": "descending"}),
             y="val:Q",
         )
-        .show_svg()
+        .to_svg()
     )
     order = _x_cat_order(svg, {"A", "B", "C"})
     assert order == ["A", "B", "C"], (
@@ -612,7 +612,7 @@ def test_d5_violin_sort_descending(sort_composite_df: pl.DataFrame) -> None:
         fm.Chart(sort_composite_df)
         .mark_violin()
         .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
-        .show_svg()
+        .to_svg()
     )
     order = _x_cat_order(svg, {"A", "B", "C"})
     assert order == ["A", "B", "C"], (
@@ -626,7 +626,7 @@ def test_d5_errorbar_sort_descending(sort_composite_df: pl.DataFrame) -> None:
         fm.Chart(sort_composite_df)
         .mark_errorbar()
         .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
-        .show_svg()
+        .to_svg()
     )
     order = _x_cat_order(svg, {"A", "B", "C"})
     assert order == ["A", "B", "C"], (
@@ -639,7 +639,7 @@ def test_d5_errorbar_sort_descending(sort_composite_df: pl.DataFrame) -> None:
 
 def test_d5_boxplot_no_sort_preserves_data_order(sort_composite_df: pl.DataFrame) -> None:
     """mark_boxplot without sort preserves data-appearance order (C, A, B)."""
-    svg = fm.Chart(sort_composite_df).mark_boxplot().encode(x="cat:N", y="val:Q").show_svg()
+    svg = fm.Chart(sort_composite_df).mark_boxplot().encode(x="cat:N", y="val:Q").to_svg()
     order = _x_cat_order(svg, {"A", "B", "C"})
     assert order == ["C", "A", "B"], (
         f"boxplot without sort should render in data-appearance order C, A, B; got {order}"
@@ -648,7 +648,7 @@ def test_d5_boxplot_no_sort_preserves_data_order(sort_composite_df: pl.DataFrame
 
 def test_d5_violin_no_sort_preserves_data_order(sort_composite_df: pl.DataFrame) -> None:
     """mark_violin without sort preserves data-appearance order (C, A, B)."""
-    svg = fm.Chart(sort_composite_df).mark_violin().encode(x="cat:N", y="val:Q").show_svg()
+    svg = fm.Chart(sort_composite_df).mark_violin().encode(x="cat:N", y="val:Q").to_svg()
     order = _x_cat_order(svg, {"A", "B", "C"})
     assert order == ["C", "A", "B"], (
         f"violin without sort should render in data-appearance order C, A, B; got {order}"
@@ -710,7 +710,7 @@ def test_d5_boxen_sort_descending(sort_boxen_df: pl.DataFrame) -> None:
             fm.Chart(sort_boxen_df)
             .mark_boxen()
             .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
-            .show_svg()
+            .to_svg()
         )
     sort_ignored = any("SortSpecIgnored" in str(ww.message) for ww in w)
     assert not sort_ignored, "sort='-y' on mark_boxen must not emit SortSpecIgnored"
@@ -733,7 +733,7 @@ def test_d5_boxen_sort_descending(sort_boxen_df: pl.DataFrame) -> None:
     )
 
     # Check 3: sorted SVG differs from unsorted (the sort visually affects rendering).
-    svg_no_sort = fm.Chart(sort_boxen_df).mark_boxen().encode(x="cat:N", y="val:Q").show_svg()
+    svg_no_sort = fm.Chart(sort_boxen_df).mark_boxen().encode(x="cat:N", y="val:Q").to_svg()
     assert svg_desc != svg_no_sort, (
         "boxen sort='-y' must produce a different SVG than no-sort "
         "(sort is not being applied to the domain)"
@@ -746,7 +746,7 @@ def test_d5_swarm_sort_descending(sort_composite_df: pl.DataFrame) -> None:
         fm.Chart(sort_composite_df)
         .mark_swarm()
         .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
-        .show_svg()
+        .to_svg()
     )
     order = _x_cat_order(svg, {"A", "B", "C"})
     assert order == ["A", "B", "C"], (
@@ -761,7 +761,7 @@ def test_d5_errorbar_no_sort_preserves_data_order(sort_composite_df: pl.DataFram
     when no sort is requested.  The data appearance order for sort_composite_df is
     C (first rows), A (second batch), B (third batch).
     """
-    svg = fm.Chart(sort_composite_df).mark_errorbar().encode(x="cat:N", y="val:Q").show_svg()
+    svg = fm.Chart(sort_composite_df).mark_errorbar().encode(x="cat:N", y="val:Q").to_svg()
     order = _x_cat_order(svg, {"A", "B", "C"})
     assert order == ["C", "A", "B"], (
         f"errorbar without sort should render in data-appearance order C, A, B; got {order}"
@@ -781,7 +781,7 @@ def test_d5_horizontal_boxplot_sort_descending(sort_composite_df: pl.DataFrame) 
         fm.Chart(sort_composite_df)
         .mark_boxplot(horizontal=True)
         .encode(x="val:Q", y=fm.Y("cat:N", sort="-x"))
-        .show_svg()
+        .to_svg()
     )
     # For horizontal charts, y-axis labels appear in document order top-to-bottom.
     # Descending by x (the numeric axis) means A(80) is first/topmost.
@@ -824,7 +824,7 @@ def test_d6_line_color_maps_to_stroke_in_svg(line_df: pl.DataFrame) -> None:
     fill; their visible color is the stroke.  The hex must appear as
     ``stroke="#e4572e"`` in the rendered SVG, not as a fill attribute.
     """
-    svg = fm.Chart(line_df).mark_line(color="#e4572e").encode(x="x:Q", y="y:Q").show_svg()
+    svg = fm.Chart(line_df).mark_line(color="#e4572e").encode(x="x:Q", y="y:Q").to_svg()
     strokes = _hex_strokes(svg)
     assert "e4572e" in strokes, (
         f"mark_line(color='#e4572e') must produce stroke='#e4572e' in SVG; found strokes: {strokes}"
@@ -834,7 +834,7 @@ def test_d6_line_color_maps_to_stroke_in_svg(line_df: pl.DataFrame) -> None:
 def test_d6_rule_color_maps_to_stroke_in_svg() -> None:
     """mark_rule(color='#e4572e') sets the rule stroke color in SVG."""
     df = pl.DataFrame({"y": [1.0]})
-    svg = fm.Chart(df).mark_rule(color="#e4572e").encode(y="y:Q").show_svg()
+    svg = fm.Chart(df).mark_rule(color="#e4572e").encode(y="y:Q").to_svg()
     strokes = _hex_strokes(svg)
     assert "e4572e" in strokes, (
         f"mark_rule(color='#e4572e') must produce stroke='#e4572e' in SVG; found strokes: {strokes}"
@@ -870,7 +870,7 @@ def test_d6_segment_color_resolves_to_stroke_in_mark_kwargs(
 
 def test_d6_line_explicit_stroke_still_works(line_df: pl.DataFrame) -> None:
     """mark_line(stroke='#123456') still sets stroke when passed directly."""
-    svg = fm.Chart(line_df).mark_line(stroke="#123456").encode(x="x:Q", y="y:Q").show_svg()
+    svg = fm.Chart(line_df).mark_line(stroke="#123456").encode(x="x:Q", y="y:Q").to_svg()
     strokes = _hex_strokes(svg)
     assert "123456" in strokes, (
         f"mark_line(stroke='#123456') must produce stroke='#123456' in SVG; "
@@ -884,7 +884,7 @@ def test_d6_line_explicit_stroke_still_works(line_df: pl.DataFrame) -> None:
 def test_d6_bar_color_still_maps_to_fill() -> None:
     """mark_bar(color='#e4572e') still sets fill (bar is fill-primary)."""
     df = pl.DataFrame({"cat": ["A", "B"], "val": [10.0, 20.0]})
-    svg = fm.Chart(df).mark_bar(color="#e4572e").encode(x="cat:N", y="val:Q").show_svg()
+    svg = fm.Chart(df).mark_bar(color="#e4572e").encode(x="cat:N", y="val:Q").to_svg()
     fills = _hex_fills(svg)
     assert "e4572e" in fills, (
         f"mark_bar(color='#e4572e') must produce fill='#e4572e' in SVG; found fills: {fills}"
@@ -893,7 +893,7 @@ def test_d6_bar_color_still_maps_to_fill() -> None:
 
 def test_d6_point_color_still_maps_to_fill(line_df: pl.DataFrame) -> None:
     """mark_point(color='#e4572e') still sets fill (point is fill-primary)."""
-    svg = fm.Chart(line_df).mark_point(color="#e4572e").encode(x="x:Q", y="y:Q").show_svg()
+    svg = fm.Chart(line_df).mark_point(color="#e4572e").encode(x="x:Q", y="y:Q").to_svg()
     fills = _hex_fills(svg)
     assert "e4572e" in fills, (
         f"mark_point(color='#e4572e') must produce fill='#e4572e' in SVG; found fills: {fills}"
@@ -948,7 +948,7 @@ def test_d7_vline_date_renders_without_error(temporal_df: pl.DataFrame) -> None:
     """annotate_vline(x=date(...)) on a temporal chart renders without TypeError."""
     chart = fm.Chart(temporal_df).mark_line().encode(x="date:T", y="val:Q")
     vline = fm.annotate_vline(x=date(2020, 6, 1), stroke="red")
-    svg = (chart + vline).show_svg()
+    svg = (chart + vline).to_svg()
     assert len(svg) > 0, "composed chart with date vline must produce non-empty SVG"
 
 
@@ -996,7 +996,7 @@ def test_d7_rect_with_date_boundaries(temporal_df: pl.DataFrame) -> None:
         fill="#ffcc00",
         opacity=0.2,
     )
-    svg = (chart + rect).show_svg()
+    svg = (chart + rect).to_svg()
     assert len(svg) > 0, "composed chart with date rect must produce non-empty SVG"
 
     # Verify the primitive corners store epoch-ms values.
@@ -1009,7 +1009,7 @@ def test_d7_text_with_datetime_renders(temporal_df: pl.DataFrame) -> None:
     """annotate_text(x=datetime(...), y=..., text=...) renders without error."""
     chart = fm.Chart(temporal_df).mark_line().encode(x="date:T", y="val:Q")
     label = fm.annotate_text(x=dt(2020, 1, 1, 12, 0), y=5.0, text="noon event")
-    svg = (chart + label).show_svg()
+    svg = (chart + label).to_svg()
     assert len(svg) > 0, "annotate_text with datetime x must produce non-empty SVG"
 
     prim = label._annotation_primitive
@@ -1104,9 +1104,9 @@ def _d8_tick_texts(svg: str) -> list[str]:
 
 def test_d8_x_axis_none_hides_x_axis(_d8_df: pl.DataFrame) -> None:
     """X('a:Q', axis=None) must suppress x-axis tick labels and field title."""
-    svg_with = fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q")).show_svg()
+    svg_with = fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q")).to_svg()
     svg_without = (
-        fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q", axis=None), y=fm.Y("b:Q")).show_svg()
+        fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q", axis=None), y=fm.Y("b:Q")).to_svg()
     )
     texts_with = _d8_tick_texts(svg_with)
     texts_without = _d8_tick_texts(svg_without)
@@ -1130,9 +1130,9 @@ def test_d8_x_axis_none_hides_x_axis(_d8_df: pl.DataFrame) -> None:
 
 def test_d8_y_axis_none_hides_y_axis(_d8_df: pl.DataFrame) -> None:
     """Y('b:Q', axis=None) must suppress y-axis tick labels and field title."""
-    svg_with = fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q")).show_svg()
+    svg_with = fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q")).to_svg()
     svg_without = (
-        fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q", axis=None)).show_svg()
+        fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q", axis=None)).to_svg()
     )
     texts_with = _d8_tick_texts(svg_with)
     texts_without = _d8_tick_texts(svg_without)
@@ -1160,7 +1160,7 @@ def test_d8_both_axes_none_hides_both(_d8_df: pl.DataFrame) -> None:
         fm.Chart(_d8_df)
         .mark_point()
         .encode(x=fm.X("a:Q", axis=None), y=fm.Y("b:Q", axis=None))
-        .show_svg()
+        .to_svg()
     )
     texts = _d8_tick_texts(svg)
     assert "a" not in texts, f"field title 'a' must be absent; got {texts}"
@@ -1169,7 +1169,7 @@ def test_d8_both_axes_none_hides_both(_d8_df: pl.DataFrame) -> None:
 
 def test_d8_layered_chart_axis_none_hides_axis(_d8_df: pl.DataFrame) -> None:
     """axis=None on the data layer's channel suppresses the axis in a layered chart."""
-    svg = fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q", axis=None), y=fm.Y("b:Q")).show_svg()
+    svg = fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q", axis=None), y=fm.Y("b:Q")).to_svg()
     texts = _d8_tick_texts(svg)
     assert "a" not in texts, (
         f"x field title 'a' must be absent under axis=None in layered context; got {texts}"
@@ -1185,7 +1185,7 @@ def test_d8_real_axis_object_still_renders(_d8_df: pl.DataFrame) -> None:
         fm.Chart(_d8_df)
         .mark_point()
         .encode(x=fm.X("a:Q", axis=fm.Axis(title="Speed")), y=fm.Y("b:Q"))
-        .show_svg()
+        .to_svg()
     )
     texts = _d8_tick_texts(svg)
     assert "Speed" in texts, f"Axis(title='Speed') must render title in SVG; got {texts}"
@@ -1193,7 +1193,7 @@ def test_d8_real_axis_object_still_renders(_d8_df: pl.DataFrame) -> None:
 
 def test_d8_no_axis_kwarg_renders_normally(_d8_df: pl.DataFrame) -> None:
     """Default (no axis kwarg) must still render both axes."""
-    svg = fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q")).show_svg()
+    svg = fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q")).to_svg()
     texts = _d8_tick_texts(svg)
     assert "a" in texts, f"x field title 'a' must appear by default; got {texts}"
     assert "b" in texts, f"y field title 'b' must appear by default; got {texts}"
@@ -1202,7 +1202,7 @@ def test_d8_no_axis_kwarg_renders_normally(_d8_df: pl.DataFrame) -> None:
 def test_d8_chart_axis_method_still_works(_d8_df: pl.DataFrame) -> None:
     """Chart.axis(x=False) must still suppress the x-axis regardless of encoding."""
     svg = (
-        fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q")).axis(x=False).show_svg()
+        fm.Chart(_d8_df).mark_point().encode(x=fm.X("a:Q"), y=fm.Y("b:Q")).axis(x=False).to_svg()
     )
     texts = _d8_tick_texts(svg)
     assert "a" not in texts, f"Chart.axis(x=False) must suppress x-axis; got {texts}"
@@ -1218,7 +1218,7 @@ def test_d8_channel_axis_none_does_not_override_chart_axis_true(_d8_df: pl.DataF
         .mark_point()
         .encode(x=fm.X("a:Q", axis=None), y=fm.Y("b:Q"))
         .axis(x=True)
-        .show_svg()
+        .to_svg()
     )
     texts = _d8_tick_texts(svg)
     assert "a" in texts, f"Chart.axis(x=True) must override per-channel axis=None; got {texts}"
@@ -1333,7 +1333,7 @@ def test_d9a_twelve_row_facet_kde_renders_nonblank(month_temp_df: pl.DataFrame) 
     with _warnings.catch_warnings(record=True) as w:
         _warnings.simplefilter("always")
         c = fm.displot(month_temp_df, x="temp", row="month", kind="kde", fill=True)
-        svg = c.show_svg()
+        svg = c.to_svg()
 
     empty_panel_warns = [x for x in w if "EmptyPanel" in str(x.message)]
     assert not empty_panel_warns, (
@@ -1351,7 +1351,7 @@ def test_d9a_twelve_row_facet_hist_renders_nonblank(month_temp_df: pl.DataFrame)
     with _warnings.catch_warnings(record=True) as w:
         _warnings.simplefilter("always")
         c = fm.displot(month_temp_df, x="temp", row="month", kind="hist")
-        svg = c.show_svg()
+        svg = c.to_svg()
 
     empty_panel_warns = [x for x in w if "EmptyPanel" in str(x.message)]
     assert not empty_panel_warns, (
@@ -1375,7 +1375,7 @@ def test_d9a_height_param_is_per_panel(month_temp_df: pl.DataFrame) -> None:
     with _warnings.catch_warnings(record=True) as w:
         _warnings.simplefilter("always")
         c = fm.displot(month_temp_df, x="temp", row="month", kind="kde", fill=True, height=80)
-        svg = c.show_svg()
+        svg = c.to_svg()
 
     empty_panel_warns = [x for x in w if "EmptyPanel" in str(x.message)]
     assert not empty_panel_warns, (
@@ -1401,7 +1401,7 @@ def test_d9a_three_row_facet_unaffected(month_temp_df: pl.DataFrame) -> None:
     months3 = ["Jan", "Feb", "Mar"]
     tdf3 = month_temp_df.filter(pl.col("month").is_in(months3))
     c = fm.displot(tdf3, x="temp", row="month", kind="kde", fill=True)
-    svg = c.show_svg()
+    svg = c.to_svg()
     path_count = svg.count('d="M')
     assert path_count >= 3, f"3-row KDE facet must render at least 3 paths; got {path_count}"
 
@@ -1424,7 +1424,7 @@ def test_d9b_ordinal_x_string_column_eight_values_renders(
         fm.Chart(ordinal_line_df_str)
         .mark_line()
         .encode(x=fm.X("year", type_="O"), y="rank:Q", color="series:N")
-        .show_svg()
+        .to_svg()
     )
     polyline_count = svg.count("<polyline")
     assert polyline_count >= 6, (
@@ -1447,7 +1447,7 @@ def test_d9b_ordinal_x_integer_column_renders(ordinal_line_df_int: pl.DataFrame)
         fm.Chart(ordinal_line_df_int)
         .mark_line()
         .encode(x=fm.X("year", type_="O"), y="rank:Q", color="series:N")
-        .show_svg()
+        .to_svg()
     )
     polyline_count = svg.count("<polyline")
     assert polyline_count >= 6, (
@@ -1485,8 +1485,8 @@ def test_d9c_inset_does_not_blank_parent_marks(inset_df: pl.DataFrame) -> None:
     )
     with_inset = main + fm.Inset(chart=inset_chart, bounds=(0.55, 0.08, 0.97, 0.5))
 
-    svg_composed = with_inset.show_svg()
-    svg_main_only = main.show_svg()
+    svg_composed = with_inset.to_svg()
+    svg_main_only = main.to_svg()
 
     parent_polylines = svg_main_only.count("<polyline")
     composed_polylines = svg_composed.count("<polyline")
@@ -1520,8 +1520,8 @@ def test_d9c_inset_adds_extra_marks(inset_df: pl.DataFrame) -> None:
         .properties(width=900, height=420)
     )
 
-    svg_main = main.show_svg()
-    svg_composed = (main + fm.Inset(chart=inset_chart, bounds=(0.6, 0.1, 0.98, 0.5))).show_svg()
+    svg_main = main.to_svg()
+    svg_composed = (main + fm.Inset(chart=inset_chart, bounds=(0.6, 0.1, 0.98, 0.5))).to_svg()
 
     main_count = svg_main.count("<polyline")
     composed_count = svg_composed.count("<polyline")
@@ -1565,7 +1565,7 @@ def test_t9_size_legend_title_and_labels_present(_t9_df: pl.DataFrame) -> None:
     numeric labels at round values (e.g. ``1e8``, ``2e8``, …). Both must appear
     in the SVG text elements.
     """
-    svg = fm.Chart(_t9_df).mark_point().encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q")).show_svg()
+    svg = fm.Chart(_t9_df).mark_point().encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q")).to_svg()
     texts = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
 
     assert "pop" in texts, f"size legend title 'pop' must appear in SVG texts; got {texts}"
@@ -1584,7 +1584,7 @@ def test_t9_size_legend_circles_exceed_data_points(_t9_df: pl.DataFrame) -> None
     The data layer renders 30 circles (one per row). The size legend adds ~5
     additional graduated circles. The total circle count must therefore exceed 30.
     """
-    svg = fm.Chart(_t9_df).mark_point().encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q")).show_svg()
+    svg = fm.Chart(_t9_df).mark_point().encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q")).to_svg()
     circle_count = svg.count("<circle")
     n_rows = len(_t9_df)
     assert circle_count > n_rows, (
@@ -1609,7 +1609,7 @@ def test_t9_color_and_size_both_produce_legends(_t9_df: pl.DataFrame) -> None:
             size=fm.Size("pop:Q"),
             color=fm.Color("region:N"),
         )
-        .show_svg()
+        .to_svg()
     )
     texts = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
 
@@ -1634,7 +1634,7 @@ def test_t9_shape_legend_title_and_category_labels_present(_t9_df: pl.DataFrame)
         fm.Chart(_t9_df)
         .mark_point()
         .encode(x="x:Q", y="y:Q", shape=fm.Shape("region:N"))
-        .show_svg()
+        .to_svg()
     )
     texts = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
 
@@ -1656,13 +1656,13 @@ def test_t9_size_legend_none_suppresses_legend(_t9_df: pl.DataFrame) -> None:
     more circles than the number of data rows.
     """
     svg_default = (
-        fm.Chart(_t9_df).mark_point().encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q")).show_svg()
+        fm.Chart(_t9_df).mark_point().encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q")).to_svg()
     )
     svg_suppressed = (
         fm.Chart(_t9_df)
         .mark_point()
         .encode(x="x:Q", y="y:Q", size=fm.Size("pop:Q", legend=None))
-        .show_svg()
+        .to_svg()
     )
 
     # The default chart must have the legend.
@@ -1705,7 +1705,7 @@ def test_t9_same_field_size_color_merges_into_single_legend(_t9_df: pl.DataFrame
             size=fm.Size("pop:Q"),
             color=fm.Color("pop:Q"),
         )
-        .show_svg()
+        .to_svg()
     )
     texts = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
     pop_count = texts.count("pop")
@@ -1725,7 +1725,7 @@ def test_t9_color_only_legend_unchanged(_t9_df: pl.DataFrame) -> None:
         fm.Chart(_t9_df)
         .mark_point()
         .encode(x="x:Q", y="y:Q", color=fm.Color("region:N"))
-        .show_svg()
+        .to_svg()
     )
     texts = re.findall(r"<text[^>]*>([^<]+)</text>", svg)
 
@@ -1834,7 +1834,7 @@ def test_t2b_date_column_without_annotation_gets_temporal_ticks(
     and rendered raw epoch-integer tick values. After the fix, the type is
     inferred as temporal and the D3 chrono formatter emits human-readable dates.
     """
-    svg = fm.Chart(_t2b_monthly_df).mark_line().encode(x="date", y="val:Q").show_svg()
+    svg = fm.Chart(_t2b_monthly_df).mark_line().encode(x="date", y="val:Q").to_svg()
     texts = _tick_texts(svg)
     assert _is_date_formatted(texts), (
         f"unannotated Date column on x must produce date-formatted ticks; got: {texts}"
@@ -1854,7 +1854,7 @@ def test_t2b_datetime_us_column_without_annotation_gets_temporal_ticks(
     After the fix, _coerce.py normalizes it to Datetime(ms) and type inference
     infers temporal, so the D3 chrono formatter produces readable dates.
     """
-    svg = fm.Chart(_t2b_datetime_us_df).mark_line().encode(x="ts", y="val:Q").show_svg()
+    svg = fm.Chart(_t2b_datetime_us_df).mark_line().encode(x="ts", y="val:Q").to_svg()
     texts = _tick_texts(svg)
     assert _is_date_formatted(texts), (
         f"unannotated Datetime(us) column on x must produce date-formatted ticks; got: {texts}"
@@ -1873,8 +1873,8 @@ def test_t2b_unannotated_matches_explicit_temporal_annotation(
     must behave identically to the explicit ':T' annotation when the column is
     temporal.
     """
-    svg_inferred = fm.Chart(_t2b_monthly_df).mark_line().encode(x="date", y="val:Q").show_svg()
-    svg_explicit = fm.Chart(_t2b_monthly_df).mark_line().encode(x="date:T", y="val:Q").show_svg()
+    svg_inferred = fm.Chart(_t2b_monthly_df).mark_line().encode(x="date", y="val:Q").to_svg()
+    svg_explicit = fm.Chart(_t2b_monthly_df).mark_line().encode(x="date:T", y="val:Q").to_svg()
     assert svg_inferred == svg_explicit, (
         "unannotated Date column must produce identical SVG to explicit ':T' annotation"
     )
@@ -1889,7 +1889,7 @@ def test_t2b_explicit_q_on_date_column_overrides_inference(
     ':Q' must produce a numeric (non-date) tick pattern even though the column
     holds date values.
     """
-    svg_q = fm.Chart(_t2b_monthly_df).mark_line().encode(x="date:Q", y="val:Q").show_svg()
+    svg_q = fm.Chart(_t2b_monthly_df).mark_line().encode(x="date:Q", y="val:Q").to_svg()
     texts_q = _tick_texts(svg_q)
     # With :Q the tick labels are epoch-ms numbers (large integers), not formatted dates.
     assert not _is_date_formatted(texts_q) or _is_epoch_integer(texts_q), (
@@ -1903,7 +1903,7 @@ def test_t2b_numeric_column_still_quantitative() -> None:
     Regression guard: the temporal inference must not affect numeric columns.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-    svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     texts = _tick_texts(svg)
     numeric_ticks = [t for t in texts if re.match(r"^\d+(?:\.\d+)?$", t)]
     assert numeric_ticks, (
@@ -2058,7 +2058,7 @@ def test_cleanup_three_digit_hex_parses(three_cat_df: pl.DataFrame) -> None:
             fm.Chart(three_cat_df)
             .mark_bar()
             .encode(x="cat:N", y="val:Q", color=Color("cat:N", scale=scale))
-            .show_svg()
+            .to_svg()
         )
     parse_failure_warns = [str(x.message) for x in w if "ColorRangeParseFailure" in str(x.message)]
     assert not parse_failure_warns, (
@@ -2097,7 +2097,7 @@ def test_cleanup_tilde_e_scientific_trim(_orders_of_magnitude_df: pl.DataFrame) 
             x="cat:N",
             y=fm.Y("val:Q", axis=fm.Axis(label_format="~e")),
         )
-        .show_svg()
+        .to_svg()
     )
     tick_labels = _tick_texts(svg)
     has_sci = any("e+" in t or "e-" in t for t in tick_labels)
@@ -2126,7 +2126,7 @@ def test_cleanup_tilde_s_si_trim_regression(_orders_of_magnitude_df: pl.DataFram
             x="cat:N",
             y=fm.Y("val:Q", axis=fm.Axis(label_format="~s")),
         )
-        .show_svg()
+        .to_svg()
     )
     tick_labels = _tick_texts(svg)
     assert any("M" in t for t in tick_labels), (
@@ -2166,7 +2166,7 @@ def test_cleanup_ranged_rule_per_row_color(_ranged_rule_df: pl.DataFrame) -> Non
         fm.Chart(_ranged_rule_df)
         .mark_rule(stroke_width=3)
         .encode(x="cat:N", y="lo:Q", y2="hi:Q", color="dir:N")
-        .show_svg()
+        .to_svg()
     )
     mark_strokes = _mark_strokes(svg, stroke_width=3)
     assert len(mark_strokes) >= 2, (
@@ -2182,7 +2182,7 @@ def test_cleanup_ranged_rule_no_color_single_stroke(_ranged_rule_df: pl.DataFram
     is no color encoding, so all ranged rules share the mark-style default.
     """
     df = _ranged_rule_df.drop("dir")
-    svg = fm.Chart(df).mark_rule(stroke_width=3).encode(x="cat:N", y="lo:Q", y2="hi:Q").show_svg()
+    svg = fm.Chart(df).mark_rule(stroke_width=3).encode(x="cat:N", y="lo:Q", y2="hi:Q").to_svg()
     mark_strokes = _mark_strokes(svg, stroke_width=3)
     assert len(mark_strokes) == 1, (
         f"ranged mark_rule without color encoding must use a single constant stroke; "
@@ -2205,7 +2205,7 @@ def test_cleanup_ranged_segment_per_row_color() -> None:
         fm.Chart(df)
         .mark_segment(stroke_width=3)
         .encode(x="x:Q", y="y:Q", x2="x2:Q", y2="y2:Q", color="dir:N")
-        .show_svg()
+        .to_svg()
     )
     mark_strokes = _mark_strokes(svg, stroke_width=3)
     assert len(mark_strokes) >= 2, (
@@ -2255,7 +2255,7 @@ def test_cleanup_raster_y_orientation(_positive_corr_df: pl.DataFrame) -> None:
     lies on the bottom-left to top-right diagonal, i.e.
         top_right_mass + bottom_left_mass > top_left_mass + bottom_right_mass.
     """
-    svg = fm.Chart(_positive_corr_df).mark_raster().encode(x="x:Q", y="y:Q").show_svg()
+    svg = fm.Chart(_positive_corr_df).mark_raster().encode(x="x:Q", y="y:Q").to_svg()
     # Extract the embedded PNG from the data URI.
     m = re.search(r"data:image/png;base64,([A-Za-z0-9+/=]+)", svg)
     assert m is not None, "mark_raster SVG must contain an embedded PNG data URI"
@@ -2329,8 +2329,8 @@ def test_rf1_displot_facet_width_constant_across_row_counts() -> None:
     per_panel_h = 200.0
     asp = 1.0
 
-    svg_1 = displot(df_1, x="x", row="cat", height=per_panel_h, aspect=asp).show_svg()
-    svg_6 = displot(df_6, x="x", row="cat", height=per_panel_h, aspect=asp).show_svg()
+    svg_1 = displot(df_1, x="x", row="cat", height=per_panel_h, aspect=asp).to_svg()
+    svg_6 = displot(df_6, x="x", row="cat", height=per_panel_h, aspect=asp).to_svg()
 
     w1 = _extract_svg_width(svg_1)
     w6 = _extract_svg_width(svg_6)
@@ -2386,7 +2386,7 @@ def test_rf2_boxen_sort_descending_pandas(sort_boxen_pandas_df) -> None:
             fm.Chart(sort_boxen_pandas_df)
             .mark_boxen()
             .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
-            .show_svg()
+            .to_svg()
         )
     sort_ignored = any("SortSpecIgnored" in str(ww.message) for ww in w)
     assert not sort_ignored, (
@@ -2410,7 +2410,7 @@ def test_rf2_boxen_sort_descending_pandas(sort_boxen_pandas_df) -> None:
 
     # Check 3: sorted SVG differs from unsorted.
     svg_no_sort = (
-        fm.Chart(sort_boxen_pandas_df).mark_boxen().encode(x="cat:N", y="val:Q").show_svg()
+        fm.Chart(sort_boxen_pandas_df).mark_boxen().encode(x="cat:N", y="val:Q").to_svg()
     )
     assert svg_desc != svg_no_sort, (
         "boxen sort='-y' on pandas input must produce a different SVG than no-sort"
@@ -2438,7 +2438,7 @@ def test_rf2_boxen_sort_descending_pyarrow() -> None:
 
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        (fm.Chart(table).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q").show_svg())
+        (fm.Chart(table).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q").to_svg())
     sort_ignored = any("SortSpecIgnored" in str(ww.message) for ww in w)
     assert not sort_ignored, (
         "sort='-y' on mark_boxen with PyArrow Table input must not emit SortSpecIgnored"
@@ -2565,7 +2565,7 @@ def test_r6_layered_mark_x_temporal_inferred_via_build_layers_list(
     chart = fm.Chart(_t2b_monthly_df).mark_point().encode(x="date", y="val:Q") + fm.Chart(
         _t2b_monthly_df
     ).mark_line().encode(x="date", y="val:Q")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     texts = _tick_texts(svg)
     assert _is_date_formatted(texts), (
         f"layered path: unannotated Date x must produce date-formatted ticks; got {texts}"
@@ -2598,7 +2598,7 @@ def test_r6_inferred_type_identical_across_both_paths(
     layered = fm.Chart(_t2b_monthly_df).mark_point().encode(x="date", y="val:Q") + fm.Chart(
         _t2b_monthly_df
     ).mark_line().encode(x="date", y="val:Q")
-    layered_svg = layered.show_svg()
+    layered_svg = layered.to_svg()
     layered_texts = _tick_texts(layered_svg)
 
     assert single_type == "temporal", (
@@ -2641,12 +2641,12 @@ def test_r7_d2_behavior_still_holds() -> None:
         .encode(x="year:Q", y="value:Q", color=fm.Color("country:N", scheme="set1"))
     )
 
-    standalone_colors = _polyline_strokes(highlight.show_svg())
+    standalone_colors = _polyline_strokes(highlight.to_svg())
     assert len(standalone_colors) == 2, (
         f"highlight standalone should have 2 distinct colors; got {standalone_colors}"
     )
 
-    svg = (base + highlight).show_svg()
+    svg = (base + highlight).to_svg()
     colors = _polyline_strokes(svg)
     missing = standalone_colors - colors
     assert not missing, f"base + highlight is missing highlight colors {missing}; got {colors}"
@@ -2714,7 +2714,7 @@ def test_r5_sorted_bar_category_order_unchanged() -> None:
         fm.Chart(df)
         .mark_bar()
         .encode(x=fm.X("cat", type="N", sort="-y"), y=fm.Y("val", type="Q"))
-        .show_svg()
+        .to_svg()
     )
     # B (30) should appear before C (20) should appear before A (10).
     pos_b = svg.find(">B<")
@@ -2730,13 +2730,13 @@ def test_r5_axis_none_suppression_unchanged() -> None:
     """X('field', axis=None) still suppresses the x-axis after the option() swap."""
     df = pl.DataFrame({"x": [1, 2, 3], "y": [4.0, 5.0, 6.0]})
     svg_with_axis = (
-        fm.Chart(df).mark_point().encode(x=fm.X("x", type="Q"), y=fm.Y("y", type="Q")).show_svg()
+        fm.Chart(df).mark_point().encode(x=fm.X("x", type="Q"), y=fm.Y("y", type="Q")).to_svg()
     )
     svg_no_axis = (
         fm.Chart(df)
         .mark_point()
         .encode(x=fm.X("x", type="Q", axis=None), y=fm.Y("y", type="Q"))
-        .show_svg()
+        .to_svg()
     )
     # With axis: tick labels appear; without: they should be absent or suppressed.
     # The simplest proxy is that the suppressed SVG has fewer characters (no tick
@@ -2825,7 +2825,7 @@ def test_r1_boxen_vertical_sort_descending_order(boxen_sort_df: pl.DataFrame) ->
         fm.Chart(boxen_sort_df)
         .mark_boxen()
         .encode(x=fm.X("cat", type="N", sort="-y"), y=fm.Y("val", type="Q"))
-        .show_svg()
+        .to_svg()
     )
     order = _category_order_in_svg(svg, ["A", "B", "C"])
     assert order == ["C", "B", "A"], f"expected descending-sum order C,B,A; got {order}"
@@ -2837,7 +2837,7 @@ def test_r1_boxen_horizontal_sort_order(boxen_sort_df: pl.DataFrame) -> None:
         fm.Chart(boxen_sort_df)
         .mark_boxen(horizontal=True)
         .encode(x=fm.X("val", type="Q"), y=fm.Y("cat", type="N", sort="-x"))
-        .show_svg()
+        .to_svg()
     )
     # All three categories must render; the chart must not collapse.
     order = _category_order_in_svg(svg, ["A", "B", "C"])
@@ -2859,7 +2859,7 @@ def test_r1_errorbar_with_categorical_sort_renders() -> None:
         fm.Chart(df)
         .mark_errorbar(extent="stdev")
         .encode(x=fm.X("cat", type="N", sort="-y"), y=fm.Y("val", type="Q"))
-        .show_svg()
+        .to_svg()
     )
     order = _category_order_in_svg(svg, ["A", "B", "C"])
     # B has highest mean, C middle, A lowest → descending order B, C, A.
@@ -2894,7 +2894,7 @@ def test_r3b_catplot_height_aspect_non_faceted(_r3b_cat_df: pl.DataFrame) -> Non
     The SVG canvas width must be approximately H * A and height approximately H.
     """
     H, A = 300.0, 1.5
-    svg = fm.catplot(_r3b_cat_df, x="cat", y="val", kind="box", height=H, aspect=A).show_svg()
+    svg = fm.catplot(_r3b_cat_df, x="cat", y="val", kind="box", height=H, aspect=A).to_svg()
     w = _extract_svg_width(svg)
     assert w == pytest.approx(H * A, rel=0.05), (
         f"catplot non-faceted width must be ~H*A={H * A}; got {w}"
@@ -2910,7 +2910,7 @@ def test_r3b_catplot_height_aspect_row_faceted(_r3b_cat_df: pl.DataFrame) -> Non
     H, A = 200.0, 1.2
     svg = fm.catplot(
         _r3b_cat_df, x="cat", y="val", kind="strip", row="grp", height=H, aspect=A
-    ).show_svg()
+    ).to_svg()
     w = _extract_svg_width(svg)
     # Width must be ~per_panel_h * aspect, not total_h * aspect.
     expected_w = H * A
@@ -2943,8 +2943,8 @@ def test_r3b_catplot_facet_width_constant_across_row_counts() -> None:
         }
     )
     H, A = 150.0, 1.0
-    svg_2 = fm.catplot(df_2, x="cat", y="val", kind="box", row="grp", height=H, aspect=A).show_svg()
-    svg_5 = fm.catplot(df_5, x="cat", y="val", kind="box", row="grp", height=H, aspect=A).show_svg()
+    svg_2 = fm.catplot(df_2, x="cat", y="val", kind="box", row="grp", height=H, aspect=A).to_svg()
+    svg_5 = fm.catplot(df_5, x="cat", y="val", kind="box", row="grp", height=H, aspect=A).to_svg()
 
     w2 = _extract_svg_width(svg_2)
     w5 = _extract_svg_width(svg_5)
@@ -2974,7 +2974,7 @@ def test_r3b_displot_sizing_unchanged_after_helper_extraction() -> None:
     df = pl.DataFrame({"x": rng.normal(0, 1, 200).tolist(), "cat": cats_4})
 
     H, A = 180.0, 1.4
-    svg = fm.displot(df, x="x", row="cat", kind="kde", height=H, aspect=A).show_svg()
+    svg = fm.displot(df, x="x", row="cat", kind="kde", height=H, aspect=A).to_svg()
     w = _extract_svg_width(svg)
     expected_w = H * A
     assert w == pytest.approx(expected_w, rel=0.05), (
@@ -2984,7 +2984,7 @@ def test_r3b_displot_sizing_unchanged_after_helper_extraction() -> None:
 
 def test_r3b_catplot_no_height_aspect_still_renders(_r3b_cat_df: pl.DataFrame) -> None:
     """catplot without height= or aspect= renders without error (no regression)."""
-    svg = fm.catplot(_r3b_cat_df, x="cat", y="val", kind="violin").show_svg()
+    svg = fm.catplot(_r3b_cat_df, x="cat", y="val", kind="violin").to_svg()
     assert len(svg) > 0, "catplot without height/aspect must produce non-empty SVG"
     # Violin bodies are <path> elements.
     assert svg.count('d="M') >= 1, "catplot without height/aspect must render mark elements"
@@ -3043,7 +3043,7 @@ def test_r2_boxen_aggregate_sort_cross_backend_parity(_r2_boxen_df: pl.DataFrame
     patbl = _r2_boxen_df.to_arrow()
 
     def render(data: object) -> str:
-        return fm.Chart(data).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q").show_svg()
+        return fm.Chart(data).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q").to_svg()
 
     svg_pl = render(_r2_boxen_df)
     svg_pd = render(pddf)

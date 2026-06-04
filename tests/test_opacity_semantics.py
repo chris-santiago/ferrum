@@ -49,7 +49,7 @@ class TestFillOpacity:
     def test_fill_opacity_in_svg(self, scatter_df):
         """encode(fill_opacity='fo') must emit fill-opacity in SVG."""
         chart = fm.Chart(scatter_df).mark_point().encode(x="x", y="y", fill_opacity="fo")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "fill-opacity" in svg, "Expected fill-opacity attribute in SVG output"
         # Extract fill-opacity values; at least one should be ~0.3
         values = re.findall(r'fill-opacity="([^"]+)"', svg)
@@ -60,7 +60,7 @@ class TestFillOpacity:
     def test_fill_opacity_on_large_batch(self, large_scatter_df):
         """fill_opacity on >1000 points (packed path) produces valid SVG."""
         chart = fm.Chart(large_scatter_df).mark_point().encode(x="x", y="y", fill_opacity="fo")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         # SVG should render without error and contain circle elements
         assert "<circle" in svg or "<path" in svg or "fill-opacity" in svg, (
             "Large-batch chart with fill_opacity must render marks"
@@ -77,7 +77,7 @@ class TestStrokeOpacity:
             .mark_point(stroke="black")
             .encode(x="x", y="y", stroke_opacity="so")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "stroke-opacity" in svg, "Expected stroke-opacity attribute in SVG output"
         values = re.findall(r'stroke-opacity="([^"]+)"', svg)
         assert any(abs(float(v) - 0.7) < 0.05 for v in values), (
@@ -94,7 +94,7 @@ class TestStrokeOpacity:
             }
         )
         chart = fm.Chart(df).mark_bar(stroke="black").encode(x="cat", y="val", stroke_opacity="so")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "stroke-opacity" in svg, "Expected stroke-opacity on bar chart SVG"
 
 
@@ -116,7 +116,7 @@ class TestOpacityNoDoubleApply:
             )
             .encode(x="x", y="y", stroke_opacity="so")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         # Both opacity and stroke-opacity should appear as separate attributes
         has_opacity = "opacity" in svg
         assert has_opacity, "Expected opacity-related attributes in SVG"
@@ -131,7 +131,7 @@ class TestOpacityNoDoubleApply:
             )
             .encode(x="x", y="y", fill_opacity="fo", stroke_opacity="so")
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
 
         fill_opacities = re.findall(r'fill-opacity="([^"]+)"', svg)
         stroke_opacities = re.findall(r'stroke-opacity="([^"]+)"', svg)

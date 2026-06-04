@@ -85,7 +85,7 @@ def test_recordbatch_date32_renders_without_error():  # BUG: RecordBatch date32 
         {"d": pa.array([0, 100, 200], type=pa.date32()), "y": pa.array([1.0, 2.0, 3.0])},
         schema=schema,
     )
-    svg = fr.Chart(rb).mark_point().encode(x="d", y="y").show_svg()
+    svg = fr.Chart(rb).mark_point().encode(x="d", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -171,7 +171,7 @@ def test_pyarrow_dictionary_encoded_renders():  # BUG: Rust rejects dictionary-e
         pa.array(["cat_a", "cat_b"]),
     )
     tbl = pa.table({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "cat": arr})
-    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y", color="cat").show_svg()
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y", color="cat").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -430,7 +430,7 @@ def test_chart_with_configure_and_special_data_types():
         {"d": [date(2024, 1, 1), date(2024, 6, 15), date(2024, 12, 31)], "y": [1.0, 2.0, 3.0]}
     )
     chart = fr.Chart(df).mark_point().encode(x="d", y="y").configure_axis(label_angle=45)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -454,7 +454,7 @@ def test_chart_with_annotations_and_categorical_data():
     chart = fr.Chart(df).mark_point().encode(x="x", y="y", color="cat") + Annotate(
         [ann_text(2.0, 5.0, "label")]
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -481,7 +481,7 @@ def test_chart_with_label_map_and_data_coercion():
             y="y",
         )
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -497,7 +497,7 @@ def test_chart_composition_with_different_data_types():
     chart1 = fr.Chart(df1).mark_point().encode(x="x", y="y")
     chart2 = fr.Chart(df2).mark_line().encode(x="x", y="y")
     combined = chart1 + chart2
-    svg = combined.show_svg()
+    svg = combined.to_svg()
     assert "<svg" in svg
 
 
@@ -1090,7 +1090,7 @@ def test_polars_duration_column_renders_no_nan():
             "y": [1.0, 2.0, 3.0],
         }
     )
-    svg = fr.Chart(df).mark_point().encode(x="dur", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="dur", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
     assert "Infinity" not in svg
@@ -1104,7 +1104,7 @@ def test_pyarrow_date32_with_nulls_renders():
 
     arr = pa.array([0, None, 100], type=pa.date32())
     tbl = pa.table({"d": arr, "y": [1.0, 2.0, 3.0]})
-    svg = fr.Chart(tbl).mark_point().encode(x="d", y="y").show_svg()
+    svg = fr.Chart(tbl).mark_point().encode(x="d", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1118,7 +1118,7 @@ def test_dict_input_with_all_null_column_renders():  # BUG: Rust rejects Null dt
     import ferrum as fr
 
     data = {"x": [None, None, None], "y": [1.0, 2.0, 3.0]}
-    svg = fr.Chart(data).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(data).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
 
 
@@ -1129,7 +1129,7 @@ def test_list_of_dicts_renders_valid_svg_no_nan():
     import ferrum as fr
 
     data = [{"x": 1.0, "y": 2.0}, {"x": 3.0, "y": 4.0}, {"x": 5.0, "y": 6.0}]
-    svg = fr.Chart(data).mark_line().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(data).mark_line().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1141,7 +1141,7 @@ def test_numpy_2d_renders_valid_svg():
     import ferrum as fr
 
     arr = np.array([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]])
-    svg = fr.Chart(arr).mark_point().encode(x="col_0", y="col_1").show_svg()
+    svg = fr.Chart(arr).mark_point().encode(x="col_0", y="col_1").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1165,7 +1165,7 @@ def test_chart_with_configure_grid_and_annotations():
     chart = fr.Chart(df).mark_point().encode(x="dur", y="y").configure_grid(
         x=True, y=True, color="#ddd"
     ) + Annotate([ann_line(0, 0, 3000, 3.0)])
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1327,7 +1327,7 @@ def test_polars_int8_renders():
     import ferrum as fr
 
     df = pl.DataFrame({"x": pl.Series([1, 2, 3], dtype=pl.Int8), "y": [4.0, 5.0, 6.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
 
 
@@ -1338,7 +1338,7 @@ def test_polars_uint32_renders():
     import ferrum as fr
 
     df = pl.DataFrame({"x": pl.Series([1, 2, 3], dtype=pl.UInt32), "y": [4.0, 5.0, 6.0]})
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
 
 
@@ -1349,7 +1349,7 @@ def test_pyarrow_int8_renders():
     import ferrum as fr
 
     tbl = pa.table({"x": pa.array([1, 2, 3], type=pa.int8()), "y": [4.0, 5.0, 6.0]})
-    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
 
 
@@ -1416,13 +1416,13 @@ def test_pyarrow_mixed_date_types():
 
 def test_empty_dataframe_with_configure_renders():
     """Zero-row DataFrame with configure should produce valid empty SVG.
-    Tests the empty-data shortcircuit in show_svg at line 426-428.
+    Tests the empty-data shortcircuit in to_svg at line 426-428.
     """
     import ferrum as fr
 
     df = pl.DataFrame({"x": pl.Series([], dtype=pl.Float64), "y": pl.Series([], dtype=pl.Float64)})
     chart = fr.Chart(df).mark_point().encode(x="x", y="y").configure_axis(label_angle=30)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1503,7 +1503,7 @@ def test_render_dict_encoded_date32_raises():  # BUG: dictionary-encoded date32 
     )
     tbl = pa.table({"d": arr, "y": [1.0, 2.0, 3.0]})
     # This should render valid SVG, not raise ValueError
-    svg = fr.Chart(tbl).mark_point().encode(x="d", y="y").show_svg()
+    svg = fr.Chart(tbl).mark_point().encode(x="d", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1520,7 +1520,7 @@ def test_render_dict_encoded_date64_raises():  # BUG: dictionary-encoded date64 
         pa.array([0, 86_400_000], type=pa.date64()),
     )
     tbl = pa.table({"d": arr, "y": [1.0, 2.0]})
-    svg = fr.Chart(tbl).mark_point().encode(x="d", y="y").show_svg()
+    svg = fr.Chart(tbl).mark_point().encode(x="d", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1652,7 +1652,7 @@ def test_render_dict_encoded_all_null_indices_as_color():
         pa.array(["a", "b"]),
     )
     tbl = pa.table({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "cat": arr})
-    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y", color="cat").show_svg()
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y", color="cat").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -1756,7 +1756,7 @@ def test_render_all_null_columns_as_encodings():
             "y": pa.array([None, None, None], type=pa.null()),
         }
     )
-    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
     assert "Infinity" not in svg
@@ -1968,7 +1968,7 @@ def test_render_mixed_dict_null_normal_columns():
             "unused": pa.array([None, None, None], type=pa.null()),
         }
     )
-    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -2102,7 +2102,7 @@ def test_recordbatch_mixed_date_and_dict_columns():
     assert pa.types.is_dictionary(tbl.schema.field("cat").type)
 
     # Full render pipeline: _sanitize_for_rust decodes the dictionary
-    svg = fr.Chart(rb).mark_point().encode(x="d", y="y", color="cat").show_svg()
+    svg = fr.Chart(rb).mark_point().encode(x="d", y="y", color="cat").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -2126,7 +2126,7 @@ def test_recordbatch_mixed_date_and_null_columns():
     tbl = to_arrow_table(rb)
     assert pa.types.is_timestamp(tbl.schema.field("d").type)
 
-    svg = fr.Chart(rb).mark_point().encode(x="d", y="y").show_svg()
+    svg = fr.Chart(rb).mark_point().encode(x="d", y="y").to_svg()
     assert "<svg" in svg
 
 
@@ -2195,7 +2195,7 @@ def test_label_map_with_dict_encoded_x_column():
             y="y",
         )
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     assert "Alpha" in svg
 
@@ -2225,7 +2225,7 @@ def test_label_map_with_null_typed_x_column():
         )
     )
     # Should not crash even though the column is all nulls
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -2253,7 +2253,7 @@ def test_dict_encoded_color_produces_distinct_marks():
             "group": arr,
         }
     )
-    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y", color="group").show_svg()
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y", color="group").to_svg()
     assert "<svg" in svg
     # Should have at least 4 circle elements (one per data point)
     assert svg.count("<circle") >= 4 or svg.count('cx="') >= 4
@@ -2276,7 +2276,7 @@ def test_null_column_renders_valid_viewbox():
             "y": [1.0, 2.0, 3.0],
         }
     )
-    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").to_svg()
     assert 'viewBox="' in svg
     # Extract viewBox and verify no NaN
     vb_match = re.search(r'viewBox="([^"]+)"', svg)
@@ -2300,7 +2300,7 @@ def test_dict_encoded_y_produces_valid_svg():
         pa.array([10.0, 20.0, 30.0]),
     )
     tbl = pa.table({"x": [1.0, 2.0, 3.0], "y": arr})
-    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -2323,7 +2323,7 @@ def test_dict_encoded_with_inf_renders():
         pa.array([1.0, float("inf")]),
     )
     tbl = pa.table({"x": arr, "y": [1.0, 2.0, 3.0]})
-    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
 
 
@@ -2339,7 +2339,7 @@ def test_dict_encoded_with_neg_inf_renders():
         pa.array([1.0, float("-inf")]),
     )
     tbl = pa.table({"x": arr, "y": [1.0, 2.0, 3.0]})
-    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(tbl).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
 
 
@@ -2422,7 +2422,7 @@ def test_recordbatch_dict_encoded_date32():  # BUG: RecordBatch + dict(date32) p
         names=["d", "y"],
     )
     # This should work but will fail because date32 leaks through
-    svg = fr.Chart(rb).mark_point().encode(x="d", y="y").show_svg()
+    svg = fr.Chart(rb).mark_point().encode(x="d", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -2447,7 +2447,7 @@ def test_polars_null_column_through_render_pipeline():
             "null_col": pl.Series([None, None, None], dtype=pl.Null),
         }
     )
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
 
@@ -2467,7 +2467,7 @@ def test_polars_null_column_as_color_through_render():
             "color": pl.Series([None, None, None], dtype=pl.Null),
         }
     )
-    svg = fr.Chart(df).mark_point().encode(x="x", y="y", color="color").show_svg()
+    svg = fr.Chart(df).mark_point().encode(x="x", y="y", color="color").to_svg()
     assert "<svg" in svg
 
 
@@ -2489,6 +2489,6 @@ def test_dict_encoded_timestamp_survives_sanitize():
         pa.array([1_000_000, 2_000_000], type=pa.timestamp("ms")),
     )
     tbl = pa.table({"ts": arr, "y": [1.0, 2.0, 3.0]})
-    svg = fr.Chart(tbl).mark_point().encode(x="ts", y="y").show_svg()
+    svg = fr.Chart(tbl).mark_point().encode(x="ts", y="y").to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg

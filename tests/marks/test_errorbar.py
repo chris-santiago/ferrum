@@ -39,5 +39,5 @@ def test_errorbar_uses_error_extent_transform(df):
 
 def test_errorbar_render_smoke(df):
     chart = fe.Chart(df).mark_errorbar().encode(x="x", y="y")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg

@@ -21,42 +21,42 @@ def simple_chart():
 # ---------------------------------------------------------------------------
 
 
-def test_show_png_default_scale(simple_chart):
-    """show_png() with default scale=2.0 returns valid PNG bytes."""
-    png = simple_chart.show_png()
+def test_to_png_default_scale(simple_chart):
+    """to_png() with default scale=2.0 returns valid PNG bytes."""
+    png = simple_chart.to_png()
     assert png[:8] == b"\x89PNG\r\n\x1a\n", "expected PNG magic bytes"
 
 
-def test_show_png_scale_param_explicit_default(simple_chart):
-    """show_png(scale=2.0) equals the no-arg default."""
-    default = simple_chart.show_png()
-    explicit = simple_chart.show_png(scale=2.0)
+def test_to_png_scale_param_explicit_default(simple_chart):
+    """to_png(scale=2.0) equals the no-arg default."""
+    default = simple_chart.to_png()
+    explicit = simple_chart.to_png(scale=2.0)
     # Both should be valid PNG; they should be identical (deterministic render)
     assert default[:8] == b"\x89PNG\r\n\x1a\n"
     assert explicit[:8] == b"\x89PNG\r\n\x1a\n"
     assert default == explicit
 
 
-def test_show_png_scale_1x_smaller_than_2x(simple_chart):
+def test_to_png_scale_1x_smaller_than_2x(simple_chart):
     """1x PNG is smaller than 2x PNG (fewer pixels)."""
-    png_1x = simple_chart.show_png(scale=1.0)
-    png_2x = simple_chart.show_png(scale=2.0)
+    png_1x = simple_chart.to_png(scale=1.0)
+    png_2x = simple_chart.to_png(scale=2.0)
     assert png_1x[:8] == b"\x89PNG\r\n\x1a\n"
     assert png_2x[:8] == b"\x89PNG\r\n\x1a\n"
     assert len(png_1x) < len(png_2x)
 
 
-def test_show_png_scale_3x_larger_than_2x(simple_chart):
+def test_to_png_scale_3x_larger_than_2x(simple_chart):
     """3x PNG is larger than 2x PNG."""
-    png_2x = simple_chart.show_png(scale=2.0)
-    png_3x = simple_chart.show_png(scale=3.0)
+    png_2x = simple_chart.to_png(scale=2.0)
+    png_3x = simple_chart.to_png(scale=3.0)
     assert len(png_3x) > len(png_2x)
 
 
-def test_show_png_scale_pixel_dimensions(simple_chart):
+def test_to_png_scale_pixel_dimensions(simple_chart):
     """PNG dimensions reflect the scale factor."""
-    png_1x = simple_chart.show_png(scale=1.0)
-    png_2x = simple_chart.show_png(scale=2.0)
+    png_1x = simple_chart.to_png(scale=1.0)
+    png_2x = simple_chart.to_png(scale=2.0)
 
     # PNG IHDR chunk starts at byte 8: 4-byte length, 4-byte "IHDR",
     # then 4-byte width, 4-byte height
@@ -76,24 +76,24 @@ def test_show_png_scale_pixel_dimensions(simple_chart):
 # ---------------------------------------------------------------------------
 
 
-def test_composition_show_png_scale_param():
-    """_ChartLike.show_png(scale=...) propagates scale."""
+def test_composition_to_png_scale_param():
+    """_ChartLike.to_png(scale=...) propagates scale."""
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     c = fm.Chart(df).mark_point().encode(x="x", y="y")
     comp = c | c  # HConcat composition
 
-    png_1x = comp.show_png(scale=1.0)
-    png_2x = comp.show_png(scale=2.0)
+    png_1x = comp.to_png(scale=1.0)
+    png_2x = comp.to_png(scale=2.0)
     assert png_1x[:8] == b"\x89PNG\r\n\x1a\n"
     assert len(png_1x) < len(png_2x)
 
 
-def test_composition_show_png_default_unchanged():
-    """_ChartLike.show_png() default (scale=2.0) returns valid PNG."""
+def test_composition_to_png_default_unchanged():
+    """_ChartLike.to_png() default (scale=2.0) returns valid PNG."""
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     c = fm.Chart(df).mark_point().encode(x="x", y="y")
     comp = c | c
-    png = comp.show_png()
+    png = comp.to_png()
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
 
 

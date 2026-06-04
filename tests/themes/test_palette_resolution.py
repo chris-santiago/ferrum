@@ -26,8 +26,8 @@ def _multi_series_chart() -> fm.Chart:
 
 def test_theme_color_scheme_switches_palette() -> None:
     chart = _multi_series_chart()
-    svg_tab = chart.theme(fm.Theme(color_scheme="tableau10")).show_svg()
-    svg_s1 = chart.theme(fm.Theme(color_scheme="set1")).show_svg()
+    svg_tab = chart.theme(fm.Theme(color_scheme="tableau10")).to_svg()
+    svg_s1 = chart.theme(fm.Theme(color_scheme="set1")).to_svg()
     assert svg_tab != svg_s1, "tableau10 and set1 must produce different SVGs"
     # tableau10 first color = #4C78A8; set1 first color = #E41A1C.
     assert "#4c78a8" in svg_tab.lower() or "rgb(76, 120, 168)" in svg_tab.lower()
@@ -48,15 +48,15 @@ def test_palette_wraps_past_length() -> None:
         .mark_point()
         .encode(x="x", y="y", color="cat")
         .theme(fm.Theme(color_scheme="tableau10"))
-        .show_svg()
+        .to_svg()
     )
     assert "<svg" in svg
 
 
 def test_sequential_scheme_falls_back_to_tableau10_on_nominal() -> None:
     chart = _multi_series_chart()
-    svg_viridis = chart.theme(fm.Theme(color_scheme="viridis")).show_svg()
-    svg_tab = chart.theme(fm.Theme(color_scheme="tableau10")).show_svg()
+    svg_viridis = chart.theme(fm.Theme(color_scheme="viridis")).to_svg()
+    svg_tab = chart.theme(fm.Theme(color_scheme="tableau10")).to_svg()
     # Sequential scheme on a nominal encoding substitutes tableau10 — so the
     # categorical color path should produce byte-identical SVGs.
     assert svg_viridis == svg_tab
@@ -68,6 +68,6 @@ def test_no_theme_equals_explicit_default_scheme() -> None:
     # Theme(color_scheme="paper_ink") produces a byte-identical SVG —
     # confirms the default theme path doesn't drift from the explicit-theme path.
     chart = _multi_series_chart()
-    svg_default = chart.show_svg()
-    svg_explicit = chart.theme(fm.Theme(color_scheme="paper_ink")).show_svg()
+    svg_default = chart.to_svg()
+    svg_explicit = chart.theme(fm.Theme(color_scheme="paper_ink")).to_svg()
     assert svg_default == svg_explicit

@@ -306,30 +306,30 @@ class TestStructuralSerialization:
 
 
 # ---------------------------------------------------------------------------
-# Rendering integration tests (show_svg round-trip)
+# Rendering integration tests (to_svg round-trip)
 # ---------------------------------------------------------------------------
 
 
 class TestStructuralRendering:
     def test_secondary_y_renders_svg(self, base_chart):
         chart = base_chart + SecondaryY("revenue")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
 
     def test_break_axis_renders_svg(self, base_chart):
         chart = base_chart + BreakAxis(axis="y", gap=(50, 200))
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
 
     def test_inset_renders_svg(self, base_chart, dual_field_df):
         inset_chart = fm.Chart(dual_field_df).mark_point().encode(x="x", y="revenue")
         chart = base_chart + Inset(chart=inset_chart, bounds=(0.6, 0.1, 0.95, 0.45))
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")
 
     def test_structural_with_configure_renders(self, base_chart):
         from ferrum.configure import Configure, AxisConfig
 
         chart = base_chart + Configure(axis=AxisConfig(grid=True)) + SecondaryY("revenue")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert svg.startswith("<svg")

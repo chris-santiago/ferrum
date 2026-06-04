@@ -82,7 +82,7 @@ def test_silhouette_chart_renders():
     df = load_dataset("clustering")
     source = ferrum.ModelSource(model, df)
     chart = _silhouette_chart_from_source(source)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg") or "<svg" in svg
 
 
@@ -90,7 +90,7 @@ def test_pca_scree_chart_renders():
     model = load_fixture("pca_4comp")
     df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.pca_scree_chart(model, df, threshold=0.95)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -99,14 +99,14 @@ def test_pca_scree_chart_threshold_none_omits_rule():
     model = load_fixture("pca_4comp")
     df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.pca_scree_chart(model, df, threshold=None)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
 def test_cluster_diagnostics_figure():
     df = load_dataset("clustering")
     chart = ferrum.cluster_diagnostics(df, ks=[2, 3, 4, 5], random_state=0)
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_cluster_diagnostics_scoring_elbow_only():
@@ -117,7 +117,7 @@ def test_cluster_diagnostics_scoring_elbow_only():
         scoring="elbow",
         random_state=0,
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # Single-panel: should NOT be an HConcatChart (no panel separator).
     # HConcatChart renders two <svg> sub-panels nested in a wrapper.
@@ -132,7 +132,7 @@ def test_cluster_diagnostics_scoring_silhouette_only():
         scoring="silhouette",
         random_state=0,
     )
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_cluster_diagnostics_hierarchical():
@@ -146,7 +146,7 @@ def test_cluster_diagnostics_hierarchical():
         ks=[2, 3, 4],
         method="hierarchical",
     )
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_cluster_diagnostics_rejects_dbscan():
@@ -170,7 +170,7 @@ def test_mark_silhouette_rejects_unknown_kwarg():
     source = ferrum.ModelSource(model, df_data)
     sil = source.silhouette()
     with pytest.raises(TypeError, match="unknown keyword"):
-        ferrum.Chart(sil).mark_silhouette(strokr="red").show_svg()
+        ferrum.Chart(sil).mark_silhouette(strokr="red").to_svg()
 
 
 def test_mark_pca_scree_rejects_unknown_kwarg():
@@ -179,7 +179,7 @@ def test_mark_pca_scree_rejects_unknown_kwarg():
     source = ferrum.ModelSource(model, df)
     pca = source.pca_variance()
     with pytest.raises(TypeError, match="unknown keyword"):
-        ferrum.Chart(pca).mark_pca_scree(strokr="red").show_svg()
+        ferrum.Chart(pca).mark_pca_scree(strokr="red").to_svg()
 
 
 # --- Task 31: embeddings + intercluster_distance --------------------
@@ -254,7 +254,7 @@ def test_intercluster_distance_chart_renders():
         k=3,
         random_state=0,
     )
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_intercluster_distance_chart_auto_k():
@@ -262,7 +262,7 @@ def test_intercluster_distance_chart_auto_k():
     model = load_fixture("kmeans_3cluster")
     df = load_dataset("clustering")
     chart = ferrum.intercluster_distance_chart(model, df, random_state=0)
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_mark_intercluster_distance_rejects_unknown_kwarg():
@@ -271,7 +271,7 @@ def test_mark_intercluster_distance_rejects_unknown_kwarg():
     source = ferrum.ModelSource(model, df, random_state=0)
     icd = source.intercluster_distance(k=3)
     with pytest.raises(TypeError, match="unknown keyword"):
-        (ferrum.Chart(icd).mark_intercluster_distance(strokr="red").show_svg())
+        (ferrum.Chart(icd).mark_intercluster_distance(strokr="red").to_svg())
 
 
 # --- Task 32: decision_boundary --------------------------------------
@@ -292,7 +292,7 @@ def test_decision_boundary_chart_binary():
         grid_resolution=50,
         proba=True,
     )
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_decision_boundary_chart_scatter_overlay():
@@ -317,7 +317,7 @@ def test_decision_boundary_chart_scatter_overlay():
     assert type(chart).__name__ == "Chart"
     assert chart._layers is not None
     assert len(chart._layers) == 2
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     # The scatter overlay emits SVG <circle> elements with a black
     # stroke (uniform across all points).
     assert 'stroke="#000000"' in svg
@@ -347,7 +347,7 @@ def test_decision_boundary_chart_scatter_overlay_proba_mode():
     )
     assert chart._layers is not None
     assert len(chart._layers) == 2
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_decision_boundary_rejects_three_features():
@@ -382,7 +382,7 @@ def test_decision_boundary_predict_path_no_proba():
         grid_resolution=20,
         proba=False,
     )
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_mark_decision_boundary_rejects_unknown_kwarg():
@@ -399,7 +399,7 @@ def test_mark_decision_boundary_rejects_unknown_kwarg():
         }
     )
     with pytest.raises(TypeError, match="unknown keyword"):
-        ferrum.Chart(grid).mark_decision_boundary(strokr="red").show_svg()
+        ferrum.Chart(grid).mark_decision_boundary(strokr="red").to_svg()
 
 
 # --- Task 33: clustering / manifold visualizers ----------------------
@@ -411,7 +411,7 @@ def test_silhouette_visualizer():
     viz = ferrum.SilhouetteVisualizer(model).fit(df)
     assert viz._fitted
     assert "mean_silhouette=" in repr(viz)
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_elbow_visualizer():
@@ -447,7 +447,7 @@ def test_elbow_visualizer_silhouette():
     best_k = viz._metrics["best_k"]
     assert np.isfinite(best_k)
     assert best_k in {2.0, 3.0, 4.0, 5.0}
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_elbow_visualizer_calinski_harabasz():
@@ -465,7 +465,7 @@ def test_elbow_visualizer_calinski_harabasz():
     best_k = viz._metrics["best_k"]
     assert np.isfinite(best_k)
     assert best_k in {2.0, 3.0, 4.0, 5.0}
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_elbow_visualizer_rejects_bad_metric():
@@ -505,7 +505,7 @@ def test_manifold_visualizer_pca():
         random_state=0,
     ).fit(df)
     assert viz._fitted
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_intercluster_distance_visualizer():
@@ -525,7 +525,7 @@ def test_pca_variance_visualizer():
     viz = ferrum.PCAVarianceVisualizer(model).fit(df)
     assert viz._fitted
     assert "first_component_var=" in repr(viz)
-    assert "<svg" in viz.show().show_svg()
+    assert "<svg" in viz.show().to_svg()
 
 
 def test_visualizer_show_before_fit_raises():
@@ -547,7 +547,7 @@ def test_silhouette_chart_figure_function():
     df = load_dataset("clustering")
     model = KMeans(n_clusters=3, random_state=0, n_init=10).fit(df)
     chart = ferrum.silhouette_chart(model, df)
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_manifold_chart_figure_function():
@@ -556,7 +556,7 @@ def test_manifold_chart_figure_function():
     df = load_dataset("clustering")
     model = KMeans(n_clusters=3, random_state=0, n_init=10).fit(df)
     chart = ferrum.manifold_chart(model, df, method="pca")
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_manifold_chart_colors_by_cluster():
@@ -567,7 +567,7 @@ def test_manifold_chart_colors_by_cluster():
 
     df = load_dataset("clustering")
     model = KMeans(n_clusters=3, random_state=0, n_init=10).fit(df)
-    svg = ferrum.manifold_chart(model, df, method="pca").show_svg()
+    svg = ferrum.manifold_chart(model, df, method="pca").to_svg()
     fills = set(re.findall(r'fill="(#[0-9a-fA-F]{6})"', svg))
     assert len(fills) >= 3, f"Expected ≥3 distinct fill colors for 3 clusters; got {fills}"
 
@@ -577,7 +577,7 @@ def test_elbow_chart_figure_function():
 
     df = load_dataset("clustering")
     chart = ferrum.elbow_chart(KMeans, df, ks=range(2, 6), random_state=0)
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_elbow_chart_silhouette_metric():
@@ -585,4 +585,4 @@ def test_elbow_chart_silhouette_metric():
 
     df = load_dataset("clustering")
     chart = ferrum.elbow_chart(KMeans, df, ks=range(2, 5), metric="silhouette", random_state=0)
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()

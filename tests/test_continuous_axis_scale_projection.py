@@ -95,7 +95,7 @@ class TestLinearAxisTickMarkCoincidence:
             .mark_point()
             .encode(x="x:Q", y="y:Q")
             .properties(width=self._WIDTH, height=self._HEIGHT)
-            .show_svg()
+            .to_svg()
         )
 
     def test_leftmost_gridline_coincides_with_domain_min_mark(self) -> None:
@@ -235,7 +235,7 @@ class TestLogAxisTickMarkCoincidence:
             .mark_point()
             .encode(x=X("x:Q", scale={"type": "log"}), y="y:Q")
             .properties(width=self._WIDTH, height=self._HEIGHT)
-            .show_svg()
+            .to_svg()
         )
 
     def test_log_leftmost_gridline_coincides_with_x_min_mark(self) -> None:
@@ -357,7 +357,7 @@ class TestCategoricalAxisUniformSlots:
             .mark_bar()
             .encode(x="cat:N", y="val:Q")
             .properties(width=self._WIDTH, height=self._HEIGHT)
-            .show_svg()
+            .to_svg()
         )
 
     def test_categorical_bar_centers_are_uniformly_spaced(self) -> None:
@@ -439,7 +439,7 @@ class TestCategoricalAxisUniformSlots:
             .encode(x="cat:N", y="val:Q")
             .theme(fm.Theme(grid=True, grid_color="#abcdef"))
             .properties(width=self._WIDTH, height=self._HEIGHT)
-            .show_svg()
+            .to_svg()
         )
         gridlines_grid = _vertical_gridline_xs(svg_grid)
 
@@ -472,7 +472,7 @@ class TestCategoricalAxisUniformSlots:
             .encode(x="cat:N", y="val:Q")
             .theme(fm.Theme(grid=True, grid_color="#abcdef"))
             .properties(width=self._WIDTH, height=self._HEIGHT)
-            .show_svg()
+            .to_svg()
         )
         gridlines_cat = _vertical_gridline_xs(svg_cat)
 
@@ -484,7 +484,7 @@ class TestCategoricalAxisUniformSlots:
             .encode(x="x:Q", y="y:Q")
             .theme(fm.Theme(grid=True, grid_color="#abcdef"))
             .properties(width=self._WIDTH, height=self._HEIGHT)
-            .show_svg()
+            .to_svg()
         )
         gridlines_cont = _vertical_gridline_xs(svg_cont)
 

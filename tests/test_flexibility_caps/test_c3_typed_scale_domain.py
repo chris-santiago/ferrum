@@ -94,8 +94,8 @@ def test_log_scale_no_domain_matches_dict(df):
             y=fm.Y("y", scale={"type": "log", "range": [0, 400]}),
         )
     )
-    svg_typed = chart_typed.show_svg()
-    svg_dict = chart_dict.show_svg()
+    svg_typed = chart_typed.to_svg()
+    svg_dict = chart_dict.to_svg()
     assert svg_typed, "typed chart produced empty SVG"
     assert svg_dict, "dict chart produced empty SVG"
     assert svg_typed == svg_dict, (
@@ -122,8 +122,8 @@ def test_linear_scale_no_domain_matches_dict(df):
             y=fm.Y("y", scale={"type": "linear", "range": [0, 400]}),
         )
     )
-    svg_typed = chart_typed.show_svg()
-    svg_dict = chart_dict.show_svg()
+    svg_typed = chart_typed.to_svg()
+    svg_dict = chart_dict.to_svg()
     assert svg_typed, "typed chart produced empty SVG"
     assert svg_dict, "dict chart produced empty SVG"
     assert svg_typed == svg_dict, (
@@ -150,8 +150,8 @@ def test_pow_scale_no_domain_matches_dict(df):
             y=fm.Y("y", scale={"type": "pow", "range": [0, 400]}),
         )
     )
-    svg_typed = chart_typed.show_svg()
-    svg_dict = chart_dict.show_svg()
+    svg_typed = chart_typed.to_svg()
+    svg_dict = chart_dict.to_svg()
     assert svg_typed, "typed chart produced empty SVG"
     assert svg_dict, "dict chart produced empty SVG"
     assert svg_typed == svg_dict, (
@@ -178,8 +178,8 @@ def test_sqrt_scale_no_domain_matches_dict(df):
             y=fm.Y("y", scale={"type": "sqrt", "range": [0, 400]}),
         )
     )
-    svg_typed = chart_typed.show_svg()
-    svg_dict = chart_dict.show_svg()
+    svg_typed = chart_typed.to_svg()
+    svg_dict = chart_dict.to_svg()
     assert svg_typed, "typed chart produced empty SVG"
     assert svg_dict, "dict chart produced empty SVG"
     assert svg_typed == svg_dict, (
@@ -206,8 +206,8 @@ def test_symlog_scale_no_domain_matches_dict(df):
             y=fm.Y("y", scale={"type": "symlog", "range": [0, 400]}),
         )
     )
-    svg_typed = chart_typed.show_svg()
-    svg_dict = chart_dict.show_svg()
+    svg_typed = chart_typed.to_svg()
+    svg_dict = chart_dict.to_svg()
     assert svg_typed, "typed chart produced empty SVG"
     assert svg_dict, "dict chart produced empty SVG"
     assert svg_typed == svg_dict, (
@@ -271,7 +271,7 @@ def test_log_scale_no_domain_axis_spans_data(df):
             y=fm.Y("y", scale=fm.LogScale(range=(0, 400))),
         )
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     # The SVG should contain tick labels near the data max (1024)
     # A reasonable log axis spanning [2, 1024] should include 100, 1000 or similar
     assert "1" in svg, "SVG should contain numeric tick labels"
@@ -288,7 +288,7 @@ def test_linear_scale_no_domain_axis_spans_data(df):
             y=fm.Y("y", scale=fm.LinearScale(range=(0, 400))),
         )
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.strip(), "SVG should not be empty"
 
 

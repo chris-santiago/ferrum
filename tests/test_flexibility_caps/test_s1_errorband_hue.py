@@ -178,7 +178,7 @@ def test_errorband_hue_per_group_extents_differ():
     """With very different spreads, the tight and wide group bands must differ in height."""
     df = _make_df_continuous()
     chart = fm.Chart(df).mark_errorband().encode(x="x:Q", y="y:Q", color="grp:N")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     # The SVG must actually render without error and contain ribbon content.
     # Presence of two distinct colors (one per group) is the minimal behavioral check.
     assert svg, "expected non-empty SVG"
@@ -195,8 +195,8 @@ def test_errorband_hue_renders_per_group_distinct_bands():
     hue_chart = fm.Chart(df).mark_errorband().encode(x="x:Q", y="y:Q", color="grp:N")
     no_hue_chart = fm.Chart(df).mark_errorband().encode(x="x:Q", y="y:Q")
 
-    hue_svg = hue_chart.show_svg()
-    no_hue_svg = no_hue_chart.show_svg()
+    hue_svg = hue_chart.to_svg()
+    no_hue_svg = no_hue_chart.to_svg()
 
     # The hue chart must have more path elements (one ribbon per (x, grp) pair vs. one per x).
     hue_paths = hue_svg.count("<path")
@@ -257,14 +257,14 @@ def test_errorband_no_hue_svg_stable():
     """Without hue, two renders of the same chart must be identical (byte-stability)."""
     df = _make_df_continuous()
     chart = fm.Chart(df).mark_errorband().encode(x="x:Q", y="y:Q")
-    assert chart.show_svg() == chart.show_svg()
+    assert chart.to_svg() == chart.to_svg()
 
 
 def test_errorbar_no_hue_svg_stable():
     """Without hue, two renders of the same chart must be identical."""
     df = _make_df_categorical()
     chart = fm.Chart(df).mark_errorbar().encode(x="day:N", y="val:Q")
-    assert chart.show_svg() == chart.show_svg()
+    assert chart.to_svg() == chart.to_svg()
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +340,7 @@ def test_errorband_hue_render_png(tmp_path):
 
     df = _make_df_continuous()
     chart = fm.Chart(df).mark_errorband().encode(x="x:Q", y="y:Q", color="grp:N")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     png_bytes = svg_to_bytes(svg)
     png_path = out_dir / "errorband_hue.png"
     png_path.write_bytes(png_bytes)

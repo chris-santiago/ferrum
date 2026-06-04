@@ -51,7 +51,7 @@ def _render(df, mark_method, encoding, position=None, coord=None) -> str:
     chart = chart.encode(**encoding)
     if coord is not None:
         chart = chart.coord(coord)
-    return chart.show_svg()
+    return chart.to_svg()
 
 
 # ---------------------------------------------------------------------------

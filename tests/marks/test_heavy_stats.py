@@ -3,7 +3,7 @@
 Each mark gets:
 - A spec-build smoke test (assert spec.layers is not None or appropriate shape)
 - Key kwarg propagation test (verify kwarg flows into spec JSON)
-- A render smoke test (show_svg returns valid SVG) where supported
+- A render smoke test (to_svg returns valid SVG) where supported
 - An error-case test where applicable
 """
 
@@ -170,7 +170,7 @@ def test_hex_stroke_with_width_renders_border_attributes(df_xy):
     dropped. This is a pre-existing constraint in the renderer, not a limitation of the
     hex-stroke wiring.
     """
-    svg = fe.Chart(df_xy).mark_hex(stroke="#ffffff", stroke_width=1).encode(x="x", y="y").show_svg()
+    svg = fe.Chart(df_xy).mark_hex(stroke="#ffffff", stroke_width=1).encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     # The polygon <path> elements should carry stroke="..." (white = #ffffff)
     assert 'stroke="#ffffff"' in svg
@@ -187,7 +187,7 @@ def test_hex_stroke_alone_width_zero_renders_no_visible_border(df_xy):
     """
     import re
 
-    svg = fe.Chart(df_xy).mark_hex(stroke="#ffffff").encode(x="x", y="y").show_svg()
+    svg = fe.Chart(df_xy).mark_hex(stroke="#ffffff").encode(x="x", y="y").to_svg()
     assert "<svg" in svg
     # The polygon paths carry stroke="#ffffff" but no stroke-width (0 = invisible).
     assert 'stroke="#ffffff"' in svg
@@ -257,13 +257,13 @@ def test_function_wrong_shape_raises():
 
 def test_violin_no_inner_renders(df_xy):
     """Smoke render -- violin polygon only (no inner box/quartile)."""
-    svg = fe.Chart(df_xy).mark_violin(inner=None).encode(x="x", y="y").show_svg()
+    svg = fe.Chart(df_xy).mark_violin(inner=None).encode(x="x", y="y").to_svg()
     assert "<svg" in svg
 
 
 def test_qq_renders():
     df = pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0, 5.0, 1.5, 2.5, 3.5, 4.5, 1.2]})
-    svg = fe.Chart(df).mark_qq(line=False).encode(x="v").show_svg()
+    svg = fe.Chart(df).mark_qq(line=False).encode(x="v").to_svg()
     assert "<svg" in svg
 
 
@@ -275,13 +275,13 @@ def test_swarm_renders():
             "v": [1.0, 2.0, 3.0, 4.0, 5.0, 2.0, 3.0, 4.0, 5.0, 6.0],
         }
     )
-    svg = fe.Chart(df_cat).mark_swarm().encode(x="g", y="v").show_svg()
+    svg = fe.Chart(df_cat).mark_swarm().encode(x="g", y="v").to_svg()
     assert "<svg" in svg
 
 
 def test_function_renders(df_xy):
     chart = fe.Chart(df_xy).encode(x="x", y="y").mark_function(lambda x: x**2)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 

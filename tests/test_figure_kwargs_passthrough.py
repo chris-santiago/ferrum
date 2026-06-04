@@ -53,8 +53,8 @@ def wide_df():
 
 def _renders_differently(chart_default, chart_override):
     """Assert that two charts produce different SVG output."""
-    svg_default = chart_default.show_svg()
-    svg_override = chart_override.show_svg()
+    svg_default = chart_default.to_svg()
+    svg_override = chart_override.to_svg()
     assert svg_default != svg_override, (
         "Expected overridden chart to produce different SVG from the default"
     )
@@ -204,7 +204,7 @@ class TestPairplotPassthrough:
     def test_mark_override(self, df):
         default = fm.pairplot(df, vars=["x", "y"])
         overridden = fm.pairplot(df, vars=["x", "y"], mark={"opacity": 0.2})
-        assert overridden.show_svg() is not None
+        assert overridden.to_svg() is not None
 
     def test_encode_override(self, df):
         default = fm.pairplot(df, vars=["x", "y"], hue="cat")
@@ -234,7 +234,7 @@ class TestHeatmapPassthrough:
         # encode override replaces the default color encoding — may or may not
         # differ visually, but the spec contract is that it's wired.  At minimum
         # we verify it does not raise.
-        assert overridden.show_svg() is not None
+        assert overridden.to_svg() is not None
 
     def test_properties_override(self, wide_df):
         default = fm.heatmap(wide_df)
@@ -258,7 +258,7 @@ class TestJointplotPassthrough:
         overridden = fm.jointplot(df, x="x", y="y", mark={"opacity": 0.2})
         # jointplot is a compound view; mark override fans out to children.
         # Verify no crash and valid SVG.
-        assert "<svg" in overridden.show_svg()
+        assert "<svg" in overridden.to_svg()
 
     def test_encode_override(self, df):
         default = fm.jointplot(df, x="x", y="y")

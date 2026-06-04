@@ -28,7 +28,7 @@ def _ridge_xy():
 def test_learning_curve_chart_renders():
     model, X, y = _ridge_xy()
     chart = ferrum.learning_curve_chart(model, X, y, cv=3, random_state=0)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert svg.startswith("<svg") or svg.lstrip().startswith("<svg")
 
 
@@ -42,14 +42,14 @@ def test_learning_curve_chart_errorbar_style():
         ci_style="errorbar",
         random_state=0,
     )
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_learning_curve_chart_invalid_ci_style():
     # Schwabish SB3 (2026-05-11): the direct-label overlay forces the
     # pending stat-mark to desugar at chart construction time (the ``+``
     # operator resolves it), so invalid ci_style now surfaces at the
-    # ``learning_curve_chart`` call rather than later at ``show_svg``.
+    # ``learning_curve_chart`` call rather than later at ``to_svg``.
     model, X, y = _ridge_xy()
     with pytest.raises(ValueError, match="ci_style"):
         ferrum.learning_curve_chart(
@@ -76,7 +76,7 @@ def test_validation_curve_chart_linear_x():
         cv=3,
         log_scale=False,
     )
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_validation_curve_chart_auto_log_scale():
@@ -91,7 +91,7 @@ def test_validation_curve_chart_auto_log_scale():
         cv=3,
         log_scale="auto",
     )
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_validation_curve_chart_requires_values():
@@ -106,32 +106,32 @@ def test_validation_curve_chart_requires_values():
 def test_cv_scores_chart_box():
     model, X, y = _ridge_xy()
     chart = ferrum.cv_scores_chart(model, X, y, cv=3, kind="box")
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_cv_scores_chart_bar_aggregates():
     model, X, y = _ridge_xy()
     chart = ferrum.cv_scores_chart(model, X, y, cv=3, kind="bar")
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_cv_scores_chart_strip():
     model, X, y = _ridge_xy()
     chart = ferrum.cv_scores_chart(model, X, y, cv=3, kind="strip")
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_cv_scores_chart_filter_split():
     model, X, y = _ridge_xy()
     chart = ferrum.cv_scores_chart(model, X, y, cv=3, kind="box", split="test")
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_cv_scores_chart_invalid_kind():
     model, X, y = _ridge_xy()
     chart = ferrum.cv_scores_chart(model, X, y, cv=3, kind="invalid")
     with pytest.raises(ValueError, match="kind"):
-        chart.show_svg()
+        chart.to_svg()
 
 
 # --- alpha_selection_chart -----------------------------------------------
@@ -146,7 +146,7 @@ def test_alpha_selection_chart_default():
         alphas=[0.1, 1.0, 10.0],
         cv=3,
     )
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_alpha_selection_chart_highlight_best_injects_column():
@@ -289,7 +289,7 @@ def test_visualizer_show_returns_chart():
     model, X, y = _ridge_xy()
     viz = ferrum.LearningCurveVisualizer(model, cv=3, random_state=0).fit(X, y)
     chart = viz.show()
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_visualizer_show_before_fit_raises():
@@ -369,7 +369,7 @@ def test_mark_kwargs_unknown_kwarg_raises():
     bad = ferrum.learning_curve_chart(model, X, y, cv=3, random_state=0)
     bad = bad._clone().mark_learning_curve(not_a_real_kwarg=42)
     with pytest.raises(TypeError, match="not_a_real_kwarg"):
-        bad.show_svg()
+        bad.to_svg()
 
 
 def test_user_mark_kwargs_override_desugar_defaults():

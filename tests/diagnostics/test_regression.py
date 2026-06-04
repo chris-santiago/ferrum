@@ -17,7 +17,7 @@ def test_chart_mark_residuals_renders():
     source, _ = _ridge_source()
     pred = source.predictions()
     chart = ferrum.Chart(pred).mark_residuals()
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -25,7 +25,7 @@ def test_chart_mark_residuals_raw_kind():
     source, _ = _ridge_source()
     pred = source.predictions()
     chart = ferrum.Chart(pred).mark_residuals(kind="raw")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -33,7 +33,7 @@ def test_chart_mark_residuals_no_reference_line():
     source, _ = _ridge_source()
     pred = source.predictions()
     chart = ferrum.Chart(pred).mark_residuals(reference_line=False)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # No reference line means no _ref_zero column injected
     assert "_ref_zero" not in (chart._data.columns if chart._data is not None else [])
@@ -58,7 +58,7 @@ def test_chart_mark_prediction_error_renders():
     source, _ = _ridge_source()
     pred = source.predictions()
     chart = ferrum.Chart(pred).mark_prediction_error()
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -66,7 +66,7 @@ def test_chart_mark_prediction_error_no_identity():
     source, _ = _ridge_source()
     pred = source.predictions()
     chart = ferrum.Chart(pred).mark_prediction_error(reference_line=False)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -87,7 +87,7 @@ def test_residuals_chart_from_source_builder():
 
     source, _ = _ridge_source()
     chart = _residuals_chart_from_source(source)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -96,7 +96,7 @@ def test_residuals_chart_from_source_raw_kind():
 
     source, _ = _ridge_source()
     chart = _residuals_chart_from_source(source, kind="raw")
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -105,7 +105,7 @@ def test_prediction_error_chart_from_source_builder():
 
     source, _ = _ridge_source()
     chart = _prediction_error_chart_from_source(source)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -117,14 +117,14 @@ def test_residuals_chart_figure_function():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.residuals_chart(model, X, df["y"])
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
 def test_residuals_chart_accepts_existing_source():
     source, _ = _ridge_source()
     chart = ferrum.residuals_chart(source)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
 
 
@@ -140,7 +140,7 @@ def test_residuals_visualizer_full_cycle():
     assert "rmse=" in repr(viz)
     assert "mae=" in repr(viz)
     chart = viz.show()
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_prediction_error_visualizer():
@@ -150,7 +150,7 @@ def test_prediction_error_visualizer():
 
     viz = ferrum.PredictionErrorVisualizer(model).fit(X, df["y"])
     chart = viz.show()
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
     assert "rmse=" in repr(viz)
 
 
@@ -161,7 +161,7 @@ def test_cooks_distance_visualizer():
 
     viz = ferrum.CooksDistanceVisualizer(model).fit(X, df["y"])
     chart = viz.show()
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
     assert "max_studentized=" in repr(viz)
 
 
@@ -178,7 +178,7 @@ def test_cooks_distance_visualizer_threshold_overlays_outliers():
         X,
         df["y"],
     )
-    svg = viz.show().show_svg()
+    svg = viz.show().to_svg()
     assert "<svg" in svg
     # The outlier-overlay layer renders red-filled points; the tableau-red
     # fill color appears in the SVG.
@@ -196,7 +196,7 @@ def test_cooks_distance_visualizer_explicit_threshold():
         X,
         df["y"],
     )
-    svg = viz.show().show_svg()
+    svg = viz.show().to_svg()
     assert "<svg" in svg
 
 
@@ -222,7 +222,7 @@ def test_mark_residuals_cook_threshold_highlights_outliers():
         source,
         cook_threshold="auto",
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert "<svg" in svg
     # The outlier overlay uses the explicit red fill #e15759.
     assert "#e15759" in svg
@@ -236,7 +236,7 @@ def test_mark_residuals_cook_threshold_explicit_float():
     svg = ferrum.residuals_chart(
         source,
         cook_threshold=0.001,
-    ).show_svg()
+    ).to_svg()
     assert "#e15759" in svg
 
 
@@ -257,7 +257,7 @@ def test_mark_residuals_cook_threshold_nonlinear_silent_no_outliers():
         X,
         df["y"],
         cook_threshold="auto",
-    ).show_svg()
+    ).to_svg()
     assert "<svg" in svg
     # No red outlier overlay since Cook's D is NaN for every row.
     assert "#e15759" not in svg
@@ -274,7 +274,7 @@ def test_mark_prediction_error_ci_renders_quantile_ribbon():
         source._X,
         source._y,
     )
-    svg = viz.show().show_svg()
+    svg = viz.show().to_svg()
     assert "<svg" in svg
     # mark_ribbon emits a closed <path> element for the filled band.
     assert "<path " in svg
@@ -287,7 +287,7 @@ def test_mark_prediction_error_reference_band_renders_rmse_band():
         source._model,
         reference_band=True,
     ).fit(source._X, source._y)
-    svg = viz.show().show_svg()
+    svg = viz.show().to_svg()
     assert "<path " in svg
 
 
@@ -338,7 +338,7 @@ def test_prediction_error_chart_returns_chart():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.prediction_error_chart(model, X, df["y"])
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_prediction_error_chart_with_ci():
@@ -346,7 +346,7 @@ def test_prediction_error_chart_with_ci():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.prediction_error_chart(model, X, df["y"], ci=0.90)
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_prediction_error_chart_with_reference_band():
@@ -354,7 +354,7 @@ def test_prediction_error_chart_with_reference_band():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.prediction_error_chart(model, X, df["y"], reference_band=True)
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_cooks_distance_chart_returns_chart():
@@ -362,7 +362,7 @@ def test_cooks_distance_chart_returns_chart():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.cooks_distance_chart(model, X, df["y"])
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()
 
 
 def test_cooks_distance_chart_with_auto_threshold():
@@ -370,4 +370,4 @@ def test_cooks_distance_chart_with_auto_threshold():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.cooks_distance_chart(model, X, df["y"], threshold="auto")
-    assert "<svg" in chart.show_svg()
+    assert "<svg" in chart.to_svg()

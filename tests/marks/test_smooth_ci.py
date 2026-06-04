@@ -60,5 +60,5 @@ def test_smooth_method_lm_with_ci(df):
 
 def test_smooth_ci_renders(df):
     """End-to-end: ci= path renders SVG without raising."""
-    svg = fe.Chart(df).mark_smooth(ci=0.95).encode(x="x", y="y").show_svg()
+    svg = fe.Chart(df).mark_smooth(ci=0.95).encode(x="x", y="y").to_svg()
     assert "<svg" in svg

@@ -55,7 +55,7 @@ def test_golden_residuals_chart_regression_cook_outliers():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.residuals_chart(model, X, df["y"], cook_threshold="auto")
-    _check_golden(chart.show_svg(), "residuals_chart_regression_cook_outliers")
+    _check_golden(chart.to_svg(), "residuals_chart_regression_cook_outliers")
 
 
 def test_golden_residuals_chart_regression():
@@ -63,7 +63,7 @@ def test_golden_residuals_chart_regression():
     df = load_dataset("regression")
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.residuals_chart(model, X, df["y"])
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     _check_golden(svg, "residuals_chart_regression")
 
 
@@ -75,7 +75,7 @@ def test_golden_prediction_error_regression_ci95():
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     source = ferrum.ModelSource(model, X, df["y"])
     chart = _prediction_error_chart_from_source(source, ci=0.95)
-    _check_golden(chart.show_svg(), "prediction_error_regression_ci95")
+    _check_golden(chart.to_svg(), "prediction_error_regression_ci95")
 
 
 def test_golden_prediction_error_regression_reference_band():
@@ -86,7 +86,7 @@ def test_golden_prediction_error_regression_reference_band():
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     source = ferrum.ModelSource(model, X, df["y"])
     chart = _prediction_error_chart_from_source(source, reference_band=True)
-    _check_golden(chart.show_svg(), "prediction_error_regression_reference_band")
+    _check_golden(chart.to_svg(), "prediction_error_regression_reference_band")
 
 
 def test_golden_prediction_error_regression():
@@ -97,7 +97,7 @@ def test_golden_prediction_error_regression():
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     source = ferrum.ModelSource(model, X, df["y"])
     chart = _prediction_error_chart_from_source(source)
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     _check_golden(svg, "prediction_error_regression")
 
 
@@ -121,43 +121,43 @@ def _multi_xy():
 def test_golden_roc_chart_binary():
     model, X, y = _binary_xy()
     chart = ferrum.roc_chart(model, X, y)
-    _check_golden(chart.show_svg(), "roc_chart_binary")
+    _check_golden(chart.to_svg(), "roc_chart_binary")
 
 
 def test_golden_roc_chart_binary_annotate_auc():
     model, X, y = _binary_xy()
     chart = ferrum.roc_chart(model, X, y, annotate_auc=True)
-    _check_golden(chart.show_svg(), "roc_chart_binary_annotate_auc")
+    _check_golden(chart.to_svg(), "roc_chart_binary_annotate_auc")
 
 
 def test_golden_roc_chart_multiclass():
     model, X, y = _multi_xy()
     chart = ferrum.roc_chart(model, X, y)
-    _check_golden(chart.show_svg(), "roc_chart_multiclass")
+    _check_golden(chart.to_svg(), "roc_chart_multiclass")
 
 
 def test_golden_roc_chart_multiclass_annotate_auc():
     model, X, y = _multi_xy()
     chart = ferrum.roc_chart(model, X, y, annotate_auc=True)
-    _check_golden(chart.show_svg(), "roc_chart_multiclass_annotate_auc")
+    _check_golden(chart.to_svg(), "roc_chart_multiclass_annotate_auc")
 
 
 def test_golden_pr_chart_binary_annotate_ap():
     model, X, y = _binary_xy()
     chart = ferrum.pr_chart(model, X, y, annotate_ap=True)
-    _check_golden(chart.show_svg(), "pr_chart_binary_annotate_ap")
+    _check_golden(chart.to_svg(), "pr_chart_binary_annotate_ap")
 
 
 def test_golden_pr_chart_binary_iso_lines():
     model, X, y = _binary_xy()
     chart = ferrum.pr_chart(model, X, y, iso_lines=True)
-    _check_golden(chart.show_svg(), "pr_chart_binary_iso_lines")
+    _check_golden(chart.to_svg(), "pr_chart_binary_iso_lines")
 
 
 def test_golden_pr_chart_multiclass_annotate_ap_iso():
     model, X, y = _multi_xy()
     chart = ferrum.pr_chart(model, X, y, annotate_ap=True, iso_lines=True)
-    _check_golden(chart.show_svg(), "pr_chart_multiclass_annotate_ap_iso")
+    _check_golden(chart.to_svg(), "pr_chart_multiclass_annotate_ap_iso")
 
 
 def test_golden_pr_chart_multiclass_macro_average():
@@ -166,31 +166,31 @@ def test_golden_pr_chart_multiclass_macro_average():
     """
     model, X, y = _multi_xy()
     chart = ferrum.pr_chart(model, X, y, per_class=False)
-    _check_golden(chart.show_svg(), "pr_chart_multiclass_macro_average")
+    _check_golden(chart.to_svg(), "pr_chart_multiclass_macro_average")
 
 
 def test_golden_pr_chart_binary():
     model, X, y = _binary_xy()
     chart = ferrum.pr_chart(model, X, y)
-    _check_golden(chart.show_svg(), "pr_chart_binary")
+    _check_golden(chart.to_svg(), "pr_chart_binary")
 
 
 def test_golden_calibration_chart_binary():
     model, X, y = _binary_xy()
     chart = ferrum.calibration_chart(model, X=X, y=y, n_bins=5)
-    _check_golden(chart.show_svg(), "calibration_chart_binary")
+    _check_golden(chart.to_svg(), "calibration_chart_binary")
 
 
 def test_golden_gain_chart_binary():
     model, X, y = _binary_xy()
     chart = ferrum.gain_chart(model, X, y)
-    _check_golden(chart.show_svg(), "gain_chart_binary")
+    _check_golden(chart.to_svg(), "gain_chart_binary")
 
 
 def test_golden_lift_chart_binary():
     model, X, y = _binary_xy()
     chart = ferrum.lift_chart(model, X, y)
-    _check_golden(chart.show_svg(), "lift_chart_binary")
+    _check_golden(chart.to_svg(), "lift_chart_binary")
 
 
 def test_golden_discrimination_threshold_binary_threshold_line():
@@ -203,7 +203,7 @@ def test_golden_discrimination_threshold_binary_threshold_line():
         threshold_line=True,
     )
     _check_golden(
-        chart.show_svg(),
+        chart.to_svg(),
         "discrimination_threshold_binary_threshold_line",
     )
 
@@ -211,7 +211,7 @@ def test_golden_discrimination_threshold_binary_threshold_line():
 def test_golden_discrimination_threshold_binary():
     model, X, y = _binary_xy()
     chart = ferrum.discrimination_threshold_chart(model, X, y, n_thresholds=20)
-    _check_golden(chart.show_svg(), "discrimination_threshold_binary")
+    _check_golden(chart.to_svg(), "discrimination_threshold_binary")
 
 
 # --- 10c goldens (classification matrices) ---
@@ -220,13 +220,13 @@ def test_golden_discrimination_threshold_binary():
 def test_golden_confusion_matrix_binary():
     model, X, y = _binary_xy()
     chart = ferrum.confusion_matrix_chart(model, X, y)
-    _check_golden(chart.show_svg(), "confusion_matrix_binary")
+    _check_golden(chart.to_svg(), "confusion_matrix_binary")
 
 
 def test_golden_confusion_matrix_multiclass():
     model, X, y = _multi_xy()
     chart = ferrum.confusion_matrix_chart(model, X, y, normalize="true")
-    _check_golden(chart.show_svg(), "confusion_matrix_multiclass")
+    _check_golden(chart.to_svg(), "confusion_matrix_multiclass")
 
 
 # The Task 19 golden was held back pending the mark_bar + Stack rendering
@@ -241,7 +241,7 @@ def test_golden_confusion_matrix_multiclass():
 def test_golden_class_prediction_error_multiclass():
     model, X, y = _multi_xy()
     chart = ferrum.class_prediction_error_chart(model, X, y)
-    _check_golden(chart.show_svg(), "class_prediction_error_multiclass")
+    _check_golden(chart.to_svg(), "class_prediction_error_multiclass")
 
 
 # --- 10d goldens (feature importance + SHAP + PDP) ---
@@ -257,7 +257,7 @@ def _regression_xy():
 def test_golden_importance_chart_builtin():
     model, X, y = _regression_xy()
     chart = ferrum.importance_chart(model, X, y)
-    _check_golden(chart.show_svg(), "importance_chart_builtin")
+    _check_golden(chart.to_svg(), "importance_chart_builtin")
 
 
 def test_golden_importance_chart_permutation():
@@ -269,7 +269,7 @@ def test_golden_importance_chart_permutation():
         method="permutation",
         random_state=0,
     )
-    _check_golden(chart.show_svg(), "importance_chart_permutation")
+    _check_golden(chart.to_svg(), "importance_chart_permutation")
 
 
 def _ridge_xy():
@@ -284,19 +284,19 @@ def _ridge_xy():
 def test_golden_shap_chart_beeswarm():
     model, X, _y = _ridge_xy()
     chart = ferrum.shap_chart(model, X, kind="beeswarm")
-    _check_golden(chart.show_svg(), "shap_chart_beeswarm")
+    _check_golden(chart.to_svg(), "shap_chart_beeswarm")
 
 
 def test_golden_shap_chart_bar():
     model, X, _y = _ridge_xy()
     chart = ferrum.shap_chart(model, X, kind="bar")
-    _check_golden(chart.show_svg(), "shap_chart_bar")
+    _check_golden(chart.to_svg(), "shap_chart_bar")
 
 
 def test_golden_shap_chart_waterfall():
     model, X, _y = _ridge_xy()
     chart = ferrum.shap_chart(model, X, kind="waterfall", sample_idx=3)
-    _check_golden(chart.show_svg(), "shap_chart_waterfall_sample3")
+    _check_golden(chart.to_svg(), "shap_chart_waterfall_sample3")
 
 
 def test_golden_pdp_chart_individual_ice():
@@ -311,7 +311,7 @@ def test_golden_pdp_chart_individual_ice():
         grid_resolution=15,
         kind="individual",
     )
-    _check_golden(chart.show_svg(), "pdp_chart_individual_ice")
+    _check_golden(chart.to_svg(), "pdp_chart_individual_ice")
 
 
 def test_golden_pdp_chart_both_centered():
@@ -327,7 +327,7 @@ def test_golden_pdp_chart_both_centered():
         kind="both",
         center=True,
     )
-    _check_golden(chart.show_svg(), "pdp_chart_both_centered")
+    _check_golden(chart.to_svg(), "pdp_chart_both_centered")
 
 
 def test_golden_pdp_chart_three_features():
@@ -339,7 +339,7 @@ def test_golden_pdp_chart_three_features():
         features=["f0", "f1", "f2"],
         grid_resolution=20,
     )
-    _check_golden(chart.show_svg(), "pdp_chart_three_features")
+    _check_golden(chart.to_svg(), "pdp_chart_three_features")
 
 
 # --- 10e goldens (model selection / CV curves) ---
@@ -357,7 +357,7 @@ def _ridge_for_selection():
 def test_golden_learning_curve_ridge():
     model, X, y = _ridge_for_selection()
     chart = ferrum.learning_curve_chart(model, X, y, cv=3, random_state=0)
-    _check_golden(chart.show_svg(), "learning_curve_ridge")
+    _check_golden(chart.to_svg(), "learning_curve_ridge")
 
 
 def test_golden_validation_curve_ridge_alpha():
@@ -370,13 +370,13 @@ def test_golden_validation_curve_ridge_alpha():
         values=[0.1, 1.0, 10.0],
         cv=3,
     )
-    _check_golden(chart.show_svg(), "validation_curve_ridge_alpha")
+    _check_golden(chart.to_svg(), "validation_curve_ridge_alpha")
 
 
 def test_golden_cv_scores_ridge_box():
     model, X, y = _ridge_for_selection()
     chart = ferrum.cv_scores_chart(model, X, y, cv=3, kind="box")
-    _check_golden(chart.show_svg(), "cv_scores_ridge_box")
+    _check_golden(chart.to_svg(), "cv_scores_ridge_box")
 
 
 def test_golden_alpha_selection_ridge():
@@ -388,7 +388,7 @@ def test_golden_alpha_selection_ridge():
         alphas=[0.01, 0.1, 1.0, 10.0],
         cv=3,
     )
-    _check_golden(chart.show_svg(), "alpha_selection_ridge")
+    _check_golden(chart.to_svg(), "alpha_selection_ridge")
 
 
 # --- 10f goldens (clustering / manifold / decision boundary) ---
@@ -401,14 +401,14 @@ def test_golden_silhouette_kmeans():
     df = load_dataset("clustering")
     source = ferrum.ModelSource(model, df)
     chart = _silhouette_chart_from_source(source)
-    _check_golden(chart.show_svg(), "silhouette_kmeans_3cluster")
+    _check_golden(chart.to_svg(), "silhouette_kmeans_3cluster")
 
 
 def test_golden_pca_scree_4comp():
     model = load_fixture("pca_4comp")
     df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.pca_scree_chart(model, df, threshold=0.95)
-    _check_golden(chart.show_svg(), "pca_scree_4comp")
+    _check_golden(chart.to_svg(), "pca_scree_4comp")
 
 
 def test_golden_intercluster_distance_kmeans():
@@ -425,7 +425,7 @@ def test_golden_intercluster_distance_kmeans():
         method="mds",
         random_state=0,
     )
-    _check_golden(chart.show_svg(), "intercluster_distance_mds_3cluster")
+    _check_golden(chart.to_svg(), "intercluster_distance_mds_3cluster")
 
 
 def test_golden_decision_boundary_binary():
@@ -439,7 +439,7 @@ def test_golden_decision_boundary_binary():
         grid_resolution=50,
         proba=True,
     )
-    _check_golden(chart.show_svg(), "decision_boundary_binary_logistic")
+    _check_golden(chart.to_svg(), "decision_boundary_binary_logistic")
 
 
 def test_golden_decision_boundary_binary_with_scatter():
@@ -458,7 +458,7 @@ def test_golden_decision_boundary_binary_with_scatter():
         scatter=True,
     )
     _check_golden(
-        chart.show_svg(),
+        chart.to_svg(),
         "decision_boundary_binary_with_scatter",
     )
 
@@ -469,13 +469,13 @@ def test_golden_decision_boundary_binary_with_scatter():
 def test_golden_rank1d_shapiro_regression():
     df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.rank_chart(df, rank="1d", algorithm="shapiro")
-    _check_golden(chart.show_svg(), "rank1d_shapiro_regression")
+    _check_golden(chart.to_svg(), "rank1d_shapiro_regression")
 
 
 def test_golden_rank2d_kendall_regression():
     df = load_dataset("regression").select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.rank_chart(df, rank="2d", algorithm="kendall")
-    _check_golden(chart.show_svg(), "rank2d_kendall_regression")
+    _check_golden(chart.to_svg(), "rank2d_kendall_regression")
 
 
 def test_golden_parallel_coordinates_multiclass():
@@ -486,7 +486,7 @@ def test_golden_parallel_coordinates_multiclass():
         hue="y",
         rescale="minmax",
     )
-    _check_golden(chart.show_svg(), "parallel_coordinates_multiclass")
+    _check_golden(chart.to_svg(), "parallel_coordinates_multiclass")
 
 
 # --- 10h goldens (multi-model compare) ---
@@ -500,4 +500,4 @@ def test_golden_roc_chart_compare_two_models():
     """
     model, X, y = _binary_xy()
     chart = ferrum.roc_chart({"a": model, "b": model}, X, y)
-    _check_golden(chart.show_svg(), "roc_chart_compare_two_models")
+    _check_golden(chart.to_svg(), "roc_chart_compare_two_models")

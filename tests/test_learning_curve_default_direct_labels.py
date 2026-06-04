@@ -12,7 +12,7 @@ def test_learning_curve_default_emits_direct_labels():
         y,
         cv=3,
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     assert ">Training Score<" in svg
     assert ">Cross-Validation Score<" in svg
 
@@ -25,7 +25,7 @@ def test_learning_curve_legend_suppressed_when_direct_labels():
         y,
         cv=3,
     )
-    svg = chart.show_svg()
+    svg = chart.to_svg()
     # With legend suppression, each split label appears exactly once —
     # the direct-label endpoint annotation. Without suppression we'd get
     # one extra occurrence per series for the legend swatch.

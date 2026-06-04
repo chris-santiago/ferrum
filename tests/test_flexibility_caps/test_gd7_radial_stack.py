@@ -222,7 +222,7 @@ class TestRadialStackGeometry:
             .mark_bar(position=fm.Stack())
             .encode(x="direction:N", y="value:Q", color="category:N")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert paths, (
@@ -241,7 +241,7 @@ class TestRadialStackGeometry:
                 color="category:N",
             )
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert paths, "No filled arc wedge paths in Radius(stack='zero') polar bar SVG."
@@ -260,7 +260,7 @@ class TestRadialStackGeometry:
             .mark_bar(position=fm.Stack())
             .encode(x="direction:N", y="value:Q", color="category:N")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert paths, "no filled arc paths to inspect"
@@ -291,7 +291,7 @@ class TestRadialStackGeometry:
                 color="category:N",
             )
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert paths, "no filled arc paths to inspect"
@@ -319,14 +319,14 @@ class TestRadialStackGeometry:
             .mark_bar(position=fm.Stack())
             .encode(x="direction:N", y="value:Q", color="category:N")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         unstacked_svg = (
             fm.Chart(wind_rose_df)
             .mark_bar()
             .encode(x="direction:N", y="value:Q", color="category:N")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
 
         def _max_inner(svg: str) -> float:
@@ -364,7 +364,7 @@ class TestRadialStackGeometry:
             .mark_bar(position=fm.Stack())
             .encode(x="direction:N", y="value:Q", color="category:N")
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         paths = _filled_arc_paths(svg)
         assert paths, "no arc paths for single-direction stacked chart"
@@ -438,7 +438,7 @@ class TestBackCompat:
             fm.Chart(cartesian_stack_df)
             .mark_bar(position=fm.Stack())
             .encode(x="cat:N", y="val:Q", color="grp:N")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg, "Cartesian stacked bar did not render to SVG"
 
@@ -448,7 +448,7 @@ class TestBackCompat:
             fm.Chart(cartesian_stack_df)
             .mark_bar()
             .encode(x="cat:N", y=fm.Y("val", stack="zero"), color="grp:N")
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg, "Cartesian Y(stack='zero') bar did not render to SVG"
 
@@ -463,7 +463,7 @@ class TestBackCompat:
                 color="category:N",
             )
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg, "Non-stacked Radius chart did not render"
 
@@ -547,7 +547,7 @@ class TestSiblingStackNormalization:
                 y=fm.Y("val", stack=True),
                 color="grp:N",
             )
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg, "Y(stack=True) stacked bar did not render to SVG"
 
@@ -561,7 +561,7 @@ class TestSiblingStackNormalization:
                 color="grp:N",
             )
             .coord(fm.CoordPolar(theta="x"))
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg, "Theta(stack=True) arc did not render to SVG"
 
@@ -575,7 +575,7 @@ class TestSiblingStackNormalization:
                 y="cat:N",
                 color="grp:N",
             )
-            .show_svg()
+            .to_svg()
         )
         assert "<svg" in svg, "X(stack=True) horizontal stacked bar did not render to SVG"
 

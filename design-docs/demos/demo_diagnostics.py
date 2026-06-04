@@ -185,8 +185,8 @@ def try_render(name: str, fn) -> tuple[str, bytes | None, str | None]:
         if isinstance(result, bytes):
             png = result
         else:
-            # It's a Chart/JointChart/etc. — call show_png()
-            png = result.show_png()
+            # It's a Chart/JointChart/etc. — call to_png()
+            png = result.to_png()
         return name, png, None
     except Exception as exc:
         tb = traceback.format_exc()

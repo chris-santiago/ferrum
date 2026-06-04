@@ -24,49 +24,49 @@ class TestInfinityDomainRegression:
     def test_positive_inf_in_y_skips_row(self):
         """Regression: +inf y value skipped, finite points still render."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, float("inf"), 30.0]})
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
         assert _count_circles(svg) == 2
 
     def test_negative_inf_in_y_skips_row(self):
         """Regression: -inf y value skipped, finite points still render."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [10.0, float("-inf"), 30.0]})
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
         assert _count_circles(svg) == 2
 
     def test_positive_inf_in_x_skips_row(self):
         """Regression: +inf x value skipped, finite points still render."""
         df = pl.DataFrame({"x": [1.0, float("inf"), 3.0], "y": [10.0, 20.0, 30.0]})
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
         assert _count_circles(svg) == 2
 
     def test_negative_inf_in_x_skips_row(self):
         """Regression: -inf x value skipped, finite points still render."""
         df = pl.DataFrame({"x": [float("-inf"), 2.0, 3.0], "y": [10.0, 20.0, 30.0]})
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
         assert _count_circles(svg) == 2
 
     def test_all_inf_produces_valid_svg(self):
         """Regression: all-infinity data must not crash, should produce empty chart."""
         df = pl.DataFrame({"x": [float("inf"), float("-inf")], "y": [float("inf"), float("-inf")]})
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y").to_svg()
         assert svg.startswith("<svg")
 
     def test_inf_in_bar_chart(self):
         """Regression: bar mark with inf in y still renders finite bars."""
         df = pl.DataFrame({"x": ["A", "B", "C"], "y": [10.0, float("inf"), 30.0]})
-        svg = fm.Chart(df).mark_bar().encode(x="x:N", y="y").show_svg()
+        svg = fm.Chart(df).mark_bar().encode(x="x:N", y="y").to_svg()
         assert _count_visible_rects(svg) >= 2
 
     def test_inf_in_line_chart(self):
         """Regression: line mark with inf in y still renders line segments."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [10.0, float("inf"), 30.0, 40.0]})
-        svg = fm.Chart(df).mark_line().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_line().encode(x="x", y="y").to_svg()
         assert "<path" in svg or "<line" in svg
 
     def test_inf_in_area_chart(self):
         """Regression: area mark with inf in y still renders."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [10.0, float("inf"), 30.0, 40.0]})
-        svg = fm.Chart(df).mark_area().encode(x="x", y="y").show_svg()
+        svg = fm.Chart(df).mark_area().encode(x="x", y="y").to_svg()
         assert svg.startswith("<svg")
 
     def test_inf_in_size_encoding(self):
@@ -78,5 +78,5 @@ class TestInfinityDomainRegression:
                 "s": [5.0, float("inf"), 15.0],
             }
         )
-        svg = fm.Chart(df).mark_point().encode(x="x", y="y", size="s").show_svg()
+        svg = fm.Chart(df).mark_point().encode(x="x", y="y", size="s").to_svg()
         assert _count_circles(svg) >= 2

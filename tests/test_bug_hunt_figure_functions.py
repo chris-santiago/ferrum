@@ -98,7 +98,7 @@ class TestDisplotKdeOverlay:
         """displot(kde=True) should render SVG without NaN or Infinity.
         Exercises distribution.py lines 303-318: _KdeTransform with name='kde_overlay'."""
         chart = fm.displot(iris_like, x="sepal_length", kde=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
         assert "Infinity" not in svg
@@ -145,7 +145,7 @@ class TestDisplotKdeOverlayWithHue:
         """displot(kde=True, hue=...) should render without errors.
         Tests interaction between hist groupby and kde named-transform."""
         chart = fm.displot(iris_like, x="sepal_length", hue="species", kde=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
         assert "Infinity" not in svg
@@ -153,7 +153,7 @@ class TestDisplotKdeOverlayWithHue:
     def test_hist_kde_with_hue_stacked_renders(self, iris_like):
         """displot(kde=True, hue=..., multiple='stack') — stacked hist with kde overlay."""
         chart = fm.displot(iris_like, x="sepal_length", hue="species", kde=True, multiple="stack")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -165,14 +165,14 @@ class TestDisplotKdeOverlayWithFacet:
         """displot(kde=True, col=...) should render faceted chart with kde overlay.
         Tests interaction between named-transform routing and faceting."""
         chart = fm.displot(facet_df, x="value", kde=True, col="facet")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_hist_kde_with_facet_and_hue(self, facet_df):
         """displot(kde=True, hue=..., col=...) — all three features together."""
         chart = fm.displot(facet_df, x="value", hue="hue", kde=True, col="facet")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -189,7 +189,7 @@ class TestDisplotRugOverlay:
         """displot(rug=True) should render SVG with tick marks and no NaN.
         distribution.py lines 321-335: PyIdentity('rug_data') + _Layer(mark='tick')."""
         chart = fm.displot(iris_like, x="sepal_length", rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
         assert "Infinity" not in svg
@@ -217,7 +217,7 @@ class TestDisplotRugOverlay:
     def test_hist_rug_with_hue(self, iris_like):
         """displot(rug=True, hue=...) should render with hue grouping."""
         chart = fm.displot(iris_like, x="sepal_length", hue="species", rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -233,7 +233,7 @@ class TestDisplotKdeAndRugOverlay:
     def test_hist_kde_rug_overlay_renders(self, iris_like):
         """displot(kde=True, rug=True) should produce valid SVG with all three marks."""
         chart = fm.displot(iris_like, x="sepal_length", kde=True, rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
         assert "Infinity" not in svg
@@ -257,14 +257,14 @@ class TestDisplotKdeAndRugOverlay:
     def test_hist_kde_rug_with_hue(self, iris_like):
         """displot(kde=True, rug=True, hue=...) — all features with grouping."""
         chart = fm.displot(iris_like, x="sepal_length", hue="species", kde=True, rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_hist_kde_rug_with_facet(self, facet_df):
         """displot(kde=True, rug=True, col=...) — overlays + faceting."""
         chart = fm.displot(facet_df, x="value", kde=True, rug=True, col="facet")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -281,21 +281,21 @@ class TestDisplotKdeOnlyPath:
     def test_kde_only_renders(self, iris_like):
         """displot(kind='kde') should still work after the overlay refactor."""
         chart = fm.displot(iris_like, x="sepal_length", kind="kde")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_kde_only_with_hue(self, iris_like):
         """displot(kind='kde', hue=...) should produce per-group KDE curves."""
         chart = fm.displot(iris_like, x="sepal_length", hue="species", kind="kde")
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_kde_only_with_fill_false(self, iris_like):
         """displot(kind='kde', fill=False) should produce unfilled KDE lines."""
         chart = fm.displot(iris_like, x="sepal_length", kind="kde", fill=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_kde_only_does_not_have_overlay_transforms(self, iris_like):
@@ -348,7 +348,7 @@ class TestResidplotLabel:
             show_metrics=False,
             zero_line=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -413,7 +413,7 @@ class TestResidplotLabel:
             show_metrics=True,
             zero_line=True,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -429,7 +429,7 @@ class TestResidplotLabel:
             show_metrics=False,
             zero_line=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -466,7 +466,7 @@ class TestResidplotLabel:
             show_metrics=False,
             zero_line=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         # The Robust transform drops _label. The encoding
         # references _label via color, causing the crash.
@@ -485,7 +485,7 @@ class TestLmplotIntegerAutoCast:
         """lmplot with Int64 x and y should auto-cast and render.
         regression.py lines 510-515: casts.append(pl.col(col_name).cast(pl.Float64))."""
         chart = fm.lmplot(int_reg_df, x="x", y="y", ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -493,7 +493,7 @@ class TestLmplotIntegerAutoCast:
         """lmplot with Int64 x but Float64 y should auto-cast x only."""
         df = pl.DataFrame({"x": [1, 2, 3, 4, 5], "y": [2.1, 3.9, 6.0, 8.1, 10.0]})
         chart = fm.lmplot(df, x="x", y="y", ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -501,14 +501,14 @@ class TestLmplotIntegerAutoCast:
         """lmplot with Float64 x but Int64 y should auto-cast y only."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [2, 4, 6, 8, 10]})
         chart = fm.lmplot(df, x="x", y="y", ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_lmplot_int_with_ci(self, int_reg_df):
         """lmplot with Int64 columns and ci=95 should work (confidence band)."""
         chart = fm.lmplot(int_reg_df, x="x", y="y", ci=95, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -522,7 +522,7 @@ class TestLmplotIntegerAutoCast:
             ci=None,
             show_metrics=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -536,7 +536,7 @@ class TestLmplotIntegerAutoCast:
             ci=None,
             show_metrics=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -550,7 +550,7 @@ class TestLmplotIntegerAutoCast:
             }
         )
         chart = fm.lmplot(df, x="x", y="y", ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -563,28 +563,28 @@ class TestLmplotIntegerAutoCast:
             }
         )
         chart = fm.lmplot(df, x="x", y="y", ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_lmplot_int_with_show_metrics(self, int_reg_df):
         """lmplot with Int64 columns and show_metrics=True — auto-cast + metrics."""
         chart = fm.lmplot(int_reg_df, x="x", y="y", show_metrics=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "R²" in svg  # R-squared symbol
 
     def test_lmplot_int_method_loess(self, int_reg_df):
         """lmplot with Int64 columns and method='loess' should auto-cast."""
         chart = fm.lmplot(int_reg_df, x="x", y="y", method="loess", ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_lmplot_int_method_robust(self, int_reg_df):
         """lmplot with Int64 columns and method='robust' should auto-cast."""
         chart = fm.lmplot(int_reg_df, x="x", y="y", method="robust", ci=None)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -595,13 +595,13 @@ class TestLmplotIntegerAutoCast:
             {"x": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "y": [0, 0, 0, 0, 1, 0, 1, 1, 1, 1]}
         )
         chart = fm.lmplot(df, x="x", y="y", method="logistic", ci=None)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_lmplot_int_method_glm(self, int_reg_df):
         """lmplot with Int64 columns and method='glm' should auto-cast."""
         chart = fm.lmplot(int_reg_df, x="x", y="y", method="glm", ci=None)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
 
@@ -624,14 +624,14 @@ class TestResidplotIntegerAutoCast:
             show_metrics=False,
             zero_line=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_residplot_int_with_metrics(self, int_reg_df):
         """residplot with Int64 and show_metrics — tests int-cast + metric injection."""
         chart = fm.residplot(int_reg_df, x="x", y="y", show_metrics=True, zero_line=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -645,7 +645,7 @@ class TestResidplotIntegerAutoCast:
             show_metrics=False,
             zero_line=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -659,7 +659,7 @@ class TestResidplotIntegerAutoCast:
             show_metrics=False,
             zero_line=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -673,7 +673,7 @@ class TestResidplotIntegerAutoCast:
             show_metrics=False,
             zero_line=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -686,7 +686,7 @@ class TestResidplotIntegerAutoCast:
             }
         )
         chart = fm.residplot(df, x="x", y="y", show_metrics=False, zero_line=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -704,7 +704,7 @@ class TestDisplotEdgeCases:
         The KDE should still produce output, even if it's a spike."""
         df = pl.DataFrame({"x": [5.0] * 20})
         chart = fm.displot(df, x="x", kde=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -712,7 +712,7 @@ class TestDisplotEdgeCases:
         """displot(rug=True) with a constant column — all ticks at same x."""
         df = pl.DataFrame({"x": [3.0] * 10})
         chart = fm.displot(df, x="x", rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -720,7 +720,7 @@ class TestDisplotEdgeCases:
         """displot(kde=True) with only 2 rows — minimal data for KDE."""
         df = pl.DataFrame({"x": [1.0, 2.0]})
         chart = fm.displot(df, x="x", kde=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -728,7 +728,7 @@ class TestDisplotEdgeCases:
         """displot(kde=True) with 1 row — extreme degenerate case."""
         df = pl.DataFrame({"x": [5.0]})
         chart = fm.displot(df, x="x", kde=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -736,7 +736,7 @@ class TestDisplotEdgeCases:
         """displot(rug=True) with 1 row."""
         df = pl.DataFrame({"x": [5.0]})
         chart = fm.displot(df, x="x", rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -744,21 +744,21 @@ class TestDisplotEdgeCases:
         """displot(kde=True) with nulls in the x column — should not crash."""
         df = pl.DataFrame({"x": [1.0, None, 3.0, None, 5.0, 6.0, 7.0, 8.0]})
         chart = fm.displot(df, x="x", kde=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_rug_overlay_with_nulls_in_x(self):
         """displot(rug=True) with nulls in the x column."""
         df = pl.DataFrame({"x": [1.0, None, 3.0, None, 5.0]})
         chart = fm.displot(df, x="x", rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_kde_overlay_with_inf_in_x(self):
         """displot(kde=True) with Infinity in the data — tests KDE robustness."""
         df = pl.DataFrame({"x": [1.0, 2.0, float("inf"), 4.0, 5.0, 6.0, 7.0, 8.0]})
         chart = fm.displot(df, x="x", kde=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
 
     def test_kde_overlay_integer_column(
@@ -768,7 +768,7 @@ class TestDisplotEdgeCases:
         Float64 but displot doesn't auto-cast for the overlay path (unlike lmplot/residplot)."""
         df = pl.DataFrame({"x": [1, 2, 3, 4, 5, 3, 2, 4, 3, 2]})
         chart = fm.displot(df, x="x", kde=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -786,14 +786,14 @@ class TestDisplotStatWithOverlay:
         """displot(stat='density', kde=True) — density-normalized histogram + KDE.
         distribution.py line 226: density=(stat == 'density')."""
         chart = fm.displot(iris_like, x="sepal_length", stat="density", kde=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_hist_density_with_rug_overlay(self, iris_like):
         """displot(stat='density', rug=True) — density histogram + rug."""
         chart = fm.displot(iris_like, x="sepal_length", stat="density", rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -816,7 +816,7 @@ class TestResidplotEdgeCases:
             show_metrics=False,
             zero_line=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -830,7 +830,7 @@ class TestResidplotEdgeCases:
             show_metrics=False,
             zero_line=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -870,7 +870,7 @@ class TestResidplotEdgeCases:
             show_metrics=False,
             zero_line=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -884,7 +884,7 @@ class TestResidplotEdgeCases:
             show_metrics=False,
             zero_line=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -901,7 +901,7 @@ class TestLmplotEdgeCases:
         """lmplot with exactly 2 data points — minimal regression."""
         df = pl.DataFrame({"x": [1.0, 10.0], "y": [1.0, 10.0]})
         chart = fm.lmplot(df, x="x", y="y", ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -909,7 +909,7 @@ class TestLmplotEdgeCases:
         """lmplot with constant y — regression line should be flat."""
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "y": [7.0, 7.0, 7.0, 7.0, 7.0]})
         chart = fm.lmplot(df, x="x", y="y", ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -917,7 +917,7 @@ class TestLmplotEdgeCases:
         """lmplot with constant x — degenerate domain, regression undefined."""
         df = pl.DataFrame({"x": [5.0, 5.0, 5.0, 5.0, 5.0], "y": [1.0, 2.0, 3.0, 4.0, 5.0]})
         chart = fm.lmplot(df, x="x", y="y", ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         # With constant x, regression is undefined but should not crash
 
@@ -932,7 +932,7 @@ class TestLmplotEdgeCases:
             ci=None,
             show_metrics=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -952,7 +952,7 @@ class TestLmplotEdgeCases:
             ci=None,
             show_metrics=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -969,14 +969,14 @@ class TestRegplotIntegerColumns:
     def test_regplot_int_columns(self, int_reg_df):
         """regplot with Int64 columns should auto-cast via lmplot delegation."""
         chart = fm.regplot(int_reg_df, x="x", y="y", ci=None)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_regplot_int_with_hue(self, int_hue_reg_df):
         """regplot with Int64 columns and hue."""
         chart = fm.regplot(int_hue_reg_df, x="x", y="y", hue="grp", ci=None)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1029,7 +1029,7 @@ class TestDisplotEcdfOverlays:
         """displot(kind='ecdf', rug=True) should layer rug on ECDF.
         distribution.py: kind='ecdf' is not 'rug', so rug overlay should activate."""
         chart = fm.displot(iris_like, x="sepal_length", kind="ecdf", rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1037,7 +1037,7 @@ class TestDisplotEcdfOverlays:
         """displot(kind='ecdf', kde=True) should layer KDE on ECDF.
         distribution.py: kind='ecdf' is not 'kde', so kde overlay should activate."""
         chart = fm.displot(iris_like, x="sepal_length", kind="ecdf", kde=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1097,14 +1097,14 @@ class TestDisplotCumulativeWithOverlay:
     def test_cumulative_hist_with_kde_overlay(self, iris_like):
         """displot(cumulative=True, kde=True) — cumulative histogram + KDE."""
         chart = fm.displot(iris_like, x="sepal_length", cumulative=True, kde=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_cumulative_hist_with_rug_overlay(self, iris_like):
         """displot(cumulative=True, rug=True) — cumulative histogram + rug."""
         chart = fm.displot(iris_like, x="sepal_length", cumulative=True, rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1120,14 +1120,14 @@ class TestDisplotBinsWithOverlay:
     def test_bins_int_with_kde_overlay(self, iris_like):
         """displot(bins=5, kde=True) — explicit bin count with KDE overlay."""
         chart = fm.displot(iris_like, x="sepal_length", bins=5, kde=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
     def test_bins_int_with_rug_overlay(self, iris_like):
         """displot(bins=5, rug=True) — explicit bin count with rug overlay."""
         chart = fm.displot(iris_like, x="sepal_length", bins=5, rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1150,7 +1150,7 @@ class TestLmplotScatterKwsIntColumns:
             ci=None,
             show_metrics=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1164,7 +1164,7 @@ class TestLmplotScatterKwsIntColumns:
             ci=None,
             show_metrics=False,
         )
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
 
@@ -1181,7 +1181,7 @@ class TestOverlaySvgContracts:
         """displot(kde=True) SVG should contain path elements (KDE line).
         The histogram renders <rect> bars, the KDE overlay renders <path>."""
         chart = fm.displot(iris_like, x="sepal_length", kde=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<rect" in svg, "No <rect> elements — histogram bars missing"
         # KDE renders as a path (line or area)
         assert "<path" in svg or "d=" in svg, "No <path> elements — KDE line missing"
@@ -1190,7 +1190,7 @@ class TestOverlaySvgContracts:
         """displot(rug=True) SVG should contain line/tick elements for the rug.
         Tick marks render as short vertical lines."""
         chart = fm.displot(iris_like, x="sepal_length", rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<rect" in svg, "No <rect> elements — histogram bars missing"
         # Rug ticks render as <line> elements
         assert "<line" in svg, "No <line> elements — rug tick marks missing"
@@ -1198,7 +1198,7 @@ class TestOverlaySvgContracts:
     def test_hist_svg_has_no_nan_in_viewbox(self, iris_like):
         """The viewBox attribute should not contain NaN values."""
         chart = fm.displot(iris_like, x="sepal_length", kde=True, rug=True)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         # Extract viewBox
         import re
 
@@ -1223,6 +1223,6 @@ class TestLmplotLogxWithIntCast:
         # Use positive integers only (log scale needs positive values)
         df = pl.DataFrame({"x": [1, 2, 5, 10, 20], "y": [1, 2, 3, 4, 5]})
         chart = fm.lmplot(df, x="x", y="y", logx=True, ci=None, show_metrics=False)
-        svg = chart.show_svg()
+        svg = chart.to_svg()
         assert "<svg" in svg
         assert "NaN" not in svg
