@@ -1350,3 +1350,51 @@ class TestRasterOverride:
         original_config = chart._render_config
         chart.to_svg(raster=False)
         assert chart._render_config is original_config
+
+
+class TestKdeIntegerCoercion:
+    """Regression: mark_density / KDE transforms hard-errored on integer columns.
+
+    Before the fix, stat_kde (1D) and stat_kde_2d rejected any column whose
+    arrow dtype was not Float64 with "column '<x>' must be Float64", so
+    mark_density on Int64 data (ages, counts, years, range(...)) raised a
+    ValueError instead of rendering. The fix coerces numeric columns to Float64
+    in the transform; genuinely non-numeric columns must still raise.
+    """
+
+    def test_mark_density_1d_renders_on_int_column(self):
+        """1D KDE on an Int64 column renders instead of raising."""
+        df = pl.DataFrame({"x": list(range(50))})
+        svg = fm.Chart(df).mark_density().encode(x="x").to_svg()
+        assert svg.lstrip().startswith("<svg")
+        assert "<path" in svg
+
+    def test_mark_density_2d_renders_on_int_columns(self):
+        """2D KDE on Int64 x and y renders instead of raising."""
+        df = pl.DataFrame({"x": list(range(50)), "y": list(range(50, 100))})
+        svg = fm.Chart(df).mark_density().encode(x="x", y="y").to_svg()
+        assert svg.lstrip().startswith("<svg")
+
+    def test_mark_density_int_matches_float(self):
+        """Int input produces the same density output as the equivalent floats."""
+        ints = list(range(50))
+        svg_int = fm.Chart(pl.DataFrame({"x": ints})).mark_density().encode(x="x").to_svg()
+        svg_float = (
+            fm.Chart(pl.DataFrame({"x": [float(v) for v in ints]}))
+            .mark_density()
+            .encode(x="x")
+            .to_svg()
+        )
+        assert svg_int == svg_float
+
+    def test_mark_density_renders_on_non_int_numeric_column(self):
+        """A non-Int64 integer dtype (UInt) also coerces and renders."""
+        df = pl.DataFrame({"x": pl.Series(list(range(50)), dtype=pl.UInt32)})
+        svg = fm.Chart(df).mark_density().encode(x="x").to_svg()
+        assert svg.lstrip().startswith("<svg")
+
+    def test_mark_density_string_column_still_raises(self):
+        """A genuinely non-numeric (Utf8) field must still raise, not coerce."""
+        df = pl.DataFrame({"x": ["a", "b", "c", "d"] * 10})
+        with pytest.raises(Exception, match="numeric|Float64"):
+            fm.Chart(df).mark_density().encode(x="x").to_svg()
