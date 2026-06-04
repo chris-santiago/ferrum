@@ -1436,3 +1436,58 @@ class TestQqHexIntegerCoercion:
         df = pl.DataFrame({"val": ["a", "b", "c", "d"] * 5})
         with pytest.raises(Exception, match="numeric|Float64"):
             fm.Chart(df).mark_qq().encode(x="val").to_svg()
+
+
+# ---------------------------------------------------------------------------
+# TestJointplotHist: regression for bin_x_start / bin_y_start wrong column names
+# ---------------------------------------------------------------------------
+
+
+def _spread_df(n: int = 250, seed: int = 0) -> pl.DataFrame:
+    """Bivariate dataset with enough rows to fill multiple 2D histogram bins."""
+    rng = __import__("numpy").random.default_rng(seed)
+    return pl.DataFrame(
+        {
+            "x": rng.normal(0.0, 1.5, n).tolist(),
+            "y": rng.normal(0.0, 1.5, n).tolist(),
+        }
+    )
+
+
+class TestJointplotHist:
+    """Regression: jointplot(kind='hist') encoded wrong Bin2D output columns.
+
+    The hist branch was encoding x='bin_x_start'/y='bin_y_start' but Bin2D
+    emits [x_lo, x_hi, y_lo, y_hi, count].  This caused a ValueError ("unknown
+    column 'bin_x_start'") for all dtypes.  The fix is to use all four corner
+    columns (x='x_lo', x2='x_hi', y='y_lo', y2='y_hi') so tiles are full-width
+    rectangles, not degenerate points.
+    """
+
+    def test_jointplot_hist_renders_svg(self):
+        """jointplot(kind='hist') must render without raising ValueError."""
+        df = _spread_df()
+        svg = fm.jointplot(df, x="x", y="y", kind="hist").to_svg()
+        assert svg.lstrip().startswith("<svg"), "Expected SVG output"
+
+    def test_jointplot_hist_has_many_rects(self):
+        """The center panel must contain a healthy number of <rect> tiles.
+
+        With correct x_lo/x_hi/y_lo/y_hi encoding, Bin2D produces a grid of
+        filled rectangles (>10).  With the old degenerate encoding, only ~3
+        rects appear.
+        """
+        df = _spread_df()
+        svg = fm.jointplot(df, x="x", y="y", kind="hist").to_svg()
+        assert svg.count("<rect") > 10, (
+            f"Expected >10 <rect> elements in hist jointplot SVG, got {svg.count('<rect')}"
+        )
+
+    def test_jointplot_hist_with_xlim_ylim_renders(self):
+        """The xlim/ylim scale-domain branch of kind='hist' renders correctly."""
+        df = _spread_df()
+        svg = fm.jointplot(df, x="x", y="y", kind="hist", xlim=(-3.0, 3.0), ylim=(-3.0, 3.0)).to_svg()
+        assert svg.lstrip().startswith("<svg"), "Expected SVG output with xlim/ylim"
+        assert svg.count("<rect") > 10, (
+            f"Expected >10 <rect> elements with xlim/ylim, got {svg.count('<rect')}"
+        )
