@@ -252,6 +252,7 @@ _DOC_ALLOWLIST: set[str] = {
     "PaddingConfig",
     "ColorConfig",
     "Configure",
+    "FerrumOverrideError",
     "Annotate",
     "SecondaryY",
     "BreakAxis",

@@ -4,6 +4,8 @@ and Chart.__add__ dispatch for Configure / Annotate / structural types.
 
 from __future__ import annotations
 
+from dataclasses import fields
+
 import pytest
 import polars as pl
 
@@ -19,7 +21,10 @@ from ferrum.configure import (
 )
 from ferrum.annotation.container import Annotate
 from ferrum.annotation.primitives import AnnotationText
+from ferrum.exceptions import FerrumOverrideError
+from ferrum.marks.base import _VALID_MARK_KWARGS
 from ferrum.structural import BreakAxis, Inset, SecondaryY
+from ferrum import _override_apply as oa
 
 
 # ---------------------------------------------------------------------------
@@ -308,3 +313,219 @@ class TestAddDispatch:
         c2 = Configure(legend=LegendConfig(orient="top"))
         c = base_chart + c1 + c2
         assert len(c._configure) == 2
+
+
+# ---------------------------------------------------------------------------
+# _override_apply — registry, resolution, validation, payload (pure logic)
+# ---------------------------------------------------------------------------
+
+
+class TestOverrideRegistryParity:
+    """The generated leaf sets must equal the live schemas they derive from."""
+
+    @pytest.mark.parametrize(
+        ("prefix", "config_cls"),
+        [
+            ("x_axis_", AxisConfig),
+            ("y_axis_", AxisConfig),
+            ("axis_", AxisConfig),
+            ("legend_", LegendConfig),
+            ("title_", TitleConfig),
+            ("grid_", GridConfig),
+            ("padding_", PaddingConfig),
+            ("color_", ColorConfig),
+        ],
+    )
+    def test_chart_config_leaves_match_dataclass_fields(self, prefix, config_cls):
+        rule = next(r for r in oa._PREFIX_RULES if r.prefix == prefix)
+        assert rule.valid_leaves == frozenset(f.name for f in fields(config_cls))
+
+    def test_mark_leaves_match_valid_mark_kwargs(self):
+        rule = next(r for r in oa._PREFIX_RULES if r.prefix == "mark_")
+        assert rule.valid_leaves == _VALID_MARK_KWARGS
+
+    def test_scale_leaves_include_common_options_and_exclude_derived(self):
+        rule = next(r for r in oa._PREFIX_RULES if r.prefix == "x_scale_")
+        # Settable scale-spec leaves are present.
+        assert {"domain", "range", "type", "scheme", "padding"} <= rule.valid_leaves
+        # Derived getters are not settable leaves.
+        assert "num_bins" not in rule.valid_leaves
+
+    def test_coord_leaves_match_coord_dataclass_fields(self):
+        rule = next(r for r in oa._PREFIX_RULES if r.prefix == "coord_")
+        # Union of CoordCartesian / CoordFixed / CoordPolar / CoordGeo fields.
+        assert {"clip", "expand", "xlim", "ylim", "ratio", "theta", "projection"} <= (
+            rule.valid_leaves
+        )
+
+
+class TestOverrideResolve:
+    def test_x_axis_longest_prefix_wins(self):
+        r = oa.resolve("x_axis_label_angle")
+        assert r is not None
+        assert r.target is oa.Target.CHART_CONFIG
+        assert r.location.target_key == "axis_x"
+        assert r.location.leaf == "label_angle"
+
+    def test_y_axis_tick_count(self):
+        r = oa.resolve("y_axis_tick_count")
+        assert r is not None
+        assert r.location.target_key == "axis_y"
+        assert r.location.leaf == "tick_count"
+
+    def test_axis_grid(self):
+        r = oa.resolve("axis_grid")
+        assert r is not None
+        assert r.location.target_key == "axis"
+        assert r.location.leaf == "grid"
+
+    def test_legend_orient(self):
+        r = oa.resolve("legend_orient")
+        assert r is not None
+        assert r.location.target_key == "legend"
+        assert r.location.leaf == "orient"
+
+    def test_color_scheme(self):
+        r = oa.resolve("color_scheme")
+        assert r is not None
+        assert r.location.target_key == "color"
+        assert r.location.leaf == "scheme"
+
+    def test_x_scale_domain(self):
+        r = oa.resolve("x_scale_domain")
+        assert r is not None
+        assert r.target is oa.Target.ENCODING_SCALE
+        assert r.location.target_key == "x"
+        assert r.location.leaf == "domain"
+
+    def test_mark_corner_radius(self):
+        r = oa.resolve("mark_corner_radius")
+        assert r is not None
+        assert r.target is oa.Target.MARK
+        assert r.location.target_key is None
+        assert r.location.leaf == "corner_radius"
+
+    def test_coord_clip(self):
+        r = oa.resolve("coord_clip")
+        assert r is not None
+        assert r.target is oa.Target.COORD
+        assert r.location.target_key == "coord"
+        assert r.location.leaf == "clip"
+
+    def test_width_height_properties(self):
+        for key in ("width", "height"):
+            r = oa.resolve(key)
+            assert r is not None
+            assert r.target is oa.Target.PROPERTIES
+            assert r.location.leaf == key
+
+    def test_x_axis_not_missplit_as_axis(self):
+        # ``x_axis_grid_color`` is a real AxisConfig leaf reached via the
+        # longest ``x_axis_`` prefix, not via ``axis_`` with leaf ``grid_color``.
+        r = oa.resolve("x_axis_grid_color")
+        assert r is not None
+        assert r.location.target_key == "axis_x"
+        assert r.location.leaf == "grid_color"
+
+    def test_unknown_prefix_resolves_none(self):
+        assert oa.resolve("bogus_thing") is None
+
+    def test_known_prefix_bad_leaf_resolves_none(self):
+        assert oa.resolve("mark_notathing") is None
+        assert oa.resolve("x_axis_lable_angle") is None
+
+    def test_typed_equivalent_present_for_config_and_properties(self):
+        assert oa.resolve("x_axis_label_angle").typed_equivalent == (
+            ".configure_axis(label_angle=...)"
+        )
+        assert oa.resolve("width").typed_equivalent == ".properties(width=...)"
+
+    def test_typed_equivalent_absent_for_escape_hatch_paths(self):
+        assert oa.resolve("x_scale_domain").typed_equivalent is None
+        assert oa.resolve("mark_corner_radius").typed_equivalent is None
+        assert oa.resolve("coord_clip").typed_equivalent is None
+
+
+class TestOverrideValidate:
+    def test_unknown_prefix_raises(self):
+        with pytest.raises(FerrumOverrideError, match="bogus_thing"):
+            oa.validate({"bogus_thing": 1})
+
+    def test_known_prefix_bad_leaf_raises(self):
+        with pytest.raises(FerrumOverrideError, match="mark_notathing"):
+            oa.validate({"mark_notathing": 1})
+
+    def test_typo_suggests_closest_path(self):
+        with pytest.raises(FerrumOverrideError) as excinfo:
+            oa.validate({"x_axis_lable_angle": -45})
+        assert "x_axis_label_angle" in str(excinfo.value)
+
+    def test_per_channel_axis_grid_color_resolves_to_chart_config(self):
+        # ``x_axis_grid_color`` targets the typed AxisConfig leaf ``grid_color``
+        # (chart-config), NOT the opaque per-channel AxisSpec.extra map.  Valid.
+        oa.validate({"x_axis_grid_color": "#eee"})
+
+    def test_per_channel_only_key_without_config_equivalent_raises(self):
+        # ``x_legend_glyph_dx`` is a genuinely per-channel-only key with no
+        # LegendConfig equivalent; the per-channel axis/legend maps are excluded
+        # in v1, so it must raise.
+        with pytest.raises(FerrumOverrideError, match="x_legend_glyph_dx"):
+            oa.validate({"x_legend_glyph_dx": 1})
+
+    def test_valid_dict_does_not_raise(self):
+        oa.validate(
+            {"x_axis_label_angle": -45, "width": 900, "mark_size": 50, "color_scheme": "viridis"}
+        )
+
+
+class TestOverrideBuildPayload:
+    def test_routes_each_target_into_its_piece(self):
+        payload = oa.build_payload(
+            {
+                "x_axis_label_angle": -45,
+                "width": 900,
+                "mark_size": 50,
+                "color_scheme": "viridis",
+            }
+        )
+        assert payload.chart_config == {
+            "axis_x": {"label_angle": -45},
+            "color": {"scheme": "viridis"},
+        }
+        assert payload.properties == {"width": 900}
+        assert payload.mark_style == {"size": 50}
+        # Unused pieces are empty.
+        assert payload.encoding == {}
+        assert payload.coord == {}
+
+    def test_encoding_scale_piece_shape(self):
+        payload = oa.build_payload({"x_scale_domain": [0, 10]})
+        assert payload.encoding == {"x": {"scale": {"domain": [0, 10]}}}
+        assert payload.chart_config == {}
+
+    def test_coord_piece_shape(self):
+        payload = oa.build_payload({"coord_clip": False})
+        assert payload.coord == {"clip": False}
+
+    def test_deprecations_include_typed_equivalent_paths(self):
+        payload = oa.build_payload(
+            {
+                "x_axis_label_angle": -45,
+                "width": 900,
+                "mark_size": 50,
+                "color_scheme": "viridis",
+            }
+        )
+        deprecated_paths = {p for p, _ in payload.deprecations}
+        # config + properties paths have typed equivalents.
+        assert "x_axis_label_angle" in deprecated_paths
+        assert "width" in deprecated_paths
+        assert "color_scheme" in deprecated_paths
+        # mark style has no typed equivalent.
+        assert "mark_size" not in deprecated_paths
+        # The descriptor is carried alongside the path.
+        assert ("width", ".properties(width=...)") in payload.deprecations
+
+    def test_build_payload_validates_before_building(self):
+        with pytest.raises(FerrumOverrideError, match="bogus_thing"):
+            oa.build_payload({"x_axis_label_angle": -45, "bogus_thing": 1})
