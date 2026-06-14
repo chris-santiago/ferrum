@@ -646,6 +646,7 @@ pub fn compute_layout(
             metrics,
             estimated_slot_w,
             axes.x.label_padding,
+            theme.sizes.tick_size,
         )
     } else {
         0.0
@@ -963,6 +964,7 @@ pub fn compute_layout(
                     theme.typography.title_font_size,
                     theme.padding.axis_title_padding,
                     theme.cull_threshold,
+                    theme.sizes.tick_size,
                     metrics,
                 );
                 if let Some(axis::XAxisWarning::LabelsElided { count }) = xwarn {

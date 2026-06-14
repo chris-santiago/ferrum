@@ -295,6 +295,35 @@ pub struct AxisTitleLayout {
 
 use super::text_metrics::TextMetrics;
 
+/// Vertical extent (px below the axis line) occupied by an x-axis tick label
+/// rotated by `angle` (degrees, may be negative). Mirrors the end-anchored
+/// pivot geometry in `render/marks/axis.rs`: the pivot sits
+/// `tick_size + label_pad + sin(|angle|)·font_size` below the axis line, then the
+/// rotated label drops a further `sin(|angle|)·max_label_w + cos(|angle|)·line_h`.
+///
+/// At -90 this collapses to `tick_size + label_pad + font_size + max_label_w`
+/// (sin=1, cos=0); at angle 0 it would give `tick_size + label_pad + line_h`,
+/// which is *not* the flat band — callers must guard on `angle != 0` and use the
+/// flat `line_h` term directly for un-rotated labels.
+///
+/// SYNC: render (`render/marks/axis.rs`), the rotated branches of
+/// `estimate_x_label_band`, and the rotated title placement in `layout_x_axis`
+/// all depend on this. Change all three together or the x-axis title will
+/// overlap (or float above) the rotated labels.
+fn rotated_x_label_extent(
+    angle: f64,
+    max_label_w: f64,
+    font_size: f64,
+    line_h: f64,
+    tick_size: f64,
+    label_pad: f64,
+) -> f64 {
+    let rad = angle.to_radians();
+    let sin_abs = rad.sin().abs();
+    let cos_abs = rad.cos().abs();
+    tick_size + label_pad + sin_abs * font_size + sin_abs * max_label_w + cos_abs * line_h
+}
+
 /// Estimate the vertical space (in pixels) needed below the x-axis to
 /// accommodate tick labels, accounting for how the collision cascade is likely
 /// to resolve. Called by the layout orchestrator **before** the plot rect is
@@ -306,9 +335,21 @@ use super::text_metrics::TextMetrics;
 /// 2. If all labels fit flat, return `line_height`.
 /// 3. If wrapping resolves collision (all labels wrap successfully), return
 ///    `max_lines * line_height`.
-/// 4. Try each angle in `ANGLE_CASCADE`; first that passes returns
-///    `max_label_w * sin(|angle|) + line_height * cos(|angle|)`.
-/// 5. Fallback: return `max_label_w + 2.0` (vertical labels, S4/S5 scenarios).
+/// 4. Try each angle in `ANGLE_CASCADE`; first that passes returns the full
+///    geometric extent of the rotated label (see the SYNC comment below).
+/// 5. Fallback: vertical labels (-90°, S4/S5 scenarios) reserve the full extent
+///    at sin=1, cos=0.
+///
+/// SYNC: the rotated branches mirror the rotated-bottom-label geometry in
+/// `crate::render::marks::axis::build_axis`. A rotated label is end-anchored at
+/// the pivot `(tick.position, label_y)` where
+/// `label_y = r.y + tick_size + label_pad + sin(|angle|)·font_size`, then rotated
+/// about that pivot. Its lowest point sits below the pivot, so the full extent
+/// from the axis line (`r.y`) down to the label bottom is
+/// `tick_size + label_pad + sin(|angle|)·(font_size + max_label_w) + cos(|angle|)·descent`.
+/// The band below uses `line_h` for the cos term (instead of a bare descent) to
+/// match the existing code and keep a small safety margin. Changing either side
+/// requires changing the other or the x-axis title will overlap the labels.
 pub(crate) fn estimate_x_label_band(
     labels: &[String],
     label_font_size: f64,
@@ -316,12 +357,20 @@ pub(crate) fn estimate_x_label_band(
     metrics: &dyn TextMetrics,
     estimated_slot_w: f64,
     label_padding: Option<f64>,
+    tick_size: f64,
 ) -> f64 {
     // When label_padding is explicitly set, it replaces the hardcoded 2.0 gap
     // in build_axis. The delta from the default (2.0) is added to the margin
-    // estimate. When label_padding is None the existing margin values are
-    // unchanged (backward-compatible with all existing goldens).
+    // estimate for the flat/wrapped branches. When label_padding is None the
+    // existing margin values are unchanged (backward-compatible with all
+    // existing goldens). The rotated branches instead fold the *effective* pad
+    // directly into the pivot offset (`label_pad_eff` below), so they do not add
+    // `padding_delta` again — it is subsumed.
     let padding_delta = label_padding.map(|lp| lp - 2.0).unwrap_or(0.0);
+    // Clamp to match the renderer (`render/marks/axis.rs` L-2 guard: `.max(0.0)`).
+    // A negative label_padding must not under-reserve the rotated band — the
+    // renderer clamps it to 0, so the layout must too or band < render extent.
+    let label_pad_eff = label_padding.unwrap_or(2.0).max(0.0);
     let line_h = metrics.line_height(label_font_size);
 
     // Empty label set: fall back to current behavior.
@@ -337,12 +386,16 @@ pub(crate) fn estimate_x_label_band(
     // If the caller has set label_angle_override, skip the cascade entirely
     // and compute the margin for that specific angle.
     if let Some(angle) = label_angle_override {
-        let rad = angle.to_radians();
-        let sin_abs = rad.sin().abs();
-        let cos_abs = rad.cos().abs();
-        // At -90° (or 90°), sin≈1, cos≈0 → margin = max_label_w + small pad.
-        // For intermediate angles: label extends downward by w*sin + line_h*cos.
-        return max_label_w * sin_abs + line_h * cos_abs + padding_delta;
+        // SYNC (see `rotated_x_label_extent`): full geometric extent of the
+        // rotated label below the axis line, shared with the title placement.
+        return rotated_x_label_extent(
+            angle,
+            max_label_w,
+            label_font_size,
+            line_h,
+            tick_size,
+            label_pad_eff,
+        );
     }
 
     let threshold = estimated_slot_w * (1.0 - LABEL_OVERLAP_TOLERANCE);
@@ -380,14 +433,31 @@ pub(crate) fn estimate_x_label_band(
     for &angle in &ANGLE_CASCADE[1..] {
         let cos_factor = angle.to_radians().cos().abs();
         if max_label_w * cos_factor <= estimated_slot_w {
-            let sin_abs = angle.to_radians().sin().abs();
-            let cos_abs = angle.to_radians().cos().abs();
-            return max_label_w * sin_abs + line_h * cos_abs + padding_delta;
+            // SYNC (see `rotated_x_label_extent`): full geometric extent of the
+            // rotated label, shared with the title placement.
+            return rotated_x_label_extent(
+                angle,
+                max_label_w,
+                label_font_size,
+                line_h,
+                tick_size,
+                label_pad_eff,
+            );
         }
     }
 
-    // S4/S5 fallback: vertical labels (-90°). Height = full label width + 2px pad.
-    max_label_w + 2.0 + padding_delta
+    // S4/S5 fallback: vertical labels (-90°). The helper at -90 gives sin=1,
+    // cos=0, so the extent collapses to
+    // `tick_size + label_pad_eff + font_size + max_label_w`
+    // (SYNC with the rotated render geometry above).
+    rotated_x_label_extent(
+        -90.0,
+        max_label_w,
+        label_font_size,
+        line_h,
+        tick_size,
+        label_pad_eff,
+    )
 }
 
 /// Returns the pixel width of the widest tick label on the y-axis. Used by the
@@ -840,6 +910,7 @@ pub fn layout_x_axis(
     title_font_size: f64,
     axis_title_padding: f64,
     cull_threshold: u32,
+    tick_size: f64,
     metrics: &dyn TextMetrics,
 ) -> (AxisLayout, Option<XAxisWarning>) {
     let n = input.tick_labels.len();
@@ -950,13 +1021,52 @@ pub fn layout_x_axis(
     let effective_title_font_size = input.title_font_size.unwrap_or(title_font_size);
     let effective_title_padding = input.title_padding.unwrap_or(axis_title_padding);
 
+    // Resolved tick angle: all non-culled ticks share `label_angle` (the cascade
+    // and the override path both apply a single angle). 0.0 means flat. Use any
+    // non-culled tick; default to flat when every tick is culled or absent.
+    let resolved_angle = ticks
+        .iter()
+        .find(|t| !t.culled)
+        .map(|t| t.label_angle)
+        .unwrap_or(0.0);
+
     let title = input.title.as_ref().map(|text| {
         let title_h = metrics.line_height(effective_title_font_size);
-        let label_h = metrics.line_height(label_font_size);
+        // The vertical drop from the axis line to the labels' lowest point. For
+        // flat labels this is a single line height (keeps flat goldens byte
+        // identical). For rotated labels it is the full end-anchored extent,
+        // shared with `estimate_x_label_band` via `rotated_x_label_extent` so the
+        // reserved band and the title placement cannot drift.
+        let label_extent = if resolved_angle == 0.0 {
+            metrics.line_height(label_font_size)
+        } else {
+            // Clamp matches the renderer's L-2 guard so band >= render extent.
+            let label_pad = input.label_padding.unwrap_or(2.0).max(0.0);
+            let line_h = metrics.line_height(label_font_size);
+            // Widest final (possibly-elided) label that will actually render —
+            // skip culled ticks since they draw no label.
+            let max_label_w = ticks
+                .iter()
+                .filter(|t| !t.culled)
+                .map(|t| metrics.measure_width(&t.label, label_font_size))
+                .fold(0.0_f64, f64::max);
+            rotated_x_label_extent(
+                resolved_angle,
+                max_label_w,
+                label_font_size,
+                line_h,
+                tick_size,
+                label_pad,
+            )
+        };
         AxisTitleLayout {
             text: text.clone(),
             anchor_x: panel_area.x + panel_area.w / 2.0,
-            anchor_y: panel_area.y + panel_area.h + label_h + effective_title_padding + title_h / 2.0,
+            anchor_y: panel_area.y
+                + panel_area.h
+                + label_extent
+                + effective_title_padding
+                + title_h / 2.0,
             angle: 0.0,
         }
     });
@@ -1105,7 +1215,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 50.0, line_h_factor: 1.2 };
-        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         assert_eq!(axis.ticks.len(), 4);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, 0.0);
@@ -1124,7 +1234,7 @@ mod tests {
         );
         let panel_area = Rect { x: 100.0, y: 50.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         assert!((axis.ticks[0].position - (100.0 + 50.0)).abs() < 1e-9);
         assert!((axis.ticks[1].position - (100.0 + 150.0)).abs() < 1e-9);
         assert!((axis.ticks[2].position - (100.0 + 250.0)).abs() < 1e-9);
@@ -1145,7 +1255,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -60.0);
             assert!(!t.elided);
@@ -1162,7 +1272,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -90.0);
         }
@@ -1181,7 +1291,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 95.0, line_h_factor: 1.2 };
-        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -30.0);
             assert!(!t.elided, "rotated projection should fit; no elision");
@@ -1201,7 +1311,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
         let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
-        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -45.0);
             assert!(t.elided, "expected all 20 labels to be elided with override");
@@ -1227,7 +1337,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
         let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
-        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -90.0);
             assert!(!t.elided, "cascade should resolve at -90 without elision");
@@ -1246,7 +1356,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
         let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         for t in &axis.ticks {
             assert!(t.elided);
             assert!(t.label.is_char_boundary(t.label.len()));
@@ -1289,7 +1399,7 @@ mod tests {
         );
         let panel = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
 
         assert!(axis.minor_ticks.is_empty(), "gate off must produce no minors");
         assert_eq!(axis.ticks.len(), 4);
@@ -1332,7 +1442,7 @@ mod tests {
         );
         let panel = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
 
         // Majors unchanged: 2 labeled ticks at 100 and 300.
         assert_eq!(axis.ticks.len(), 2);
@@ -1403,7 +1513,7 @@ mod tests {
         );
         let panel = Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 10.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
 
         assert!(axis.minor_ticks.is_empty(), "no positions → no minors");
         assert_eq!(axis.ticks.len(), 3);
@@ -1437,7 +1547,7 @@ mod tests {
 
         let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
 
         // Inset band (8, 592), span 584 → minor at f=0.25: 8 + 0.25*584 = 154.
         assert_eq!(axis.minor_ticks.len(), 1);
@@ -1463,7 +1573,7 @@ mod tests {
             major: vec![0.25],
             minor: Vec::new(),
         });
-        let (major_axis, _) = layout_x_axis(&major_input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (major_axis, _) = layout_x_axis(&major_input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         let major_px = major_axis.ticks[0].position;
         assert!(
             (minor_px - major_px).abs() < 1e-9,
@@ -1867,7 +1977,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         for t in &axis.ticks {
             assert_eq!(t.label_angle, -90.0, "override should force -90");
             // Labels should not be wrapped (override bypasses cascade).
@@ -1891,7 +2001,7 @@ mod tests {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let (_, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (_, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         assert!(
             matches!(warning, Some(XAxisWarning::LabelsElided { .. })),
             "expected LabelsElided warning; got {:?}",
@@ -1910,7 +2020,7 @@ mod tests {
         );
         let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
-        let (_, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (_, warning) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         assert!(warning.is_none(), "rotation should not produce LabelsElided warning");
     }
 
@@ -1923,7 +2033,9 @@ mod tests {
         let labels: Vec<String> = vec!["A".into(), "B".into(), "C".into(), "D".into()];
         let m = mock(10.0); // fixed_width: chars * 10
         let line_h = m.line_height(11.0); // 11.0 * 1.2 = 13.2
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None);
+        // Regression guard: the new `tick_size` param must NOT affect the flat
+        // case — a non-zero tick_size (4.0) is passed, yet the band stays line_h.
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 4.0);
         assert!(
             (band - line_h).abs() < 1e-9,
             "flat labels should return line_height={line_h}, got {band}"
@@ -1944,7 +2056,7 @@ mod tests {
         ];
         let m = mock(6.0); // per_char * 6; "trivial_baseline" = 16*6 = 96 > 90
         let line_h = m.line_height(11.0); // 11.0 * 1.2 = 13.2
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None);
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 4.0);
         let expected = 2.0 * line_h;
         assert!(
             (band - expected).abs() < 1e-9,
@@ -1967,9 +2079,20 @@ mod tests {
         ];
         let m = mock(10.0);
         let line_h = m.line_height(11.0); // 13.2
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, None);
+        let tick_size = 4.0;
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, None, tick_size);
+        // Full geometric extent (mirrors the render pivot): the old too-tight
+        // formula was `sin·max_w + cos·line_h`; the band now adds the pivot
+        // offset `tick_size + label_pad + sin·font_size` on top of it.
         let angle_rad = (-45.0_f64).to_radians();
-        let expected = 100.0 * angle_rad.sin().abs() + line_h * angle_rad.cos().abs();
+        let sin_abs = angle_rad.sin().abs();
+        let cos_abs = angle_rad.cos().abs();
+        let label_pad = 2.0; // default
+        let expected = tick_size
+            + label_pad
+            + sin_abs * 11.0
+            + sin_abs * 100.0
+            + cos_abs * line_h;
         assert!(
             (band - expected).abs() < 1e-6,
             "rotated -45° band should be {expected}, got {band}"
@@ -1983,16 +2106,16 @@ mod tests {
         // "ABCDEFGHIJ" = 10 * 10 = 100px.
         let labels: Vec<String> = vec!["ABCDEFGHIJ".into(), "KLMNOPQRST".into()];
         let m = mock(10.0);
-        let band = estimate_x_label_band(&labels, 11.0, Some(-90.0), &m, 80.0, None);
-        let angle_rad = (-90.0_f64).to_radians();
-        let line_h = m.line_height(11.0);
-        let expected = 100.0 * angle_rad.sin().abs() + line_h * angle_rad.cos().abs();
+        let tick_size = 4.0;
+        let band = estimate_x_label_band(&labels, 11.0, Some(-90.0), &m, 80.0, None, tick_size);
+        // At -90°: sin=1, cos=0 → full vertical extent =
+        // tick_size + label_pad + font_size + max_label_w.
+        let label_pad = 2.0; // default
+        let expected = tick_size + label_pad + 11.0 + 100.0;
         assert!(
             (band - expected).abs() < 1e-6,
             "override -90° band should be ~{expected}, got {band}"
         );
-        // At -90°, cos≈0 so band should be approximately equal to max_label_w.
-        assert!(band > 99.0 && band < 101.0, "band should be ≈ 100 at -90°; got {band}");
     }
 
     #[test]
@@ -2001,9 +2124,18 @@ mod tests {
         let labels: Vec<String> = vec!["ABCDEFGHIJ".into()];
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
-        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 200.0, None);
+        let tick_size = 4.0;
+        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 200.0, None, tick_size);
+        // Full geometric extent at -45° (mirrors the render pivot).
         let angle_rad = (-45.0_f64).to_radians();
-        let expected = 100.0 * angle_rad.sin().abs() + line_h * angle_rad.cos().abs();
+        let sin_abs = angle_rad.sin().abs();
+        let cos_abs = angle_rad.cos().abs();
+        let label_pad = 2.0; // default
+        let expected = tick_size
+            + label_pad
+            + sin_abs * 11.0
+            + sin_abs * 100.0
+            + cos_abs * line_h;
         assert!(
             (band - expected).abs() < 1e-6,
             "override -45° band should be {expected}, got {band}"
@@ -2014,7 +2146,7 @@ mod tests {
     fn estimate_empty_labels_returns_line_height() {
         let m = mock(10.0);
         let line_h = m.line_height(11.0);
-        let band = estimate_x_label_band(&[], 11.0, None, &m, 100.0, None);
+        let band = estimate_x_label_band(&[], 11.0, None, &m, 100.0, None, 4.0);
         assert!(
             (band - line_h).abs() < 1e-9,
             "empty labels should return line_height={line_h}, got {band}"
@@ -2030,11 +2162,271 @@ mod tests {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let band = estimate_x_label_band(&labels, 11.0, None, &m, 10.0, None);
-        // Expected: fallback path: 1e18 + 2.0
+        let tick_size = 4.0;
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 10.0, None, tick_size);
+        // Vertical fallback: tick_size + label_pad + font_size + max_label_w.
+        // At 1e18 the additive terms vanish into float epsilon, so the band is
+        // dominated by max_label_w (1e18). Compare with a generous tolerance.
+        let label_pad = 2.0;
+        let expected = tick_size + label_pad + 11.0 + 1e18;
         assert!(
-            (band - (1e18 + 2.0)).abs() < 1.0,
-            "fallback path should return max_label_w + 2.0, got {band}"
+            (band - expected).abs() < 1.0,
+            "fallback path should return tick_size + label_pad + font_size + max_label_w, got {band}"
+        );
+    }
+
+    // --- estimate_x_label_band: x-title overlap fix (rotated band reservation) ---
+    //
+    // These guard the fix where the reserved x-axis label band under-counted the
+    // true vertical extent of rotated tick labels, letting the x-axis title ride
+    // into the longest labels. The rotated branches must now reserve the full
+    // geometric extent that `render::marks::axis::build_axis` draws.
+
+    #[test]
+    fn estimate_rotated_band_grew_by_pivot_offset() {
+        // Labels that collide flat and resolve at -45° (same setup as
+        // `estimate_rotated_labels`). The NEW band must exceed the OLD too-tight
+        // formula (`sin·max_label_w + cos·line_h`) by exactly the pivot offset
+        // `tick_size + label_pad + sin·font_size`. Both sides computed explicitly.
+        let labels: Vec<String> = vec![
+            "ABCDEFGHIJ".into(), "KLMNOPQRST".into(),
+            "UVWXYZABCD".into(), "EFGHIJKLMN".into(),
+        ];
+        let m = mock(10.0);
+        let font_size = 11.0;
+        let tick_size = 4.0;
+        let line_h = m.line_height(font_size);
+        let max_label_w = 100.0; // 10 chars * 10px
+
+        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, None, tick_size);
+
+        // Cascade resolves at -45° here.
+        let angle_rad = (-45.0_f64).to_radians();
+        let sin_abs = angle_rad.sin().abs();
+        let cos_abs = angle_rad.cos().abs();
+
+        let old_formula = sin_abs * max_label_w + cos_abs * line_h;
+        let label_pad = 2.0; // default
+        let pivot_offset = tick_size + label_pad + sin_abs * font_size;
+
+        assert!(
+            (band - (old_formula + pivot_offset)).abs() < 1e-6,
+            "new band ({band}) must equal old formula ({old_formula}) + pivot offset ({pivot_offset})",
+        );
+    }
+
+    #[test]
+    fn estimate_vertical_fallback_full_extent() {
+        // The -90 / S4-S5 vertical path returns the full vertical extent at
+        // sin=1, cos=0: tick_size + label_pad + font_size + max_label_w.
+        // Force the fallback with labels too wide for any cascade angle.
+        let labels: Vec<String> = vec!["X".into(), "Y".into()];
+        let m = MockMetrics { measure: |_, _| 5_000.0, line_h_factor: 1.2 };
+        let font_size = 11.0;
+        let tick_size = 4.0;
+        let band = estimate_x_label_band(&labels, font_size, None, &m, 10.0, None, tick_size);
+        let label_pad = 2.0; // default
+        let expected = tick_size + label_pad + font_size + 5_000.0;
+        assert!(
+            (band - expected).abs() < 1e-6,
+            "vertical fallback should return {expected}, got {band}",
+        );
+    }
+
+    #[test]
+    fn estimate_flat_band_unaffected_by_tick_size() {
+        // Regression guard for flat goldens: short labels that fit return exactly
+        // `line_h + padding_delta` regardless of the new tick_size param. Passing
+        // two different tick_size values must yield the identical flat band.
+        let labels: Vec<String> = vec!["A".into(), "B".into(), "C".into()];
+        let m = mock(10.0);
+        let line_h = m.line_height(11.0);
+        let band_ts0 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 0.0);
+        let band_ts8 = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 8.0);
+        assert!(
+            (band_ts0 - line_h).abs() < 1e-9 && (band_ts8 - line_h).abs() < 1e-9,
+            "flat band must equal line_h ({line_h}) and ignore tick_size; got {band_ts0} and {band_ts8}",
+        );
+    }
+
+    #[test]
+    fn estimate_label_padding_widens_rotated_band() {
+        // Increasing label_padding must widen the rotated band by the same delta.
+        // Rotated branch folds `label_pad_eff` directly into the pivot offset, so
+        // band(lp = a + Δ) - band(lp = a) == Δ.
+        let labels: Vec<String> = vec![
+            "ABCDEFGHIJ".into(), "KLMNOPQRST".into(),
+            "UVWXYZABCD".into(), "EFGHIJKLMN".into(),
+        ];
+        let m = mock(10.0);
+        let tick_size = 4.0;
+        let band_default = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, Some(2.0), tick_size);
+        let band_wider = estimate_x_label_band(&labels, 11.0, None, &m, 80.0, Some(12.0), tick_size);
+        let delta = 12.0 - 2.0;
+        assert!(
+            (band_wider - band_default - delta).abs() < 1e-6,
+            "label_padding +{delta} must widen rotated band by {delta}; \
+             got {band_default} -> {band_wider}",
+        );
+    }
+
+    #[test]
+    fn estimate_rotated_band_covers_true_label_extent() {
+        // Integration-style guard without wiring a full compute_layout: the
+        // returned band must be >= the analytically computed true label extent
+        // that the render draws below the axis line, namely
+        //   tick_size + label_pad + sin·(font_size + max_label_w) + cos·descent
+        // for a representative resolved angle. Because the band uses line_h (>=
+        // descent) for the cos term, it clears the labels with a small margin,
+        // so the x-axis title placed just below the band cannot overlap them.
+        let labels: Vec<String> = vec![
+            "ABCDEFGHIJ".into(), "KLMNOPQRST".into(),
+            "UVWXYZABCD".into(), "EFGHIJKLMN".into(),
+        ];
+        let m = mock(10.0);
+        let font_size = 11.0;
+        let tick_size = 4.0;
+        let max_label_w = 100.0;
+        // This setup resolves at -45° in the cascade.
+        let angle_rad = (-45.0_f64).to_radians();
+        let sin_abs = angle_rad.sin().abs();
+        let cos_abs = angle_rad.cos().abs();
+        // Conservative descent estimate (well under line_h ~= 13.2).
+        let descent = font_size * 0.3;
+        let label_pad = 2.0; // default
+        let true_extent =
+            tick_size + label_pad + sin_abs * (font_size + max_label_w) + cos_abs * descent;
+
+        let band = estimate_x_label_band(&labels, font_size, None, &m, 80.0, None, tick_size);
+        assert!(
+            band >= true_extent,
+            "band ({band}) must cover the true label extent ({true_extent}) so the \
+             x-axis title placed below the band clears the rotated labels",
+        );
+    }
+
+    // --- rotated_x_label_extent helper + x-title placement tests ---
+    //
+    // These guard the second half of the overlap fix: the x-axis title's
+    // `anchor_y` is now derived from `rotated_x_label_extent` (the same helper the
+    // band uses) when labels rotate, so the title drops below the true rotated
+    // extent instead of a flat line height. Flat labels keep the old formula.
+
+    #[test]
+    fn rotated_x_label_extent_hand_computed_values() {
+        // -45°: sin=cos=√2/2≈0.70710678. With font_size=11, max_w=100,
+        // line_h=13.2, tick_size=4, label_pad=2:
+        //   4 + 2 + 0.7071·11 + 0.7071·100 + 0.7071·13.2
+        let sin45 = (-45.0_f64).to_radians().sin().abs();
+        let cos45 = (-45.0_f64).to_radians().cos().abs();
+        let expected_45 = 4.0 + 2.0 + sin45 * 11.0 + sin45 * 100.0 + cos45 * 13.2;
+        let got_45 = rotated_x_label_extent(-45.0, 100.0, 11.0, 13.2, 4.0, 2.0);
+        assert!(
+            (got_45 - expected_45).abs() < 1e-9,
+            "-45° extent should be {expected_45}, got {got_45}",
+        );
+
+        // -90°: sin=1, cos≈0 → tick_size + label_pad + font_size + max_w
+        // (the cos·line_h term is a sub-femtopixel epsilon, well under 1e-6).
+        let got_90 = rotated_x_label_extent(-90.0, 100.0, 11.0, 13.2, 4.0, 2.0);
+        let expected_90 = 4.0 + 2.0 + 11.0 + 100.0;
+        assert!(
+            (got_90 - expected_90).abs() < 1e-6,
+            "-90° extent should be ~{expected_90}, got {got_90}",
+        );
+    }
+
+    #[test]
+    fn x_axis_title_clears_rotated_labels() {
+        // Long labels in a narrow panel force rotation; with a title present the
+        // title `anchor_y` must sit at or below the full rotated-label extent so
+        // it cannot overlap the longest label.
+        let input = AxisInput::new(
+            AxisOrient::Bottom,
+            Some("Feature".into()),
+            // No underscores/spaces/camelCase boundaries → wrap is impossible, so
+            // the cascade resolves by rotation rather than wrapping.
+            (0..6).map(|i| format!("aaaaaaaaaaaaaaaaa{i}")).collect(),
+            None,
+        );
+        // 18-char labels at 10px/char = 180px in a 300px panel (slot 50) force the
+        // cascade well past flat into rotation.
+        let panel_area = Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
+        let m = mock(10.0);
+        let label_font_size = 11.0;
+        let title_font_size = 13.0;
+        let title_padding = 4.0;
+        let tick_size = 4.0;
+        let (axis, _) = layout_x_axis(
+            &input, panel_area, 0, label_font_size, title_font_size, title_padding,
+            8, tick_size, &m,
+        );
+
+        // The labels must have rotated (non-zero angle) for this test to be meaningful.
+        let resolved_angle = axis.ticks.iter().find(|t| !t.culled).map(|t| t.label_angle).unwrap();
+        assert!(resolved_angle != 0.0, "labels should rotate; got angle {resolved_angle}");
+
+        // Recompute the expected rotated extent from the FINAL non-culled labels.
+        let max_label_w = axis
+            .ticks
+            .iter()
+            .filter(|t| !t.culled)
+            .map(|t| m.measure_width(&t.label, label_font_size))
+            .fold(0.0_f64, f64::max);
+        let line_h = m.line_height(label_font_size);
+        let extent = rotated_x_label_extent(
+            resolved_angle, max_label_w, label_font_size, line_h, tick_size, 2.0,
+        );
+
+        let title = axis.title.expect("title present");
+        let min_anchor_y = panel_area.y + panel_area.h + extent;
+        assert!(
+            title.anchor_y >= min_anchor_y,
+            "title anchor_y ({}) must be >= panel bottom + rotated extent ({min_anchor_y})",
+            title.anchor_y,
+        );
+        // Exact placement: extent + title_padding + title_h/2.
+        let title_h = m.line_height(title_font_size);
+        let expected = panel_area.y + panel_area.h + extent + title_padding + title_h / 2.0;
+        assert!(
+            (title.anchor_y - expected).abs() < 1e-9,
+            "title anchor_y ({}) should equal extent-based formula ({expected})",
+            title.anchor_y,
+        );
+    }
+
+    #[test]
+    fn x_axis_title_flat_unchanged_regression_guard() {
+        // Short labels (angle 0) with a title: the title anchor_y must EXACTLY
+        // equal the old flat formula so flat-label goldens never move.
+        let input = AxisInput::new(
+            AxisOrient::Bottom,
+            Some("Price".into()),
+            vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            None,
+        );
+        let panel_area = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
+        let m = MockMetrics { measure: |_, _| 20.0, line_h_factor: 1.2 };
+        let label_font_size = 11.0;
+        let title_font_size = 13.0;
+        let title_padding = 4.0;
+        let (axis, _) = layout_x_axis(
+            &input, panel_area, 0, label_font_size, title_font_size, title_padding,
+            8, 4.0, &m,
+        );
+        // All flat.
+        for t in &axis.ticks {
+            assert_eq!(t.label_angle, 0.0);
+        }
+        let title = axis.title.expect("title present");
+        let label_h = m.line_height(label_font_size);
+        let title_h = m.line_height(title_font_size);
+        let expected =
+            panel_area.y + panel_area.h + label_h + title_padding + title_h / 2.0;
+        assert!(
+            (title.anchor_y - expected).abs() < 1e-12,
+            "flat title anchor_y ({}) must equal the old formula ({expected})",
+            title.anchor_y,
         );
     }
 
@@ -2070,7 +2462,7 @@ mod tests {
         );
         let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         assert_eq!(axis.ticks.len(), 3);
         assert!((axis.ticks[0].position - 8.0).abs() < 1e-9, "got {}", axis.ticks[0].position);
         assert!((axis.ticks[1].position - 300.0).abs() < 1e-9, "got {}", axis.ticks[1].position);
@@ -2092,7 +2484,7 @@ mod tests {
         );
         let panel = Rect { x: 100.0, y: 0.0, w: 600.0, h: 200.0 };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         assert!((axis.ticks[0].position - 108.0).abs() < 1e-9);
         assert!((axis.ticks[1].position - 692.0).abs() < 1e-9);
     }
@@ -2110,7 +2502,7 @@ mod tests {
         assert!(input.tick_projection.is_none());
         let panel = Rect { x: 100.0, y: 50.0, w: 400.0, h: 200.0 };
         let m = mock(10.0);
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         assert!((axis.ticks[0].position - 150.0).abs() < 1e-9);
         assert!((axis.ticks[1].position - 250.0).abs() < 1e-9);
         assert!((axis.ticks[2].position - 350.0).abs() < 1e-9);
@@ -2176,7 +2568,7 @@ mod tests {
         let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
         // Each label is 70px wide. Uniform slot=100 → would stay flat (70<90).
         let m = MockMetrics { measure: |_, _| 70.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         // The tightest gap is between fractions 0.965 and 1.0 over inset span 584:
         // 0.035 * 584 ≈ 20.4px. 70px labels cannot stay flat at that gap, so the
         // cascade must rotate (non-zero angle) — proving it used the real min gap,
@@ -2203,7 +2595,36 @@ mod tests {
         );
         let panel = Rect { x: 0.0, y: 0.0, w: 600.0, h: 200.0 };
         let m = MockMetrics { measure: |_, _| 70.0, line_h_factor: 1.2 };
-        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, &m);
+        let (axis, _) = layout_x_axis(&input, panel, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
         assert!(axis.ticks.iter().all(|t| t.label_angle == 0.0));
+    }
+
+    // --- label_padding clamp invariant (band >= render extent) ---
+
+    /// Helper: compute `estimate_x_label_band` for a set of wide labels that
+    /// force rotation, with the given `label_padding`.
+    fn rotated_band_with_padding(label_padding: Option<f64>) -> f64 {
+        // 6 labels of 80px each in a 240px panel.
+        // slot_w = 40, threshold = 36.  80 > 36 → S0/S1 fail.
+        // S3: cos(-30)*80 ≈ 69.3 > 40, cos(-45)*80 ≈ 56.6 > 40,
+        //     cos(-60)*80 = 40.0 ≤ 40 → passes at -60.
+        let labels: Vec<String> = (0..6).map(|i| format!("L{i}")).collect();
+        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
+        estimate_x_label_band(&labels, 11.0, None, &m, 40.0, label_padding, 4.0)
+    }
+
+    #[test]
+    fn negative_label_padding_rotated_band_no_less_than_zero_padding() {
+        // Invariant: band(negative_pad) >= band(zero_pad).
+        // The renderer clamps label_padding to 0 for negative values; the layout
+        // must do the same so the reserved band cannot fall below the actual
+        // render extent (which would cause title-vs-label overlap).
+        let band_zero = rotated_band_with_padding(Some(0.0));
+        let band_neg = rotated_band_with_padding(Some(-10.0));
+        assert!(
+            band_neg >= band_zero,
+            "negative label_padding must not shrink the rotated band below \
+             the band computed with label_padding=0: band(-10)={band_neg} < band(0)={band_zero}"
+        );
     }
 }

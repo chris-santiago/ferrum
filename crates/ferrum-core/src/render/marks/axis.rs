@@ -35,7 +35,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
     for tick in &axis.ticks {
         let effective_font_size = tick.label_font_size.unwrap_or(theme.typography.label_font_size);
 
-        let (tx1, ty1, tx2, ty2, label_x, label_y, anchor, angle) = match axis.orient {
+        let (tx1, ty1, tx2, ty2, label_x, mut label_y, mut anchor, angle) = match axis.orient {
             AxisOrient::Bottom => (
                 tick.position, r.y, tick.position, r.y + theme.sizes.tick_size,
                 tick.position, r.y + theme.sizes.tick_size + effective_font_size + label_pad,
@@ -57,6 +57,40 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
                 TextAnchor::Start, 0.0,
             ),
         };
+
+        // Angle-aware anchor/offset for horizontal axes: when labels are rotated the
+        // SVG rotation pivots around (label_x, label_y) with `text-anchor` deciding
+        // where the text sits relative to that pivot before rotation.  Middle-anchored
+        // text pivots at its horizontal centre, so half the label swings into the plot.
+        // Switch to an edge anchor and remove the font-size baseline drop (the rotation
+        // itself carries the text away from the axis) for the rotated case.
+        if tick.label_angle != 0.0 {
+            match axis.orient {
+                AxisOrient::Bottom => {
+                    // End-anchor pivots from the right edge of the text.  The label's
+                    // top corner sits sin(|angle|)*ascent above the pivot, so only
+                    // remove the portion of the font-size baseline drop not "used up"
+                    // by the rotation.  At -90 this subtracts 0 (full clearance kept);
+                    // at -45 it subtracts ~0.29*font_size.
+                    //
+                    // SYNC: the band reservation for rotated bottom labels in
+                    // `crate::layout::axis::estimate_x_label_band` mirrors this
+                    // pivot geometry (pivot at
+                    // `r.y + tick_size + label_pad + sin(|angle|)·font_size`, label
+                    // dropping `sin·max_label_w + cos·extent` below it). The two
+                    // must be changed together or the x-axis title overlaps the
+                    // labels.
+                    anchor = TextAnchor::End;
+                    label_y -= effective_font_size * (1.0 - tick.label_angle.to_radians().sin().abs());
+                }
+                AxisOrient::Top => {
+                    // Start-anchor: with negative angles the label hangs up-and-away
+                    // from the plot rather than swinging downward into it.
+                    anchor = TextAnchor::Start;
+                }
+                AxisOrient::Left | AxisOrient::Right => {}
+            }
+        }
         if axis.show_ticks {
             nodes.push(SceneNode::Line {
                 x1: tx1,
@@ -620,6 +654,218 @@ mod tests {
         let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &[]);
         let rect_count = nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count();
         assert_eq!(rect_count, 0, "no band_colors means no rects");
+    }
+
+    // -----------------------------------------------------------------------
+    // Rotated tick-label anchor / y-offset tests (the rendering-defaults fix).
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a bottom AxisLayout with the given label_angle on every tick.
+    fn bottom_axis_with_angle(label_angle: f64) -> AxisLayout {
+        AxisLayout {
+            orient: AxisOrient::Bottom,
+            panel_index: 0,
+            axis_line: Rect { x: 0.0, y: 80.0, w: 100.0, h: 0.0 },
+            ticks: vec![
+                TickLayout { position: 25.0, label: "a".into(), label_angle, elided: false, culled: false, label_font_size: None, is_major: true },
+                TickLayout { position: 75.0, label: "b".into(), label_angle, elided: false, culled: false, label_font_size: None, is_major: true },
+            ],
+            minor_ticks: vec![],
+            title: None,
+            show_labels: true,
+            show_ticks: true,
+            show_domain: false,
+            show_grid: false,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding: None,
+        }
+    }
+
+    /// Helper: build a top AxisLayout with the given label_angle on every tick.
+    fn top_axis_with_angle(label_angle: f64) -> AxisLayout {
+        AxisLayout {
+            orient: AxisOrient::Top,
+            ..bottom_axis_with_angle(label_angle)
+        }
+    }
+
+    /// Collect (anchor, angle) from every Text node in a node list.
+    /// Returns `ferrum_scene::TextAnchor` — the type stored in `SceneNode::Text.style`.
+    fn text_anchors_and_angles(nodes: &[SceneNode]) -> Vec<(ferrum_scene::TextAnchor, f64)> {
+        nodes.iter().filter_map(|n| {
+            if let SceneNode::Text { style, .. } = n {
+                Some((style.anchor, style.angle))
+            } else {
+                None
+            }
+        }).collect()
+    }
+
+    #[test]
+    fn bottom_rotated_tick_labels_use_end_anchor() {
+        // Bottom axis with label_angle = -45: every tick-label Text node must
+        // have anchor == End and the stored angle must equal -45.
+        let axis = bottom_axis_with_angle(-45.0);
+        let theme = ThemeInputs::default();
+        let nodes = build_axis(&axis, &theme);
+        let texts = text_anchors_and_angles(&nodes);
+        assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
+        for (anchor, angle) in &texts {
+            assert_eq!(*anchor, ferrum_scene::TextAnchor::End, "rotated bottom tick must use End anchor");
+            assert!((angle - (-45.0_f64)).abs() < 0.001, "angle must be -45, got {angle}");
+        }
+    }
+
+    #[test]
+    fn bottom_flat_tick_labels_use_middle_anchor() {
+        // Regression guard: the common flat (angle == 0) case must keep Middle.
+        let axis = bottom_axis_with_angle(0.0);
+        let theme = ThemeInputs::default();
+        let nodes = build_axis(&axis, &theme);
+        let texts = text_anchors_and_angles(&nodes);
+        assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
+        for (anchor, _) in &texts {
+            assert_eq!(*anchor, ferrum_scene::TextAnchor::Middle, "flat bottom tick must keep Middle anchor");
+        }
+    }
+
+    #[test]
+    fn bottom_rotated_label_y_angle_aware_geometry() {
+        // Validates the angle-aware vertical gap formula:
+        //   label_y = base - effective_font_size * (1 - sin(|angle|))
+        // where base = r.y + tick_size + effective_font_size + label_pad.
+        //
+        // With r.y=80, tick_size=4 (default), font_size=11 (default), label_pad=2:
+        //   flat (0°):  80 + 4 + 11 + 2             = 97.0
+        //   -90°:  base - 11*(1-sin(90°)) = 97 - 0  = 97.0  (full clearance kept)
+        //   -45°:  base - 11*(1-sin(45°)) ≈ 97 - 3.22 ≈ 93.78 (partial subtraction)
+        let theme = ThemeInputs::default();
+        let font_size = theme.typography.label_font_size; // 11.0
+
+        let label_y_at = |angle: f64| -> f64 {
+            build_axis(&bottom_axis_with_angle(angle), &theme)
+                .into_iter()
+                .find_map(|n| if let SceneNode::Text { y, .. } = n { Some(y) } else { None })
+                .expect("axis must have a text node")
+        };
+
+        let flat_y = label_y_at(0.0);
+        let y_neg90 = label_y_at(-90.0);
+        let y_neg60 = label_y_at(-60.0);
+        let y_neg45 = label_y_at(-45.0);
+        let y_neg30 = label_y_at(-30.0);
+
+        // 1. At -90° the rotated label_y equals the flat label_y (sin(90°)=1 → subtract 0).
+        assert!(
+            (y_neg90 - flat_y).abs() < 0.01,
+            "at -90° label_y ({y_neg90}) must equal flat label_y ({flat_y})"
+        );
+
+        // 2. At -45° the rotated label_y is strictly between old too-tight value and flat.
+        //    Old value: flat_y - font_size (dropped the full term).
+        //    New value: flat_y - font_size*(1-sin(45°))  — greater than old, less than flat.
+        let old_tight = flat_y - font_size;
+        assert!(
+            y_neg45 > old_tight && y_neg45 < flat_y,
+            "at -45° label_y ({y_neg45}) must be between old tight ({old_tight}) and flat ({flat_y})"
+        );
+
+        // 3. Monotonic: steeper angle → larger sin → smaller subtraction → larger label_y.
+        //    y(-30) < y(-45) < y(-60) < y(-90)
+        assert!(
+            y_neg30 < y_neg45,
+            "label_y(-30°)={y_neg30} must be less than label_y(-45°)={y_neg45}"
+        );
+        assert!(
+            y_neg45 < y_neg60,
+            "label_y(-45°)={y_neg45} must be less than label_y(-60°)={y_neg60}"
+        );
+        assert!(
+            y_neg60 < y_neg90,
+            "label_y(-60°)={y_neg60} must be less than label_y(-90°)={y_neg90}"
+        );
+    }
+
+    #[test]
+    fn top_rotated_tick_labels_use_start_anchor() {
+        // Top axis with label_angle = -45: every tick-label must use Start anchor.
+        let axis = top_axis_with_angle(-45.0);
+        let theme = ThemeInputs::default();
+        let nodes = build_axis(&axis, &theme);
+        let texts = text_anchors_and_angles(&nodes);
+        assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
+        for (anchor, _) in &texts {
+            assert_eq!(*anchor, ferrum_scene::TextAnchor::Start, "rotated top tick must use Start anchor");
+        }
+    }
+
+    #[test]
+    fn top_flat_tick_labels_use_middle_anchor() {
+        // Regression guard: flat top ticks must keep Middle.
+        let axis = top_axis_with_angle(0.0);
+        let theme = ThemeInputs::default();
+        let nodes = build_axis(&axis, &theme);
+        let texts = text_anchors_and_angles(&nodes);
+        assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
+        for (anchor, _) in &texts {
+            assert_eq!(*anchor, ferrum_scene::TextAnchor::Middle, "flat top tick must keep Middle anchor");
+        }
+    }
+
+    #[test]
+    fn axis_title_anchor_unaffected_by_rotated_ticks() {
+        // A bottom axis with rotated tick labels AND a title: the title Text node
+        // must still use Middle anchor regardless of tick rotation.
+        let mut axis = bottom_axis_with_angle(-45.0);
+        axis.title = Some(crate::layout::AxisTitleLayout {
+            text: "My Axis Title".into(),
+            anchor_x: 50.0,
+            anchor_y: 110.0,
+            angle: 0.0,
+        });
+        let theme = ThemeInputs::default();
+        let nodes = build_axis(&axis, &theme);
+
+        let title_node = nodes.iter().find(|n| {
+            if let SceneNode::Text { content, .. } = n { content == "My Axis Title" } else { false }
+        }).expect("title text node must be present");
+
+        if let SceneNode::Text { style, .. } = title_node {
+            assert_eq!(
+                style.anchor, ferrum_scene::TextAnchor::Middle,
+                "axis title anchor must remain Middle even when tick labels are rotated"
+            );
+        }
+    }
+
+    #[test]
+    fn left_and_right_tick_labels_unchanged() {
+        // Left ticks → End anchor, angle 0.  Right ticks → Start anchor, angle 0.
+        let left_axis = AxisLayout {
+            orient: AxisOrient::Left,
+            ..bottom_axis_with_angle(0.0)
+        };
+        let right_axis = AxisLayout {
+            orient: AxisOrient::Right,
+            ..bottom_axis_with_angle(0.0)
+        };
+        let theme = ThemeInputs::default();
+
+        let left_texts  = text_anchors_and_angles(&build_axis(&left_axis,  &theme));
+        let right_texts = text_anchors_and_angles(&build_axis(&right_axis, &theme));
+
+        assert_eq!(left_texts.len(),  2, "expected 2 left tick-label nodes");
+        assert_eq!(right_texts.len(), 2, "expected 2 right tick-label nodes");
+
+        for (anchor, angle) in &left_texts {
+            assert_eq!(*anchor, ferrum_scene::TextAnchor::End,   "left tick must use End anchor");
+            assert!((angle).abs() < 0.001,                        "left tick angle must be 0");
+        }
+        for (anchor, angle) in &right_texts {
+            assert_eq!(*anchor, ferrum_scene::TextAnchor::Start, "right tick must use Start anchor");
+            assert!((angle).abs() < 0.001,                        "right tick angle must be 0");
+        }
     }
 
     #[test]

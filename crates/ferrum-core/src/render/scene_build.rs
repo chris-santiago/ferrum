@@ -206,6 +206,7 @@ pub fn build_scene(
                 theme.typography.title_font_size,
                 theme.padding.axis_title_padding,
                 crate::layout::DEFAULT_CULL_THRESHOLD,
+                theme.sizes.tick_size,
                 &facet_metrics,
             );
             Some(new_x_layout)
