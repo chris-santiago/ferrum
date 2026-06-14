@@ -78,6 +78,36 @@ def _x_domain_line(root: ET.Element) -> ET.Element | None:
     return max(candidates, key=lambda c: c[0])[1]
 
 
+def _x_tick_label_anchors(svg: str) -> list[str]:
+    """Text-anchors of the x-axis tick labels, ordered left-to-right.
+
+    The x-axis labels sit below the plot (largest ``y``) and are the numeric
+    tick texts; y-axis labels sit to the left and default to ``end`` anchoring.
+    We isolate the x labels as the numeric texts at the maximal label ``y`` band,
+    then sort by ``x`` so index 0 is the first (leftmost) tick label and -1 the
+    last. This makes the flush boundary anchors (start on the first, end on the
+    last) directly assertable without the y labels interfering.
+    """
+    root = _svg_root(svg)
+    labels: list[tuple[float, float, str]] = []
+    for t in _texts(root):
+        content = (t.text or "").strip()
+        if not re.fullmatch(r"[0-9.]+", content):
+            continue
+        try:
+            x = float(t.get("x", "nan"))
+            y = float(t.get("y", "nan"))
+        except ValueError:
+            continue
+        anchor = t.get("text-anchor", "middle")
+        labels.append((x, y, anchor))
+    if not labels:
+        return []
+    max_y = max(y for _, y, _ in labels)
+    x_band = [(x, anchor) for x, y, anchor in labels if abs(y - max_y) <= 2.0]
+    return [anchor for _, anchor in sorted(x_band, key=lambda p: p[0])]
+
+
 @pytest.fixture()
 def scatter_df() -> pl.DataFrame:
     return pl.DataFrame(
@@ -142,8 +172,21 @@ class TestAxisToDict:
         assert result == {"grid_dash": [4.0, 2.0], "grid_width": 0.5, "grid_color": "#ccc"}
 
     def test_label_options(self):
-        result = Axis(label_angle=45.0, label_overlap="greedy").to_dict()
-        assert result == {"label_angle": 45.0, "label_overlap": "greedy"}
+        # "greedy" is the default overlap strategy and is omitted; "parity" is a
+        # non-default value and must round-trip.
+        result = Axis(label_angle=45.0, label_overlap="parity").to_dict()
+        assert result == {"label_angle": 45.0, "label_overlap": "parity"}
+
+    def test_label_overlap_default_omitted(self):
+        # The Python default ("greedy") matches the renderer default and is omitted.
+        assert Axis(label_overlap="greedy").to_dict() == {}
+        assert Axis().to_dict() == {}
+
+    def test_label_flush_explicit_not_omitted(self):
+        # label_flush default is False (the renderer default, omitted); an explicit
+        # True must reach the renderer instead of being silently dropped.
+        assert Axis(label_flush=False).to_dict() == {}
+        assert Axis(label_flush=True).to_dict() == {"label_flush": True}
 
     def test_orient(self):
         result = Axis(orient="top").to_dict()
@@ -584,6 +627,80 @@ class TestAxisRender:
             .to_svg()
         )
         assert layered != base, "per-channel zindex must change grid/mark layering"
+
+    def test_label_flush_anchors_boundary_labels(self, scatter_df: pl.DataFrame) -> None:
+        # The default (flush off) anchors every x tick label "middle"; flush=True
+        # left-anchors the first label and right-anchors the last so the boundary
+        # labels do not overhang the plot edges. Before this fix the True value was
+        # silently dropped (it matched the Python default) and never reached Rust.
+        base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y").to_svg()
+        flushed = (
+            fm.Chart(scatter_df)
+            .mark_point()
+            .encode(x=fm.X("x", axis=fm.Axis(label_flush=True)), y="y")
+            .to_svg()
+        )
+        assert flushed != base, "label_flush=True must change the x tick-label anchoring"
+        base_anchors = _x_tick_label_anchors(base)
+        flush_anchors = _x_tick_label_anchors(flushed)
+        assert base_anchors and set(base_anchors) == {"middle"}, (
+            f"default (flush off) must keep every x tick label middle-anchored, got {base_anchors}"
+        )
+        assert flush_anchors[0] == "start", (
+            f"label_flush=True must left-anchor the first x tick label, got {flush_anchors}"
+        )
+        assert flush_anchors[-1] == "end", (
+            f"label_flush=True must right-anchor the last x tick label, got {flush_anchors}"
+        )
+
+    def test_label_flush_false_matches_default(self, scatter_df: pl.DataFrame) -> None:
+        # label_flush=False is the renderer default, so it must be byte-identical
+        # to omitting the field entirely (no silent render change either way).
+        base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y").to_svg()
+        explicit = (
+            fm.Chart(scatter_df)
+            .mark_point()
+            .encode(x=fm.X("x", axis=fm.Axis(label_flush=False)), y="y")
+            .to_svg()
+        )
+        assert explicit == base, "label_flush=False must render identically to the default"
+
+    def test_label_overlap_parity_thins_labels(self) -> None:
+        # A dense integer x axis where the greedy cascade keeps most labels; parity
+        # culls to a stride-2 subset, so it must show strictly fewer x tick labels.
+        df = pl.DataFrame({"x": list(range(20)), "y": list(range(20))})
+        greedy = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x=fm.X("x", axis=fm.Axis(label_overlap="greedy")), y="y")
+            .to_svg()
+        )
+        parity = (
+            fm.Chart(df)
+            .mark_point()
+            .encode(x=fm.X("x", axis=fm.Axis(label_overlap="parity")), y="y")
+            .to_svg()
+        )
+        assert parity != greedy, "label_overlap='parity' must change the rendered tick set"
+
+        def _x_label_count(svg: str) -> int:
+            return len(re.findall(r'text-anchor="middle"[^>]*>\d+</text>', svg))
+
+        assert _x_label_count(parity) < _x_label_count(greedy), (
+            "label_overlap='parity' must show fewer x tick labels than 'greedy'"
+        )
+
+    def test_label_overlap_greedy_matches_default(self, scatter_df: pl.DataFrame) -> None:
+        # "greedy" is the renderer default, so it must render identically to the
+        # default (the field is omitted from the spec when set to its default).
+        base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y").to_svg()
+        explicit = (
+            fm.Chart(scatter_df)
+            .mark_point()
+            .encode(x=fm.X("x", axis=fm.Axis(label_overlap="greedy")), y="y")
+            .to_svg()
+        )
+        assert explicit == base, "label_overlap='greedy' must render identically to the default"
 
 
 # ---------------------------------------------------------------------------
