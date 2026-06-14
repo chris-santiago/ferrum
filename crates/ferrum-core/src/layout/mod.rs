@@ -57,6 +57,23 @@ pub struct LayoutResult {
     pub warnings: Vec<LayoutWarning>,
 }
 
+/// Clamp a dynamically-estimated axis margin band to the per-axis
+/// `min_extent`/`max_extent` overrides (B5). `min` reserves at least that many
+/// px; `max` caps the reservation (labels may clip past the cap — allowed). When
+/// both are `None` the dynamic value passes through unchanged, preserving
+/// byte-identical default output. A `min > max` (user contradiction) resolves to
+/// `max` (the cap wins), matching the "max is a hard ceiling" semantic.
+fn clamp_axis_extent(dynamic: f64, min_extent: Option<f64>, max_extent: Option<f64>) -> f64 {
+    let mut band = dynamic;
+    if let Some(min) = min_extent {
+        band = band.max(min);
+    }
+    if let Some(max) = max_extent {
+        band = band.min(max);
+    }
+    band
+}
+
 /// Chart-level (top-of-SVG) title placement. Positioned in the band reserved
 /// at the top of the inner rect by `compute_layout`. The renderer reads
 /// `theme.title_color`, `theme.title_font_family`, `theme.title_font_size`,
@@ -664,11 +681,34 @@ pub fn compute_layout(
         0.0
     };
 
+    // Reserved band totals per axis (label band + title gutter). The orphan
+    // `min_extent`/`max_extent` overrides (B5) clamp each total to `[min, max]`
+    // after the dynamic estimate: `min` reserves at least that much, `max` caps
+    // it (labels may clip past the cap — allowed). `None`/unset leaves the
+    // dynamic value unchanged, so default output is byte-identical.
+    let x_band = clamp_axis_extent(
+        x_label_band + x_title_gutter,
+        axes.x.min_extent,
+        axes.x.max_extent,
+    );
+    let y_band = clamp_axis_extent(
+        y_label_band + y_title_gutter,
+        axes.y.min_extent,
+        axes.y.max_extent,
+    );
+
+    // Orient (B5): reserve each axis's band on its chosen side. x defaults to the
+    // bottom (Bottom orient) but moves to the top for `orient="top"`; y defaults
+    // to the left (Left orient) but moves to the right for `orient="right"`. The
+    // cross-dimension case is rejected upstream (`prepare.rs`), so only the two
+    // valid sides per dimension occur here.
+    let x_on_top = matches!(axes.x.orient, AxisOrient::Top);
+    let y_on_right = matches!(axes.y.orient, AxisOrient::Right);
     let plot_region = inner_after_legend.shrink(Inset {
-        top: 0.0,
-        right: 0.0,
-        bottom: x_label_band + x_title_gutter,
-        left: y_label_band + y_title_gutter,
+        top: if x_on_top { x_band } else { 0.0 },
+        right: if y_on_right { y_band } else { 0.0 },
+        bottom: if x_on_top { 0.0 } else { x_band },
+        left: if y_on_right { 0.0 } else { y_band },
     });
 
     // 6. Split into facet cells (or a single panel).
@@ -1114,6 +1154,108 @@ mod tests {
         assert_eq!(panel.row, 0);
         assert_eq!(panel.col, 0);
         assert!(panel.facet_key.is_none());
+    }
+
+    // ── B5 unit 2: clamp_axis_extent + orient band reservation ──────────────
+
+    #[test]
+    fn clamp_axis_extent_passthrough_when_unset() {
+        // Default path (both None) must return the dynamic value unchanged so
+        // existing layouts stay byte-identical.
+        assert_eq!(clamp_axis_extent(37.5, None, None), 37.5);
+    }
+
+    #[test]
+    fn clamp_axis_extent_min_reserves_at_least() {
+        assert_eq!(clamp_axis_extent(20.0, Some(80.0), None), 80.0);
+        // Already above min: unchanged.
+        assert_eq!(clamp_axis_extent(120.0, Some(80.0), None), 120.0);
+    }
+
+    #[test]
+    fn clamp_axis_extent_max_caps() {
+        assert_eq!(clamp_axis_extent(120.0, None, Some(40.0)), 40.0);
+        // Already below max: unchanged.
+        assert_eq!(clamp_axis_extent(20.0, None, Some(40.0)), 20.0);
+    }
+
+    #[test]
+    fn clamp_axis_extent_max_wins_over_contradictory_min() {
+        // min > max is a user contradiction; the cap (max) wins.
+        assert_eq!(clamp_axis_extent(50.0, Some(90.0), Some(40.0)), 40.0);
+    }
+
+    #[test]
+    fn min_extent_reserves_larger_left_band() {
+        // A y-axis min_extent of 200px must push the plot area right by at least
+        // that much vs. the unset baseline.
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+
+        let baseline = compute_layout(
+            &spec, &default_theme_inputs(), viewport, &dummy_axes(),
+            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[],
+        ).unwrap();
+
+        let mut axes = dummy_axes();
+        axes.y.min_extent = Some(200.0);
+        let widened = compute_layout(
+            &spec, &default_theme_inputs(), viewport, &axes,
+            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[],
+        ).unwrap();
+
+        let base_x = baseline.panels[0].plot_area.x;
+        let wide_x = widened.panels[0].plot_area.x;
+        assert!(
+            wide_x >= base_x + 100.0,
+            "min_extent=200 must reserve a much larger left band: base x={base_x}, widened x={wide_x}"
+        );
+        // The reserved left band is at least min_extent.
+        assert!(wide_x - viewport.into_rect().x >= 200.0);
+    }
+
+    #[test]
+    fn x_orient_top_reserves_band_above_plot() {
+        // orient="top" must reserve the x band on the TOP and free up the bottom,
+        // mirroring the default Bottom layout. Compare against the Bottom baseline.
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+
+        let mut bottom_axes = dummy_axes();
+        bottom_axes.x.title = Some("x title".into());
+        let baseline = compute_layout(
+            &spec, &default_theme_inputs(), viewport, &bottom_axes,
+            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[],
+        ).unwrap();
+        let base_plot = baseline.panels[0].plot_area;
+
+        let mut top_axes = dummy_axes();
+        top_axes.x.title = Some("x title".into());
+        top_axes.x.orient = AxisOrient::Top;
+        let result = compute_layout(
+            &spec, &default_theme_inputs(), viewport, &top_axes,
+            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[],
+        ).unwrap();
+        let plot = result.panels[0].plot_area;
+
+        // The reserved band moved from the bottom to the top: the top axis layout
+        // has a larger plot.y (band reserved above) and its plot bottom reaches
+        // lower than the bottom-oriented baseline's plot bottom (no bottom band).
+        assert!(
+            plot.y > base_plot.y + 5.0,
+            "top-oriented x axis must reserve a top band: base y={}, top y={}",
+            base_plot.y, plot.y
+        );
+        assert!(
+            plot.y + plot.h > base_plot.y + base_plot.h + 5.0,
+            "top-oriented x axis must free the bottom: base bottom={}, top bottom={}",
+            base_plot.y + base_plot.h, plot.y + plot.h
+        );
+        // The emitted x axis line sits at the plot top.
+        let x_axis = result.axes.iter().find(|a| a.orient == AxisOrient::Top).unwrap();
+        assert!((x_axis.axis_line.y - plot.y).abs() < 0.01);
     }
 
     #[test]

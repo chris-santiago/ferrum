@@ -188,6 +188,12 @@ pub struct PreparedInputs {
     /// field with the color channel is merged into the color legend rather than
     /// emitted here (Vega-Lite same-field merge).
     pub aux_legends: Vec<crate::layout::AuxLegendInput>,
+    /// The tick-count hints (`Axis(tick_count=N)`, default 10) used to generate
+    /// the x/y tick labels + projections. Carried so the post-prepare
+    /// tick_extra/tick_min_step adjustment (B5 unit 2) can regenerate the SAME
+    /// raw tick values that produced the current labels.
+    pub x_tick_count: usize,
+    pub y_tick_count: usize,
 }
 
 /// Per-encoding legend style overrides extracted from `encoding.color.legend.*`.
@@ -594,6 +600,13 @@ pub fn prepare_render_inputs(
         Vec::new()
     };
 
+    // B5: per-channel axis STYLING + positioning overrides (grid color/dash/
+    // width, label color/font-size, domain color/width, title styling,
+    // tick_values, padding, and the unit-2 orphans orient/translate/extents/
+    // grid_opacity/title_orient/zindex/tick_min_step/tick_extra).
+    let x_axis_style = encoding_axis_style_overrides(x_enc_axis.map(Box::as_ref), "x")?;
+    let y_axis_style = encoding_axis_style_overrides(y_enc_axis.map(Box::as_ref), "y")?;
+
     // Continuous-axis scale projection: an empty major-fraction vec means the
     // axis is categorical/discretizing (ordinal) → carrier is `None`, so layout
     // keeps the uniform-slot formula byte-identically. A non-empty vec means a
@@ -610,19 +623,14 @@ pub fn prepare_render_inputs(
         minor: y_minor_fractions,
     });
 
-    // B5: per-channel axis STYLING overrides (grid color/dash/width, label
-    // color/font-size, domain color/width, title styling, tick_values, padding).
-    // These set the per-axis override fields on `AxisInput` that
-    // `build_axis`/`build_grid` consult with a theme fallback, so they render at
-    // per-channel precedence (the chart-level `configure_axis` apply later only
-    // fills fields still `None`). Honored keys only; orphan fields are carried in
-    // the spec but not applied here (their render lands in later units).
-    let x_axis_style = encoding_axis_style_overrides(x_enc_axis.map(Box::as_ref));
-    let y_axis_style = encoding_axis_style_overrides(y_enc_axis.map(Box::as_ref));
+    // Per-channel `orient` selects the axis side; absent → the dimension default
+    // (Bottom for x, Left for y). Validated above against the channel dimension.
+    let x_orient = x_axis_style.orient.unwrap_or(AxisOrient::Bottom);
+    let y_orient = y_axis_style.orient.unwrap_or(AxisOrient::Left);
 
     let axes = AxesInput {
         x: AxisInput {
-            orient: AxisOrient::Bottom,
+            orient: x_orient,
             title: x_axis_title,
             tick_labels: x_tick_labels,
             label_angle_override: x_label_angle,
@@ -646,9 +654,17 @@ pub fn prepare_render_inputs(
             domain_color: x_axis_style.domain_color,
             domain_width: x_axis_style.domain_width,
             tick_projection: x_tick_projection,
+            translate: x_axis_style.translate,
+            min_extent: x_axis_style.min_extent,
+            max_extent: x_axis_style.max_extent,
+            grid_opacity: x_axis_style.grid_opacity,
+            title_orient: x_axis_style.title_orient,
+            zindex: x_axis_style.zindex,
+            tick_extra: x_axis_style.tick_extra,
+            tick_min_step: x_axis_style.tick_min_step,
         },
         y: AxisInput {
-            orient: AxisOrient::Left,
+            orient: y_orient,
             title: y_axis_title,
             tick_labels: y_tick_labels,
             label_angle_override: y_label_angle,
@@ -672,6 +688,14 @@ pub fn prepare_render_inputs(
             domain_color: y_axis_style.domain_color,
             domain_width: y_axis_style.domain_width,
             tick_projection: y_tick_projection,
+            translate: y_axis_style.translate,
+            min_extent: y_axis_style.min_extent,
+            max_extent: y_axis_style.max_extent,
+            grid_opacity: y_axis_style.grid_opacity,
+            title_orient: y_axis_style.title_orient,
+            zindex: y_axis_style.zindex,
+            tick_extra: y_axis_style.tick_extra,
+            tick_min_step: y_axis_style.tick_min_step,
         },
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),
@@ -853,6 +877,8 @@ pub fn prepare_render_inputs(
         coord_flipped,
         legend_overrides,
         aux_legends,
+        x_tick_count,
+        y_tick_count,
     })
 }
 
@@ -1178,17 +1204,90 @@ struct AxisStyleOverrides {
     grid_width: Option<f64>,
     domain_color: Option<palette::Srgba<u8>>,
     domain_width: Option<f64>,
+    // ── Orphan positioning/draw-order fields (B5 unit 2) ─────────────────────
+    /// Validated against the channel dimension; `None` → the channel's default
+    /// side (Bottom for x, Left for y).
+    orient: Option<AxisOrient>,
+    translate: Option<f64>,
+    min_extent: Option<f64>,
+    max_extent: Option<f64>,
+    grid_opacity: Option<f64>,
+    /// Title side/orientation; any of the four sides is accepted (a title can
+    /// run perpendicular to its axis), so no dimension validation applies.
+    title_orient: Option<AxisOrient>,
+    zindex: Option<i64>,
+    tick_extra: Option<bool>,
+    tick_min_step: Option<f64>,
+}
+
+/// Parse an axis `orient` string into an [`AxisOrient`], validating it against
+/// the channel dimension: x accepts top/bottom, y accepts left/right. A
+/// cross-dimension value fails loud per the B5 contract. Shared by the
+/// per-channel (here) and chart-level (`render::mod`) apply paths so the two
+/// cannot drift on the accepted token set or the dimension check.
+pub(crate) fn parse_axis_orient(
+    value: &str,
+    channel: &'static str,
+) -> Result<AxisOrient, RenderError> {
+    let orient = match value.trim().to_ascii_lowercase().as_str() {
+        "top" => AxisOrient::Top,
+        "bottom" => AxisOrient::Bottom,
+        "left" => AxisOrient::Left,
+        "right" => AxisOrient::Right,
+        _ => {
+            return Err(RenderError::InvalidAxisOrient {
+                channel,
+                orient: value.to_owned(),
+            })
+        }
+    };
+    let ok = match channel {
+        "x" => matches!(orient, AxisOrient::Top | AxisOrient::Bottom),
+        _ => matches!(orient, AxisOrient::Left | AxisOrient::Right),
+    };
+    if ok {
+        Ok(orient)
+    } else {
+        Err(RenderError::InvalidAxisOrient { channel, orient: value.to_owned() })
+    }
+}
+
+/// Parse a `title_orient` string into an [`AxisOrient`]. Unlike axis `orient`,
+/// all four sides are valid (a title may run perpendicular to its axis), so this
+/// only rejects an unrecognized token. Shared with the chart-level apply path.
+pub(crate) fn parse_title_orient(
+    value: &str,
+    channel: &'static str,
+) -> Result<AxisOrient, RenderError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "top" => Ok(AxisOrient::Top),
+        "bottom" => Ok(AxisOrient::Bottom),
+        "left" => Ok(AxisOrient::Left),
+        "right" => Ok(AxisOrient::Right),
+        _ => Err(RenderError::InvalidAxisOrient { channel, orient: value.to_owned() }),
+    }
 }
 
 fn encoding_axis_style_overrides(
     axis: Option<&crate::render::chart_config::AxisStyleSpec>,
-) -> AxisStyleOverrides {
-    let Some(a) = axis else { return AxisStyleOverrides::default() };
+    channel: &'static str,
+) -> Result<AxisStyleOverrides, RenderError> {
+    let Some(a) = axis else { return Ok(AxisStyleOverrides::default()) };
     let parse = |c: &Option<String>| {
         c.as_deref()
             .and_then(|s| crate::render::color::from_hex_str(s).ok())
     };
-    AxisStyleOverrides {
+    let orient = a
+        .orient
+        .as_deref()
+        .map(|s| parse_axis_orient(s, channel))
+        .transpose()?;
+    let title_orient = a
+        .title_orient
+        .as_deref()
+        .map(|s| parse_title_orient(s, channel))
+        .transpose()?;
+    Ok(AxisStyleOverrides {
         tick_values: a.values.clone(),
         title_font_size: a.title_font_size,
         title_color: parse(&a.title_color),
@@ -1201,6 +1300,113 @@ fn encoding_axis_style_overrides(
         grid_width: a.grid_width,
         domain_color: parse(&a.domain_color),
         domain_width: a.domain_width,
+        orient,
+        translate: a.translate,
+        min_extent: a.min_extent,
+        max_extent: a.max_extent,
+        grid_opacity: a.grid_opacity,
+        title_orient,
+        zindex: a.zindex,
+        tick_extra: a.tick_extra,
+        tick_min_step: a.tick_min_step,
+    })
+}
+
+/// Apply the per-axis `tick_min_step` / `tick_extra` adjustments (B5 unit 2) to a
+/// continuous axis's already-generated ticks, mutating the axis's `tick_labels`
+/// and projected `tick_projection.major` fractions in lockstep.
+///
+/// - `tick_min_step` (data units): greedily drop any tick whose raw value is
+///   within `min_step` of the previously kept tick (in domain order), thinning a
+///   dense axis without disturbing the surviving labels/fractions.
+/// - `tick_extra`: append a tick at each domain boundary (`scale min`/`max`) when
+///   not already present (within a tiny epsilon), labeled via `format_numeric`
+///   and projected to its domain fraction via the scale.
+///
+/// Both are no-ops for ordinal axes (no `tick_projection`), when neither field is
+/// set, or when the tick count drifted, so default output is byte-identical. The
+/// effective `tick_extra`/`tick_min_step` are read off the axis input AFTER the
+/// chart-level config merge, so the per-channel value already won when present.
+/// `tick_extra` formats boundary labels with `format_numeric`, so it is scoped to
+/// non-temporal continuous axes (temporal boundary formatting needs spacing
+/// context the scale only has internally — flagged as a bounded interpretation).
+///
+/// `reversed` mirrors the non-ordinal-y label reversal so the raw values pulled
+/// from the scale stay index-aligned with the (reversed) labels/fractions.
+pub(crate) fn adjust_axis_ticks(
+    axis: &mut AxisInput,
+    scale: &crate::render::scale_resolve::ScaleKind,
+    tick_count: usize,
+    reversed: bool,
+) {
+    let tick_min_step = axis.tick_min_step;
+    let tick_extra = axis.tick_extra.unwrap_or(false);
+    if tick_min_step.is_none() && !tick_extra {
+        return;
+    }
+    // Only continuous axes carry a projection; ordinal axes have no numeric
+    // domain to thin or bound.
+    let Some(proj) = axis.tick_projection.as_mut() else { return };
+    let Some(raw_src) = scale.tick_values_raw(tick_count) else { return };
+    let is_temporal = matches!(scale, crate::render::scale_resolve::ScaleKind::Time(_));
+
+    let mut raw: Vec<f64> = raw_src;
+    if reversed {
+        raw.reverse();
+    }
+    // Guard against index drift (a stale tick count): only act when the raw
+    // values, labels, and projected fractions all line up.
+    if raw.len() != axis.tick_labels.len() || raw.len() != proj.major.len() {
+        return;
+    }
+
+    // ── tick_min_step: thin ticks closer than min_step in data space ─────────
+    if let Some(min_step) = tick_min_step {
+        if min_step > 0.0 && raw.len() > 1 {
+            // Walk in domain order so "closer than min_step to the last kept" is
+            // well-defined regardless of the reversed display order.
+            let mut order: Vec<usize> = (0..raw.len()).collect();
+            order.sort_by(|&a, &b| raw[a].total_cmp(&raw[b]));
+            let mut keep = vec![false; raw.len()];
+            let mut last_kept: Option<f64> = None;
+            for &idx in &order {
+                let v = raw[idx];
+                let far_enough = last_kept.is_none_or(|lk| (v - lk).abs() >= min_step);
+                if far_enough {
+                    keep[idx] = true;
+                    last_kept = Some(v);
+                }
+            }
+            let mut k = 0;
+            raw.retain(|_| { let keep_it = keep[k]; k += 1; keep_it });
+            let mut k = 0;
+            axis.tick_labels.retain(|_| { let keep_it = keep[k]; k += 1; keep_it });
+            let mut k = 0;
+            proj.major.retain(|_| { let keep_it = keep[k]; k += 1; keep_it });
+        }
+    }
+
+    // ── tick_extra: append domain-boundary ticks if missing ──────────────────
+    if tick_extra && !is_temporal {
+        if let Some((d_lo, d_hi)) = scale.data_domain() {
+            let eps = ((d_hi - d_lo).abs() * 1e-9).max(f64::MIN_POSITIVE);
+            for boundary in [d_lo, d_hi] {
+                if !boundary.is_finite() {
+                    continue;
+                }
+                if raw.iter().any(|&v| (v - boundary).abs() <= eps) {
+                    continue;
+                }
+                let frac = scale.value_fractions(&[boundary]);
+                let Some(&f) = frac.first() else { continue };
+                if !f.is_finite() {
+                    continue;
+                }
+                raw.push(boundary);
+                axis.tick_labels.push(crate::render::format::format_numeric(boundary));
+                proj.major.push(f);
+            }
+        }
     }
 }
 
@@ -2272,6 +2478,128 @@ mod tests {
         assert!(prep.axes.y.label_color.is_none());
     }
 
+    // ── B5 unit 2: orphan positioning / tick fields ─────────────────────────
+
+    #[test]
+    fn per_channel_orient_reaches_axis_input() {
+        // `Axis(orient="top")` on x must set the x AxisInput's orient to Top.
+        let mut spec = single_layer_spec();
+        spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "orient": "top" })));
+        let batch = price_weight_batch();
+        let prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        assert_eq!(prep.axes.x.orient, AxisOrient::Top);
+        // y untouched (default Left).
+        assert_eq!(prep.axes.y.orient, AxisOrient::Left);
+    }
+
+    #[test]
+    fn cross_dimension_orient_fails_loud() {
+        // `Axis(orient="left")` on the x channel is a cross-dimension error and
+        // must surface a RenderError rather than silently dropping.
+        let mut spec = single_layer_spec();
+        spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "orient": "left" })));
+        let batch = price_weight_batch();
+        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default())
+            .expect_err("x orient='left' must fail loud");
+        match err {
+            crate::render::RenderError::InvalidAxisOrient { channel, orient } => {
+                assert_eq!(channel, "x");
+                assert_eq!(orient, "left");
+            }
+            other => panic!("expected InvalidAxisOrient, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn per_channel_orphan_positioning_fields_reach_axis_input() {
+        let mut spec = single_layer_spec();
+        spec.encoding.x = Some(enc_with_axis(
+            "price",
+            serde_json::json!({
+                "translate": 12.0,
+                "min_extent": 70.0,
+                "max_extent": 120.0,
+                "grid_opacity": 0.25,
+                "title_orient": "bottom",
+                "zindex": 1
+            }),
+        ));
+        let batch = price_weight_batch();
+        let prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        assert_eq!(prep.axes.x.translate, Some(12.0));
+        assert_eq!(prep.axes.x.min_extent, Some(70.0));
+        assert_eq!(prep.axes.x.max_extent, Some(120.0));
+        assert_eq!(prep.axes.x.grid_opacity, Some(0.25));
+        assert_eq!(prep.axes.x.title_orient, Some(AxisOrient::Bottom));
+        assert_eq!(prep.axes.x.zindex, Some(1));
+    }
+
+    #[test]
+    fn tick_min_step_thins_dense_ticks() {
+        // A continuous x-axis with tick_min_step set must drop ticks closer than
+        // the step in data space, leaving fewer labels.
+        let mut spec = single_layer_spec();
+        let batch = price_weight_batch();
+        let baseline =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        let base_count = baseline.axes.x.tick_labels.len();
+
+        // Pick a min_step larger than the natural tick spacing to force thinning.
+        spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "tick_min_step": 1e9 })));
+        let mut prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        // The adjustment runs in prepare_and_layout; invoke it directly here.
+        let tc = prep.x_tick_count;
+        adjust_axis_ticks(&mut prep.axes.x, &prep.provisional_scales.x, tc, false);
+        assert!(
+            prep.axes.x.tick_labels.len() < base_count,
+            "tick_min_step=1e9 must thin ticks: base={base_count}, after={}",
+            prep.axes.x.tick_labels.len()
+        );
+        // At least one tick survives.
+        assert!(!prep.axes.x.tick_labels.is_empty());
+        // Labels and projected fractions stay index-aligned.
+        if let Some(proj) = prep.axes.x.tick_projection.as_ref() {
+            assert_eq!(proj.major.len(), prep.axes.x.tick_labels.len());
+        }
+    }
+
+    #[test]
+    fn tick_extra_appends_domain_boundaries() {
+        // tick_extra must add a tick at each domain boundary not already present.
+        // Use awkward bounds (3.0 .. 97.0) so the scale's nice ticks (0,20,40,…)
+        // do NOT already include the exact boundaries, forcing an actual append.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("price", DataType::Float64, false),
+            Field::new("weight", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![3.0, 50.0, 97.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let mut spec = single_layer_spec();
+        spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "tick_extra": true })));
+        let mut prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        let before = prep.axes.x.tick_labels.len();
+        let tc = prep.x_tick_count;
+        adjust_axis_ticks(&mut prep.axes.x, &prep.provisional_scales.x, tc, false);
+        let after = prep.axes.x.tick_labels.len();
+        assert!(after > before, "tick_extra must append boundary ticks: {before} -> {after}");
+        // Labels and projected fractions stay index-aligned.
+        let proj = prep.axes.x.tick_projection.as_ref().unwrap();
+        assert_eq!(proj.major.len(), prep.axes.x.tick_labels.len(), "labels/fractions aligned");
+        // The exact domain-boundary labels ("3" and "97") are present.
+        assert!(prep.axes.x.tick_labels.iter().any(|l| l == "3"), "domain min tick present");
+        assert!(prep.axes.x.tick_labels.iter().any(|l| l == "97"), "domain max tick present");
+    }
+
     #[test]
     fn per_channel_axis_style_wins_over_chart_config() {
         // B5 cascade: a per-channel `Axis(grid_width=...)` on x, applied in
@@ -2294,7 +2622,7 @@ mod tests {
             },
             ..Default::default()
         };
-        crate::render::apply_axis_style_to_axis_input(&mut prep.axes.x, &cfg.style);
+        crate::render::apply_axis_style_to_axis_input(&mut prep.axes.x, &cfg.style).unwrap();
         assert_eq!(prep.axes.x.grid_width, Some(4.0), "per-channel must win over configure_axis");
     }
 
@@ -2329,8 +2657,8 @@ mod tests {
             },
             ..Default::default()
         };
-        crate::render::apply_axis_config_to_axis_input(&mut prep.axes.x, Some(&cfg));
-        crate::render::apply_axis_config_to_axis_input(&mut prep.axes.y, Some(&cfg));
+        crate::render::apply_axis_config_to_axis_input(&mut prep.axes.x, Some(&cfg)).unwrap();
+        crate::render::apply_axis_config_to_axis_input(&mut prep.axes.y, Some(&cfg)).unwrap();
 
         // Per-channel x suppression survives the conflicting chart-level toggle.
         assert!(

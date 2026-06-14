@@ -183,7 +183,43 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
         });
     }
 
+    // `translate` (B5): shift the whole axis group (line/ticks/labels/title)
+    // perpendicular to its line by N px, outward positive. Composes additively
+    // with any `offset` already baked into the layout coordinates. `None`/`0` is
+    // a no-op so default output is byte-identical.
+    if let Some(t) = axis.translate {
+        if t != 0.0 {
+            let (dx, dy) = match axis.orient {
+                AxisOrient::Bottom => (0.0, t),  // outward = down
+                AxisOrient::Top => (0.0, -t),    // outward = up
+                AxisOrient::Left => (-t, 0.0),   // outward = left
+                AxisOrient::Right => (t, 0.0),   // outward = right
+            };
+            for node in &mut nodes {
+                offset_axis_node(node, dx, dy);
+            }
+        }
+    }
+
     nodes
+}
+
+/// Translate an axis scene node (`Line`/`Text`) by `(dx, dy)`. Only the node
+/// kinds `build_axis` emits are handled; any other kind is left untouched.
+fn offset_axis_node(node: &mut SceneNode, dx: f64, dy: f64) {
+    match node {
+        SceneNode::Line { x1, y1, x2, y2, .. } => {
+            *x1 += dx;
+            *y1 += dy;
+            *x2 += dx;
+            *y2 += dy;
+        }
+        SceneNode::Text { x, y, .. } => {
+            *x += dx;
+            *y += dy;
+        }
+        _ => {}
+    }
 }
 
 pub fn build_grid(
@@ -283,15 +319,14 @@ pub fn build_grid(
 }
 
 /// Major-gridline stroke style for one axis, honoring the per-axis `grid_color`,
-/// `grid_width`, and `grid_dash` overrides and falling back to the supplied theme
-/// major-level values when an override is absent. Opacity stays theme-driven
-/// (`grid_opacity` is an orphan per-axis field in this unit).
+/// `grid_width`, `grid_dash`, and `grid_opacity` overrides and falling back to
+/// the supplied theme major-level values when an override is absent (B5).
 fn major_grid_style(
     axis: &AxisLayout,
     theme_color: palette::Srgba<u8>,
     theme_width: f64,
     theme_dash: Option<&[f64]>,
-    opacity: f64,
+    theme_opacity: f64,
 ) -> ferrum_scene::StrokeStyle {
     let color = axis
         .grid_color_rgba
@@ -299,6 +334,7 @@ fn major_grid_style(
         .unwrap_or(theme_color);
     let width = axis.grid_width.unwrap_or(theme_width);
     let dash: Option<&[f64]> = axis.grid_dash.as_deref().or(theme_dash);
+    let opacity = axis.grid_opacity.unwrap_or(theme_opacity);
     to_scene_stroke(color, width, opacity, dash, None, None)
 }
 
@@ -397,6 +433,82 @@ mod tests {
             grid_width: None,
             domain_color_rgba: None,
             domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
+        }
+    }
+
+    // ── B5 unit 2: grid_opacity + translate render ──────────────────────────
+
+    #[test]
+    fn build_grid_honors_per_axis_grid_opacity() {
+        // A y-axis with grid_opacity=0.3 must emit its gridlines at opacity 0.3,
+        // overriding the theme grid opacity.
+        let mut y_axis = y_axis_with_minors();
+        y_axis.grid_opacity = Some(0.3);
+        let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
+        let theme = ThemeInputs::default();
+        let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &[]);
+        let lines: Vec<&SceneNode> =
+            nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).collect();
+        assert!(!lines.is_empty());
+        for n in &lines {
+            if let SceneNode::Line { style, .. } = n {
+                assert!((style.opacity - 0.3).abs() < 1e-9, "grid opacity override not applied: {}", style.opacity);
+            }
+        }
+    }
+
+    #[test]
+    fn build_grid_default_grid_opacity_unchanged() {
+        // Regression guard: no grid_opacity override → theme opacity preserved.
+        let y_axis = y_axis_with_minors();
+        let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
+        let theme = ThemeInputs::default();
+        let nodes = build_grid(plot_area, None, Some(&y_axis), &theme, &[]);
+        for n in &nodes {
+            if let SceneNode::Line { style, .. } = n {
+                assert!((style.opacity - theme.grid.grid_opacity).abs() < 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn build_axis_translate_shifts_bottom_axis_downward() {
+        // A Bottom axis with translate=10 shifts every node down by 10px (outward).
+        let base = bottom_axis_with_angle(0.0);
+        let mut shifted = base.clone();
+        shifted.translate = Some(10.0);
+        let theme = ThemeInputs::default();
+        let base_nodes = build_axis(&base, &theme);
+        let shifted_nodes = build_axis(&shifted, &theme);
+        assert_eq!(base_nodes.len(), shifted_nodes.len());
+        // Compare each Line's y by 10px shift.
+        for (b, s) in base_nodes.iter().zip(shifted_nodes.iter()) {
+            if let (SceneNode::Line { y1: by1, .. }, SceneNode::Line { y1: sy1, .. }) = (b, s) {
+                assert!((sy1 - (by1 + 10.0)).abs() < 1e-9, "translate must shift line down 10px");
+            }
+            if let (SceneNode::Text { y: by, x: bx, .. }, SceneNode::Text { y: sy, x: sx, .. }) = (b, s) {
+                assert!((sy - (by + 10.0)).abs() < 1e-9, "translate must shift text down 10px");
+                assert!((sx - bx).abs() < 1e-9, "bottom translate must not move x");
+            }
+        }
+    }
+
+    #[test]
+    fn build_axis_translate_shifts_left_axis_leftward() {
+        let mut base = bottom_axis_with_angle(0.0);
+        base.orient = AxisOrient::Left;
+        let mut shifted = base.clone();
+        shifted.translate = Some(8.0);
+        let theme = ThemeInputs::default();
+        let base_nodes = build_axis(&base, &theme);
+        let shifted_nodes = build_axis(&shifted, &theme);
+        for (b, s) in base_nodes.iter().zip(shifted_nodes.iter()) {
+            if let (SceneNode::Line { x1: bx1, .. }, SceneNode::Line { x1: sx1, .. }) = (b, s) {
+                assert!((sx1 - (bx1 - 8.0)).abs() < 1e-9, "left translate must shift line left 8px");
+            }
         }
     }
 
@@ -502,6 +614,9 @@ mod tests {
             grid_width: None,
             domain_color_rgba: None,
             domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -538,6 +653,9 @@ mod tests {
             grid_width: None,
             domain_color_rgba: None,
             domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -586,6 +704,9 @@ mod tests {
             grid_width: None,
             domain_color_rgba: None,
             domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -644,6 +765,9 @@ mod tests {
             grid_width: None,
             domain_color_rgba: None,
             domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
         };
         let theme = ThemeInputs::default(); // theme.typography.label_font_size == 11.0
         let nodes = build_axis(&axis, &theme);
@@ -697,6 +821,9 @@ mod tests {
             grid_width: None,
             domain_color_rgba: None,
             domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
         };
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let band_colors = vec!["#f0f0f0".to_string(), "transparent".to_string()];
@@ -728,6 +855,9 @@ mod tests {
             label_color_rgba: None, label_font_size: None,
             grid_color_rgba: None, grid_dash: None, grid_width: None,
             domain_color_rgba: None, domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
         };
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let theme = ThemeInputs::default();
@@ -766,6 +896,9 @@ mod tests {
             grid_width: None,
             domain_color_rgba: None,
             domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
         }
     }
 
@@ -985,6 +1118,9 @@ mod tests {
             grid_width: None,
             domain_color_rgba: None,
             domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);

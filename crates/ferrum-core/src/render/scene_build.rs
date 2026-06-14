@@ -271,21 +271,45 @@ pub fn build_scene(
         } else {
             marks::axis::build_grid(panel.plot_area, panel_x_axis, panel_y_axis, theme, grid_band_colors)
         };
+        // zindex (B5): gridlines follow their axis above/below the marks. When a
+        // grid-bearing axis requests `zindex >= 1`, the whole grid block is routed
+        // above the marks (into the annotation list) alongside that axis. Computed
+        // here so the break-axis remap below still sees the grid before routing.
+        let grid_above = !suppress_axes
+            && [panel_x_axis, panel_y_axis]
+                .into_iter()
+                .flatten()
+                .any(|a| a.show_grid && a.draws_above_marks());
 
         // Axes — draw from the effective (possibly per-panel) AxisLayout values.
         // `panel_x_axis` and `panel_y_axis` already point to either the
         // independent (per-panel) or the shared (global) layout. Emit them
         // first, then any additional axes (e.g. secondary Top/Right) from the
         // global layout that were not overridden.
+        //
+        // zindex (B5): an axis with `zindex >= 1` draws ABOVE the data marks. Its
+        // nodes are routed into `axes_above_nodes` (appended to the panel's
+        // annotation list, which the renderer emits after marks) instead of
+        // `axes_nodes` (emitted before marks). `<= 0`/absent keeps the historical
+        // below-marks behavior, so default output is byte-identical.
         let mut axes_nodes: Vec<SceneNode> = Vec::new();
+        let mut axes_above_nodes: Vec<SceneNode> = Vec::new();
+        let route_axis = |axis: &AxisLayout, above: &mut Vec<SceneNode>, below: &mut Vec<SceneNode>| {
+            let nodes = marks::axis::build_axis(axis, theme);
+            if axis.draws_above_marks() {
+                above.extend(nodes);
+            } else {
+                below.extend(nodes);
+            }
+        };
         if !suppress_axes {
             if x_independent || y_independent {
                 // Emit the effective x and y axes (may be independent).
                 if let Some(ax) = panel_x_axis {
-                    axes_nodes.extend(marks::axis::build_axis(ax, theme));
+                    route_axis(ax, &mut axes_above_nodes, &mut axes_nodes);
                 }
                 if let Some(ay) = panel_y_axis {
-                    axes_nodes.extend(marks::axis::build_axis(ay, theme));
+                    route_axis(ay, &mut axes_above_nodes, &mut axes_nodes);
                 }
                 // Also emit any other orientations (Top, Right) from the global
                 // layout that are not covered by the independent overrides.
@@ -294,12 +318,12 @@ pub fn build_scene(
                         crate::layout::AxisOrient::Bottom | crate::layout::AxisOrient::Top
                         | crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right)
                     {
-                        axes_nodes.extend(marks::axis::build_axis(axis, theme));
+                        route_axis(axis, &mut axes_above_nodes, &mut axes_nodes);
                     }
                 }
             } else {
                 for axis in &panel_axes_layout {
-                    axes_nodes.extend(marks::axis::build_axis(axis, theme));
+                    route_axis(axis, &mut axes_above_nodes, &mut axes_nodes);
                 }
             }
         }
@@ -498,6 +522,15 @@ pub fn build_scene(
             }
         }
 
+        // zindex (B5): an above-marks grid is moved out of the (before-marks)
+        // `grid` slot into the `annotations` slot (emitted after marks). The
+        // below-marks default keeps the grid in `grid` for byte-identical output.
+        let (grid_below, grid_above_nodes) = if grid_above {
+            (Vec::new(), grid_nodes)
+        } else {
+            (grid_nodes, Vec::new())
+        };
+
         let final_axes: Vec<SceneNode> = {
             let mut v = axes_nodes;
             v.extend(structural_axes);
@@ -508,8 +541,12 @@ pub fn build_scene(
             v.extend(structural_marks);
             v
         };
+        // Annotation list (emitted after marks): user annotations, then any
+        // above-marks grid + axes (zindex >= 1), then structural annotations.
         let final_annotations: Vec<SceneNode> = {
             let mut v = annotation_nodes;
+            v.extend(grid_above_nodes);
+            v.extend(axes_above_nodes);
             v.extend(structural_annotations);
             v
         };
@@ -519,7 +556,7 @@ pub fn build_scene(
             plot_area,
             clip: panel_clip,
             coord: scene_coord,
-            grid: grid_nodes,
+            grid: grid_below,
             marks: final_marks,
             axes: final_axes,
             annotations: final_annotations,

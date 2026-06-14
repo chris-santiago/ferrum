@@ -71,6 +71,10 @@ pub enum RenderError {
     /// the unsupported channel (e.g. `"x2"`); `hint` is an actionable suggestion
     /// pointing at the correct mark or channel to use instead.
     UnsupportedChannelCombination { mark: &'static str, channel: &'static str, hint: &'static str },
+    /// A per-channel / chart-level `axis(orient=...)` named a side that does not
+    /// match the channel's dimension. `channel` is `"x"` or `"y"`; `orient` is
+    /// the rejected value. x accepts `top`/`bottom`; y accepts `left`/`right`.
+    InvalidAxisOrient { channel: &'static str, orient: String },
 }
 
 impl std::fmt::Display for RenderError {
@@ -108,6 +112,13 @@ impl std::fmt::Display for RenderError {
                 write!(f, "HTML bundle assembly failed: {msg}"),
             Self::UnsupportedChannelCombination { mark, channel, hint } =>
                 write!(f, "{mark}: channel '{channel}' is not supported; {hint}"),
+            Self::InvalidAxisOrient { channel, orient } => {
+                let allowed = if *channel == "x" { "'top' or 'bottom'" } else { "'left' or 'right'" };
+                write!(
+                    f,
+                    "axis orient '{orient}' is invalid for the {channel} axis (expected {allowed})"
+                )
+            }
         }
     }
 }
@@ -457,8 +468,8 @@ fn apply_chart_config_to_legend_overrides(
 pub(crate) fn apply_axis_config_to_axis_input(
     axis: &mut crate::layout::AxisInput,
     config: Option<&chart_config::AxisConfigSpec>,
-) {
-    let Some(cfg) = config else { return };
+) -> Result<(), RenderError> {
+    let Some(cfg) = config else { return Ok(()) };
     // Resolve the chart-level d3-format override BEFORE the shared style apply.
     // `effective_label_format()` is raw-first: `label_format_raw` (the chart-level
     // spelling) wins over the style's `label_format`. Applying it first ensures that
@@ -471,7 +482,15 @@ pub(crate) fn apply_axis_config_to_axis_input(
     if axis.label_format_override.is_none() {
         axis.label_format_override = cfg.effective_label_format().map(str::to_owned);
     }
-    apply_axis_style_to_axis_input(axis, &cfg.style);
+    apply_axis_style_to_axis_input(axis, &cfg.style)
+}
+
+/// The channel an axis belongs to, inferred from its current orient. x carries a
+/// horizontal axis (Top/Bottom); y a vertical one (Left/Right). Used to validate
+/// a chart-level `orient`/`title_orient` against the axis's dimension.
+fn axis_channel(orient: crate::layout::AxisOrient) -> &'static str {
+    use crate::layout::AxisOrient::{Bottom, Top};
+    if matches!(orient, Top | Bottom) { "x" } else { "y" }
 }
 
 /// Apply an [`AxisStyleSpec`](chart_config::AxisStyleSpec) to one `AxisInput`,
@@ -482,13 +501,61 @@ pub(crate) fn apply_axis_config_to_axis_input(
 /// `EncodingSpec.axis` path (B5 fix). Honored styling keys (grid color/dash/width,
 /// label color/font-size, domain color/width) flow into per-axis override fields
 /// on `AxisInput` that `build_axis`/`build_grid` consult with a theme fallback, so
-/// they render per-axis instead of mutating the shared theme. Orphan fields
-/// (`orient`, `translate`, extents, `tick_extra`, etc.) are intentionally not
-/// applied here — their render support lands in later units.
+/// they render per-axis instead of mutating the shared theme.
+///
+/// The positioning/draw-order orphan fields (`orient`, `translate`,
+/// `min_extent`/`max_extent`, `grid_opacity`, `title_orient`, `zindex`) are also
+/// threaded here at chart level (B5 unit 2) with the same fill-only-if-`None`
+/// precedence, so `configure_axis(orient=...)` works alongside `fm.Axis(...)`.
+/// An invalid `orient` (cross-dimension) or `title_orient` token fails loud via
+/// `RenderError::InvalidAxisOrient`. `tick_extra`/`tick_min_step` are NOT applied
+/// here — they need the scale and are handled in `prepare_and_layout`.
 pub(crate) fn apply_axis_style_to_axis_input(
     axis: &mut crate::layout::AxisInput,
     style: &chart_config::AxisStyleSpec,
-) {
+) -> Result<(), RenderError> {
+    let channel = axis_channel(axis.orient);
+    // ── Positioning / draw-order orphans (B5 unit 2) ─────────────────────────
+    // `orient` rewrites the axis's own orient (validated against its dimension).
+    // Only applied when the per-channel path did not already move it off the
+    // dimension default, so per-channel wins.
+    if let Some(ref o) = style.orient {
+        let parsed = prepare::parse_axis_orient(o, channel)?;
+        let at_default = matches!(
+            (channel, axis.orient),
+            ("x", crate::layout::AxisOrient::Bottom) | ("y", crate::layout::AxisOrient::Left)
+        );
+        if at_default {
+            axis.orient = parsed;
+        }
+    }
+    if let Some(ref to) = style.title_orient {
+        let parsed = prepare::parse_title_orient(to, channel)?;
+        if axis.title_orient.is_none() {
+            axis.title_orient = Some(parsed);
+        }
+    }
+    if axis.translate.is_none() {
+        axis.translate = style.translate;
+    }
+    if axis.min_extent.is_none() {
+        axis.min_extent = style.min_extent;
+    }
+    if axis.max_extent.is_none() {
+        axis.max_extent = style.max_extent;
+    }
+    if axis.grid_opacity.is_none() {
+        axis.grid_opacity = style.grid_opacity;
+    }
+    if axis.zindex.is_none() {
+        axis.zindex = style.zindex;
+    }
+    if axis.tick_extra.is_none() {
+        axis.tick_extra = style.tick_extra;
+    }
+    if axis.tick_min_step.is_none() {
+        axis.tick_min_step = style.tick_min_step;
+    }
     // label_angle_override.
     if axis.label_angle_override.is_none() {
         axis.label_angle_override = style.label_angle;
@@ -561,6 +628,7 @@ pub(crate) fn apply_axis_style_to_axis_input(
     if axis.domain_width.is_none() {
         axis.domain_width = style.domain_width;
     }
+    Ok(())
 }
 
 /// Re-format tick label strings using a d3-format string override.
@@ -718,10 +786,21 @@ fn prepare_and_layout(
 
     // Apply ChartConfig axis overrides (level 3) to AxisInput (level 2 wins when already set).
     // Order: shared `axis` key first, then axis-specific keys (axis_x / axis_y) win.
-    apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis.as_ref());
-    apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis.as_ref());
-    apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis_x.as_ref());
-    apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis_y.as_ref());
+    apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis.as_ref())?;
+    apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis.as_ref())?;
+    apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis_x.as_ref())?;
+    apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis_y.as_ref())?;
+    // tick_extra / tick_min_step (B5 unit 2): apply AFTER the config merge so the
+    // effective value (per-channel wins, chart-level fallback) is on `AxisInput`,
+    // then adjust the generated ticks against the provisional scale. No-op when
+    // neither field is set, so default output is byte-identical. The non-ordinal
+    // y labels/fractions were reversed in prepare, so the raw values are reversed
+    // in lockstep.
+    let y_reversed =
+        !matches!(prep.provisional_scales.y, scale_resolve::ScaleKind::Ordinal(_));
+    let (x_tc, y_tc) = (prep.x_tick_count, prep.y_tick_count);
+    prepare::adjust_axis_ticks(&mut prep.axes.x, &prep.provisional_scales.x, x_tc, false);
+    prepare::adjust_axis_ticks(&mut prep.axes.y, &prep.provisional_scales.y, y_tc, y_reversed);
     // Apply label_format_override to tick labels (requires axis config to be set first).
     apply_label_format_to_axis(&mut prep.axes.x);
     apply_label_format_to_axis(&mut prep.axes.y);
@@ -1818,8 +1897,70 @@ mod chart_config_application_tests {
             style: AxisStyleSpec { title_font_size: Some(16.0), ..Default::default() },
             ..Default::default()
         };
-        apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         assert_eq!(axis.title_font_size, Some(16.0));
+    }
+
+    #[test]
+    fn chart_config_orient_propagates_when_at_default() {
+        // configure_axis(orient="top") on an x-axis at its Bottom default moves
+        // it to Top; the orphan positioning fields flow too.
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            Some("X".to_string()),
+            vec!["0".to_string()],
+            None,
+        );
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec {
+                orient: Some("top".to_string()),
+                translate: Some(5.0),
+                grid_opacity: Some(0.4),
+                zindex: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        assert_eq!(axis.orient, crate::layout::AxisOrient::Top);
+        assert_eq!(axis.translate, Some(5.0));
+        assert_eq!(axis.grid_opacity, Some(0.4));
+        assert_eq!(axis.zindex, Some(1));
+    }
+
+    #[test]
+    fn chart_config_cross_dimension_orient_fails_loud() {
+        // configure_axis(orient="left") on an x-axis is a cross-dimension error.
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            vec![],
+            None,
+        );
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec { orient: Some("left".to_string()), ..Default::default() },
+            ..Default::default()
+        };
+        let err = apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap_err();
+        assert!(matches!(err, RenderError::InvalidAxisOrient { channel: "x", .. }));
+    }
+
+    #[test]
+    fn chart_config_orient_does_not_override_per_channel() {
+        // An x-axis already moved to Top by the per-channel path must not be moved
+        // again by a conflicting chart-level orient (per-channel wins).
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Top, // per-channel already set Top
+            None,
+            vec![],
+            None,
+        );
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec { orient: Some("bottom".to_string()), ..Default::default() },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        assert_eq!(axis.orient, crate::layout::AxisOrient::Top, "per-channel orient must win");
     }
 
     #[test]
@@ -1834,7 +1975,7 @@ mod chart_config_application_tests {
             style: AxisStyleSpec { title_color: Some("#ff0000".to_string()), ..Default::default() },
             ..Default::default()
         };
-        apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         let c = axis.title_color.expect("title_color should be Some");
         assert_eq!(c.red, 0xff);
         assert_eq!(c.green, 0x00);
@@ -1853,7 +1994,7 @@ mod chart_config_application_tests {
             style: AxisStyleSpec { title_padding: Some(12.0), ..Default::default() },
             ..Default::default()
         };
-        apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         assert_eq!(axis.title_padding, Some(12.0));
     }
 
@@ -1866,7 +2007,7 @@ mod chart_config_application_tests {
             None,
         );
         let cfg = AxisConfigSpec { label_format_raw: Some(",.0f".to_string()), ..Default::default() };
-        apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         apply_label_format_to_axis(&mut axis);
         // ",.0f" formats with thousands separator and 0 decimal places.
         assert_eq!(axis.tick_labels, vec!["1,000", "2,000", "3,000"]);
@@ -1885,7 +2026,7 @@ mod chart_config_application_tests {
             style: AxisStyleSpec { values: Some(vec![0.0, 0.5, 1.0]), ..Default::default() },
             ..Default::default()
         };
-        apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         apply_label_format_to_axis(&mut axis);
         assert_eq!(axis.tick_labels, vec!["0.0%", "50.0%", "100.0%"]);
     }
@@ -1902,7 +2043,7 @@ mod chart_config_application_tests {
             style: AxisStyleSpec { label_padding: Some(6.0), ..Default::default() },
             ..Default::default()
         };
-        apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         assert_eq!(axis.label_padding, Some(6.0));
     }
 
@@ -1919,7 +2060,7 @@ mod chart_config_application_tests {
             style: AxisStyleSpec { label_angle: Some(-90.0), ..Default::default() },
             ..Default::default()
         };
-        apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         // -45.0 should win because it was already set (Some).
         assert_eq!(axis.label_angle_override, Some(-45.0));
     }

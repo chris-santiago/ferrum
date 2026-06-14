@@ -87,6 +87,39 @@ pub struct AxisInput {
     /// uniform-slot placement byte-identically. Presence of this field — not the
     /// scale type — drives the placement branch. See [`TickProjection`].
     pub tick_projection: Option<TickProjection>,
+    // ── Orphan positioning/draw-order fields (B5 unit 2) ─────────────────────
+    // All `None`/default keep output byte-identical; only a per-channel /
+    // chart-level spec lights these up. Consumed in `layout_*_axis` (translate,
+    // extents, title_orient) or carried onto `AxisLayout` for the renderer /
+    // scene assembler (grid_opacity, translate, zindex).
+    /// Shift the axis group perpendicular to its line by N px (outward
+    /// positive), composing additively with the renderer's `offset` handling.
+    /// `None` → no shift.
+    pub translate: Option<f64>,
+    /// Lower bound (px) for the reserved axis margin band — reserve at least
+    /// this much. `None` → dynamic band only.
+    pub min_extent: Option<f64>,
+    /// Upper bound (px) for the reserved axis margin band — cap at this much
+    /// (labels may clip past it). `None` → no cap.
+    pub max_extent: Option<f64>,
+    /// Per-axis grid-line opacity override `[0, 1]`. `None` →
+    /// `theme.grid.grid_opacity`.
+    pub grid_opacity: Option<f64>,
+    /// Side/orientation of the axis title relative to its axis (e.g. a
+    /// horizontal title on a left axis). `None` → the orient-default rotation.
+    pub title_orient: Option<AxisOrient>,
+    /// Coarse draw order relative to marks: `>= 1` → axis + grid drawn above
+    /// marks; `<= 0` (default) → below marks. `None` → default (below).
+    pub zindex: Option<i64>,
+    /// Append a tick at each domain boundary (scale min/max) if not already
+    /// present. Applied during the prepare/layout merge against the scale (so
+    /// chart-level and per-channel resolve to one value first). `None`/`false` →
+    /// no boundary ticks.
+    pub tick_extra: Option<bool>,
+    /// Minimum step (data units) between generated ticks; ticks closer than this
+    /// in data space are dropped. Applied against the scale. `None` → no
+    /// thinning.
+    pub tick_min_step: Option<f64>,
 }
 
 /// Continuous-axis scale projection carried by [`AxisInput`]. Groups the three
@@ -147,6 +180,14 @@ impl AxisInput {
             domain_color: None,
             domain_width: None,
             tick_projection: None,
+            translate: None,
+            min_extent: None,
+            max_extent: None,
+            grid_opacity: None,
+            title_orient: None,
+            zindex: None,
+            tick_extra: None,
+            tick_min_step: None,
         }
     }
 }
@@ -226,9 +267,33 @@ pub struct AxisLayout {
     /// Domain-line width override. `None` → `theme.sizes.axis_line_width`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain_width: Option<f64>,
+    // ── Orphan positioning/draw-order overrides (B5 unit 2) ──────────────────
+    /// Per-axis grid-line opacity override `[0, 1]`. `None` →
+    /// `theme.grid.grid_opacity`. Consumed by `build_grid` for this axis's
+    /// gridlines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid_opacity: Option<f64>,
+    /// Perpendicular shift (px, outward positive) applied to every axis scene
+    /// node (line/ticks/labels/title) at render time. `None`/`0` → no shift.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translate: Option<f64>,
+    /// Coarse draw order relative to marks: `>= 1` → this axis + its gridlines
+    /// drawn above marks; `<= 0`/`None` (default) → below marks (current
+    /// behavior). Consumed by the scene assembler.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zindex: Option<i64>,
 }
 
 fn default_true() -> bool { true }
+
+impl AxisLayout {
+    /// Whether this axis (and its gridlines) should be drawn above the data
+    /// marks. Maps the bounded `zindex` semantic (B5): `>= 1` → above,
+    /// `<= 0`/absent → below (the historical default).
+    pub fn draws_above_marks(&self) -> bool {
+        self.zindex.is_some_and(|z| z >= 1)
+    }
+}
 
 /// Convert an `AxisInput` color override (`Srgba<u8>`) to the `[R, G, B, A]`
 /// array form stored on `AxisLayout`. Mirrors the existing `title_color`
@@ -591,8 +656,13 @@ pub fn layout_y_axis(
     // projection of `v`.
     let minor_ticks = build_minor_ticks(input, (panel_area.y + panel_area.h, panel_area.y));
 
+    // Orient: Left (default) places the axis on the panel's left edge; Right on
+    // the right edge. Any other orient is rejected upstream (`prepare.rs`
+    // validates x→{top,bottom}, y→{left,right}); default to Left defensively.
+    let on_right = matches!(input.orient, AxisOrient::Right);
+    let axis_x = if on_right { panel_area.x + panel_area.w } else { panel_area.x };
     let axis_line = Rect {
-        x: panel_area.x,
+        x: axis_x,
         y: panel_area.y,
         w: 1.0,
         h: panel_area.h,
@@ -604,16 +674,33 @@ pub fn layout_y_axis(
     let title = input.title.as_ref().map(|text| {
         let label_band = compute_y_label_band_width(input, label_font_size, metrics);
         let title_h = metrics.line_height(effective_title_font_size);
+        // The title sits beyond the tick labels, on the same side as the axis.
+        let title_x = if on_right {
+            axis_x + label_band + effective_title_padding + title_h / 2.0
+        } else {
+            axis_x - label_band - effective_title_padding - title_h / 2.0
+        };
+        // `title_orient` overrides the title's own rotation/anchor. The default
+        // for a vertical (left/right) axis is a 90°-rotated title; a horizontal
+        // `title_orient` (top/bottom) renders the title flat (e.g. a horizontal
+        // caption above a left axis). The default orient (no override) keeps the
+        // historical rotation: `-90` on the left, `+90` on the right.
+        let angle = match input.title_orient {
+            Some(AxisOrient::Top) | Some(AxisOrient::Bottom) => 0.0,
+            Some(AxisOrient::Right) => 90.0,
+            Some(AxisOrient::Left) => -90.0,
+            None => if on_right { 90.0 } else { -90.0 },
+        };
         AxisTitleLayout {
             text: text.clone(),
-            anchor_x: panel_area.x - label_band - effective_title_padding - title_h / 2.0,
+            anchor_x: title_x,
             anchor_y: panel_area.y + panel_area.h / 2.0,
-            angle: -90.0,
+            angle,
         }
     });
 
     AxisLayout {
-        orient: AxisOrient::Left,
+        orient: input.orient,
         panel_index,
         axis_line,
         ticks,
@@ -633,6 +720,9 @@ pub fn layout_y_axis(
         grid_width: input.grid_width,
         domain_color_rgba: input.domain_color.map(rgba_array),
         domain_width: input.domain_width,
+        grid_opacity: input.grid_opacity,
+        translate: input.translate,
+        zindex: input.zindex,
     }
 }
 
@@ -1074,9 +1164,14 @@ pub fn layout_x_axis(
         (ticks, warning)
     };
 
+    // Orient: Bottom (default) places the axis at the panel's bottom edge; Top
+    // at the top edge. Any other orient is rejected upstream (`prepare.rs`
+    // validates x→{top,bottom}); default to Bottom defensively.
+    let on_top = matches!(input.orient, AxisOrient::Top);
+    let axis_y = if on_top { panel_area.y } else { panel_area.y + panel_area.h };
     let axis_line = Rect {
         x: panel_area.x,
-        y: panel_area.y + panel_area.h,
+        y: axis_y,
         w: panel_area.w,
         h: 1.0,
     };
@@ -1122,15 +1217,24 @@ pub fn layout_x_axis(
                 label_pad,
             )
         };
+        // Title sits beyond the tick labels, on the same side as the axis. For a
+        // Top axis the band extends upward (subtract); for Bottom, downward (add).
+        let band = label_extent + effective_title_padding + title_h / 2.0;
+        let anchor_y = if on_top { axis_y - band } else { axis_y + band };
+        // `title_orient` overrides the title rotation. The default for a
+        // horizontal (top/bottom) axis is a flat title (`0`); a vertical
+        // `title_orient` (left/right) rotates it (e.g. a vertical caption beside a
+        // bottom axis).
+        let angle = match input.title_orient {
+            Some(AxisOrient::Left) => -90.0,
+            Some(AxisOrient::Right) => 90.0,
+            _ => 0.0,
+        };
         AxisTitleLayout {
             text: text.clone(),
             anchor_x: panel_area.x + panel_area.w / 2.0,
-            anchor_y: panel_area.y
-                + panel_area.h
-                + label_extent
-                + effective_title_padding
-                + title_h / 2.0,
-            angle: 0.0,
+            anchor_y,
+            angle,
         }
     });
 
@@ -1140,7 +1244,7 @@ pub fn layout_x_axis(
     let minor_ticks = build_minor_ticks(input, (panel_area.x, panel_area.x + panel_area.w));
 
     (AxisLayout {
-        orient: AxisOrient::Bottom,
+        orient: input.orient,
         panel_index,
         axis_line,
         ticks,
@@ -1160,6 +1264,9 @@ pub fn layout_x_axis(
         grid_width: input.grid_width,
         domain_color_rgba: input.domain_color.map(rgba_array),
         domain_width: input.domain_width,
+        grid_opacity: input.grid_opacity,
+        translate: input.translate,
+        zindex: input.zindex,
     }, warning)
 }
 
@@ -1203,6 +1310,9 @@ mod tests {
             grid_width: None,
             domain_color_rgba: None,
             domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
         };
         let json = serde_json::to_string(&a).unwrap();
         let parsed: AxisLayout = serde_json::from_str(&json).unwrap();
@@ -1232,6 +1342,9 @@ mod tests {
             grid_width: None,
             domain_color_rgba: None,
             domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
         };
         let json = serde_json::to_string(&a).unwrap();
         assert!(json.contains(r#""orient":"left""#));
@@ -1287,6 +1400,124 @@ mod tests {
         let title = axis.title.unwrap();
         assert_eq!(title.text, "Price");
         assert!((title.angle - (-90.0)).abs() < 1e-9);
+    }
+
+    // ── B5 unit 2: orient-aware axis_line + title_orient ────────────────────
+
+    #[test]
+    fn draws_above_marks_zindex_threshold() {
+        let mut a = AxisLayout {
+            orient: AxisOrient::Bottom,
+            panel_index: 0,
+            axis_line: Rect::ZERO,
+            ticks: vec![],
+            minor_ticks: vec![],
+            title: None,
+            show_labels: true,
+            show_ticks: true,
+            show_domain: true,
+            show_grid: true,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
+        };
+        assert!(!a.draws_above_marks(), "None zindex draws below (default)");
+        a.zindex = Some(0);
+        assert!(!a.draws_above_marks(), "zindex 0 draws below");
+        a.zindex = Some(-2);
+        assert!(!a.draws_above_marks(), "negative zindex draws below");
+        a.zindex = Some(1);
+        assert!(a.draws_above_marks(), "zindex >= 1 draws above");
+        a.zindex = Some(99);
+        assert!(a.draws_above_marks(), "any zindex >= 1 draws above");
+    }
+
+    #[test]
+    fn y_axis_right_orient_places_line_on_right_edge() {
+        let mut input = AxisInput::new(
+            AxisOrient::Right,
+            Some("Price".into()),
+            vec!["0".into(), "1".into(), "2".into()],
+            None,
+        );
+        input.orient = AxisOrient::Right;
+        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let m = mock(10.0);
+        let axis = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        assert_eq!(axis.orient, AxisOrient::Right);
+        // Axis line on the right edge (x + w), not the left.
+        assert!((axis.axis_line.x - (100.0 + 300.0)).abs() < 1e-9);
+        // Default title rotation on a right axis is +90 (reads bottom-to-top).
+        let title = axis.title.unwrap();
+        assert!((title.angle - 90.0).abs() < 1e-9);
+        // Title is to the right of the axis line.
+        assert!(title.anchor_x > axis.axis_line.x);
+    }
+
+    #[test]
+    fn y_axis_horizontal_title_orient_renders_flat() {
+        let mut input = AxisInput::new(
+            AxisOrient::Left,
+            Some("Price".into()),
+            vec!["0".into(), "1".into()],
+            None,
+        );
+        input.title_orient = Some(AxisOrient::Top);
+        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let m = mock(10.0);
+        let axis = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        // A horizontal title_orient renders the y-axis title flat (angle 0).
+        assert_eq!(axis.title.unwrap().angle, 0.0);
+    }
+
+    #[test]
+    fn x_axis_top_orient_places_line_on_top_edge() {
+        let mut input = AxisInput::new(
+            AxisOrient::Top,
+            Some("Feature".into()),
+            vec!["a".into(), "b".into(), "c".into()],
+            None,
+        );
+        input.orient = AxisOrient::Top;
+        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let m = mock(10.0);
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 30, 4.0, &m);
+        assert_eq!(axis.orient, AxisOrient::Top);
+        // Axis line at the panel top, not the bottom.
+        assert!((axis.axis_line.y - 50.0).abs() < 1e-9);
+        // Title is above the axis line (smaller y).
+        let title = axis.title.unwrap();
+        assert!(title.anchor_y < axis.axis_line.y);
+    }
+
+    #[test]
+    fn x_axis_default_orient_unchanged() {
+        // Regression guard: a Bottom x-axis still places the line at the panel
+        // bottom and a flat title below it (byte-identity sentinel).
+        let input = AxisInput::new(
+            AxisOrient::Bottom,
+            Some("Feature".into()),
+            vec!["a".into(), "b".into()],
+            None,
+        );
+        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let m = mock(10.0);
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 30, 4.0, &m);
+        assert_eq!(axis.orient, AxisOrient::Bottom);
+        assert!((axis.axis_line.y - (50.0 + 200.0)).abs() < 1e-9);
+        let title = axis.title.unwrap();
+        assert_eq!(title.angle, 0.0);
+        assert!(title.anchor_y > axis.axis_line.y);
     }
 
     #[test]

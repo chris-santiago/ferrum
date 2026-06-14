@@ -252,6 +252,18 @@ impl ScaleKind {
         self.project_values_to_fractions(&values, NonFinite::RejectAll)
     }
 
+    /// Raw numeric tick *values* for a continuous scale, in the same order and
+    /// count as [`tick_labels`](Self::tick_labels) (both delegate to
+    /// `ticks_internal`). `None` for ordinal scales (no numeric tick domain).
+    /// Used by `prepare.rs` to apply the per-axis `tick_min_step` / `tick_extra`
+    /// adjustments in data space (B5 unit 2).
+    pub(crate) fn tick_values_raw(&self, count_hint: usize) -> Option<Vec<f64>> {
+        if matches!(self, Self::Ordinal(_)) {
+            return None;
+        }
+        Some(dispatch_continuous!(self, ticks_internal, count_hint))
+    }
+
     /// Continuous-axis scale-projection support for explicit tick values
     /// (`configure_axis(tick_values=[...])`). Projects each supplied data value
     /// to a domain fraction `t ∈ [0, 1]` over this scale's resolved range, in
