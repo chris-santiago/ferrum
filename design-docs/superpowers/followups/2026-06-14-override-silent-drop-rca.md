@@ -104,7 +104,20 @@ To make `.override()` honor its documented contract:
 - **(B) Remove the API + docs** — only if every documented path now has a typed equivalent and the escape-hatch value is judged nil. Loses the stated purpose ("for the rare case where the typed surface hasn't caught up"). Not recommended without product sign-off.
 - A do-nothing / `NotImplementedError` stub is explicitly **not** acceptable per project rules.
 
-## 8. Links
+## 8. Provenance — how it shipped as a no-op
+
+The feature was designed correctly and then half-built; tests and docs covered for the missing half. Chain, with commit evidence:
+
+1. **Design was complete and explicit.** `40cbf18` (2026-05-24, `design-docs/superpowers/{specs,plans}/2026-05-24-declarative-configure-*`) specified render-time application, `FerrumOverrideError` with closest-match suggestion, a strict 6-level cascade with override on top, and — verbatim — **"No silent no-ops."** What shipped is exactly what the design forbade.
+2. **Implementation built only the storage half.** `e7c1ecc` added `.override()` (writes `self._overrides`) and `test_override.py`, but never the render-time consumer. The companion plan task *"Wire cascade resolution in `_render.py`: merge config layers in precedence order"* (plan line 78) was done for `configure` layers but silently omitted the override level of the cascade. `git log -S` shows a `_overrides` consumer never existed in `_render.py`.
+3. **The checklist conflated build with verify, and was never maintained.** Plan line 76 — `[ ] Add .override() to Chart — store overrides, validate at render time` — is one checkbox for two halves; partial completion was inexpressible. `grep -c '[x]'` on the plan → **0**: no box was ever ticked, so the checklist gave zero completion signal.
+4. **Tests certified a hollow feature (the largest hole).** The plan specified (line 41) the tests should prove *"valid paths apply, unknown paths error, deprecation warnings."* The shipped `test_override.py` has **0** render/apply/error/deprecation assertions (`grep -cE 'to_svg|to_spec|FerrumOverrideError|pytest.warns|pytest.raises'` → 0) — it asserts only `c._overrides == {...}`. The tests drifted from their own spec, locked in the no-op, and kept CI green.
+5. **Docs were written from the design, not the code.** `b289c67` documented the full designed contract. The example even carries a tell — `# uses typed method in practice; shown for illustration` (`override.md:144`) — i.e. someone hit the dead feature while making the screenshot, worked around it with `configure`, and shipped the doc instead of filing the bug.
+6. **Merges propagated it unchallenged.** With no consumer to drop, no merge "broke" it; a missing consumer is invisible to conflict detection, and CI stayed green on the hollow tests.
+
+**Systemic lessons (beyond this bug):** tests that assert internal structure instead of rendered behavior can certify a no-op; docs written to a design with no doc-vs-implementation liveness gate describe features that don't exist; plan checklists that bundle "build" with "verify it works" and aren't maintained hide partial completion. Sibling features built in the same vintage may share the pattern.
+
+## 9. Links
 
 - Override method: `src/ferrum/chart.py:2495`
 - Render pipeline (missing consumer): `src/ferrum/_render.py` `_resolve_chart_config` / `_render_inputs`
