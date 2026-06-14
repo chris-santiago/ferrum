@@ -697,6 +697,9 @@ pub fn prepare_render_inputs(
             zindex: x_axis_style.zindex,
             tick_extra: x_axis_style.tick_extra,
             tick_min_step: x_axis_style.tick_min_step,
+            offset: x_axis_style.offset,
+            label_flush: x_axis_style.label_flush,
+            label_overlap: x_axis_style.label_overlap,
         },
         y: AxisInput {
             orient: y_orient,
@@ -731,6 +734,9 @@ pub fn prepare_render_inputs(
             zindex: y_axis_style.zindex,
             tick_extra: y_axis_style.tick_extra,
             tick_min_step: y_axis_style.tick_min_step,
+            offset: y_axis_style.offset,
+            label_flush: y_axis_style.label_flush,
+            label_overlap: y_axis_style.label_overlap,
         },
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),
@@ -1273,6 +1279,14 @@ struct AxisStyleOverrides {
     zindex: Option<i64>,
     tick_extra: Option<bool>,
     tick_min_step: Option<f64>,
+    // ── Residual positioning/overlap fields (B5 unit 6b) ─────────────────────
+    /// Perpendicular shift away from the plot edge (px); composes additively with
+    /// `translate` at render time.
+    offset: Option<f64>,
+    /// Flush first/last tick labels at the axis ends.
+    label_flush: Option<bool>,
+    /// Tick-label overlap strategy; parsed from the Vega-style token/bool.
+    label_overlap: Option<crate::layout::LabelOverlap>,
 }
 
 /// Parse an axis `orient` string into an [`AxisOrient`], validating it against
@@ -1304,6 +1318,32 @@ pub(crate) fn parse_axis_orient(
         Ok(orient)
     } else {
         Err(RenderError::InvalidAxisOrient { channel, orient: value.to_owned() })
+    }
+}
+
+/// Parse a `label_overlap` token (`fm.Axis(label_overlap=...)` /
+/// `configure_axis(label_overlap=...)`) into a [`LabelOverlap`] strategy (B5 unit
+/// 6b). Maps the Vega-style values onto the existing cascade primitives:
+/// - `"true"` → [`LabelOverlap::ShowAll`] (show every label, may overlap).
+/// - `"false"` / `"greedy"` → [`LabelOverlap::Greedy`] (cascade default cull).
+/// - `"parity"` → [`LabelOverlap::Parity`] (stride-2 decimation).
+/// - `"rotate"` → [`LabelOverlap::Rotate`] (force the rotate stage).
+///
+/// An unrecognized token is **bounded to the nearest existing behavior**
+/// (`Greedy`, the cascade default) rather than failing loud, since
+/// `label_overlap` only biases an already-graceful cascade — an unknown value
+/// degrades to the default rather than erroring on a render. Returns `None` for
+/// an empty/whitespace token so callers leave the cascade unmodified.
+pub(crate) fn parse_label_overlap(value: &str) -> Option<crate::layout::LabelOverlap> {
+    use crate::layout::LabelOverlap;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" => None,
+        "true" => Some(LabelOverlap::ShowAll),
+        "parity" => Some(LabelOverlap::Parity),
+        "rotate" => Some(LabelOverlap::Rotate),
+        // "false", "greedy", and any unrecognized token bound to the cascade
+        // default (greedy) — the nearest existing behavior.
+        _ => Some(LabelOverlap::Greedy),
     }
 }
 
@@ -1364,6 +1404,9 @@ fn encoding_axis_style_overrides(
         zindex: a.zindex,
         tick_extra: a.tick_extra,
         tick_min_step: a.tick_min_step,
+        offset: a.offset,
+        label_flush: a.label_flush,
+        label_overlap: a.label_overlap.as_deref().and_then(parse_label_overlap),
     })
 }
 
@@ -1964,6 +2007,22 @@ mod tests {
     use arrow::array::{Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
+
+    #[test]
+    fn parse_label_overlap_maps_vega_tokens() {
+        use crate::layout::LabelOverlap;
+        assert_eq!(parse_label_overlap("true"), Some(LabelOverlap::ShowAll));
+        assert_eq!(parse_label_overlap("parity"), Some(LabelOverlap::Parity));
+        assert_eq!(parse_label_overlap("rotate"), Some(LabelOverlap::Rotate));
+        assert_eq!(parse_label_overlap("greedy"), Some(LabelOverlap::Greedy));
+        assert_eq!(parse_label_overlap("false"), Some(LabelOverlap::Greedy));
+        // Case-insensitive + whitespace-tolerant.
+        assert_eq!(parse_label_overlap("  PARITY "), Some(LabelOverlap::Parity));
+        // Empty → no override (leave the cascade unmodified).
+        assert_eq!(parse_label_overlap(""), None);
+        // Unrecognized → bounded to the cascade default (greedy), not an error.
+        assert_eq!(parse_label_overlap("nonsense"), Some(LabelOverlap::Greedy));
+    }
 
     fn batch3() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![

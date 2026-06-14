@@ -16,6 +16,28 @@ pub enum AxisOrient {
     Right,
 }
 
+/// Tick-label overlap strategy (B5 unit 6b: `fm.Axis(label_overlap=...)` /
+/// `configure_axis(label_overlap=...)`). Maps the Vega-style values onto the
+/// existing collision cascade (`cascade_collision_recovery`) primitives rather
+/// than introducing a new collision engine.
+///
+/// `None` on [`AxisInput`] (the default) runs the unmodified cascade, so default
+/// output is byte-identical. Only an explicit value changes behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LabelOverlap {
+    /// `true`: show ALL labels, skipping the overlap cull/elide stages. Labels
+    /// may visibly overlap — the user's explicit choice.
+    ShowAll,
+    /// `false` / `"greedy"`: keep as many labels as fit without overlap (the
+    /// cascade's default cull/decimation behavior, unchanged).
+    Greedy,
+    /// `"parity"`: show every other label (stride-2 decimation), reusing the
+    /// cascade's culling with a fixed parity stride.
+    Parity,
+    /// `"rotate"`: force the cascade's rotate stage (steepest cascade angle).
+    Rotate,
+}
+
 /// Caller-supplied per-axis input. Phase 6 takes both x and y always.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AxisInput {
@@ -120,6 +142,21 @@ pub struct AxisInput {
     /// in data space are dropped. Applied against the scale. `None` → no
     /// thinning.
     pub tick_min_step: Option<f64>,
+    // ── Residual positioning/overlap fields (B5 unit 6b) ─────────────────────
+    /// Shift the axis perpendicular AWAY from the plot edge by N px (Vega axis
+    /// `offset`). Composes **additively** with [`translate`](Self::translate):
+    /// the renderer applies `translate + offset` as a single outward shift.
+    /// `None`/`0` → no shift.
+    pub offset: Option<f64>,
+    /// Flush the first/last tick labels at the axis ends so edge labels align
+    /// within the plot bounds instead of overflowing (Vega `labelFlush`). `None`
+    /// /`false` → all labels keep their default anchor (byte-identical). Consumed
+    /// by `render::marks::axis::build_axis`.
+    pub label_flush: Option<bool>,
+    /// Tick-label overlap strategy override. `None` → run the unmodified
+    /// collision cascade (`cascade_collision_recovery`). Only consumed by the
+    /// x-axis layout (`layout_x_axis`); the y-axis applies no overlap policy.
+    pub label_overlap: Option<LabelOverlap>,
 }
 
 /// Continuous-axis scale projection carried by [`AxisInput`]. Groups the three
@@ -188,6 +225,9 @@ impl AxisInput {
             zindex: None,
             tick_extra: None,
             tick_min_step: None,
+            offset: None,
+            label_flush: None,
+            label_overlap: None,
         }
     }
 }
@@ -282,6 +322,16 @@ pub struct AxisLayout {
     /// behavior). Consumed by the scene assembler.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zindex: Option<i64>,
+    /// Perpendicular shift (px, outward positive) from the plot edge (Vega axis
+    /// `offset`). Applied **additively with `translate`** at render time as a
+    /// single outward shift. `None`/`0` → no shift. (B5 unit 6b)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<f64>,
+    /// Flush the first/last tick labels at the axis ends so edge labels align
+    /// within the plot bounds (Vega `labelFlush`). `None`/`false` → default
+    /// anchors (byte-identical). Consumed by `build_axis`. (B5 unit 6b)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_flush: Option<bool>,
 }
 
 fn default_true() -> bool { true }
@@ -723,6 +773,8 @@ pub fn layout_y_axis(
         grid_opacity: input.grid_opacity,
         translate: input.translate,
         zindex: input.zindex,
+        offset: input.offset,
+        label_flush: input.label_flush,
     }
 }
 
@@ -877,15 +929,68 @@ fn wrap_label(
 /// Run the graduated collision cascade (spec SS4.1). Tries recovery strategies in
 /// order (S0 flat -> S1 wrap -> S2 font shrink -> S3 rotate -> S4 cull -> S5 elide),
 /// returning as soon as one resolves all collisions.
+///
+/// `label_overlap` (B5 unit 6b) biases the cascade onto an explicit primitive
+/// instead of running the graduated flow:
+/// - [`LabelOverlap::ShowAll`] short-circuits to S0-Flat with every label
+///   visible (no cull/elide), so labels may overlap — the user's choice.
+/// - [`LabelOverlap::Parity`] short-circuits to a stride-2 cull (S4 with a fixed
+///   parity stride), independent of measured width.
+/// - [`LabelOverlap::Rotate`] short-circuits to S3-rotate at the steepest cascade
+///   angle.
+/// - `None` / [`LabelOverlap::Greedy`] runs the unmodified cascade (default),
+///   keeping default output byte-identical.
 fn cascade_collision_recovery(
     labels: &[String],
     slot_w: f64,
     label_font_size: f64,
     cull_threshold: u32,
+    label_overlap: Option<LabelOverlap>,
     metrics: &dyn TextMetrics,
 ) -> CascadeResult {
     let n = labels.len();
     let all_visible = vec![true; n];
+
+    // ── label_overlap override (B5 unit 6b) ─────────────────────────────────
+    // Bias the cascade onto an explicit primitive. `None`/`Greedy` skip this and
+    // fall through to the graduated cascade below (byte-identical default).
+    match label_overlap {
+        Some(LabelOverlap::ShowAll) => {
+            // Show ALL labels flat: skip the cull/elide stages entirely.
+            return CascadeResult {
+                labels: labels.to_vec(),
+                angle: 0.0,
+                font_size: None,
+                visible: all_visible,
+                strategy: CascadeStrategy::Flat,
+            };
+        }
+        Some(LabelOverlap::Parity) => {
+            // Stride-2 decimation: show every other label. Reuses the cascade's
+            // cull primitive with a fixed parity stride (no width measurement).
+            let visible: Vec<bool> = (0..n).map(|i| i % 2 == 0).collect();
+            return CascadeResult {
+                labels: labels.to_vec(),
+                angle: 0.0,
+                font_size: None,
+                visible,
+                strategy: CascadeStrategy::Culled { stride: 2 },
+            };
+        }
+        Some(LabelOverlap::Rotate) => {
+            // Force the cascade's rotate stage at the steepest angle.
+            let angle = *ANGLE_CASCADE.last().unwrap(); // -90.0
+            return CascadeResult {
+                labels: labels.to_vec(),
+                angle,
+                font_size: None,
+                visible: all_visible,
+                strategy: CascadeStrategy::Rotated { angle },
+            };
+        }
+        // Greedy is the default cascade behavior — fall through.
+        None | Some(LabelOverlap::Greedy) => {}
+    }
 
     // Measure all labels at their original font size.
     let widths: Vec<f64> = labels
@@ -1132,12 +1237,14 @@ pub fn layout_x_axis(
         };
         (ticks, warning)
     } else {
-        // Run the graduated collision cascade.
+        // Run the graduated collision cascade, biased by any `label_overlap`
+        // override (B5 unit 6b).
         let cascade = cascade_collision_recovery(
             &input.tick_labels,
             cascade_slot_w,
             label_font_size,
             cull_threshold,
+            input.label_overlap,
             metrics,
         );
         let is_elision_strategy = matches!(cascade.strategy, CascadeStrategy::Elided { .. });
@@ -1267,6 +1374,8 @@ pub fn layout_x_axis(
         grid_opacity: input.grid_opacity,
         translate: input.translate,
         zindex: input.zindex,
+        offset: input.offset,
+        label_flush: input.label_flush,
     }, warning)
 }
 
@@ -1313,6 +1422,8 @@ mod tests {
             grid_opacity: None,
             translate: None,
             zindex: None,
+            offset: None,
+            label_flush: None,
         };
         let json = serde_json::to_string(&a).unwrap();
         let parsed: AxisLayout = serde_json::from_str(&json).unwrap();
@@ -1345,6 +1456,8 @@ mod tests {
             grid_opacity: None,
             translate: None,
             zindex: None,
+            offset: None,
+            label_flush: None,
         };
         let json = serde_json::to_string(&a).unwrap();
         assert!(json.contains(r#""orient":"left""#));
@@ -1430,6 +1543,8 @@ mod tests {
             grid_opacity: None,
             translate: None,
             zindex: None,
+            offset: None,
+            label_flush: None,
         };
         assert!(!a.draws_above_marks(), "None zindex draws below (default)");
         a.zindex = Some(0);
@@ -1982,7 +2097,7 @@ mod tests {
         // "AAAA"=4*10=40 <= 90 -> no collision -> S0 flat.
         let labels: Vec<String> = vec!["AAAA".into(), "BBBB".into(), "CCCC".into(), "DDDD".into()];
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 100.0, 11.0, 8, &m);
+        let result = cascade_collision_recovery(&labels, 100.0, 11.0, 8, None, &m);
         assert_eq!(result.angle, 0.0);
         assert!(result.font_size.is_none());
         assert_eq!(result.strategy, CascadeStrategy::Flat);
@@ -2006,7 +2121,7 @@ mod tests {
             "minimal_context".into(),
         ];
         let m = mock(6.0);
-        let result = cascade_collision_recovery(&labels, 100.0, 11.0, 8, &m);
+        let result = cascade_collision_recovery(&labels, 100.0, 11.0, 8, None, &m);
         assert_eq!(result.angle, 0.0);
         assert!(result.font_size.is_none());
         assert_eq!(result.strategy, CascadeStrategy::Wrapped);
@@ -2032,7 +2147,7 @@ mod tests {
             measure: |text: &str, font_size: f64| text.chars().count() as f64 * font_size * 0.5,
             line_h_factor: 1.2,
         };
-        let result = cascade_collision_recovery(&labels, 60.0, 11.0, 8, &m);
+        let result = cascade_collision_recovery(&labels, 60.0, 11.0, 8, None, &m);
         assert_eq!(result.angle, 0.0);
         assert_eq!(result.strategy, CascadeStrategy::FontReduced);
         let expected_fs = 11.0 * 0.82;
@@ -2052,7 +2167,7 @@ mod tests {
             "UVWXYZABCD".into(), "EFGHIJKLMN".into(),
         ];
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 80.0, 11.0, 8, &m);
+        let result = cascade_collision_recovery(&labels, 80.0, 11.0, 8, None, &m);
         assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: -45.0 });
         assert_eq!(result.angle, -45.0);
         assert!(result.font_size.is_none());
@@ -2072,7 +2187,7 @@ mod tests {
             "ABCDEF".into(), "GHIJKL".into(), "MNOPQR".into(), "STUVWX".into(),
         ];
         let m = mock(10.0);
-        let result = cascade_collision_recovery(&labels, 55.0, 11.0, 8, &m);
+        let result = cascade_collision_recovery(&labels, 55.0, 11.0, 8, None, &m);
         assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: -30.0 });
         assert_eq!(result.angle, -30.0);
     }
@@ -2137,7 +2252,7 @@ mod tests {
         // This is only > slot_w if slot_w < 8.6e-15. That's effectively zero.
         //
         // slot_w = 0 triggers degenerate path. Let's use slot_w at exactly 0.
-        let result = cascade_collision_recovery(&labels, 0.0, 11.0, 8, &m);
+        let result = cascade_collision_recovery(&labels, 0.0, 11.0, 8, None, &m);
         // With slot_w=0, threshold=0, all labels collide.
         // S0-S2: fail (width > 0).
         // S3: for each angle, w*cos_factor <= 0 only if cos_factor=0 exactly.
@@ -2173,7 +2288,7 @@ mod tests {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 8, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 8, None, &m);
         // 20 > 8 (cull_threshold) -> culling eligible.
         match result.strategy {
             CascadeStrategy::Culled { stride } => {
@@ -2199,7 +2314,7 @@ mod tests {
             measure: |_text: &str, _fs: f64| 1e18,
             line_h_factor: 1.2,
         };
-        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 8, &m);
+        let result = cascade_collision_recovery(&labels, 10.0, 11.0, 8, None, &m);
         match result.strategy {
             CascadeStrategy::Elided { count } => {
                 assert!(count > 0, "expected some labels elided");
@@ -2257,7 +2372,7 @@ mod tests {
         ];
         let m = mock(5.0); // fixed_width: chars * 5
         let slot_w = 600.0 / 9.0; // ~66.67
-        let result = cascade_collision_recovery(&labels, slot_w, 11.0, 8, &m);
+        let result = cascade_collision_recovery(&labels, slot_w, 11.0, 8, None, &m);
         // Verify: no elision.
         assert!(
             !matches!(result.strategy, CascadeStrategy::Elided { .. }),
@@ -2941,5 +3056,104 @@ mod tests {
             "negative label_padding must not shrink the rotated band below \
              the band computed with label_padding=0: band(-10)={band_neg} < band(0)={band_zero}"
         );
+    }
+
+    // --- label_overlap override (B5 unit 6b) ------------------------------------
+
+    /// Six dense colliding labels (each 80px) in a 40px slot — the default
+    /// cascade would cull/rotate. Used to exercise the overlap overrides.
+    fn dense_labels() -> Vec<String> {
+        (0..6).map(|i| format!("L{i}")).collect()
+    }
+
+    #[test]
+    fn label_overlap_show_all_keeps_every_label_visible() {
+        // ShowAll short-circuits to flat with all ticks visible — labels may
+        // overlap, but none are culled or elided.
+        let labels = dense_labels();
+        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
+        let result =
+            cascade_collision_recovery(&labels, 40.0, 11.0, 8, Some(LabelOverlap::ShowAll), &m);
+        assert_eq!(result.strategy, CascadeStrategy::Flat);
+        assert_eq!(result.angle, 0.0);
+        assert!(result.visible.iter().all(|v| *v), "ShowAll must keep all labels visible");
+        assert_eq!(result.labels, labels, "ShowAll must not elide any label");
+    }
+
+    #[test]
+    fn label_overlap_parity_shows_every_other_label() {
+        // Parity short-circuits to a stride-2 cull regardless of width.
+        let labels = dense_labels();
+        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
+        let result =
+            cascade_collision_recovery(&labels, 40.0, 11.0, 8, Some(LabelOverlap::Parity), &m);
+        assert_eq!(result.strategy, CascadeStrategy::Culled { stride: 2 });
+        let visible: Vec<bool> = result.visible;
+        assert_eq!(visible, vec![true, false, true, false, true, false]);
+        let shown = visible.iter().filter(|v| **v).count();
+        assert_eq!(shown, 3, "parity on 6 labels shows 3");
+    }
+
+    #[test]
+    fn label_overlap_rotate_forces_steepest_angle_all_visible() {
+        // Rotate short-circuits to the steepest cascade angle with all visible.
+        let labels = dense_labels();
+        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
+        let result =
+            cascade_collision_recovery(&labels, 40.0, 11.0, 8, Some(LabelOverlap::Rotate), &m);
+        let steepest = *ANGLE_CASCADE.last().unwrap();
+        assert_eq!(result.strategy, CascadeStrategy::Rotated { angle: steepest });
+        assert_eq!(result.angle, steepest);
+        assert!(result.visible.iter().all(|v| *v), "rotate keeps all labels");
+    }
+
+    #[test]
+    fn label_overlap_greedy_matches_default_cascade() {
+        // Greedy must run the unmodified cascade — identical to `None`.
+        let labels = dense_labels();
+        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
+        let greedy =
+            cascade_collision_recovery(&labels, 40.0, 11.0, 8, Some(LabelOverlap::Greedy), &m);
+        let default = cascade_collision_recovery(&labels, 40.0, 11.0, 8, None, &m);
+        assert_eq!(greedy.strategy, default.strategy);
+        assert_eq!(greedy.angle, default.angle);
+        assert_eq!(greedy.visible, default.visible);
+        assert_eq!(greedy.labels, default.labels);
+    }
+
+    #[test]
+    fn layout_x_axis_parity_culls_alternating_ticks() {
+        // End-to-end through layout_x_axis: a parity override on a dense axis
+        // marks alternating ticks culled.
+        let mut input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            dense_labels(),
+            None,
+        );
+        input.label_overlap = Some(LabelOverlap::Parity);
+        let panel = Rect { x: 0.0, y: 100.0, w: 240.0, h: 0.0 };
+        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
+        let (axis, _warn) = layout_x_axis(&input, panel, 0, 11.0, 11.0, 4.0, 8, 4.0, &m);
+        let culled: Vec<bool> = axis.ticks.iter().map(|t| t.culled).collect();
+        assert_eq!(culled, vec![false, true, false, true, false, true]);
+    }
+
+    #[test]
+    fn layout_x_axis_show_all_culls_nothing_on_dense_axis() {
+        // A dense axis that the default cascade would cull renders every label
+        // when label_overlap = ShowAll.
+        let mut input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            dense_labels(),
+            None,
+        );
+        input.label_overlap = Some(LabelOverlap::ShowAll);
+        let panel = Rect { x: 0.0, y: 100.0, w: 240.0, h: 0.0 };
+        let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
+        let (axis, _warn) = layout_x_axis(&input, panel, 0, 11.0, 11.0, 4.0, 8, 4.0, &m);
+        assert!(axis.ticks.iter().all(|t| !t.culled), "ShowAll must cull nothing");
+        assert!(axis.ticks.iter().all(|t| t.label_angle == 0.0), "ShowAll stays flat");
     }
 }

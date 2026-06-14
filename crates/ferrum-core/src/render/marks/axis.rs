@@ -42,7 +42,22 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
     // inside the tick area, producing overlapping or invisible labels.
     let label_pad = axis.label_padding.unwrap_or(2.0).max(0.0);
 
-    for tick in &axis.ticks {
+    // `label_flush` (B5): flush the first/last *rendered* tick labels at the axis
+    // ends so edge labels align within the plot bounds instead of overflowing.
+    // `None`/`false` keeps every label at its default anchor (byte-identical).
+    // Edge ticks are the first and last non-culled ticks in index order (ticks are
+    // emitted in axis order). Single-tick axes have first == last; flush still
+    // applies a coherent edge anchor. Only flat labels are flushed — rotated
+    // labels already carry edge anchors via the rotation handling below.
+    let flush = axis.label_flush.unwrap_or(false);
+    let first_label_idx = flush
+        .then(|| axis.ticks.iter().position(|t| !t.culled))
+        .flatten();
+    let last_label_idx = flush
+        .then(|| axis.ticks.iter().rposition(|t| !t.culled))
+        .flatten();
+
+    for (tick_idx, tick) in axis.ticks.iter().enumerate() {
         // Per-tick font size wins; else the per-axis override; else the theme.
         let effective_font_size = tick.label_font_size.unwrap_or(axis_label_font_size);
 
@@ -102,6 +117,35 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
                 AxisOrient::Left | AxisOrient::Right => {}
             }
         }
+
+        // `label_flush` edge alignment (B5). Applies only to flat labels at the
+        // first/last rendered tick — rotated labels already carry edge anchors.
+        if tick.label_angle == 0.0 && (Some(tick_idx) == first_label_idx || Some(tick_idx) == last_label_idx) {
+            let is_first = Some(tick_idx) == first_label_idx;
+            match axis.orient {
+                // Horizontal axes: the leftmost (first) label anchors at its start
+                // edge, the rightmost (last) at its end edge, so neither spills past
+                // the plot bounds. A lone tick (first == last) is anchored Start.
+                AxisOrient::Bottom | AxisOrient::Top => {
+                    anchor = if is_first { TextAnchor::Start } else { TextAnchor::End };
+                }
+                // Vertical axes: the top (first) label baseline drops so its cap sits
+                // within the plot top; the bottom (last) label baseline rises so its
+                // descender sits within the plot bottom. The default baseline is
+                // tick-centered (`+ font/3`); flush shifts it to a within-bounds
+                // edge alignment.
+                AxisOrient::Left | AxisOrient::Right => {
+                    label_y = if is_first {
+                        // Top edge: baseline below the tick by the cap height.
+                        tick.position + effective_font_size
+                    } else {
+                        // Bottom edge: baseline at the tick (no descender past it).
+                        tick.position
+                    };
+                }
+            }
+        }
+
         if axis.show_ticks {
             nodes.push(SceneNode::Line {
                 x1: tx1,
@@ -183,21 +227,21 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
         });
     }
 
-    // `translate` (B5): shift the whole axis group (line/ticks/labels/title)
-    // perpendicular to its line by N px, outward positive. Composes additively
-    // with any `offset` already baked into the layout coordinates. `None`/`0` is
-    // a no-op so default output is byte-identical.
-    if let Some(t) = axis.translate {
-        if t != 0.0 {
-            let (dx, dy) = match axis.orient {
-                AxisOrient::Bottom => (0.0, t),  // outward = down
-                AxisOrient::Top => (0.0, -t),    // outward = up
-                AxisOrient::Left => (-t, 0.0),   // outward = left
-                AxisOrient::Right => (t, 0.0),   // outward = right
-            };
-            for node in &mut nodes {
-                offset_axis_node(node, dx, dy);
-            }
+    // `translate` + `offset` (B5): shift the whole axis group
+    // (line/ticks/labels/title) perpendicular to its line, outward positive. Both
+    // are perpendicular shifts away from the plot edge and **compose additively**
+    // (`translate` is Vega's axis translate, `offset` its axis offset). `None`/`0`
+    // on both is a no-op so default output is byte-identical.
+    let shift = axis.translate.unwrap_or(0.0) + axis.offset.unwrap_or(0.0);
+    if shift != 0.0 {
+        let (dx, dy) = match axis.orient {
+            AxisOrient::Bottom => (0.0, shift),  // outward = down
+            AxisOrient::Top => (0.0, -shift),    // outward = up
+            AxisOrient::Left => (-shift, 0.0),   // outward = left
+            AxisOrient::Right => (shift, 0.0),   // outward = right
+        };
+        for node in &mut nodes {
+            offset_axis_node(node, dx, dy);
         }
     }
 
@@ -436,6 +480,8 @@ mod tests {
             grid_opacity: None,
             translate: None,
             zindex: None,
+            offset: None,
+            label_flush: None,
         }
     }
 
@@ -617,6 +663,8 @@ mod tests {
             grid_opacity: None,
             translate: None,
             zindex: None,
+            offset: None,
+            label_flush: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -656,6 +704,8 @@ mod tests {
             grid_opacity: None,
             translate: None,
             zindex: None,
+            offset: None,
+            label_flush: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -707,6 +757,8 @@ mod tests {
             grid_opacity: None,
             translate: None,
             zindex: None,
+            offset: None,
+            label_flush: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -768,6 +820,8 @@ mod tests {
             grid_opacity: None,
             translate: None,
             zindex: None,
+            offset: None,
+            label_flush: None,
         };
         let theme = ThemeInputs::default(); // theme.typography.label_font_size == 11.0
         let nodes = build_axis(&axis, &theme);
@@ -824,6 +878,8 @@ mod tests {
             grid_opacity: None,
             translate: None,
             zindex: None,
+            offset: None,
+            label_flush: None,
         };
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let band_colors = vec!["#f0f0f0".to_string(), "transparent".to_string()];
@@ -858,6 +914,8 @@ mod tests {
             grid_opacity: None,
             translate: None,
             zindex: None,
+            offset: None,
+            label_flush: None,
         };
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let theme = ThemeInputs::default();
@@ -899,6 +957,8 @@ mod tests {
             grid_opacity: None,
             translate: None,
             zindex: None,
+            offset: None,
+            label_flush: None,
         }
     }
 
@@ -1121,6 +1181,8 @@ mod tests {
             grid_opacity: None,
             translate: None,
             zindex: None,
+            offset: None,
+            label_flush: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -1134,5 +1196,154 @@ mod tests {
             assert_eq!(style.color.g, 0x00);
             assert_eq!(style.color.b, 0x00);
         }
+    }
+
+    // ── B5 unit 6b: offset (additive with translate) + label_flush ──────────
+
+    #[test]
+    fn build_axis_offset_shifts_bottom_axis_downward() {
+        // A Bottom axis with offset=30 shifts every node down 30px (outward),
+        // exactly like translate.
+        let base = bottom_axis_with_angle(0.0);
+        let mut shifted = base.clone();
+        shifted.offset = Some(30.0);
+        let theme = ThemeInputs::default();
+        let base_nodes = build_axis(&base, &theme);
+        let shifted_nodes = build_axis(&shifted, &theme);
+        for (b, s) in base_nodes.iter().zip(shifted_nodes.iter()) {
+            if let (SceneNode::Line { y1: by1, .. }, SceneNode::Line { y1: sy1, .. }) = (b, s) {
+                assert!((sy1 - (by1 + 30.0)).abs() < 1e-9, "offset must shift line down 30px");
+            }
+        }
+    }
+
+    #[test]
+    fn build_axis_offset_composes_additively_with_translate() {
+        // offset=10 + translate=10 → a single combined 20px outward shift.
+        let base = bottom_axis_with_angle(0.0);
+        let mut both = base.clone();
+        both.offset = Some(10.0);
+        both.translate = Some(10.0);
+        let theme = ThemeInputs::default();
+        let base_nodes = build_axis(&base, &theme);
+        let both_nodes = build_axis(&both, &theme);
+        for (b, s) in base_nodes.iter().zip(both_nodes.iter()) {
+            if let (SceneNode::Line { y1: by1, .. }, SceneNode::Line { y1: sy1, .. }) = (b, s) {
+                assert!(
+                    (sy1 - (by1 + 20.0)).abs() < 1e-9,
+                    "offset+translate must compose additively to a 20px shift"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_axis_offset_none_is_byte_identical() {
+        // Regression guard: no offset/translate → unchanged geometry.
+        let base = bottom_axis_with_angle(0.0);
+        let theme = ThemeInputs::default();
+        let a = build_axis(&base, &theme);
+        let b = build_axis(&base, &theme);
+        assert_eq!(a, b);
+    }
+
+    /// A Bottom axis with three flat ticks (left/middle/right) for flush tests.
+    fn three_tick_bottom_axis() -> AxisLayout {
+        let mut axis = bottom_axis_with_angle(0.0);
+        axis.ticks = vec![
+            crate::layout::TickLayout {
+                position: 10.0, label: "left".into(), label_angle: 0.0,
+                elided: false, culled: false, label_font_size: None, is_major: true,
+            },
+            crate::layout::TickLayout {
+                position: 50.0, label: "mid".into(), label_angle: 0.0,
+                elided: false, culled: false, label_font_size: None, is_major: true,
+            },
+            crate::layout::TickLayout {
+                position: 90.0, label: "right".into(), label_angle: 0.0,
+                elided: false, culled: false, label_font_size: None, is_major: true,
+            },
+        ];
+        axis
+    }
+
+    /// Collect (label content, anchor) for every tick-label Text node.
+    fn label_anchors(nodes: &[SceneNode]) -> Vec<(String, ferrum_scene::TextAnchor)> {
+        nodes.iter().filter_map(|n| {
+            if let SceneNode::Text { content, style, .. } = n {
+                Some((content.clone(), style.anchor))
+            } else {
+                None
+            }
+        }).collect()
+    }
+
+    #[test]
+    fn build_axis_label_flush_anchors_edge_labels_on_bottom() {
+        // label_flush=true: first (leftmost) label → Start, last (rightmost) →
+        // End, interior → Middle.
+        let mut axis = three_tick_bottom_axis();
+        axis.label_flush = Some(true);
+        let theme = ThemeInputs::default();
+        let anchors = label_anchors(&build_axis(&axis, &theme));
+        assert_eq!(anchors.len(), 3);
+        assert_eq!(anchors[0], ("left".into(), ferrum_scene::TextAnchor::Start));
+        assert_eq!(anchors[1], ("mid".into(), ferrum_scene::TextAnchor::Middle));
+        assert_eq!(anchors[2], ("right".into(), ferrum_scene::TextAnchor::End));
+    }
+
+    #[test]
+    fn build_axis_label_flush_off_keeps_all_middle() {
+        // Regression guard: no flush → every bottom label stays Middle.
+        let axis = three_tick_bottom_axis();
+        let theme = ThemeInputs::default();
+        let anchors = label_anchors(&build_axis(&axis, &theme));
+        for (_, a) in &anchors {
+            assert_eq!(*a, ferrum_scene::TextAnchor::Middle, "flush off keeps Middle");
+        }
+    }
+
+    #[test]
+    fn build_axis_label_flush_skips_culled_edges() {
+        // With the leftmost tick culled, the first *rendered* label is the middle
+        // tick, which then takes the Start edge anchor.
+        let mut axis = three_tick_bottom_axis();
+        axis.label_flush = Some(true);
+        axis.ticks[0].culled = true;
+        let theme = ThemeInputs::default();
+        let anchors = label_anchors(&build_axis(&axis, &theme));
+        // Culled tick emits no label; 2 labels remain: mid (now first→Start),
+        // right (last→End).
+        assert_eq!(anchors.len(), 2);
+        assert_eq!(anchors[0], ("mid".into(), ferrum_scene::TextAnchor::Start));
+        assert_eq!(anchors[1], ("right".into(), ferrum_scene::TextAnchor::End));
+    }
+
+    #[test]
+    fn build_axis_label_flush_vertical_shifts_edge_baselines() {
+        // On a Left axis, flush moves the first (top) and last (bottom) label
+        // baselines off the tick-centered default to within-bounds edges.
+        let mut axis = three_tick_bottom_axis();
+        axis.orient = AxisOrient::Left;
+        axis.label_flush = Some(true);
+        let theme = ThemeInputs::default();
+        let base = {
+            let mut no_flush = axis.clone();
+            no_flush.label_flush = None;
+            build_axis(&no_flush, &theme)
+        };
+        let flushed = build_axis(&axis, &theme);
+        let ys = |nodes: &[SceneNode]| -> Vec<f64> {
+            nodes.iter().filter_map(|n| {
+                if let SceneNode::Text { y, .. } = n { Some(*y) } else { None }
+            }).collect()
+        };
+        let base_ys = ys(&base);
+        let flush_ys = ys(&flushed);
+        assert_eq!(base_ys.len(), 3);
+        // Edge baselines move; the interior one is unchanged.
+        assert!((flush_ys[0] - base_ys[0]).abs() > 1e-6, "top edge baseline must shift");
+        assert!((flush_ys[1] - base_ys[1]).abs() < 1e-9, "interior baseline unchanged");
+        assert!((flush_ys[2] - base_ys[2]).abs() > 1e-6, "bottom edge baseline must shift");
     }
 }

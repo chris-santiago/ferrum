@@ -606,6 +606,19 @@ pub(crate) fn apply_axis_style_to_axis_input(
     if axis.tick_min_step.is_none() {
         axis.tick_min_step = style.tick_min_step;
     }
+    // ── Residual positioning/overlap orphans (B5 unit 6b) ────────────────────
+    if axis.offset.is_none() {
+        axis.offset = style.offset;
+    }
+    if axis.label_flush.is_none() {
+        axis.label_flush = style.label_flush;
+    }
+    if axis.label_overlap.is_none() {
+        axis.label_overlap = style
+            .label_overlap
+            .as_deref()
+            .and_then(prepare::parse_label_overlap);
+    }
     // label_angle_override.
     if axis.label_angle_override.is_none() {
         axis.label_angle_override = style.label_angle;
@@ -2011,6 +2024,61 @@ mod chart_config_application_tests {
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         assert_eq!(axis.orient, crate::layout::AxisOrient::Top, "per-channel orient must win");
+    }
+
+    #[test]
+    fn chart_config_offset_flush_overlap_propagate() {
+        // configure_axis(offset=, label_flush=, label_overlap=) flow to AxisInput.
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            vec!["0".to_string()],
+            None,
+        );
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec {
+                offset: Some(30.0),
+                label_flush: Some(true),
+                label_overlap: Some("parity".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        assert_eq!(axis.offset, Some(30.0));
+        assert_eq!(axis.label_flush, Some(true));
+        assert_eq!(axis.label_overlap, Some(crate::layout::LabelOverlap::Parity));
+    }
+
+    #[test]
+    fn chart_config_offset_flush_overlap_do_not_override_per_channel() {
+        // Per-channel values already on the AxisInput must win over chart-level.
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            vec!["0".to_string()],
+            None,
+        );
+        axis.offset = Some(5.0);
+        axis.label_flush = Some(false);
+        axis.label_overlap = Some(crate::layout::LabelOverlap::ShowAll);
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec {
+                offset: Some(30.0),
+                label_flush: Some(true),
+                label_overlap: Some("rotate".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        assert_eq!(axis.offset, Some(5.0), "per-channel offset must win");
+        assert_eq!(axis.label_flush, Some(false), "per-channel label_flush must win");
+        assert_eq!(
+            axis.label_overlap,
+            Some(crate::layout::LabelOverlap::ShowAll),
+            "per-channel label_overlap must win",
+        );
     }
 
     #[test]
