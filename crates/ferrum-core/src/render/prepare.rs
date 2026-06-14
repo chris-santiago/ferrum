@@ -233,6 +233,28 @@ pub struct LegendPreparedOverrides {
     /// B5: symbol shape override from `encoding.color.legend.symbol_type`.
     /// Per-channel wins over chart-level `configure_legend(symbol_type=...)`.
     pub symbol_type: Option<String>,
+    /// B5 unit 3: stroke width of legend symbols from
+    /// `encoding.color.legend.symbol_stroke_width`.
+    pub symbol_stroke_width: Option<f64>,
+    /// B5 unit 3: per-legend vertical entry spacing from
+    /// `encoding.color.legend.row_padding` (replaces `LEGEND_ENTRY_ROW_PAD`).
+    pub row_padding: Option<f64>,
+    /// B5 unit 3: per-legend horizontal entry spacing from
+    /// `encoding.color.legend.column_padding`.
+    pub column_padding: Option<f64>,
+    /// B5 unit 3: max legend-label pixel width from
+    /// `encoding.color.legend.label_limit`. Labels wider than this are truncated
+    /// with an ellipsis.
+    pub label_limit: Option<f64>,
+    /// B5 unit 3: cap the legend group's total height from
+    /// `encoding.color.legend.clip_height`. Overflow is hard-clipped.
+    pub clip_height: Option<f64>,
+    /// B5 unit 3: minimum step between colorbar ticks (data units) from
+    /// `encoding.color.legend.tick_min_step`.
+    pub tick_min_step: Option<f64>,
+    /// B5 unit 3: coarse draw order from `encoding.color.legend.zindex`.
+    /// `>= 1` routes the legend above marks; `<= 0` (default) below.
+    pub zindex: Option<i64>,
 }
 
 impl PreparedInputs {
@@ -762,11 +784,14 @@ pub fn prepare_render_inputs(
                     color_legend.and_then(|l| l.tick_labels.clone());
                 let format_spec: Option<&str> =
                     color_legend.and_then(|l| l.format.as_deref());
-                let tick_labels = if let Some(labels) = custom_tick_labels {
-                    labels
+                // `cb_domain` is the numeric span the labels cover — carried for
+                // `tick_min_step` thinning in `compute_layout`. `None` for explicit
+                // non-numeric label overrides (their step is undefined).
+                let (tick_labels, cb_domain) = if let Some(labels) = custom_tick_labels {
+                    (labels, None)
                 } else {
                     let (lo, hi) = *domain;
-                    (0..5).map(|i| {
+                    let labels = (0..5).map(|i| {
                         let t = i as f64 / 4.0;
                         let v = lo + t * (hi - lo);
                         if let Some(spec_str) = format_spec {
@@ -774,9 +799,10 @@ pub fn prepare_render_inputs(
                         } else {
                             format_colorbar_tick(v, lo, hi)
                         }
-                    }).collect()
+                    }).collect();
+                    (labels, Some((lo, hi)))
                 };
-                (Vec::new(), Some(ColorbarInput { stops, tick_labels }))
+                (Vec::new(), Some(ColorbarInput { stops, tick_labels, domain: cb_domain }))
             }
             None => (Vec::new(), None),
             }
@@ -839,6 +865,15 @@ pub fn prepare_render_inputs(
         // `type`: "gradient" forces colorbar path; "symbol" forces categorical entries.
         legend_type: color_legend.and_then(|l| l.legend_type.clone()),
         symbol_type: color_legend.and_then(|l| l.symbol_type.clone()),
+        // B5 unit 3: orphan legend styling/positioning fields. Per-channel here;
+        // chart-level `configure_legend(...)` fills any that stay `None`.
+        symbol_stroke_width: color_legend.and_then(|l| l.symbol_stroke_width),
+        row_padding: color_legend.and_then(|l| l.row_padding),
+        column_padding: color_legend.and_then(|l| l.column_padding),
+        label_limit: color_legend.and_then(|l| l.label_limit),
+        clip_height: color_legend.and_then(|l| l.clip_height),
+        tick_min_step: color_legend.and_then(|l| l.tick_min_step),
+        zindex: color_legend.and_then(|l| l.zindex),
     };
 
     // Multivariate B1: build size/shape auxiliary legends from the resolved

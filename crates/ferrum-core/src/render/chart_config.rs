@@ -283,8 +283,12 @@ impl AxisConfigSpec {
 /// reader accepted (`titleFontSize`, `labelFontSize`, `gradientLength`,
 /// `gradientThickness`, `tickCount`).
 ///
-/// Orphans (no renderer yet): `clip_height`, `row_padding`, `column_padding`,
-/// `symbol_stroke_width`, `label_limit`, `tick_min_step`, `zindex`.
+/// Formerly-orphan fields (`clip_height`, `row_padding`, `column_padding`,
+/// `symbol_stroke_width`, `label_limit`, `tick_min_step`, `zindex`) now render
+/// at both chart and per-channel level (B5 unit 3). `label_limit` truncates with
+/// an ellipsis, `clip_height` hard-clips via an SVG `clipPath`, and `zindex`
+/// maps to coarse below/above-marks ordering (legends sit outside the plot, so
+/// it is usually a visual no-op).
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct LegendStyleSpec {
@@ -306,12 +310,13 @@ pub struct LegendStyleSpec {
     pub label_font_size: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_color: Option<String>,
-    /// Orphan: maximum legend-label pixel width.
+    /// Maximum legend-label pixel width; labels wider than this are truncated
+    /// with an ellipsis (B5 unit 3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_limit: Option<f64>,
     #[serde(alias = "tickCount", skip_serializing_if = "Option::is_none")]
     pub tick_count: Option<u32>,
-    /// Orphan: minimum step between colorbar ticks.
+    /// Minimum step between colorbar ticks in data units (B5 unit 3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tick_min_step: Option<f64>,
     /// Explicit tick/entry labels (`fm.Legend(values=[...])`).
@@ -324,7 +329,7 @@ pub struct LegendStyleSpec {
     pub format_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol_size: Option<f64>,
-    /// Orphan: stroke width of legend symbols.
+    /// Stroke width (px) of legend symbol swatches (B5 unit 3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol_stroke_width: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -335,20 +340,21 @@ pub struct LegendStyleSpec {
     pub gradient_thickness: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub columns: Option<u32>,
-    /// Orphan: padding between legend columns.
+    /// Horizontal entry spacing (px) for horizontal-direction legends (B5 unit 3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column_padding: Option<f64>,
-    /// Orphan: padding between legend rows.
+    /// Vertical entry spacing (px) for vertical-direction legends (B5 unit 3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row_padding: Option<f64>,
-    /// Orphan: cap legend height.
+    /// Cap on the legend group height (px); overflow is hard-clipped (B5 unit 3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clip_height: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub padding: Option<f64>,
-    /// Orphan: coarse draw order relative to marks.
+    /// Coarse draw order relative to marks (B5 unit 3): `>= 1` → above, `<= 0`
+    /// (default) → below. Legends sit outside the plot, so usually a no-op.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zindex: Option<i64>,
     /// Suppress the legend entirely. Produced by `_normalize_legend` for

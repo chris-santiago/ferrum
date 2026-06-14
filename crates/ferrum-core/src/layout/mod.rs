@@ -591,6 +591,14 @@ pub fn compute_layout(
         } else {
             tick_labels
         };
+        // B5 unit 3: thin colorbar ticks to honor `tick_min_step`. Needs the
+        // numeric domain the labels span (carried on `ColorbarInput.domain`);
+        // absent for explicit non-numeric label overrides → no-op.
+        let tick_labels = match (legend_overrides.tick_min_step, cb.domain) {
+            (Some(min_step), Some(domain)) =>
+                legend::thin_colorbar_ticks_by_min_step(tick_labels, domain, min_step),
+            _ => tick_labels,
+        };
         legend::layout_colorbar(
             inner,
             theme.legend.legend_orient,
@@ -603,6 +611,7 @@ pub fn compute_layout(
             theme.padding.column_padding,
             legend_overrides.gradient_length,
             legend_overrides.gradient_thickness,
+            legend_overrides.clip_height,
         )
     } else {
         legend::layout_legend(
@@ -616,6 +625,13 @@ pub fn compute_layout(
             theme.typography.legend_title_font_size,
             theme.legend.legend_columns,
             legend_overrides.symbol_type.as_deref(),
+            legend::LegendStyleOpts {
+                symbol_stroke_width: legend_overrides.symbol_stroke_width,
+                row_padding: legend_overrides.row_padding,
+                column_padding: legend_overrides.column_padding,
+                label_limit: legend_overrides.label_limit,
+                clip_height: legend_overrides.clip_height,
+            },
         )
     };
     let legend_dropped = legend_entries

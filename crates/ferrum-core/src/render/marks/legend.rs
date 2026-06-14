@@ -113,6 +113,12 @@ pub fn build_legend(
         }
     }
 
+    // B5 unit 3: `symbol_stroke_width` strokes each symbol swatch. The stroke
+    // reuses the swatch's own fill color (a common legend convention), so a
+    // single positive width thickens the outline without introducing a second
+    // color knob. `None`/0 → no stroke (byte-identical default).
+    let symbol_stroke_w = legend.symbol_stroke_width.filter(|w| *w > 0.0);
+
     // Categorical entries (color), graduated size symbols, and shape glyphs.
     // Per-entry precedence for the swatch color: an explicit `color_hex`
     // (merged color+size legend) wins; else the categorical color-scale
@@ -155,13 +161,19 @@ pub fn build_legend(
                 style: to_scene_fill_stroke(Some(color), None, 0.0, 1.0, None),
             });
         } else {
+            // A positive `symbol_stroke_width` outlines the swatch in its own
+            // color; otherwise no stroke (the historical fill-only swatch).
+            let (swatch_stroke, swatch_stroke_w) = match symbol_stroke_w {
+                Some(w) => (Some(color), w),
+                None => (None, 0.0),
+            };
             match entry.symbol_kind {
                 SymbolKind::Circle => {
                     nodes.push(SceneNode::Circle {
                         cx: sx,
                         cy: sy,
                         r: 4.0,
-                        style: to_scene_fill_stroke(Some(color), None, 0.0, 1.0, None),
+                        style: to_scene_fill_stroke(Some(color), swatch_stroke, swatch_stroke_w, 1.0, None),
                     });
                 }
                 SymbolKind::Square => {
@@ -170,17 +182,20 @@ pub fn build_legend(
                         y: sy - 4.0,
                         w: 8.0,
                         h: 8.0,
-                        style: to_scene_fill_stroke(Some(color), None, 0.0, 1.0, None),
+                        style: to_scene_fill_stroke(Some(color), swatch_stroke, swatch_stroke_w, 1.0, None),
                         corner_radius: 0.0,
                     });
                 }
                 SymbolKind::Line => {
+                    // A line swatch has no fill; `symbol_stroke_width` overrides the
+                    // theme line width when set so the legend line thickens too.
+                    let line_w = symbol_stroke_w.unwrap_or(theme.sizes.line_stroke_width);
                     nodes.push(SceneNode::Line {
                         x1: sx - 6.0,
                         y1: sy,
                         x2: sx + 6.0,
                         y2: sy,
-                        style: to_scene_stroke(color, theme.sizes.line_stroke_width, 1.0, None, None, None),
+                        style: to_scene_stroke(color, line_w, 1.0, None, None, None),
                     });
                 }
             }
@@ -193,7 +208,53 @@ pub fn build_legend(
         });
     }
 
+    // B5 unit 3: `clip_height` hard-clips the legend group to the requested
+    // height. Wrap every legend node in a `<g clip-path>` whose `<clipPath>`
+    // rect caps the legend rect at `clip_height`. The def and its consuming
+    // group are emitted together (one Raw def + one Group) so overflowing
+    // entries are clipped in the static SVG. This is static-SVG-only: the WASM
+    // scene loader flattens `SceneNode::Group` and discards its `attrs`, so the
+    // `clip-path` reference is dropped and the interactive render does not clip
+    // overflowing legend entries (consistent with the W4/W5 interactive-export
+    // limitations). Absent → nodes pass through unwrapped (byte-identical
+    // default).
+    if let Some(clip_h) = legend.clip_height.filter(|h| *h > 0.0) {
+        return clip_legend_nodes(legend, clip_h, nodes);
+    }
+
     nodes
+}
+
+/// Wrap `nodes` in an SVG `clipPath` capping the legend at `clip_h` pixels tall.
+/// Emits a single `<clipPath>` def (Chrome-anchored `Raw`) followed by a
+/// `<g clip-path="url(#…)">` group (`SceneNode::Group`) that contains the legend
+/// content, so overflow past `clip_h` is hard-clipped (B5 unit 3 `clip_height`).
+///
+/// Static-SVG-only: the WASM scene loader flattens `SceneNode::Group` and drops
+/// its `attrs`, so the `clip-path` reference is discarded in the interactive
+/// render (the `<clipPath>` def still lands but nothing consumes it) and
+/// overflowing legend entries are not clipped there. This matches the known
+/// W4/W5 interactive-export limitations and is intentionally not fixed here.
+fn clip_legend_nodes(legend: &LegendLayout, clip_h: f64, nodes: Vec<SceneNode>) -> Vec<SceneNode> {
+    const CLIP_ID: &str = "ferrum-legend-clip-0";
+    let r = &legend.rect;
+    let def = SceneNode::Raw {
+        svg: format!(
+            "<defs><clipPath id=\"{CLIP_ID}\">\
+             <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/>\
+             </clipPath></defs>",
+            fmt_f(r.x),
+            fmt_f(r.y),
+            fmt_f(r.w),
+            fmt_f(clip_h),
+        ),
+        anchor: RawAnchor::Chrome,
+    };
+    let group = SceneNode::Group {
+        attrs: vec![("clip-path".to_string(), format!("url(#{CLIP_ID})"))],
+        children: nodes,
+    };
+    vec![def, group]
 }
 
 #[cfg(test)]
@@ -217,6 +278,8 @@ mod tests {
                 stops: vec![(0.0, "#0000ff".to_string()), (1.0, "#ff0000".to_string())],
                 ticks: vec![],
             }),
+            symbol_stroke_width: None,
+            clip_height: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -249,6 +312,8 @@ mod tests {
                 stops: vec![(0.0, "#0000ff".to_string()), (1.0, "#ff0000".to_string())],
                 ticks: vec![],
             }),
+            symbol_stroke_width: None,
+            clip_height: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -303,6 +368,8 @@ mod tests {
             ],
             title: None,
             colorbar: None,
+            symbol_stroke_width: None,
+            clip_height: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -334,6 +401,8 @@ mod tests {
             entries: vec![entry("20", 3.0, 10.0), entry("60", 6.0, 30.0), entry("100", 10.0, 55.0)],
             title: None,
             colorbar: None,
+            symbol_stroke_width: None,
+            clip_height: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -370,6 +439,8 @@ mod tests {
             }],
             title: None,
             colorbar: None,
+            symbol_stroke_width: None,
+            clip_height: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -382,6 +453,119 @@ mod tests {
             nodes.iter().filter(|n| matches!(n, SceneNode::Text { .. })).count(),
             1,
             "one shape label"
+        );
+    }
+
+    // ── B5 unit 3: symbol_stroke_width + clip_height render ───────────────
+
+    fn two_circle_legend(symbol_stroke_width: Option<f64>, clip_height: Option<f64>) -> LegendLayout {
+        let entry = |label: &str, y: f64| LegendEntryLayout {
+            label: label.into(),
+            label_anchor_x: 100.0,
+            label_anchor_y: y,
+            symbol_anchor_x: 90.0,
+            symbol_anchor_y: y,
+            symbol_kind: SymbolKind::Circle,
+            symbol_radius: None,
+            shape_name: None,
+            color_hex: Some("#1f77b4".into()),
+        };
+        LegendLayout {
+            rect: Rect { x: 80.0, y: 0.0, w: 40.0, h: 100.0 },
+            orient: LegendOrient::Right,
+            direction: LegendDirection::Vertical,
+            entries: vec![entry("a", 10.0), entry("b", 30.0)],
+            title: None,
+            colorbar: None,
+            symbol_stroke_width,
+            clip_height,
+        }
+    }
+
+    /// `symbol_stroke_width=3` strokes each swatch circle with width 3.
+    #[test]
+    fn symbol_stroke_width_strokes_swatches() {
+        let theme = ThemeInputs::default();
+        let nodes = build_legend(&two_circle_legend(Some(3.0), None), None, &theme);
+        let stroke_widths: Vec<f64> = nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Circle { style, .. } = n {
+                Some(style.stroke_width)
+            } else {
+                None
+            })
+            .collect();
+        assert_eq!(stroke_widths, vec![3.0, 3.0], "both swatches stroked at width 3");
+        // The stroke is present (Some) on each swatch.
+        for n in &nodes {
+            if let SceneNode::Circle { style, .. } = n {
+                assert!(style.stroke.is_some(), "stroked swatch must carry a stroke color");
+            }
+        }
+    }
+
+    /// With no `symbol_stroke_width`, swatches keep the historical fill-only
+    /// shape (stroke_width 0, no stroke color).
+    #[test]
+    fn symbol_stroke_width_absent_no_stroke() {
+        let theme = ThemeInputs::default();
+        let nodes = build_legend(&two_circle_legend(None, None), None, &theme);
+        for n in &nodes {
+            if let SceneNode::Circle { style, .. } = n {
+                assert_eq!(style.stroke_width, 0.0);
+                assert!(style.stroke.is_none(), "default swatch has no stroke");
+            }
+        }
+    }
+
+    /// `clip_height` wraps the legend in a `<clipPath>` def + a clipping group,
+    /// hard-clipping overflow.
+    #[test]
+    fn clip_height_wraps_legend_in_clip_group() {
+        let theme = ThemeInputs::default();
+        let nodes = build_legend(&two_circle_legend(None, Some(50.0)), None, &theme);
+        // Exactly one Raw clipPath def + one clipping Group.
+        let raw_defs: Vec<&str> = nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Raw { svg, .. } = n { Some(svg.as_str()) } else { None })
+            .collect();
+        assert_eq!(raw_defs.len(), 1, "one clipPath def emitted");
+        let def = raw_defs[0];
+        assert!(def.contains("<clipPath id=\"ferrum-legend-clip-0\""), "clipPath def present: {def}");
+        // The clip rect height equals clip_height (50), not the rect's full 100.
+        assert!(def.contains("height=\"50\""), "clip rect height = clip_height: {def}");
+
+        let groups: Vec<&Vec<SceneNode>> = nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Group { attrs, children } = n {
+                assert!(attrs.iter().any(|(k, v)| k == "clip-path"
+                    && v == "url(#ferrum-legend-clip-0)"));
+                Some(children)
+            } else {
+                None
+            })
+            .collect();
+        assert_eq!(groups.len(), 1, "one clipping group wraps the content");
+        // The clipped group holds the actual swatches/labels.
+        assert!(
+            groups[0].iter().any(|n| matches!(n, SceneNode::Circle { .. })),
+            "clipped group contains the swatch circles",
+        );
+    }
+
+    /// Without `clip_height`, the legend nodes are emitted unwrapped (no
+    /// clipPath, no clipping group) — byte-identical to the historical shape.
+    #[test]
+    fn clip_height_absent_no_clip_group() {
+        let theme = ThemeInputs::default();
+        let nodes = build_legend(&two_circle_legend(None, None), None, &theme);
+        assert!(
+            !nodes.iter().any(|n| matches!(n, SceneNode::Group { .. })),
+            "no clip group when clip_height absent",
+        );
+        assert!(
+            !nodes.iter().any(|n| matches!(n, SceneNode::Raw { .. })),
+            "no clipPath def when clip_height absent",
         );
     }
 }

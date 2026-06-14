@@ -433,6 +433,13 @@ fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides
         // Per-channel `Legend(symbol_type=...)` (B5); chart-level
         // `configure_legend` fills this only when the per-channel value is absent.
         symbol_type:        lo.symbol_type.clone(),
+        // B5 unit 3 orphans (per-channel here; chart-level fills any still None).
+        symbol_stroke_width: lo.symbol_stroke_width,
+        row_padding:        lo.row_padding,
+        column_padding:     lo.column_padding,
+        label_limit:        lo.label_limit,
+        clip_height:        lo.clip_height,
+        tick_min_step:      lo.tick_min_step,
     }
 }
 
@@ -453,6 +460,26 @@ fn apply_chart_config_to_legend_overrides(
     }
     if overrides.symbol_type.is_none() {
         overrides.symbol_type = legend.symbol_type.clone();
+    }
+    // B5 unit 3 orphans: per-channel (level 2) already in `overrides`; fill from
+    // `configure_legend` (level 3) only where still None, so per-channel wins.
+    if overrides.symbol_stroke_width.is_none() {
+        overrides.symbol_stroke_width = legend.symbol_stroke_width;
+    }
+    if overrides.row_padding.is_none() {
+        overrides.row_padding = legend.row_padding;
+    }
+    if overrides.column_padding.is_none() {
+        overrides.column_padding = legend.column_padding;
+    }
+    if overrides.label_limit.is_none() {
+        overrides.label_limit = legend.label_limit;
+    }
+    if overrides.clip_height.is_none() {
+        overrides.clip_height = legend.clip_height;
+    }
+    if overrides.tick_min_step.is_none() {
+        overrides.tick_min_step = legend.tick_min_step;
     }
 }
 
@@ -2109,6 +2136,51 @@ mod chart_config_application_tests {
         };
         apply_chart_config_to_legend_overrides(&mut overrides, &config);
         assert_eq!(overrides.gradient_length, Some(150.0)); // level 2 wins
+    }
+
+    /// B5 unit 3: `configure_legend(symbol_stroke_width=...)` fills the override
+    /// only when the per-channel value is absent.
+    #[test]
+    fn legend_config_symbol_stroke_width_fills_when_absent() {
+        let mut overrides = legend_overrides_from_prep_default();
+        let config = ChartConfig {
+            legend: Some(chart_config::LegendConfigSpec {
+                style: LegendStyleSpec { symbol_stroke_width: Some(2.0), ..Default::default() },
+            }),
+            ..Default::default()
+        };
+        apply_chart_config_to_legend_overrides(&mut overrides, &config);
+        assert_eq!(overrides.symbol_stroke_width, Some(2.0));
+    }
+
+    /// B5 unit 3: a per-channel orphan (here `symbol_stroke_width`) beats the
+    /// chart-level `configure_legend` value.
+    #[test]
+    fn legend_orphan_per_channel_wins_over_configure() {
+        let mut overrides = LegendOverrides {
+            symbol_stroke_width: Some(5.0), // per-channel (level 2)
+            row_padding: Some(18.0),
+            clip_height: Some(40.0),
+            tick_min_step: Some(2.0),
+            ..Default::default()
+        };
+        let config = ChartConfig {
+            legend: Some(chart_config::LegendConfigSpec {
+                style: LegendStyleSpec {
+                    symbol_stroke_width: Some(1.0),
+                    row_padding: Some(4.0),
+                    clip_height: Some(999.0),
+                    tick_min_step: Some(99.0),
+                    ..Default::default()
+                },
+            }),
+            ..Default::default()
+        };
+        apply_chart_config_to_legend_overrides(&mut overrides, &config);
+        assert_eq!(overrides.symbol_stroke_width, Some(5.0), "per-channel wins");
+        assert_eq!(overrides.row_padding, Some(18.0), "per-channel wins");
+        assert_eq!(overrides.clip_height, Some(40.0), "per-channel wins");
+        assert_eq!(overrides.tick_min_step, Some(2.0), "per-channel wins");
     }
 
     #[test]

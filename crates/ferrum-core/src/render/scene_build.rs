@@ -567,6 +567,24 @@ pub fn build_scene(
     // Legend
     build_legend_decorations(layout, spec, prep, theme, chart_config, &mut legend_nodes)?;
 
+    // zindex (B5 unit 3): coarse below/above-marks ordering for the legend,
+    // mirroring the axis mechanism. Per-channel `Legend(zindex=...)` wins over
+    // chart-level `configure_legend(zindex=...)`. `>= 1` routes the legend into
+    // the first panel's annotation slot (drawn after that panel's marks); absent
+    // or `<= 0` keeps it in the top-level `legend` slot (the byte-identical
+    // default). Because the legend sits outside the plot area, both slots render
+    // after the data marks, so this is usually a visual no-op — implemented for
+    // parity with the axis `zindex` semantics rather than visible layering.
+    let legend_zindex = prep
+        .legend_overrides
+        .zindex
+        .or_else(|| chart_config.legend.as_ref().and_then(|l| l.style.zindex));
+    if legend_zindex.is_some_and(|z| z >= 1) && !legend_nodes.is_empty() {
+        if let Some(first_panel) = panels.first_mut() {
+            first_panel.annotations.append(&mut legend_nodes);
+        }
+    }
+
     // Param→scene bindings (D6, 5e-2a). Computed from the ORIGINAL `spec`,
     // which still carries `domainParam`/transform `param`/selection `bind`:
     // the static resolver only mutated per-panel clones.
