@@ -263,7 +263,8 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
 
     // ── Legend overrides ──────────────────────────────────────────────────────
     if let Some(ref legend_cfg) = config.legend {
-        if let Some(ref orient) = legend_cfg.orient {
+        let legend = &legend_cfg.style;
+        if let Some(ref orient) = legend.orient {
             theme.legend.legend_orient = match orient.as_str() {
                 "right"  => LegendOrient::Right,
                 "left"   => LegendOrient::Left,
@@ -272,22 +273,22 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
                 _ => theme.legend.legend_orient,
             };
         }
-        if let Some(ref dir) = legend_cfg.direction {
+        if let Some(ref dir) = legend.direction {
             theme.legend.legend_direction = match dir.as_str() {
                 "vertical"   => Some(LegendDirection::Vertical),
                 "horizontal" => Some(LegendDirection::Horizontal),
                 _ => theme.legend.legend_direction,
             };
         }
-        if let Some(cols) = legend_cfg.columns {
+        if let Some(cols) = legend.columns {
             theme.legend.legend_columns = Some(cols);
         }
-        if let Some(fs) = legend_cfg.title_font_size {
+        if let Some(fs) = legend.title_font_size {
             theme.typography.legend_title_font_size = fs;
         }
         // legend.label_font_size maps to the shared theme.typography.label_font_size,
         // which controls both axis and legend label sizing.
-        if let Some(fs) = legend_cfg.label_font_size {
+        if let Some(fs) = legend.label_font_size {
             theme.typography.label_font_size = fs;
         }
     }
@@ -350,40 +351,41 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
 /// `ThemeInputs` and are applied here regardless of x/y axis distinction.
 /// Per-axis-specific overrides (x vs y) are handled in the sibling functions.
 fn apply_axis_config_to_theme(theme: &mut ThemeInputs, axis_cfg: &AxisConfigSpec) {
-    if let Some(fs) = axis_cfg.label_font_size {
+    let style = &axis_cfg.style;
+    if let Some(fs) = style.label_font_size {
         theme.typography.label_font_size = fs;
     }
-    if let Some(ref c) = axis_cfg.label_color {
+    if let Some(ref c) = style.label_color {
         if let Ok(parsed) = color::from_hex_str(c) {
             theme.colors.label_color = parsed;
         }
     }
-    if let Some(ts) = axis_cfg.tick_size {
+    if let Some(ts) = style.tick_size {
         theme.sizes.tick_size = ts;
     }
-    if let Some(enabled) = axis_cfg.domain {
+    if let Some(enabled) = style.domain {
         theme.axis.axis_line = enabled;
     }
-    if let Some(ref c) = axis_cfg.domain_color {
+    if let Some(ref c) = style.domain_color {
         if let Ok(parsed) = color::from_hex_str(c) {
             theme.colors.axis_line_color = parsed;
         }
     }
-    if let Some(w) = axis_cfg.domain_width {
+    if let Some(w) = style.domain_width {
         theme.sizes.axis_line_width = w;
     }
-    if let Some(enabled) = axis_cfg.grid {
+    if let Some(enabled) = style.grid {
         theme.grid.grid = enabled;
     }
-    if let Some(ref c) = axis_cfg.grid_color {
+    if let Some(ref c) = style.grid_color {
         if let Ok(parsed) = color::from_hex_str(c) {
             theme.colors.grid_color = parsed;
         }
     }
-    if let Some(ref d) = axis_cfg.grid_dash {
+    if let Some(ref d) = style.grid_dash {
         theme.grid.grid_dash = Some(d.clone());
     }
-    if let Some(w) = axis_cfg.grid_width {
+    if let Some(w) = style.grid_width {
         theme.sizes.grid_width = w;
     }
 }
@@ -417,7 +419,9 @@ fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides
         direction:          lo.direction,
         values:             lo.values.clone(),
         legend_type:        lo.legend_type.clone(),
-        symbol_type:        None, // filled by apply_chart_config_to_legend_overrides
+        // Per-channel `Legend(symbol_type=...)` (B5); chart-level
+        // `configure_legend` fills this only when the per-channel value is absent.
+        symbol_type:        lo.symbol_type.clone(),
     }
 }
 
@@ -432,6 +436,7 @@ fn apply_chart_config_to_legend_overrides(
     config: &ChartConfig,
 ) {
     let Some(ref legend) = config.legend else { return };
+    let legend = &legend.style;
     if overrides.gradient_length.is_none() {
         overrides.gradient_length = legend.gradient_length;
     }
@@ -440,50 +445,121 @@ fn apply_chart_config_to_legend_overrides(
     }
 }
 
-/// Apply `ChartConfig.axis` / `axis_x` / `axis_y` fields that are not expressed
-/// in `ThemeInputs` to the per-axis `AxisInput`.
+/// Apply `ChartConfig.axis` / `axis_x` / `axis_y` per-axis fields to the
+/// `AxisInput`. Only fields absent from the input (higher-precedence per-channel
+/// or earlier config) are filled, so the cascade is per-channel > axis_x/axis_y >
+/// axis > theme.
 ///
-/// These are the per-axis fields that cannot be represented in the shared theme:
-/// `title_font_size`, `title_color`, `title_padding`, `label_format_raw`,
-/// and `tick_values` (stored for layout-time use).
-///
-/// Called with `config_both` (the `axis` key that applies to both x and y),
-/// then with `config_specific` (the `axis_x` or `axis_y` key). The specific
-/// key wins because it runs last.
-fn apply_axis_config_to_axis_input(
+/// Called with the `axis` key (both x and y), then `axis_x`/`axis_y` (which win
+/// because they run last). Delegates the per-axis style fields to
+/// [`apply_axis_style_to_axis_input`] and handles the chart-only `label_format_raw`
+/// d3-format key here (the per-channel path uses `label_format` inside the style).
+pub(crate) fn apply_axis_config_to_axis_input(
     axis: &mut crate::layout::AxisInput,
     config: Option<&chart_config::AxisConfigSpec>,
 ) {
     let Some(cfg) = config else { return };
-    // label_angle_override: per-encoding Axis() wins (already set); only fill if not set.
-    if axis.label_angle_override.is_none() {
-        axis.label_angle_override = cfg.label_angle;
-    }
-    // label_format_raw: d3-format string for tick labels.
+    // Resolve the chart-level d3-format override BEFORE the shared style apply.
+    // `effective_label_format()` is raw-first: `label_format_raw` (the chart-level
+    // spelling) wins over the style's `label_format`. Applying it first ensures that
+    // precedence holds — the style apply below only fills `label_format_override`
+    // when still `None`, so it can no longer override the raw-first resolution. Both
+    // keys are mutually exclusive at the Python boundary (`AxisConfig.__post_init__`
+    // raises), so in practice at most one is set; this keeps the Rust side
+    // self-consistent regardless. Fill only when nothing higher-precedence (a
+    // per-channel spec) already set the override.
     if axis.label_format_override.is_none() {
-        axis.label_format_override = cfg.label_format_raw.clone()
-            .or_else(|| cfg.label_format.clone());
+        axis.label_format_override = cfg.effective_label_format().map(str::to_owned);
     }
-    // tick_values: explicit tick positions in data space.
+    apply_axis_style_to_axis_input(axis, &cfg.style);
+}
+
+/// Apply an [`AxisStyleSpec`](chart_config::AxisStyleSpec) to one `AxisInput`,
+/// filling only fields the input has not already set (so a higher-precedence
+/// source — a per-channel spec, or an earlier config layer — always wins).
+///
+/// Shared by the chart-level `configure_axis` path and the per-channel
+/// `EncodingSpec.axis` path (B5 fix). Honored styling keys (grid color/dash/width,
+/// label color/font-size, domain color/width) flow into per-axis override fields
+/// on `AxisInput` that `build_axis`/`build_grid` consult with a theme fallback, so
+/// they render per-axis instead of mutating the shared theme. Orphan fields
+/// (`orient`, `translate`, extents, `tick_extra`, etc.) are intentionally not
+/// applied here — their render support lands in later units.
+pub(crate) fn apply_axis_style_to_axis_input(
+    axis: &mut crate::layout::AxisInput,
+    style: &chart_config::AxisStyleSpec,
+) {
+    // label_angle_override.
+    if axis.label_angle_override.is_none() {
+        axis.label_angle_override = style.label_angle;
+    }
+    // d3-format string for tick labels (per-channel `label_format`).
+    if axis.label_format_override.is_none() {
+        axis.label_format_override = style.label_format.clone();
+    }
+    // Explicit tick positions (`fm.Axis(values=...)`).
     if axis.tick_values_override.is_none() {
-        axis.tick_values_override = cfg.tick_values.clone();
+        axis.tick_values_override = style.values.clone();
     }
-    // title_font_size / title_color / title_padding.
+    // Show toggles (`grid`/`domain`/`labels`/`ticks`) are deliberately NOT written
+    // here. The per-channel prepare path (`prepare_render_inputs`) is the sole owner
+    // of `AxisInput.show_*`, so a per-channel `Axis(grid=False)` wins over a
+    // conflicting chart-level `configure_axis(grid=True)`. The chart-level toggle
+    // still takes effect through its global theme/gate path: `configure_axis` maps
+    // `grid`→`theme.grid.grid` and `domain`→`theme.axis.axis_line` in
+    // `apply_axis_config_to_theme`, and `build_grid`/`build_axis` AND that global
+    // gate with the per-axis `show_*` gate. Writing `show_*` here too would clobber
+    // the per-channel value and invert the precedence.
+    // Title overrides.
     if axis.title_font_size.is_none() {
-        axis.title_font_size = cfg.title_font_size;
+        axis.title_font_size = style.title_font_size;
     }
     if axis.title_color.is_none() {
-        if let Some(ref c) = cfg.title_color {
+        if let Some(ref c) = style.title_color {
             if let Ok(parsed) = color::from_hex_str(c) {
                 axis.title_color = Some(parsed);
             }
         }
     }
     if axis.title_padding.is_none() {
-        axis.title_padding = cfg.title_padding;
+        axis.title_padding = style.title_padding;
     }
     if axis.label_padding.is_none() {
-        axis.label_padding = cfg.label_padding;
+        axis.label_padding = style.label_padding;
+    }
+    // ── Per-axis styling overrides (B5): consulted by build_axis/build_grid ──
+    if axis.label_color.is_none() {
+        if let Some(ref c) = style.label_color {
+            if let Ok(parsed) = color::from_hex_str(c) {
+                axis.label_color = Some(parsed);
+            }
+        }
+    }
+    if axis.label_font_size.is_none() {
+        axis.label_font_size = style.label_font_size;
+    }
+    if axis.grid_color.is_none() {
+        if let Some(ref c) = style.grid_color {
+            if let Ok(parsed) = color::from_hex_str(c) {
+                axis.grid_color = Some(parsed);
+            }
+        }
+    }
+    if axis.grid_dash.is_none() {
+        axis.grid_dash = style.grid_dash.clone();
+    }
+    if axis.grid_width.is_none() {
+        axis.grid_width = style.grid_width;
+    }
+    if axis.domain_color.is_none() {
+        if let Some(ref c) = style.domain_color {
+            if let Ok(parsed) = color::from_hex_str(c) {
+                axis.domain_color = Some(parsed);
+            }
+        }
+    }
+    if axis.domain_width.is_none() {
+        axis.domain_width = style.domain_width;
     }
 }
 
@@ -1469,8 +1545,8 @@ mod chart_config_application_tests {
 
     use super::*;
     use chart_config::{
-        AxisConfigSpec, ChartConfig, ColorConfigSpec, GridConfigSpec, LegendConfigSpec,
-        PaddingConfigSpec, TitleConfigSpec,
+        AxisConfigSpec, AxisStyleSpec, ChartConfig, ColorConfigSpec, GridConfigSpec,
+        LegendConfigSpec, LegendStyleSpec, PaddingConfigSpec, TitleConfigSpec,
     };
 
     #[test]
@@ -1524,7 +1600,10 @@ mod chart_config_application_tests {
         let mut theme = ThemeInputs::default();
         theme.grid.grid = false;
         let config = ChartConfig {
-            axis: Some(AxisConfigSpec { grid: Some(true), ..Default::default() }),
+            axis: Some(AxisConfigSpec {
+                style: AxisStyleSpec { grid: Some(true), ..Default::default() },
+                ..Default::default()
+            }),
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
@@ -1580,12 +1659,14 @@ mod chart_config_application_tests {
         let mut theme = ThemeInputs::default();
         let config = ChartConfig {
             legend: Some(LegendConfigSpec {
-                orient: Some("bottom".to_string()),
-                direction: Some("horizontal".to_string()),
-                columns: Some(4),
-                title_font_size: Some(16.0),
-                label_font_size: Some(9.0),
-                ..Default::default()
+                style: LegendStyleSpec {
+                    orient: Some("bottom".to_string()),
+                    direction: Some("horizontal".to_string()),
+                    columns: Some(4),
+                    title_font_size: Some(16.0),
+                    label_font_size: Some(9.0),
+                    ..Default::default()
+                },
             }),
             ..Default::default()
         };
@@ -1619,7 +1700,10 @@ mod chart_config_application_tests {
     fn apply_chart_config_axis_label_font_size() {
         let mut theme = ThemeInputs::default();
         let config = ChartConfig {
-            axis: Some(AxisConfigSpec { label_font_size: Some(14.0), ..Default::default() }),
+            axis: Some(AxisConfigSpec {
+                style: AxisStyleSpec { label_font_size: Some(14.0), ..Default::default() },
+                ..Default::default()
+            }),
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
@@ -1632,9 +1716,12 @@ mod chart_config_application_tests {
         assert!(theme.axis.axis_line); // default on
         let config = ChartConfig {
             axis: Some(AxisConfigSpec {
-                tick_size: Some(6.0),
-                domain: Some(false),
-                domain_width: Some(2.0),
+                style: AxisStyleSpec {
+                    tick_size: Some(6.0),
+                    domain: Some(false),
+                    domain_width: Some(2.0),
+                    ..Default::default()
+                },
                 ..Default::default()
             }),
             ..Default::default()
@@ -1688,8 +1775,14 @@ mod chart_config_application_tests {
         // (applied last). This is the documented behavior for per-axis overrides.
         let mut theme = ThemeInputs::default();
         let config = ChartConfig {
-            axis: Some(AxisConfigSpec { label_font_size: Some(10.0), ..Default::default() }),
-            axis_x: Some(AxisConfigSpec { label_font_size: Some(14.0), ..Default::default() }),
+            axis: Some(AxisConfigSpec {
+                style: AxisStyleSpec { label_font_size: Some(10.0), ..Default::default() },
+                ..Default::default()
+            }),
+            axis_x: Some(AxisConfigSpec {
+                style: AxisStyleSpec { label_font_size: Some(14.0), ..Default::default() },
+                ..Default::default()
+            }),
             ..Default::default()
         };
         apply_chart_config(&mut theme, &config);
@@ -1721,7 +1814,10 @@ mod chart_config_application_tests {
             vec!["0".to_string(), "50".to_string(), "100".to_string()],
             None,
         );
-        let cfg = AxisConfigSpec { title_font_size: Some(16.0), ..Default::default() };
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec { title_font_size: Some(16.0), ..Default::default() },
+            ..Default::default()
+        };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
         assert_eq!(axis.title_font_size, Some(16.0));
     }
@@ -1734,7 +1830,10 @@ mod chart_config_application_tests {
             vec!["0".to_string()],
             None,
         );
-        let cfg = AxisConfigSpec { title_color: Some("#ff0000".to_string()), ..Default::default() };
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec { title_color: Some("#ff0000".to_string()), ..Default::default() },
+            ..Default::default()
+        };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
         let c = axis.title_color.expect("title_color should be Some");
         assert_eq!(c.red, 0xff);
@@ -1750,7 +1849,10 @@ mod chart_config_application_tests {
             vec![],
             None,
         );
-        let cfg = AxisConfigSpec { title_padding: Some(12.0), ..Default::default() };
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec { title_padding: Some(12.0), ..Default::default() },
+            ..Default::default()
+        };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
         assert_eq!(axis.title_padding, Some(12.0));
     }
@@ -1780,7 +1882,7 @@ mod chart_config_application_tests {
         );
         let cfg = AxisConfigSpec {
             label_format_raw: Some(".1%".to_string()),
-            tick_values: Some(vec![0.0, 0.5, 1.0]),
+            style: AxisStyleSpec { values: Some(vec![0.0, 0.5, 1.0]), ..Default::default() },
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
@@ -1796,7 +1898,10 @@ mod chart_config_application_tests {
             vec!["0".to_string(), "50".to_string(), "100".to_string()],
             None,
         );
-        let cfg = AxisConfigSpec { label_padding: Some(6.0), ..Default::default() };
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec { label_padding: Some(6.0), ..Default::default() },
+            ..Default::default()
+        };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
         assert_eq!(axis.label_padding, Some(6.0));
     }
@@ -1810,7 +1915,10 @@ mod chart_config_application_tests {
             vec![],
             Some(-45.0), // per-channel override already set
         );
-        let cfg = AxisConfigSpec { label_angle: Some(-90.0), ..Default::default() };
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec { label_angle: Some(-90.0), ..Default::default() },
+            ..Default::default()
+        };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg));
         // -45.0 should win because it was already set (Some).
         assert_eq!(axis.label_angle_override, Some(-45.0));
@@ -1823,8 +1931,7 @@ mod chart_config_application_tests {
         let mut overrides = prep_overrides;
         let config = ChartConfig {
             legend: Some(chart_config::LegendConfigSpec {
-                gradient_length: Some(300.0),
-                ..Default::default()
+                style: LegendStyleSpec { gradient_length: Some(300.0), ..Default::default() },
             }),
             ..Default::default()
         };
@@ -1837,8 +1944,7 @@ mod chart_config_application_tests {
         let mut overrides = legend_overrides_from_prep_default();
         let config = ChartConfig {
             legend: Some(chart_config::LegendConfigSpec {
-                symbol_type: Some("square".to_string()),
-                ..Default::default()
+                style: LegendStyleSpec { symbol_type: Some("square".to_string()), ..Default::default() },
             }),
             ..Default::default()
         };
@@ -1855,8 +1961,8 @@ mod chart_config_application_tests {
         };
         let config = ChartConfig {
             legend: Some(chart_config::LegendConfigSpec {
-                gradient_length: Some(300.0), // configure (level 3) tries to override
-                ..Default::default()
+                // configure (level 3) tries to override.
+                style: LegendStyleSpec { gradient_length: Some(300.0), ..Default::default() },
             }),
             ..Default::default()
         };

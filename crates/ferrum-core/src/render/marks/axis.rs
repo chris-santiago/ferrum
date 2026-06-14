@@ -8,6 +8,16 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
     let mut nodes = Vec::new();
     let r = axis.axis_line;
 
+    // Per-axis style overrides (B5): fall back to the shared theme when unset, so
+    // chart-level styling stays byte-identical and only a per-channel/per-axis
+    // spec lights these up.
+    let rgba = |arr: [u8; 4]| palette::Srgba::new(arr[0], arr[1], arr[2], arr[3]);
+    let label_color = axis.label_color_rgba.map(rgba).unwrap_or(theme.colors.label_color);
+    let axis_line_color =
+        axis.domain_color_rgba.map(rgba).unwrap_or(theme.colors.axis_line_color);
+    let axis_line_width = axis.domain_width.unwrap_or(theme.sizes.axis_line_width);
+    let axis_label_font_size = axis.label_font_size.unwrap_or(theme.typography.label_font_size);
+
     // Domain line.
     if theme.axis.axis_line && axis.show_domain {
         nodes.push(SceneNode::Line {
@@ -15,7 +25,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
             y1: r.y,
             x2: r.x + r.w,
             y2: r.y + r.h,
-            style: to_scene_stroke(theme.colors.axis_line_color, theme.sizes.axis_line_width, 1.0, None, None, None),
+            style: to_scene_stroke(axis_line_color, axis_line_width, 1.0, None, None, None),
         });
     }
 
@@ -33,7 +43,8 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
     let label_pad = axis.label_padding.unwrap_or(2.0).max(0.0);
 
     for tick in &axis.ticks {
-        let effective_font_size = tick.label_font_size.unwrap_or(theme.typography.label_font_size);
+        // Per-tick font size wins; else the per-axis override; else the theme.
+        let effective_font_size = tick.label_font_size.unwrap_or(axis_label_font_size);
 
         let (tx1, ty1, tx2, ty2, label_x, mut label_y, mut anchor, angle) = match axis.orient {
             AxisOrient::Bottom => (
@@ -109,7 +120,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
                     y: label_y,
                     content: tick.label.clone(),
                     style: to_scene_text_style(
-                        theme.colors.label_color,
+                        label_color,
                         effective_font_size,
                         anchor,
                         angle,
@@ -129,7 +140,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
                         y: line_y,
                         content: line.to_string(),
                         style: to_scene_text_style(
-                            theme.colors.label_color,
+                            label_color,
                             effective_font_size,
                             anchor,
                             angle,
@@ -254,17 +265,41 @@ pub fn build_grid(
         }
     }
 
+    // Major gridlines honor per-axis style overrides (B5): the x gridlines pick up
+    // the x-axis's `grid_color`/`grid_width`/`grid_dash` overrides, the y gridlines
+    // the y-axis's; each falls back to the shared theme major level when unset, so
+    // chart-level gridline styling (which mutates the theme) stays byte-identical.
     if let Some(ax) = x_axis.filter(|a| a.show_grid) {
-        let style = to_scene_stroke(major_color, major_width, major_opacity, major_dash, None, None);
+        let style = major_grid_style(ax, major_color, major_width, major_dash, major_opacity);
         emit_gridlines(&mut nodes, &ax.ticks, true, plot_area, y_baseline_x, &style);
     }
 
     if let Some(ay) = y_axis.filter(|a| a.show_grid) {
-        let style = to_scene_stroke(major_color, major_width, major_opacity, major_dash, None, None);
+        let style = major_grid_style(ay, major_color, major_width, major_dash, major_opacity);
         emit_gridlines(&mut nodes, &ay.ticks, false, plot_area, x_baseline_y, &style);
     }
 
     nodes
+}
+
+/// Major-gridline stroke style for one axis, honoring the per-axis `grid_color`,
+/// `grid_width`, and `grid_dash` overrides and falling back to the supplied theme
+/// major-level values when an override is absent. Opacity stays theme-driven
+/// (`grid_opacity` is an orphan per-axis field in this unit).
+fn major_grid_style(
+    axis: &AxisLayout,
+    theme_color: palette::Srgba<u8>,
+    theme_width: f64,
+    theme_dash: Option<&[f64]>,
+    opacity: f64,
+) -> ferrum_scene::StrokeStyle {
+    let color = axis
+        .grid_color_rgba
+        .map(|[r, g, b, a]| palette::Srgba::new(r, g, b, a))
+        .unwrap_or(theme_color);
+    let width = axis.grid_width.unwrap_or(theme_width);
+    let dash: Option<&[f64]> = axis.grid_dash.as_deref().or(theme_dash);
+    to_scene_stroke(color, width, opacity, dash, None, None)
 }
 
 /// Emit one `SceneNode::Line` per tick spanning the plot area, skipping any
@@ -355,6 +390,13 @@ mod tests {
             title_font_size: None,
             title_color_rgba: None,
             label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
         }
     }
 
@@ -453,6 +495,13 @@ mod tests {
             title_font_size: None,
             title_color_rgba: None,
             label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -482,6 +531,13 @@ mod tests {
             title_font_size: None,
             title_color_rgba: None,
             label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -523,6 +579,13 @@ mod tests {
             title_font_size: None,
             title_color_rgba: None,
             label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);
@@ -574,6 +637,13 @@ mod tests {
             title_font_size: None,
             title_color_rgba: None,
             label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
         };
         let theme = ThemeInputs::default(); // theme.typography.label_font_size == 11.0
         let nodes = build_axis(&axis, &theme);
@@ -620,6 +690,13 @@ mod tests {
             title_font_size: None,
             title_color_rgba: None,
             label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
         };
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let band_colors = vec!["#f0f0f0".to_string(), "transparent".to_string()];
@@ -648,6 +725,9 @@ mod tests {
             title: None,
             show_labels: true, show_ticks: true, show_domain: true, show_grid: true,
             title_font_size: None, title_color_rgba: None, label_padding: None,
+            label_color_rgba: None, label_font_size: None,
+            grid_color_rgba: None, grid_dash: None, grid_width: None,
+            domain_color_rgba: None, domain_width: None,
         };
         let plot_area = Rect { x: 50.0, y: 10.0, w: 400.0, h: 300.0 };
         let theme = ThemeInputs::default();
@@ -679,6 +759,13 @@ mod tests {
             title_font_size: None,
             title_color_rgba: None,
             label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
         }
     }
 
@@ -891,6 +978,13 @@ mod tests {
             title_font_size: Some(20.0),
             title_color_rgba: Some([0xff, 0x00, 0x00, 0xff]),
             label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_axis(&axis, &theme);

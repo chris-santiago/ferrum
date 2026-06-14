@@ -62,6 +62,25 @@ pub struct AxisInput {
     /// Pixel gap between the end of a tick mark and the tick label baseline.
     /// Overrides the renderer's hardcoded per-orient gaps.
     pub label_padding: Option<f64>,
+    // ── Per-axis style overrides (B5: per-channel axis styling) ──────────────
+    // Each falls back to the corresponding shared `theme` value when `None`, so
+    // chart-level styling (which mutates the theme) stays byte-identical and only
+    // a per-channel/per-axis spec lights these up. Consumed by
+    // `render::marks::axis::{build_axis, build_grid}`.
+    /// Tick-label color override. `None` → `theme.colors.label_color`.
+    pub label_color: Option<Srgba<u8>>,
+    /// Tick-label font-size override. `None` → `theme.typography.label_font_size`.
+    pub label_font_size: Option<f64>,
+    /// Gridline color override. `None` → `theme.colors.grid_color`.
+    pub grid_color: Option<Srgba<u8>>,
+    /// Gridline dash override. `None` → `theme.grid.grid_dash`.
+    pub grid_dash: Option<Vec<f64>>,
+    /// Gridline width override. `None` → `theme.sizes.grid_width`.
+    pub grid_width: Option<f64>,
+    /// Domain-line color override. `None` → `theme.colors.axis_line_color`.
+    pub domain_color: Option<Srgba<u8>>,
+    /// Domain-line width override. `None` → `theme.sizes.axis_line_width`.
+    pub domain_width: Option<f64>,
     /// Continuous-axis scale projection (continuous-axis tick design,
     /// 2026-05-30). `Some` for continuous (linear/log/pow/symlog/time) axes;
     /// `None` for categorical/discretizing (ordinal) axes, which keep the
@@ -120,6 +139,13 @@ impl AxisInput {
             title_color: None,
             title_padding: None,
             label_padding: None,
+            label_color: None,
+            label_font_size: None,
+            grid_color: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color: None,
+            domain_width: None,
             tick_projection: None,
         }
     }
@@ -177,9 +203,39 @@ pub struct AxisLayout {
     /// `configure_axis(label_padding=...)`. `None` means use the renderer default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label_padding: Option<f64>,
+    // ── Per-axis style overrides (B5). Stored as `[R, G, B, A]` for colors so the
+    //    layout serializes without a palette dependency. `None` → theme default. ──
+    /// Tick-label color override. `None` → `theme.colors.label_color`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_color_rgba: Option<[u8; 4]>,
+    /// Tick-label font-size override. `None` → `theme.typography.label_font_size`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_font_size: Option<f64>,
+    /// Gridline color override. `None` → `theme.colors.grid_color`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid_color_rgba: Option<[u8; 4]>,
+    /// Gridline dash override. `None` → `theme.grid.grid_dash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid_dash: Option<Vec<f64>>,
+    /// Gridline width override. `None` → `theme.sizes.grid_width`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid_width: Option<f64>,
+    /// Domain-line color override. `None` → `theme.colors.axis_line_color`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_color_rgba: Option<[u8; 4]>,
+    /// Domain-line width override. `None` → `theme.sizes.axis_line_width`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_width: Option<f64>,
 }
 
 fn default_true() -> bool { true }
+
+/// Convert an `AxisInput` color override (`Srgba<u8>`) to the `[R, G, B, A]`
+/// array form stored on `AxisLayout`. Mirrors the existing `title_color`
+/// mapping at the two `layout_*_axis` constructors.
+fn rgba_array(c: Srgba<u8>) -> [u8; 4] {
+    [c.red, c.green, c.blue, c.alpha]
+}
 
 /// Continuous-axis scale projection: map each per-tick domain fraction onto the
 /// panel's mark pixel range, applying the *same* padding inset that places data
@@ -568,8 +624,15 @@ pub fn layout_y_axis(
         show_domain: input.show_domain,
         show_grid: input.show_grid,
         title_font_size: input.title_font_size,
-        title_color_rgba: input.title_color.map(|c| [c.red, c.green, c.blue, c.alpha]),
+        title_color_rgba: input.title_color.map(rgba_array),
         label_padding: input.label_padding,
+        label_color_rgba: input.label_color.map(rgba_array),
+        label_font_size: input.label_font_size,
+        grid_color_rgba: input.grid_color.map(rgba_array),
+        grid_dash: input.grid_dash.clone(),
+        grid_width: input.grid_width,
+        domain_color_rgba: input.domain_color.map(rgba_array),
+        domain_width: input.domain_width,
     }
 }
 
@@ -1088,8 +1151,15 @@ pub fn layout_x_axis(
         show_domain: input.show_domain,
         show_grid: input.show_grid,
         title_font_size: input.title_font_size,
-        title_color_rgba: input.title_color.map(|c| [c.red, c.green, c.blue, c.alpha]),
+        title_color_rgba: input.title_color.map(rgba_array),
         label_padding: input.label_padding,
+        label_color_rgba: input.label_color.map(rgba_array),
+        label_font_size: input.label_font_size,
+        grid_color_rgba: input.grid_color.map(rgba_array),
+        grid_dash: input.grid_dash.clone(),
+        grid_width: input.grid_width,
+        domain_color_rgba: input.domain_color.map(rgba_array),
+        domain_width: input.domain_width,
     }, warning)
 }
 
@@ -1126,6 +1196,13 @@ mod tests {
             title_font_size: None,
             title_color_rgba: None,
             label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
         };
         let json = serde_json::to_string(&a).unwrap();
         let parsed: AxisLayout = serde_json::from_str(&json).unwrap();
@@ -1148,6 +1225,13 @@ mod tests {
             title_font_size: None,
             title_color_rgba: None,
             label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
         };
         let json = serde_json::to_string(&a).unwrap();
         assert!(json.contains(r#""orient":"left""#));

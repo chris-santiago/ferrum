@@ -224,6 +224,9 @@ pub struct LegendPreparedOverrides {
     /// D13+: legend type override from `encoding.color.legend.type`.
     /// "gradient" forces colorbar rendering; "symbol" forces discrete entries.
     pub legend_type: Option<String>,
+    /// B5: symbol shape override from `encoding.color.legend.symbol_type`.
+    /// Per-channel wins over chart-level `configure_legend(symbol_type=...)`.
+    pub symbol_type: Option<String>,
 }
 
 impl PreparedInputs {
@@ -508,67 +511,34 @@ pub fn prepare_render_inputs(
         y_tick_labels.reverse();
         y_tick_fractions.reverse();
     }
-    // D7 + D12: extract per-axis style fields from encoding.axis and encoding.format.
-    // All new fields default to the safe backward-compat value so SVG output is
-    // byte-identical when the encoding carries no axis/format overrides.
+    // D7 + D12 (B5-typed): extract per-axis style fields from the typed
+    // `encoding.axis` style spec. The show toggles default to `true` (and title
+    // falls through to the field name) so SVG output is byte-identical when the
+    // encoding carries no axis overrides.
     let x_enc_axis = rendering_encoding.x.as_ref().and_then(|e| e.axis.as_ref());
     let y_enc_axis = rendering_encoding.y.as_ref().and_then(|e| e.axis.as_ref());
-    let x_axis_labels = x_enc_axis
-        .and_then(|a| a.extra.get("labels"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let x_axis_ticks = x_enc_axis
-        .and_then(|a| a.extra.get("ticks"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let x_axis_domain = x_enc_axis
-        .and_then(|a| a.extra.get("domain"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let x_axis_grid = x_enc_axis
-        .and_then(|a| a.extra.get("grid"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let x_label_angle = x_enc_axis
-        .and_then(|a| a.extra.get("labelAngle").or_else(|| a.extra.get("label_angle")))
-        .and_then(|v| v.as_f64());
+    let x_axis_labels = x_enc_axis.and_then(|a| a.labels).unwrap_or(true);
+    let x_axis_ticks = x_enc_axis.and_then(|a| a.ticks).unwrap_or(true);
+    let x_axis_domain = x_enc_axis.and_then(|a| a.domain).unwrap_or(true);
+    let x_axis_grid = x_enc_axis.and_then(|a| a.grid).unwrap_or(true);
+    let x_label_angle = x_enc_axis.and_then(|a| a.label_angle);
     // Axis(title=...) resolution: the outer Option distinguishes "key absent" from
     // "key present but empty".
     //   - None (absent)  → fall through to x_field (field-name default)
     //   - Some("") or Some("  ") → explicit suppress; final title is None, no fallback
     //   - Some("Custom") → use "Custom" directly, no fallback
-    let x_axis_title: Option<String> = match x_enc_axis
-        .and_then(|a| a.extra.get("title"))
-        .and_then(|v| v.as_str())
-    {
+    let x_axis_title: Option<String> = match x_enc_axis.and_then(|a| a.title.as_deref()) {
         Some(s) if s.trim().is_empty() => None, // explicit suppress: don't fall back
         Some(s) => Some(s.to_owned()),           // explicit non-empty title
         None => x_field,                         // absent: fall through to field default
     };
-    let y_axis_labels = y_enc_axis
-        .and_then(|a| a.extra.get("labels"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let y_axis_ticks = y_enc_axis
-        .and_then(|a| a.extra.get("ticks"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let y_axis_domain = y_enc_axis
-        .and_then(|a| a.extra.get("domain"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let y_axis_grid = y_enc_axis
-        .and_then(|a| a.extra.get("grid"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let y_label_angle = y_enc_axis
-        .and_then(|a| a.extra.get("labelAngle").or_else(|| a.extra.get("label_angle")))
-        .and_then(|v| v.as_f64());
+    let y_axis_labels = y_enc_axis.and_then(|a| a.labels).unwrap_or(true);
+    let y_axis_ticks = y_enc_axis.and_then(|a| a.ticks).unwrap_or(true);
+    let y_axis_domain = y_enc_axis.and_then(|a| a.domain).unwrap_or(true);
+    let y_axis_grid = y_enc_axis.and_then(|a| a.grid).unwrap_or(true);
+    let y_label_angle = y_enc_axis.and_then(|a| a.label_angle);
     // Same three-way resolution as x_axis_title above.
-    let y_axis_title: Option<String> = match y_enc_axis
-        .and_then(|a| a.extra.get("title"))
-        .and_then(|v| v.as_str())
-    {
+    let y_axis_title: Option<String> = match y_enc_axis.and_then(|a| a.title.as_deref()) {
         Some(s) if s.trim().is_empty() => None,
         Some(s) => Some(s.to_owned()),
         None => y_field,
@@ -640,6 +610,16 @@ pub fn prepare_render_inputs(
         minor: y_minor_fractions,
     });
 
+    // B5: per-channel axis STYLING overrides (grid color/dash/width, label
+    // color/font-size, domain color/width, title styling, tick_values, padding).
+    // These set the per-axis override fields on `AxisInput` that
+    // `build_axis`/`build_grid` consult with a theme fallback, so they render at
+    // per-channel precedence (the chart-level `configure_axis` apply later only
+    // fills fields still `None`). Honored keys only; orphan fields are carried in
+    // the spec but not applied here (their render lands in later units).
+    let x_axis_style = encoding_axis_style_overrides(x_enc_axis.map(Box::as_ref));
+    let y_axis_style = encoding_axis_style_overrides(y_enc_axis.map(Box::as_ref));
+
     let axes = AxesInput {
         x: AxisInput {
             orient: AxisOrient::Bottom,
@@ -652,12 +632,19 @@ pub fn prepare_render_inputs(
             show_grid: x_axis_grid,
             tick_format: None, // already applied above
             tick_format_type: None,
-            tick_values_override: None,
+            tick_values_override: x_axis_style.tick_values,
             label_format_override: x_label_format_override,
-            title_font_size: None,
-            title_color: None,
-            title_padding: None,
-            label_padding: None,
+            title_font_size: x_axis_style.title_font_size,
+            title_color: x_axis_style.title_color,
+            title_padding: x_axis_style.title_padding,
+            label_padding: x_axis_style.label_padding,
+            label_color: x_axis_style.label_color,
+            label_font_size: x_axis_style.label_font_size,
+            grid_color: x_axis_style.grid_color,
+            grid_dash: x_axis_style.grid_dash,
+            grid_width: x_axis_style.grid_width,
+            domain_color: x_axis_style.domain_color,
+            domain_width: x_axis_style.domain_width,
             tick_projection: x_tick_projection,
         },
         y: AxisInput {
@@ -671,12 +658,19 @@ pub fn prepare_render_inputs(
             show_grid: y_axis_grid,
             tick_format: None,
             tick_format_type: None,
-            tick_values_override: None,
+            tick_values_override: y_axis_style.tick_values,
             label_format_override: y_label_format_override,
-            title_font_size: None,
-            title_color: None,
-            title_padding: None,
-            label_padding: None,
+            title_font_size: y_axis_style.title_font_size,
+            title_color: y_axis_style.title_color,
+            title_padding: y_axis_style.title_padding,
+            label_padding: y_axis_style.label_padding,
+            label_color: y_axis_style.label_color,
+            label_font_size: y_axis_style.label_font_size,
+            grid_color: y_axis_style.grid_color,
+            grid_dash: y_axis_style.grid_dash,
+            grid_width: y_axis_style.grid_width,
+            domain_color: y_axis_style.domain_color,
+            domain_width: y_axis_style.domain_width,
             tick_projection: y_tick_projection,
         },
         show_x: spec.axis_x.unwrap_or(true),
@@ -708,8 +702,7 @@ pub fn prepare_render_inputs(
         .color
         .as_ref()
         .and_then(|c| c.legend.as_ref())
-        .and_then(|l| l.extra.get("disabled"))
-        .and_then(|v| v.as_bool())
+        .and_then(|l| l.disabled)
         .unwrap_or(false);
     let (legend_entries, colorbar): (Vec<LegendEntry>, Option<ColorbarInput>) =
         if legend_disabled {
@@ -732,23 +725,19 @@ pub fn prepare_render_inputs(
                     let color = scheme.sample(t);
                     (t, super::color::fmt_svg(color))
                 }).collect();
-                // Tick labels: check for explicit tickLabels override from
-                // legend extra (e.g. ["Low", "High"] for SHAP beeswarm),
+                // Tick labels: check for explicit tickLabels override from the
+                // typed legend spec (e.g. ["Low", "High"] for SHAP beeswarm),
                 // else compute 5 ticks across the domain at 0, 0.25, 0.5, 0.75, 1.0.
                 // When `format=` is set, apply a Python-style format spec to each tick value.
-                let legend_extra_ref = spec
+                let color_legend = spec
                     .encoding
                     .color
                     .as_ref()
-                    .and_then(|c| c.legend.as_ref())
-                    .map(|l| &l.extra);
-                let custom_tick_labels: Option<Vec<String>> = legend_extra_ref
-                    .and_then(|extra| extra.get("tickLabels"))
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect());
-                let format_spec: Option<&str> = legend_extra_ref
-                    .and_then(|extra| extra.get("format"))
-                    .and_then(|v| v.as_str());
+                    .and_then(|c| c.legend.as_ref());
+                let custom_tick_labels: Option<Vec<String>> =
+                    color_legend.and_then(|l| l.tick_labels.clone());
+                let format_spec: Option<&str> =
+                    color_legend.and_then(|l| l.format.as_deref());
                 let tick_labels = if let Some(labels) = custom_tick_labels {
                     labels
                 } else {
@@ -776,85 +765,56 @@ pub fn prepare_render_inputs(
         None
     };
 
-    // D13: extract legend style overrides from encoding.color.legend extra fields.
-    let color_legend_extra = spec
+    // D13 (B5-typed): extract legend style overrides from the typed
+    // `encoding.color.legend` spec. Per-channel precedence: these win over
+    // chart-level `configure_legend` (which fills only what is still `None`).
+    let color_legend = spec
         .encoding
         .color
         .as_ref()
-        .and_then(|c| c.legend.as_ref())
-        .map(|l| &l.extra);
+        .and_then(|c| c.legend.as_ref());
     let legend_overrides = LegendPreparedOverrides {
-        orient: color_legend_extra
-            .and_then(|extra| extra.get("orient"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| match s {
-                "right"  => Some(LegendOrient::Right),
-                "left"   => Some(LegendOrient::Left),
-                "top"    => Some(LegendOrient::Top),
-                "bottom" => Some(LegendOrient::Bottom),
-                _ => None,
-            }),
-        title: color_legend_extra
-            .and_then(|extra| extra.get("title"))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned),
-        title_font_size: color_legend_extra
-            .and_then(|extra| {
-                extra.get("titleFontSize").or_else(|| extra.get("title_font_size"))
-            })
-            .and_then(|v| v.as_f64()),
-        columns: color_legend_extra
-            .and_then(|extra| extra.get("columns"))
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32),
-        tick_count: color_legend_extra
-            .and_then(|extra| extra.get("tickCount"))
-            .and_then(|v| v.as_u64())
-            .map(|n| n as usize),
-        label_font_size: color_legend_extra
-            .and_then(|extra| extra.get("labelFontSize").or_else(|| extra.get("label_font_size")))
-            .and_then(|v| v.as_f64()),
-        gradient_length: color_legend_extra
-            .and_then(|extra| extra.get("gradientLength").or_else(|| extra.get("gradient_length")))
-            .and_then(|v| v.as_f64()),
-        gradient_thickness: color_legend_extra
-            .and_then(|extra| extra.get("gradientThickness").or_else(|| extra.get("gradient_thickness")))
-            .and_then(|v| v.as_f64()),
-        direction: color_legend_extra
-            .and_then(|extra| extra.get("direction"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| match s {
-                "horizontal" => Some(crate::layout::LegendDirection::Horizontal),
-                "vertical"   => Some(crate::layout::LegendDirection::Vertical),
-                _ => None,
-            }),
+        orient: color_legend.and_then(|l| l.orient.as_deref()).and_then(|s| match s {
+            "right"  => Some(LegendOrient::Right),
+            "left"   => Some(LegendOrient::Left),
+            "top"    => Some(LegendOrient::Top),
+            "bottom" => Some(LegendOrient::Bottom),
+            _ => None,
+        }),
+        title: color_legend.and_then(|l| l.title.clone()),
+        title_font_size: color_legend.and_then(|l| l.title_font_size),
+        columns: color_legend.and_then(|l| l.columns),
+        tick_count: color_legend.and_then(|l| l.tick_count).map(|n| n as usize),
+        label_font_size: color_legend.and_then(|l| l.label_font_size),
+        gradient_length: color_legend.and_then(|l| l.gradient_length),
+        gradient_thickness: color_legend.and_then(|l| l.gradient_thickness),
+        direction: color_legend.and_then(|l| l.direction.as_deref()).and_then(|s| match s {
+            "horizontal" => Some(crate::layout::LegendDirection::Horizontal),
+            "vertical"   => Some(crate::layout::LegendDirection::Vertical),
+            _ => None,
+        }),
         // `values`: explicit tick/entry labels for the legend. Accepts an array of
         // strings or numbers. Numbers are formatted to a short decimal string.
-        values: color_legend_extra
-            .and_then(|extra| extra.get("values"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .map(|item| {
-                        if let Some(s) = item.as_str() {
-                            s.to_string()
-                        } else if let Some(n) = item.as_f64() {
-                            if n.fract() == 0.0 && n.abs() < 1e15 {
-                                format!("{}", n as i64)
-                            } else {
-                                format!("{:.4}", n).trim_end_matches('0').trim_end_matches('.').to_string()
-                            }
+        values: color_legend.and_then(|l| l.values.as_ref()).map(|arr| {
+            arr.iter()
+                .map(|item| {
+                    if let Some(s) = item.as_str() {
+                        s.to_string()
+                    } else if let Some(n) = item.as_f64() {
+                        if n.fract() == 0.0 && n.abs() < 1e15 {
+                            format!("{}", n as i64)
                         } else {
-                            item.to_string()
+                            format!("{:.4}", n).trim_end_matches('0').trim_end_matches('.').to_string()
                         }
-                    })
-                    .collect()
-            }),
+                    } else {
+                        item.to_string()
+                    }
+                })
+                .collect()
+        }),
         // `type`: "gradient" forces colorbar path; "symbol" forces categorical entries.
-        legend_type: color_legend_extra
-            .and_then(|extra| extra.get("type"))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned),
+        legend_type: color_legend.and_then(|l| l.legend_type.clone()),
+        symbol_type: color_legend.and_then(|l| l.symbol_type.clone()),
     };
 
     // Multivariate B1: build size/shape auxiliary legends from the resolved
@@ -896,24 +856,18 @@ pub fn prepare_render_inputs(
     })
 }
 
-/// Read whether a channel's `legend` extra carries `disabled: true`
+/// Read whether a channel's typed `legend` spec carries `disabled: true`
 /// (`legend=None` / `legend=False` from the Python `Size`/`Shape` classes).
 fn legend_channel_disabled(enc: Option<&crate::spec::encoding::EncodingSpec>) -> bool {
     enc.and_then(|e| e.legend.as_ref())
-        .and_then(|l| l.extra.get("disabled"))
-        .and_then(|v| v.as_bool())
+        .and_then(|l| l.disabled)
         .unwrap_or(false)
 }
 
-/// Optional explicit legend title from a channel's `legend.title` extra,
+/// Optional explicit legend title from a channel's typed `legend.title`,
 /// falling back to the channel's field name.
 fn aux_legend_title(enc: &crate::spec::encoding::EncodingSpec) -> Option<String> {
-    let explicit = enc
-        .legend
-        .as_ref()
-        .and_then(|l| l.extra.get("title"))
-        .and_then(|v| v.as_str())
-        .map(str::to_owned);
+    let explicit = enc.legend.as_ref().and_then(|l| l.title.clone());
     explicit.or_else(|| Some(enc.field.clone()))
 }
 
@@ -954,8 +908,7 @@ fn build_aux_legends(
             let format_spec = size_enc
                 .legend
                 .as_ref()
-                .and_then(|l| l.extra.get("format"))
-                .and_then(|v| v.as_str());
+                .and_then(|l| l.format.as_deref());
             if let Some((lo, hi)) = size_scale.inner.data_domain() {
                 let values = nice_ticks(lo, hi, 5);
                 let entries: Vec<SizeLegendEntry> = values
@@ -1199,13 +1152,56 @@ fn apply_impute(
 // for temporal axes) and re-applies the requested format.
 
 /// D3 (flexibility campaign): per-channel `Axis(tick_count=N)`. Read from the
-/// encoding's `axis` map (`tick_count` key, written by Python's `Axis.to_dict()`).
-/// `None` → use the caller's default (10).
+/// encoding's typed `axis` style spec. `None` → use the caller's default (10).
 fn encoding_axis_tick_count(enc: Option<&crate::spec::encoding::EncodingSpec>) -> Option<usize> {
     enc.and_then(|e| e.axis.as_ref())
-        .and_then(|a| a.extra.get("tick_count").or_else(|| a.extra.get("tickCount")))
-        .and_then(|v| v.as_u64())
+        .and_then(|a| a.tick_count)
         .map(|n| n as usize)
+}
+
+/// Per-channel axis styling overrides parsed from a typed `AxisStyleSpec`, ready
+/// to drop into an `AxisInput` (B5). Color strings are pre-parsed to `Srgba<u8>`;
+/// an unparseable hex string yields `None` (theme fallback) rather than failing,
+/// matching the chart-level apply behavior. Only the honored styling keys are
+/// surfaced; orphan fields (orient/translate/extents/…) are intentionally absent.
+#[derive(Default)]
+struct AxisStyleOverrides {
+    tick_values: Option<Vec<f64>>,
+    title_font_size: Option<f64>,
+    title_color: Option<palette::Srgba<u8>>,
+    title_padding: Option<f64>,
+    label_padding: Option<f64>,
+    label_color: Option<palette::Srgba<u8>>,
+    label_font_size: Option<f64>,
+    grid_color: Option<palette::Srgba<u8>>,
+    grid_dash: Option<Vec<f64>>,
+    grid_width: Option<f64>,
+    domain_color: Option<palette::Srgba<u8>>,
+    domain_width: Option<f64>,
+}
+
+fn encoding_axis_style_overrides(
+    axis: Option<&crate::render::chart_config::AxisStyleSpec>,
+) -> AxisStyleOverrides {
+    let Some(a) = axis else { return AxisStyleOverrides::default() };
+    let parse = |c: &Option<String>| {
+        c.as_deref()
+            .and_then(|s| crate::render::color::from_hex_str(s).ok())
+    };
+    AxisStyleOverrides {
+        tick_values: a.values.clone(),
+        title_font_size: a.title_font_size,
+        title_color: parse(&a.title_color),
+        title_padding: a.title_padding,
+        label_padding: a.label_padding,
+        label_color: parse(&a.label_color),
+        label_font_size: a.label_font_size,
+        grid_color: parse(&a.grid_color),
+        grid_dash: a.grid_dash.clone(),
+        grid_width: a.grid_width,
+        domain_color: parse(&a.domain_color),
+        domain_width: a.domain_width,
+    }
 }
 
 /// Resolve the tick-label format `(spec, type)` for a positional channel.
@@ -1221,21 +1217,9 @@ pub(crate) fn resolve_axis_label_format(
     enc: Option<&crate::spec::encoding::EncodingSpec>,
 ) -> (Option<String>, Option<String>) {
     let Some(e) = enc else { return (None, None) };
-    let axis_fmt = e.axis.as_ref().and_then(|a| {
-        a.extra
-            .get("label_format")
-            .or_else(|| a.extra.get("labelFormat"))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-    });
-    if let Some(fmt) = axis_fmt {
-        let ty = e.axis.as_ref().and_then(|a| {
-            a.extra
-                .get("label_format_type")
-                .or_else(|| a.extra.get("labelFormatType"))
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-        });
+    let axis = e.axis.as_ref();
+    if let Some(fmt) = axis.and_then(|a| a.label_format.clone()) {
+        let ty = axis.and_then(|a| a.label_format_type.clone());
         return (Some(fmt), ty);
     }
     (e.format.clone(), e.format_type.clone())
@@ -1929,11 +1913,12 @@ mod tests {
     #[test]
     fn size_legend_disabled_suppresses_block() {
         let mut spec = base_spec();
-        let mut extra = serde_json::Map::new();
-        extra.insert("disabled".into(), serde_json::Value::Bool(true));
         spec.encoding.size = Some(EncodingSpec {
             field: "pop".into(),
-            legend: Some(crate::spec::encoding::LegendSpec { extra }),
+            legend: Some(Box::new(crate::render::chart_config::LegendStyleSpec {
+                disabled: Some(true),
+                ..Default::default()
+            })),
             ..Default::default()
         });
         let p = prep(&spec, &batch_pop());
@@ -2236,15 +2221,15 @@ mod tests {
 
     // --- D3 (flexibility campaign): per-channel Axis(label_format, tick_count) ---
 
-    /// Build an `EncodingSpec` carrying an `axis` map with the given key/values.
+    /// Build an `EncodingSpec` carrying a per-channel `axis` from a JSON object,
+    /// deserialized through the typed `AxisStyleSpec` (so the test exercises the
+    /// real wire path, including `deny_unknown_fields`).
     fn enc_with_axis(field: &str, axis: serde_json::Value) -> EncodingSpec {
-        let extra = match axis {
-            serde_json::Value::Object(m) => m,
-            _ => serde_json::Map::new(),
-        };
+        let axis: crate::render::chart_config::AxisStyleSpec =
+            serde_json::from_value(axis).expect("valid axis style json");
         EncodingSpec {
             field: field.into(),
-            axis: Some(crate::spec::encoding::AxisSpec { extra }),
+            axis: Some(Box::new(axis)),
             ..Default::default()
         }
     }
@@ -2262,6 +2247,103 @@ mod tests {
         let prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
         assert_eq!(prep.axes.x.label_format_override.as_deref(), Some(",.0f"));
+    }
+
+    #[test]
+    fn per_channel_axis_styling_reaches_axis_input() {
+        // B5: a per-channel `Axis(grid_color=, label_color=, domain_width=)` must
+        // land on the AxisInput's per-axis style override fields (which
+        // build_axis/build_grid consult with a theme fallback).
+        let mut spec = single_layer_spec();
+        spec.encoding.x = Some(enc_with_axis(
+            "price",
+            serde_json::json!({ "grid_color": "#cccccc", "label_color": "#ff00ff", "domain_width": 3.0 }),
+        ));
+        let batch = price_weight_batch();
+        let prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        let gx = prep.axes.x.grid_color.expect("per-channel grid_color must reach x AxisInput");
+        assert_eq!([gx.red, gx.green, gx.blue], [0xcc, 0xcc, 0xcc]);
+        let lx = prep.axes.x.label_color.expect("per-channel label_color must reach x AxisInput");
+        assert_eq!([lx.red, lx.green, lx.blue], [0xff, 0x00, 0xff]);
+        assert_eq!(prep.axes.x.domain_width, Some(3.0));
+        // The y-axis must be untouched (per-channel applies only to its own axis).
+        assert!(prep.axes.y.grid_color.is_none());
+        assert!(prep.axes.y.label_color.is_none());
+    }
+
+    #[test]
+    fn per_channel_axis_style_wins_over_chart_config() {
+        // B5 cascade: a per-channel `Axis(grid_width=...)` on x, applied in
+        // `prepare_render_inputs`, is set BEFORE the chart-level
+        // `configure_axis(grid_width=...)` fill (which only fills `None`), so the
+        // per-channel value wins. We assert the prep-stage value here, then verify
+        // the chart-level apply does not overwrite it.
+        let mut spec = single_layer_spec();
+        spec.encoding.x =
+            Some(enc_with_axis("price", serde_json::json!({ "grid_width": 4.0 })));
+        let batch = price_weight_batch();
+        let mut prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        assert_eq!(prep.axes.x.grid_width, Some(4.0), "per-channel value set in prep");
+        // Chart-level configure_axis(grid_width=1.0) must NOT overwrite per-channel.
+        let cfg = crate::render::chart_config::AxisConfigSpec {
+            style: crate::render::chart_config::AxisStyleSpec {
+                grid_width: Some(1.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        crate::render::apply_axis_style_to_axis_input(&mut prep.axes.x, &cfg.style);
+        assert_eq!(prep.axes.x.grid_width, Some(4.0), "per-channel must win over configure_axis");
+    }
+
+    #[test]
+    fn per_channel_show_toggle_wins_over_chart_config() {
+        // B5 Unit-1 fix: a per-channel `Axis(grid=False)`/`Axis(domain=False)` on x
+        // must survive a conflicting chart-level `configure_axis(grid=True)` /
+        // `configure_axis(domain=True)`. The per-channel prepare path is the sole
+        // owner of `AxisInput.show_*`; the chart-level toggle flows through its
+        // global theme/gate path, not by clobbering the per-axis `show_*` value.
+        let mut spec = single_layer_spec();
+        spec.encoding.x = Some(enc_with_axis(
+            "price",
+            serde_json::json!({ "grid": false, "domain": false }),
+        ));
+        let batch = price_weight_batch();
+        let mut prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        // Per-channel suppression is set in prep; y is untouched (defaults true).
+        assert!(!prep.axes.x.show_grid, "per-channel grid=False set in prep");
+        assert!(!prep.axes.x.show_domain, "per-channel domain=False set in prep");
+        assert!(prep.axes.y.show_grid, "y grid default true");
+        assert!(prep.axes.y.show_domain, "y domain default true");
+
+        // Chart-level configure_axis(grid=True, domain=True) applies to BOTH axes
+        // via the shared `axis` key, the same wire step `prepare_and_layout` runs.
+        let cfg = crate::render::chart_config::AxisConfigSpec {
+            style: crate::render::chart_config::AxisStyleSpec {
+                grid: Some(true),
+                domain: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        crate::render::apply_axis_config_to_axis_input(&mut prep.axes.x, Some(&cfg));
+        crate::render::apply_axis_config_to_axis_input(&mut prep.axes.y, Some(&cfg));
+
+        // Per-channel x suppression survives the conflicting chart-level toggle.
+        assert!(
+            !prep.axes.x.show_grid,
+            "per-channel grid=False must survive configure_axis(grid=True)"
+        );
+        assert!(
+            !prep.axes.x.show_domain,
+            "per-channel domain=False must survive configure_axis(domain=True)"
+        );
+        // The other axis (no per-channel override) is unaffected: still shown.
+        assert!(prep.axes.y.show_grid, "y axis show_grid unaffected");
+        assert!(prep.axes.y.show_domain, "y axis show_domain unaffected");
     }
 
     #[test]
@@ -2324,17 +2406,15 @@ mod tests {
     /// Build a spec with a continuous color encoding on "pop" so that the colorbar
     /// code path activates. Returns a `ColorbarInput` with `format_spec` applied.
     fn colorbar_with_format(format_spec: &str) -> crate::layout::ColorbarInput {
-        use crate::spec::encoding::{DataType, LegendSpec};
+        use crate::spec::encoding::DataType;
         let mut spec = base_spec();
-        let mut legend_extra = serde_json::Map::new();
-        legend_extra.insert(
-            "format".into(),
-            serde_json::Value::String(format_spec.to_owned()),
-        );
         spec.encoding.color = Some(EncodingSpec {
             field: "pop".into(),
             type_: Some(DataType::Quantitative),
-            legend: Some(LegendSpec { extra: legend_extra }),
+            legend: Some(Box::new(crate::render::chart_config::LegendStyleSpec {
+                format: Some(format_spec.to_owned()),
+                ..Default::default()
+            })),
             ..Default::default()
         });
         let p = prep(&spec, &batch_pop());
@@ -2362,7 +2442,7 @@ mod tests {
     /// we build a dedicated batch).
     #[test]
     fn colorbar_format_dot0pct_byte_stable() {
-        use crate::spec::encoding::{DataType, LegendSpec};
+        use crate::spec::encoding::DataType;
         use arrow::array::Float64Array;
         use arrow::datatypes::{DataType as ArrowDt, Field, Schema};
 
@@ -2383,15 +2463,13 @@ mod tests {
         .unwrap();
 
         let mut spec = base_spec();
-        let mut legend_extra = serde_json::Map::new();
-        legend_extra.insert(
-            "format".into(),
-            serde_json::Value::String(".0%".to_owned()),
-        );
         spec.encoding.color = Some(EncodingSpec {
             field: "pop".into(),
             type_: Some(DataType::Quantitative),
-            legend: Some(LegendSpec { extra: legend_extra }),
+            legend: Some(Box::new(crate::render::chart_config::LegendStyleSpec {
+                format: Some(".0%".to_owned()),
+                ..Default::default()
+            })),
             ..Default::default()
         });
         let p = prep(&spec, &batch);
@@ -2417,7 +2495,7 @@ mod tests {
     #[test]
     fn colorbar_format_comma_grouped_widened() {
         // Domain [1000, 100000] so we can see grouping separators.
-        use crate::spec::encoding::{DataType, LegendSpec};
+        use crate::spec::encoding::DataType;
         use arrow::array::Float64Array;
         use arrow::datatypes::{DataType as ArrowDt, Field, Schema};
 
@@ -2437,15 +2515,13 @@ mod tests {
         .unwrap();
 
         let mut spec = base_spec();
-        let mut legend_extra = serde_json::Map::new();
-        legend_extra.insert(
-            "format".into(),
-            serde_json::Value::String(",.0f".to_owned()),
-        );
         spec.encoding.color = Some(EncodingSpec {
             field: "pop".into(),
             type_: Some(DataType::Quantitative),
-            legend: Some(LegendSpec { extra: legend_extra }),
+            legend: Some(Box::new(crate::render::chart_config::LegendStyleSpec {
+                format: Some(",.0f".to_owned()),
+                ..Default::default()
+            })),
             ..Default::default()
         });
         let p = prep(&spec, &batch);
@@ -2472,7 +2548,7 @@ mod tests {
     /// Domain [1000, 1_000_000]; first tick (1000) → "1k", last (1M) → "1M".
     #[test]
     fn colorbar_format_si_trim_widened() {
-        use crate::spec::encoding::{DataType, LegendSpec};
+        use crate::spec::encoding::DataType;
         use arrow::array::Float64Array;
         use arrow::datatypes::{DataType as ArrowDt, Field, Schema};
 
@@ -2492,15 +2568,13 @@ mod tests {
         .unwrap();
 
         let mut spec = base_spec();
-        let mut legend_extra = serde_json::Map::new();
-        legend_extra.insert(
-            "format".into(),
-            serde_json::Value::String("~s".to_owned()),
-        );
         spec.encoding.color = Some(EncodingSpec {
             field: "pop".into(),
             type_: Some(DataType::Quantitative),
-            legend: Some(LegendSpec { extra: legend_extra }),
+            legend: Some(Box::new(crate::render::chart_config::LegendStyleSpec {
+                format: Some("~s".to_owned()),
+                ..Default::default()
+            })),
             ..Default::default()
         });
         let p = prep(&spec, &batch);
