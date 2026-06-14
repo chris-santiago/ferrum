@@ -255,6 +255,19 @@ pub struct LegendPreparedOverrides {
     /// B5 unit 3: coarse draw order from `encoding.color.legend.zindex`.
     /// `>= 1` routes the legend above marks; `<= 0` (default) below.
     pub zindex: Option<i64>,
+    /// B5 unit 6a: legend swatch area (px²) from `encoding.color.legend.symbol_size`.
+    pub symbol_size: Option<f64>,
+    /// B5 unit 6a: legend entry-label fill color from
+    /// `encoding.color.legend.label_color`.
+    pub label_color: Option<String>,
+    /// B5 unit 6a: extra plot→legend gap (px) from `encoding.color.legend.offset`.
+    pub offset: Option<f64>,
+    /// B5 unit 6a: internal legend box padding (px) from
+    /// `encoding.color.legend.padding`.
+    pub padding: Option<f64>,
+    /// B5 unit 6a: legend title→entry gap (px) from
+    /// `encoding.color.legend.title_padding`.
+    pub title_padding: Option<f64>,
 }
 
 impl PreparedInputs {
@@ -874,6 +887,13 @@ pub fn prepare_render_inputs(
         clip_height: color_legend.and_then(|l| l.clip_height),
         tick_min_step: color_legend.and_then(|l| l.tick_min_step),
         zindex: color_legend.and_then(|l| l.zindex),
+        // B5 unit 6a orphans. Per-channel here; chart-level `configure_legend`
+        // fills any that stay `None`.
+        symbol_size: color_legend.and_then(|l| l.symbol_size),
+        label_color: color_legend.and_then(|l| l.label_color.clone()),
+        offset: color_legend.and_then(|l| l.offset),
+        padding: color_legend.and_then(|l| l.padding),
+        title_padding: color_legend.and_then(|l| l.title_padding),
     };
 
     // Multivariate B1: build size/shape auxiliary legends from the resolved

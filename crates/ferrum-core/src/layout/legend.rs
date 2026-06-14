@@ -73,6 +73,17 @@ pub struct LegendLayout {
     /// hard-clipped. `None` → no clip (default; omitted from JSON).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clip_height: Option<f64>,
+    /// B5 unit 6a: legend swatch/symbol area in px². The renderer derives the
+    /// swatch geometry (circle radius, square side, line length, shape glyph
+    /// radius) from this area via the mark `size` channel's `radius = sqrt(area /
+    /// PI)` mapping. `None` → the fixed default swatch geometry (byte-identical;
+    /// omitted from JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_size: Option<f64>,
+    /// B5 unit 6a: fill color (css hex) of the legend ENTRY label text. `None` →
+    /// the theme `font_color` default (byte-identical; omitted from JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_color: Option<String>,
 }
 
 /// Continuous-color colorbar within a LegendLayout. The bar is rendered as
@@ -176,6 +187,19 @@ pub struct LegendOverrides {
     /// B5 unit 3: minimum step between colorbar ticks (data units). Drops ticks
     /// whose labelled value is closer than this to a kept tick.
     pub tick_min_step: Option<f64>,
+    /// B5 unit 6a: legend swatch area (px²). The renderer derives the swatch
+    /// geometry from this via `radius = sqrt(area / PI)`.
+    pub symbol_size: Option<f64>,
+    /// B5 unit 6a: fill color (css hex) of the legend entry label text.
+    pub label_color: Option<String>,
+    /// B5 unit 6a: extra gap (px) between the plot area and the legend strip.
+    pub offset: Option<f64>,
+    /// B5 unit 6a: internal padding (px) between the legend box edge and its
+    /// contents (replaces `LEGEND_OUTER_PAD` for the categorical legend).
+    pub padding: Option<f64>,
+    /// B5 unit 6a: gap (px) between the legend title and the first entry row
+    /// (replaces `LEGEND_TITLE_GAP`).
+    pub title_padding: Option<f64>,
 }
 
 const SYMBOL_WIDTH: f64 = 12.0;
@@ -183,15 +207,22 @@ const SYMBOL_LABEL_GAP: f64 = 4.0;
 const LEGEND_OUTER_PAD: f64 = 8.0;
 const LEGEND_ENTRY_ROW_PAD: f64 = 4.0;
 const LEGEND_TITLE_GAP: f64 = 8.0;
+/// Base gap between the plot area and the legend strip so data points near the
+/// axis edge don't visually merge with legend text. The per-legend `offset`
+/// (B5 unit 6a) adds to this.
+const LEGEND_PLOT_GAP: f64 = 8.0;
 /// The ellipsis appended to a label truncated by `label_limit`.
 const LABEL_ELLIPSIS: &str = "…";
 
-/// B5 unit 3: per-legend styling/positioning options that previously had no
+/// B5 unit 3 / 6a: per-legend styling/positioning options that previously had no
 /// renderer (`symbol_stroke_width`, `row_padding`/`column_padding`,
-/// `label_limit`, `clip_height`). Bundled into one struct so `layout_legend`
+/// `label_limit`, `clip_height`, `padding`/`title_padding`/`offset`,
+/// `symbol_size`, `label_color`). Bundled into one struct so `layout_legend`
 /// keeps a manageable arity. All fields are `Option`; `Default` (all `None`)
-/// reproduces the historical layout byte-for-byte.
-#[derive(Debug, Clone, Copy, Default)]
+/// reproduces the historical layout byte-for-byte. `symbol_size`/`label_color`
+/// do not affect layout geometry — they are carried straight onto the
+/// `LegendLayout` for the renderer.
+#[derive(Debug, Clone, Default)]
 pub struct LegendStyleOpts {
     /// Stroke width (px) for legend symbol swatches; carried onto the
     /// `LegendLayout` for the renderer.
@@ -200,7 +231,8 @@ pub struct LegendStyleOpts {
     /// vertical (row) direction.
     pub row_padding: Option<f64>,
     /// Horizontal entry spacing (px), replacing `LEGEND_ENTRY_ROW_PAD` for the
-    /// horizontal (column) direction.
+    /// horizontal (column) direction. Also sets the inter-column gap in a
+    /// multi-column vertical legend (`columns > 1`).
     pub column_padding: Option<f64>,
     /// Max legend-label width (px); labels wider than this are truncated with an
     /// ellipsis and the rect shrinks to the truncated width.
@@ -208,6 +240,24 @@ pub struct LegendStyleOpts {
     /// Cap on the legend group height (px); carried onto the `LegendLayout` for
     /// the renderer to hard-clip.
     pub clip_height: Option<f64>,
+    /// B5 unit 6a: internal padding (px) between the legend's bounding-box edge
+    /// and its contents, replacing `LEGEND_OUTER_PAD` for the categorical legend.
+    /// Affects both size estimation and entry/title placement so the rect grows
+    /// with the inset. `None` → `LEGEND_OUTER_PAD` (byte-identical default).
+    pub padding: Option<f64>,
+    /// B5 unit 6a: gap (px) between the legend title and the first entry row,
+    /// replacing `LEGEND_TITLE_GAP`. `None` → `LEGEND_TITLE_GAP`.
+    pub title_padding: Option<f64>,
+    /// B5 unit 6a: extra gap (px) between the plot area and the legend strip,
+    /// added on top of the base `LEGEND_PLOT_GAP`. Shifts the whole legend away
+    /// from the plot edge. `None` → no extra offset (byte-identical default).
+    pub offset: Option<f64>,
+    /// B5 unit 6a: legend swatch area (px²); carried onto the `LegendLayout` so
+    /// the renderer scales the swatch geometry. Layout anchors are unaffected.
+    pub symbol_size: Option<f64>,
+    /// B5 unit 6a: legend entry-label fill color (css hex); carried onto the
+    /// `LegendLayout` for the renderer. Layout is unaffected.
+    pub label_color: Option<String>,
 }
 
 /// Truncate `label` to at most `limit` pixels wide, appending an ellipsis when
@@ -245,6 +295,12 @@ pub struct LegendSize {
 /// Title-aware version of `estimate_legend_size`. For Vertical-direction
 /// legends, adds a title line to the height. For Horizontal, adds title
 /// width to the left. Falls through to the no-title shape when title=None.
+///
+/// `outer_pad` is the effective inner padding (`LEGEND_OUTER_PAD` or the
+/// per-legend `padding` override) and `title_gap` the title-to-entry gap
+/// (`LEGEND_TITLE_GAP` or the per-legend `title_padding` override); both must
+/// match the values `layout_legend` places with so the rect stays sized.
+#[allow(clippy::too_many_arguments)]
 pub fn estimate_legend_size_with_title(
     entries: &[LegendEntry],
     orient: LegendOrient,
@@ -253,19 +309,24 @@ pub fn estimate_legend_size_with_title(
     title_font_size: f64,
     metrics: &dyn TextMetrics,
     entry_pad: f64,
+    outer_pad: f64,
+    title_gap: f64,
+    symbol_width: f64,
 ) -> LegendSize {
-    let base = estimate_legend_size(entries, orient, label_font_size, metrics, entry_pad);
+    let base = estimate_legend_size(
+        entries, orient, label_font_size, metrics, entry_pad, outer_pad, symbol_width,
+    );
     let Some(title_text) = title else { return base };
     let title_h = metrics.line_height(title_font_size);
     let title_w = metrics.measure_width(title_text, title_font_size);
     match orient {
         LegendOrient::Right | LegendOrient::Left => LegendSize {
-            width: base.width.max(title_w + 2.0 * LEGEND_OUTER_PAD),
-            height: base.height + title_h + LEGEND_TITLE_GAP,
+            width: base.width.max(title_w + 2.0 * outer_pad),
+            height: base.height + title_h + title_gap,
         },
         LegendOrient::Top | LegendOrient::Bottom => LegendSize {
-            width: base.width + title_w + LEGEND_TITLE_GAP,
-            height: base.height.max(title_h + 2.0 * LEGEND_OUTER_PAD),
+            width: base.width + title_w + title_gap,
+            height: base.height.max(title_h + 2.0 * outer_pad),
         },
     }
 }
@@ -273,12 +334,20 @@ pub fn estimate_legend_size_with_title(
 /// `entry_pad` is the inter-entry spacing — `LEGEND_ENTRY_ROW_PAD` by default,
 /// or the per-legend `row_padding`/`column_padding` override (B5 unit 3). It
 /// applies to the height for vertical legends and the width for horizontal ones.
+///
+/// `outer_pad` is the effective inner padding (`LEGEND_OUTER_PAD` by default,
+/// or the per-legend `padding` override, B5 unit 6a). `symbol_width` is the
+/// reserved swatch-column width (`SYMBOL_WIDTH` by default, widened when
+/// `symbol_size` enlarges the swatch). Passing `LEGEND_OUTER_PAD` / `SYMBOL_WIDTH`
+/// reproduces the historical size byte-for-byte.
 pub fn estimate_legend_size(
     entries: &[LegendEntry],
     orient: LegendOrient,
     label_font_size: f64,
     metrics: &dyn TextMetrics,
     entry_pad: f64,
+    outer_pad: f64,
+    symbol_width: f64,
 ) -> LegendSize {
     let line_h = metrics.line_height(label_font_size);
     let max_label_w = entries
@@ -286,26 +355,30 @@ pub fn estimate_legend_size(
         .map(|e| metrics.measure_width(&e.label, label_font_size))
         .fold(0.0_f64, f64::max);
     let n = entries.len() as f64;
+    // Row pitch is driven by the label line height; the swatch is centered on
+    // the row so `symbol_width` widens the column (so labels clear the swatch)
+    // but does not change the vertical pitch. Default `symbol_width = 12`
+    // reproduces the historical width byte-for-byte.
 
     match orient {
         LegendOrient::Right | LegendOrient::Left => {
-            let entry_w = SYMBOL_WIDTH + SYMBOL_LABEL_GAP + max_label_w;
-            let width = entry_w + 2.0 * LEGEND_OUTER_PAD;
+            let entry_w = symbol_width + SYMBOL_LABEL_GAP + max_label_w;
+            let width = entry_w + 2.0 * outer_pad;
             let height = if entries.is_empty() {
                 0.0
             } else {
-                n * line_h + (n - 1.0).max(0.0) * entry_pad + 2.0 * LEGEND_OUTER_PAD
+                n * line_h + (n - 1.0).max(0.0) * entry_pad + 2.0 * outer_pad
             };
             LegendSize { width, height }
         }
         LegendOrient::Top | LegendOrient::Bottom => {
-            let entry_w = SYMBOL_WIDTH + SYMBOL_LABEL_GAP + max_label_w;
+            let entry_w = symbol_width + SYMBOL_LABEL_GAP + max_label_w;
             let width = if entries.is_empty() {
                 0.0
             } else {
-                n * entry_w + (n - 1.0).max(0.0) * entry_pad + 2.0 * LEGEND_OUTER_PAD
+                n * entry_w + (n - 1.0).max(0.0) * entry_pad + 2.0 * outer_pad
             };
-            let height = line_h + 2.0 * LEGEND_OUTER_PAD;
+            let height = line_h + 2.0 * outer_pad;
             LegendSize { width, height }
         }
     }
@@ -352,6 +425,31 @@ pub fn layout_legend(
     }
     .unwrap_or(LEGEND_ENTRY_ROW_PAD);
 
+    // B5 unit 6a effective spacing. `padding` replaces `LEGEND_OUTER_PAD` (inner
+    // inset), `title_padding` replaces `LEGEND_TITLE_GAP` (title→entry gap), and
+    // `offset` adds extra distance from the plot edge. Each defaults to the
+    // historical constant / 0 so the unset path is byte-identical.
+    let outer_pad = opts.padding.unwrap_or(LEGEND_OUTER_PAD);
+    let title_gap = opts.title_padding.unwrap_or(LEGEND_TITLE_GAP);
+    let extra_offset = opts.offset.unwrap_or(0.0);
+    // Inter-column gap for a multi-column vertical legend. `column_padding`
+    // doubles as this horizontal gap; absent → 0 (columns abut evenly, the
+    // historical layout).
+    let col_gap = opts.column_padding.unwrap_or(0.0);
+
+    // B5 unit 6a: a `symbol_size`-enlarged swatch needs a wider symbol column so
+    // the label clears it. The swatch radius is `sqrt(area / PI)` (the mark
+    // `size` mapping, mirrored in the renderer); the widest swatch dimension is
+    // the line swatch at `3 * r` (= `SYMBOL_WIDTH` at the default `r = 4`).
+    // Reserve `max(SYMBOL_WIDTH, 3 * r)` so the default stays byte-identical.
+    let symbol_width = match opts.symbol_size.filter(|a| *a > 0.0 && a.is_finite()) {
+        Some(area) => {
+            let r = (area / std::f64::consts::PI).sqrt();
+            SYMBOL_WIDTH.max(3.0 * r)
+        }
+        None => SYMBOL_WIDTH,
+    };
+
     // `label_limit`: truncate every entry label to the pixel budget up front so
     // size estimation, the rect, and the laid-out anchors all see the shortened
     // text. When unset, the entries pass through untouched (byte-identical).
@@ -371,45 +469,61 @@ pub fn layout_legend(
 
     let size = estimate_legend_size_with_title(
         entries, orient, label_font_size, title, title_font_size, metrics, entry_pad,
+        outer_pad, title_gap, symbol_width,
     );
 
     // Add a small gap between the plot area and the legend strip so data
-    // points near the axis edge don't visually merge with legend text.
-    const LEGEND_PLOT_GAP: f64 = 8.0;
+    // points near the axis edge don't visually merge with legend text. The
+    // per-legend `offset` (B5 unit 6a) widens this gap further.
+    let legend_plot_gap = LEGEND_PLOT_GAP + extra_offset;
 
     let (legend_rect, plot_inner) = match orient {
         LegendOrient::Right => {
             let w = size.width.min(inner.w * 0.5);
-            let (strip_with_gap, rest) = inner.split_right(w + LEGEND_PLOT_GAP);
+            let (strip_with_gap, rest) = inner.split_right(w + legend_plot_gap);
             // Inset the legend rect by the gap on its left side.
             let legend_rect = crate::layout::Rect {
-                x: strip_with_gap.x + LEGEND_PLOT_GAP,
+                x: strip_with_gap.x + legend_plot_gap,
                 y: strip_with_gap.y,
-                w: strip_with_gap.w - LEGEND_PLOT_GAP,
+                w: strip_with_gap.w - legend_plot_gap,
                 h: strip_with_gap.h,
             };
             (legend_rect, rest)
         }
         LegendOrient::Left => {
             let w = size.width.min(inner.w * 0.5);
-            let (strip_with_gap, rest) = inner.split_left(w + LEGEND_PLOT_GAP);
+            let (strip_with_gap, rest) = inner.split_left(w + legend_plot_gap);
             let legend_rect = crate::layout::Rect {
                 x: strip_with_gap.x,
                 y: strip_with_gap.y,
-                w: strip_with_gap.w - LEGEND_PLOT_GAP,
+                w: strip_with_gap.w - legend_plot_gap,
                 h: strip_with_gap.h,
             };
             (legend_rect, rest)
         }
         LegendOrient::Top => {
-            let h = size.height.min(inner.h * 0.5);
+            let h = (size.height + extra_offset).min(inner.h * 0.5);
             let (strip, rest) = inner.split_top(h);
-            (strip, rest)
+            // Inset the legend rect down by the offset gap from the plot edge.
+            let legend_rect = crate::layout::Rect {
+                x: strip.x,
+                y: strip.y + extra_offset,
+                w: strip.w,
+                h: (strip.h - extra_offset).max(0.0),
+            };
+            (legend_rect, rest)
         }
         LegendOrient::Bottom => {
-            let h = size.height.min(inner.h * 0.5);
+            let h = (size.height + extra_offset).min(inner.h * 0.5);
             let (strip, rest) = inner.split_bottom(h);
-            (strip, rest)
+            // Inset the legend rect by the offset gap on its top side.
+            let legend_rect = crate::layout::Rect {
+                x: strip.x,
+                y: strip.y + extra_offset,
+                w: strip.w,
+                h: (strip.h - extra_offset).max(0.0),
+            };
+            (legend_rect, rest)
         }
     };
 
@@ -423,22 +537,22 @@ pub fn layout_legend(
         match direction {
             LegendDirection::Vertical => {
                 // Title sits at the top, left-aligned with entry symbols.
-                let tx = legend_rect.x + LEGEND_OUTER_PAD;
-                let ty = legend_rect.y + LEGEND_OUTER_PAD + title_h;
+                let tx = legend_rect.x + outer_pad;
+                let ty = legend_rect.y + outer_pad + title_h;
                 (
                     Some(LegendTitleLayout { text: title_text.to_string(), x: tx, y: ty }),
-                    title_h + LEGEND_TITLE_GAP,
+                    title_h + title_gap,
                     0.0,
                 )
             }
             LegendDirection::Horizontal => {
                 // Title sits to the left, vertically centered with entry row.
-                let tx = legend_rect.x + LEGEND_OUTER_PAD;
+                let tx = legend_rect.x + outer_pad;
                 let ty = legend_rect.y + legend_rect.h / 2.0 + title_h / 3.0;
                 (
                     Some(LegendTitleLayout { text: title_text.to_string(), x: tx, y: ty }),
                     0.0,
-                    title_w + LEGEND_TITLE_GAP,
+                    title_w + title_gap,
                 )
             }
         }
@@ -448,14 +562,23 @@ pub fn layout_legend(
 
     let entries_laid_out: Vec<LegendEntryLayout> = match direction {
         LegendDirection::Vertical => {
-            let avail_h = (legend_rect.h - 2.0 * LEGEND_OUTER_PAD - title_y_offset).max(0.0);
-            let avail_w = (legend_rect.w - 2.0 * LEGEND_OUTER_PAD).max(0.0);
+            let avail_h = (legend_rect.h - 2.0 * outer_pad - title_y_offset).max(0.0);
+            let avail_w = (legend_rect.w - 2.0 * outer_pad).max(0.0);
             let row_pitch = line_h + entry_pad;
             let n_cols = columns.unwrap_or(1).max(1) as usize;
 
-            // Column width: divide available width evenly across N columns.
+            // Column width: divide the available width (minus the inter-column
+            // gaps) evenly across N columns, then place each column at
+            // `col_w + col_gap` pitch. `col_gap` defaults to 0, so without
+            // `column_padding` the columns abut exactly as before (byte-identical).
             // Label overflow within a column is acceptable — text truncation is render-side.
-            let col_w = if n_cols > 1 { avail_w / n_cols as f64 } else { avail_w };
+            let col_pitch = if n_cols > 1 {
+                let gaps_total = (n_cols - 1) as f64 * col_gap;
+                let col_w = ((avail_w - gaps_total).max(0.0)) / n_cols as f64;
+                col_w + col_gap
+            } else {
+                avail_w
+            };
 
             let max_rows = if row_pitch > 0.0 {
                 ((avail_h + entry_pad) / row_pitch).floor() as usize
@@ -472,11 +595,11 @@ pub fn layout_legend(
                 .map(|(i, e)| {
                     let col = i % n_cols;
                     let row = i / n_cols;
-                    let col_origin_x = legend_rect.x + LEGEND_OUTER_PAD + col as f64 * col_w;
-                    let y = legend_rect.y + LEGEND_OUTER_PAD + title_y_offset
+                    let col_origin_x = legend_rect.x + outer_pad + col as f64 * col_pitch;
+                    let y = legend_rect.y + outer_pad + title_y_offset
                         + (row as f64) * row_pitch + line_h / 2.0;
-                    let symbol_x = col_origin_x + SYMBOL_WIDTH / 2.0;
-                    let label_x = col_origin_x + SYMBOL_WIDTH + SYMBOL_LABEL_GAP;
+                    let symbol_x = col_origin_x + symbol_width / 2.0;
+                    let label_x = col_origin_x + symbol_width + SYMBOL_LABEL_GAP;
                     LegendEntryLayout {
                         label: e.label.clone(),
                         label_anchor_x: label_x,
@@ -492,12 +615,12 @@ pub fn layout_legend(
                 .collect()
         }
         LegendDirection::Horizontal => {
-            let avail_w = (legend_rect.w - 2.0 * LEGEND_OUTER_PAD - title_x_offset).max(0.0);
+            let avail_w = (legend_rect.w - 2.0 * outer_pad - title_x_offset).max(0.0);
             let max_label_w = entries
                 .iter()
                 .map(|e| metrics.measure_width(&e.label, label_font_size))
                 .fold(0.0_f64, f64::max);
-            let entry_w = SYMBOL_WIDTH + SYMBOL_LABEL_GAP + max_label_w;
+            let entry_w = symbol_width + SYMBOL_LABEL_GAP + max_label_w;
             let pitch = entry_w + entry_pad;
             let max_n = if pitch > 0.0 {
                 ((avail_w + entry_pad) / pitch).floor() as usize
@@ -510,11 +633,11 @@ pub fn layout_legend(
                 .take(n_fit)
                 .enumerate()
                 .map(|(i, e)| {
-                    let entry_x = legend_rect.x + LEGEND_OUTER_PAD + title_x_offset
+                    let entry_x = legend_rect.x + outer_pad + title_x_offset
                         + (i as f64) * pitch;
                     let cy = legend_rect.y + legend_rect.h / 2.0;
-                    let symbol_x = entry_x + SYMBOL_WIDTH / 2.0;
-                    let label_x = entry_x + SYMBOL_WIDTH + SYMBOL_LABEL_GAP;
+                    let symbol_x = entry_x + symbol_width / 2.0;
+                    let label_x = entry_x + symbol_width + SYMBOL_LABEL_GAP;
                     LegendEntryLayout {
                         label: e.label.clone(),
                         label_anchor_x: label_x,
@@ -540,6 +663,8 @@ pub fn layout_legend(
         colorbar: None,
         symbol_stroke_width: opts.symbol_stroke_width,
         clip_height: opts.clip_height,
+        symbol_size: opts.symbol_size,
+        label_color: opts.label_color,
     };
     (Some(legend), plot_inner)
 }
@@ -748,6 +873,8 @@ pub fn layout_colorbar(
         colorbar: Some(ColorbarLayout { bar_rect, stops, ticks }),
         symbol_stroke_width: None,
         clip_height,
+        symbol_size: None,
+        label_color: None,
     };
     (Some(legend), new_inner)
 }
@@ -1049,6 +1176,8 @@ fn layout_aux_block(
         colorbar: None,
         symbol_stroke_width: None,
         clip_height: None,
+        symbol_size: None,
+        label_color: None,
     }
 }
 
@@ -1077,6 +1206,8 @@ mod tests {
             colorbar: None,
             symbol_stroke_width: None,
             clip_height: None,
+            symbol_size: None,
+            label_color: None,
         };
         let json = serde_json::to_string(&l).unwrap();
         let parsed: LegendLayout = serde_json::from_str(&json).unwrap();
@@ -1107,7 +1238,9 @@ mod tests {
             LegendEntry { label: "abcdef".into(), symbol: SymbolKind::Circle },
         ];
         let m = mock(10.0);
-        let size = estimate_legend_size(&es, LegendOrient::Right, 11.0, &m, LEGEND_ENTRY_ROW_PAD);
+        let size = estimate_legend_size(
+            &es, LegendOrient::Right, 11.0, &m, LEGEND_ENTRY_ROW_PAD, LEGEND_OUTER_PAD, SYMBOL_WIDTH,
+        );
         // max_label_w = 6 * 10 = 60; symbol_w + sep = 12 + 4 = 16; outer pad 8+8=16.
         // total width = 16 + 60 + 16 = 92. height = 2*line_h + 1*row_pad + 2*outer_pad
         //   = 2*13.2 + 4.0 + 16.0 = 46.4. line_h = 11*1.2 = 13.2.
@@ -1346,6 +1479,164 @@ mod tests {
         assert_eq!(legend.symbol_stroke_width, Some(3.0));
     }
 
+    // ── B5 unit 6a: offset / padding / title_padding / multi-col column_padding ──
+
+    /// `offset` widens the gap between the plot area and the legend strip. For a
+    /// right-orient legend (pinned to the viewport's right edge) the legend rect
+    /// is unchanged but the plot area shrinks by the extra offset, and the gap
+    /// between the plot's right edge and the legend's left edge grows by it.
+    #[test]
+    fn legend_offset_widens_plot_to_legend_gap() {
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let es = entries(3, 4);
+        let m = mock(10.0);
+        let (base, base_plot) = {
+            let (l, p) = layout_legend(
+                &es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None, None,
+                LegendStyleOpts::default(),
+            );
+            (l.unwrap(), p)
+        };
+        let (offset, offset_plot) = {
+            let (l, p) = layout_legend(
+                &es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None, None,
+                LegendStyleOpts { offset: Some(50.0), ..Default::default() },
+            );
+            (l.unwrap(), p)
+        };
+        // The legend strip stays pinned to the viewport's right edge (same width).
+        assert!((offset.rect.w - base.rect.w).abs() < 1e-9, "legend width unchanged by offset");
+        // The plot area shrinks by the extra offset.
+        assert!(
+            (base_plot.w - offset_plot.w - 50.0).abs() < 1e-9,
+            "offset=50 must shrink the plot width by 50: base={}, offset={}",
+            base_plot.w, offset_plot.w,
+        );
+        // The gap between the plot's right edge and the legend's left edge grows
+        // by the offset (8px base gap → 58px).
+        let base_gap = base.rect.x - (base_plot.x + base_plot.w);
+        let offset_gap = offset.rect.x - (offset_plot.x + offset_plot.w);
+        assert!(
+            (offset_gap - base_gap - 50.0).abs() < 1e-9,
+            "offset=50 must widen the plot→legend gap by 50: base={base_gap}, offset={offset_gap}",
+        );
+    }
+
+    /// `padding` widens the inner inset, growing the rect and pushing the first
+    /// entry's symbol anchor further from the rect edge.
+    #[test]
+    fn legend_padding_insets_contents_and_grows_rect() {
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let es = entries(3, 4);
+        let m = mock(10.0);
+        let base = layout_legend(
+            &es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None, None,
+            LegendStyleOpts::default(),
+        ).0.unwrap();
+        let padded = layout_legend(
+            &es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None, None,
+            LegendStyleOpts { padding: Some(30.0), ..Default::default() },
+        ).0.unwrap();
+        // Larger padding → wider legend rect (entry_w + 2*padding).
+        assert!(
+            padded.rect.w > base.rect.w,
+            "padding=30 must widen the legend rect: base={}, padded={}",
+            base.rect.w, padded.rect.w,
+        );
+        // First entry symbol is inset by `padding` from the rect's left edge.
+        let base_inset = base.entries[0].symbol_anchor_x - SYMBOL_WIDTH / 2.0 - base.rect.x;
+        let padded_inset = padded.entries[0].symbol_anchor_x - SYMBOL_WIDTH / 2.0 - padded.rect.x;
+        assert!((base_inset - LEGEND_OUTER_PAD).abs() < 1e-9, "default inset = LEGEND_OUTER_PAD");
+        assert!((padded_inset - 30.0).abs() < 1e-9, "padded inset = padding override");
+    }
+
+    /// `title_padding` widens the gap between the title and the first entry row,
+    /// pushing the first entry lower (with a title present).
+    #[test]
+    fn legend_title_padding_increases_title_to_entry_gap() {
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let es = entries(3, 4);
+        let m = mock(10.0);
+        let base = layout_legend(
+            &es, LegendOrient::Right, inner, 11.0, &m, None, Some("Title"), 13.0, None, None,
+            LegendStyleOpts::default(),
+        ).0.unwrap();
+        let padded = layout_legend(
+            &es, LegendOrient::Right, inner, 11.0, &m, None, Some("Title"), 13.0, None, None,
+            LegendStyleOpts { title_padding: Some(25.0), ..Default::default() },
+        ).0.unwrap();
+        // The title sits at the same place; the first entry drops by the extra gap.
+        assert!(
+            padded.entries[0].symbol_anchor_y > base.entries[0].symbol_anchor_y,
+            "title_padding=25 must push the first entry lower: base={}, padded={}",
+            base.entries[0].symbol_anchor_y, padded.entries[0].symbol_anchor_y,
+        );
+    }
+
+    /// In a multi-column vertical legend, `column_padding` widens the gap between
+    /// columns so the second column's symbol anchor lands further right.
+    #[test]
+    fn legend_column_padding_widens_multi_column_gap() {
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let es = entries(4, 4);
+        let m = mock(10.0);
+        let base = layout_legend(
+            &es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, Some(2), None,
+            LegendStyleOpts::default(),
+        ).0.unwrap();
+        let padded = layout_legend(
+            &es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, Some(2), None,
+            LegendStyleOpts { column_padding: Some(40.0), ..Default::default() },
+        ).0.unwrap();
+        // Entry 0 → col 0, entry 1 → col 1 (row-major). The inter-column gap is
+        // the difference of their symbol anchor x.
+        let base_gap = base.entries[1].symbol_anchor_x - base.entries[0].symbol_anchor_x;
+        let padded_gap = padded.entries[1].symbol_anchor_x - padded.entries[0].symbol_anchor_x;
+        assert!(
+            padded_gap > base_gap,
+            "column_padding=40 must widen the inter-column gap: base={base_gap}, padded={padded_gap}",
+        );
+    }
+
+    /// `symbol_size` widens the reserved symbol column so the swatch clears the
+    /// label, pushing the label anchor further right.
+    #[test]
+    fn legend_symbol_size_widens_symbol_column() {
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let es = entries(3, 4);
+        let m = mock(10.0);
+        let base = layout_legend(
+            &es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None, None,
+            LegendStyleOpts::default(),
+        ).0.unwrap();
+        let big = layout_legend(
+            &es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None, None,
+            LegendStyleOpts { symbol_size: Some(400.0), ..Default::default() },
+        ).0.unwrap();
+        let base_col = base.entries[0].label_anchor_x - base.entries[0].symbol_anchor_x;
+        let big_col = big.entries[0].label_anchor_x - big.entries[0].symbol_anchor_x;
+        assert!(
+            big_col > base_col,
+            "symbol_size=400 must widen the symbol→label gap: base={base_col}, big={big_col}",
+        );
+        // symbol_size/label_color are carried onto the layout for the renderer.
+        assert_eq!(big.symbol_size, Some(400.0));
+    }
+
+    /// `label_color` is carried onto the produced `LegendLayout` for the renderer
+    /// (layout geometry unaffected).
+    #[test]
+    fn legend_label_color_carried_onto_layout() {
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let es = entries(2, 4);
+        let m = mock(10.0);
+        let legend = layout_legend(
+            &es, LegendOrient::Right, inner, 11.0, &m, None, None, 13.0, None, None,
+            LegendStyleOpts { label_color: Some("#ff0000".into()), ..Default::default() },
+        ).0.unwrap();
+        assert_eq!(legend.label_color.as_deref(), Some("#ff0000"));
+    }
+
     /// `LegendStyleOpts::default()` reproduces the historical layout — same rect
     /// and same entry anchors as the pre-orphan code path.
     #[test]
@@ -1420,6 +1711,8 @@ mod tests {
             colorbar: None,
             symbol_stroke_width: None,
             clip_height: None,
+            symbol_size: None,
+            label_color: None,
         }
     }
 

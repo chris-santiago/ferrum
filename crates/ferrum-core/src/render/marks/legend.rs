@@ -18,8 +18,16 @@ pub fn build_legend(
     } else {
         Some(&theme.typography.font_weight)
     };
+    // B5 unit 6a: `label_color` overrides the entry-label text fill. Absent → the
+    // theme `font_color` default (byte-identical). An unparsable hex falls back to
+    // the theme color rather than failing the render.
+    let label_fill = legend
+        .label_color
+        .as_deref()
+        .and_then(|hex| crate::render::color::from_hex_str(hex).ok())
+        .unwrap_or(theme.colors.font_color);
     let label_text_style = to_scene_text_style(
-        theme.colors.font_color,
+        label_fill,
         theme.typography.label_font_size,
         TextAnchor::Start,
         0.0,
@@ -119,6 +127,21 @@ pub fn build_legend(
     // color knob. `None`/0 → no stroke (byte-identical default).
     let symbol_stroke_w = legend.symbol_stroke_width.filter(|w| *w > 0.0);
 
+    // B5 unit 6a: `symbol_size` (area px²) scales the swatch geometry. Reuse the
+    // mark `size` channel's area→radius mapping (`radius = sqrt(area / PI)`, see
+    // `render::marks::point`) so a legend swatch and a same-area data point share
+    // a radius. The default swatch geometry (circle r=4, square side=8, line
+    // half-length=6, shape r=5) corresponds to r=4, so each dimension scales by
+    // `r / 4` to keep the historical proportions. Absent / non-positive → the
+    // fixed defaults (byte-identical). Negative/NaN areas are ignored.
+    const DEFAULT_SWATCH_R: f64 = 4.0;
+    let swatch_r = legend
+        .symbol_size
+        .filter(|a| *a > 0.0 && a.is_finite())
+        .map(|area| (area / std::f64::consts::PI).sqrt())
+        .unwrap_or(DEFAULT_SWATCH_R);
+    let swatch_scale = swatch_r / DEFAULT_SWATCH_R;
+
     // Categorical entries (color), graduated size symbols, and shape glyphs.
     // Per-entry precedence for the swatch color: an explicit `color_hex`
     // (merged color+size legend) wins; else the categorical color-scale
@@ -139,7 +162,8 @@ pub fn build_legend(
         let sy = entry.symbol_anchor_y;
 
         if let Some(shape_name) = &entry.shape_name {
-            // Shape legend: draw the category's point glyph at a fixed radius.
+            // Shape legend: draw the category's point glyph. `symbol_size` scales
+            // its fixed 5px radius (default scale = 1.0 → byte-identical).
             let kind = crate::render::marks::point::shape_from_str(shape_name);
             let style = crate::render::marks::point::ShapeStyle {
                 fill: Some(color),
@@ -151,7 +175,7 @@ pub fn build_legend(
                 stroke_dash_idx: None,
                 angle: 0.0,
             };
-            nodes.extend(crate::render::marks::point::emit_shape_nodes(kind, sx, sy, 5.0, style));
+            nodes.extend(crate::render::marks::point::emit_shape_nodes(kind, sx, sy, 5.0 * swatch_scale, style));
         } else if let Some(radius) = entry.symbol_radius {
             // Graduated size legend: a filled circle at the scaled radius.
             nodes.push(SceneNode::Circle {
@@ -167,21 +191,25 @@ pub fn build_legend(
                 Some(w) => (Some(color), w),
                 None => (None, 0.0),
             };
+            // `symbol_size` scales each swatch dimension by `swatch_scale`
+            // (default 1.0 → byte-identical). Circle r=4, square side=8 (half
+            // 4), line half-length=6 are the defaults at scale 1.0.
             match entry.symbol_kind {
                 SymbolKind::Circle => {
                     nodes.push(SceneNode::Circle {
                         cx: sx,
                         cy: sy,
-                        r: 4.0,
+                        r: swatch_r,
                         style: to_scene_fill_stroke(Some(color), swatch_stroke, swatch_stroke_w, 1.0, None),
                     });
                 }
                 SymbolKind::Square => {
+                    let half = 4.0 * swatch_scale;
                     nodes.push(SceneNode::Rect {
-                        x: sx - 4.0,
-                        y: sy - 4.0,
-                        w: 8.0,
-                        h: 8.0,
+                        x: sx - half,
+                        y: sy - half,
+                        w: 2.0 * half,
+                        h: 2.0 * half,
                         style: to_scene_fill_stroke(Some(color), swatch_stroke, swatch_stroke_w, 1.0, None),
                         corner_radius: 0.0,
                     });
@@ -190,10 +218,11 @@ pub fn build_legend(
                     // A line swatch has no fill; `symbol_stroke_width` overrides the
                     // theme line width when set so the legend line thickens too.
                     let line_w = symbol_stroke_w.unwrap_or(theme.sizes.line_stroke_width);
+                    let half_len = 6.0 * swatch_scale;
                     nodes.push(SceneNode::Line {
-                        x1: sx - 6.0,
+                        x1: sx - half_len,
                         y1: sy,
-                        x2: sx + 6.0,
+                        x2: sx + half_len,
                         y2: sy,
                         style: to_scene_stroke(color, line_w, 1.0, None, None, None),
                     });
@@ -280,6 +309,8 @@ mod tests {
             }),
             symbol_stroke_width: None,
             clip_height: None,
+            symbol_size: None,
+            label_color: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -314,6 +345,8 @@ mod tests {
             }),
             symbol_stroke_width: None,
             clip_height: None,
+            symbol_size: None,
+            label_color: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -370,6 +403,8 @@ mod tests {
             colorbar: None,
             symbol_stroke_width: None,
             clip_height: None,
+            symbol_size: None,
+            label_color: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -403,6 +438,8 @@ mod tests {
             colorbar: None,
             symbol_stroke_width: None,
             clip_height: None,
+            symbol_size: None,
+            label_color: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -441,6 +478,8 @@ mod tests {
             colorbar: None,
             symbol_stroke_width: None,
             clip_height: None,
+            symbol_size: None,
+            label_color: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -459,6 +498,15 @@ mod tests {
     // ── B5 unit 3: symbol_stroke_width + clip_height render ───────────────
 
     fn two_circle_legend(symbol_stroke_width: Option<f64>, clip_height: Option<f64>) -> LegendLayout {
+        two_circle_legend_styled(symbol_stroke_width, clip_height, None, None)
+    }
+
+    fn two_circle_legend_styled(
+        symbol_stroke_width: Option<f64>,
+        clip_height: Option<f64>,
+        symbol_size: Option<f64>,
+        label_color: Option<String>,
+    ) -> LegendLayout {
         let entry = |label: &str, y: f64| LegendEntryLayout {
             label: label.into(),
             label_anchor_x: 100.0,
@@ -479,6 +527,8 @@ mod tests {
             colorbar: None,
             symbol_stroke_width,
             clip_height,
+            symbol_size,
+            label_color,
         }
     }
 
@@ -567,5 +617,94 @@ mod tests {
             !nodes.iter().any(|n| matches!(n, SceneNode::Raw { .. })),
             "no clipPath def when clip_height absent",
         );
+    }
+
+    // ── B5 unit 6a: symbol_size + label_color render ──────────────────────
+
+    fn swatch_radii(nodes: &[SceneNode]) -> Vec<f64> {
+        nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Circle { r, .. } = n { Some(*r) } else { None })
+            .collect()
+    }
+
+    /// `symbol_size` enlarges the circle swatch via `radius = sqrt(area / PI)`,
+    /// the same mapping the mark `size` channel uses. Default (None) → r=4.
+    #[test]
+    fn symbol_size_scales_circle_swatch_radius() {
+        let theme = ThemeInputs::default();
+        let base = build_legend(&two_circle_legend_styled(None, None, None, None), None, &theme);
+        assert_eq!(swatch_radii(&base), vec![4.0, 4.0], "default swatch r=4");
+
+        // area = 400 → r = sqrt(400 / PI) ≈ 11.28, larger than the default 4.
+        let big = build_legend(
+            &two_circle_legend_styled(None, None, Some(400.0), None), None, &theme,
+        );
+        let expected_r = (400.0_f64 / std::f64::consts::PI).sqrt();
+        for r in swatch_radii(&big) {
+            assert!((r - expected_r).abs() < 1e-9, "swatch r = sqrt(area/PI): got {r}");
+            assert!(r > 4.0, "symbol_size=400 must enlarge the swatch beyond the default");
+        }
+    }
+
+    /// `symbol_size` scales the square swatch side proportionally (default side 8
+    /// at r=4, so side = 2 * r).
+    #[test]
+    fn symbol_size_scales_square_swatch_side() {
+        let theme = ThemeInputs::default();
+        let mut legend = two_circle_legend_styled(None, None, Some(400.0), None);
+        for e in &mut legend.entries {
+            e.symbol_kind = SymbolKind::Square;
+        }
+        let nodes = build_legend(&legend, None, &theme);
+        let expected_side = 2.0 * (400.0_f64 / std::f64::consts::PI).sqrt();
+        for n in &nodes {
+            if let SceneNode::Rect { w, h, .. } = n {
+                assert!((w - expected_side).abs() < 1e-9, "square side = 2r: got {w}");
+                assert!((h - expected_side).abs() < 1e-9);
+                assert!(*w > 8.0, "symbol_size=400 must enlarge the square beyond side 8");
+            }
+        }
+    }
+
+    /// Absent `symbol_size` keeps the historical fixed geometry (byte-identical).
+    #[test]
+    fn symbol_size_absent_keeps_default_geometry() {
+        let theme = ThemeInputs::default();
+        let nodes = build_legend(&two_circle_legend_styled(None, None, None, None), None, &theme);
+        assert_eq!(swatch_radii(&nodes), vec![4.0, 4.0], "default r=4 unchanged");
+    }
+
+    /// `label_color` overrides the entry-label text fill with the given hex.
+    #[test]
+    fn label_color_overrides_entry_label_fill() {
+        use crate::render::draw::to_scene_color;
+        let theme = ThemeInputs::default();
+        let red = to_scene_color(crate::render::color::from_hex_str("#ff0000").unwrap());
+        let nodes = build_legend(
+            &two_circle_legend_styled(None, None, None, Some("#ff0000".into())), None, &theme,
+        );
+        let label_colors: Vec<_> = nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Text { style, .. } = n { Some(style.color) } else { None })
+            .collect();
+        assert!(!label_colors.is_empty(), "legend must emit label text nodes");
+        for color in label_colors {
+            assert_eq!(color, red, "entry label fill must be the label_color override");
+        }
+    }
+
+    /// Absent `label_color` uses the theme `font_color` (byte-identical default).
+    #[test]
+    fn label_color_absent_uses_theme_font_color() {
+        use crate::render::draw::to_scene_color;
+        let theme = ThemeInputs::default();
+        let expected = to_scene_color(theme.colors.font_color);
+        let nodes = build_legend(&two_circle_legend_styled(None, None, None, None), None, &theme);
+        for n in &nodes {
+            if let SceneNode::Text { style, .. } = n {
+                assert_eq!(style.color, expected);
+            }
+        }
     }
 }

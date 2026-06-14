@@ -631,6 +631,11 @@ pub fn compute_layout(
                 column_padding: legend_overrides.column_padding,
                 label_limit: legend_overrides.label_limit,
                 clip_height: legend_overrides.clip_height,
+                padding: legend_overrides.padding,
+                title_padding: legend_overrides.title_padding,
+                offset: legend_overrides.offset,
+                symbol_size: legend_overrides.symbol_size,
+                label_color: legend_overrides.label_color.clone(),
             },
         )
     };

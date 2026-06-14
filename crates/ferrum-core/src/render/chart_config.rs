@@ -681,6 +681,30 @@ mod tests {
         assert_eq!(legend.style.gradient_length, Some(200.0));
     }
 
+    /// B5 unit 6a: the six residual render fields deserialize from the legend
+    /// JSON contract Python emits.
+    #[test]
+    fn legend_config_6a_render_fields_deserialize() {
+        let json = r##"{
+            "legend": {
+                "symbol_size": 400.0,
+                "label_color": "#ff0000",
+                "offset": 50.0,
+                "padding": 30.0,
+                "title_padding": 25.0,
+                "column_padding": 40.0
+            }
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        let s = cfg.legend.unwrap().style;
+        assert_eq!(s.symbol_size, Some(400.0));
+        assert_eq!(s.label_color.as_deref(), Some("#ff0000"));
+        assert_eq!(s.offset, Some(50.0));
+        assert_eq!(s.padding, Some(30.0));
+        assert_eq!(s.title_padding, Some(25.0));
+        assert_eq!(s.column_padding, Some(40.0));
+    }
+
     #[test]
     fn axis_style_deny_unknown_fields_rejects_typo() {
         // Standalone per-channel deserialization (not via the flatten container)

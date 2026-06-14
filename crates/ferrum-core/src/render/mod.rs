@@ -440,6 +440,12 @@ fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides
         label_limit:        lo.label_limit,
         clip_height:        lo.clip_height,
         tick_min_step:      lo.tick_min_step,
+        // B5 unit 6a orphans (per-channel here; chart-level fills any still None).
+        symbol_size:        lo.symbol_size,
+        label_color:        lo.label_color.clone(),
+        offset:             lo.offset,
+        padding:            lo.padding,
+        title_padding:      lo.title_padding,
     }
 }
 
@@ -480,6 +486,23 @@ fn apply_chart_config_to_legend_overrides(
     }
     if overrides.tick_min_step.is_none() {
         overrides.tick_min_step = legend.tick_min_step;
+    }
+    // B5 unit 6a orphans: per-channel (level 2) already in `overrides`; fill from
+    // `configure_legend` (level 3) only where still None, so per-channel wins.
+    if overrides.symbol_size.is_none() {
+        overrides.symbol_size = legend.symbol_size;
+    }
+    if overrides.label_color.is_none() {
+        overrides.label_color = legend.label_color.clone();
+    }
+    if overrides.offset.is_none() {
+        overrides.offset = legend.offset;
+    }
+    if overrides.padding.is_none() {
+        overrides.padding = legend.padding;
+    }
+    if overrides.title_padding.is_none() {
+        overrides.title_padding = legend.title_padding;
     }
 }
 
@@ -2162,6 +2185,12 @@ mod chart_config_application_tests {
             row_padding: Some(18.0),
             clip_height: Some(40.0),
             tick_min_step: Some(2.0),
+            // B5 unit 6a orphans, per-channel.
+            symbol_size: Some(300.0),
+            label_color: Some("#ff0000".into()),
+            offset: Some(50.0),
+            padding: Some(30.0),
+            title_padding: Some(25.0),
             ..Default::default()
         };
         let config = ChartConfig {
@@ -2171,6 +2200,11 @@ mod chart_config_application_tests {
                     row_padding: Some(4.0),
                     clip_height: Some(999.0),
                     tick_min_step: Some(99.0),
+                    symbol_size: Some(1.0),
+                    label_color: Some("#0000ff".into()),
+                    offset: Some(1.0),
+                    padding: Some(1.0),
+                    title_padding: Some(1.0),
                     ..Default::default()
                 },
             }),
@@ -2181,6 +2215,37 @@ mod chart_config_application_tests {
         assert_eq!(overrides.row_padding, Some(18.0), "per-channel wins");
         assert_eq!(overrides.clip_height, Some(40.0), "per-channel wins");
         assert_eq!(overrides.tick_min_step, Some(2.0), "per-channel wins");
+        assert_eq!(overrides.symbol_size, Some(300.0), "per-channel wins");
+        assert_eq!(overrides.label_color.as_deref(), Some("#ff0000"), "per-channel wins");
+        assert_eq!(overrides.offset, Some(50.0), "per-channel wins");
+        assert_eq!(overrides.padding, Some(30.0), "per-channel wins");
+        assert_eq!(overrides.title_padding, Some(25.0), "per-channel wins");
+    }
+
+    /// When per-channel leaves the 6a fields `None`, `configure_legend` fills
+    /// them (level 3) — the chart-level fallback.
+    #[test]
+    fn legend_6a_orphan_chart_level_fills_when_absent() {
+        let mut overrides = LegendOverrides::default();
+        let config = ChartConfig {
+            legend: Some(chart_config::LegendConfigSpec {
+                style: LegendStyleSpec {
+                    symbol_size: Some(300.0),
+                    label_color: Some("#0000ff".into()),
+                    offset: Some(50.0),
+                    padding: Some(30.0),
+                    title_padding: Some(25.0),
+                    ..Default::default()
+                },
+            }),
+            ..Default::default()
+        };
+        apply_chart_config_to_legend_overrides(&mut overrides, &config);
+        assert_eq!(overrides.symbol_size, Some(300.0));
+        assert_eq!(overrides.label_color.as_deref(), Some("#0000ff"));
+        assert_eq!(overrides.offset, Some(50.0));
+        assert_eq!(overrides.padding, Some(30.0));
+        assert_eq!(overrides.title_padding, Some(25.0));
     }
 
     #[test]
