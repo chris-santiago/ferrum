@@ -81,6 +81,27 @@ class AxisConfig:
         Round the scale domain to nice round values.
     zero : bool, optional
         Include zero in the scale domain.
+    grid_opacity : float, optional
+        Grid line opacity (0--1).
+    orient : str, optional
+        Axis side: ``"top"``/``"bottom"`` (x) or ``"left"``/``"right"`` (y).
+        Because chart-level ``axis`` applies to both axes, a single value is
+        valid for only one of them; set ``orient`` via ``axis_x`` / ``axis_y``
+        (or per-channel ``fm.Axis(orient=...)``) instead of the general ``axis``.
+    translate : float, optional
+        Pixel translation of the axis group perpendicular to its line.
+    min_extent : float, optional
+        Lower bound for the reserved axis margin band, in pixels.
+    max_extent : float, optional
+        Upper bound for the reserved axis margin band, in pixels.
+    tick_extra : bool, optional
+        Append an extra tick at each domain boundary.
+    tick_min_step : float, optional
+        Minimum step between ticks in data space.
+    title_orient : str, optional
+        Side/orientation of the axis title.
+    zindex : int, optional
+        Coarse draw order of the axis relative to marks.
     """
 
     x: bool = True
@@ -109,6 +130,15 @@ class AxisConfig:
     nice: bool | None = None
     zero: bool | None = None
     label_padding: float | None = None
+    grid_opacity: float | None = None
+    orient: str | None = None
+    translate: float | None = None
+    min_extent: float | None = None
+    max_extent: float | None = None
+    tick_extra: bool | None = None
+    tick_min_step: float | None = None
+    title_orient: str | None = None
+    zindex: int | None = None
 
     def __post_init__(self) -> None:
         if self.label_format is not None and self.label_format_raw is not None:
@@ -151,16 +181,37 @@ class LegendConfig:
         Legend title font size.
     label_font_size : float, optional
         Legend label font size.
+    label_color : str, optional
+        Legend label color.
+    label_limit : float, optional
+        Maximum legend-label width in pixels; wider labels are truncated with
+        an ellipsis.
     symbol_size : float, optional
         Symbol size.
+    symbol_stroke_width : float, optional
+        Stroke width of legend symbol swatches in pixels.
     symbol_type : str, optional
         Symbol shape type.
     gradient_length : float, optional
         Gradient legend length.
+    gradient_thickness : float, optional
+        Gradient legend thickness in pixels.
+    title_padding : float, optional
+        Padding between the legend title and its entries.
+    row_padding : float, optional
+        Vertical entry spacing in pixels (vertical-direction legends).
+    column_padding : float, optional
+        Horizontal entry spacing in pixels (horizontal-direction legends).
+    clip_height : float, optional
+        Cap on the legend group height in pixels; overflow is hard-clipped.
+    tick_min_step : float, optional
+        Minimum step between colorbar ticks in data units.
     offset : float, optional
         Offset from the plot area.
     padding : float, optional
         Internal padding.
+    zindex : int, optional
+        Coarse draw order of the legend relative to marks.
     """
 
     orient: str | None = None
@@ -168,11 +219,21 @@ class LegendConfig:
     columns: int | None = None
     title_font_size: float | None = None
     label_font_size: float | None = None
+    label_color: str | None = None
+    label_limit: float | None = None
     symbol_size: float | None = None
+    symbol_stroke_width: float | None = None
     symbol_type: str | None = None
     gradient_length: float | None = None
+    gradient_thickness: float | None = None
+    title_padding: float | None = None
+    row_padding: float | None = None
+    column_padding: float | None = None
+    clip_height: float | None = None
+    tick_min_step: float | None = None
     offset: float | None = None
     padding: float | None = None
+    zindex: int | None = None
 
     def __post_init__(self) -> None:
         if self.orient is not None and self.orient not in _VALID_LEGEND_ORIENTS:

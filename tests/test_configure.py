@@ -79,6 +79,56 @@ class TestAxisConfig:
         assert d["nice"] is True
         assert d["zero"] is False
 
+    def test_orphan_fields_default_none(self):
+        cfg = AxisConfig()
+        assert cfg.grid_opacity is None
+        assert cfg.orient is None
+        assert cfg.translate is None
+        assert cfg.min_extent is None
+        assert cfg.max_extent is None
+        assert cfg.tick_extra is None
+        assert cfg.tick_min_step is None
+        assert cfg.title_orient is None
+        assert cfg.zindex is None
+
+    def test_orphan_fields_to_dict(self):
+        cfg = AxisConfig(
+            grid_opacity=0.3,
+            orient="top",
+            translate=5.0,
+            min_extent=10.0,
+            max_extent=40.0,
+            tick_extra=True,
+            tick_min_step=2.0,
+            title_orient="left",
+            zindex=1,
+        )
+        d = cfg.to_dict()
+        assert d["grid_opacity"] == 0.3
+        assert d["orient"] == "top"
+        assert d["translate"] == 5.0
+        assert d["min_extent"] == 10.0
+        assert d["max_extent"] == 40.0
+        assert d["tick_extra"] is True
+        assert d["tick_min_step"] == 2.0
+        assert d["title_orient"] == "left"
+        assert d["zindex"] == 1
+
+    def test_orphan_fields_omitted_when_none(self):
+        d = AxisConfig(label_angle=-30).to_dict()
+        for key in (
+            "grid_opacity",
+            "orient",
+            "translate",
+            "min_extent",
+            "max_extent",
+            "tick_extra",
+            "tick_min_step",
+            "title_orient",
+            "zindex",
+        ):
+            assert key not in d
+
 
 # ---------------------------------------------------------------------------
 # LegendConfig
@@ -116,6 +166,60 @@ class TestLegendConfig:
         # orient=None means "not set" — different from orient="none"
         cfg = LegendConfig(orient=None)
         assert cfg.orient is None
+
+    def test_styling_fields_default_none(self):
+        cfg = LegendConfig()
+        assert cfg.label_color is None
+        assert cfg.label_limit is None
+        assert cfg.symbol_stroke_width is None
+        assert cfg.gradient_thickness is None
+        assert cfg.title_padding is None
+        assert cfg.row_padding is None
+        assert cfg.column_padding is None
+        assert cfg.clip_height is None
+        assert cfg.tick_min_step is None
+        assert cfg.zindex is None
+
+    def test_styling_fields_to_dict(self):
+        cfg = LegendConfig(
+            label_color="#333333",
+            label_limit=40.0,
+            symbol_stroke_width=3.0,
+            gradient_thickness=30.0,
+            title_padding=15.0,
+            row_padding=20.0,
+            column_padding=30.0,
+            clip_height=40.0,
+            tick_min_step=5.0,
+            zindex=1,
+        )
+        d = cfg.to_dict()
+        assert d["label_color"] == "#333333"
+        assert d["label_limit"] == 40.0
+        assert d["symbol_stroke_width"] == 3.0
+        assert d["gradient_thickness"] == 30.0
+        assert d["title_padding"] == 15.0
+        assert d["row_padding"] == 20.0
+        assert d["column_padding"] == 30.0
+        assert d["clip_height"] == 40.0
+        assert d["tick_min_step"] == 5.0
+        assert d["zindex"] == 1
+
+    def test_styling_fields_omitted_when_none(self):
+        d = LegendConfig(orient="top").to_dict()
+        for key in (
+            "label_color",
+            "label_limit",
+            "symbol_stroke_width",
+            "gradient_thickness",
+            "title_padding",
+            "row_padding",
+            "column_padding",
+            "clip_height",
+            "tick_min_step",
+            "zindex",
+        ):
+            assert key not in d
 
 
 # ---------------------------------------------------------------------------
