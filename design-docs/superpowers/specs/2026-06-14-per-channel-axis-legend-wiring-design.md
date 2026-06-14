@@ -40,7 +40,7 @@ Make per-channel axis/legend options actually render. Today `encode(x=fm.X("f", 
 
 ## 6. Canonical interfaces / data contracts
 
-- `EncodingSpec.axis: Option<AxisStyleSpec>` and `EncodingSpec.legend: Option<LegendStyleSpec>` where `AxisStyleSpec`/`LegendStyleSpec` are the typed structs (reused/shared with `AxisConfigSpec`/`LegendConfigSpec`). Field names are snake_case mirroring `fm.Axis`/`fm.Legend`; camelCase legacy keys via `#[serde(alias = "...")]`; `#[serde(deny_unknown_fields)]`.
+- `EncodingSpec.axis: Option<AxisStyleSpec>` and `EncodingSpec.legend: Option<LegendStyleSpec>`. Per Q3 (resolved, §11): `AxisStyleSpec`/`LegendStyleSpec` are **new shared styling+positioning structs**, NOT `AxisConfigSpec` directly — investigation showed `AxisConfigSpec` is not a clean superset (it carries chart-level-only scale-domain fields `domain_min`/`domain_max`/`nice`/`zero` and the `x`/`y` show toggles, which are meaningless per-channel). The chart-level `AxisConfigSpec` embeds `AxisStyleSpec` via `#[serde(flatten)]` and adds those chart-only fields; the per-channel `EncodingSpec.axis` uses `AxisStyleSpec` alone. `LegendConfigSpec` ≈ `LegendStyleSpec` (legend has no chart-only-extra fields), so it flattens/extends the same struct. Field names are snake_case mirroring `fm.Axis`/`fm.Legend`; camelCase legacy keys via `#[serde(alias = "...")]`; `#[serde(deny_unknown_fields)]`. **Scale-domain (`domain_min`/`max`/`nice`/`zero`) is NOT in `AxisStyleSpec`** — per-channel scale domain is set via the scale path (`x_scale_domain`), not the axis.
 - **Cascade precedence (per axis):** per-channel `<channel>.axis` > chart-level `axis_x`/`axis_y` > chart-level `axis` > theme > Rust default. Equivalent for legend.
 - **Suppression:** `axis=False` → suppression spec (unchanged); `title=None` → empty-title suppress (unchanged).
 
@@ -54,7 +54,7 @@ Make per-channel axis/legend options actually render. Today `encode(x=fm.X("f", 
 
 ## 8. Key decisions and tradeoffs
 
-- **D1 — Reuse the chart-level config struct as the per-channel type (single schema).** The dropped keys are already rendered from `AxisConfigSpec`/`LegendConfigSpec`; making the per-channel spec the same type means zero new render code for those and guaranteed parity between per-channel and chart-level. *Rejected:* a fresh per-channel struct (duplicate schema, re-introduces drift). *Per Q1 (resolved: implement all):* `fm.Axis`/`fm.Legend` fields with no current `AxisConfigSpec`/`LegendConfigSpec` counterpart are **added** to the shared struct and given new layout/render support, so chart-level `configure_axis(orient=...)` starts working too. This is the scope-expanding consequence of the single-schema choice.
+- **D1 — One shared styling struct per concept (single schema).** Factor `AxisStyleSpec`/`LegendStyleSpec` (styling + positioning), embedded by both the chart-level config struct and the per-channel `EncodingSpec.axis`/`.legend` (see R-Q3, §11 — `AxisConfigSpec` is *not* a clean superset, so we share a styling struct rather than reuse the config struct directly). The already-rendered keys need zero new render code and gain guaranteed per-channel/chart-level parity; orphan fields are added to the shared struct AND given new layout/render support (so chart-level `configure_axis(orient=...)` starts working too). *Rejected:* a fresh, separate per-channel struct (duplicate schema, re-introduces drift); and direct `AxisConfigSpec` reuse (leaks scale-domain + `x`/`y` toggles per-channel).
 - **D2 — Per-channel wins the cascade.** Per-channel is the more specific intent; it must beat the chart-wide `configure_axis`. Mirrors the override cascade philosophy. *Tradeoff:* a precedence the docs must state.
 - **D3 — `deny_unknown_fields` + serde aliases.** Typing the spec is what makes fail-loud possible; aliases preserve the camelCase back-compat the hand-reader had. This is the B5-local instance of override-spec Q3 (defense-in-depth).
 - **D4 — Snake_case is canonical.** Python already emits snake; the typed struct is snake; camelCase is alias-only. Removes the casing-mismatch drop the old reader had.
@@ -78,8 +78,34 @@ Make per-channel axis/legend options actually render. Today `encode(x=fm.X("f", 
 - **Rust round-trip:** `ChartSpec.from_json(s.to_json()) == s` for specs carrying typed per-channel axis/legend.
 - **Golden stability:** no `tests/goldens/**` churn from honored-key or no-styling charts.
 
-## 11. Open questions
+## 11. Resolved decisions
 
-- **Q1 — RESOLVED: implement all advertised fields.** Orphan `fm.Axis`/`fm.Legend` fields (`orient`, `translate`, `min_extent`/`max_extent`, `tick_extra`, `tick_min_step`, `grid_opacity`, `title_orient`, `zindex`; legend `clip_height`, `row_padding`/`column_padding`, `symbol_stroke_width`, `label_limit`) get added to the shared struct AND new layout/render support, so every advertised field renders (chart-level and per-channel). Sub-decision for the plan: render semantics for a few of these (`zindex` ordering, `translate`/`offset` interaction, `min_extent`/`max_extent` vs auto margins) need a concrete definition per field — enumerate and pin in the plan.
-- **Q2 — Error type:** surface the deny_unknown_fields failure as the existing `ValueError` from the binding, or add a Python-side pre-check raising `FerrumOverrideError`-style with did-you-mean (reuse the override registry idea)? Default: rely on the Rust `ValueError` for v1; consider a friendlier Python pre-check later.
-- **Q3 — Shared struct vs alias type:** make `EncodingSpec.axis` literally `Option<AxisConfigSpec>`, or introduce an `AxisStyleSpec` that both the encoding and chart-config reference? Default: reuse `AxisConfigSpec` directly if its field set is a superset; otherwise factor a shared struct.
+### R-Q3 — Shared styling struct (not direct `AxisConfigSpec` reuse)
+
+Investigation (RCA §D) found `AxisConfigSpec` is **not** a clean per-channel superset: it carries chart-level scale-domain fields (`domain_min`/`domain_max`/`nice`/`zero`) and `x`/`y` show toggles that are meaningless per-channel. **Resolution:** factor a shared `AxisStyleSpec` (styling + positioning fields only); `AxisConfigSpec` = `#[serde(flatten)] AxisStyleSpec` + the chart-only fields; `EncodingSpec.axis = Option<AxisStyleSpec>`. Scale-domain stays chart-only (per-channel scale domain is the `x_scale_domain` path, not the axis). Legend has no chart-only-extra fields, so `LegendStyleSpec` is the full legend styling set and `LegendConfigSpec` flattens/extends it. One field set per concept → no drift; per-channel cannot set nonsensical fields.
+
+### R-Q2 — Error type: Rust `deny_unknown_fields` → `ValueError` for v1
+
+Rely on the typed-spec deserialization failure surfacing as the existing `ValueError` from the binding (the established PyO3 error path). A friendlier Python-side pre-check with did-you-mean (reusing the override registry) is a deliberate later enhancement, not v1. The hard requirement (fail loud, not silent) is met by `deny_unknown_fields`.
+
+### R-Q1 — Per-orphan render semantics (implement all)
+
+Each orphan field gets the concrete semantic below. Grouped by implementation cost; **★ marks a bounded interpretation** where the field accepts its full type but maps to a constrained behavior (flagged because a fuller version would need a new subsystem).
+
+| Field | Resolved semantic | Anchor / cost |
+|---|---|---|
+| **axis `orient`** | Place the axis on the named side. Validate against the channel dimension: x→{top,bottom}, y→{left,right}; a cross-dimension value (x="left") **fails loud**. Reserve the label/title margin band on the chosen side. | `AxisLayout.orient` already carried + orient-aware `build_axis` (`marks/axis.rs:38-59`); reserve-on-side in layout. Med. |
+| **axis `translate`** | Shift the axis group perpendicular to its line by N px (outward = positive), composing **additively** with the already-honored `offset`. | translate wrapper on the axis scene group (`compositor.rs` pattern). Low. |
+| **axis `min_extent`/`max_extent`** | Clamp the reserved axis margin band to `[min,max]` px after the dynamic `estimate_x_label_band` / y-band computation. `min` = reserve at least; `max` = cap (labels may clip past it — documented). | `layout/axis.rs:353-400`. Low-med. |
+| **axis `tick_extra`** | After tick generation, append a tick at each domain boundary if not already present. | scale `ticks_internal`. Low-med. |
+| **axis `tick_min_step`** | Pass `min_step` into scale tick generation; drop ticks closer than `min_step` in data space. | scale tick methods. Med. |
+| **axis `grid_opacity`** | Per-axis grid-line opacity, overriding the theme grid opacity for that axis. | `AxisLayout` field → `build_grid` (`marks/axis.rs:193`). Low. |
+| **axis `title_orient`** | Side/orientation of the axis title relative to its axis (e.g. horizontal title on a left axis); adjust title rotation + position. | `AxisTitleLayout` gains orient (`marks/axis.rs:147-173`). Med. |
+| **axis/legend `zindex`** ★ | **Bounded:** maps to coarse draw order, not arbitrary integer layering — `zindex >= 1` → axis/grid (or legend) drawn **above** marks; `<= 0` (default) → below marks (current behavior). Reuses the existing annotation above/below-marks ordering; arbitrary int z-order is NOT supported. | reuse annotation z-order mechanism. Med. **(see flag)** |
+| **legend `row_padding`/`column_padding`** | Per-legend vertical (row) / horizontal (column) entry spacing, replacing the hardcoded `LEGEND_ENTRY_ROW_PAD=4.0`. | `layout/legend.rs:153,200-211,378-415`. Low. |
+| **legend `symbol_stroke_width`** | Stroke width of legend symbols. | `marks/legend.rs:158-187`. Low. |
+| **legend `label_limit`** ★ | **Bounded:** max legend-label pixel width; truncate with an ellipsis (`…`) and shrink the legend rect. No wrapping/tooltip. | `layout/legend.rs` label-width calc. Med. |
+| **legend `clip_height`** ★ | **Bounded:** cap legend height; hard-clip overflow via an SVG `clipPath`/`overflow` on the legend group. No scrolling. | `marks/legend.rs:9-14`. Med. |
+| **legend `tick_min_step`** | Min step between colorbar (gradient) ticks; same as axis `tick_min_step` for the colorbar tick generation. | colorbar tick gen. Med. |
+
+**Flag for the user:** the three ★ bounded semantics (`zindex` → coarse below/above-marks; `label_limit` → ellipsis truncation; `clip_height` → hard clip) are pragmatic interpretations chosen to avoid new subsystems (a full integer z-order, text wrapping, scrolling). If any should be fuller-fidelity, that becomes its own scoped task.
