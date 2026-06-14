@@ -1,0 +1,528 @@
+"""Registry, resolution, validation, and payload construction for ``Chart.override``.
+
+``Chart.override(**kwargs)`` is a flat snake_case escape hatch onto the chart's
+*presentation* spec (config dataclasses, encoding scales, mark style, coord,
+``width``/``height``).  Because the Rust spec deserializers silently drop unknown
+fields, a misspelled path cannot fail-loud on the Rust side; validation is
+therefore Python-side against a registry built **at import from the live schemas**
+so the valid-leaf sets cannot drift from the typed surface.
+
+This module is a pure transform: it resolves paths, validates a whole override
+dict, and builds a plain :class:`OverridePayload` data object.  It never imports
+``Chart``, touches the filesystem, renders, or mutates global state.  The render
+consumer (a separate unit) deep-merges each payload piece at its injection point
+and emits the deprecations as warnings.
+
+Targets
+-------
+chart-config
+    ``x_axis_``/``y_axis_``/``axis_``/``legend_``/``title_``/``grid_``/
+    ``padding_``/``color_`` prefixes.  Valid leaves are the ``dataclasses.fields``
+    of the matching :mod:`ferrum.configure` class.  Folds into
+    ``{target_key: {leaf: value}}``.
+encoding-scale
+    ``<channel>_scale_<leaf>`` for each scale-bearing encoding channel.  Valid
+    leaves are the scale-spec field names.  Folds into
+    ``{channel: {"scale": {leaf: value}}}``.
+mark
+    ``mark_<leaf>``; valid leaves are ``ferrum.marks.base._VALID_MARK_KWARGS``.
+    Folds into ``mark_style[leaf]``.
+coord
+    ``coord_<leaf>``; valid leaves are the coord-dataclass field names.  Folds
+    into ``coord[leaf]``.
+properties
+    Exact keys ``width`` and ``height``.
+
+Per-channel ``<channel>_axis_*`` / ``<channel>_legend_*`` (the opaque
+``AxisSpec.extra`` / ``LegendSpec.extra`` maps) are intentionally **excluded** in
+v1: they resolve as UNKNOWN and raise :class:`~ferrum.exceptions.FerrumOverrideError`.
+Route those through the typed chart-config target (``x_axis_*`` / ``legend_*``).
+"""
+
+from __future__ import annotations
+
+import difflib
+from dataclasses import dataclass, fields
+from enum import Enum
+from typing import Any, NamedTuple
+
+from ferrum.configure import (
+    AxisConfig,
+    ColorConfig,
+    GridConfig,
+    LegendConfig,
+    PaddingConfig,
+    TitleConfig,
+)
+from ferrum.coord import (
+    CoordCartesian,
+    CoordFixed,
+    CoordGeo,
+    CoordPolar,
+)
+from ferrum.encoding import _channel_class_map
+from ferrum.exceptions import FerrumOverrideError
+from ferrum.marks.base import _VALID_MARK_KWARGS
+
+
+class Target(Enum):
+    """The presentation-spec subsystem an override path routes into."""
+
+    CHART_CONFIG = "chart-config"
+    ENCODING_SCALE = "encoding-scale"
+    MARK = "mark"
+    COORD = "coord"
+    PROPERTIES = "properties"
+
+
+class SpecLocation(NamedTuple):
+    """Where a resolved override writes in the assembled spec.
+
+    Parameters
+    ----------
+    target_key:
+        The top-level key within the target.  For chart-config this is the
+        config dict key (``"axis_x"``, ``"legend"``, …); for encoding-scale it is
+        the channel name (``"x"``, ``"color"``, …); for properties it is the
+        property name (``"width"``/``"height"``).  ``None`` for the mark target,
+        which has no intermediate key (leaves fold directly into ``mark_style``).
+    leaf:
+        The terminal field name written under ``target_key`` (e.g.
+        ``"label_angle"``, ``"domain"``, ``"corner_radius"``).  For the
+        properties target this equals ``target_key`` (``"width"``/``"height"``).
+    """
+
+    target_key: str | None
+    leaf: str
+
+
+@dataclass(frozen=True)
+class ResolvedPath:
+    """The registry entry a flat override path resolves to.
+
+    Parameters
+    ----------
+    target:
+        Which presentation subsystem the path routes into.
+    location:
+        The spec target-key + leaf the value is written to.
+    typed_equivalent:
+        A human-readable descriptor of the typed ``configure_*`` / ``properties``
+        method that supersedes this path (e.g. ``".configure_axis(label_angle=...)"``),
+        or ``None`` for genuine escape-hatch paths with no typed surface.
+    """
+
+    target: Target
+    location: SpecLocation
+    typed_equivalent: str | None
+
+
+@dataclass(frozen=True)
+class OverridePayload:
+    """The pure result of resolving + validating an override dict.
+
+    Each field is a ready-to-merge piece for the render consumer.  The consumer
+    deep-merges ``chart_config`` into the resolved chart-config dict, ``encoding``
+    into the assembled encoding specs, ``mark_style`` into the mark-style dict,
+    applies ``properties`` to the render-time dimensions, and emits one
+    ``DeprecationWarning`` per ``deprecations`` entry.
+
+    Parameters
+    ----------
+    chart_config:
+        ``{target_key: {leaf: value}}`` for chart-config targets, e.g.
+        ``{"axis_x": {"label_angle": -45}, "color": {"scheme": "viridis"}}``.
+    encoding:
+        ``{channel: {"scale": {leaf: value}}}`` for encoding-scale targets, e.g.
+        ``{"x": {"scale": {"domain": [0, 10]}}}``.
+    mark_style:
+        ``{leaf: value}`` for mark-style targets, e.g. ``{"corner_radius": 4}``.
+    coord:
+        ``{leaf: value}`` for coord targets, e.g. ``{"clip": False}``.  The
+        consumer merges these into the assembled ``coord`` spec.
+    properties:
+        A subset of ``{"width": value, "height": value}``.
+    deprecations:
+        ``(path, typed_equivalent_descriptor)`` pairs for every override path that
+        has a typed equivalent.  The consumer emits one ``DeprecationWarning`` per
+        pair before applying.
+    """
+
+    chart_config: dict[str, dict[str, Any]]
+    encoding: dict[str, dict[str, dict[str, Any]]]
+    mark_style: dict[str, Any]
+    coord: dict[str, Any]
+    properties: dict[str, Any]
+    deprecations: list[tuple[str, str]]
+
+
+# ---------------------------------------------------------------------------
+# Leaf-set introspection (no hand-maintained lists)
+# ---------------------------------------------------------------------------
+
+
+def _config_leaves(config_cls: type) -> frozenset[str]:
+    """Return the valid override leaves for a :mod:`ferrum.configure` dataclass."""
+    return frozenset(f.name for f in fields(config_cls))
+
+
+def _coord_leaves() -> frozenset[str]:
+    """Return the union of field names across the coord dataclasses.
+
+    ``CoordFlip`` carries no fields (it serializes to a bare token); the
+    remaining coord types expose their tunable options as dataclass fields.
+    """
+    leaves: set[str] = set()
+    for coord_cls in (CoordCartesian, CoordFixed, CoordPolar, CoordGeo):
+        leaves.update(f.name for f in fields(coord_cls))
+    return frozenset(leaves)
+
+
+# Derived (read-only) scale attributes that are not settable spec leaves.
+# ``num_bins`` is ``len(bins)`` on ``BinOrdinalScale`` — a computed getter, not a
+# field the user can set.  Guarded by the registry-parity test.
+_SCALE_DERIVED_ATTRS = frozenset({"num_bins"})
+
+
+def _scale_leaves() -> frozenset[str]:
+    """Return the settable scale-spec leaf names, introspected from the live schemas.
+
+    The PyO3 scale classes do not expose introspectable ``__init__`` signatures,
+    so the leaf set is the union of public, non-callable data attributes across a
+    representative instance of every scale type, minus the derived-attr blocklist,
+    plus ``type`` (the scale-kind discriminator the user sets via override).
+    New scale fields therefore appear automatically.
+    """
+    from ferrum._core import (  # type: ignore[attr-defined]
+        BandScale,
+        BinOrdinalScale,
+        DivergingScale,
+        LinearScale,
+        LogScale,
+        OrdinalScale,
+        PointScale,
+        PowScale,
+        QuantileScale,
+        QuantizeScale,
+        SequentialScale,
+        SqrtScale,
+        SymlogScale,
+        ThresholdScale,
+        TimeScale,
+    )
+
+    instances = [
+        LinearScale(),
+        LogScale(),
+        PowScale(),
+        SqrtScale(),
+        SymlogScale(),
+        OrdinalScale(domain=["a"]),
+        BandScale(),
+        PointScale(),
+        SequentialScale(),
+        DivergingScale(),
+        QuantizeScale(domain=[0.0, 1.0], range=["#000", "#fff"]),
+        QuantileScale(domain=[0.0, 1.0], range=[0.0, 1.0]),
+        ThresholdScale(domain=[0.0, 1.0], range=[0.0, 1.0, 2.0]),
+        BinOrdinalScale(bins=[1.0, 2.0]),
+        TimeScale(domain=[0.0, 1.0], range=[0.0, 1.0]),
+    ]
+    leaves: set[str] = {"type"}
+    for inst in instances:
+        for attr in dir(inst):
+            if attr.startswith("_") or attr in _SCALE_DERIVED_ATTRS:
+                continue
+            if callable(getattr(inst, attr)):
+                continue
+            leaves.add(attr)
+    return frozenset(leaves)
+
+
+def _scale_bearing_channels() -> tuple[str, ...]:
+    """Return the encoding channel names whose ``scale=`` option is honored."""
+    return tuple(
+        name for name, cls in _channel_class_map().items() if "scale" in cls._honored_kwargs
+    )
+
+
+# ---------------------------------------------------------------------------
+# Registry (built once at import from the live schemas)
+# ---------------------------------------------------------------------------
+
+
+class _PrefixRule(NamedTuple):
+    """A registry prefix → target binding.
+
+    Parameters
+    ----------
+    prefix:
+        The flat-path prefix (e.g. ``"x_axis_"``, ``"mark_"``).  Longer prefixes
+        are matched first so ``x_axis_`` binds before ``axis_``.
+    target:
+        The presentation subsystem the matched paths route into.
+    target_key:
+        The spec target-key shared by every leaf under this prefix (the config
+        dict key for chart-config, the channel name for encoding-scale).  ``None``
+        for the mark target, whose leaves fold directly into ``mark_style``.
+    valid_leaves:
+        The set of leaf names accepted after the prefix.
+    typed_equivalent:
+        A format string with a single ``{leaf}`` placeholder describing the typed
+        method that supersedes paths under this prefix, or ``None`` when the prefix
+        has no typed equivalent.
+    """
+
+    prefix: str
+    target: Target
+    target_key: str | None
+    valid_leaves: frozenset[str]
+    typed_equivalent: str | None
+
+
+def _build_chart_config_rules() -> list[_PrefixRule]:
+    """Build the chart-config prefix rules, longest-prefix-first within axis."""
+    axis_leaves = _config_leaves(AxisConfig)
+    # ``x_axis_`` / ``y_axis_`` MUST be ordered before ``axis_`` so the longest
+    # prefix wins (``x_axis_grid_color`` is not mis-split as ``axis_…``).
+    return [
+        _PrefixRule(
+            "x_axis_", Target.CHART_CONFIG, "axis_x", axis_leaves, ".configure_axis({leaf}=...)"
+        ),
+        _PrefixRule(
+            "y_axis_", Target.CHART_CONFIG, "axis_y", axis_leaves, ".configure_axis({leaf}=...)"
+        ),
+        _PrefixRule(
+            "axis_", Target.CHART_CONFIG, "axis", axis_leaves, ".configure_axis({leaf}=...)"
+        ),
+        _PrefixRule(
+            "legend_",
+            Target.CHART_CONFIG,
+            "legend",
+            _config_leaves(LegendConfig),
+            ".configure_legend({leaf}=...)",
+        ),
+        _PrefixRule(
+            "title_",
+            Target.CHART_CONFIG,
+            "title",
+            _config_leaves(TitleConfig),
+            ".configure_title({leaf}=...)",
+        ),
+        _PrefixRule(
+            "grid_",
+            Target.CHART_CONFIG,
+            "grid",
+            _config_leaves(GridConfig),
+            ".configure_grid({leaf}=...)",
+        ),
+        _PrefixRule(
+            "padding_",
+            Target.CHART_CONFIG,
+            "padding",
+            _config_leaves(PaddingConfig),
+            ".configure_padding({leaf}=...)",
+        ),
+        _PrefixRule(
+            "color_",
+            Target.CHART_CONFIG,
+            "color",
+            _config_leaves(ColorConfig),
+            ".configure_color({leaf}=...)",
+        ),
+    ]
+
+
+def _build_prefix_rules() -> list[_PrefixRule]:
+    """Build the full prefix-rule list, ordered longest-prefix-first.
+
+    Encoding-scale rules (``<channel>_scale_``) precede chart-config so that a
+    channel-scoped scale path (``x_scale_domain``) binds to the scale target,
+    never to the ``x_axis_`` / ``axis_`` chart-config prefixes.  ``mark_`` and
+    ``coord_`` bind their own targets.
+    """
+    scale_leaves = _scale_leaves()
+    rules: list[_PrefixRule] = []
+    for channel in _scale_bearing_channels():
+        rules.append(
+            _PrefixRule(
+                f"{channel}_scale_",
+                Target.ENCODING_SCALE,
+                channel,
+                scale_leaves,
+                None,
+            )
+        )
+    rules.extend(_build_chart_config_rules())
+    rules.append(_PrefixRule("mark_", Target.MARK, None, _VALID_MARK_KWARGS, None))
+    rules.append(_PrefixRule("coord_", Target.COORD, "coord", _coord_leaves(), None))
+    # Longest prefix first guarantees ``x_axis_`` beats ``axis_`` and
+    # ``x_scale_`` beats ``x_axis_`` regardless of insertion order.
+    rules.sort(key=lambda r: len(r.prefix), reverse=True)
+    return rules
+
+
+# Exact-path properties (no prefix; the whole key is the leaf).
+_PROPERTY_PATHS: dict[str, str] = {
+    "width": ".properties(width=...)",
+    "height": ".properties(height=...)",
+}
+
+_PREFIX_RULES: tuple[_PrefixRule, ...] = tuple(_build_prefix_rules())
+
+
+def _all_known_paths() -> frozenset[str]:
+    """Return every fully-enumerated valid override path (for did-you-mean)."""
+    paths: set[str] = set(_PROPERTY_PATHS)
+    for rule in _PREFIX_RULES:
+        for leaf in rule.valid_leaves:
+            paths.add(f"{rule.prefix}{leaf}")
+    return frozenset(paths)
+
+
+_KNOWN_PATHS: frozenset[str] = _all_known_paths()
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def resolve(path: str) -> ResolvedPath | None:
+    """Resolve a flat override *path* to its registry entry, or ``None``.
+
+    Resolution is longest-prefix-first against the enumerated registry, so prefix
+    ambiguity is structurally impossible (``x_axis_`` binds before ``axis_``;
+    ``x_scale_`` binds before ``x_axis_``).  A path resolves only when its prefix
+    is known **and** its leaf is a valid field of that prefix's target; an unknown
+    prefix or a known prefix with an invalid leaf returns ``None`` (the caller
+    raises :class:`~ferrum.exceptions.FerrumOverrideError`).
+
+    Parameters
+    ----------
+    path:
+        A flat snake_case override key (e.g. ``"x_axis_label_angle"``, ``"width"``).
+
+    Returns
+    -------
+    ResolvedPath or None
+        The resolved registry entry, or ``None`` when the path is unknown.
+    """
+    if path in _PROPERTY_PATHS:
+        return ResolvedPath(
+            target=Target.PROPERTIES,
+            location=SpecLocation(target_key=path, leaf=path),
+            typed_equivalent=_PROPERTY_PATHS[path],
+        )
+    for rule in _PREFIX_RULES:
+        if not path.startswith(rule.prefix):
+            continue
+        leaf = path[len(rule.prefix) :]
+        if leaf not in rule.valid_leaves:
+            return None
+        typed = rule.typed_equivalent.format(leaf=leaf) if rule.typed_equivalent else None
+        return ResolvedPath(
+            target=rule.target,
+            location=SpecLocation(target_key=rule.target_key, leaf=leaf),
+            typed_equivalent=typed,
+        )
+    return None
+
+
+def _suggestion(path: str) -> str:
+    """Return a '` Did you mean: 'x'?`' suffix when a close known path exists."""
+    matches = difflib.get_close_matches(path, _KNOWN_PATHS, n=1)
+    if matches:
+        return f" Did you mean: {matches[0]!r}?"
+    return ""
+
+
+def validate(overrides: dict[str, Any]) -> None:
+    """Validate a whole override dict, raising on the first unresolvable path.
+
+    Each key is resolved through the registry.  An unknown prefix, or a known
+    prefix with a leaf that is not a valid field of its target, raises
+    :class:`~ferrum.exceptions.FerrumOverrideError` naming the offending path and
+    — when a close match exists among the known paths — suggesting the nearest one
+    via :func:`difflib.get_close_matches`.  Keys are checked in iteration order and
+    the error is raised on the first failure (fail-fast).
+
+    Parameters
+    ----------
+    overrides:
+        The flat override dict stored by ``Chart.override``.
+
+    Raises
+    ------
+    FerrumOverrideError
+        When any path does not resolve.
+    """
+    for path in overrides:
+        if resolve(path) is None:
+            raise FerrumOverrideError(f"Unknown override path {path!r}.{_suggestion(path)}")
+
+
+def build_payload(overrides: dict[str, Any]) -> OverridePayload:
+    """Validate *overrides* and build the ready-to-merge :class:`OverridePayload`.
+
+    Calls :func:`validate` first (a bad dict raises before any payload is built),
+    then routes each path by target into the corresponding payload piece.  This is
+    a pure transform: it constructs and returns a plain data object and touches no
+    ``Chart``.  Paths with a typed equivalent are recorded in ``deprecations`` so
+    the consumer can warn before applying.
+
+    Parameters
+    ----------
+    overrides:
+        The flat override dict stored by ``Chart.override``.
+
+    Returns
+    -------
+    OverridePayload
+        The merged-by-target payload pieces plus the deprecation list.
+
+    Raises
+    ------
+    FerrumOverrideError
+        When any path does not resolve (propagated from :func:`validate`).
+    """
+    validate(overrides)
+
+    chart_config: dict[str, dict[str, Any]] = {}
+    encoding: dict[str, dict[str, dict[str, Any]]] = {}
+    mark_style: dict[str, Any] = {}
+    coord: dict[str, Any] = {}
+    properties: dict[str, Any] = {}
+    deprecations: list[tuple[str, str]] = []
+
+    for path, value in overrides.items():
+        resolved = resolve(path)
+        # validate() guarantees resolve() is non-None here.
+        assert resolved is not None
+        loc = resolved.location
+
+        if resolved.target is Target.CHART_CONFIG:
+            assert loc.target_key is not None
+            chart_config.setdefault(loc.target_key, {})[loc.leaf] = value
+        elif resolved.target is Target.ENCODING_SCALE:
+            assert loc.target_key is not None
+            channel = encoding.setdefault(loc.target_key, {})
+            channel.setdefault("scale", {})[loc.leaf] = value
+        elif resolved.target is Target.MARK:
+            mark_style[loc.leaf] = value
+        elif resolved.target is Target.COORD:
+            coord[loc.leaf] = value
+        elif resolved.target is Target.PROPERTIES:
+            properties[loc.leaf] = value
+
+        if resolved.typed_equivalent is not None:
+            deprecations.append((path, resolved.typed_equivalent))
+
+    return OverridePayload(
+        chart_config=chart_config,
+        encoding=encoding,
+        mark_style=mark_style,
+        coord=coord,
+        properties=properties,
+        deprecations=deprecations,
+    )

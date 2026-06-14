@@ -574,7 +574,16 @@ class _RenderMixin:
 
         resolved = self._resolve_pending()
         chart = resolved._apply_auto_raster()
-        spec = chart.to_spec()
+        # Chart.override: build the payload once per render (guarded on _overrides so a
+        # chart that never calls .override() renders byte-identically). The spec-piece
+        # payload is threaded into to_spec(); chart_config / viewport / deprecations are
+        # applied below, all LAST among presentation sources so override wins (spec §7).
+        override_payload = None
+        if chart._overrides:
+            from ferrum._override_apply import build_payload
+
+            override_payload = build_payload(chart._overrides)
+        spec = chart.to_spec(_override_payload=override_payload)
         if _auto_tooltips:
             kw = json.loads(spec.to_json())
             kw = chart._inject_auto_tooltips(kw)
@@ -595,6 +604,16 @@ class _RenderMixin:
         effective_theme = chart._theme or get_default_theme()
         theme_dict = effective_theme.to_spec_dict() if effective_theme else {}
         chart_config_dict = chart._resolve_chart_config()
+        if override_payload is not None:
+            from ferrum._override_consume import (
+                apply_properties,
+                emit_deprecations,
+                merge_chart_config,
+            )
+
+            chart_config_dict = merge_chart_config(chart_config_dict, override_payload)
+            viewport = apply_properties(viewport, override_payload)
+            emit_deprecations(override_payload)
         return spec, data, viewport, theme_dict, chart_config_dict
 
     def to_svg(self, *, raster: bool | None = None) -> str:

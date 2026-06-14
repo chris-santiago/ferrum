@@ -226,6 +226,7 @@ from ferrum.configure import (
     ColorConfig,
     Configure,
 )
+from ferrum.exceptions import FerrumOverrideError
 from ferrum.format_presets import resolve_format
 from ferrum.structural import SecondaryY, BreakAxis, Inset
 from ferrum.annotation.coords import px, norm, PixelCoord, NormCoord
@@ -650,6 +651,7 @@ __all__ = [
     "PaddingConfig",
     "ColorConfig",
     "Configure",
+    "FerrumOverrideError",
     "resolve_format",
     "SecondaryY",
     "BreakAxis",

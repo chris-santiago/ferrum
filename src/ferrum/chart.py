@@ -3098,7 +3098,9 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 enc["x"] = enc["y"]
         return enc
 
-    def _build_encoding_specs(self, resolved, enc: dict, agg_field_remap: dict) -> dict:
+    def _build_encoding_specs(
+        self, resolved, enc: dict, agg_field_remap: dict, override_encoding: dict | None = None
+    ) -> dict:
         """Build ``EncodingSpec`` entries for each honored channel.
 
         Iterates over ``_RENDERER_HONORED_CHANNELS``, converts each present
@@ -3116,6 +3118,10 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         agg_field_remap :
             Map from original field name → output column name for any
             ``_PendingAggregate`` transforms already present.
+        override_encoding :
+            ``Chart.override`` encoding-scale payload (``{channel: {"scale": {...}}}``),
+            or ``None``.  Applied last per channel so an override scale leaf beats the
+            channel's own ``scale=`` setting (override wins the cascade, spec §7).
 
         Returns
         -------
@@ -3232,6 +3238,20 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             # Apply the guard only on the positional value channel (``y`` for
             # normal orientation, ``x`` when coord-flipped).
             _strip_unstackable(d, resolved._mark)
+            # Chart.override(<channel>_scale_<leaf>=...) — merge the override scale
+            # leaves into this channel's scale dict LAST so override wins over the
+            # channel's own scale= setting (override wins the cascade, spec §7).
+            # Route the merged dict back through _scale_to_dict so a typeless
+            # override scale (e.g. just `domain`) gains the `type` discriminator
+            # Rust's tagged-enum ScaleSpec deserialiser requires.
+            if override_encoding is not None:
+                scale_overrides = override_encoding.get(axis, {}).get("scale")
+                if scale_overrides:
+                    from ferrum.encoding._scale import _scale_to_dict
+
+                    existing_scale = d.get("scale")
+                    base_scale = existing_scale if isinstance(existing_scale, dict) else {}
+                    d["scale"] = _scale_to_dict({**base_scale, **scale_overrides})
             # `field` is positional; rest are keyword-only on EncodingSpec.__new__.
             # The Python-visible param name is `type_` (Rust signature `type_: Option<&str>`).
             field = d.pop("field")
@@ -3337,12 +3357,20 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 resolved_transforms.append(t)
         return resolved_transforms
 
-    def to_spec(self):
+    def to_spec(self, *, _override_payload=None):
         """Build the Rust ``ChartSpec`` for this chart.
 
         Resolves any pending statistical-mark desugar, converts Python encoding
         channel objects to ``EncodingSpec`` instances, and constructs the
         ``ChartSpec`` PyO3 object that the Rust renderer consumes.
+
+        When the chart carries ``Chart.override`` kwargs, the spec-targeted pieces
+        of the override payload (encoding scales, mark style, coord) are applied
+        last so override wins the cascade (spec §7).  ``_render_inputs`` builds the
+        payload once per render and threads it via ``_override_payload``; a direct
+        ``.to_spec()`` call builds it on demand from ``self._overrides`` so the
+        standalone spec also reflects overrides.  The chart-config, property, and
+        deprecation pieces are applied by the render path, not here.
 
         Returns
         -------
@@ -3362,6 +3390,14 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
 
         # Resolve any pending statistical mark desugar (mark called before encode).
         resolved = self._resolve_pending()
+
+        # Chart.override spec-piece payload (encoding scales / mark style / coord).
+        # Built on demand for standalone .to_spec() callers; the render path passes
+        # the once-per-render payload via _override_payload.  None when no override.
+        if _override_payload is None and self._overrides:
+            from ferrum._override_apply import build_payload
+
+            _override_payload = build_payload(self._overrides)
 
         # --- Channel aliasing (operates on a shallow copy to avoid mutating self) ---
         enc = dict(resolved._encoding)  # shallow copy — safe for alias remapping
@@ -3385,7 +3421,8 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
 
         # --- Build EncodingSpec entries for each honored channel ---
         kw: dict = {"mark": resolved._mark or "point", "data": "default"}
-        kw.update(self._build_encoding_specs(resolved, enc, agg_field_remap))
+        _override_encoding = _override_payload.encoding if _override_payload is not None else None
+        kw.update(self._build_encoding_specs(resolved, enc, agg_field_remap, _override_encoding))
 
         # --- Resolve _PendingAggregate sentinels to concrete Aggregate objects ---
         effective_transforms = list(resolved._transforms) if resolved._transforms else []
@@ -3438,11 +3475,26 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         # --- Remaining chart-level properties ---
         if resolved._facet is not None:
             kw["facet"] = resolved._build_facet_dict()
-        if resolved._coord is not None:
+        # Coord: serialize the chart's coord, then apply any coord_* override last
+        # (override wins; reconstructs the coord dataclass with the override leaves).
+        if _override_payload is not None and _override_payload.coord:
+            from ferrum._override_consume import apply_coord
+
+            coord_spec = apply_coord(resolved._coord, _override_payload)
+            if coord_spec is not None:
+                kw["coord"] = coord_spec
+        elif resolved._coord is not None:
             c = resolved._coord
             # Back-compat: orient_coord_flip sets _coord = "flip" (a string).
             # New coord objects expose to_spec_dict(); CoordFlip returns "flip".
             kw["coord"] = c.to_spec_dict() if hasattr(c, "to_spec_dict") else c
+        # Mark style: apply mark_* override last so it beats the chart's mark style.
+        # A layered chart (multiple marks) has no single primary mark — apply_mark_style
+        # raises FerrumOverrideError on a mark_* override there (spec §11 Q4).
+        if _override_payload is not None and _override_payload.mark_style:
+            from ferrum._override_consume import apply_mark_style
+
+            mk = apply_mark_style(mk, _override_payload, is_multi_mark=resolved._layers is not None)
         if mk:
             kw["mark_style"] = mk
         if resolved._layers is not None:
