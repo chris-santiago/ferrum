@@ -55,6 +55,23 @@ chart.override(
 
 ---
 
+## Scope
+
+Override reaches the chart's **presentation** spec: the chart-level config
+(`x_axis_*`/`y_axis_*`, `legend_*`, `title_*`, `grid_*`, `padding_*`, `color_*`),
+per-channel **scales** (`<channel>_scale_*`, e.g. `x_scale_domain`), mark style
+(`mark_*`), coordinate settings (`coord_*`), and `width`/`height`. It does **not**
+set structural grammar — mark type, encoding field bindings, transforms, or
+faceting — those belong to the typed grammar API.
+
+Per-channel `axis=`/`legend=` options set on an encoding (e.g.
+`fm.X("f", axis={...})`) are **not** override targets; a `<channel>_axis_*` /
+`<channel>_legend_*` path raises `FerrumOverrideError`. Use the typed chart-config
+paths (`x_axis_*`, `legend_*`) instead — they cover the same settings and are
+validated against the typed surface.
+
+---
+
 ## Validation at render time
 
 Unknown override paths raise `FerrumOverrideError` when the chart renders, not when
@@ -136,12 +153,14 @@ df = pl.DataFrame({
     "y": [2.1, 3.8, 3.2, 5.1, 4.9],
 })
 
-# This hypothetical path isn't yet in the typed surface
 chart = (
     fm.Chart(df)
     .mark_point(size=80)
     .encode(x="x:Q", y="y:Q")
-    .override(x_axis_label_angle=-30)  # uses typed method in practice; shown for illustration
+    # Force the rotation via override. This path has a typed equivalent
+    # (.configure_axis(label_angle=...)), so it also emits a DeprecationWarning
+    # steering you there — prefer the typed method for paths that have one.
+    .override(x_axis_label_angle=-30)
 )
 ```
 
