@@ -529,3 +529,193 @@ class TestOverrideBuildPayload:
     def test_build_payload_validates_before_building(self):
         with pytest.raises(FerrumOverrideError, match="bogus_thing"):
             oa.build_payload({"x_axis_label_angle": -45, "bogus_thing": 1})
+
+
+# ---------------------------------------------------------------------------
+# Render-level wiring (Chart.override takes effect in the rendered SVG)
+#
+# These are the load-bearing tests that close bug B4: they assert observable
+# changes in to_svg() output, never the contents of _overrides.
+# ---------------------------------------------------------------------------
+
+
+import warnings
+import xml.etree.ElementTree as ET
+
+_SVG_NS = "{http://www.w3.org/2000/svg}"
+
+
+def _svg_root(chart):
+    """Render *chart* to SVG and return the parsed root element."""
+    return ET.fromstring(chart.to_svg())
+
+
+def _text_elements(root):
+    """Return every ``<text>`` element in the SVG tree."""
+    return list(root.iter(_SVG_NS + "text"))
+
+
+@pytest.fixture()
+def color_chart():
+    df = pl.DataFrame({"x": [1, 2, 3, 4], "y": [4, 5, 6, 7], "g": ["a", "b", "c", "d"]})
+    return fm.Chart(df).mark_point().encode(x="x", y="y", color="g")
+
+
+@pytest.fixture()
+def bar_chart():
+    df = pl.DataFrame({"cat": ["a", "b", "c"], "y": [4, 5, 6]})
+    return fm.Chart(df).mark_bar().encode(x="cat", y="y")
+
+
+class TestOverrideRenderChartConfig:
+    def test_x_axis_label_angle_rotates_end_anchored_labels(self, bar_chart):
+        root = _svg_root(bar_chart.override(x_axis_label_angle=-45))
+        rotated = [
+            t for t in _text_elements(root) if (t.get("transform") or "").find("rotate(-45") != -1
+        ]
+        assert rotated, "expected at least one x-tick label rotated by -45"
+        assert all(t.get("text-anchor") == "end" for t in rotated)
+
+    def test_baseline_has_no_rotation(self, bar_chart):
+        root = _svg_root(bar_chart)
+        assert not any("rotate(-45" in (t.get("transform") or "") for t in _text_elements(root))
+
+
+class TestOverrideRenderProperties:
+    def test_width_override_sets_viewbox_width(self, base_chart):
+        root = _svg_root(base_chart.override(width=900))
+        assert root.get("viewBox").split()[2] == "900"
+        assert root.get("width") == "900"
+
+    def test_height_override_sets_viewbox_height(self, base_chart):
+        root = _svg_root(base_chart.override(height=700))
+        assert root.get("viewBox").split()[3] == "700"
+        assert root.get("height") == "700"
+
+    def test_property_override_beats_properties_call(self, base_chart):
+        # spec §8 D5: override width beats .properties(width=...).
+        chart = base_chart.properties(width=300).override(width=900)
+        root = _svg_root(chart)
+        assert root.get("viewBox").split()[2] == "900"
+
+
+class TestOverrideRenderLegend:
+    def test_legend_orient_changes_render(self, color_chart):
+        baseline = color_chart.to_svg()
+        relocated = color_chart.override(legend_orient="bottom").to_svg()
+        assert relocated != baseline
+
+
+class TestOverrideRenderColor:
+    def test_color_scheme_changes_mark_fills(self, color_chart):
+        baseline = color_chart.to_svg()
+        recolored = color_chart.override(color_scheme="viridis").to_svg()
+        assert recolored != baseline
+
+    def test_color_scheme_fill_values_differ(self, color_chart):
+        def fills(svg):
+            root = ET.fromstring(svg)
+            out = set()
+            for el in root.iter():
+                fill = el.get("fill")
+                if fill and fill.startswith("#"):
+                    out.add(fill.lower())
+            return out
+
+        baseline = fills(color_chart.to_svg())
+        recolored = fills(color_chart.override(color_scheme="viridis").to_svg())
+        assert baseline != recolored
+
+
+class TestOverrideRenderEncodingScale:
+    def test_x_scale_domain_changes_axis_extent(self, base_chart):
+        def x_tick_labels(svg):
+            root = ET.fromstring(svg)
+            return [t.text for t in _text_elements(root) if t.text]
+
+        baseline = x_tick_labels(base_chart.to_svg())
+        overridden = x_tick_labels(base_chart.override(x_scale_domain=[0, 100]).to_svg())
+        assert overridden != baseline
+        # The override domain end (100) appears among the rendered tick labels.
+        assert "100" in overridden
+        assert "100" not in baseline
+
+
+class TestOverrideRenderMarkStyle:
+    def test_mark_corner_radius_rounds_bars(self, bar_chart):
+        root = _svg_root(bar_chart.override(mark_corner_radius=6))
+        rects = list(root.iter(_SVG_NS + "rect"))
+        assert any(r.get("rx") == "6" for r in rects)
+
+    def test_baseline_bars_have_no_corner_radius(self, bar_chart):
+        root = _svg_root(bar_chart)
+        rects = list(root.iter(_SVG_NS + "rect"))
+        assert not any(r.get("rx") for r in rects)
+
+
+class TestOverrideRenderCascade:
+    def test_override_beats_configure_axis_configure_first(self, bar_chart):
+        chart = bar_chart.configure_axis(label_angle=0).override(x_axis_label_angle=-45)
+        root = _svg_root(chart)
+        assert any("rotate(-45" in (t.get("transform") or "") for t in _text_elements(root))
+
+    def test_override_beats_configure_axis_override_first(self, bar_chart):
+        # Reverse construction order: override still wins (top of cascade, not
+        # last-call-wins between configure and override).
+        chart = bar_chart.override(x_axis_label_angle=-45).configure_axis(label_angle=0)
+        root = _svg_root(chart)
+        assert any("rotate(-45" in (t.get("transform") or "") for t in _text_elements(root))
+
+
+class TestOverrideRenderDeprecation:
+    def test_typed_equivalent_path_warns(self, base_chart):
+        with pytest.warns(DeprecationWarning, match=r"\.configure_axis\(label_angle"):
+            base_chart.override(x_axis_label_angle=-45).to_svg()
+
+    def test_property_path_warns(self, base_chart):
+        with pytest.warns(DeprecationWarning, match=r"\.properties\(width"):
+            base_chart.override(width=900).to_svg()
+
+    def test_genuine_gap_path_does_not_warn(self, base_chart):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            # x_scale_domain has no typed configure_* equivalent: applies silently.
+            base_chart.override(x_scale_domain=[0, 1]).to_svg()
+
+
+class TestOverrideRenderErrors:
+    def test_unknown_path_raises_at_render(self, base_chart):
+        with pytest.raises(FerrumOverrideError, match="bogus_path"):
+            base_chart.override(bogus_path=1).to_svg()
+
+    def test_typo_raises_with_suggestion_at_render(self, base_chart):
+        with pytest.raises(FerrumOverrideError, match="x_axis_label_angle"):
+            base_chart.override(x_axis_lable_angle=-45).to_svg()
+
+    def test_known_prefix_bad_leaf_raises_at_render(self, base_chart):
+        with pytest.raises(FerrumOverrideError, match="mark_notathing"):
+            base_chart.override(mark_notathing=1).to_svg()
+
+
+class TestOverrideRenderMultiMark:
+    def test_mark_override_on_layered_chart_raises(self):
+        df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+        layered = fm.Chart(df).mark_line().encode(x="x", y="y") + fm.Chart(df).mark_point().encode(
+            x="x", y="y"
+        )
+        with pytest.raises(FerrumOverrideError, match="multi-mark"):
+            layered.override(mark_size=50).to_svg()
+
+    def test_single_mark_override_applies(self, bar_chart):
+        # The normal case: a single-mark chart accepts a mark_* override.
+        root = _svg_root(bar_chart.override(mark_corner_radius=6))
+        assert any(r.get("rx") == "6" for r in root.iter(_SVG_NS + "rect"))
+
+
+class TestOverrideRenderNoOpStability:
+    def test_no_override_render_unaffected_by_machinery(self, bar_chart):
+        # Sanity that the applicator guard holds: a chart with no override
+        # renders identically across calls and is unchanged by .override().
+        baseline = bar_chart.to_svg()
+        assert bar_chart.to_svg() == baseline
+        assert bar_chart.override().to_svg() == baseline
