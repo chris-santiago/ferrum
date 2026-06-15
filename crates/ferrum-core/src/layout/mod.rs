@@ -30,6 +30,7 @@ pub use self::axis::{
     AxesInput, AxisInput, AxisLayout, AxisOrient, AxisTitleLayout, LabelOverlap, TickLayout,
     TickProjection,
 };
+pub(crate) use self::axis::AxisStyleOverrides;
 pub use self::facet::{FacetGroup, FacetMode, FacetResolve, FacetSpec, ResolveMode};
 pub use self::geometry::{Inset, Rect, Viewport};
 pub use self::legend::{
@@ -681,10 +682,10 @@ pub fn compute_layout(
         axis::estimate_x_label_band(
             &axes.x.tick_labels,
             theme.typography.label_font_size,
-            axes.x.label_angle_override,
+            axes.x.overrides.label_angle,
             metrics,
             estimated_slot_w,
-            axes.x.label_padding,
+            axes.x.overrides.label_padding,
             theme.sizes.tick_size,
         )
     } else {
@@ -696,8 +697,8 @@ pub fn compute_layout(
     // Previously used theme.title_font_size unconditionally, which caused the
     // gutter to be undersized when axes.x.title_font_size was larger than theme.
     let x_title_gutter = if axes.x.title.is_some() {
-        let effective_title_font_size = axes.x.title_font_size.unwrap_or(theme.typography.title_font_size);
-        let effective_title_padding = axes.x.title_padding.unwrap_or(theme.padding.axis_title_padding);
+        let effective_title_font_size = axes.x.overrides.title_font_size.unwrap_or(theme.typography.title_font_size);
+        let effective_title_padding = axes.x.overrides.title_padding.unwrap_or(theme.padding.axis_title_padding);
         metrics.line_height(effective_title_font_size) + effective_title_padding
     } else {
         0.0
@@ -710,13 +711,13 @@ pub fn compute_layout(
     // dynamic value unchanged, so default output is byte-identical.
     let x_band = clamp_axis_extent(
         x_label_band + x_title_gutter,
-        axes.x.min_extent,
-        axes.x.max_extent,
+        axes.x.overrides.min_extent,
+        axes.x.overrides.max_extent,
     );
     let y_band = clamp_axis_extent(
         y_label_band + y_title_gutter,
-        axes.y.min_extent,
-        axes.y.max_extent,
+        axes.y.overrides.min_extent,
+        axes.y.overrides.max_extent,
     );
 
     // Orient (B5): reserve each axis's band on its chosen side. x defaults to the
@@ -1221,7 +1222,7 @@ mod tests {
         ).unwrap();
 
         let mut axes = dummy_axes();
-        axes.y.min_extent = Some(200.0);
+        axes.y.overrides.min_extent = Some(200.0);
         let widened = compute_layout(
             &spec, &default_theme_inputs(), viewport, &axes,
             &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[],

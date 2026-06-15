@@ -38,13 +38,109 @@ pub enum LabelOverlap {
     Rotate,
 }
 
+/// Per-axis style/positioning overrides, bundled so a future field is a one-line
+/// struct addition instead of a five-site thread (mirrors `LegendStyleOpts` on
+/// the legend side). Every field is `Option` and falls back to the shared theme
+/// value (or a layout default) when `None`, so default output stays byte-identical
+/// and only a per-channel `fm.Axis(...)` / chart-level `configure_axis(...)` spec
+/// lights one up.
+///
+/// Both the per-channel parse path (`render::prepare::encoding_axis_style_overrides`)
+/// and the chart-level apply path (`render::apply_axis_style_to_axis_input`) write
+/// here uniformly via the `is_none()` fill-only pattern, so a higher-precedence
+/// source (per-channel, or an earlier config layer) always wins. The resolved
+/// concrete axis side is computed from [`orient`](Self::orient) into
+/// [`AxisInput::orient`] at layout-build time (x→Bottom / y→Left default).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct AxisStyleOverrides {
+    /// Explicit tick values (`fm.Axis(values=[...])` / `configure_axis(tick_values=[...])`).
+    /// When set, tick labels are replaced with formatted versions of these values.
+    pub tick_values: Option<Vec<f64>>,
+    /// Tick-label rotation angle override (`fm.Axis(label_angle=...)`). Bypasses
+    /// the collision cascade when `Some`. `None` → cascade-resolved angle.
+    pub label_angle: Option<f64>,
+    /// d3-format string for tick labels (per-channel `label_format` /
+    /// chart-level `label_format_raw`). Applied after `tick_values`.
+    pub label_format: Option<String>,
+    /// Axis title font size. `None` → `theme.title_font_size`.
+    pub title_font_size: Option<f64>,
+    /// Axis title color. `None` → `theme.title_color`.
+    pub title_color: Option<Srgba<u8>>,
+    /// Padding between axis title and tick labels. `None` → `theme.axis_title_padding`.
+    pub title_padding: Option<f64>,
+    /// Pixel gap between the end of a tick mark and the tick label baseline.
+    /// `None` → the renderer's hardcoded per-orient gaps.
+    pub label_padding: Option<f64>,
+    /// Tick-label color override. `None` → `theme.colors.label_color`.
+    pub label_color: Option<Srgba<u8>>,
+    /// Tick-label font-size override. `None` → `theme.typography.label_font_size`.
+    pub label_font_size: Option<f64>,
+    /// Gridline color override. `None` → `theme.colors.grid_color`.
+    pub grid_color: Option<Srgba<u8>>,
+    /// Gridline dash override. `None` → `theme.grid.grid_dash`.
+    pub grid_dash: Option<Vec<f64>>,
+    /// Gridline width override. `None` → `theme.sizes.grid_width`.
+    pub grid_width: Option<f64>,
+    /// Domain-line color override. `None` → `theme.colors.axis_line_color`.
+    pub domain_color: Option<Srgba<u8>>,
+    /// Domain-line width override. `None` → `theme.sizes.axis_line_width`.
+    pub domain_width: Option<f64>,
+    /// Axis side override, validated against the channel dimension (x→top/bottom,
+    /// y→left/right). `None` → the channel's default side (Bottom for x, Left for
+    /// y). Resolved into the concrete [`AxisInput::orient`] at layout-build time.
+    pub orient: Option<AxisOrient>,
+    /// Shift the axis group perpendicular to its line by N px (outward positive),
+    /// composing additively with the renderer's `offset` handling. `None` → no shift.
+    pub translate: Option<f64>,
+    /// Lower bound (px) for the reserved axis margin band — reserve at least this
+    /// much. `None` → dynamic band only.
+    pub min_extent: Option<f64>,
+    /// Upper bound (px) for the reserved axis margin band — cap at this much
+    /// (labels may clip past it). `None` → no cap.
+    pub max_extent: Option<f64>,
+    /// Per-axis grid-line opacity override `[0, 1]`. `None` → `theme.grid.grid_opacity`.
+    pub grid_opacity: Option<f64>,
+    /// Side/orientation of the axis title relative to its axis (e.g. a horizontal
+    /// title on a left axis). `None` → the orient-default rotation.
+    pub title_orient: Option<AxisOrient>,
+    /// Coarse draw order relative to marks: `>= 1` → axis + grid drawn above
+    /// marks; `<= 0` (default) → below marks. `None` → default (below).
+    pub zindex: Option<i64>,
+    /// Append a tick at each domain boundary (scale min/max) if not already
+    /// present. `None`/`false` → no boundary ticks.
+    pub tick_extra: Option<bool>,
+    /// Minimum step (data units) between generated ticks; ticks closer than this
+    /// in data space are dropped. `None` → no thinning.
+    pub tick_min_step: Option<f64>,
+    /// Shift the axis perpendicular AWAY from the plot edge by N px (Vega axis
+    /// `offset`). Composes **additively** with [`translate`](Self::translate):
+    /// the renderer applies `translate + offset` as a single outward shift.
+    /// `None`/`0` → no shift.
+    pub offset: Option<f64>,
+    /// Flush the first/last tick labels at the axis ends so edge labels align
+    /// within the plot bounds instead of overflowing (Vega `labelFlush`).
+    /// `None`/`false` → default anchors (byte-identical).
+    pub label_flush: Option<bool>,
+    /// Tick-label overlap strategy override. `None` → the unmodified collision
+    /// cascade. Only consumed by the x-axis layout; the y-axis applies no overlap
+    /// policy.
+    pub label_overlap: Option<LabelOverlap>,
+}
+
 /// Caller-supplied per-axis input. Phase 6 takes both x and y always.
+///
+/// The render-input data (orient, title, labels, show toggles, formats, tick
+/// projection) lives flat; the per-axis style/positioning overrides are bundled
+/// in [`overrides`](Self::overrides) (see [`AxisStyleOverrides`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AxisInput {
+    /// Resolved concrete axis side, used by layout (plot-rect sizing,
+    /// `layout_*_axis`) and the scene assembler. Resolved from
+    /// `overrides.orient` (default Bottom for x, Left for y) via
+    /// [`resolve_orient`](Self::resolve_orient) after all override layers merge.
     pub orient: AxisOrient,
     pub title: Option<String>,
     pub tick_labels: Vec<String>,
-    pub label_angle_override: Option<f64>,
     /// When `false`, tick labels are suppressed (D7: `axis.labels`).
     /// Default `true` — preserves byte-identity for all existing goldens.
     pub show_labels: bool,
@@ -66,97 +162,14 @@ pub struct AxisInput {
     /// `layout_y_axis` — tick strings are already pre-formatted before this
     /// struct is built. Reserved for future granularity hints.
     pub tick_format_type: Option<String>,
-    /// Explicit tick values override from `configure_axis(tick_values=[...])`.
-    /// When set, tick labels are replaced with formatted versions of these values.
-    pub tick_values_override: Option<Vec<f64>>,
-    /// d3-format string from `configure_axis(label_format_raw="...")`.
-    /// Applied to tick labels after the tick_values_override is applied.
-    pub label_format_override: Option<String>,
-    /// Axis title font size from `configure_axis(title_font_size=...)`.
-    /// Overrides `theme.title_font_size` for this axis only.
-    pub title_font_size: Option<f64>,
-    /// Axis title color from `configure_axis(title_color="...")`.
-    /// Overrides `theme.title_color` for this axis only.
-    pub title_color: Option<Srgba<u8>>,
-    /// Padding between axis title and tick labels from `configure_axis(title_padding=...)`.
-    /// Overrides `theme.axis_title_padding` for this axis only.
-    pub title_padding: Option<f64>,
-    /// Pixel gap between the end of a tick mark and the tick label baseline.
-    /// Overrides the renderer's hardcoded per-orient gaps.
-    pub label_padding: Option<f64>,
-    // ── Per-axis style overrides (B5: per-channel axis styling) ──────────────
-    // Each falls back to the corresponding shared `theme` value when `None`, so
-    // chart-level styling (which mutates the theme) stays byte-identical and only
-    // a per-channel/per-axis spec lights these up. Consumed by
-    // `render::marks::axis::{build_axis, build_grid}`.
-    /// Tick-label color override. `None` → `theme.colors.label_color`.
-    pub label_color: Option<Srgba<u8>>,
-    /// Tick-label font-size override. `None` → `theme.typography.label_font_size`.
-    pub label_font_size: Option<f64>,
-    /// Gridline color override. `None` → `theme.colors.grid_color`.
-    pub grid_color: Option<Srgba<u8>>,
-    /// Gridline dash override. `None` → `theme.grid.grid_dash`.
-    pub grid_dash: Option<Vec<f64>>,
-    /// Gridline width override. `None` → `theme.sizes.grid_width`.
-    pub grid_width: Option<f64>,
-    /// Domain-line color override. `None` → `theme.colors.axis_line_color`.
-    pub domain_color: Option<Srgba<u8>>,
-    /// Domain-line width override. `None` → `theme.sizes.axis_line_width`.
-    pub domain_width: Option<f64>,
     /// Continuous-axis scale projection (continuous-axis tick design,
     /// 2026-05-30). `Some` for continuous (linear/log/pow/symlog/time) axes;
     /// `None` for categorical/discretizing (ordinal) axes, which keep the
     /// uniform-slot placement byte-identically. Presence of this field — not the
     /// scale type — drives the placement branch. See [`TickProjection`].
     pub tick_projection: Option<TickProjection>,
-    // ── Orphan positioning/draw-order fields (B5 unit 2) ─────────────────────
-    // All `None`/default keep output byte-identical; only a per-channel /
-    // chart-level spec lights these up. Consumed in `layout_*_axis` (translate,
-    // extents, title_orient) or carried onto `AxisLayout` for the renderer /
-    // scene assembler (grid_opacity, translate, zindex).
-    /// Shift the axis group perpendicular to its line by N px (outward
-    /// positive), composing additively with the renderer's `offset` handling.
-    /// `None` → no shift.
-    pub translate: Option<f64>,
-    /// Lower bound (px) for the reserved axis margin band — reserve at least
-    /// this much. `None` → dynamic band only.
-    pub min_extent: Option<f64>,
-    /// Upper bound (px) for the reserved axis margin band — cap at this much
-    /// (labels may clip past it). `None` → no cap.
-    pub max_extent: Option<f64>,
-    /// Per-axis grid-line opacity override `[0, 1]`. `None` →
-    /// `theme.grid.grid_opacity`.
-    pub grid_opacity: Option<f64>,
-    /// Side/orientation of the axis title relative to its axis (e.g. a
-    /// horizontal title on a left axis). `None` → the orient-default rotation.
-    pub title_orient: Option<AxisOrient>,
-    /// Coarse draw order relative to marks: `>= 1` → axis + grid drawn above
-    /// marks; `<= 0` (default) → below marks. `None` → default (below).
-    pub zindex: Option<i64>,
-    /// Append a tick at each domain boundary (scale min/max) if not already
-    /// present. Applied during the prepare/layout merge against the scale (so
-    /// chart-level and per-channel resolve to one value first). `None`/`false` →
-    /// no boundary ticks.
-    pub tick_extra: Option<bool>,
-    /// Minimum step (data units) between generated ticks; ticks closer than this
-    /// in data space are dropped. Applied against the scale. `None` → no
-    /// thinning.
-    pub tick_min_step: Option<f64>,
-    // ── Residual positioning/overlap fields (B5 unit 6b) ─────────────────────
-    /// Shift the axis perpendicular AWAY from the plot edge by N px (Vega axis
-    /// `offset`). Composes **additively** with [`translate`](Self::translate):
-    /// the renderer applies `translate + offset` as a single outward shift.
-    /// `None`/`0` → no shift.
-    pub offset: Option<f64>,
-    /// Flush the first/last tick labels at the axis ends so edge labels align
-    /// within the plot bounds instead of overflowing (Vega `labelFlush`). `None`
-    /// /`false` → all labels keep their default anchor (byte-identical). Consumed
-    /// by `render::marks::axis::build_axis`.
-    pub label_flush: Option<bool>,
-    /// Tick-label overlap strategy override. `None` → run the unmodified
-    /// collision cascade (`cascade_collision_recovery`). Only consumed by the
-    /// x-axis layout (`layout_x_axis`); the y-axis applies no overlap policy.
-    pub label_overlap: Option<LabelOverlap>,
+    /// Per-axis style/positioning overrides (B5). See [`AxisStyleOverrides`].
+    pub overrides: AxisStyleOverrides,
 }
 
 /// Continuous-axis scale projection carried by [`AxisInput`]. Groups the three
@@ -184,51 +197,43 @@ pub struct TickProjection {
 }
 
 impl AxisInput {
-    /// Construct an `AxisInput` with all new D7/D12 fields at their
-    /// backward-compatible defaults (all show_* = true, no tick_format).
+    /// Construct an `AxisInput` with all overrides empty and all show_* = true
+    /// (the backward-compatible defaults). `label_angle` seeds
+    /// `overrides.label_angle`.
     pub fn new(
         orient: AxisOrient,
         title: Option<String>,
         tick_labels: Vec<String>,
-        label_angle_override: Option<f64>,
+        label_angle: Option<f64>,
     ) -> Self {
         Self {
             orient,
             title,
             tick_labels,
-            label_angle_override,
             show_labels: true,
             show_ticks: true,
             show_domain: true,
             show_grid: true,
             tick_format: None,
             tick_format_type: None,
-            tick_values_override: None,
-            label_format_override: None,
-            title_font_size: None,
-            title_color: None,
-            title_padding: None,
-            label_padding: None,
-            label_color: None,
-            label_font_size: None,
-            grid_color: None,
-            grid_dash: None,
-            grid_width: None,
-            domain_color: None,
-            domain_width: None,
             tick_projection: None,
-            translate: None,
-            min_extent: None,
-            max_extent: None,
-            grid_opacity: None,
-            title_orient: None,
-            zindex: None,
-            tick_extra: None,
-            tick_min_step: None,
-            offset: None,
-            label_flush: None,
-            label_overlap: None,
+            overrides: AxisStyleOverrides {
+                label_angle,
+                ..AxisStyleOverrides::default()
+            },
         }
+    }
+
+    /// Re-resolve the concrete [`orient`](Self::orient) from the
+    /// `overrides.orient` override after all override layers (per-channel,
+    /// chart-level config) have merged. The override (when `Some`) is already
+    /// validated against the channel dimension, so the channel is inferred from
+    /// the current concrete orient and the default is its dimension edge (Bottom
+    /// for x, Left for y). Idempotent.
+    pub(crate) fn resolve_orient(&mut self) {
+        use AxisOrient::{Bottom, Left, Top};
+        let default = if matches!(self.orient, Top | Bottom) { Bottom } else { Left };
+        self.orient = self.overrides.orient.unwrap_or(default);
     }
 }
 
@@ -655,8 +660,8 @@ pub fn compute_y_title_width(
     metrics: &dyn TextMetrics,
 ) -> f64 {
     if input.title.is_some() {
-        let effective_title_font_size = input.title_font_size.unwrap_or(title_font_size);
-        let effective_title_padding = input.title_padding.unwrap_or(axis_title_padding);
+        let effective_title_font_size = input.overrides.title_font_size.unwrap_or(title_font_size);
+        let effective_title_padding = input.overrides.title_padding.unwrap_or(axis_title_padding);
         metrics.line_height(effective_title_font_size) + effective_title_padding
     } else {
         0.0
@@ -718,8 +723,8 @@ pub fn layout_y_axis(
         h: panel_area.h,
     };
 
-    let effective_title_font_size = input.title_font_size.unwrap_or(title_font_size);
-    let effective_title_padding = input.title_padding.unwrap_or(axis_title_padding);
+    let effective_title_font_size = input.overrides.title_font_size.unwrap_or(title_font_size);
+    let effective_title_padding = input.overrides.title_padding.unwrap_or(axis_title_padding);
 
     let title = input.title.as_ref().map(|text| {
         let label_band = compute_y_label_band_width(input, label_font_size, metrics);
@@ -735,7 +740,7 @@ pub fn layout_y_axis(
         // `title_orient` (top/bottom) renders the title flat (e.g. a horizontal
         // caption above a left axis). The default orient (no override) keeps the
         // historical rotation: `-90` on the left, `+90` on the right.
-        let angle = match input.title_orient {
+        let angle = match input.overrides.title_orient {
             Some(AxisOrient::Top) | Some(AxisOrient::Bottom) => 0.0,
             Some(AxisOrient::Right) => 90.0,
             Some(AxisOrient::Left) => -90.0,
@@ -760,21 +765,21 @@ pub fn layout_y_axis(
         show_ticks: input.show_ticks,
         show_domain: input.show_domain,
         show_grid: input.show_grid,
-        title_font_size: input.title_font_size,
-        title_color_rgba: input.title_color.map(rgba_array),
-        label_padding: input.label_padding,
-        label_color_rgba: input.label_color.map(rgba_array),
-        label_font_size: input.label_font_size,
-        grid_color_rgba: input.grid_color.map(rgba_array),
-        grid_dash: input.grid_dash.clone(),
-        grid_width: input.grid_width,
-        domain_color_rgba: input.domain_color.map(rgba_array),
-        domain_width: input.domain_width,
-        grid_opacity: input.grid_opacity,
-        translate: input.translate,
-        zindex: input.zindex,
-        offset: input.offset,
-        label_flush: input.label_flush,
+        title_font_size: input.overrides.title_font_size,
+        title_color_rgba: input.overrides.title_color.map(rgba_array),
+        label_padding: input.overrides.label_padding,
+        label_color_rgba: input.overrides.label_color.map(rgba_array),
+        label_font_size: input.overrides.label_font_size,
+        grid_color_rgba: input.overrides.grid_color.map(rgba_array),
+        grid_dash: input.overrides.grid_dash.clone(),
+        grid_width: input.overrides.grid_width,
+        domain_color_rgba: input.overrides.domain_color.map(rgba_array),
+        domain_width: input.overrides.domain_width,
+        grid_opacity: input.overrides.grid_opacity,
+        translate: input.overrides.translate,
+        zindex: input.overrides.zindex,
+        offset: input.overrides.offset,
+        label_flush: input.overrides.label_flush,
     }
 }
 
@@ -1194,7 +1199,7 @@ pub fn layout_x_axis(
         None => slot_w,
     };
 
-    let (ticks, warning) = if let Some(override_angle) = input.label_angle_override {
+    let (ticks, warning) = if let Some(override_angle) = input.overrides.label_angle {
         // label_angle_override always bypasses the cascade (spec SS7).
         // Apply the override angle, then elide if labels still collide.
         let widths: Vec<f64> = input
@@ -1244,7 +1249,7 @@ pub fn layout_x_axis(
             cascade_slot_w,
             label_font_size,
             cull_threshold,
-            input.label_overlap,
+            input.overrides.label_overlap,
             metrics,
         );
         let is_elision_strategy = matches!(cascade.strategy, CascadeStrategy::Elided { .. });
@@ -1283,8 +1288,8 @@ pub fn layout_x_axis(
         h: 1.0,
     };
 
-    let effective_title_font_size = input.title_font_size.unwrap_or(title_font_size);
-    let effective_title_padding = input.title_padding.unwrap_or(axis_title_padding);
+    let effective_title_font_size = input.overrides.title_font_size.unwrap_or(title_font_size);
+    let effective_title_padding = input.overrides.title_padding.unwrap_or(axis_title_padding);
 
     // Resolved tick angle: all non-culled ticks share `label_angle` (the cascade
     // and the override path both apply a single angle). 0.0 means flat. Use any
@@ -1306,7 +1311,7 @@ pub fn layout_x_axis(
             metrics.line_height(label_font_size)
         } else {
             // Clamp matches the renderer's L-2 guard so band >= render extent.
-            let label_pad = input.label_padding.unwrap_or(2.0).max(0.0);
+            let label_pad = input.overrides.label_padding.unwrap_or(2.0).max(0.0);
             let line_h = metrics.line_height(label_font_size);
             // Widest final (possibly-elided) label that will actually render —
             // skip culled ticks since they draw no label.
@@ -1332,7 +1337,7 @@ pub fn layout_x_axis(
         // horizontal (top/bottom) axis is a flat title (`0`); a vertical
         // `title_orient` (left/right) rotates it (e.g. a vertical caption beside a
         // bottom axis).
-        let angle = match input.title_orient {
+        let angle = match input.overrides.title_orient {
             Some(AxisOrient::Left) => -90.0,
             Some(AxisOrient::Right) => 90.0,
             _ => 0.0,
@@ -1361,21 +1366,21 @@ pub fn layout_x_axis(
         show_ticks: input.show_ticks,
         show_domain: input.show_domain,
         show_grid: input.show_grid,
-        title_font_size: input.title_font_size,
-        title_color_rgba: input.title_color.map(rgba_array),
-        label_padding: input.label_padding,
-        label_color_rgba: input.label_color.map(rgba_array),
-        label_font_size: input.label_font_size,
-        grid_color_rgba: input.grid_color.map(rgba_array),
-        grid_dash: input.grid_dash.clone(),
-        grid_width: input.grid_width,
-        domain_color_rgba: input.domain_color.map(rgba_array),
-        domain_width: input.domain_width,
-        grid_opacity: input.grid_opacity,
-        translate: input.translate,
-        zindex: input.zindex,
-        offset: input.offset,
-        label_flush: input.label_flush,
+        title_font_size: input.overrides.title_font_size,
+        title_color_rgba: input.overrides.title_color.map(rgba_array),
+        label_padding: input.overrides.label_padding,
+        label_color_rgba: input.overrides.label_color.map(rgba_array),
+        label_font_size: input.overrides.label_font_size,
+        grid_color_rgba: input.overrides.grid_color.map(rgba_array),
+        grid_dash: input.overrides.grid_dash.clone(),
+        grid_width: input.overrides.grid_width,
+        domain_color_rgba: input.overrides.domain_color.map(rgba_array),
+        domain_width: input.overrides.domain_width,
+        grid_opacity: input.overrides.grid_opacity,
+        translate: input.overrides.translate,
+        zindex: input.overrides.zindex,
+        offset: input.overrides.offset,
+        label_flush: input.overrides.label_flush,
     }, warning)
 }
 
@@ -1587,7 +1592,7 @@ mod tests {
             vec!["0".into(), "1".into()],
             None,
         );
-        input.title_orient = Some(AxisOrient::Top);
+        input.overrides.title_orient = Some(AxisOrient::Top);
         let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
         let m = mock(10.0);
         let axis = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
@@ -3131,7 +3136,7 @@ mod tests {
             dense_labels(),
             None,
         );
-        input.label_overlap = Some(LabelOverlap::Parity);
+        input.overrides.label_overlap = Some(LabelOverlap::Parity);
         let panel = Rect { x: 0.0, y: 100.0, w: 240.0, h: 0.0 };
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
         let (axis, _warn) = layout_x_axis(&input, panel, 0, 11.0, 11.0, 4.0, 8, 4.0, &m);
@@ -3149,7 +3154,7 @@ mod tests {
             dense_labels(),
             None,
         );
-        input.label_overlap = Some(LabelOverlap::ShowAll);
+        input.overrides.label_overlap = Some(LabelOverlap::ShowAll);
         let panel = Rect { x: 0.0, y: 100.0, w: 240.0, h: 0.0 };
         let m = MockMetrics { measure: |_, _| 80.0, line_h_factor: 1.2 };
         let (axis, _warn) = layout_x_axis(&input, panel, 0, 11.0, 11.0, 4.0, 8, 4.0, &m);

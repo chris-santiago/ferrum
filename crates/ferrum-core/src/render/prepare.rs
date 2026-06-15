@@ -562,7 +562,6 @@ pub fn prepare_render_inputs(
     let x_axis_ticks = x_enc_axis.and_then(|a| a.ticks).unwrap_or(true);
     let x_axis_domain = x_enc_axis.and_then(|a| a.domain).unwrap_or(true);
     let x_axis_grid = x_enc_axis.and_then(|a| a.grid).unwrap_or(true);
-    let x_label_angle = x_enc_axis.and_then(|a| a.label_angle);
     // Axis(title=...) resolution: the outer Option distinguishes "key absent" from
     // "key present but empty".
     //   - None (absent)  → fall through to x_field (field-name default)
@@ -577,7 +576,6 @@ pub fn prepare_render_inputs(
     let y_axis_ticks = y_enc_axis.and_then(|a| a.ticks).unwrap_or(true);
     let y_axis_domain = y_enc_axis.and_then(|a| a.domain).unwrap_or(true);
     let y_axis_grid = y_enc_axis.and_then(|a| a.grid).unwrap_or(true);
-    let y_label_angle = y_enc_axis.and_then(|a| a.label_angle);
     // Same three-way resolution as x_axis_title above.
     let y_axis_title: Option<String> = match y_enc_axis.and_then(|a| a.title.as_deref()) {
         Some(s) if s.trim().is_empty() => None,
@@ -639,8 +637,8 @@ pub fn prepare_render_inputs(
     // width, label color/font-size, domain color/width, title styling,
     // tick_values, padding, and the unit-2 orphans orient/translate/extents/
     // grid_opacity/title_orient/zindex/tick_min_step/tick_extra).
-    let x_axis_style = encoding_axis_style_overrides(x_enc_axis.map(Box::as_ref), "x")?;
-    let y_axis_style = encoding_axis_style_overrides(y_enc_axis.map(Box::as_ref), "y")?;
+    let mut x_axis_style = encoding_axis_style_overrides(x_enc_axis.map(Box::as_ref), "x")?;
+    let mut y_axis_style = encoding_axis_style_overrides(y_enc_axis.map(Box::as_ref), "y")?;
 
     // Continuous-axis scale projection: an empty major-fraction vec means the
     // axis is categorical/discretizing (ordinal) → carrier is `None`, so layout
@@ -660,83 +658,44 @@ pub fn prepare_render_inputs(
 
     // Per-channel `orient` selects the axis side; absent → the dimension default
     // (Bottom for x, Left for y). Validated above against the channel dimension.
+    // Stored as the concrete `AxisInput.orient`; the `orient` override input stays
+    // in the bundle so a later chart-level `configure_axis(orient=...)` fills it
+    // only when still `None` (per-channel wins), then `resolve_orient` re-syncs.
     let x_orient = x_axis_style.orient.unwrap_or(AxisOrient::Bottom);
     let y_orient = y_axis_style.orient.unwrap_or(AxisOrient::Left);
+
+    // Seed the per-channel `label_format` (resolved via the temporal/numeric
+    // threading above) onto the bundle. `label_angle` is already on the bundle
+    // (parsed from the same `encoding.axis` spec as `x_label_angle`).
+    x_axis_style.label_format = x_label_format_override;
+    y_axis_style.label_format = y_label_format_override;
 
     let axes = AxesInput {
         x: AxisInput {
             orient: x_orient,
             title: x_axis_title,
             tick_labels: x_tick_labels,
-            label_angle_override: x_label_angle,
             show_labels: x_axis_labels,
             show_ticks: x_axis_ticks,
             show_domain: x_axis_domain,
             show_grid: x_axis_grid,
             tick_format: None, // already applied above
             tick_format_type: None,
-            tick_values_override: x_axis_style.tick_values,
-            label_format_override: x_label_format_override,
-            title_font_size: x_axis_style.title_font_size,
-            title_color: x_axis_style.title_color,
-            title_padding: x_axis_style.title_padding,
-            label_padding: x_axis_style.label_padding,
-            label_color: x_axis_style.label_color,
-            label_font_size: x_axis_style.label_font_size,
-            grid_color: x_axis_style.grid_color,
-            grid_dash: x_axis_style.grid_dash,
-            grid_width: x_axis_style.grid_width,
-            domain_color: x_axis_style.domain_color,
-            domain_width: x_axis_style.domain_width,
             tick_projection: x_tick_projection,
-            translate: x_axis_style.translate,
-            min_extent: x_axis_style.min_extent,
-            max_extent: x_axis_style.max_extent,
-            grid_opacity: x_axis_style.grid_opacity,
-            title_orient: x_axis_style.title_orient,
-            zindex: x_axis_style.zindex,
-            tick_extra: x_axis_style.tick_extra,
-            tick_min_step: x_axis_style.tick_min_step,
-            offset: x_axis_style.offset,
-            label_flush: x_axis_style.label_flush,
-            label_overlap: x_axis_style.label_overlap,
+            overrides: x_axis_style,
         },
         y: AxisInput {
             orient: y_orient,
             title: y_axis_title,
             tick_labels: y_tick_labels,
-            label_angle_override: y_label_angle,
             show_labels: y_axis_labels,
             show_ticks: y_axis_ticks,
             show_domain: y_axis_domain,
             show_grid: y_axis_grid,
             tick_format: None,
             tick_format_type: None,
-            tick_values_override: y_axis_style.tick_values,
-            label_format_override: y_label_format_override,
-            title_font_size: y_axis_style.title_font_size,
-            title_color: y_axis_style.title_color,
-            title_padding: y_axis_style.title_padding,
-            label_padding: y_axis_style.label_padding,
-            label_color: y_axis_style.label_color,
-            label_font_size: y_axis_style.label_font_size,
-            grid_color: y_axis_style.grid_color,
-            grid_dash: y_axis_style.grid_dash,
-            grid_width: y_axis_style.grid_width,
-            domain_color: y_axis_style.domain_color,
-            domain_width: y_axis_style.domain_width,
             tick_projection: y_tick_projection,
-            translate: y_axis_style.translate,
-            min_extent: y_axis_style.min_extent,
-            max_extent: y_axis_style.max_extent,
-            grid_opacity: y_axis_style.grid_opacity,
-            title_orient: y_axis_style.title_orient,
-            zindex: y_axis_style.zindex,
-            tick_extra: y_axis_style.tick_extra,
-            tick_min_step: y_axis_style.tick_min_step,
-            offset: y_axis_style.offset,
-            label_flush: y_axis_style.label_flush,
-            label_overlap: y_axis_style.label_overlap,
+            overrides: y_axis_style,
         },
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),
@@ -1246,49 +1205,6 @@ fn encoding_axis_tick_count(enc: Option<&crate::spec::encoding::EncodingSpec>) -
         .map(|n| n as usize)
 }
 
-/// Per-channel axis styling overrides parsed from a typed `AxisStyleSpec`, ready
-/// to drop into an `AxisInput` (B5). Color strings are pre-parsed to `Srgba<u8>`;
-/// an unparseable hex string yields `None` (theme fallback) rather than failing,
-/// matching the chart-level apply behavior. Only the honored styling keys are
-/// surfaced; orphan fields (orient/translate/extents/…) are intentionally absent.
-#[derive(Default)]
-struct AxisStyleOverrides {
-    tick_values: Option<Vec<f64>>,
-    title_font_size: Option<f64>,
-    title_color: Option<palette::Srgba<u8>>,
-    title_padding: Option<f64>,
-    label_padding: Option<f64>,
-    label_color: Option<palette::Srgba<u8>>,
-    label_font_size: Option<f64>,
-    grid_color: Option<palette::Srgba<u8>>,
-    grid_dash: Option<Vec<f64>>,
-    grid_width: Option<f64>,
-    domain_color: Option<palette::Srgba<u8>>,
-    domain_width: Option<f64>,
-    // ── Orphan positioning/draw-order fields (B5 unit 2) ─────────────────────
-    /// Validated against the channel dimension; `None` → the channel's default
-    /// side (Bottom for x, Left for y).
-    orient: Option<AxisOrient>,
-    translate: Option<f64>,
-    min_extent: Option<f64>,
-    max_extent: Option<f64>,
-    grid_opacity: Option<f64>,
-    /// Title side/orientation; any of the four sides is accepted (a title can
-    /// run perpendicular to its axis), so no dimension validation applies.
-    title_orient: Option<AxisOrient>,
-    zindex: Option<i64>,
-    tick_extra: Option<bool>,
-    tick_min_step: Option<f64>,
-    // ── Residual positioning/overlap fields (B5 unit 6b) ─────────────────────
-    /// Perpendicular shift away from the plot edge (px); composes additively with
-    /// `translate` at render time.
-    offset: Option<f64>,
-    /// Flush first/last tick labels at the axis ends.
-    label_flush: Option<bool>,
-    /// Tick-label overlap strategy; parsed from the Vega-style token/bool.
-    label_overlap: Option<crate::layout::LabelOverlap>,
-}
-
 /// Parse an axis `orient` string into an [`AxisOrient`], validating it against
 /// the channel dimension: x accepts top/bottom, y accepts left/right. A
 /// cross-dimension value fails loud per the B5 contract. Shared by the
@@ -1363,11 +1279,20 @@ pub(crate) fn parse_title_orient(
     }
 }
 
+/// Parse a per-channel typed [`AxisStyleSpec`] into the bundled
+/// [`AxisStyleOverrides`] ready to drop into an `AxisInput` (B5). Color strings
+/// are pre-parsed to `Srgba<u8>`; an unparseable hex string yields `None` (theme
+/// fallback) rather than failing, matching the chart-level apply behavior.
+///
+/// `label_format` is left `None` here: prepare resolves it through the temporal/
+/// numeric format threading (`apply_axis_format_or_thread`) and seeds it onto the
+/// bundle at construction. `orient` is the validated override input; the concrete
+/// axis side is resolved into `AxisInput.orient` once all override layers merge.
 fn encoding_axis_style_overrides(
     axis: Option<&crate::render::chart_config::AxisStyleSpec>,
     channel: &'static str,
-) -> Result<AxisStyleOverrides, RenderError> {
-    let Some(a) = axis else { return Ok(AxisStyleOverrides::default()) };
+) -> Result<crate::layout::AxisStyleOverrides, RenderError> {
+    let Some(a) = axis else { return Ok(crate::layout::AxisStyleOverrides::default()) };
     let parse = |c: &Option<String>| {
         c.as_deref()
             .and_then(|s| crate::render::color::from_hex_str(s).ok())
@@ -1382,8 +1307,10 @@ fn encoding_axis_style_overrides(
         .as_deref()
         .map(|s| parse_title_orient(s, channel))
         .transpose()?;
-    Ok(AxisStyleOverrides {
+    Ok(crate::layout::AxisStyleOverrides {
         tick_values: a.values.clone(),
+        label_angle: a.label_angle,
+        label_format: None,
         title_font_size: a.title_font_size,
         title_color: parse(&a.title_color),
         title_padding: a.title_padding,
@@ -1437,8 +1364,8 @@ pub(crate) fn adjust_axis_ticks(
     tick_count: usize,
     reversed: bool,
 ) {
-    let tick_min_step = axis.tick_min_step;
-    let tick_extra = axis.tick_extra.unwrap_or(false);
+    let tick_min_step = axis.overrides.tick_min_step;
+    let tick_extra = axis.overrides.tick_extra.unwrap_or(false);
     if tick_min_step.is_none() && !tick_extra {
         return;
     }
@@ -2566,7 +2493,7 @@ mod tests {
         let batch = price_weight_batch();
         let prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
-        assert_eq!(prep.axes.x.label_format_override.as_deref(), Some(",.0f"));
+        assert_eq!(prep.axes.x.overrides.label_format.as_deref(), Some(",.0f"));
     }
 
     #[test]
@@ -2582,14 +2509,14 @@ mod tests {
         let batch = price_weight_batch();
         let prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
-        let gx = prep.axes.x.grid_color.expect("per-channel grid_color must reach x AxisInput");
+        let gx = prep.axes.x.overrides.grid_color.expect("per-channel grid_color must reach x AxisInput");
         assert_eq!([gx.red, gx.green, gx.blue], [0xcc, 0xcc, 0xcc]);
-        let lx = prep.axes.x.label_color.expect("per-channel label_color must reach x AxisInput");
+        let lx = prep.axes.x.overrides.label_color.expect("per-channel label_color must reach x AxisInput");
         assert_eq!([lx.red, lx.green, lx.blue], [0xff, 0x00, 0xff]);
-        assert_eq!(prep.axes.x.domain_width, Some(3.0));
+        assert_eq!(prep.axes.x.overrides.domain_width, Some(3.0));
         // The y-axis must be untouched (per-channel applies only to its own axis).
-        assert!(prep.axes.y.grid_color.is_none());
-        assert!(prep.axes.y.label_color.is_none());
+        assert!(prep.axes.y.overrides.grid_color.is_none());
+        assert!(prep.axes.y.overrides.label_color.is_none());
     }
 
     // ── B5 unit 2: orphan positioning / tick fields ─────────────────────────
@@ -2642,12 +2569,12 @@ mod tests {
         let batch = price_weight_batch();
         let prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
-        assert_eq!(prep.axes.x.translate, Some(12.0));
-        assert_eq!(prep.axes.x.min_extent, Some(70.0));
-        assert_eq!(prep.axes.x.max_extent, Some(120.0));
-        assert_eq!(prep.axes.x.grid_opacity, Some(0.25));
-        assert_eq!(prep.axes.x.title_orient, Some(AxisOrient::Bottom));
-        assert_eq!(prep.axes.x.zindex, Some(1));
+        assert_eq!(prep.axes.x.overrides.translate, Some(12.0));
+        assert_eq!(prep.axes.x.overrides.min_extent, Some(70.0));
+        assert_eq!(prep.axes.x.overrides.max_extent, Some(120.0));
+        assert_eq!(prep.axes.x.overrides.grid_opacity, Some(0.25));
+        assert_eq!(prep.axes.x.overrides.title_orient, Some(AxisOrient::Bottom));
+        assert_eq!(prep.axes.x.overrides.zindex, Some(1));
     }
 
     #[test]
@@ -2727,7 +2654,7 @@ mod tests {
         let batch = price_weight_batch();
         let mut prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
-        assert_eq!(prep.axes.x.grid_width, Some(4.0), "per-channel value set in prep");
+        assert_eq!(prep.axes.x.overrides.grid_width, Some(4.0), "per-channel value set in prep");
         // Chart-level configure_axis(grid_width=1.0) must NOT overwrite per-channel.
         let cfg = crate::render::chart_config::AxisConfigSpec {
             style: crate::render::chart_config::AxisStyleSpec {
@@ -2737,7 +2664,7 @@ mod tests {
             ..Default::default()
         };
         crate::render::apply_axis_style_to_axis_input(&mut prep.axes.x, &cfg.style).unwrap();
-        assert_eq!(prep.axes.x.grid_width, Some(4.0), "per-channel must win over configure_axis");
+        assert_eq!(prep.axes.x.overrides.grid_width, Some(4.0), "per-channel must win over configure_axis");
     }
 
     #[test]
@@ -2804,7 +2731,7 @@ mod tests {
         // Apply the threaded override exactly as render/mod.rs does.
         prep.axes.x.tick_labels = apply_tick_format(
             std::mem::take(&mut prep.axes.x.tick_labels),
-            prep.axes.x.label_format_override.as_deref(),
+            prep.axes.x.overrides.label_format.as_deref(),
             None,
         );
         // Every numeric label should now carry the "$" prefix and 2 decimals.

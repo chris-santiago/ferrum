@@ -529,8 +529,8 @@ pub(crate) fn apply_axis_config_to_axis_input(
     // raises), so in practice at most one is set; this keeps the Rust side
     // self-consistent regardless. Fill only when nothing higher-precedence (a
     // per-channel spec) already set the override.
-    if axis.label_format_override.is_none() {
-        axis.label_format_override = cfg.effective_label_format().map(str::to_owned);
+    if axis.overrides.label_format.is_none() {
+        axis.overrides.label_format = cfg.effective_label_format().map(str::to_owned);
     }
     apply_axis_style_to_axis_input(axis, &cfg.style)
 }
@@ -565,71 +565,67 @@ pub(crate) fn apply_axis_style_to_axis_input(
     style: &chart_config::AxisStyleSpec,
 ) -> Result<(), RenderError> {
     let channel = axis_channel(axis.orient);
+    let o = &mut axis.overrides;
     // ── Positioning / draw-order orphans (B5 unit 2) ─────────────────────────
-    // `orient` rewrites the axis's own orient (validated against its dimension).
-    // Only applied when the per-channel path did not already move it off the
-    // dimension default, so per-channel wins.
-    if let Some(ref o) = style.orient {
-        let parsed = prepare::parse_axis_orient(o, channel)?;
-        let at_default = matches!(
-            (channel, axis.orient),
-            ("x", crate::layout::AxisOrient::Bottom) | ("y", crate::layout::AxisOrient::Left)
-        );
-        if at_default {
-            axis.orient = parsed;
+    // `orient` is the override INPUT (validated against the dimension); it fills
+    // like every sibling — only when still `None`, so a per-channel
+    // `fm.Axis(orient=...)` always wins. The concrete `AxisInput.orient` is
+    // re-synced from this by `resolve_orient` after all override layers merge.
+    if o.orient.is_none() {
+        if let Some(ref s) = style.orient {
+            o.orient = Some(prepare::parse_axis_orient(s, channel)?);
         }
     }
-    if let Some(ref to) = style.title_orient {
-        let parsed = prepare::parse_title_orient(to, channel)?;
-        if axis.title_orient.is_none() {
-            axis.title_orient = Some(parsed);
+    if o.title_orient.is_none() {
+        if let Some(ref s) = style.title_orient {
+            o.title_orient = Some(prepare::parse_title_orient(s, channel)?);
         }
     }
-    if axis.translate.is_none() {
-        axis.translate = style.translate;
+    if o.translate.is_none() {
+        o.translate = style.translate;
     }
-    if axis.min_extent.is_none() {
-        axis.min_extent = style.min_extent;
+    if o.min_extent.is_none() {
+        o.min_extent = style.min_extent;
     }
-    if axis.max_extent.is_none() {
-        axis.max_extent = style.max_extent;
+    if o.max_extent.is_none() {
+        o.max_extent = style.max_extent;
     }
-    if axis.grid_opacity.is_none() {
-        axis.grid_opacity = style.grid_opacity;
+    if o.grid_opacity.is_none() {
+        o.grid_opacity = style.grid_opacity;
     }
-    if axis.zindex.is_none() {
-        axis.zindex = style.zindex;
+    if o.zindex.is_none() {
+        o.zindex = style.zindex;
     }
-    if axis.tick_extra.is_none() {
-        axis.tick_extra = style.tick_extra;
+    if o.tick_extra.is_none() {
+        o.tick_extra = style.tick_extra;
     }
-    if axis.tick_min_step.is_none() {
-        axis.tick_min_step = style.tick_min_step;
+    if o.tick_min_step.is_none() {
+        o.tick_min_step = style.tick_min_step;
     }
     // ── Residual positioning/overlap orphans (B5 unit 6b) ────────────────────
-    if axis.offset.is_none() {
-        axis.offset = style.offset;
+    if o.offset.is_none() {
+        o.offset = style.offset;
     }
-    if axis.label_flush.is_none() {
-        axis.label_flush = style.label_flush;
+    if o.label_flush.is_none() {
+        o.label_flush = style.label_flush;
     }
-    if axis.label_overlap.is_none() {
-        axis.label_overlap = style
+    if o.label_overlap.is_none() {
+        o.label_overlap = style
             .label_overlap
             .as_deref()
             .and_then(prepare::parse_label_overlap);
     }
-    // label_angle_override.
-    if axis.label_angle_override.is_none() {
-        axis.label_angle_override = style.label_angle;
+    // label_angle.
+    if o.label_angle.is_none() {
+        o.label_angle = style.label_angle;
     }
     // d3-format string for tick labels (per-channel `label_format`).
-    if axis.label_format_override.is_none() {
-        axis.label_format_override = style.label_format.clone();
+    if o.label_format.is_none() {
+        o.label_format = style.label_format.clone();
     }
     // Explicit tick positions (`fm.Axis(values=...)`).
-    if axis.tick_values_override.is_none() {
-        axis.tick_values_override = style.values.clone();
+    if o.tick_values.is_none() {
+        o.tick_values = style.values.clone();
     }
     // Show toggles (`grid`/`domain`/`labels`/`ticks`) are deliberately NOT written
     // here. The per-channel prepare path (`prepare_render_inputs`) is the sole owner
@@ -641,55 +637,55 @@ pub(crate) fn apply_axis_style_to_axis_input(
     // gate with the per-axis `show_*` gate. Writing `show_*` here too would clobber
     // the per-channel value and invert the precedence.
     // Title overrides.
-    if axis.title_font_size.is_none() {
-        axis.title_font_size = style.title_font_size;
+    if o.title_font_size.is_none() {
+        o.title_font_size = style.title_font_size;
     }
-    if axis.title_color.is_none() {
+    if o.title_color.is_none() {
         if let Some(ref c) = style.title_color {
             if let Ok(parsed) = color::from_hex_str(c) {
-                axis.title_color = Some(parsed);
+                o.title_color = Some(parsed);
             }
         }
     }
-    if axis.title_padding.is_none() {
-        axis.title_padding = style.title_padding;
+    if o.title_padding.is_none() {
+        o.title_padding = style.title_padding;
     }
-    if axis.label_padding.is_none() {
-        axis.label_padding = style.label_padding;
+    if o.label_padding.is_none() {
+        o.label_padding = style.label_padding;
     }
     // ── Per-axis styling overrides (B5): consulted by build_axis/build_grid ──
-    if axis.label_color.is_none() {
+    if o.label_color.is_none() {
         if let Some(ref c) = style.label_color {
             if let Ok(parsed) = color::from_hex_str(c) {
-                axis.label_color = Some(parsed);
+                o.label_color = Some(parsed);
             }
         }
     }
-    if axis.label_font_size.is_none() {
-        axis.label_font_size = style.label_font_size;
+    if o.label_font_size.is_none() {
+        o.label_font_size = style.label_font_size;
     }
-    if axis.grid_color.is_none() {
+    if o.grid_color.is_none() {
         if let Some(ref c) = style.grid_color {
             if let Ok(parsed) = color::from_hex_str(c) {
-                axis.grid_color = Some(parsed);
+                o.grid_color = Some(parsed);
             }
         }
     }
-    if axis.grid_dash.is_none() {
-        axis.grid_dash = style.grid_dash.clone();
+    if o.grid_dash.is_none() {
+        o.grid_dash = style.grid_dash.clone();
     }
-    if axis.grid_width.is_none() {
-        axis.grid_width = style.grid_width;
+    if o.grid_width.is_none() {
+        o.grid_width = style.grid_width;
     }
-    if axis.domain_color.is_none() {
+    if o.domain_color.is_none() {
         if let Some(ref c) = style.domain_color {
             if let Ok(parsed) = color::from_hex_str(c) {
-                axis.domain_color = Some(parsed);
+                o.domain_color = Some(parsed);
             }
         }
     }
-    if axis.domain_width.is_none() {
-        axis.domain_width = style.domain_width;
+    if o.domain_width.is_none() {
+        o.domain_width = style.domain_width;
     }
     Ok(())
 }
@@ -706,12 +702,12 @@ pub(crate) fn apply_axis_style_to_axis_input(
 /// spec. Non-numeric labels (category names, time strings) are passed through
 /// unchanged.
 fn apply_label_format_to_axis(axis: &mut crate::layout::AxisInput) {
-    if let Some(tick_vals) = axis.tick_values_override.clone() {
+    if let Some(tick_vals) = axis.overrides.tick_values.clone() {
         // Replace tick_labels with formatted versions of the explicit tick_values.
         let numeric_strings: Vec<String> = tick_vals.iter().map(|v| v.to_string()).collect();
-        let fmt = axis.label_format_override.as_deref();
+        let fmt = axis.overrides.label_format.as_deref();
         axis.tick_labels = prepare::apply_tick_format(numeric_strings, fmt, None);
-    } else if let Some(ref fmt_str) = axis.label_format_override.clone() {
+    } else if let Some(ref fmt_str) = axis.overrides.label_format.clone() {
         // Re-format existing labels using the d3-format spec.
         axis.tick_labels = prepare::apply_tick_format(
             std::mem::take(&mut axis.tick_labels),
@@ -735,7 +731,7 @@ fn sync_projected_fractions_to_tick_values(
     if axis.tick_projection.is_none() {
         return;
     }
-    let Some(values) = axis.tick_values_override.clone() else {
+    let Some(values) = axis.overrides.tick_values.clone() else {
         return;
     };
     let fractions = scale.value_fractions(&values);
@@ -853,6 +849,12 @@ fn prepare_and_layout(
     apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis.as_ref())?;
     apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis_x.as_ref())?;
     apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis_y.as_ref())?;
+    // Re-sync the concrete axis side from the merged `overrides.orient`: a
+    // per-channel `fm.Axis(orient=...)` already set it (so this is a no-op there
+    // and per-channel wins), otherwise a chart-level `configure_axis(orient=...)`
+    // filled it above and now takes effect.
+    prep.axes.x.resolve_orient();
+    prep.axes.y.resolve_orient();
     // tick_extra / tick_min_step (B5 unit 2): apply AFTER the config merge so the
     // effective value (per-channel wins, chart-level fallback) is on `AxisInput`,
     // then adjust the generated ticks against the provisional scale. No-op when
@@ -1961,13 +1963,14 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        assert_eq!(axis.title_font_size, Some(16.0));
+        assert_eq!(axis.overrides.title_font_size, Some(16.0));
     }
 
     #[test]
     fn chart_config_orient_propagates_when_at_default() {
-        // configure_axis(orient="top") on an x-axis at its Bottom default moves
-        // it to Top; the orphan positioning fields flow too.
+        // configure_axis(orient="top") on an x-axis with no per-channel orient
+        // override fills `overrides.orient`; `resolve_orient` then moves the
+        // concrete side to Top. The orphan positioning fields flow too.
         let mut axis = crate::layout::AxisInput::new(
             crate::layout::AxisOrient::Bottom,
             Some("X".to_string()),
@@ -1985,10 +1988,11 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        axis.resolve_orient();
         assert_eq!(axis.orient, crate::layout::AxisOrient::Top);
-        assert_eq!(axis.translate, Some(5.0));
-        assert_eq!(axis.grid_opacity, Some(0.4));
-        assert_eq!(axis.zindex, Some(1));
+        assert_eq!(axis.overrides.translate, Some(5.0));
+        assert_eq!(axis.overrides.grid_opacity, Some(0.4));
+        assert_eq!(axis.overrides.zindex, Some(1));
     }
 
     #[test]
@@ -2010,20 +2014,75 @@ mod chart_config_application_tests {
 
     #[test]
     fn chart_config_orient_does_not_override_per_channel() {
-        // An x-axis already moved to Top by the per-channel path must not be moved
-        // again by a conflicting chart-level orient (per-channel wins).
+        // An x-axis already moved to Top by the per-channel path (which sets the
+        // `overrides.orient` INPUT, mirroring prepare.rs) must not be moved again
+        // by a conflicting chart-level orient — the chart-level fill is gated on
+        // `is_none()`, so per-channel wins.
         let mut axis = crate::layout::AxisInput::new(
-            crate::layout::AxisOrient::Top, // per-channel already set Top
+            crate::layout::AxisOrient::Top,
             None,
             vec![],
             None,
         );
+        axis.overrides.orient = Some(crate::layout::AxisOrient::Top); // per-channel already set Top
         let cfg = AxisConfigSpec {
             style: AxisStyleSpec { orient: Some("bottom".to_string()), ..Default::default() },
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        axis.resolve_orient();
         assert_eq!(axis.orient, crate::layout::AxisOrient::Top, "per-channel orient must win");
+        assert_eq!(axis.overrides.orient, Some(crate::layout::AxisOrient::Top));
+    }
+
+    #[test]
+    fn per_channel_orient_at_default_side_still_beats_chart_level() {
+        // Regression (B5 follow-up, Issue 1): an EXPLICIT per-channel
+        // `fm.Axis(orient="bottom")` lands on the x default side (Bottom). The old
+        // value-heuristic treated "at default side" as "unset" and let a
+        // chart-level `configure(axis_x=AxisConfig(orient="top"))` win — a
+        // precedence inversion. With the `is_none()` sentinel the explicit
+        // per-channel Bottom wins and the axis stays at the bottom.
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            None,
+            vec![],
+            None,
+        );
+        // Mirror prepare.rs: an explicit per-channel orient sets BOTH the concrete
+        // side and the `overrides.orient` input (even when it equals the default).
+        axis.overrides.orient = Some(crate::layout::AxisOrient::Bottom);
+        let cfg = AxisConfigSpec {
+            style: AxisStyleSpec { orient: Some("top".to_string()), ..Default::default() },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
+        axis.resolve_orient();
+        assert_eq!(
+            axis.orient,
+            crate::layout::AxisOrient::Bottom,
+            "explicit per-channel orient='bottom' must beat chart-level orient='top'",
+        );
+
+        // y mirror: explicit per-channel Left must beat chart-level Right.
+        let mut yaxis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Left,
+            None,
+            vec![],
+            None,
+        );
+        yaxis.overrides.orient = Some(crate::layout::AxisOrient::Left);
+        let ycfg = AxisConfigSpec {
+            style: AxisStyleSpec { orient: Some("right".to_string()), ..Default::default() },
+            ..Default::default()
+        };
+        apply_axis_config_to_axis_input(&mut yaxis, Some(&ycfg)).unwrap();
+        yaxis.resolve_orient();
+        assert_eq!(
+            yaxis.orient,
+            crate::layout::AxisOrient::Left,
+            "explicit per-channel orient='left' must beat chart-level orient='right'",
+        );
     }
 
     #[test]
@@ -2045,9 +2104,9 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        assert_eq!(axis.offset, Some(30.0));
-        assert_eq!(axis.label_flush, Some(true));
-        assert_eq!(axis.label_overlap, Some(crate::layout::LabelOverlap::Parity));
+        assert_eq!(axis.overrides.offset, Some(30.0));
+        assert_eq!(axis.overrides.label_flush, Some(true));
+        assert_eq!(axis.overrides.label_overlap, Some(crate::layout::LabelOverlap::Parity));
     }
 
     #[test]
@@ -2059,9 +2118,9 @@ mod chart_config_application_tests {
             vec!["0".to_string()],
             None,
         );
-        axis.offset = Some(5.0);
-        axis.label_flush = Some(false);
-        axis.label_overlap = Some(crate::layout::LabelOverlap::ShowAll);
+        axis.overrides.offset = Some(5.0);
+        axis.overrides.label_flush = Some(false);
+        axis.overrides.label_overlap = Some(crate::layout::LabelOverlap::ShowAll);
         let cfg = AxisConfigSpec {
             style: AxisStyleSpec {
                 offset: Some(30.0),
@@ -2072,10 +2131,10 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        assert_eq!(axis.offset, Some(5.0), "per-channel offset must win");
-        assert_eq!(axis.label_flush, Some(false), "per-channel label_flush must win");
+        assert_eq!(axis.overrides.offset, Some(5.0), "per-channel offset must win");
+        assert_eq!(axis.overrides.label_flush, Some(false), "per-channel label_flush must win");
         assert_eq!(
-            axis.label_overlap,
+            axis.overrides.label_overlap,
             Some(crate::layout::LabelOverlap::ShowAll),
             "per-channel label_overlap must win",
         );
@@ -2094,7 +2153,7 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        let c = axis.title_color.expect("title_color should be Some");
+        let c = axis.overrides.title_color.expect("title_color should be Some");
         assert_eq!(c.red, 0xff);
         assert_eq!(c.green, 0x00);
         assert_eq!(c.blue, 0x00);
@@ -2113,7 +2172,7 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        assert_eq!(axis.title_padding, Some(12.0));
+        assert_eq!(axis.overrides.title_padding, Some(12.0));
     }
 
     #[test]
@@ -2162,17 +2221,17 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
-        assert_eq!(axis.label_padding, Some(6.0));
+        assert_eq!(axis.overrides.label_padding, Some(6.0));
     }
 
     #[test]
     fn axis_config_per_channel_wins_over_configure() {
-        // Per-channel label_angle_override (level 2) wins over configure (level 3).
+        // Per-channel label_angle (level 2) wins over configure (level 3).
         let mut axis = crate::layout::AxisInput::new(
             crate::layout::AxisOrient::Bottom,
             None,
             vec![],
-            Some(-45.0), // per-channel override already set
+            Some(-45.0), // per-channel override already set (seeds overrides.label_angle)
         );
         let cfg = AxisConfigSpec {
             style: AxisStyleSpec { label_angle: Some(-90.0), ..Default::default() },
@@ -2180,7 +2239,7 @@ mod chart_config_application_tests {
         };
         apply_axis_config_to_axis_input(&mut axis, Some(&cfg)).unwrap();
         // -45.0 should win because it was already set (Some).
-        assert_eq!(axis.label_angle_override, Some(-45.0));
+        assert_eq!(axis.overrides.label_angle, Some(-45.0));
     }
 
     #[test]
