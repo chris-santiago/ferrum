@@ -246,6 +246,9 @@ pub struct ThemeColors {
     pub background_color: palette::Srgba<u8>,
     pub strip_background_color: palette::Srgba<u8>,
     pub title_color: palette::Srgba<u8>,
+    /// Subtitle text color. `None` falls back to `font_color` at render time,
+    /// preserving the pre-subtitle-config default output.
+    pub subtitle_color: Option<palette::Srgba<u8>>,
     pub label_color: palette::Srgba<u8>,
     pub reference_line_color: palette::Srgba<u8>,
 }
@@ -271,6 +274,7 @@ impl Default for ThemeColors {
             background_color: bg_cream,
             strip_background_color: strip_bg,
             title_color: text_fg,
+            subtitle_color: None,
             label_color: label_gray,
             reference_line_color: palette::Srgba::new(0x9C, 0xA3, 0xAF, 0xFF),
         }
@@ -289,6 +293,9 @@ pub struct ThemeTypography {
     pub title_font_weight: String,
     pub title_anchor: TextAnchor,
     pub title_offset: f64,
+    /// Subtitle font size. `None` falls back to `title_font_size * 0.85`,
+    /// preserving the pre-subtitle-config default output.
+    pub subtitle_font_size: Option<f64>,
     pub legend_title_font_size: f64,
 }
 
@@ -304,6 +311,7 @@ impl Default for ThemeTypography {
             title_font_weight: "600".into(),
             title_anchor: TextAnchor::Start,
             title_offset: 6.0,
+            subtitle_font_size: None,
             legend_title_font_size: DEFAULT_LABEL_FONT_SIZE,
         }
     }
@@ -533,6 +541,7 @@ pub fn compute_layout(
         let title_line_h = metrics.line_height(resolved_font_size);
         let subtitle_font_size = title_spec
             .subtitle_font_size
+            .or(theme.typography.subtitle_font_size)
             .unwrap_or(resolved_font_size * 0.85);
         let subtitle_line_h = if title_spec.subtitle.is_some() {
             metrics.line_height(subtitle_font_size)

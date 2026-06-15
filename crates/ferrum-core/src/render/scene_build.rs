@@ -770,9 +770,11 @@ fn build_title(
         let resolved_sub_color = title_spec
             .and_then(|t| t.subtitle_color.as_deref())
             .and_then(|hex| super::color::from_hex_str(hex).ok())
+            .or(theme.colors.subtitle_color)
             .unwrap_or(theme.colors.font_color);
         let resolved_sub_font_size = title_spec
             .and_then(|t| t.subtitle_font_size)
+            .or(theme.typography.subtitle_font_size)
             .unwrap_or(resolved_font_size * 0.85);
         out.push(SceneNode::Text {
             x: title.x,
@@ -1968,5 +1970,77 @@ mod tests {
         let mut bare = spec;
         bare.encoding.x = None;
         assert!(collect_param_bindings(&bare, 1).is_empty());
+    }
+
+    fn layout_with_subtitle(subtitle: &str) -> LayoutResult {
+        LayoutResult {
+            viewport: Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 },
+            panels: Vec::new(),
+            axes: Vec::new(),
+            legend: None,
+            aux_legends: Vec::new(),
+            chart_title: Some(crate::layout::ChartTitleLayout {
+                text: "Main Title".to_string(),
+                subtitle: Some(subtitle.to_string()),
+                x: 10.0,
+                y: 20.0,
+                subtitle_y: Some(36.0),
+                anchor: crate::layout::TextAnchor::Start,
+            }),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// `configure_title(subtitle_font_size=…, subtitle_color=…)` flows through the
+    /// chart-config → theme path and reaches the rendered subtitle. The chart-level
+    /// subtitle styling lives on the theme (populated by `apply_chart_config`); the
+    /// per-chart `spec.title` is `None` here, exactly the `configure_title` case.
+    #[test]
+    fn build_title_applies_chart_config_subtitle_styling() {
+        let spec = spec_with_x_domain_param(Vec::new());
+        assert!(spec.title.is_none(), "this test exercises the chart-config path, not spec.title");
+        let layout = layout_with_subtitle("Styled subtitle");
+
+        let mut theme = ThemeInputs::default();
+        theme.typography.subtitle_font_size = Some(22.0);
+        theme.colors.subtitle_color = Some(super::super::color::from_hex_str("#ff0000").unwrap());
+
+        let mut nodes = Vec::new();
+        build_title(&layout, &spec, &theme, &mut nodes);
+
+        // [0] = title line, [1] = subtitle line.
+        let subtitle_node = nodes
+            .iter()
+            .find_map(|n| match n {
+                SceneNode::Text { content, style, .. } if content == "Styled subtitle" => Some(style),
+                _ => None,
+            })
+            .expect("subtitle text node must be emitted");
+        assert_eq!(subtitle_node.font_size, 22.0);
+        assert_eq!(
+            subtitle_node.color,
+            to_scene_color(super::super::color::from_hex_str("#ff0000").unwrap()),
+        );
+    }
+
+    /// Unset subtitle config → byte-identical default: font_color and 0.85× title size.
+    #[test]
+    fn build_title_subtitle_defaults_unchanged_when_unset() {
+        let spec = spec_with_x_domain_param(Vec::new());
+        let layout = layout_with_subtitle("Default subtitle");
+        let theme = ThemeInputs::default();
+
+        let mut nodes = Vec::new();
+        build_title(&layout, &spec, &theme, &mut nodes);
+
+        let subtitle_node = nodes
+            .iter()
+            .find_map(|n| match n {
+                SceneNode::Text { content, style, .. } if content == "Default subtitle" => Some(style),
+                _ => None,
+            })
+            .expect("subtitle text node must be emitted");
+        assert_eq!(subtitle_node.font_size, theme.typography.title_font_size * 0.85);
+        assert_eq!(subtitle_node.color, to_scene_color(theme.colors.font_color));
     }
 }

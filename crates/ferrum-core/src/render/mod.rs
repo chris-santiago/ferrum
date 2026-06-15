@@ -353,6 +353,14 @@ fn apply_chart_config(theme: &mut ThemeInputs, config: &ChartConfig) {
         if let Some(o) = title.offset {
             theme.typography.title_offset = o;
         }
+        if let Some(fs) = title.subtitle_font_size {
+            theme.typography.subtitle_font_size = Some(fs);
+        }
+        if let Some(ref c) = title.subtitle_color {
+            if let Ok(parsed) = color::from_hex_str(c) {
+                theme.colors.subtitle_color = Some(parsed);
+            }
+        }
     }
 }
 
@@ -1890,6 +1898,8 @@ mod chart_config_application_tests {
                 anchor: Some("end".to_string()),
                 color: Some("#123456".to_string()),
                 offset: Some(8.0),
+                subtitle_font_size: Some(13.0),
+                subtitle_color: Some("#ff0000".to_string()),
             }),
             ..Default::default()
         };
@@ -1899,6 +1909,21 @@ mod chart_config_application_tests {
         assert_eq!(theme.typography.title_anchor, TextAnchor::End);
         assert_eq!(theme.colors.title_color, color::from_hex_str("#123456").unwrap());
         assert_eq!(theme.typography.title_offset, 8.0);
+        assert_eq!(theme.typography.subtitle_font_size, Some(13.0));
+        assert_eq!(
+            theme.colors.subtitle_color,
+            Some(color::from_hex_str("#ff0000").unwrap())
+        );
+    }
+
+    #[test]
+    fn apply_chart_config_title_subtitle_defaults_unset() {
+        // No `title` config → subtitle theme fields stay `None`, preserving the
+        // pre-config default subtitle styling (font_color + title*0.85).
+        let mut theme = ThemeInputs::default();
+        apply_chart_config(&mut theme, &ChartConfig::default());
+        assert_eq!(theme.typography.subtitle_font_size, None);
+        assert_eq!(theme.colors.subtitle_color, None);
     }
 
     #[test]
