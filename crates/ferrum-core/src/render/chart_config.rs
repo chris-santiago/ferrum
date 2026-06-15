@@ -424,6 +424,8 @@ pub struct TitleConfigSpec {
     pub anchor: Option<String>,
     pub color: Option<String>,
     pub offset: Option<f64>,
+    pub subtitle_font_size: Option<f64>,
+    pub subtitle_color: Option<String>,
 }
 
 #[cfg(test)]

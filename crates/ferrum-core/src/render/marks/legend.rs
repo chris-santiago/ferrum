@@ -26,9 +26,16 @@ pub fn build_legend(
         .as_deref()
         .and_then(|hex| crate::render::color::from_hex_str(hex).ok())
         .unwrap_or(theme.colors.font_color);
+    // Per-legend `label_font_size` override sizes both entry labels and colorbar
+    // tick labels. The layout already reserved space at this size; drawing at the
+    // raw theme size (the prior behavior) under-/over-flowed. Absent → the theme
+    // default (byte-identical).
+    let label_font_size = legend
+        .label_font_size
+        .unwrap_or(theme.typography.label_font_size);
     let label_text_style = to_scene_text_style(
         label_fill,
-        theme.typography.label_font_size,
+        label_font_size,
         TextAnchor::Start,
         0.0,
         &theme.typography.label_font_family,
@@ -114,7 +121,7 @@ pub fn build_legend(
             });
             nodes.push(SceneNode::Text {
                 x: label_x,
-                y: tick.y + theme.typography.label_font_size * 0.35,
+                y: tick.y + label_font_size * 0.35,
                 content: tick.label.clone(),
                 style: label_text_style.clone(),
             });
@@ -311,6 +318,7 @@ mod tests {
             clip_height: None,
             symbol_size: None,
             label_color: None,
+            label_font_size: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -347,6 +355,7 @@ mod tests {
             clip_height: None,
             symbol_size: None,
             label_color: None,
+            label_font_size: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -405,6 +414,7 @@ mod tests {
             clip_height: None,
             symbol_size: None,
             label_color: None,
+            label_font_size: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -440,6 +450,7 @@ mod tests {
             clip_height: None,
             symbol_size: None,
             label_color: None,
+            label_font_size: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -480,6 +491,7 @@ mod tests {
             clip_height: None,
             symbol_size: None,
             label_color: None,
+            label_font_size: None,
         };
         let theme = ThemeInputs::default();
         let nodes = build_legend(&legend, None, &theme);
@@ -498,7 +510,7 @@ mod tests {
     // ── B5 unit 3: symbol_stroke_width + clip_height render ───────────────
 
     fn two_circle_legend(symbol_stroke_width: Option<f64>, clip_height: Option<f64>) -> LegendLayout {
-        two_circle_legend_styled(symbol_stroke_width, clip_height, None, None)
+        two_circle_legend_styled(symbol_stroke_width, clip_height, None, None, None)
     }
 
     fn two_circle_legend_styled(
@@ -506,6 +518,7 @@ mod tests {
         clip_height: Option<f64>,
         symbol_size: Option<f64>,
         label_color: Option<String>,
+        label_font_size: Option<f64>,
     ) -> LegendLayout {
         let entry = |label: &str, y: f64| LegendEntryLayout {
             label: label.into(),
@@ -529,6 +542,7 @@ mod tests {
             clip_height,
             symbol_size,
             label_color,
+            label_font_size,
         }
     }
 
@@ -633,12 +647,12 @@ mod tests {
     #[test]
     fn symbol_size_scales_circle_swatch_radius() {
         let theme = ThemeInputs::default();
-        let base = build_legend(&two_circle_legend_styled(None, None, None, None), None, &theme);
+        let base = build_legend(&two_circle_legend_styled(None, None, None, None, None), None, &theme);
         assert_eq!(swatch_radii(&base), vec![4.0, 4.0], "default swatch r=4");
 
         // area = 400 → r = sqrt(400 / PI) ≈ 11.28, larger than the default 4.
         let big = build_legend(
-            &two_circle_legend_styled(None, None, Some(400.0), None), None, &theme,
+            &two_circle_legend_styled(None, None, Some(400.0), None, None), None, &theme,
         );
         let expected_r = (400.0_f64 / std::f64::consts::PI).sqrt();
         for r in swatch_radii(&big) {
@@ -652,7 +666,7 @@ mod tests {
     #[test]
     fn symbol_size_scales_square_swatch_side() {
         let theme = ThemeInputs::default();
-        let mut legend = two_circle_legend_styled(None, None, Some(400.0), None);
+        let mut legend = two_circle_legend_styled(None, None, Some(400.0), None, None);
         for e in &mut legend.entries {
             e.symbol_kind = SymbolKind::Square;
         }
@@ -671,7 +685,7 @@ mod tests {
     #[test]
     fn symbol_size_absent_keeps_default_geometry() {
         let theme = ThemeInputs::default();
-        let nodes = build_legend(&two_circle_legend_styled(None, None, None, None), None, &theme);
+        let nodes = build_legend(&two_circle_legend_styled(None, None, None, None, None), None, &theme);
         assert_eq!(swatch_radii(&nodes), vec![4.0, 4.0], "default r=4 unchanged");
     }
 
@@ -682,7 +696,7 @@ mod tests {
         let theme = ThemeInputs::default();
         let red = to_scene_color(crate::render::color::from_hex_str("#ff0000").unwrap());
         let nodes = build_legend(
-            &two_circle_legend_styled(None, None, None, Some("#ff0000".into())), None, &theme,
+            &two_circle_legend_styled(None, None, None, Some("#ff0000".into()), None), None, &theme,
         );
         let label_colors: Vec<_> = nodes
             .iter()
@@ -700,10 +714,37 @@ mod tests {
         use crate::render::draw::to_scene_color;
         let theme = ThemeInputs::default();
         let expected = to_scene_color(theme.colors.font_color);
-        let nodes = build_legend(&two_circle_legend_styled(None, None, None, None), None, &theme);
+        let nodes = build_legend(&two_circle_legend_styled(None, None, None, None, None), None, &theme);
         for n in &nodes {
             if let SceneNode::Text { style, .. } = n {
                 assert_eq!(style.color, expected);
+            }
+        }
+    }
+
+    /// Per-legend `label_font_size` override sizes the rendered entry-label text
+    /// (the layout already reserves space at this size). Absent → theme default.
+    #[test]
+    fn label_font_size_override_sizes_entry_label_text() {
+        let theme = ThemeInputs::default();
+        // Override to 18; entry-label text nodes must be drawn at 18, not theme.
+        let nodes = build_legend(
+            &two_circle_legend_styled(None, None, None, None, Some(18.0)), None, &theme,
+        );
+        let sizes: Vec<f64> = nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Text { style, .. } = n { Some(style.font_size) } else { None })
+            .collect();
+        assert!(!sizes.is_empty(), "legend must emit label text nodes");
+        for s in sizes {
+            assert_eq!(s, 18.0, "entry label must render at the label_font_size override");
+        }
+        // Absent → theme label_font_size (byte-identical default).
+        let nodes_default =
+            build_legend(&two_circle_legend_styled(None, None, None, None, None), None, &theme);
+        for n in &nodes_default {
+            if let SceneNode::Text { style, .. } = n {
+                assert_eq!(style.font_size, theme.typography.label_font_size);
             }
         }
     }

@@ -2,12 +2,30 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, fields
 from typing import Any
 
 
 _VALID_LEGEND_ORIENTS = frozenset({"right", "left", "top", "bottom", "none"})
 _VALID_TITLE_ANCHORS = frozenset({"start", "middle", "end"})
+
+_AXIS_XY_DEPRECATION_MSG = (
+    "AxisConfig.x / configure_axis(x=...) has no effect and is deprecated; "
+    "use Chart.axis(x=False) / Chart.axis(y=False) to show/hide an axis."
+)
+
+
+def _warn_axis_xy_deprecated(*, x: bool, y: bool, stacklevel: int) -> None:
+    """Emit a DeprecationWarning when the vestigial ``x``/``y`` flags are set to ``False``.
+
+    ``x=True``/``y=True`` are the do-nothing defaults and never warn; only the
+    meaningful (but no-op) ``False`` intent is flagged. Centralised here so the
+    direct-construction path (:meth:`AxisConfig.__post_init__`) and the
+    ``configure_axis`` mixin method share one message.
+    """
+    if x is False or y is False:
+        warnings.warn(_AXIS_XY_DEPRECATION_MSG, DeprecationWarning, stacklevel=stacklevel + 1)
 
 
 def _to_dict_omit_none(obj: Any) -> dict[str, Any]:
@@ -26,10 +44,9 @@ class AxisConfig:
 
     Parameters
     ----------
-    x : bool
-        Show the x axis.
-    y : bool
-        Show the y axis.
+    x, y : bool, default True
+        Deprecated and has no effect. Use ``Chart.axis(x=False)`` /
+        ``Chart.axis(y=False)`` to show or hide an axis.
     label_angle : float, optional
         Tick label rotation angle in degrees.
     label_font_size : float, optional
@@ -141,6 +158,7 @@ class AxisConfig:
     zindex: int | None = None
 
     def __post_init__(self) -> None:
+        _warn_axis_xy_deprecated(x=self.x, y=self.y, stacklevel=2)
         if self.label_format is not None and self.label_format_raw is not None:
             raise ValueError(
                 "AxisConfig: 'label_format' and 'label_format_raw' are mutually exclusive; "

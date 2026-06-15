@@ -84,6 +84,12 @@ pub struct LegendLayout {
     /// the theme `font_color` default (byte-identical; omitted from JSON).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label_color: Option<String>,
+    /// Effective font size (px) for entry/colorbar-tick label text. Carries the
+    /// per-legend `label_font_size` override so the renderer draws text at the
+    /// same size the layout reserved space for. `None` → the theme
+    /// `label_font_size` default (byte-identical; omitted from JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_font_size: Option<f64>,
 }
 
 /// Continuous-color colorbar within a LegendLayout. The bar is rendered as
@@ -258,6 +264,13 @@ pub struct LegendStyleOpts {
     /// B5 unit 6a: legend entry-label fill color (css hex); carried onto the
     /// `LegendLayout` for the renderer. Layout is unaffected.
     pub label_color: Option<String>,
+    /// Per-legend `label_font_size` override (px); carried onto the
+    /// `LegendLayout` so the renderer draws entry labels at the same size the
+    /// layout reserved space for. `None` → theme default (byte-identical).
+    /// NOTE: the layout's own geometry already uses the resolved effective font
+    /// size passed as `label_font_size`; this field exists solely to forward the
+    /// override to the renderer.
+    pub label_font_size: Option<f64>,
 }
 
 /// Truncate `label` to at most `limit` pixels wide, appending an ellipsis when
@@ -665,6 +678,7 @@ pub fn layout_legend(
         clip_height: opts.clip_height,
         symbol_size: opts.symbol_size,
         label_color: opts.label_color,
+        label_font_size: opts.label_font_size,
     };
     (Some(legend), plot_inner)
 }
@@ -776,6 +790,11 @@ pub fn layout_colorbar(
     gradient_length_override: Option<f64>,
     gradient_thickness_override: Option<f64>,
     clip_height: Option<f64>,
+    // Per-legend `label_color`/`label_font_size` overrides carried onto the
+    // emitted `LegendLayout` so the renderer styles the colorbar tick labels to
+    // match the categorical legend path. `None` → theme default (byte-identical).
+    label_color: Option<String>,
+    label_font_size_override: Option<f64>,
 ) -> (Option<LegendLayout>, Rect) {
     if stops.is_empty() {
         return (None, plot_inner);
@@ -874,7 +893,8 @@ pub fn layout_colorbar(
         symbol_stroke_width: None,
         clip_height,
         symbol_size: None,
-        label_color: None,
+        label_color,
+        label_font_size: label_font_size_override,
     };
     (Some(legend), new_inner)
 }
@@ -1178,6 +1198,7 @@ fn layout_aux_block(
         clip_height: None,
         symbol_size: None,
         label_color: None,
+        label_font_size: None,
     }
 }
 
@@ -1208,6 +1229,7 @@ mod tests {
             clip_height: None,
             symbol_size: None,
             label_color: None,
+            label_font_size: None,
         };
         let json = serde_json::to_string(&l).unwrap();
         let parsed: LegendLayout = serde_json::from_str(&json).unwrap();
@@ -1637,6 +1659,36 @@ mod tests {
         assert_eq!(legend.label_color.as_deref(), Some("#ff0000"));
     }
 
+    /// Colorbar legends must carry the per-legend `label_color` /
+    /// `label_font_size` overrides onto the emitted `LegendLayout` (mirroring the
+    /// categorical path) so the renderer styles the colorbar tick labels. The bug
+    /// hardcoded both to `None`, silently dropping them on the continuous path.
+    #[test]
+    fn colorbar_carries_label_color_and_font_size_onto_layout() {
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let m = mock(10.0);
+        let stops = vec![(0.0, "#0000ff".to_string()), (1.0, "#ff0000".to_string())];
+        let labels = vec!["0".into(), "50".into(), "100".into()];
+        let (legend, _inner) = layout_colorbar(
+            inner, LegendOrient::Right, None, stops, labels, 11.0, 13.0, &m, 13.0,
+            None, None, None,
+            Some("#ff0000".into()), Some(18.0),
+        );
+        let legend = legend.expect("colorbar layout");
+        assert_eq!(legend.label_color.as_deref(), Some("#ff0000"));
+        assert_eq!(legend.label_font_size, Some(18.0));
+        // Defaults still produce None on both fields (byte-identical path).
+        let (default_legend, _) = layout_colorbar(
+            inner, LegendOrient::Right, None,
+            vec![(0.0, "#0000ff".to_string()), (1.0, "#ff0000".to_string())],
+            vec!["0".into(), "100".into()], 11.0, 13.0, &m, 13.0,
+            None, None, None, None, None,
+        );
+        let default_legend = default_legend.expect("default colorbar layout");
+        assert_eq!(default_legend.label_color, None);
+        assert_eq!(default_legend.label_font_size, None);
+    }
+
     /// `LegendStyleOpts::default()` reproduces the historical layout — same rect
     /// and same entry anchors as the pre-orphan code path.
     #[test]
@@ -1713,6 +1765,7 @@ mod tests {
             clip_height: None,
             symbol_size: None,
             label_color: None,
+            label_font_size: None,
         }
     }
 
