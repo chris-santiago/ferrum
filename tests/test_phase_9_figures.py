@@ -678,6 +678,47 @@ class TestClustermap:
         link_t = next(t for t in d["transforms"] if t.get("type") == "linkage")
         assert link_t.get("z_score") == "rows"
 
+    @pytest.mark.parametrize(
+        ("z_score", "expected"),
+        [(0, "rows"), (1, "columns"), ("rows", "rows"), ("columns", "columns")],
+    )
+    def test_z_score_int_maps_to_axis_string(self, cluster_data, z_score, expected):
+        """Documented ints (0=rows, 1=columns) and string forms both thread through.
+
+        Regression: ``z_score=1`` / ``standard_scale=1`` previously crashed
+        with ``TypeError`` because the int passed straight through to the Rust
+        ``Linkage`` constructor, which types it as ``Option<&str>``.
+        """
+        cm = fe.clustermap(cluster_data, z_score=z_score)
+        d = json.loads(cm.heatmap.to_spec().to_json())
+        link_t = next(t for t in d["transforms"] if t.get("type") == "linkage")
+        assert link_t.get("z_score") == expected
+        # Renders without error.
+        svg = cm.to_svg()
+        assert "<svg" in svg[:200]
+
+    @pytest.mark.parametrize(
+        ("standard_scale", "expected"),
+        [(0, "rows"), (1, "columns"), ("rows", "rows"), ("columns", "columns")],
+    )
+    def test_standard_scale_int_maps_to_axis_string(self, cluster_data, standard_scale, expected):
+        cm = fe.clustermap(cluster_data, standard_scale=standard_scale)
+        d = json.loads(cm.heatmap.to_spec().to_json())
+        link_t = next(t for t in d["transforms"] if t.get("type") == "linkage")
+        assert link_t.get("standard_scale") == expected
+        svg = cm.to_svg()
+        assert "<svg" in svg[:200]
+
+    @pytest.mark.parametrize("bad", [2, -1, "bogus", True])
+    def test_z_score_invalid_value_raises_value_error(self, cluster_data, bad):
+        with pytest.raises(ValueError, match="z_score"):
+            fe.clustermap(cluster_data, z_score=bad)
+
+    @pytest.mark.parametrize("bad", [2, "bogus"])
+    def test_standard_scale_invalid_value_raises_value_error(self, cluster_data, bad):
+        with pytest.raises(ValueError, match="standard_scale"):
+            fe.clustermap(cluster_data, standard_scale=bad)
+
     def test_method_metric_threads_to_linkage(self, cluster_data):
         cm = fe.clustermap(cluster_data, method="average", metric="cosine")
         d = json.loads(cm.heatmap.to_spec().to_json())

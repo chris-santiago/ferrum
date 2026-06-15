@@ -574,6 +574,50 @@ def heatmap(
 # ---------------------------------------------------------------------------
 
 
+def _normalize_standardize_arg(value: Any, *, param: str) -> str | None:
+    """Map a ``z_score`` / ``standard_scale`` argument to a Linkage axis string.
+
+    The clustermap/Vega convention encodes the standardization axis as an
+    integer (``0`` = rows, ``1`` = columns) with ``None`` meaning "no
+    standardization". The Rust ``Linkage`` constructor instead takes the axis
+    name (``"rows"`` / ``"columns"`` / ``None``), so the integer must be mapped
+    before it crosses the binding boundary. The string forms are passed through
+    unchanged for back-compat.
+
+    Parameters
+    ----------
+    value : {0, 1, "rows", "columns", None}
+        The user-supplied standardization argument.
+    param : str
+        The parameter name (``"z_score"`` or ``"standard_scale"``), used only
+        for error messages.
+
+    Returns
+    -------
+    str or None
+        ``"rows"``, ``"columns"``, or ``None``.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not one of the accepted forms.
+    """
+    if value is None:
+        return None
+    # `bool` is an `int` subclass; treat True/False as invalid rather than 0/1.
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value == 0:
+            return "rows"
+        if value == 1:
+            return "columns"
+    elif value in ("rows", "columns"):
+        return value
+    raise ValueError(
+        f"clustermap: {param}={value!r} is invalid; expected 0 (rows), "
+        "1 (columns), 'rows', 'columns', or None"
+    )
+
+
 def clustermap(
     data: Any,
     *,
@@ -692,6 +736,13 @@ def clustermap(
     # a row identity to carry through to the heatmap's y encoding. Mirrors
     # heatmap's handling for all-numeric input.
     data, tbl, id_col = _ensure_id_column(data, tbl, id_col)
+
+    # Normalize the standardization arguments to the axis strings the Rust
+    # ``Linkage`` constructor expects. The Vega/clustermap convention is
+    # ``0`` = rows, ``1`` = columns, ``None`` = none; the existing string
+    # forms (``"rows"`` / ``"columns"``) remain accepted for back-compat.
+    z_score = _normalize_standardize_arg(z_score, param="z_score")
+    standard_scale = _normalize_standardize_arg(standard_scale, param="standard_scale")
 
     # Linkage transforms (rows + columns) with explicit names so we can route
     # their `segments` named outputs to the dendrogram layers.

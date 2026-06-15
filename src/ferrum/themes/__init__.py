@@ -8,9 +8,10 @@ from typing import Any
 def _expand_hex(color: str) -> str:
     """Expand CSS shorthand hex colors to their full-length equivalents.
 
-    The Rust color parser accepts ``#rrggbb`` and ``#rrggbbaa`` but not the
-    CSS shorthand forms ``#rgb`` (3-char) or ``#rgba`` (4-char).  This helper
-    doubles each hex digit so the Rust layer never sees a shorthand string.
+    The Rust color parser (``from_hex_str``) already expands the CSS shorthand
+    forms ``#rgb`` (3-char) and ``#rgba`` (4-char) itself, so this helper is a
+    redundant safety step: it doubles each hex digit on the Python side so the
+    expansion is performed even if a caller bypasses the Rust parser.
 
     Non-hex values (named colors, ``none``, ``transparent``, ``theme:*``) are
     returned unchanged.
@@ -122,7 +123,8 @@ area_opacity, opacity : optional
         ``slate_citrus``, ``arctic_signal``, ``okabe_ito``,
         ``tableau10``, ``set1``, ``set2``, ``paired``, ``pastel``, ``dark2``.
         Sequential names (``viridis``, ``plasma``, ``magma``, ``inferno``,
-        ``cividis``, ``cool_blue``, ``warm_ochre``, ``night_blue``,
+        ``cividis``, ``blues``, ``reds``, ``greens``, ``oranges``,
+        ``purples``, ``cool_blue``, ``warm_ochre``, ``night_blue``,
         ``electric_lime``, ``signal_blue``, ``ember_orange``) and diverging
         names (``rdbu``, ``blue_to_red``, ``cyan_to_amber``,
         ``blue_to_violet``) also accepted.
