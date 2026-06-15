@@ -6,6 +6,34 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.16.1
+
+*2026-06-15*
+
+This release makes several documented-but-broken features actually render. No new
+public API was added; methods and parameters that previously stored their values
+without effect now take effect, and silently-dropped inputs now fail loud.
+
+### Added
+
+- [`Chart.override(**kwargs)`][ferrum.Chart.override] now applies at render. It is a fail-loud escape hatch that injects presentation-spec values (per-axis/legend config, per-channel scales, mark style, coord, `width`/`height`) and **wins the cascade** over `configure_*`/theme. Previously the overrides were stored but never read. Unknown or misspelled paths now raise `FerrumOverrideError` with a closest-match suggestion.
+- Per-channel axis and legend styling now renders. Every documented field on [`fm.Axis`][ferrum.Axis] and [`fm.Legend`][ferrum.Legend] — label/grid/domain/title colors and sizes, `orient`, `translate`, `min_extent`/`max_extent`, `tick_extra`/`tick_min_step`, `grid_opacity`, `title_orient`, `zindex`, `label_flush`, `label_overlap`; legend `symbol_size`/`symbol_stroke_width`, `label_color`, `label_limit`, `clip_height`, `row_padding`/`column_padding`, `padding`/`title_padding`, `offset` — now takes effect when set on an encoding, matching `configure_axis`/`configure_legend`. Previously most of these silently dropped. A misspelled per-channel key now raises.
+- `configure_axis(...)` and `configure_legend(...)` gained the same orphan styling fields, so they can be set chart-wide too.
+
+### Fixed
+
+- Rotated x-axis tick labels are now end-anchored (were center-anchored and overlapped the plot) with an angle-aware gap, and the x-axis title clears them.
+- `configure(axis_x=…)` per-axis styling is no longer clobbered by a general `configure(axis=…)`; a per-axis/legend `label_font_size` now sizes the reserved layout (not just the drawn text); `fm.Legend(label_color=…)` applies to continuous colorbars; `configure_title(subtitle_font_size=…, subtitle_color=…)` styling is honored.
+- [`clustermap`][ferrum.clustermap] accepts the documented integer `z_score`/`standard_scale` values (`0`/`1`); they previously raised `TypeError`.
+
+### Changed
+
+- Per-channel axis/legend options are now typed structs with `deny_unknown_fields` (replacing an opaque pass-through map), so typos fail at render instead of silently dropping. Internal: axis style overrides were unified into one struct and the `orient` precedence moved to an `Option` sentinel.
+
+### Deprecated
+
+- `AxisConfig.x` / `configure_axis(x=…, y=…)` are deprecated and emit a `DeprecationWarning` — they never had any effect. Use [`Chart.axis(x=False)`][ferrum.Chart.axis] / `Chart.axis(y=False)` to show or hide an axis.
+
 ## 0.16.0
 
 *2026-06-04*
