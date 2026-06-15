@@ -198,11 +198,15 @@ pub fn build_scene(
                 x_fmt_spec.as_deref(),
                 x_fmt_type.as_deref(),
             );
+            let x_label_fs = x_input
+                .overrides
+                .label_font_size
+                .unwrap_or(theme.typography.label_font_size);
             let (new_x_layout, _warn) = crate::layout::axis::layout_x_axis(
                 &x_input,
                 panel.plot_area,
                 panel_idx,
-                theme.typography.label_font_size,
+                x_label_fs,
                 theme.typography.title_font_size,
                 theme.padding.axis_title_padding,
                 crate::layout::DEFAULT_CULL_THRESHOLD,
@@ -232,11 +236,15 @@ pub fn build_scene(
                 y_fmt_type.as_deref(),
             );
             y_input.tick_projection = build_independent_y_projection(&scales.y, y_tick_count);
+            let y_label_fs = y_input
+                .overrides
+                .label_font_size
+                .unwrap_or(theme.typography.label_font_size);
             let new_y_layout = crate::layout::axis::layout_y_axis(
                 &y_input,
                 panel.plot_area,
                 panel_idx,
-                theme.typography.label_font_size,
+                y_label_fs,
                 theme.typography.title_font_size,
                 theme.padding.axis_title_padding,
                 &facet_metrics,

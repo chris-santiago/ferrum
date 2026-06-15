@@ -844,11 +844,15 @@ fn prepare_and_layout(
     let mut warnings = prep.warnings.clone();
 
     // Apply ChartConfig axis overrides (level 3) to AxisInput (level 2 wins when already set).
-    // Order: shared `axis` key first, then axis-specific keys (axis_x / axis_y) win.
-    apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis.as_ref())?;
-    apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis.as_ref())?;
+    // These styling fields use fill-only-if-`None` (first writer claims the slot), so the
+    // MORE-SPECIFIC source must run FIRST: apply the per-axis `axis_x`/`axis_y` keys before
+    // the shared `axis` key so `axis_x > axis` precedence holds (documented in configure.py).
+    // (This is the OPPOSITE order from the overwrite-semantics theme path in
+    // `apply_chart_config`, where last-writer-wins makes `axis` run first then `axis_x`.)
     apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis_x.as_ref())?;
     apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis_y.as_ref())?;
+    apply_axis_config_to_axis_input(&mut prep.axes.x, chart_config.axis.as_ref())?;
+    apply_axis_config_to_axis_input(&mut prep.axes.y, chart_config.axis.as_ref())?;
     // Re-sync the concrete axis side from the merged `overrides.orient`: a
     // per-channel `fm.Axis(orient=...)` already set it (so this is a no-op there
     // and per-channel wins), otherwise a chart-level `configure_axis(orient=...)`
@@ -1931,6 +1935,39 @@ mod chart_config_application_tests {
         };
         apply_chart_config(&mut theme, &config);
         assert_eq!(theme.typography.label_font_size, 14.0);
+    }
+
+    #[test]
+    fn axis_x_styling_field_wins_over_axis_via_fill_none_ordering() {
+        // Per-axis STYLING fields (grid_color/width/dash, label_color, domain_*,
+        // title_*, label_padding) flow through `apply_axis_config_to_axis_input`,
+        // which fills `AxisInput.overrides` only when still `None` (first writer
+        // wins). `prepare_and_layout` therefore applies the MORE-SPECIFIC
+        // `axis_x`/`axis_y` BEFORE the shared `axis`, so `axis_x > axis` holds.
+        // Reproduce that exact call ordering here.
+        let mut axis = crate::layout::AxisInput::new(
+            crate::layout::AxisOrient::Bottom,
+            Some("X".to_string()),
+            vec!["0".to_string(), "1".to_string()],
+            None,
+        );
+        let axis_shared = AxisConfigSpec {
+            style: AxisStyleSpec { grid_color: Some("#00ff00".into()), ..Default::default() },
+            ..Default::default()
+        };
+        let axis_x = AxisConfigSpec {
+            style: AxisStyleSpec { grid_color: Some("#0000ff".into()), ..Default::default() },
+            ..Default::default()
+        };
+        // Mirror prepare_and_layout: per-axis FIRST, shared `axis` SECOND.
+        apply_axis_config_to_axis_input(&mut axis, Some(&axis_x)).unwrap();
+        apply_axis_config_to_axis_input(&mut axis, Some(&axis_shared)).unwrap();
+        // axis_x blue (0,0,255) must win over axis green.
+        assert_eq!(
+            axis.overrides.grid_color.map(|c| [c.red, c.green, c.blue]),
+            Some([0, 0, 255]),
+            "axis_x grid_color must win over the shared axis grid_color",
+        );
     }
 
     #[test]

@@ -614,6 +614,8 @@ pub fn compute_layout(
             legend_overrides.gradient_length,
             legend_overrides.gradient_thickness,
             legend_overrides.clip_height,
+            legend_overrides.label_color.clone(),
+            legend_overrides.label_font_size,
         )
     } else {
         legend::layout_legend(
@@ -638,6 +640,7 @@ pub fn compute_layout(
                 offset: legend_overrides.offset,
                 symbol_size: legend_overrides.symbol_size,
                 label_color: legend_overrides.label_color.clone(),
+                label_font_size: legend_overrides.label_font_size,
             },
         )
     };
@@ -669,7 +672,15 @@ pub fn compute_layout(
         theme.padding.axis_title_padding,
         metrics,
     );
-    let y_label_band = axis::compute_y_label_band_width(&axes.y, theme.typography.label_font_size, metrics);
+    // Per-axis label_font_size override must drive the band reservation too (it
+    // already drives the rendered label size in marks/axis.rs); otherwise the
+    // gutter is sized at the theme value but drawn at the override → mis-sized.
+    let y_label_font_size = axes
+        .y
+        .overrides
+        .label_font_size
+        .unwrap_or(theme.typography.label_font_size);
+    let y_label_band = axis::compute_y_label_band_width(&axes.y, y_label_font_size, metrics);
 
     // Rotation-aware bottom margin estimate (spec §4.8). Compute the probable
     // angle the cascade will choose by running a lightweight worst-case check
@@ -679,9 +690,14 @@ pub fn compute_layout(
         let estimated_plot_w = inner_after_legend.w - y_label_band - y_title_gutter;
         let n_labels = axes.x.tick_labels.len().max(1);
         let estimated_slot_w = estimated_plot_w / n_labels as f64;
+        let x_label_font_size = axes
+            .x
+            .overrides
+            .label_font_size
+            .unwrap_or(theme.typography.label_font_size);
         axis::estimate_x_label_band(
             &axes.x.tick_labels,
-            theme.typography.label_font_size,
+            x_label_font_size,
             axes.x.overrides.label_angle,
             metrics,
             estimated_slot_w,
@@ -996,11 +1012,15 @@ pub fn compute_layout(
                 } else {
                     axes.y.clone()
                 };
+                let y_label_fs = y_input
+                    .overrides
+                    .label_font_size
+                    .unwrap_or(theme.typography.label_font_size);
                 let y_axis = axis::layout_y_axis(
                     &y_input,
                     rect,
                     panel_index,
-                    theme.typography.label_font_size,
+                    y_label_fs,
                     theme.typography.title_font_size,
                     theme.padding.axis_title_padding,
                     metrics,
@@ -1019,11 +1039,15 @@ pub fn compute_layout(
                 } else {
                     axes.x.clone()
                 };
+                let x_label_fs = x_input
+                    .overrides
+                    .label_font_size
+                    .unwrap_or(theme.typography.label_font_size);
                 let (x_axis, xwarn) = axis::layout_x_axis(
                     &x_input,
                     rect,
                     panel_index,
-                    theme.typography.label_font_size,
+                    x_label_fs,
                     theme.typography.title_font_size,
                     theme.padding.axis_title_padding,
                     theme.cull_threshold,
@@ -1177,6 +1201,44 @@ mod tests {
         assert_eq!(panel.row, 0);
         assert_eq!(panel.col, 0);
         assert!(panel.facet_key.is_none());
+    }
+
+    #[test]
+    fn per_axis_label_font_size_override_widens_reserved_y_band() {
+        // A large per-axis `label_font_size` override must drive the y-label band
+        // reservation (not just the rendered text). With metrics whose width
+        // scales with font size, a bigger override → wider band → narrower plot.
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        // Font-size-sensitive metrics: width scales with the supplied font size.
+        let m = MockMetrics {
+            measure: |t: &str, fs: f64| t.chars().count() as f64 * fs * 0.6,
+            line_h_factor: 1.2,
+        };
+
+        let baseline = compute_layout(
+            &spec, &default_theme_inputs(), viewport, &dummy_axes(),
+            &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[],
+        )
+        .expect("baseline layout");
+
+        let mut axes_big = dummy_axes();
+        axes_big.y.overrides.label_font_size = Some(40.0);
+        let widened = compute_layout(
+            &spec, &default_theme_inputs(), viewport, &axes_big,
+            &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[],
+        )
+        .expect("widened layout");
+
+        let base_w = baseline.panels[0].plot_area.w;
+        let wide_w = widened.panels[0].plot_area.w;
+        assert!(
+            wide_w < base_w,
+            "large per-axis label_font_size must widen the y-label band, shrinking \
+             the plot ({wide_w} should be < {base_w})",
+        );
     }
 
     // ── B5 unit 2: clamp_axis_extent + orient band reservation ──────────────
