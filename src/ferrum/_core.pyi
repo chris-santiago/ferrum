@@ -745,6 +745,9 @@ def compose_svg_horizontal(
     title: str | None = None,
     subtitle: str | None = None,
     caption: str | None = None,
+    left_inset: float | None = None,
+    right_inset: float | None = None,
+    anchor: str | None = None,
 ) -> str:
     """
     Lay out SVG panels side-by-side.
@@ -767,6 +770,9 @@ def compose_svg_vertical(
     title: str | None = None,
     subtitle: str | None = None,
     caption: str | None = None,
+    left_inset: float | None = None,
+    right_inset: float | None = None,
+    anchor: str | None = None,
 ) -> str:
     """
     Stack SVG panels top-to-bottom.
@@ -792,6 +798,9 @@ def compose_svg_grid(
     title: str | None = None,
     subtitle: str | None = None,
     caption: str | None = None,
+    left_inset: float | None = None,
+    right_inset: float | None = None,
+    anchor: str | None = None,
 ) -> str:
     """
     Arrange SVG panels in a grid.

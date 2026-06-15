@@ -674,6 +674,43 @@ fn render_err_to_py(e: RenderError) -> PyErr {
 // SVG compositor bindings (Task 11)
 // ---------------------------------------------------------------------------
 
+use crate::render::figure_chrome::{ChromeAnchor, FigureChrome, DEFAULT_CHROME_INSET};
+
+/// Parse the user-facing chrome-anchor string into a [`ChromeAnchor`].
+///
+/// `None` and `"start"` both map to the default left alignment. Any other
+/// string is rejected with a `ValueError` naming the valid set.
+fn parse_chrome_anchor(anchor: Option<&str>) -> PyResult<ChromeAnchor> {
+    match anchor {
+        None | Some("start") => Ok(ChromeAnchor::Start),
+        Some("middle") => Ok(ChromeAnchor::Middle),
+        Some("end") => Ok(ChromeAnchor::End),
+        Some(other) => Err(PyValueError::new_err(format!(
+            "anchor must be one of 'start'|'middle'|'end', got '{other}'"
+        ))),
+    }
+}
+
+/// Build a [`FigureChrome`] from the chrome-related keyword params, applying the
+/// default inset when not supplied and parsing the anchor string.
+fn build_chrome<'a>(
+    title: Option<&'a str>,
+    subtitle: Option<&'a str>,
+    caption: Option<&'a str>,
+    left_inset: Option<f64>,
+    right_inset: Option<f64>,
+    anchor: Option<&str>,
+) -> PyResult<FigureChrome<'a>> {
+    Ok(FigureChrome {
+        title,
+        subtitle,
+        caption,
+        left_inset: left_inset.unwrap_or(DEFAULT_CHROME_INSET),
+        right_inset: right_inset.unwrap_or(DEFAULT_CHROME_INSET),
+        anchor: parse_chrome_anchor(anchor)?,
+    })
+}
+
 /// Compose SVG panels side-by-side into a single horizontal strip.
 ///
 /// Parameters
@@ -693,6 +730,15 @@ fn render_err_to_py(e: RenderError) -> PyErr {
 ///     Figure-level subtitle rendered below the title, above the panels (13 px).
 /// caption : str or None, default None
 ///     Figure-level caption rendered as a band below all panels (muted, 11 px).
+/// left_inset : float or None, default None
+///     Horizontal inset (px) from the left panel edge for ``"start"``-anchored
+///     chrome. Defaults to 16.0 (matching single-chart title inset).
+/// right_inset : float or None, default None
+///     Horizontal inset (px) from the right panel edge for ``"end"``-anchored
+///     chrome. Defaults to 16.0.
+/// anchor : str or None, default None
+///     Horizontal alignment of all chrome lines. One of ``"start"``,
+///     ``"middle"``, or ``"end"``. ``None`` is treated as ``"start"``.
 ///
 /// Returns
 /// -------
@@ -721,7 +767,8 @@ fn render_err_to_py(e: RenderError) -> PyErr {
 /// >>> combined = fm.compose_svg_horizontal([svg1, svg2], spacing=10)
 #[pyfunction]
 #[pyo3(name = "compose_svg_horizontal")]
-#[pyo3(signature = (svgs, *, spacing = 10.0, align = "top", title = None, subtitle = None, caption = None))]
+#[pyo3(signature = (svgs, *, spacing = 10.0, align = "top", title = None, subtitle = None, caption = None, left_inset = None, right_inset = None, anchor = None))]
+#[allow(clippy::too_many_arguments)]
 pub fn compose_svg_horizontal_py(
     svgs: Vec<String>,
     spacing: f64,
@@ -729,6 +776,9 @@ pub fn compose_svg_horizontal_py(
     title: Option<&str>,
     subtitle: Option<&str>,
     caption: Option<&str>,
+    left_inset: Option<f64>,
+    right_inset: Option<f64>,
+    anchor: Option<&str>,
 ) -> PyResult<String> {
     let align_val = match align {
         "top" => crate::render::compositor::VerticalAlign::Top,
@@ -742,7 +792,7 @@ pub fn compose_svg_horizontal_py(
     };
     let composed = crate::render::compositor::compose_svg_horizontal(&svgs, spacing, align_val)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    let chrome = crate::render::figure_chrome::FigureChrome { title, subtitle, caption };
+    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
     crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
@@ -766,6 +816,15 @@ pub fn compose_svg_horizontal_py(
 ///     Figure-level subtitle rendered below the title, above the panels (13 px).
 /// caption : str or None, default None
 ///     Figure-level caption rendered as a band below all panels (muted, 11 px).
+/// left_inset : float or None, default None
+///     Horizontal inset (px) from the left panel edge for ``"start"``-anchored
+///     chrome. Defaults to 16.0 (matching single-chart title inset).
+/// right_inset : float or None, default None
+///     Horizontal inset (px) from the right panel edge for ``"end"``-anchored
+///     chrome. Defaults to 16.0.
+/// anchor : str or None, default None
+///     Horizontal alignment of all chrome lines. One of ``"start"``,
+///     ``"middle"``, or ``"end"``. ``None`` is treated as ``"start"``.
 ///
 /// Returns
 /// -------
@@ -794,7 +853,8 @@ pub fn compose_svg_horizontal_py(
 /// >>> combined = fm.compose_svg_vertical([svg1, svg2], spacing=10)
 #[pyfunction]
 #[pyo3(name = "compose_svg_vertical")]
-#[pyo3(signature = (svgs, *, spacing = 10.0, align = "left", title = None, subtitle = None, caption = None))]
+#[pyo3(signature = (svgs, *, spacing = 10.0, align = "left", title = None, subtitle = None, caption = None, left_inset = None, right_inset = None, anchor = None))]
+#[allow(clippy::too_many_arguments)]
 pub fn compose_svg_vertical_py(
     svgs: Vec<String>,
     spacing: f64,
@@ -802,6 +862,9 @@ pub fn compose_svg_vertical_py(
     title: Option<&str>,
     subtitle: Option<&str>,
     caption: Option<&str>,
+    left_inset: Option<f64>,
+    right_inset: Option<f64>,
+    anchor: Option<&str>,
 ) -> PyResult<String> {
     let align_val = match align {
         "left" => crate::render::compositor::HorizontalAlign::Left,
@@ -815,7 +878,7 @@ pub fn compose_svg_vertical_py(
     };
     let composed = crate::render::compositor::compose_svg_vertical(&svgs, spacing, align_val)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    let chrome = crate::render::figure_chrome::FigureChrome { title, subtitle, caption };
+    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
     crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
@@ -846,6 +909,15 @@ pub fn compose_svg_vertical_py(
 ///     Figure-level subtitle rendered below the title, above the panels (13 px).
 /// caption : str or None, default None
 ///     Figure-level caption rendered as a band below all panels (muted, 11 px).
+/// left_inset : float or None, default None
+///     Horizontal inset (px) from the left panel edge for ``"start"``-anchored
+///     chrome. Defaults to 16.0 (matching single-chart title inset).
+/// right_inset : float or None, default None
+///     Horizontal inset (px) from the right panel edge for ``"end"``-anchored
+///     chrome. Defaults to 16.0.
+/// anchor : str or None, default None
+///     Horizontal alignment of all chrome lines. One of ``"start"``,
+///     ``"middle"``, or ``"end"``. ``None`` is treated as ``"start"``.
 ///
 /// Returns
 /// -------
@@ -889,7 +961,7 @@ pub fn compose_svg_vertical_py(
 /// ... )
 #[pyfunction]
 #[pyo3(name = "compose_svg_grid")]
-#[pyo3(signature = (cells, *, rows, cols, row_ratios, col_ratios, spacing = 10.0, title = None, subtitle = None, caption = None))]
+#[pyo3(signature = (cells, *, rows, cols, row_ratios, col_ratios, spacing = 10.0, title = None, subtitle = None, caption = None, left_inset = None, right_inset = None, anchor = None))]
 #[allow(clippy::too_many_arguments)]
 pub fn compose_svg_grid_py(
     cells: Vec<Option<String>>,
@@ -901,6 +973,9 @@ pub fn compose_svg_grid_py(
     title: Option<&str>,
     subtitle: Option<&str>,
     caption: Option<&str>,
+    left_inset: Option<f64>,
+    right_inset: Option<f64>,
+    anchor: Option<&str>,
 ) -> PyResult<String> {
     let composed = crate::render::grid_compose::compose_svg_grid(
         &cells,
@@ -911,7 +986,7 @@ pub fn compose_svg_grid_py(
         spacing,
     )
     .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    let chrome = crate::render::figure_chrome::FigureChrome { title, subtitle, caption };
+    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
     crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }

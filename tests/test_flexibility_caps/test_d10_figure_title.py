@@ -66,10 +66,49 @@ Test surface
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
+
 import polars as pl
 import pytest
 
 import ferrum as fm
+
+_SVG_NS = "{http://www.w3.org/2000/svg}"
+
+
+def _root_width(svg: str) -> float:
+    """Return the composed SVG's intrinsic width as a float."""
+    return float(ET.fromstring(svg).get("width"))
+
+
+def _find_text_node(svg: str, text: str) -> ET.Element:
+    """Return the ``<text>`` element whose text content equals *text*.
+
+    Raises ``AssertionError`` when no such node exists so failing position
+    assertions surface a clear message instead of an ``AttributeError``.
+    """
+    root = ET.fromstring(svg)
+    for el in root.iter(f"{_SVG_NS}text"):
+        if el.text == text:
+            return el
+    raise AssertionError(f"no <text> node with content {text!r} found in SVG")
+
+
+def _figure_title_node(svg: str, text: str) -> ET.Element:
+    """Return the figure-level title node (font-size 16, font-weight 600).
+
+    The figure title band is emitted by the Rust compositor with a distinct
+    16px / 600-weight style; per-panel child titles use a different style, so
+    matching on both attributes isolates the figure title.
+    """
+    node = _find_text_node(svg, text)
+    assert node.get("font-size") == "16", (
+        f"expected figure title font-size 16; got {node.get('font-size')!r}"
+    )
+    assert node.get("font-weight") == "600", (
+        f"expected figure title font-weight 600; got {node.get('font-weight')!r}"
+    )
+    return node
 
 
 # ---------------------------------------------------------------------------
@@ -470,4 +509,258 @@ def test_d10_t12b_empty_dataset_no_caption_path_unchanged():
     )
     assert "<caption" not in svg.lower(), (
         "No caption element should appear when no caption was set."
+    )
+
+
+# ---------------------------------------------------------------------------
+# D10-T13..T20: figure-chrome horizontal positioning (issue #1)
+#
+# Figure-level chrome (title / subtitle / caption) on composites and single-
+# chart captions previously rendered flush-left at x=0, ignoring
+# configure_padding(left=) and configure_title(anchor=).  The Rust emitter now
+# honors a left/right inset and anchor; the Python layer resolves those from a
+# chart's merged configure dict.  These tests assert the resolved positions on
+# the rendered SVG.
+# ---------------------------------------------------------------------------
+
+
+def test_d10_t13_hconcat_default_chrome_inset(two_charts):
+    """Default hconcat chrome sits at x=16, start-anchored (was x=0)."""
+    c1, c2 = two_charts
+    svg = (c1 | c2).properties(title="Figure Title", caption="Figure Caption").to_svg()
+
+    title = _figure_title_node(svg, "Figure Title")
+    assert title.get("x") == "16", f"default figure title x should be 16; got {title.get('x')!r}"
+    assert title.get("text-anchor") == "start"
+
+    caption = _find_text_node(svg, "Figure Caption")
+    assert caption.get("x") == "16", f"default caption x should be 16; got {caption.get('x')!r}"
+    assert caption.get("text-anchor") == "start"
+
+
+def test_d10_t14_vconcat_default_chrome_inset(two_charts):
+    """Default vconcat chrome sits at x=16, start-anchored."""
+    c1, c2 = two_charts
+    svg = (c1 & c2).properties(title="Figure Title", caption="Figure Caption").to_svg()
+
+    title = _figure_title_node(svg, "Figure Title")
+    assert title.get("x") == "16"
+    assert title.get("text-anchor") == "start"
+
+    caption = _find_text_node(svg, "Figure Caption")
+    assert caption.get("x") == "16"
+    assert caption.get("text-anchor") == "start"
+
+
+def test_d10_t15_concat_grid_default_chrome_inset(two_charts):
+    """Default grid-composite (ConcatChart) chrome sits at x=16, start-anchored."""
+    from ferrum.composition import ConcatChart
+
+    c1, c2 = two_charts
+    svg = ConcatChart(c1, c2).properties(title="Figure Title", caption="Figure Caption").to_svg()
+
+    title = _figure_title_node(svg, "Figure Title")
+    assert title.get("x") == "16"
+    assert title.get("text-anchor") == "start"
+
+    caption = _find_text_node(svg, "Figure Caption")
+    assert caption.get("x") == "16"
+    assert caption.get("text-anchor") == "start"
+
+
+def test_d10_t16_padding_left_shifts_chrome(two_charts):
+    """configure_padding(left=60) moves title and caption to x=60 (not dropped)."""
+    c1, c2 = two_charts
+    svg = (
+        (c1 | c2)
+        .properties(title="Figure Title", caption="Figure Caption")
+        .configure_padding(left=60, auto=False)
+        .to_svg()
+    )
+
+    title = _figure_title_node(svg, "Figure Title")
+    assert title.get("x") == "60", (
+        f"configure_padding(left=60) must shift the figure title to x=60; got {title.get('x')!r}"
+    )
+    assert title.get("text-anchor") == "start"
+
+    caption = _find_text_node(svg, "Figure Caption")
+    assert caption.get("x") == "60", (
+        f"configure_padding(left=60) must shift the caption to x=60; got {caption.get('x')!r}"
+    )
+
+
+def test_d10_t17_anchor_middle_centers_chrome(two_charts):
+    """configure_title(anchor='middle') centers chrome at width/2, middle-anchored."""
+    c1, c2 = two_charts
+    svg = (
+        (c1 | c2)
+        .properties(title="Figure Title", caption="Figure Caption")
+        .configure_title(anchor="middle")
+        .to_svg()
+    )
+    half = _root_width(svg) / 2
+
+    title = _figure_title_node(svg, "Figure Title")
+    assert title.get("text-anchor") == "middle"
+    assert float(title.get("x")) == pytest.approx(half), (
+        f"anchor=middle must center the figure title at width/2={half}; got x={title.get('x')!r}"
+    )
+
+    caption = _find_text_node(svg, "Figure Caption")
+    assert caption.get("text-anchor") == "middle"
+    assert float(caption.get("x")) == pytest.approx(half)
+
+
+def test_d10_t18_anchor_end_right_aligns_chrome(two_charts):
+    """configure_title(anchor='end') right-aligns the figure title."""
+    c1, c2 = two_charts
+    svg = (c1 | c2).properties(title="Figure Title").configure_title(anchor="end").to_svg()
+
+    title = _figure_title_node(svg, "Figure Title")
+    assert title.get("text-anchor") == "end", (
+        f"anchor=end must right-align the figure title; got {title.get('text-anchor')!r}"
+    )
+
+
+def test_d10_t19_single_chart_caption_default_and_padding():
+    """Single-chart caption defaults to x=16 and honors configure_padding(left=)."""
+    df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+
+    default_svg = fm.Chart(df).mark_point().encode(x="x", y="y").properties(caption="Note").to_svg()
+    caption = _find_text_node(default_svg, "Note")
+    assert caption.get("x") == "16", (
+        f"single-chart caption should default to x=16; got {caption.get('x')!r}"
+    )
+    assert caption.get("text-anchor") == "start"
+
+    padded_svg = (
+        fm.Chart(df)
+        .mark_point()
+        .encode(x="x", y="y")
+        .properties(caption="Note")
+        .configure_padding(left=40, auto=False)
+        .to_svg()
+    )
+    caption = _find_text_node(padded_svg, "Note")
+    assert caption.get("x") == "40", (
+        f"configure_padding(left=40) must shift the single-chart caption to x=40; "
+        f"got {caption.get('x')!r}"
+    )
+
+
+def test_d10_t20_composite_without_chrome_unaffected(two_charts):
+    """A composite with no figure title/caption renders no figure-chrome text node.
+
+    Wiring the inset/anchor resolution must not introduce a chrome band when no
+    figure title, subtitle, or caption was set.
+    """
+    c1, c2 = two_charts
+    svg = (c1 | c2).configure_padding(left=60, auto=False).to_svg()
+
+    root = ET.fromstring(svg)
+    figure_titles = [
+        el
+        for el in root.iter(f"{_SVG_NS}text")
+        if el.get("font-size") == "16" and el.get("font-weight") == "600"
+    ]
+    assert figure_titles == [], (
+        "No figure-level title band should be emitted when no figure chrome is set."
+    )
+
+
+# ---------------------------------------------------------------------------
+# D10-T21..T24: additional sibling-path regression tests for chrome positioning
+#
+# These cover paths that T13-T20 do not exercise:
+#   T21 — empty-dataset single-chart caption (distinct render branch in _render.py)
+#   T22 — figure subtitle shares the resolved anchor (separate emitter line)
+#   T23 — anchor=end with a custom right_inset (T18 only checked anchor, not inset)
+#   T24 — configure_padding(left=0) is a falsy-but-set value that must reach Rust
+# ---------------------------------------------------------------------------
+
+
+def test_d10_t21_empty_dataset_caption_default_inset():
+    """Regression: empty-dataset single-chart caption rendered flush-left at x=0 (separate render path).
+
+    The empty-data fast-path in _render.py (~line 662) is a distinct
+    compose_svg_vertical call from the normal path.  It must also honour the
+    default left inset (16) and start-anchor, not emit the caption at x=0.
+    """
+    empty = pl.DataFrame({"x": [], "y": []}, schema={"x": pl.Float64, "y": pl.Float64})
+    svg = fm.Chart(empty).mark_point().encode(x="x", y="y").properties(caption="EmptyCap").to_svg()
+
+    caption = _find_text_node(svg, "EmptyCap")
+    assert caption.get("x") == "16", (
+        f"empty-dataset caption x should default to 16; got {caption.get('x')!r}"
+    )
+    assert caption.get("text-anchor") == "start", (
+        f"empty-dataset caption text-anchor should be 'start'; got {caption.get('text-anchor')!r}"
+    )
+
+
+def test_d10_t22_subtitle_honors_anchor(two_charts):
+    """Regression: figure subtitle must share the resolved anchor from configure_title.
+
+    The subtitle is emitted on a separate line from the title in the Rust chrome
+    emitter.  With anchor=middle it must be centered at width/2, not left-aligned.
+    (The subtitle node has font-size 13, so _figure_title_node is not used.)
+    """
+    c1, c2 = two_charts
+    svg = (
+        (c1 | c2).properties(title="Main", subtitle="Sub").configure_title(anchor="middle").to_svg()
+    )
+    half = _root_width(svg) / 2
+
+    subtitle = _find_text_node(svg, "Sub")
+    assert subtitle.get("text-anchor") == "middle", (
+        f"subtitle text-anchor should be 'middle' with anchor=middle; "
+        f"got {subtitle.get('text-anchor')!r}"
+    )
+    assert float(subtitle.get("x")) == pytest.approx(half), (
+        f"subtitle x should be width/2={half}; got {subtitle.get('x')!r}"
+    )
+
+
+def test_d10_t23_anchor_end_with_custom_right_inset(two_charts):
+    """Regression: configure_padding(right=50) + anchor=end must place title at width-50.
+
+    T18 only checked that anchor=end produces text-anchor='end' without a custom
+    right inset.  This guards the right_inset field specifically: the title x
+    must be root_width - 50 when a non-default right padding is configured.
+    """
+    c1, c2 = two_charts
+    svg = (
+        (c1 | c2)
+        .properties(title="T")
+        .configure_padding(right=50, auto=False)
+        .configure_title(anchor="end")
+        .to_svg()
+    )
+    expected_x = _root_width(svg) - 50
+
+    title = _figure_title_node(svg, "T")
+    assert title.get("text-anchor") == "end", (
+        f"anchor=end must right-align the figure title; got {title.get('text-anchor')!r}"
+    )
+    assert float(title.get("x")) == pytest.approx(expected_x), (
+        f"figure title x should be width-50={expected_x}; got {title.get('x')!r}"
+    )
+
+
+def test_d10_t24_padding_left_zero_passes_through(two_charts):
+    """Regression: configure_padding(left=0) must reach the emitter as x=0, not be dropped to the default 16.
+
+    The chrome_kwargs resolver uses ``is not None`` to decide whether to forward
+    left_inset to Rust.  A value of 0 is falsy but is a legitimate explicit
+    setting and must not be silently omitted, which would let the Rust default
+    (16) override the user's choice.
+    """
+    c1, c2 = two_charts
+    svg = (c1 | c2).properties(title="T").configure_padding(left=0, auto=False).to_svg()
+
+    title = _figure_title_node(svg, "T")
+    assert title.get("x") == "0", (
+        f"configure_padding(left=0) must forward x=0 to Rust, not fall back to default 16; "
+        f"got {title.get('x')!r}"
     )

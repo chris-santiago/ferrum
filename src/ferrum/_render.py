@@ -657,9 +657,15 @@ class _RenderMixin:
             )
             figure_caption = getattr(chart, "_figure_caption", None)
             if figure_caption is not None:
+                from ferrum._chrome import chrome_kwargs
                 from ferrum._core import compose_svg_vertical
 
-                return compose_svg_vertical([empty_svg], spacing=0.0, caption=figure_caption)
+                return compose_svg_vertical(
+                    [empty_svg],
+                    spacing=0.0,
+                    caption=figure_caption,
+                    **chrome_kwargs(chart_config_dict),
+                )
             return empty_svg
         svg = render_svg(
             spec,
@@ -674,9 +680,15 @@ class _RenderMixin:
         # this branch is only reached when a caption is actually present.
         figure_caption = getattr(chart, "_figure_caption", None)
         if figure_caption is not None:
+            from ferrum._chrome import chrome_kwargs
             from ferrum._core import compose_svg_vertical
 
-            svg = compose_svg_vertical([svg], spacing=0.0, caption=figure_caption)
+            svg = compose_svg_vertical(
+                [svg],
+                spacing=0.0,
+                caption=figure_caption,
+                **chrome_kwargs(chart_config_dict),
+            )
         return svg
 
     def to_png(self, *, raster: bool | None = None, scale: float = 2.0) -> bytes:

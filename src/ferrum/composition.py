@@ -8,6 +8,7 @@ import warnings
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from ferrum._chrome import chrome_kwargs, merge_configure_layers
 from ferrum._configure_mixin import ConfigureMixin
 
 
@@ -640,6 +641,7 @@ class HConcatChart(_CompositeBase):
 
         charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
         svgs = [c.to_svg() for c in charts]
+        chrome = chrome_kwargs(merge_configure_layers(getattr(self, "_configure_layers", None)))
         return compose_svg_horizontal(
             svgs,
             spacing=self.spacing,
@@ -647,6 +649,7 @@ class HConcatChart(_CompositeBase):
             title=self._figure_title,
             subtitle=self._figure_subtitle,
             caption=self._figure_caption,
+            **chrome,
         )
 
     def __repr__(self) -> str:
@@ -723,6 +726,7 @@ class VConcatChart(_CompositeBase):
 
         charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
         svgs = [c.to_svg() for c in charts]
+        chrome = chrome_kwargs(merge_configure_layers(getattr(self, "_configure_layers", None)))
         return compose_svg_vertical(
             svgs,
             spacing=self.spacing,
@@ -730,6 +734,7 @@ class VConcatChart(_CompositeBase):
             title=self._figure_title,
             subtitle=self._figure_subtitle,
             caption=self._figure_caption,
+            **chrome,
         )
 
     def __repr__(self) -> str:
@@ -1847,6 +1852,7 @@ class ConcatChart(_CompositeBase):
         for idx, chart in enumerate(render_charts):
             grid[idx] = chart.to_svg()
 
+        chrome = chrome_kwargs(merge_configure_layers(getattr(self, "_configure_layers", None)))
         return compose_svg_grid(
             grid,
             rows=n_rows,
@@ -1857,6 +1863,7 @@ class ConcatChart(_CompositeBase):
             title=self._figure_title,
             subtitle=self._figure_subtitle,
             caption=self._figure_caption,
+            **chrome,
         )
 
     def _resolved_charts(self) -> list:

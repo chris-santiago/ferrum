@@ -28,6 +28,12 @@ const FIGURE_TITLE_FONT_SIZE: f64 = 16.0;
 const FIGURE_SUBTITLE_FONT_SIZE: f64 = 13.0;
 const FIGURE_CAPTION_FONT_SIZE: f64 = 11.0;
 
+/// Horizontal inset (in px) from the panel edges to the chrome text when the
+/// chrome anchor is `Start`/`End`. Mirrors `ThemePadding::default().padding`
+/// (the value the single-chart title inset uses — see `layout/mod.rs:172,513`),
+/// so figure-level chrome aligns with per-chart titles.
+pub const DEFAULT_CHROME_INSET: f64 = 16.0;
+
 /// Vertical gap between the top of the SVG and the title baseline.
 const TITLE_TOP_PAD: f64 = 6.0;
 /// Vertical gap between the title baseline and the subtitle baseline.
@@ -43,11 +49,30 @@ const CAPTION_BOTTOM_PAD: f64 = 4.0;
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Horizontal alignment for figure-level chrome text (title, subtitle, caption).
+///
+/// Governs all three chrome lines uniformly. The binding parses the user-facing
+/// anchor string once into this typed enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChromeAnchor {
+    /// Flush-left: `x = left_inset`, `text-anchor="start"`.
+    #[default]
+    Start,
+    /// Centered: `x = panel_w / 2`, `text-anchor="middle"`.
+    Middle,
+    /// Flush-right: `x = panel_w - right_inset`, `text-anchor="end"`.
+    End,
+}
+
 /// Chrome parameters for a figure-level band.
 ///
-/// All fields are `Option<&str>`. When all are `None`, `wrap_with_chrome`
-/// returns the input unchanged (byte-identical round-trip).
-#[derive(Debug, Clone, Copy, Default)]
+/// `title`/`subtitle`/`caption` are `Option<&str>`. When all three are `None`,
+/// `wrap_with_chrome` returns the input unchanged (byte-identical round-trip).
+///
+/// `left_inset`/`right_inset`/`anchor` resolve horizontal placement. The
+/// [`Default`] impl is hand-written so the insets default to
+/// [`DEFAULT_CHROME_INSET`] (16.0) rather than `f64::default()` (0.0).
+#[derive(Debug, Clone, Copy)]
 pub struct FigureChrome<'a> {
     /// Large text above the composed panels (bold, 16 px).
     pub title: Option<&'a str>,
@@ -55,12 +80,42 @@ pub struct FigureChrome<'a> {
     pub subtitle: Option<&'a str>,
     /// Small muted text below the composed panels (11 px, label gray).
     pub caption: Option<&'a str>,
+    /// Left inset (px) used when `anchor == Start`.
+    pub left_inset: f64,
+    /// Right inset (px) used when `anchor == End`.
+    pub right_inset: f64,
+    /// Horizontal alignment of all three chrome lines.
+    pub anchor: ChromeAnchor,
 }
 
-impl<'a> FigureChrome<'a> {
+impl Default for FigureChrome<'_> {
+    fn default() -> Self {
+        Self {
+            title: None,
+            subtitle: None,
+            caption: None,
+            left_inset: DEFAULT_CHROME_INSET,
+            right_inset: DEFAULT_CHROME_INSET,
+            anchor: ChromeAnchor::Start,
+        }
+    }
+}
+
+impl FigureChrome<'_> {
     /// Returns `true` when no chrome needs to be emitted.
     pub fn is_empty(&self) -> bool {
         self.title.is_none() && self.subtitle.is_none() && self.caption.is_none()
+    }
+
+    /// Resolve the `x` coordinate and `text-anchor` value for chrome text,
+    /// given the composed panel width. Shared by header and footer emitters so
+    /// all three lines align identically.
+    fn resolve_anchor(&self, panel_w: f64) -> (f64, &'static str) {
+        match self.anchor {
+            ChromeAnchor::Start => (self.left_inset, "start"),
+            ChromeAnchor::Middle => (panel_w / 2.0, "middle"),
+            ChromeAnchor::End => (panel_w - self.right_inset, "end"),
+        }
     }
 }
 
@@ -166,18 +221,22 @@ fn compute_footer_height(chrome: &FigureChrome<'_>) -> f64 {
 
 /// Emit `<text>` elements for the header band (title + subtitle).
 ///
-/// Both lines are left-aligned at x=0 (consistent with default per-chart
-/// title anchor = "start"). The y coordinates are absolute within the outer
-/// SVG canvas.
-fn emit_header(out: &mut String, chrome: &FigureChrome<'_>, _panel_w: f64, _header_h: f64) {
+/// Both lines share the horizontal placement resolved from `chrome.anchor`
+/// and the insets (governed uniformly with the caption). The y coordinates are
+/// absolute within the outer SVG canvas.
+fn emit_header(out: &mut String, chrome: &FigureChrome<'_>, panel_w: f64, _header_h: f64) {
+    let (x, text_anchor) = chrome.resolve_anchor(panel_w);
+
     // title baseline
     let mut y = TITLE_TOP_PAD + FIGURE_TITLE_FONT_SIZE;
 
     if let Some(title) = chrome.title {
         out.push_str(&format!(
-            "<text x=\"0\" y=\"{}\" fill=\"#1f2937\" font-family=\"Inter\" font-size=\"{}\" font-weight=\"600\" text-anchor=\"start\">{}</text>",
+            "<text x=\"{}\" y=\"{}\" fill=\"#1f2937\" font-family=\"Inter\" font-size=\"{}\" font-weight=\"600\" text-anchor=\"{}\">{}</text>",
+            fmt_f(x),
             fmt_f(y),
             fmt_f(FIGURE_TITLE_FONT_SIZE),
+            text_anchor,
             escape_text(title),
         ));
         y += TITLE_SUBTITLE_GAP + FIGURE_SUBTITLE_FONT_SIZE;
@@ -194,9 +253,11 @@ fn emit_header(out: &mut String, chrome: &FigureChrome<'_>, _panel_w: f64, _head
             TITLE_TOP_PAD + FIGURE_SUBTITLE_FONT_SIZE
         };
         out.push_str(&format!(
-            "<text x=\"0\" y=\"{}\" fill=\"#6b7280\" font-family=\"Inter\" font-size=\"{}\" text-anchor=\"start\">{}</text>",
+            "<text x=\"{}\" y=\"{}\" fill=\"#6b7280\" font-family=\"Inter\" font-size=\"{}\" text-anchor=\"{}\">{}</text>",
+            fmt_f(x),
             fmt_f(subtitle_y),
             fmt_f(FIGURE_SUBTITLE_FONT_SIZE),
+            text_anchor,
             escape_text(subtitle),
         ));
     }
@@ -205,14 +266,19 @@ fn emit_header(out: &mut String, chrome: &FigureChrome<'_>, _panel_w: f64, _head
 /// Emit the `<text>` element for the footer caption band.
 ///
 /// `panels_bottom_y` is the y-coordinate at the bottom of the composed panels
-/// within the outer SVG (i.e., `header_h + panel_h`).
-fn emit_footer(out: &mut String, chrome: &FigureChrome<'_>, _panel_w: f64, panels_bottom_y: f64) {
+/// within the outer SVG (i.e., `header_h + panel_h`). The caption shares the
+/// horizontal placement resolved from `chrome.anchor` and the insets, matching
+/// the header lines.
+fn emit_footer(out: &mut String, chrome: &FigureChrome<'_>, panel_w: f64, panels_bottom_y: f64) {
     let Some(caption) = chrome.caption else { return };
+    let (x, text_anchor) = chrome.resolve_anchor(panel_w);
     let caption_y = panels_bottom_y + CAPTION_TOP_PAD + FIGURE_CAPTION_FONT_SIZE;
     out.push_str(&format!(
-        "<text x=\"0\" y=\"{}\" fill=\"#6b7280\" font-family=\"Inter\" font-size=\"{}\" text-anchor=\"start\">{}</text>",
+        "<text x=\"{}\" y=\"{}\" fill=\"#6b7280\" font-family=\"Inter\" font-size=\"{}\" text-anchor=\"{}\">{}</text>",
+        fmt_f(x),
         fmt_f(caption_y),
         fmt_f(FIGURE_CAPTION_FONT_SIZE),
+        text_anchor,
         escape_text(caption),
     ));
 }
@@ -270,6 +336,7 @@ mod tests {
             title: Some("Title"),
             subtitle: Some("Subtitle"),
             caption: Some("Caption"),
+            ..Default::default()
         };
         let result = wrap_with_chrome(&svg, chrome).unwrap();
         let parsed = parse_svg_root(&result).unwrap();
@@ -284,7 +351,12 @@ mod tests {
     fn title_height_expansion_is_deterministic() {
         // Same inputs produce exactly the same output (no randomness).
         let svg = make_svg(400.0, 200.0);
-        let chrome = FigureChrome { title: Some("T"), subtitle: Some("S"), caption: Some("C") };
+        let chrome = FigureChrome {
+            title: Some("T"),
+            subtitle: Some("S"),
+            caption: Some("C"),
+            ..Default::default()
+        };
         let a = wrap_with_chrome(&svg, chrome).unwrap();
         let b = wrap_with_chrome(&svg, chrome).unwrap();
         assert_eq!(a, b);
@@ -340,5 +412,95 @@ mod tests {
         let header_h = compute_header_height(&chrome);
         let needle = format!(r#"<svg x="0" y="{}"#, fmt_f(header_h));
         assert!(result.contains(&needle), "inner panels at y={header_h}: {result}");
+    }
+
+    #[test]
+    fn default_inset_places_chrome_at_x16_start() {
+        let svg = make_svg(200.0, 100.0);
+        let chrome = FigureChrome {
+            title: Some("T"),
+            caption: Some("C"),
+            ..Default::default()
+        };
+        // Default left_inset is DEFAULT_CHROME_INSET (16.0), anchor Start.
+        assert_eq!(chrome.left_inset, 16.0);
+        assert_eq!(chrome.right_inset, 16.0);
+        assert_eq!(chrome.anchor, ChromeAnchor::Start);
+        let result = wrap_with_chrome(&svg, chrome).unwrap();
+        // Both the title and caption must sit at x="16" with text-anchor="start".
+        let count_x16 = result.matches(r#"x="16""#).count();
+        assert!(count_x16 >= 2, "title + caption at x=16: {result}");
+        assert!(result.contains(r#"text-anchor="start""#), "start anchor: {result}");
+        assert!(!result.contains(r#"text-anchor="middle""#));
+        assert!(!result.contains(r#"text-anchor="end""#));
+    }
+
+    #[test]
+    fn custom_left_inset_shifts_start_anchored_chrome() {
+        let svg = make_svg(200.0, 100.0);
+        let chrome = FigureChrome {
+            title: Some("T"),
+            caption: Some("C"),
+            left_inset: 60.0,
+            ..Default::default()
+        };
+        let result = wrap_with_chrome(&svg, chrome).unwrap();
+        let count_x60 = result.matches(r#"x="60""#).count();
+        assert!(count_x60 >= 2, "title + caption at x=60: {result}");
+        assert!(!result.contains(r#"x="16""#), "no chrome left at default inset: {result}");
+    }
+
+    #[test]
+    fn middle_anchor_centers_chrome_on_panel_width() {
+        let panel_w = 300.0;
+        let svg = make_svg(panel_w, 120.0);
+        let chrome = FigureChrome {
+            title: Some("T"),
+            caption: Some("C"),
+            anchor: ChromeAnchor::Middle,
+            ..Default::default()
+        };
+        let result = wrap_with_chrome(&svg, chrome).unwrap();
+        let expected_x = format!(r#"x="{}""#, fmt_f(panel_w / 2.0));
+        let count = result.matches(expected_x.as_str()).count();
+        assert!(count >= 2, "title + caption at {expected_x}: {result}");
+        // text-anchor="middle" must appear for both lines.
+        assert!(result.matches(r#"text-anchor="middle""#).count() >= 2, "{result}");
+        assert!(!result.contains(r#"text-anchor="start""#));
+    }
+
+    #[test]
+    fn end_anchor_right_aligns_chrome_using_right_inset() {
+        let panel_w = 300.0;
+        let right_inset = 40.0;
+        let svg = make_svg(panel_w, 120.0);
+        let chrome = FigureChrome {
+            title: Some("T"),
+            caption: Some("C"),
+            right_inset,
+            anchor: ChromeAnchor::End,
+            ..Default::default()
+        };
+        let result = wrap_with_chrome(&svg, chrome).unwrap();
+        let expected_x = format!(r#"x="{}""#, fmt_f(panel_w - right_inset));
+        let count = result.matches(expected_x.as_str()).count();
+        assert!(count >= 2, "title + caption at {expected_x}: {result}");
+        assert!(result.matches(r#"text-anchor="end""#).count() >= 2, "{result}");
+        assert!(!result.contains(r#"text-anchor="start""#));
+    }
+
+    #[test]
+    fn empty_chrome_is_byte_identical_even_with_custom_geometry() {
+        // Custom insets/anchor must not perturb the no-chrome early return.
+        let svg = make_svg(200.0, 100.0);
+        let chrome = FigureChrome {
+            left_inset: 99.0,
+            right_inset: 99.0,
+            anchor: ChromeAnchor::End,
+            ..Default::default()
+        };
+        assert!(chrome.is_empty());
+        let result = wrap_with_chrome(&svg, chrome).unwrap();
+        assert_eq!(result, svg, "empty chrome must be byte-identical round-trip");
     }
 }
