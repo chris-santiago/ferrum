@@ -151,24 +151,30 @@ pub(crate) fn strip_font_defs(body: &str) -> String {
 // clipPath id uniquification (cross-cell collision fix)
 // ---------------------------------------------------------------------------
 
-/// Rewrite every `id="ferrum-clip-N"` and `url(#ferrum-clip-N)` reference in
-/// a single child SVG body so each composited cell uses globally-unique IDs.
+/// Rewrite every clipPath `id="…"` and `url(#…)` reference in a single child
+/// SVG body so each composited cell uses globally-unique IDs. Covers the three
+/// id families ferrum emits: `ferrum-clip-`, `ferrum-colorbar-`, and
+/// `ferrum-legend-clip-`.
 ///
 /// Each ferrum chart numbers its clipPaths per-panel starting at 0
 /// (`ferrum-clip-0`, `ferrum-clip-1`, ...). When multiple single-panel charts
 /// are composited (JointChart, ClusterMapChart, HConcat/VConcat) they all
 /// define `id="ferrum-clip-0"`, and the SVG renderer silently picks one
-/// definition — clipping every cell by the wrong rect. Prefixing each cell's
-/// IDs with `cellNN-` makes them disjoint while preserving each body's
-/// internal `id` ↔ `url(#id)` references.
+/// definition — clipping every cell by the wrong rect. The same collision hits
+/// `ferrum-colorbar-0` colorbar gradients and `ferrum-legend-clip-0` legend
+/// `clip_height` clips. Prefixing each cell's IDs with `cellNN-` makes them
+/// disjoint while preserving each body's internal `id` ↔ `url(#id)` references.
 pub(crate) fn uniquify_clip_ids(body: &str, cell_idx: usize) -> String {
     let clip_prefix = format!("cell{cell_idx}-ferrum-clip-");
     let colorbar_prefix = format!("cell{cell_idx}-ferrum-colorbar-");
+    let legend_clip_prefix = format!("cell{cell_idx}-ferrum-legend-clip-");
     body
         .replace("id=\"ferrum-clip-", &format!("id=\"{clip_prefix}"))
         .replace("url(#ferrum-clip-", &format!("url(#{clip_prefix}"))
         .replace("id=\"ferrum-colorbar-", &format!("id=\"{colorbar_prefix}"))
         .replace("url(#ferrum-colorbar-", &format!("url(#{colorbar_prefix}"))
+        .replace("id=\"ferrum-legend-clip-", &format!("id=\"{legend_clip_prefix}"))
+        .replace("url(#ferrum-legend-clip-", &format!("url(#{legend_clip_prefix}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -429,5 +435,50 @@ mod tests {
         assert!(out.contains(r#"width="200""#));
         assert!(out.contains(r#"height="100""#));
         assert!(out.contains(r#"<path d="M0,0"/>"#));
+    }
+
+    /// Two composited children each emit a `clip_height` legend, so both bodies
+    /// carry `id="ferrum-legend-clip-0"` + `clip-path="url(#ferrum-legend-clip-0)"`.
+    /// The uniquifier must namespace them per cell so the merged SVG holds two
+    /// distinct legend-clip ids and each `url(#…)` reference resolves to the def
+    /// in its own cell. Mirrors the JointChart/HConcat collision the uniquifier
+    /// exists to prevent (`ferrum-clip-` / `ferrum-colorbar-`).
+    #[test]
+    fn hconcat_legend_clip_ids_uniquified_across_cells() {
+        let legend_body = r#"<defs><clipPath id="ferrum-legend-clip-0"><rect x="0" y="0" width="40" height="30"/></clipPath></defs><g clip-path="url(#ferrum-legend-clip-0)"><rect/></g>"#;
+        let a = make_svg(100.0, 80.0, legend_body);
+        let b = make_svg(100.0, 80.0, legend_body);
+        let out = compose_svg_horizontal(&[a, b], 0.0, VerticalAlign::Top).unwrap();
+
+        // Original colliding id must be fully rewritten away — neither the def
+        // nor the reference may keep the bare (cell-less) `ferrum-legend-clip-`
+        // prefix that both children share.
+        assert!(
+            !out.contains(r#"id="ferrum-legend-clip-"#),
+            "unprefixed legend-clip def leaked: {out}",
+        );
+        assert!(
+            !out.contains("url(#ferrum-legend-clip-"),
+            "unprefixed legend-clip reference leaked: {out}",
+        );
+
+        // Each cell gets its own namespaced id, def + reference in lockstep.
+        for (cell, id) in [(0_usize, "cell0-ferrum-legend-clip-0"), (1, "cell1-ferrum-legend-clip-0")] {
+            assert!(
+                out.contains(&format!(r#"id="{id}""#)),
+                "missing legend-clip def for cell {cell}: {out}",
+            );
+            assert!(
+                out.contains(&format!(r#"clip-path="url(#{id})""#)),
+                "missing legend-clip reference for cell {cell}: {out}",
+            );
+        }
+
+        // Exactly two distinct legend-clip defs (one per cell, no shared id).
+        assert_eq!(
+            out.matches(r#"<clipPath id="cell"#).count(),
+            2,
+            "expected 2 distinct legend-clip defs: {out}",
+        );
     }
 }

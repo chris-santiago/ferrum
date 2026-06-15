@@ -282,19 +282,6 @@ fn default_band_align() -> f64 {
     0.5
 }
 
-/// Opaque-but-typed axis spec. Round-trips JSON; renderer ignores in 8a.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct AxisSpec {
-    #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct LegendSpec {
-    #[serde(flatten)]
-    pub extra: serde_json::Map<String, serde_json::Value>,
-}
-
 /// Encoding channel specification — maps a data field to a visual variable.
 ///
 /// Created implicitly by Python's encoding channel classes (``X``, ``Y``,
@@ -313,13 +300,15 @@ pub struct LegendSpec {
 /// title : str, optional
 ///     Axis or legend title. Overrides the auto-generated field name.
 /// axis : dict, optional
-///     Axis style overrides. Supported keys: ``grid``, ``title``,
-///     ``labels``, ``ticks``, ``domain``, ``label_angle`` /
-///     ``labelAngle``. Honored by the renderer.
+///     Per-channel axis style overrides, typed against the shared
+///     ``AxisStyleSpec``. Every advertised ``fm.Axis`` field that renders at
+///     chart level (grid color/dash/width, label color/font-size, domain
+///     color/width, title styling, tick options, …) also renders per-channel.
+///     Unknown keys fail loud (a serde error surfaced as ``ValueError``).
 /// legend : dict, optional
-///     Legend style overrides. Supported keys: ``orient``, ``title``,
-///     ``titleFontSize`` / ``title_font_size``, ``disabled``. Honored
-///     by the renderer.
+///     Per-channel legend style overrides, typed against the shared
+///     ``LegendStyleSpec`` (orient, title, symbol/gradient geometry, columns,
+///     …). Unknown keys fail loud.
 /// sort : dict or str, optional
 ///     Sort order for ordinal/nominal scales. Accepts ``"ascending"``,
 ///     ``"descending"``, or an explicit array of domain values. Honored
@@ -365,10 +354,18 @@ pub struct EncodingSpec {
     pub title: Option<String>,
 
     // Honored renderer fields (D7–D13 — consumed by prepare.rs / position.rs / scale_resolve.rs):
+    // Per-channel axis/legend styling. Typed against the shared style structs
+    // (B5 fix) so every advertised `fm.Axis`/`fm.Legend` field that renders at
+    // chart level also renders per-channel, and unknown keys fail loud
+    // (`deny_unknown_fields`) instead of silently dropping.
+    //
+    // Boxed so the (wide, ~30-field) style structs do not bloat `EncodingSpec`'s
+    // monomorphized serde deserialize frame — the unboxed form overflowed the
+    // default 2MB test-thread stack when deserializing a deep `ChartSpec` graph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub axis: Option<AxisSpec>,
+    pub axis: Option<Box<crate::render::chart_config::AxisStyleSpec>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub legend: Option<LegendSpec>,
+    pub legend: Option<Box<crate::render::chart_config::LegendStyleSpec>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -494,7 +491,9 @@ impl EncodingSpec {
         self.title.as_deref()
     }
 
-    /// Axis style overrides (honored: grid, title, labels, ticks, domain, label_angle).
+    /// Axis style overrides. Typed against the shared `AxisStyleSpec`: every
+    /// advertised `fm.Axis` field that renders at chart level also renders
+    /// per-channel; unknown keys fail loud at construction.
     #[getter]
     fn axis(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         match &self.axis {
@@ -508,7 +507,9 @@ impl EncodingSpec {
         }
     }
 
-    /// Legend style overrides (honored: orient, title, titleFontSize, disabled).
+    /// Legend style overrides. Typed against the shared `LegendStyleSpec`: every
+    /// advertised `fm.Legend` field that renders at chart level also renders
+    /// per-channel; unknown keys fail loud at construction.
     #[getter]
     fn legend(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         match &self.legend {
@@ -950,20 +951,95 @@ mod tests {
     }
 
     #[test]
-    fn encoding_spec_round_trips_with_axis_opaque() {
-        use serde_json::json;
-        let mut axis_extra = serde_json::Map::new();
-        axis_extra.insert("grid".into(), json!(false));
-        axis_extra.insert("orient".into(), json!("bottom"));
+    fn encoding_spec_round_trips_with_typed_axis() {
+        // A per-channel axis carrying both an honored styling key (`grid` toggle)
+        // and an orphan positioning key (`orient`) round-trips through the typed
+        // `AxisStyleSpec`.
+        use crate::render::chart_config::AxisStyleSpec;
         let e = EncodingSpec {
             field: "x".into(),
             type_: None,
-            axis: Some(AxisSpec { extra: axis_extra }),
+            axis: Some(Box::new(AxisStyleSpec {
+                grid: Some(false),
+                orient: Some("bottom".into()),
+                ..Default::default()
+            })),
             ..Default::default()
         };
         let json = serde_json::to_string(&e).unwrap();
         let parsed: EncodingSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, e);
+    }
+
+    #[test]
+    fn encoding_spec_round_trips_with_typed_axis_styling_and_orphan() {
+        // Honored styling key `grid_color` + orphan `orient` both survive the
+        // round-trip (B5).
+        use crate::render::chart_config::AxisStyleSpec;
+        let e = EncodingSpec {
+            field: "x".into(),
+            axis: Some(Box::new(AxisStyleSpec {
+                grid_color: Some("#cccccc".into()),
+                orient: Some("bottom".into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let parsed: EncodingSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, e);
+        assert_eq!(parsed.axis.as_ref().unwrap().grid_color.as_deref(), Some("#cccccc"));
+        assert_eq!(parsed.axis.as_ref().unwrap().orient.as_deref(), Some("bottom"));
+    }
+
+    #[test]
+    fn encoding_spec_per_channel_axis_unknown_key_fails_loud() {
+        // A misspelled per-channel axis key must error (deny_unknown_fields),
+        // not silently drop (B5 fail-loud).
+        let json = r##"{"field":"x","axis":{"grid_colr":"#f00"}}"##;
+        let parsed: Result<EncodingSpec, _> = serde_json::from_str(json);
+        assert!(parsed.is_err(), "unknown per-channel axis key must fail to deserialize");
+    }
+
+    #[test]
+    fn encoding_spec_per_channel_legend_unknown_key_fails_loud() {
+        let json = r##"{"field":"c","legend":{"symbol_sze":10}}"##;
+        let parsed: Result<EncodingSpec, _> = serde_json::from_str(json);
+        assert!(parsed.is_err(), "unknown per-channel legend key must fail to deserialize");
+    }
+
+    #[test]
+    fn encoding_spec_axis_camel_case_alias_deserializes() {
+        // Raw-dict back-compat: camelCase `labelAngle` maps to `label_angle`.
+        let json = r##"{"field":"x","axis":{"labelAngle":-30}}"##;
+        let parsed: EncodingSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.axis.as_ref().unwrap().label_angle, Some(-30.0));
+    }
+
+    #[test]
+    fn encoding_spec_axis_false_suppression_round_trips() {
+        // `axis=False` serializes (Python side) to the suppression form; the typed
+        // struct must accept it and round-trip.
+        let json = r##"{"field":"x","axis":{"domain":false,"ticks":false,"labels":false,"title":"","grid":false}}"##;
+        let parsed: EncodingSpec = serde_json::from_str(json).unwrap();
+        let axis = parsed.axis.as_ref().unwrap();
+        assert_eq!(axis.domain, Some(false));
+        assert_eq!(axis.ticks, Some(false));
+        assert_eq!(axis.labels, Some(false));
+        assert_eq!(axis.grid, Some(false));
+        assert_eq!(axis.title.as_deref(), Some("")); // empty-string suppress sentinel
+        // Re-serialize → re-parse stays equal.
+        let back = serde_json::to_string(&parsed).unwrap();
+        let reparsed: EncodingSpec = serde_json::from_str(&back).unwrap();
+        assert_eq!(reparsed, parsed);
+    }
+
+    #[test]
+    fn encoding_spec_legend_disabled_suppression_round_trips() {
+        // `legend=None`/`False` serializes to `{"disabled": true}`.
+        let json = r##"{"field":"c","legend":{"disabled":true}}"##;
+        let parsed: EncodingSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.legend.as_ref().unwrap().disabled, Some(true));
     }
 
     #[test]
@@ -1293,12 +1369,11 @@ mod tests {
                 type_: Some(DataType::Quantitative),
                 scale: Some(ScaleSpec::Log { base: 2.0, common: ContinuousScaleCommon { domain: None, range: None, clamp: false, padding: None, scheme: None, domain_param: None }, nice: true }),
                 title: Some("Value (log2)".into()),
-                axis: Some(AxisSpec { extra: {
-                    let mut m = serde_json::Map::new();
-                    m.insert("grid".into(), serde_json::Value::Bool(false));
-                    m
-                }}),
-                legend: Some(LegendSpec { extra: serde_json::Map::new() }),
+                axis: Some(Box::new(crate::render::chart_config::AxisStyleSpec {
+                    grid: Some(false),
+                    ..Default::default()
+                })),
+                legend: Some(Box::new(crate::render::chart_config::LegendStyleSpec::default())),
                 format: Some(".2f".into()),
                 format_type: Some("number".into()),
                 ..Default::default()

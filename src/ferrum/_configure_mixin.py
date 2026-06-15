@@ -54,10 +54,18 @@ class ConfigureMixin:
         grid_color: "str | None" = None,
         grid_dash: "list[float] | None" = None,
         grid_width: "float | None" = None,
+        grid_opacity: "float | None" = None,
         domain_min: "float | None" = None,
         domain_max: "float | None" = None,
         nice: "bool | None" = None,
         zero: "bool | None" = None,
+        translate: "float | None" = None,
+        min_extent: "float | None" = None,
+        max_extent: "float | None" = None,
+        tick_extra: "bool | None" = None,
+        tick_min_step: "float | None" = None,
+        title_orient: "str | None" = None,
+        zindex: "int | None" = None,
     ):
         """Apply axis configuration.
 
@@ -107,16 +115,39 @@ class ConfigureMixin:
             Grid line dash pattern (on/off pixel lengths).
         grid_width : float, optional
             Grid line width in pixels.
+        grid_opacity : float, optional
+            Grid line opacity (0--1).
         domain_min, domain_max : float, optional
             Explicit scale domain bounds.
         nice : bool, optional
             Extend the domain to nice round numbers.
         zero : bool, optional
             Include zero in the scale domain.
+        translate : float, optional
+            Pixel translation of the axis group perpendicular to its line.
+        min_extent, max_extent : float, optional
+            Bounds for the reserved axis margin band, in pixels.
+        tick_extra : bool, optional
+            Append an extra tick at each domain boundary.
+        tick_min_step : float, optional
+            Minimum step between ticks in data space.
+        title_orient : str, optional
+            Side/orientation of the axis title.
+        zindex : int, optional
+            Coarse draw order of the axis relative to marks.
 
         Returns
         -------
         Self
+
+        Notes
+        -----
+        ``orient`` (the axis side) is intentionally absent here: ``configure_axis``
+        applies to both the x and y axes, so a single side value can be valid for
+        at most one of them.  Set it per-axis instead, via
+        ``configure(axis_x=AxisConfig(orient="top"))`` /
+        ``configure(axis_y=AxisConfig(orient="right"))`` or per-channel
+        ``fm.X("f", axis=fm.Axis(orient="top"))``.
         """
         from ferrum.configure import AxisConfig, Configure
 
@@ -143,10 +174,18 @@ class ConfigureMixin:
             grid_color=grid_color,
             grid_dash=grid_dash,
             grid_width=grid_width,
+            grid_opacity=grid_opacity,
             domain_min=domain_min,
             domain_max=domain_max,
             nice=nice,
             zero=zero,
+            translate=translate,
+            min_extent=min_extent,
+            max_extent=max_extent,
+            tick_extra=tick_extra,
+            tick_min_step=tick_min_step,
+            title_orient=title_orient,
+            zindex=zindex,
         )
         return self._append_configure(Configure(axis=cfg))
 
@@ -162,11 +201,21 @@ class ConfigureMixin:
         columns: "int | None" = None,
         title_font_size: "float | None" = None,
         label_font_size: "float | None" = None,
+        label_color: "str | None" = None,
+        label_limit: "float | None" = None,
         symbol_size: "float | None" = None,
+        symbol_stroke_width: "float | None" = None,
         symbol_type: "str | None" = None,
         gradient_length: "float | None" = None,
+        gradient_thickness: "float | None" = None,
+        title_padding: "float | None" = None,
+        row_padding: "float | None" = None,
+        column_padding: "float | None" = None,
+        clip_height: "float | None" = None,
+        tick_min_step: "float | None" = None,
         offset: "float | None" = None,
         padding: "float | None" = None,
+        zindex: "int | None" = None,
     ):
         """Apply legend configuration.
 
@@ -182,16 +231,37 @@ class ConfigureMixin:
             Legend title font size in pixels.
         label_font_size : float, optional
             Legend entry label font size in pixels.
+        label_color : str, optional
+            Legend label color.
+        label_limit : float, optional
+            Maximum legend-label width in pixels; wider labels are truncated
+            with an ellipsis.
         symbol_size : float, optional
             Legend symbol size in pixels.
+        symbol_stroke_width : float, optional
+            Stroke width of legend symbol swatches in pixels.
         symbol_type : str, optional
             Legend symbol shape (e.g. ``"circle"``, ``"square"``).
         gradient_length : float, optional
             Length of the continuous-legend gradient bar in pixels.
+        gradient_thickness : float, optional
+            Thickness of the continuous-legend gradient bar in pixels.
+        title_padding : float, optional
+            Padding between the legend title and its entries in pixels.
+        row_padding : float, optional
+            Vertical entry spacing in pixels (vertical-direction legends).
+        column_padding : float, optional
+            Horizontal entry spacing in pixels (horizontal-direction legends).
+        clip_height : float, optional
+            Cap on the legend group height in pixels; overflow is hard-clipped.
+        tick_min_step : float, optional
+            Minimum step between colorbar ticks in data units.
         offset : float, optional
             Legend offset from the plot edge in pixels.
         padding : float, optional
             Padding inside the legend box in pixels.
+        zindex : int, optional
+            Coarse draw order of the legend relative to marks.
 
         Returns
         -------
@@ -205,11 +275,21 @@ class ConfigureMixin:
             columns=columns,
             title_font_size=title_font_size,
             label_font_size=label_font_size,
+            label_color=label_color,
+            label_limit=label_limit,
             symbol_size=symbol_size,
+            symbol_stroke_width=symbol_stroke_width,
             symbol_type=symbol_type,
             gradient_length=gradient_length,
+            gradient_thickness=gradient_thickness,
+            title_padding=title_padding,
+            row_padding=row_padding,
+            column_padding=column_padding,
+            clip_height=clip_height,
+            tick_min_step=tick_min_step,
             offset=offset,
             padding=padding,
+            zindex=zindex,
         )
         return self._append_configure(Configure(legend=cfg))
 

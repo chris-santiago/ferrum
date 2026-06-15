@@ -102,6 +102,86 @@ class TestAxisConfigIntegration:
         svg_padded = base.configure_axis(title_padding=30).to_svg()
         assert svg_default != svg_padded, "title_padding should change SVG layout"
 
+    def test_grid_opacity(self, scatter_df: pl.DataFrame) -> None:
+        """configure_axis(grid_opacity=0.3) should set grid-line opacity in the SVG."""
+        base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y")
+        svg_default = base.to_svg()
+        svg_faint = base.configure_axis(grid_opacity=0.3).to_svg()
+        assert svg_default != svg_faint, "grid_opacity should change SVG"
+        assert 'opacity="0.3"' in svg_faint, "grid_opacity=0.3 should appear in SVG"
+
+    def test_min_extent(self, scatter_df: pl.DataFrame) -> None:
+        """configure_axis(min_extent=120) should change axis-margin layout."""
+        base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y")
+        svg_default = base.to_svg()
+        svg_extent = base.configure_axis(min_extent=120).to_svg()
+        assert svg_default != svg_extent, "min_extent should change SVG layout"
+
+    def test_title_orient(self, scatter_df: pl.DataFrame) -> None:
+        """configure_axis(title_orient='top') should reposition axis titles."""
+        base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y").labs(x="X", y="Y")
+        svg_default = base.to_svg()
+        svg_oriented = base.configure_axis(title_orient="top").to_svg()
+        assert svg_default != svg_oriented, "title_orient should change SVG"
+
+    def test_orient_not_a_general_axis_kwarg(self, scatter_df: pl.DataFrame) -> None:
+        """`orient` is rejected on the general configure_axis (ambiguous across x/y).
+
+        A single side value cannot be valid for both axes, so `orient` is not
+        exposed as a configure_axis keyword; it is set per-axis instead.
+        """
+        chart = fm.Chart(scatter_df).mark_point().encode(x="x", y="y")
+        with pytest.raises(TypeError):
+            chart.configure_axis(orient="top")
+
+    def test_orient_via_axis_x_renders(self, scatter_df: pl.DataFrame) -> None:
+        """`configure(axis_x=AxisConfig(orient='top'))` moves the x axis to the top."""
+        base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y")
+        svg_default = base.to_svg()
+        svg_top = base.configure(axis_x=AxisConfig(orient="top")).to_svg()
+        assert svg_default != svg_top, "axis_x orient='top' should change SVG"
+
+    def test_orient_via_axis_y_renders(self, scatter_df: pl.DataFrame) -> None:
+        """`configure(axis_y=AxisConfig(orient='right'))` moves the y axis to the right."""
+        base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y")
+        svg_default = base.to_svg()
+        svg_right = base.configure(axis_y=AxisConfig(orient="right")).to_svg()
+        assert svg_default != svg_right, "axis_y orient='right' should change SVG"
+
+    def test_general_axis_orient_cross_dimension_raises(self, scatter_df: pl.DataFrame) -> None:
+        """A general-axis `orient` (via AxisConfig) is always cross-dimension for one axis.
+
+        ``configure(axis=AxisConfig(orient=...))`` applies the same side to both x
+        and y, so any value fails on whichever axis it does not belong to. This is
+        the Rust-side fail-loud contract; we assert it surfaces as ``ValueError``.
+        """
+        chart = fm.Chart(scatter_df).mark_point().encode(x="x", y="y")
+        with pytest.raises(ValueError, match="invalid for the"):
+            chart.configure(axis=AxisConfig(orient="top")).to_svg()
+
+    def test_per_channel_grid_opacity_beats_chart_level(self, scatter_df: pl.DataFrame) -> None:
+        """Per-channel fm.Axis(grid_opacity) wins over configure_axis(grid_opacity).
+
+        With per-channel grid_opacity set on BOTH axes, the chart-level value is
+        fully shadowed, so the output is byte-identical to the per-channel-only
+        render.
+        """
+        per_channel = (
+            fm.Chart(scatter_df)
+            .mark_point()
+            .encode(
+                x=fm.X("x", axis=fm.Axis(grid_opacity=0.2)),
+                y=fm.Y("y", axis=fm.Axis(grid_opacity=0.2)),
+            )
+        )
+        svg_per_channel = per_channel.to_svg()
+        svg_with_chart_level = per_channel.configure_axis(grid_opacity=0.8).to_svg()
+        assert svg_with_chart_level == svg_per_channel, (
+            "per-channel grid_opacity must fully shadow chart-level configure_axis"
+        )
+        assert 'opacity="0.2"' in svg_per_channel
+        assert 'opacity="0.8"' not in svg_with_chart_level
+
 
 # ---------------------------------------------------------------------------
 # Color config fields
@@ -146,6 +226,37 @@ class TestLegendConfigIntegration:
         svg_long = base.configure_legend(gradient_length=200).to_svg()
         assert svg_default != svg_long, "gradient_length should change SVG"
 
+    def test_symbol_stroke_width(self, color_df: pl.DataFrame) -> None:
+        """configure_legend(symbol_stroke_width=3) should set swatch stroke width to 3."""
+        base = fm.Chart(color_df).mark_point().encode(x="x", y="y", color="g:N")
+        svg_default = base.to_svg()
+        svg_thick = base.configure_legend(symbol_stroke_width=3).to_svg()
+        assert svg_default != svg_thick, "symbol_stroke_width should change SVG"
+        assert 'stroke-width="3"' in svg_thick, "symbol_stroke_width=3 should appear on swatches"
+
+    def test_label_limit_truncates_with_ellipsis(self) -> None:
+        """configure_legend(label_limit=40) should truncate a long label with an ellipsis."""
+        long_label = "an extremely long category label that overflows"
+        df = pl.DataFrame(
+            {
+                "x": [1, 2, 3, 4],
+                "y": [10, 20, 30, 40],
+                "g": [long_label, "short", long_label, "short"],
+            }
+        )
+        base = fm.Chart(df).mark_point().encode(x="x", y="y", color="g:N")
+        svg_default = base.to_svg()
+        svg_limited = base.configure_legend(label_limit=40).to_svg()
+        assert svg_default != svg_limited, "label_limit should change SVG"
+        assert "…" in svg_limited, "label_limit should truncate with an ellipsis (…)"
+
+    def test_row_padding(self, color_df: pl.DataFrame) -> None:
+        """configure_legend(row_padding=20) should change vertical entry spacing."""
+        base = fm.Chart(color_df).mark_point().encode(x="x", y="y", color="g:N")
+        svg_default = base.to_svg()
+        svg_spaced = base.configure_legend(row_padding=20).to_svg()
+        assert svg_default != svg_spaced, "row_padding should change SVG layout"
+
 
 # ---------------------------------------------------------------------------
 # Grid config fields
@@ -168,6 +279,26 @@ class TestGridConfigIntegration:
 # ---------------------------------------------------------------------------
 # Rendering correctness
 # ---------------------------------------------------------------------------
+
+
+class TestGoldenStability:
+    """The new config fields must not perturb the default (no-config) render."""
+
+    def test_no_config_render_byte_identical(self, color_df: pl.DataFrame) -> None:
+        """Constructing a chart twice with no configure_* call yields identical SVG."""
+        chart = fm.Chart(color_df).mark_point().encode(x="x", y="y", color="g:N")
+        assert chart.to_svg() == chart.to_svg()
+
+    def test_default_construction_unset_orphans_no_change(self, scatter_df: pl.DataFrame) -> None:
+        """An AxisConfig/LegendConfig with only None orphans must not change output."""
+        df = pl.DataFrame({"x": [1, 2, 3], "y": [10, 50, 90], "g": ["a", "b", "c"]})
+        base = fm.Chart(df).mark_point().encode(x="x", y="y", color="g:N")
+        svg_base = base.to_svg()
+        # configure_* with every new param left at its default None must be a no-op.
+        svg_axis = base.configure_axis().to_svg()
+        svg_legend = base.configure_legend().to_svg()
+        assert svg_axis == svg_base, "configure_axis() with no args must not change SVG"
+        assert svg_legend == svg_base, "configure_legend() with no args must not change SVG"
 
 
 class TestRenderingCorrectness:

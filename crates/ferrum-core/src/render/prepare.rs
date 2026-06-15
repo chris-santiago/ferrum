@@ -188,6 +188,12 @@ pub struct PreparedInputs {
     /// field with the color channel is merged into the color legend rather than
     /// emitted here (Vega-Lite same-field merge).
     pub aux_legends: Vec<crate::layout::AuxLegendInput>,
+    /// The tick-count hints (`Axis(tick_count=N)`, default 10) used to generate
+    /// the x/y tick labels + projections. Carried so the post-prepare
+    /// tick_extra/tick_min_step adjustment (B5 unit 2) can regenerate the SAME
+    /// raw tick values that produced the current labels.
+    pub x_tick_count: usize,
+    pub y_tick_count: usize,
 }
 
 /// Per-encoding legend style overrides extracted from `encoding.color.legend.*`.
@@ -224,6 +230,44 @@ pub struct LegendPreparedOverrides {
     /// D13+: legend type override from `encoding.color.legend.type`.
     /// "gradient" forces colorbar rendering; "symbol" forces discrete entries.
     pub legend_type: Option<String>,
+    /// B5: symbol shape override from `encoding.color.legend.symbol_type`.
+    /// Per-channel wins over chart-level `configure_legend(symbol_type=...)`.
+    pub symbol_type: Option<String>,
+    /// B5 unit 3: stroke width of legend symbols from
+    /// `encoding.color.legend.symbol_stroke_width`.
+    pub symbol_stroke_width: Option<f64>,
+    /// B5 unit 3: per-legend vertical entry spacing from
+    /// `encoding.color.legend.row_padding` (replaces `LEGEND_ENTRY_ROW_PAD`).
+    pub row_padding: Option<f64>,
+    /// B5 unit 3: per-legend horizontal entry spacing from
+    /// `encoding.color.legend.column_padding`.
+    pub column_padding: Option<f64>,
+    /// B5 unit 3: max legend-label pixel width from
+    /// `encoding.color.legend.label_limit`. Labels wider than this are truncated
+    /// with an ellipsis.
+    pub label_limit: Option<f64>,
+    /// B5 unit 3: cap the legend group's total height from
+    /// `encoding.color.legend.clip_height`. Overflow is hard-clipped.
+    pub clip_height: Option<f64>,
+    /// B5 unit 3: minimum step between colorbar ticks (data units) from
+    /// `encoding.color.legend.tick_min_step`.
+    pub tick_min_step: Option<f64>,
+    /// B5 unit 3: coarse draw order from `encoding.color.legend.zindex`.
+    /// `>= 1` routes the legend above marks; `<= 0` (default) below.
+    pub zindex: Option<i64>,
+    /// B5 unit 6a: legend swatch area (px²) from `encoding.color.legend.symbol_size`.
+    pub symbol_size: Option<f64>,
+    /// B5 unit 6a: legend entry-label fill color from
+    /// `encoding.color.legend.label_color`.
+    pub label_color: Option<String>,
+    /// B5 unit 6a: extra plot→legend gap (px) from `encoding.color.legend.offset`.
+    pub offset: Option<f64>,
+    /// B5 unit 6a: internal legend box padding (px) from
+    /// `encoding.color.legend.padding`.
+    pub padding: Option<f64>,
+    /// B5 unit 6a: legend title→entry gap (px) from
+    /// `encoding.color.legend.title_padding`.
+    pub title_padding: Option<f64>,
 }
 
 impl PreparedInputs {
@@ -508,67 +552,32 @@ pub fn prepare_render_inputs(
         y_tick_labels.reverse();
         y_tick_fractions.reverse();
     }
-    // D7 + D12: extract per-axis style fields from encoding.axis and encoding.format.
-    // All new fields default to the safe backward-compat value so SVG output is
-    // byte-identical when the encoding carries no axis/format overrides.
+    // D7 + D12 (B5-typed): extract per-axis style fields from the typed
+    // `encoding.axis` style spec. The show toggles default to `true` (and title
+    // falls through to the field name) so SVG output is byte-identical when the
+    // encoding carries no axis overrides.
     let x_enc_axis = rendering_encoding.x.as_ref().and_then(|e| e.axis.as_ref());
     let y_enc_axis = rendering_encoding.y.as_ref().and_then(|e| e.axis.as_ref());
-    let x_axis_labels = x_enc_axis
-        .and_then(|a| a.extra.get("labels"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let x_axis_ticks = x_enc_axis
-        .and_then(|a| a.extra.get("ticks"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let x_axis_domain = x_enc_axis
-        .and_then(|a| a.extra.get("domain"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let x_axis_grid = x_enc_axis
-        .and_then(|a| a.extra.get("grid"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let x_label_angle = x_enc_axis
-        .and_then(|a| a.extra.get("labelAngle").or_else(|| a.extra.get("label_angle")))
-        .and_then(|v| v.as_f64());
+    let x_axis_labels = x_enc_axis.and_then(|a| a.labels).unwrap_or(true);
+    let x_axis_ticks = x_enc_axis.and_then(|a| a.ticks).unwrap_or(true);
+    let x_axis_domain = x_enc_axis.and_then(|a| a.domain).unwrap_or(true);
+    let x_axis_grid = x_enc_axis.and_then(|a| a.grid).unwrap_or(true);
     // Axis(title=...) resolution: the outer Option distinguishes "key absent" from
     // "key present but empty".
     //   - None (absent)  → fall through to x_field (field-name default)
     //   - Some("") or Some("  ") → explicit suppress; final title is None, no fallback
     //   - Some("Custom") → use "Custom" directly, no fallback
-    let x_axis_title: Option<String> = match x_enc_axis
-        .and_then(|a| a.extra.get("title"))
-        .and_then(|v| v.as_str())
-    {
+    let x_axis_title: Option<String> = match x_enc_axis.and_then(|a| a.title.as_deref()) {
         Some(s) if s.trim().is_empty() => None, // explicit suppress: don't fall back
         Some(s) => Some(s.to_owned()),           // explicit non-empty title
         None => x_field,                         // absent: fall through to field default
     };
-    let y_axis_labels = y_enc_axis
-        .and_then(|a| a.extra.get("labels"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let y_axis_ticks = y_enc_axis
-        .and_then(|a| a.extra.get("ticks"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let y_axis_domain = y_enc_axis
-        .and_then(|a| a.extra.get("domain"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let y_axis_grid = y_enc_axis
-        .and_then(|a| a.extra.get("grid"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let y_label_angle = y_enc_axis
-        .and_then(|a| a.extra.get("labelAngle").or_else(|| a.extra.get("label_angle")))
-        .and_then(|v| v.as_f64());
+    let y_axis_labels = y_enc_axis.and_then(|a| a.labels).unwrap_or(true);
+    let y_axis_ticks = y_enc_axis.and_then(|a| a.ticks).unwrap_or(true);
+    let y_axis_domain = y_enc_axis.and_then(|a| a.domain).unwrap_or(true);
+    let y_axis_grid = y_enc_axis.and_then(|a| a.grid).unwrap_or(true);
     // Same three-way resolution as x_axis_title above.
-    let y_axis_title: Option<String> = match y_enc_axis
-        .and_then(|a| a.extra.get("title"))
-        .and_then(|v| v.as_str())
-    {
+    let y_axis_title: Option<String> = match y_enc_axis.and_then(|a| a.title.as_deref()) {
         Some(s) if s.trim().is_empty() => None,
         Some(s) => Some(s.to_owned()),
         None => y_field,
@@ -624,6 +633,13 @@ pub fn prepare_render_inputs(
         Vec::new()
     };
 
+    // B5: per-channel axis STYLING + positioning overrides (grid color/dash/
+    // width, label color/font-size, domain color/width, title styling,
+    // tick_values, padding, and the unit-2 orphans orient/translate/extents/
+    // grid_opacity/title_orient/zindex/tick_min_step/tick_extra).
+    let mut x_axis_style = encoding_axis_style_overrides(x_enc_axis.map(Box::as_ref), "x")?;
+    let mut y_axis_style = encoding_axis_style_overrides(y_enc_axis.map(Box::as_ref), "y")?;
+
     // Continuous-axis scale projection: an empty major-fraction vec means the
     // axis is categorical/discretizing (ordinal) → carrier is `None`, so layout
     // keeps the uniform-slot formula byte-identically. A non-empty vec means a
@@ -640,44 +656,46 @@ pub fn prepare_render_inputs(
         minor: y_minor_fractions,
     });
 
+    // Per-channel `orient` selects the axis side; absent → the dimension default
+    // (Bottom for x, Left for y). Validated above against the channel dimension.
+    // Stored as the concrete `AxisInput.orient`; the `orient` override input stays
+    // in the bundle so a later chart-level `configure_axis(orient=...)` fills it
+    // only when still `None` (per-channel wins), then `resolve_orient` re-syncs.
+    let x_orient = x_axis_style.orient.unwrap_or(AxisOrient::Bottom);
+    let y_orient = y_axis_style.orient.unwrap_or(AxisOrient::Left);
+
+    // Seed the per-channel `label_format` (resolved via the temporal/numeric
+    // threading above) onto the bundle. `label_angle` is already on the bundle
+    // (parsed from the same `encoding.axis` spec as `x_label_angle`).
+    x_axis_style.label_format = x_label_format_override;
+    y_axis_style.label_format = y_label_format_override;
+
     let axes = AxesInput {
         x: AxisInput {
-            orient: AxisOrient::Bottom,
+            orient: x_orient,
             title: x_axis_title,
             tick_labels: x_tick_labels,
-            label_angle_override: x_label_angle,
             show_labels: x_axis_labels,
             show_ticks: x_axis_ticks,
             show_domain: x_axis_domain,
             show_grid: x_axis_grid,
             tick_format: None, // already applied above
             tick_format_type: None,
-            tick_values_override: None,
-            label_format_override: x_label_format_override,
-            title_font_size: None,
-            title_color: None,
-            title_padding: None,
-            label_padding: None,
             tick_projection: x_tick_projection,
+            overrides: x_axis_style,
         },
         y: AxisInput {
-            orient: AxisOrient::Left,
+            orient: y_orient,
             title: y_axis_title,
             tick_labels: y_tick_labels,
-            label_angle_override: y_label_angle,
             show_labels: y_axis_labels,
             show_ticks: y_axis_ticks,
             show_domain: y_axis_domain,
             show_grid: y_axis_grid,
             tick_format: None,
             tick_format_type: None,
-            tick_values_override: None,
-            label_format_override: y_label_format_override,
-            title_font_size: None,
-            title_color: None,
-            title_padding: None,
-            label_padding: None,
             tick_projection: y_tick_projection,
+            overrides: y_axis_style,
         },
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),
@@ -708,8 +726,7 @@ pub fn prepare_render_inputs(
         .color
         .as_ref()
         .and_then(|c| c.legend.as_ref())
-        .and_then(|l| l.extra.get("disabled"))
-        .and_then(|v| v.as_bool())
+        .and_then(|l| l.disabled)
         .unwrap_or(false);
     let (legend_entries, colorbar): (Vec<LegendEntry>, Option<ColorbarInput>) =
         if legend_disabled {
@@ -732,28 +749,27 @@ pub fn prepare_render_inputs(
                     let color = scheme.sample(t);
                     (t, super::color::fmt_svg(color))
                 }).collect();
-                // Tick labels: check for explicit tickLabels override from
-                // legend extra (e.g. ["Low", "High"] for SHAP beeswarm),
+                // Tick labels: check for explicit tickLabels override from the
+                // typed legend spec (e.g. ["Low", "High"] for SHAP beeswarm),
                 // else compute 5 ticks across the domain at 0, 0.25, 0.5, 0.75, 1.0.
                 // When `format=` is set, apply a Python-style format spec to each tick value.
-                let legend_extra_ref = spec
+                let color_legend = spec
                     .encoding
                     .color
                     .as_ref()
-                    .and_then(|c| c.legend.as_ref())
-                    .map(|l| &l.extra);
-                let custom_tick_labels: Option<Vec<String>> = legend_extra_ref
-                    .and_then(|extra| extra.get("tickLabels"))
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect());
-                let format_spec: Option<&str> = legend_extra_ref
-                    .and_then(|extra| extra.get("format"))
-                    .and_then(|v| v.as_str());
-                let tick_labels = if let Some(labels) = custom_tick_labels {
-                    labels
+                    .and_then(|c| c.legend.as_ref());
+                let custom_tick_labels: Option<Vec<String>> =
+                    color_legend.and_then(|l| l.tick_labels.clone());
+                let format_spec: Option<&str> =
+                    color_legend.and_then(|l| l.format.as_deref());
+                // `cb_domain` is the numeric span the labels cover — carried for
+                // `tick_min_step` thinning in `compute_layout`. `None` for explicit
+                // non-numeric label overrides (their step is undefined).
+                let (tick_labels, cb_domain) = if let Some(labels) = custom_tick_labels {
+                    (labels, None)
                 } else {
                     let (lo, hi) = *domain;
-                    (0..5).map(|i| {
+                    let labels = (0..5).map(|i| {
                         let t = i as f64 / 4.0;
                         let v = lo + t * (hi - lo);
                         if let Some(spec_str) = format_spec {
@@ -761,9 +777,10 @@ pub fn prepare_render_inputs(
                         } else {
                             format_colorbar_tick(v, lo, hi)
                         }
-                    }).collect()
+                    }).collect();
+                    (labels, Some((lo, hi)))
                 };
-                (Vec::new(), Some(ColorbarInput { stops, tick_labels }))
+                (Vec::new(), Some(ColorbarInput { stops, tick_labels, domain: cb_domain }))
             }
             None => (Vec::new(), None),
             }
@@ -776,85 +793,72 @@ pub fn prepare_render_inputs(
         None
     };
 
-    // D13: extract legend style overrides from encoding.color.legend extra fields.
-    let color_legend_extra = spec
+    // D13 (B5-typed): extract legend style overrides from the typed
+    // `encoding.color.legend` spec. Per-channel precedence: these win over
+    // chart-level `configure_legend` (which fills only what is still `None`).
+    let color_legend = spec
         .encoding
         .color
         .as_ref()
-        .and_then(|c| c.legend.as_ref())
-        .map(|l| &l.extra);
+        .and_then(|c| c.legend.as_ref());
     let legend_overrides = LegendPreparedOverrides {
-        orient: color_legend_extra
-            .and_then(|extra| extra.get("orient"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| match s {
-                "right"  => Some(LegendOrient::Right),
-                "left"   => Some(LegendOrient::Left),
-                "top"    => Some(LegendOrient::Top),
-                "bottom" => Some(LegendOrient::Bottom),
-                _ => None,
-            }),
-        title: color_legend_extra
-            .and_then(|extra| extra.get("title"))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned),
-        title_font_size: color_legend_extra
-            .and_then(|extra| {
-                extra.get("titleFontSize").or_else(|| extra.get("title_font_size"))
-            })
-            .and_then(|v| v.as_f64()),
-        columns: color_legend_extra
-            .and_then(|extra| extra.get("columns"))
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32),
-        tick_count: color_legend_extra
-            .and_then(|extra| extra.get("tickCount"))
-            .and_then(|v| v.as_u64())
-            .map(|n| n as usize),
-        label_font_size: color_legend_extra
-            .and_then(|extra| extra.get("labelFontSize").or_else(|| extra.get("label_font_size")))
-            .and_then(|v| v.as_f64()),
-        gradient_length: color_legend_extra
-            .and_then(|extra| extra.get("gradientLength").or_else(|| extra.get("gradient_length")))
-            .and_then(|v| v.as_f64()),
-        gradient_thickness: color_legend_extra
-            .and_then(|extra| extra.get("gradientThickness").or_else(|| extra.get("gradient_thickness")))
-            .and_then(|v| v.as_f64()),
-        direction: color_legend_extra
-            .and_then(|extra| extra.get("direction"))
-            .and_then(|v| v.as_str())
-            .and_then(|s| match s {
-                "horizontal" => Some(crate::layout::LegendDirection::Horizontal),
-                "vertical"   => Some(crate::layout::LegendDirection::Vertical),
-                _ => None,
-            }),
+        orient: color_legend.and_then(|l| l.orient.as_deref()).and_then(|s| match s {
+            "right"  => Some(LegendOrient::Right),
+            "left"   => Some(LegendOrient::Left),
+            "top"    => Some(LegendOrient::Top),
+            "bottom" => Some(LegendOrient::Bottom),
+            _ => None,
+        }),
+        title: color_legend.and_then(|l| l.title.clone()),
+        title_font_size: color_legend.and_then(|l| l.title_font_size),
+        columns: color_legend.and_then(|l| l.columns),
+        tick_count: color_legend.and_then(|l| l.tick_count).map(|n| n as usize),
+        label_font_size: color_legend.and_then(|l| l.label_font_size),
+        gradient_length: color_legend.and_then(|l| l.gradient_length),
+        gradient_thickness: color_legend.and_then(|l| l.gradient_thickness),
+        direction: color_legend.and_then(|l| l.direction.as_deref()).and_then(|s| match s {
+            "horizontal" => Some(crate::layout::LegendDirection::Horizontal),
+            "vertical"   => Some(crate::layout::LegendDirection::Vertical),
+            _ => None,
+        }),
         // `values`: explicit tick/entry labels for the legend. Accepts an array of
         // strings or numbers. Numbers are formatted to a short decimal string.
-        values: color_legend_extra
-            .and_then(|extra| extra.get("values"))
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .map(|item| {
-                        if let Some(s) = item.as_str() {
-                            s.to_string()
-                        } else if let Some(n) = item.as_f64() {
-                            if n.fract() == 0.0 && n.abs() < 1e15 {
-                                format!("{}", n as i64)
-                            } else {
-                                format!("{:.4}", n).trim_end_matches('0').trim_end_matches('.').to_string()
-                            }
+        values: color_legend.and_then(|l| l.values.as_ref()).map(|arr| {
+            arr.iter()
+                .map(|item| {
+                    if let Some(s) = item.as_str() {
+                        s.to_string()
+                    } else if let Some(n) = item.as_f64() {
+                        if n.fract() == 0.0 && n.abs() < 1e15 {
+                            format!("{}", n as i64)
                         } else {
-                            item.to_string()
+                            format!("{:.4}", n).trim_end_matches('0').trim_end_matches('.').to_string()
                         }
-                    })
-                    .collect()
-            }),
+                    } else {
+                        item.to_string()
+                    }
+                })
+                .collect()
+        }),
         // `type`: "gradient" forces colorbar path; "symbol" forces categorical entries.
-        legend_type: color_legend_extra
-            .and_then(|extra| extra.get("type"))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned),
+        legend_type: color_legend.and_then(|l| l.legend_type.clone()),
+        symbol_type: color_legend.and_then(|l| l.symbol_type.clone()),
+        // B5 unit 3: orphan legend styling/positioning fields. Per-channel here;
+        // chart-level `configure_legend(...)` fills any that stay `None`.
+        symbol_stroke_width: color_legend.and_then(|l| l.symbol_stroke_width),
+        row_padding: color_legend.and_then(|l| l.row_padding),
+        column_padding: color_legend.and_then(|l| l.column_padding),
+        label_limit: color_legend.and_then(|l| l.label_limit),
+        clip_height: color_legend.and_then(|l| l.clip_height),
+        tick_min_step: color_legend.and_then(|l| l.tick_min_step),
+        zindex: color_legend.and_then(|l| l.zindex),
+        // B5 unit 6a orphans. Per-channel here; chart-level `configure_legend`
+        // fills any that stay `None`.
+        symbol_size: color_legend.and_then(|l| l.symbol_size),
+        label_color: color_legend.and_then(|l| l.label_color.clone()),
+        offset: color_legend.and_then(|l| l.offset),
+        padding: color_legend.and_then(|l| l.padding),
+        title_padding: color_legend.and_then(|l| l.title_padding),
     };
 
     // Multivariate B1: build size/shape auxiliary legends from the resolved
@@ -893,27 +897,23 @@ pub fn prepare_render_inputs(
         coord_flipped,
         legend_overrides,
         aux_legends,
+        x_tick_count,
+        y_tick_count,
     })
 }
 
-/// Read whether a channel's `legend` extra carries `disabled: true`
+/// Read whether a channel's typed `legend` spec carries `disabled: true`
 /// (`legend=None` / `legend=False` from the Python `Size`/`Shape` classes).
 fn legend_channel_disabled(enc: Option<&crate::spec::encoding::EncodingSpec>) -> bool {
     enc.and_then(|e| e.legend.as_ref())
-        .and_then(|l| l.extra.get("disabled"))
-        .and_then(|v| v.as_bool())
+        .and_then(|l| l.disabled)
         .unwrap_or(false)
 }
 
-/// Optional explicit legend title from a channel's `legend.title` extra,
+/// Optional explicit legend title from a channel's typed `legend.title`,
 /// falling back to the channel's field name.
 fn aux_legend_title(enc: &crate::spec::encoding::EncodingSpec) -> Option<String> {
-    let explicit = enc
-        .legend
-        .as_ref()
-        .and_then(|l| l.extra.get("title"))
-        .and_then(|v| v.as_str())
-        .map(str::to_owned);
+    let explicit = enc.legend.as_ref().and_then(|l| l.title.clone());
     explicit.or_else(|| Some(enc.field.clone()))
 }
 
@@ -954,8 +954,7 @@ fn build_aux_legends(
             let format_spec = size_enc
                 .legend
                 .as_ref()
-                .and_then(|l| l.extra.get("format"))
-                .and_then(|v| v.as_str());
+                .and_then(|l| l.format.as_deref());
             if let Some((lo, hi)) = size_scale.inner.data_domain() {
                 let values = nice_ticks(lo, hi, 5);
                 let entries: Vec<SizeLegendEntry> = values
@@ -1199,13 +1198,241 @@ fn apply_impute(
 // for temporal axes) and re-applies the requested format.
 
 /// D3 (flexibility campaign): per-channel `Axis(tick_count=N)`. Read from the
-/// encoding's `axis` map (`tick_count` key, written by Python's `Axis.to_dict()`).
-/// `None` → use the caller's default (10).
+/// encoding's typed `axis` style spec. `None` → use the caller's default (10).
 fn encoding_axis_tick_count(enc: Option<&crate::spec::encoding::EncodingSpec>) -> Option<usize> {
     enc.and_then(|e| e.axis.as_ref())
-        .and_then(|a| a.extra.get("tick_count").or_else(|| a.extra.get("tickCount")))
-        .and_then(|v| v.as_u64())
+        .and_then(|a| a.tick_count)
         .map(|n| n as usize)
+}
+
+/// Parse an axis `orient` string into an [`AxisOrient`], validating it against
+/// the channel dimension: x accepts top/bottom, y accepts left/right. A
+/// cross-dimension value fails loud per the B5 contract. Shared by the
+/// per-channel (here) and chart-level (`render::mod`) apply paths so the two
+/// cannot drift on the accepted token set or the dimension check.
+pub(crate) fn parse_axis_orient(
+    value: &str,
+    channel: &'static str,
+) -> Result<AxisOrient, RenderError> {
+    let orient = match value.trim().to_ascii_lowercase().as_str() {
+        "top" => AxisOrient::Top,
+        "bottom" => AxisOrient::Bottom,
+        "left" => AxisOrient::Left,
+        "right" => AxisOrient::Right,
+        _ => {
+            return Err(RenderError::InvalidAxisOrient {
+                channel,
+                orient: value.to_owned(),
+            })
+        }
+    };
+    let ok = match channel {
+        "x" => matches!(orient, AxisOrient::Top | AxisOrient::Bottom),
+        _ => matches!(orient, AxisOrient::Left | AxisOrient::Right),
+    };
+    if ok {
+        Ok(orient)
+    } else {
+        Err(RenderError::InvalidAxisOrient { channel, orient: value.to_owned() })
+    }
+}
+
+/// Parse a `label_overlap` token (`fm.Axis(label_overlap=...)` /
+/// `configure_axis(label_overlap=...)`) into a [`LabelOverlap`] strategy (B5 unit
+/// 6b). Maps the Vega-style values onto the existing cascade primitives:
+/// - `"true"` → [`LabelOverlap::ShowAll`] (show every label, may overlap).
+/// - `"false"` / `"greedy"` → [`LabelOverlap::Greedy`] (cascade default cull).
+/// - `"parity"` → [`LabelOverlap::Parity`] (stride-2 decimation).
+/// - `"rotate"` → [`LabelOverlap::Rotate`] (force the rotate stage).
+///
+/// An unrecognized token is **bounded to the nearest existing behavior**
+/// (`Greedy`, the cascade default) rather than failing loud, since
+/// `label_overlap` only biases an already-graceful cascade — an unknown value
+/// degrades to the default rather than erroring on a render. Returns `None` for
+/// an empty/whitespace token so callers leave the cascade unmodified.
+pub(crate) fn parse_label_overlap(value: &str) -> Option<crate::layout::LabelOverlap> {
+    use crate::layout::LabelOverlap;
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" => None,
+        "true" => Some(LabelOverlap::ShowAll),
+        "parity" => Some(LabelOverlap::Parity),
+        "rotate" => Some(LabelOverlap::Rotate),
+        // "false", "greedy", and any unrecognized token bound to the cascade
+        // default (greedy) — the nearest existing behavior.
+        _ => Some(LabelOverlap::Greedy),
+    }
+}
+
+/// Parse a `title_orient` string into an [`AxisOrient`]. Unlike axis `orient`,
+/// all four sides are valid (a title may run perpendicular to its axis), so this
+/// only rejects an unrecognized token. Shared with the chart-level apply path.
+pub(crate) fn parse_title_orient(
+    value: &str,
+    channel: &'static str,
+) -> Result<AxisOrient, RenderError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "top" => Ok(AxisOrient::Top),
+        "bottom" => Ok(AxisOrient::Bottom),
+        "left" => Ok(AxisOrient::Left),
+        "right" => Ok(AxisOrient::Right),
+        _ => Err(RenderError::InvalidAxisOrient { channel, orient: value.to_owned() }),
+    }
+}
+
+/// Parse a per-channel typed [`AxisStyleSpec`] into the bundled
+/// [`AxisStyleOverrides`] ready to drop into an `AxisInput` (B5). Color strings
+/// are pre-parsed to `Srgba<u8>`; an unparseable hex string yields `None` (theme
+/// fallback) rather than failing, matching the chart-level apply behavior.
+///
+/// `label_format` is left `None` here: prepare resolves it through the temporal/
+/// numeric format threading (`apply_axis_format_or_thread`) and seeds it onto the
+/// bundle at construction. `orient` is the validated override input; the concrete
+/// axis side is resolved into `AxisInput.orient` once all override layers merge.
+fn encoding_axis_style_overrides(
+    axis: Option<&crate::render::chart_config::AxisStyleSpec>,
+    channel: &'static str,
+) -> Result<crate::layout::AxisStyleOverrides, RenderError> {
+    let Some(a) = axis else { return Ok(crate::layout::AxisStyleOverrides::default()) };
+    let parse = |c: &Option<String>| {
+        c.as_deref()
+            .and_then(|s| crate::render::color::from_hex_str(s).ok())
+    };
+    let orient = a
+        .orient
+        .as_deref()
+        .map(|s| parse_axis_orient(s, channel))
+        .transpose()?;
+    let title_orient = a
+        .title_orient
+        .as_deref()
+        .map(|s| parse_title_orient(s, channel))
+        .transpose()?;
+    Ok(crate::layout::AxisStyleOverrides {
+        tick_values: a.values.clone(),
+        label_angle: a.label_angle,
+        label_format: None,
+        title_font_size: a.title_font_size,
+        title_color: parse(&a.title_color),
+        title_padding: a.title_padding,
+        label_padding: a.label_padding,
+        label_color: parse(&a.label_color),
+        label_font_size: a.label_font_size,
+        grid_color: parse(&a.grid_color),
+        grid_dash: a.grid_dash.clone(),
+        grid_width: a.grid_width,
+        domain_color: parse(&a.domain_color),
+        domain_width: a.domain_width,
+        orient,
+        translate: a.translate,
+        min_extent: a.min_extent,
+        max_extent: a.max_extent,
+        grid_opacity: a.grid_opacity,
+        title_orient,
+        zindex: a.zindex,
+        tick_extra: a.tick_extra,
+        tick_min_step: a.tick_min_step,
+        offset: a.offset,
+        label_flush: a.label_flush,
+        label_overlap: a.label_overlap.as_deref().and_then(parse_label_overlap),
+    })
+}
+
+/// Apply the per-axis `tick_min_step` / `tick_extra` adjustments (B5 unit 2) to a
+/// continuous axis's already-generated ticks, mutating the axis's `tick_labels`
+/// and projected `tick_projection.major` fractions in lockstep.
+///
+/// - `tick_min_step` (data units): greedily drop any tick whose raw value is
+///   within `min_step` of the previously kept tick (in domain order), thinning a
+///   dense axis without disturbing the surviving labels/fractions.
+/// - `tick_extra`: append a tick at each domain boundary (`scale min`/`max`) when
+///   not already present (within a tiny epsilon), labeled via `format_numeric`
+///   and projected to its domain fraction via the scale.
+///
+/// Both are no-ops for ordinal axes (no `tick_projection`), when neither field is
+/// set, or when the tick count drifted, so default output is byte-identical. The
+/// effective `tick_extra`/`tick_min_step` are read off the axis input AFTER the
+/// chart-level config merge, so the per-channel value already won when present.
+/// `tick_extra` formats boundary labels with `format_numeric`, so it is scoped to
+/// non-temporal continuous axes (temporal boundary formatting needs spacing
+/// context the scale only has internally — flagged as a bounded interpretation).
+///
+/// `reversed` mirrors the non-ordinal-y label reversal so the raw values pulled
+/// from the scale stay index-aligned with the (reversed) labels/fractions.
+pub(crate) fn adjust_axis_ticks(
+    axis: &mut AxisInput,
+    scale: &crate::render::scale_resolve::ScaleKind,
+    tick_count: usize,
+    reversed: bool,
+) {
+    let tick_min_step = axis.overrides.tick_min_step;
+    let tick_extra = axis.overrides.tick_extra.unwrap_or(false);
+    if tick_min_step.is_none() && !tick_extra {
+        return;
+    }
+    // Only continuous axes carry a projection; ordinal axes have no numeric
+    // domain to thin or bound.
+    let Some(proj) = axis.tick_projection.as_mut() else { return };
+    let Some(raw_src) = scale.tick_values_raw(tick_count) else { return };
+    let is_temporal = matches!(scale, crate::render::scale_resolve::ScaleKind::Time(_));
+
+    let mut raw: Vec<f64> = raw_src;
+    if reversed {
+        raw.reverse();
+    }
+    // Guard against index drift (a stale tick count): only act when the raw
+    // values, labels, and projected fractions all line up.
+    if raw.len() != axis.tick_labels.len() || raw.len() != proj.major.len() {
+        return;
+    }
+
+    // ── tick_min_step: thin ticks closer than min_step in data space ─────────
+    if let Some(min_step) = tick_min_step {
+        if min_step > 0.0 && raw.len() > 1 {
+            // Walk in domain order so "closer than min_step to the last kept" is
+            // well-defined regardless of the reversed display order.
+            let mut order: Vec<usize> = (0..raw.len()).collect();
+            order.sort_by(|&a, &b| raw[a].total_cmp(&raw[b]));
+            let mut keep = vec![false; raw.len()];
+            let mut last_kept: Option<f64> = None;
+            for &idx in &order {
+                let v = raw[idx];
+                let far_enough = last_kept.is_none_or(|lk| (v - lk).abs() >= min_step);
+                if far_enough {
+                    keep[idx] = true;
+                    last_kept = Some(v);
+                }
+            }
+            let mut k = 0;
+            raw.retain(|_| { let keep_it = keep[k]; k += 1; keep_it });
+            let mut k = 0;
+            axis.tick_labels.retain(|_| { let keep_it = keep[k]; k += 1; keep_it });
+            let mut k = 0;
+            proj.major.retain(|_| { let keep_it = keep[k]; k += 1; keep_it });
+        }
+    }
+
+    // ── tick_extra: append domain-boundary ticks if missing ──────────────────
+    if tick_extra && !is_temporal {
+        if let Some((d_lo, d_hi)) = scale.data_domain() {
+            let eps = ((d_hi - d_lo).abs() * 1e-9).max(f64::MIN_POSITIVE);
+            for boundary in [d_lo, d_hi] {
+                if !boundary.is_finite() {
+                    continue;
+                }
+                if raw.iter().any(|&v| (v - boundary).abs() <= eps) {
+                    continue;
+                }
+                let frac = scale.value_fractions(&[boundary]);
+                let Some(&f) = frac.first() else { continue };
+                if !f.is_finite() {
+                    continue;
+                }
+                raw.push(boundary);
+                axis.tick_labels.push(crate::render::format::format_numeric(boundary));
+                proj.major.push(f);
+            }
+        }
+    }
 }
 
 /// Resolve the tick-label format `(spec, type)` for a positional channel.
@@ -1221,21 +1448,9 @@ pub(crate) fn resolve_axis_label_format(
     enc: Option<&crate::spec::encoding::EncodingSpec>,
 ) -> (Option<String>, Option<String>) {
     let Some(e) = enc else { return (None, None) };
-    let axis_fmt = e.axis.as_ref().and_then(|a| {
-        a.extra
-            .get("label_format")
-            .or_else(|| a.extra.get("labelFormat"))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned)
-    });
-    if let Some(fmt) = axis_fmt {
-        let ty = e.axis.as_ref().and_then(|a| {
-            a.extra
-                .get("label_format_type")
-                .or_else(|| a.extra.get("labelFormatType"))
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-        });
+    let axis = e.axis.as_ref();
+    if let Some(fmt) = axis.and_then(|a| a.label_format.clone()) {
+        let ty = axis.and_then(|a| a.label_format_type.clone());
         return (Some(fmt), ty);
     }
     (e.format.clone(), e.format_type.clone())
@@ -1720,6 +1935,22 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
+    #[test]
+    fn parse_label_overlap_maps_vega_tokens() {
+        use crate::layout::LabelOverlap;
+        assert_eq!(parse_label_overlap("true"), Some(LabelOverlap::ShowAll));
+        assert_eq!(parse_label_overlap("parity"), Some(LabelOverlap::Parity));
+        assert_eq!(parse_label_overlap("rotate"), Some(LabelOverlap::Rotate));
+        assert_eq!(parse_label_overlap("greedy"), Some(LabelOverlap::Greedy));
+        assert_eq!(parse_label_overlap("false"), Some(LabelOverlap::Greedy));
+        // Case-insensitive + whitespace-tolerant.
+        assert_eq!(parse_label_overlap("  PARITY "), Some(LabelOverlap::Parity));
+        // Empty → no override (leave the cascade unmodified).
+        assert_eq!(parse_label_overlap(""), None);
+        // Unrecognized → bounded to the cascade default (greedy), not an error.
+        assert_eq!(parse_label_overlap("nonsense"), Some(LabelOverlap::Greedy));
+    }
+
     fn batch3() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
@@ -1929,11 +2160,12 @@ mod tests {
     #[test]
     fn size_legend_disabled_suppresses_block() {
         let mut spec = base_spec();
-        let mut extra = serde_json::Map::new();
-        extra.insert("disabled".into(), serde_json::Value::Bool(true));
         spec.encoding.size = Some(EncodingSpec {
             field: "pop".into(),
-            legend: Some(crate::spec::encoding::LegendSpec { extra }),
+            legend: Some(Box::new(crate::render::chart_config::LegendStyleSpec {
+                disabled: Some(true),
+                ..Default::default()
+            })),
             ..Default::default()
         });
         let p = prep(&spec, &batch_pop());
@@ -2236,15 +2468,15 @@ mod tests {
 
     // --- D3 (flexibility campaign): per-channel Axis(label_format, tick_count) ---
 
-    /// Build an `EncodingSpec` carrying an `axis` map with the given key/values.
+    /// Build an `EncodingSpec` carrying a per-channel `axis` from a JSON object,
+    /// deserialized through the typed `AxisStyleSpec` (so the test exercises the
+    /// real wire path, including `deny_unknown_fields`).
     fn enc_with_axis(field: &str, axis: serde_json::Value) -> EncodingSpec {
-        let extra = match axis {
-            serde_json::Value::Object(m) => m,
-            _ => serde_json::Map::new(),
-        };
+        let axis: crate::render::chart_config::AxisStyleSpec =
+            serde_json::from_value(axis).expect("valid axis style json");
         EncodingSpec {
             field: field.into(),
-            axis: Some(crate::spec::encoding::AxisSpec { extra }),
+            axis: Some(Box::new(axis)),
             ..Default::default()
         }
     }
@@ -2261,7 +2493,226 @@ mod tests {
         let batch = price_weight_batch();
         let prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
-        assert_eq!(prep.axes.x.label_format_override.as_deref(), Some(",.0f"));
+        assert_eq!(prep.axes.x.overrides.label_format.as_deref(), Some(",.0f"));
+    }
+
+    #[test]
+    fn per_channel_axis_styling_reaches_axis_input() {
+        // B5: a per-channel `Axis(grid_color=, label_color=, domain_width=)` must
+        // land on the AxisInput's per-axis style override fields (which
+        // build_axis/build_grid consult with a theme fallback).
+        let mut spec = single_layer_spec();
+        spec.encoding.x = Some(enc_with_axis(
+            "price",
+            serde_json::json!({ "grid_color": "#cccccc", "label_color": "#ff00ff", "domain_width": 3.0 }),
+        ));
+        let batch = price_weight_batch();
+        let prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        let gx = prep.axes.x.overrides.grid_color.expect("per-channel grid_color must reach x AxisInput");
+        assert_eq!([gx.red, gx.green, gx.blue], [0xcc, 0xcc, 0xcc]);
+        let lx = prep.axes.x.overrides.label_color.expect("per-channel label_color must reach x AxisInput");
+        assert_eq!([lx.red, lx.green, lx.blue], [0xff, 0x00, 0xff]);
+        assert_eq!(prep.axes.x.overrides.domain_width, Some(3.0));
+        // The y-axis must be untouched (per-channel applies only to its own axis).
+        assert!(prep.axes.y.overrides.grid_color.is_none());
+        assert!(prep.axes.y.overrides.label_color.is_none());
+    }
+
+    // ── B5 unit 2: orphan positioning / tick fields ─────────────────────────
+
+    #[test]
+    fn per_channel_orient_reaches_axis_input() {
+        // `Axis(orient="top")` on x must set the x AxisInput's orient to Top.
+        let mut spec = single_layer_spec();
+        spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "orient": "top" })));
+        let batch = price_weight_batch();
+        let prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        assert_eq!(prep.axes.x.orient, AxisOrient::Top);
+        // y untouched (default Left).
+        assert_eq!(prep.axes.y.orient, AxisOrient::Left);
+    }
+
+    #[test]
+    fn cross_dimension_orient_fails_loud() {
+        // `Axis(orient="left")` on the x channel is a cross-dimension error and
+        // must surface a RenderError rather than silently dropping.
+        let mut spec = single_layer_spec();
+        spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "orient": "left" })));
+        let batch = price_weight_batch();
+        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default())
+            .expect_err("x orient='left' must fail loud");
+        match err {
+            crate::render::RenderError::InvalidAxisOrient { channel, orient } => {
+                assert_eq!(channel, "x");
+                assert_eq!(orient, "left");
+            }
+            other => panic!("expected InvalidAxisOrient, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn per_channel_orphan_positioning_fields_reach_axis_input() {
+        let mut spec = single_layer_spec();
+        spec.encoding.x = Some(enc_with_axis(
+            "price",
+            serde_json::json!({
+                "translate": 12.0,
+                "min_extent": 70.0,
+                "max_extent": 120.0,
+                "grid_opacity": 0.25,
+                "title_orient": "bottom",
+                "zindex": 1
+            }),
+        ));
+        let batch = price_weight_batch();
+        let prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        assert_eq!(prep.axes.x.overrides.translate, Some(12.0));
+        assert_eq!(prep.axes.x.overrides.min_extent, Some(70.0));
+        assert_eq!(prep.axes.x.overrides.max_extent, Some(120.0));
+        assert_eq!(prep.axes.x.overrides.grid_opacity, Some(0.25));
+        assert_eq!(prep.axes.x.overrides.title_orient, Some(AxisOrient::Bottom));
+        assert_eq!(prep.axes.x.overrides.zindex, Some(1));
+    }
+
+    #[test]
+    fn tick_min_step_thins_dense_ticks() {
+        // A continuous x-axis with tick_min_step set must drop ticks closer than
+        // the step in data space, leaving fewer labels.
+        let mut spec = single_layer_spec();
+        let batch = price_weight_batch();
+        let baseline =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        let base_count = baseline.axes.x.tick_labels.len();
+
+        // Pick a min_step larger than the natural tick spacing to force thinning.
+        spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "tick_min_step": 1e9 })));
+        let mut prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        // The adjustment runs in prepare_and_layout; invoke it directly here.
+        let tc = prep.x_tick_count;
+        adjust_axis_ticks(&mut prep.axes.x, &prep.provisional_scales.x, tc, false);
+        assert!(
+            prep.axes.x.tick_labels.len() < base_count,
+            "tick_min_step=1e9 must thin ticks: base={base_count}, after={}",
+            prep.axes.x.tick_labels.len()
+        );
+        // At least one tick survives.
+        assert!(!prep.axes.x.tick_labels.is_empty());
+        // Labels and projected fractions stay index-aligned.
+        if let Some(proj) = prep.axes.x.tick_projection.as_ref() {
+            assert_eq!(proj.major.len(), prep.axes.x.tick_labels.len());
+        }
+    }
+
+    #[test]
+    fn tick_extra_appends_domain_boundaries() {
+        // tick_extra must add a tick at each domain boundary not already present.
+        // Use awkward bounds (3.0 .. 97.0) so the scale's nice ticks (0,20,40,…)
+        // do NOT already include the exact boundaries, forcing an actual append.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("price", DataType::Float64, false),
+            Field::new("weight", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![3.0, 50.0, 97.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let mut spec = single_layer_spec();
+        spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "tick_extra": true })));
+        let mut prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        let before = prep.axes.x.tick_labels.len();
+        let tc = prep.x_tick_count;
+        adjust_axis_ticks(&mut prep.axes.x, &prep.provisional_scales.x, tc, false);
+        let after = prep.axes.x.tick_labels.len();
+        assert!(after > before, "tick_extra must append boundary ticks: {before} -> {after}");
+        // Labels and projected fractions stay index-aligned.
+        let proj = prep.axes.x.tick_projection.as_ref().unwrap();
+        assert_eq!(proj.major.len(), prep.axes.x.tick_labels.len(), "labels/fractions aligned");
+        // The exact domain-boundary labels ("3" and "97") are present.
+        assert!(prep.axes.x.tick_labels.iter().any(|l| l == "3"), "domain min tick present");
+        assert!(prep.axes.x.tick_labels.iter().any(|l| l == "97"), "domain max tick present");
+    }
+
+    #[test]
+    fn per_channel_axis_style_wins_over_chart_config() {
+        // B5 cascade: a per-channel `Axis(grid_width=...)` on x, applied in
+        // `prepare_render_inputs`, is set BEFORE the chart-level
+        // `configure_axis(grid_width=...)` fill (which only fills `None`), so the
+        // per-channel value wins. We assert the prep-stage value here, then verify
+        // the chart-level apply does not overwrite it.
+        let mut spec = single_layer_spec();
+        spec.encoding.x =
+            Some(enc_with_axis("price", serde_json::json!({ "grid_width": 4.0 })));
+        let batch = price_weight_batch();
+        let mut prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        assert_eq!(prep.axes.x.overrides.grid_width, Some(4.0), "per-channel value set in prep");
+        // Chart-level configure_axis(grid_width=1.0) must NOT overwrite per-channel.
+        let cfg = crate::render::chart_config::AxisConfigSpec {
+            style: crate::render::chart_config::AxisStyleSpec {
+                grid_width: Some(1.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        crate::render::apply_axis_style_to_axis_input(&mut prep.axes.x, &cfg.style).unwrap();
+        assert_eq!(prep.axes.x.overrides.grid_width, Some(4.0), "per-channel must win over configure_axis");
+    }
+
+    #[test]
+    fn per_channel_show_toggle_wins_over_chart_config() {
+        // B5 Unit-1 fix: a per-channel `Axis(grid=False)`/`Axis(domain=False)` on x
+        // must survive a conflicting chart-level `configure_axis(grid=True)` /
+        // `configure_axis(domain=True)`. The per-channel prepare path is the sole
+        // owner of `AxisInput.show_*`; the chart-level toggle flows through its
+        // global theme/gate path, not by clobbering the per-axis `show_*` value.
+        let mut spec = single_layer_spec();
+        spec.encoding.x = Some(enc_with_axis(
+            "price",
+            serde_json::json!({ "grid": false, "domain": false }),
+        ));
+        let batch = price_weight_batch();
+        let mut prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        // Per-channel suppression is set in prep; y is untouched (defaults true).
+        assert!(!prep.axes.x.show_grid, "per-channel grid=False set in prep");
+        assert!(!prep.axes.x.show_domain, "per-channel domain=False set in prep");
+        assert!(prep.axes.y.show_grid, "y grid default true");
+        assert!(prep.axes.y.show_domain, "y domain default true");
+
+        // Chart-level configure_axis(grid=True, domain=True) applies to BOTH axes
+        // via the shared `axis` key, the same wire step `prepare_and_layout` runs.
+        let cfg = crate::render::chart_config::AxisConfigSpec {
+            style: crate::render::chart_config::AxisStyleSpec {
+                grid: Some(true),
+                domain: Some(true),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        crate::render::apply_axis_config_to_axis_input(&mut prep.axes.x, Some(&cfg)).unwrap();
+        crate::render::apply_axis_config_to_axis_input(&mut prep.axes.y, Some(&cfg)).unwrap();
+
+        // Per-channel x suppression survives the conflicting chart-level toggle.
+        assert!(
+            !prep.axes.x.show_grid,
+            "per-channel grid=False must survive configure_axis(grid=True)"
+        );
+        assert!(
+            !prep.axes.x.show_domain,
+            "per-channel domain=False must survive configure_axis(domain=True)"
+        );
+        // The other axis (no per-channel override) is unaffected: still shown.
+        assert!(prep.axes.y.show_grid, "y axis show_grid unaffected");
+        assert!(prep.axes.y.show_domain, "y axis show_domain unaffected");
     }
 
     #[test]
@@ -2280,7 +2731,7 @@ mod tests {
         // Apply the threaded override exactly as render/mod.rs does.
         prep.axes.x.tick_labels = apply_tick_format(
             std::mem::take(&mut prep.axes.x.tick_labels),
-            prep.axes.x.label_format_override.as_deref(),
+            prep.axes.x.overrides.label_format.as_deref(),
             None,
         );
         // Every numeric label should now carry the "$" prefix and 2 decimals.
@@ -2324,17 +2775,15 @@ mod tests {
     /// Build a spec with a continuous color encoding on "pop" so that the colorbar
     /// code path activates. Returns a `ColorbarInput` with `format_spec` applied.
     fn colorbar_with_format(format_spec: &str) -> crate::layout::ColorbarInput {
-        use crate::spec::encoding::{DataType, LegendSpec};
+        use crate::spec::encoding::DataType;
         let mut spec = base_spec();
-        let mut legend_extra = serde_json::Map::new();
-        legend_extra.insert(
-            "format".into(),
-            serde_json::Value::String(format_spec.to_owned()),
-        );
         spec.encoding.color = Some(EncodingSpec {
             field: "pop".into(),
             type_: Some(DataType::Quantitative),
-            legend: Some(LegendSpec { extra: legend_extra }),
+            legend: Some(Box::new(crate::render::chart_config::LegendStyleSpec {
+                format: Some(format_spec.to_owned()),
+                ..Default::default()
+            })),
             ..Default::default()
         });
         let p = prep(&spec, &batch_pop());
@@ -2362,7 +2811,7 @@ mod tests {
     /// we build a dedicated batch).
     #[test]
     fn colorbar_format_dot0pct_byte_stable() {
-        use crate::spec::encoding::{DataType, LegendSpec};
+        use crate::spec::encoding::DataType;
         use arrow::array::Float64Array;
         use arrow::datatypes::{DataType as ArrowDt, Field, Schema};
 
@@ -2383,15 +2832,13 @@ mod tests {
         .unwrap();
 
         let mut spec = base_spec();
-        let mut legend_extra = serde_json::Map::new();
-        legend_extra.insert(
-            "format".into(),
-            serde_json::Value::String(".0%".to_owned()),
-        );
         spec.encoding.color = Some(EncodingSpec {
             field: "pop".into(),
             type_: Some(DataType::Quantitative),
-            legend: Some(LegendSpec { extra: legend_extra }),
+            legend: Some(Box::new(crate::render::chart_config::LegendStyleSpec {
+                format: Some(".0%".to_owned()),
+                ..Default::default()
+            })),
             ..Default::default()
         });
         let p = prep(&spec, &batch);
@@ -2417,7 +2864,7 @@ mod tests {
     #[test]
     fn colorbar_format_comma_grouped_widened() {
         // Domain [1000, 100000] so we can see grouping separators.
-        use crate::spec::encoding::{DataType, LegendSpec};
+        use crate::spec::encoding::DataType;
         use arrow::array::Float64Array;
         use arrow::datatypes::{DataType as ArrowDt, Field, Schema};
 
@@ -2437,15 +2884,13 @@ mod tests {
         .unwrap();
 
         let mut spec = base_spec();
-        let mut legend_extra = serde_json::Map::new();
-        legend_extra.insert(
-            "format".into(),
-            serde_json::Value::String(",.0f".to_owned()),
-        );
         spec.encoding.color = Some(EncodingSpec {
             field: "pop".into(),
             type_: Some(DataType::Quantitative),
-            legend: Some(LegendSpec { extra: legend_extra }),
+            legend: Some(Box::new(crate::render::chart_config::LegendStyleSpec {
+                format: Some(",.0f".to_owned()),
+                ..Default::default()
+            })),
             ..Default::default()
         });
         let p = prep(&spec, &batch);
@@ -2472,7 +2917,7 @@ mod tests {
     /// Domain [1000, 1_000_000]; first tick (1000) → "1k", last (1M) → "1M".
     #[test]
     fn colorbar_format_si_trim_widened() {
-        use crate::spec::encoding::{DataType, LegendSpec};
+        use crate::spec::encoding::DataType;
         use arrow::array::Float64Array;
         use arrow::datatypes::{DataType as ArrowDt, Field, Schema};
 
@@ -2492,15 +2937,13 @@ mod tests {
         .unwrap();
 
         let mut spec = base_spec();
-        let mut legend_extra = serde_json::Map::new();
-        legend_extra.insert(
-            "format".into(),
-            serde_json::Value::String("~s".to_owned()),
-        );
         spec.encoding.color = Some(EncodingSpec {
             field: "pop".into(),
             type_: Some(DataType::Quantitative),
-            legend: Some(LegendSpec { extra: legend_extra }),
+            legend: Some(Box::new(crate::render::chart_config::LegendStyleSpec {
+                format: Some("~s".to_owned()),
+                ..Default::default()
+            })),
             ..Default::default()
         });
         let p = prep(&spec, &batch);

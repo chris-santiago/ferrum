@@ -7,7 +7,7 @@
 //! All fields are `Option<_>` with `#[serde(default)]` so missing keys are
 //! silently accepted; unknown keys produce a serde error for fast feedback.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::annotation::AnnotationSpec;
 
@@ -113,59 +113,267 @@ fn default_true() -> bool { true }
 fn default_border_color() -> String { "#999999".to_string() }
 fn default_connect_style() -> String { "lines".to_string() }
 
-/// Per-axis configuration. Applied after per-channel values but before theme.
+/// Shared axis **styling + positioning** fields, mirroring the snake_case keys
+/// `fm.Axis.to_dict()` emits. This is the single schema used by BOTH the
+/// per-channel `EncodingSpec.axis` (directly) and the chart-level
+/// [`AxisConfigSpec`] (via `#[serde(flatten)]`). Factoring it out (B5 fix,
+/// 2026-06-14) guarantees per-channel and chart-level honor the same field set,
+/// closing the silent-drop gap where ~22 advertised `fm.Axis` fields reached the
+/// per-channel path as an opaque map and were never read.
+///
+/// `#[serde(deny_unknown_fields)]` makes a misspelled per-channel key fail loud
+/// (a serde error surfaced as `ValueError`) instead of dropping silently. Note:
+/// serde does not enforce `deny_unknown_fields` through a `#[serde(flatten)]`
+/// container, so the chart-level `AxisConfigSpec` (which flattens this) keeps its
+/// historical lenient behavior; the deny only bites on the standalone
+/// per-channel `EncodingSpec.axis` path, which is exactly where fail-loud matters.
+///
+/// Camel-case `#[serde(alias = ...)]`es preserve back-compat with raw-dict
+/// callers and the keys the old `prepare.rs` hand-reader accepted.
+///
+/// Some fields are **orphans** (no renderer honors them yet) — `orient`,
+/// `translate`, `min_extent`/`max_extent`, `tick_extra`, `tick_min_step`,
+/// `grid_opacity`, `title_orient`, `zindex`. They deserialize and round-trip now;
+/// their render support lands in later units.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AxisStyleSpec {
+    // ── Tick labels ──────────────────────────────────────────────────────────
+    #[serde(alias = "labelAngle", skip_serializing_if = "Option::is_none")]
+    pub label_angle: Option<f64>,
+    #[serde(alias = "labelFontSize", skip_serializing_if = "Option::is_none")]
+    pub label_font_size: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_color: Option<String>,
+    /// d3-format string for tick labels. The chart-level path calls its sibling
+    /// key `label_format_raw`; the two are reconciled in
+    /// [`AxisConfigSpec::effective_label_format`].
+    #[serde(alias = "labelFormat", skip_serializing_if = "Option::is_none")]
+    pub label_format: Option<String>,
+    #[serde(alias = "labelFormatType", skip_serializing_if = "Option::is_none")]
+    pub label_format_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_overlap: Option<String>,
+    /// Orphan (no renderer yet): flush labels at axis boundaries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_flush: Option<bool>,
+    /// Whether to show tick labels (`false` suppresses them).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<bool>,
+    // ── Ticks ────────────────────────────────────────────────────────────────
+    /// Whether to show tick marks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticks: Option<bool>,
+    #[serde(alias = "tickCount", skip_serializing_if = "Option::is_none")]
+    pub tick_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tick_size: Option<f64>,
+    /// Orphan: append a tick at each domain boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tick_extra: Option<bool>,
+    /// Orphan: minimum step between ticks in data space.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tick_min_step: Option<f64>,
+    /// Explicit tick values. The per-channel `fm.Axis` spelling is `values`; the
+    /// chart-level `AxisConfig` spelling is `tick_values` — both map here.
+    #[serde(alias = "tick_values", skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<f64>>,
+    // ── Grid ─────────────────────────────────────────────────────────────────
+    /// Whether to show gridlines for this axis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grid: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grid_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grid_dash: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grid_width: Option<f64>,
+    /// Orphan: per-axis grid-line opacity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grid_opacity: Option<f64>,
+    // ── Domain line ──────────────────────────────────────────────────────────
+    /// Whether to show the axis domain line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain_width: Option<f64>,
+    // ── Title ────────────────────────────────────────────────────────────────
+    /// Axis title text. `Some("")` suppresses the title (the `title=None`
+    /// contract); absent means use the field-name default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(alias = "titleFontSize", skip_serializing_if = "Option::is_none")]
+    pub title_font_size: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_padding: Option<f64>,
+    /// Orphan: side/orientation of the axis title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_orient: Option<String>,
+    // ── Positioning ──────────────────────────────────────────────────────────
+    /// Pixel gap between the end of a tick mark and the tick-label baseline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_padding: Option<f64>,
+    /// Orphan: place the axis on the named side (top/bottom/left/right).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orient: Option<String>,
+    /// Orphan: shift the axis group perpendicular to its line by N px.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub translate: Option<f64>,
+    /// Orphan: lower bound for the reserved axis margin band.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_extent: Option<f64>,
+    /// Orphan: upper bound for the reserved axis margin band.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_extent: Option<f64>,
+    /// Orphan: offset of the axis from the plot area.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<f64>,
+    /// Orphan: coarse draw order relative to marks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zindex: Option<i64>,
+}
+
+/// Per-axis chart-level configuration (`configure_axis` / `axis_x` / `axis_y`).
+/// Embeds [`AxisStyleSpec`] (the styling/positioning fields shared with the
+/// per-channel path) and adds the **chart-only** fields that are meaningless
+/// per-channel: the scale-domain controls (`domain_min`/`domain_max`/`nice`/
+/// `zero`) and the d3-format alias `label_format_raw`.
+///
+/// Applied after per-channel values but before theme.
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct AxisConfigSpec {
-    pub label_angle: Option<f64>,
-    pub label_font_size: Option<f64>,
-    pub label_color: Option<String>,
-    pub label_format: Option<String>,
-    pub label_overlap: Option<String>,
-    pub tick_count: Option<u32>,
-    pub tick_size: Option<f64>,
-    pub domain: Option<bool>,
-    pub domain_color: Option<String>,
-    pub domain_width: Option<f64>,
-    pub grid: Option<bool>,
-    pub grid_color: Option<String>,
-    pub grid_dash: Option<Vec<f64>>,
-    pub grid_width: Option<f64>,
+    #[serde(flatten)]
+    pub style: AxisStyleSpec,
+    // ── Chart-only scale-domain fields (never per-channel) ───────────────────
     pub domain_min: Option<f64>,
     pub domain_max: Option<f64>,
     pub nice: Option<bool>,
     pub zero: Option<bool>,
-    /// Explicit tick values for the axis scale.
-    pub tick_values: Option<Vec<f64>>,
-    /// Font size for axis title text.
-    pub title_font_size: Option<f64>,
-    /// Color of the axis title text (hex string).
-    pub title_color: Option<String>,
-    /// Padding between axis title and tick labels (pixels).
-    pub title_padding: Option<f64>,
-    /// d3-format string applied to tick labels.
+    /// d3-format string applied to tick labels. Chart-level callers historically
+    /// used this name; the per-channel path uses `label_format`. Both are honored
+    /// via [`AxisConfigSpec::effective_label_format`] (`label_format_raw` wins,
+    /// then `label_format`).
     pub label_format_raw: Option<String>,
-    /// Pixel gap between the end of a tick mark and the baseline of the tick label.
-    /// Overrides the per-orient hardcoded gap in the axis renderer.
-    pub label_padding: Option<f64>,
 }
 
-/// Legend configuration.
+impl AxisConfigSpec {
+    /// Reconcile the two d3-format key names: chart callers pass
+    /// `label_format_raw`, the per-channel struct carries `label_format`. The
+    /// raw key wins when both are set (it is the chart-level-specific spelling).
+    pub fn effective_label_format(&self) -> Option<&str> {
+        self.label_format_raw
+            .as_deref()
+            .or(self.style.label_format.as_deref())
+    }
+}
+
+/// Shared legend **styling + positioning** fields, mirroring the snake_case keys
+/// `fm.Legend.to_dict()` emits, plus the `disabled` suppression key that
+/// `_normalize_legend` (`legend=None`/`False`) produces and the internal
+/// `tickLabels` key used by SHAP beeswarm charts.
+///
+/// Single schema for BOTH per-channel `EncodingSpec.legend` (directly, with
+/// fail-loud `deny_unknown_fields`) and chart-level [`LegendConfigSpec`] (via
+/// `flatten`). Camel-case aliases preserve the keys the old `prepare.rs` D13
+/// reader accepted (`titleFontSize`, `labelFontSize`, `gradientLength`,
+/// `gradientThickness`, `tickCount`).
+///
+/// Formerly-orphan fields (`clip_height`, `row_padding`, `column_padding`,
+/// `symbol_stroke_width`, `label_limit`, `tick_min_step`, `zindex`) now render
+/// at both chart and per-channel level (B5 unit 3). `label_limit` truncates with
+/// an ellipsis, `clip_height` hard-clips via an SVG `clipPath`, and `zindex`
+/// maps to coarse below/above-marks ordering (legends sit outside the plot, so
+/// it is usually a visual no-op).
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct LegendStyleSpec {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orient: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+    /// Legend kind override (`"symbol"`/`"gradient"`). The old reader keyed this
+    /// as `type`; `fm.Legend` also emits `type`.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub legend_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(alias = "titleFontSize", skip_serializing_if = "Option::is_none")]
+    pub title_font_size: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_padding: Option<f64>,
+    #[serde(alias = "labelFontSize", skip_serializing_if = "Option::is_none")]
+    pub label_font_size: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_color: Option<String>,
+    /// Maximum legend-label pixel width; labels wider than this are truncated
+    /// with an ellipsis (B5 unit 3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_limit: Option<f64>,
+    #[serde(alias = "tickCount", skip_serializing_if = "Option::is_none")]
+    pub tick_count: Option<u32>,
+    /// Minimum step between colorbar ticks in data units (B5 unit 3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tick_min_step: Option<f64>,
+    /// Explicit tick/entry labels (`fm.Legend(values=[...])`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<serde_json::Value>>,
+    /// d3-format string for colorbar tick labels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_size: Option<f64>,
+    /// Stroke width (px) of legend symbol swatches (B5 unit 3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_stroke_width: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol_type: Option<String>,
+    #[serde(alias = "gradientLength", skip_serializing_if = "Option::is_none")]
+    pub gradient_length: Option<f64>,
+    #[serde(alias = "gradientThickness", skip_serializing_if = "Option::is_none")]
+    pub gradient_thickness: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<u32>,
+    /// Horizontal entry spacing (px) for horizontal-direction legends (B5 unit 3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_padding: Option<f64>,
+    /// Vertical entry spacing (px) for vertical-direction legends (B5 unit 3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_padding: Option<f64>,
+    /// Cap on the legend group height (px); overflow is hard-clipped (B5 unit 3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clip_height: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub padding: Option<f64>,
+    /// Coarse draw order relative to marks (B5 unit 3): `>= 1` → above, `<= 0`
+    /// (default) → below. Legends sit outside the plot, so usually a no-op.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zindex: Option<i64>,
+    /// Suppress the legend entirely. Produced by `_normalize_legend` for
+    /// `legend=None` / `legend=False`; not a user-facing `fm.Legend` field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
+    /// Internal: explicit colorbar tick labels (e.g. SHAP beeswarm `["Low",
+    /// "High"]`). Not a user-facing `fm.Legend` field.
+    #[serde(rename = "tickLabels", skip_serializing_if = "Option::is_none")]
+    pub tick_labels: Option<Vec<String>>,
+}
+
+/// Chart-level legend configuration (`configure_legend`). Legend has no
+/// chart-only-extra fields, so this is `LegendStyleSpec` verbatim (flattened).
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default)]
 pub struct LegendConfigSpec {
-    pub orient: Option<String>,
-    pub direction: Option<String>,
-    pub columns: Option<u32>,
-    pub title_font_size: Option<f64>,
-    pub label_font_size: Option<f64>,
-    pub symbol_size: Option<f64>,
-    pub offset: Option<f64>,
-    pub padding: Option<f64>,
-    /// Shape of legend symbols (e.g. `"circle"`, `"square"`, `"diamond"`).
-    pub symbol_type: Option<String>,
-    /// Length of a continuous gradient bar in pixels.
-    pub gradient_length: Option<f64>,
+    #[serde(flatten)]
+    pub style: LegendStyleSpec,
 }
 
 /// Grid configuration.
@@ -380,9 +588,9 @@ mod tests {
         let json = r#"{"axis": {"label_angle": -45, "grid": true}}"#;
         let cfg: ChartConfig = serde_json::from_str(json).unwrap();
         let axis = cfg.axis.unwrap();
-        assert_eq!(axis.label_angle, Some(-45.0));
-        assert_eq!(axis.grid, Some(true));
-        assert!(axis.label_font_size.is_none());
+        assert_eq!(axis.style.label_angle, Some(-45.0));
+        assert_eq!(axis.style.grid, Some(true));
+        assert!(axis.style.label_font_size.is_none());
     }
 
     #[test]
@@ -397,12 +605,12 @@ mod tests {
             "color": {"scheme": "tableau10", "sequential_scheme": "viridis"}
         }"##;
         let cfg: ChartConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.axis.as_ref().unwrap().label_angle, Some(-30.0));
+        assert_eq!(cfg.axis.as_ref().unwrap().style.label_angle, Some(-30.0));
         assert_eq!(cfg.axis_x.as_ref().unwrap().domain_min, Some(0.0));
         assert_eq!(cfg.axis_x.as_ref().unwrap().domain_max, Some(100.0));
         assert_eq!(cfg.axis_y.as_ref().unwrap().zero, Some(true));
-        assert_eq!(cfg.legend.as_ref().unwrap().orient.as_deref(), Some("bottom"));
-        assert_eq!(cfg.legend.as_ref().unwrap().columns, Some(3));
+        assert_eq!(cfg.legend.as_ref().unwrap().style.orient.as_deref(), Some("bottom"));
+        assert_eq!(cfg.legend.as_ref().unwrap().style.columns, Some(3));
         assert_eq!(cfg.grid.as_ref().unwrap().x, Some(true));
         assert_eq!(cfg.grid.as_ref().unwrap().y, Some(false));
         assert_eq!(cfg.grid.as_ref().unwrap().color.as_deref(), Some("#eee"));
@@ -438,6 +646,8 @@ mod tests {
 
     #[test]
     fn axis_config_new_fields_deserialize() {
+        // Chart-level `AxisConfig` emits `tick_values` (aliased to `values`) and
+        // the chart-only `label_format_raw`.
         let json = r##"{
             "axis": {
                 "tick_values": [0.0, 1.0, 2.0],
@@ -449,11 +659,12 @@ mod tests {
         }"##;
         let cfg: ChartConfig = serde_json::from_str(json).unwrap();
         let axis = cfg.axis.unwrap();
-        assert_eq!(axis.tick_values, Some(vec![0.0, 1.0, 2.0]));
-        assert_eq!(axis.title_font_size, Some(14.0));
-        assert_eq!(axis.title_color.as_deref(), Some("#555555"));
-        assert_eq!(axis.title_padding, Some(4.0));
+        assert_eq!(axis.style.values, Some(vec![0.0, 1.0, 2.0]));
+        assert_eq!(axis.style.title_font_size, Some(14.0));
+        assert_eq!(axis.style.title_color.as_deref(), Some("#555555"));
+        assert_eq!(axis.style.title_padding, Some(4.0));
         assert_eq!(axis.label_format_raw.as_deref(), Some(",.2f"));
+        assert_eq!(axis.effective_label_format(), Some(",.2f"));
     }
 
     #[test]
@@ -466,8 +677,74 @@ mod tests {
         }"##;
         let cfg: ChartConfig = serde_json::from_str(json).unwrap();
         let legend = cfg.legend.unwrap();
-        assert_eq!(legend.symbol_type.as_deref(), Some("square"));
-        assert_eq!(legend.gradient_length, Some(200.0));
+        assert_eq!(legend.style.symbol_type.as_deref(), Some("square"));
+        assert_eq!(legend.style.gradient_length, Some(200.0));
+    }
+
+    /// B5 unit 6a: the six residual render fields deserialize from the legend
+    /// JSON contract Python emits.
+    #[test]
+    fn legend_config_6a_render_fields_deserialize() {
+        let json = r##"{
+            "legend": {
+                "symbol_size": 400.0,
+                "label_color": "#ff0000",
+                "offset": 50.0,
+                "padding": 30.0,
+                "title_padding": 25.0,
+                "column_padding": 40.0
+            }
+        }"##;
+        let cfg: ChartConfig = serde_json::from_str(json).unwrap();
+        let s = cfg.legend.unwrap().style;
+        assert_eq!(s.symbol_size, Some(400.0));
+        assert_eq!(s.label_color.as_deref(), Some("#ff0000"));
+        assert_eq!(s.offset, Some(50.0));
+        assert_eq!(s.padding, Some(30.0));
+        assert_eq!(s.title_padding, Some(25.0));
+        assert_eq!(s.column_padding, Some(40.0));
+    }
+
+    #[test]
+    fn axis_style_deny_unknown_fields_rejects_typo() {
+        // Standalone per-channel deserialization (not via the flatten container)
+        // must reject an unknown key — the B5 fail-loud guard.
+        let bad: Result<AxisStyleSpec, _> = serde_json::from_str(r##"{"grid_colr":"#f00"}"##);
+        assert!(bad.is_err(), "unknown axis style key must fail to deserialize");
+        let good: Result<AxisStyleSpec, _> = serde_json::from_str(r##"{"grid_color":"#f00"}"##);
+        assert!(good.is_ok());
+    }
+
+    #[test]
+    fn axis_style_camel_case_alias_deserializes() {
+        let s: AxisStyleSpec = serde_json::from_str(r#"{"labelAngle":-30,"tickCount":4}"#).unwrap();
+        assert_eq!(s.label_angle, Some(-30.0));
+        assert_eq!(s.tick_count, Some(4));
+    }
+
+    #[test]
+    fn legend_style_deny_unknown_fields_rejects_typo() {
+        let bad: Result<LegendStyleSpec, _> =
+            serde_json::from_str(r##"{"symbol_sze":10}"##);
+        assert!(bad.is_err(), "unknown legend style key must fail to deserialize");
+    }
+
+    #[test]
+    fn axis_style_carries_orphan_fields() {
+        // Orphan fields deserialize and round-trip even though no renderer honors
+        // them yet (their render lands in later units).
+        let s: AxisStyleSpec = serde_json::from_str(
+            r#"{"orient":"bottom","translate":3.0,"min_extent":10.0,"max_extent":40.0,"zindex":1}"#,
+        )
+        .unwrap();
+        assert_eq!(s.orient.as_deref(), Some("bottom"));
+        assert_eq!(s.translate, Some(3.0));
+        assert_eq!(s.min_extent, Some(10.0));
+        assert_eq!(s.max_extent, Some(40.0));
+        assert_eq!(s.zindex, Some(1));
+        let back = serde_json::to_string(&s).unwrap();
+        let reparsed: AxisStyleSpec = serde_json::from_str(&back).unwrap();
+        assert_eq!(reparsed, s);
     }
 
     #[test]

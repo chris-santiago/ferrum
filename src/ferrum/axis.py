@@ -15,8 +15,8 @@ _AXIS_DEFAULTS: dict[str, Any] = {
     "tick_extra": False,
     "grid": True,
     "labels": True,
-    "label_flush": True,
-    "label_overlap": "parity",
+    "label_flush": False,
+    "label_overlap": "greedy",
     "domain": True,
 }
 
@@ -60,9 +60,12 @@ class Axis:
     label_angle : float, optional
         Tick label rotation angle.
     label_flush : bool
-        Flush labels at axis boundaries.
+        Flush the first and last tick labels against the axis ends so they do
+        not overhang the plot area.  Defaults to ``False`` (no flush), matching
+        the renderer default.
     label_overlap : str
-        Label overlap strategy ("parity", "greedy").
+        Label overlap strategy ("greedy", "parity", "rotate").  Defaults to
+        ``"greedy"`` (the renderer's graduated collision cascade).
     label_format : str, optional
         d3-format string for labels.
     label_format_type : str, optional
@@ -130,8 +133,8 @@ class Axis:
     grid_opacity: float | None = None
     labels: bool = True
     label_angle: float | None = None
-    label_flush: bool = True
-    label_overlap: str = "parity"
+    label_flush: bool = False
+    label_overlap: str = "greedy"
     label_format: str | None = None
     label_format_type: str | None = None
     label_font_size: float | None = None
