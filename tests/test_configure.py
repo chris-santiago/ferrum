@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 
 from ferrum.configure import (
@@ -128,6 +130,43 @@ class TestAxisConfig:
             "zindex",
         ):
             assert key not in d
+
+
+# ---------------------------------------------------------------------------
+# AxisConfig.x / .y deprecation (BUG 3 — vestigial flags, steer to Chart.axis)
+# ---------------------------------------------------------------------------
+
+
+class TestAxisXYDeprecation:
+    """The vestigial ``x``/``y`` flags are silent no-ops.
+
+    Setting either to ``False`` must emit a loud ``DeprecationWarning`` that
+    points the user at the working ``Chart.axis(x=False)`` / ``Chart.axis(y=False)``
+    API. The ``True`` defaults stay a silent no-op (no warning).
+    """
+
+    def test_axis_config_x_false_warns(self):
+        with pytest.warns(DeprecationWarning, match="Chart.axis"):
+            AxisConfig(x=False)
+
+    def test_axis_config_y_false_warns(self):
+        with pytest.warns(DeprecationWarning, match="Chart.axis"):
+            AxisConfig(y=False)
+
+    def test_axis_config_x_false_still_serializes(self):
+        """Non-breaking: the value is still accepted and flows into to_dict."""
+        with pytest.warns(DeprecationWarning):
+            cfg = AxisConfig(x=False, label_angle=-45)
+        d = cfg.to_dict()
+        assert d["x"] is False
+        assert d["label_angle"] == -45
+
+    def test_axis_config_defaults_do_not_warn(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            AxisConfig()
+            AxisConfig(x=True, y=True)
+            AxisConfig(label_angle=45)
 
 
 # ---------------------------------------------------------------------------

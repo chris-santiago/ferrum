@@ -72,7 +72,8 @@ class ConfigureMixin:
         Parameters
         ----------
         x, y : bool, default True
-            Which axes this config applies to.
+            Deprecated and has no effect. Use ``Chart.axis(x=False)`` /
+            ``Chart.axis(y=False)`` to show or hide an axis.
         label_angle : float, optional
             Tick label rotation in degrees.
         label_font_size : float, optional

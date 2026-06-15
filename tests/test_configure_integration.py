@@ -7,6 +7,7 @@ Written TDD-style: these should fail until the Rust pipeline consumes the field.
 from __future__ import annotations
 
 import re
+import warnings
 
 import polars as pl
 import pytest
@@ -43,7 +44,7 @@ class TestAxisConfigIntegration:
             fm.Chart(scatter_df)
             .mark_bar()
             .encode(x="x:N", y="y:Q")
-            .configure_axis(y=True, x=False, label_format="currency")
+            .configure_axis(label_format="currency")
         )
         svg = chart.to_svg()
         assert "$" in svg, "Currency format should produce $ in tick labels"
@@ -52,10 +53,7 @@ class TestAxisConfigIntegration:
         """configure_axis(label_format_raw='.0%') should produce % in tick labels."""
         df = pl.DataFrame({"x": ["a", "b", "c"], "y": [0.1, 0.5, 0.9]})
         chart = (
-            fm.Chart(df)
-            .mark_bar()
-            .encode(x="x:N", y="y:Q")
-            .configure_axis(y=True, x=False, label_format_raw=".0%")
+            fm.Chart(df).mark_bar().encode(x="x:N", y="y:Q").configure_axis(label_format_raw=".0%")
         )
         svg = chart.to_svg()
         assert "%" in svg, "Raw format .0% should produce % in tick labels"
@@ -181,6 +179,40 @@ class TestAxisConfigIntegration:
         )
         assert 'opacity="0.2"' in svg_per_channel
         assert 'opacity="0.8"' not in svg_with_chart_level
+
+
+class TestConfigureAxisXYDeprecation:
+    """configure_axis(x=False)/(y=False) are vestigial no-ops (BUG 3).
+
+    They must warn and steer the user to the working ``Chart.axis`` API, while
+    still returning a renderable chart (non-breaking).
+    """
+
+    def test_configure_axis_y_false_warns(self, scatter_df: pl.DataFrame) -> None:
+        chart = fm.Chart(scatter_df).mark_point().encode(x="x", y="y")
+        with pytest.warns(DeprecationWarning, match="Chart.axis"):
+            chart.configure_axis(y=False)
+
+    def test_configure_axis_x_false_warns(self, scatter_df: pl.DataFrame) -> None:
+        chart = fm.Chart(scatter_df).mark_point().encode(x="x", y="y")
+        with pytest.warns(DeprecationWarning, match="Chart.axis"):
+            chart.configure_axis(x=False)
+
+    def test_configure_axis_x_false_still_renders(self, scatter_df: pl.DataFrame) -> None:
+        """Non-breaking: deprecated flag is accepted and the chart still renders."""
+        chart = fm.Chart(scatter_df).mark_point().encode(x="x", y="y")
+        with pytest.warns(DeprecationWarning):
+            configured = chart.configure_axis(x=False, label_angle=-45)
+        svg = configured.to_svg()
+        assert "<svg" in svg
+
+    def test_configure_axis_grid_does_not_warn(self, scatter_df: pl.DataFrame) -> None:
+        chart = fm.Chart(scatter_df).mark_point().encode(x="x", y="y")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            chart.configure_axis(grid=True)
+            chart.configure_axis()
+            chart.configure_axis(label_angle=-45)
 
 
 # ---------------------------------------------------------------------------
