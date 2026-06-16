@@ -29,19 +29,35 @@ jobs:
           path: dist/*.tar.gz
 
   build-wheels:
-    runs-on: ${{ matrix.os }}
+    name: wheel ${{ matrix.platform }}-${{ matrix.target }}-${{ matrix.manylinux }}
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        include:
+          # --- Linux glibc (manylinux2014 = glibc 2.17: CentOS 7, Amazon Linux 2,
+          #     Ubuntu 18.04+, Debian 10+ — matches polars' broad reach) ---
+          - { platform: linux,   runner: ubuntu-latest,  target: x86_64,  manylinux: '2014' }
+          - { platform: linux,   runner: ubuntu-latest,  target: aarch64, manylinux: '2014' }
+          # --- Linux musl (Alpine 3.13+) ---
+          - { platform: musllinux, runner: ubuntu-latest, target: x86_64,  manylinux: musllinux_1_2 }
+          - { platform: musllinux, runner: ubuntu-latest, target: aarch64, manylinux: musllinux_1_2 }
+          # --- macOS (Intel + Apple Silicon) ---
+          - { platform: macos,   runner: macos-13,       target: x86_64,  manylinux: auto }
+          - { platform: macos,   runner: macos-14,       target: aarch64, manylinux: auto }
+          # --- Windows ---
+          - { platform: windows, runner: windows-latest, target: x64,     manylinux: auto }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: PyO3/maturin-action@v1
         with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
           args: --release --out dist
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.os }}
+          name: wheel-${{ matrix.platform }}-${{ matrix.target }}-${{ matrix.manylinux }}
           path: dist/*.whl
 
   publish:
@@ -60,3 +76,8 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           verbose: true
+          # Allow backfilling new platform wheels onto an already-published
+          # version: existing files (e.g. the macOS-arm64 / win_amd64 wheels
+          # from a prior run) are skipped instead of failing the upload.
+          # No-op on a fresh release (nothing exists yet).
+          skip-existing: true
