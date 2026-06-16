@@ -310,3 +310,46 @@ After shipping v0.15.0 (the merged flexibility campaign), a 7-agent audit ran on
 - **FA-19 — fix landed (`7ebfff2`, MSAA), awaiting final browser confirmation.** Root cause was NOT per-segment geometry (the axis line is one `SceneNode::Line` → one lyon stroke) but the mesh pipeline rendering with no MSAA (`sample_count=1`): abutting butt-cap quads (axis line vs tick marks, adjacent facet axis lines) left a 1px hairline gap/step with no edge AA. Interactive-only (static SVG antialiases). Predates FA-16 (confirmed byte-identical line handling); FA-16 could only shift which pixels show it. Fix = 4× MSAA across the whole main render pass (multisampled color target resolving to the surface view; all six pipelines share the sample count; rebuilt on resize), with a silent byte-identical 1× fallback when the backend lacks 4×. Same spec as FA-18.
 - **FA-20 — RESOLVED (`1d76567`, browser-validated 2026-06-03).** Surfaced while validating FA-18: box-zooming the overview made the detail vanish. Root cause = the D3-zoom path (wheel/drag-pan/box-zoom) was global and hardcoded to panel 0 (`set_transform`→`set_absolute(0,…)`); pre-existing, made visible by FA-18's per-panel transforms. Fix (focus+context semantics) = `set_transform` gains a `panel_id`; the JS resolves the focus panel from the `domain`-role binding and targets it for wheel/pan/box-zoom, and a box-zoom drawn on a context/overview panel routes through the rescale path (rescales the detail). Charts with no domain binding keep `focusPanel=0` — single-panel + generic multi-panel byte-identical. Spec: `design-docs/superpowers/specs/2026-06-03-focus-context-zoom-semantics-design.md`. (Generic-multi-panel independent per-panel zoom remains out of scope / deferred.)
 - FA-11..FA-14 remain deferred (drift-prevention, no active bug).
+
+---
+
+## 2026-06-16 — Open-item triage → GitHub issues
+
+Every still-open item in this doc (excluding the Phase 12 frontier: extension points + full
+palette library) was re-verified against current code by 7 parallel read-only audits, then
+filed as a GitHub issue. **Three were found already resolved and were NOT filed** — corrections
+below.
+
+**Found RESOLVED (no issue; this doc was stale):**
+- **FA-14** — StringView/`Utf8View` (and `LargeUtf8`) are now explicitly converted to `Utf8` in `render/prepare.rs` `normalize_string_views` before the `_ => {}` catch-all; no silent skip.
+- **D6-1** — superseded by **FA-18** (`f44b72d`): per-panel transform slots (`MarkMeshPanel.panel_id`) bind each panel's own affine and every panel's affine is uploaded per frame, so multi-panel simultaneous reactive rescale no longer shears siblings.
+- **`fm.Gradient` custom continuous palettes** (SYNTHESIS §C-D) — already public: `fm.Gradient(stops)` is exported in `ferrum.__all__` (`src/ferrum/schemes.py` → Rust `continuous.rs`). Only a usage doc is missing.
+
+**Filed as issues (ID → #):**
+
+| Issue | ID | Kind |
+|---|---|---|
+| [#2](https://github.com/chris-santiago/ferrum/issues/2) | B6 | enhancement (deny_unknown_fields on transform Specs) |
+| [#3](https://github.com/chris-santiago/ferrum/issues/3) | FA-10 | enhancement (scale sentinel+flag → Option) |
+| [#4](https://github.com/chris-santiago/ferrum/issues/4) | B7 | enhancement (legend label_color coherence) |
+| [#5](https://github.com/chris-santiago/ferrum/issues/5) | FA-11 | **bug** (fill_opacity unread on mark_line) |
+| [#6](https://github.com/chris-santiago/ferrum/issues/6) | D7 | **bug** (polar bar tooltip/href misalign) |
+| [#7](https://github.com/chris-santiago/ferrum/issues/7) | D2 | **bug** (faceted Bin/Violin extent drift) |
+| [#8](https://github.com/chris-santiago/ferrum/issues/8) | D10 | **bug** (Joint/ClusterMap title → inner panel) |
+| [#9](https://github.com/chris-santiago/ferrum/issues/9) | FA-15 | **bug** (conditional-only color → no legend) |
+| [#10](https://github.com/chris-santiago/ferrum/issues/10) | R6 | bug (interactive label z-order, cosmetic) |
+| [#11](https://github.com/chris-santiago/ferrum/issues/11) | FA-13 | enhancement (color/detail grouping dup + ribbon int risk) |
+| [#12](https://github.com/chris-santiago/ferrum/issues/12) | FA-12 | enhancement (group-partition+stack dup) |
+| [#13](https://github.com/chris-santiago/ferrum/issues/13) | FA-8 | enhancement (grouped-contour level_id namespacing) |
+| [#14](https://github.com/chris-santiago/ferrum/issues/14) | B5-followup | enhancement (chart-level label_flush) |
+| [#15](https://github.com/chris-santiago/ferrum/issues/15) | Task 37 | enhancement (per-cell quantitative color contour/hex) |
+| [#16](https://github.com/chris-santiago/ferrum/issues/16) | C4-residual | enhancement (figure-level deduped legend) |
+| [#17](https://github.com/chris-santiago/ferrum/issues/17) | #20 | enhancement (share_x/y dead-API cleanup) |
+| [#18](https://github.com/chris-santiago/ferrum/issues/18) | R7 | documentation (positional discretizing-scale comment) |
+| [#19](https://github.com/chris-santiago/ferrum/issues/19) | FA-19 | question (browser-verify MSAA fix; code landed) |
+| [#20](https://github.com/chris-santiago/ferrum/issues/20) | feat | enhancement (gridded contourf/pcolormesh/quiver) |
+| [#21](https://github.com/chris-santiago/ferrum/issues/21) | feat | enhancement (Sankey/alluvial/trail) |
+| [#22](https://github.com/chris-santiago/ferrum/issues/22) | feat | enhancement (treemap/icicle) |
+| [#23](https://github.com/chris-santiago/ferrum/issues/23) | feat | enhancement (public mark_polygon) |
+
+Note on verification upgrades: **FA-11** was reclassified from drift-prevention to an active **bug** (`fill_opacity` is silently unread on `mark_line`). **B5-followup** is a Python-side gap only (Rust `AxisStyleSpec` already carries `label_flush`).
