@@ -6,6 +6,18 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.16.2
+
+*2026-06-15*
+
+A focused patch fixing figure-level title/caption positioning on concatenated
+charts and single-chart captions ([#1](https://github.com/chris-santiago/ferrum/issues/1)).
+No new public API.
+
+### Fixed
+
+- Figure-level **title, subtitle, and caption** on concatenated charts (`a | b`, `a & b`, and `concat(...)`) and single-chart captions no longer render flush against the left edge. They now default to a 16 px left inset matching the single-chart title, and [`configure_padding(left=…, right=…)`][ferrum.Chart.configure_padding] and [`configure_title(anchor="start"|"middle"|"end")`][ferrum.Chart.configure_title] reposition them (the anchor governs title, subtitle, and caption together). Previously the chrome was pinned to `x=0` and both knobs were silently ignored at the figure level.
+
 ## 0.16.1
 
 *2026-06-15*
