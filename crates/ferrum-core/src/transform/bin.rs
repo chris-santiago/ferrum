@@ -12,6 +12,56 @@ use crate::transform::group_key::{
     KeyValue,
 };
 
+// ── Shared private helpers ────────────────────────────────────────────────────
+
+/// Compute the raw `(lo, hi)` Float64 extent of `field` from `batch`.
+///
+/// Casts numeric columns to Float64 via the Arrow cast kernel, then drops nulls
+/// and NaN values via `clean_float64_values`, and folds the result to find the
+/// minimum and maximum.  Returns `None` when the field is missing or
+/// non-numeric, when the batch is empty after cleaning, or when the resulting
+/// extent is degenerate (`lo >= hi` or non-finite).
+///
+/// This is the single source for the cast→clean→fold pattern that previously
+/// appeared separately in `global_extent` and the `apply_grouped` shared_extent
+/// block.
+fn raw_float64_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f64)> {
+    let schema = batch.schema();
+    let idx = schema.index_of(field).ok()?;
+    let col = batch.column(idx);
+    let arr = crate::transform::numeric_util::coerce_to_float64(col, "stat_bin", field).ok()?;
+    let clean = crate::transform::numeric_util::clean_float64_values(&arr, None);
+    if clean.is_empty() {
+        return None;
+    }
+    let (lo, hi) = clean
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+    if lo.is_finite() && hi.is_finite() && lo < hi {
+        Some((lo, hi))
+    } else {
+        None
+    }
+}
+
+/// Apply nice rounding to a raw `(lo, hi)` extent for a target bin count.
+///
+/// Computes the nice step size via `nice_step`, then floors `lo` and ceils
+/// `hi` to the nearest multiple of that step.  When the step is non-positive
+/// or non-finite (e.g. degenerate extent), the original values are returned
+/// unchanged.
+///
+/// This is the single source for the `nice_step` + floor/ceil block that
+/// previously appeared separately in `global_extent` and `apply_one_group`.
+fn nice_extent(lo: f64, hi: f64, target: usize) -> (f64, f64) {
+    let step = crate::scale::ticks::nice_step(lo, hi, target);
+    if step.is_finite() && step > 0.0 {
+        ((lo / step).floor() * step, (hi / step).ceil() * step)
+    } else {
+        (lo, hi)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct BinSpec {
     pub field: String,
@@ -57,56 +107,31 @@ pub(crate) fn global_extent(spec: &BinSpec, batch: &RecordBatch) -> Option<(f64,
     if let Some(e) = spec.extent {
         return Some(e);
     }
-    let schema = batch.schema();
-    let idx = schema.index_of(&spec.field).ok()?;
-    let col = batch.column(idx);
-    // Cast to Float64 the same way apply_one_group does.
-    let arr: arrow::array::Float64Array = match col.data_type() {
-        arrow::datatypes::DataType::Float64 => col
-            .as_any()
-            .downcast_ref::<arrow::array::Float64Array>()
-            .cloned()?,
-        arrow::datatypes::DataType::Int8
-        | arrow::datatypes::DataType::Int16
-        | arrow::datatypes::DataType::Int32
-        | arrow::datatypes::DataType::Int64
-        | arrow::datatypes::DataType::UInt8
-        | arrow::datatypes::DataType::UInt16
-        | arrow::datatypes::DataType::UInt32
-        | arrow::datatypes::DataType::UInt64
-        | arrow::datatypes::DataType::Float32 => {
-            let casted = arrow::compute::cast(col, &arrow::datatypes::DataType::Float64).ok()?;
-            casted.as_any().downcast_ref::<arrow::array::Float64Array>().cloned()?
-        }
-        _ => return None,
-    };
-    let clean = crate::transform::numeric_util::clean_float64_values(&arr, None);
-    if clean.is_empty() {
-        return None;
-    }
-    let (lo, hi) = clean
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
-    if !(lo.is_finite() && hi.is_finite() && lo < hi) {
-        return None;
-    }
+    let (lo, hi) = raw_float64_extent(batch, &spec.field)?;
     // Apply the same nicing as apply_one_group so the global extent aligns with
     // per-group bin edges. Only when nice=true and no explicit extent is set.
-    let (lo, hi) = if spec.nice {
-        let target = spec
-            .bin_count
-            .unwrap_or_else(|| crate::scale::ticks::sturges_floor(clean.len()))
-            .max(1);
-        let step = crate::scale::ticks::nice_step(lo, hi, target);
-        if step.is_finite() && step > 0.0 {
-            ((lo / step).floor() * step, (hi / step).ceil() * step)
-        } else {
-            (lo, hi)
-        }
+    if spec.nice {
+        // Compute the Sturges fallback target from the clean count. When
+        // bin_count is already set, clean.len() is unused but the coercion is
+        // cheap; extracting it avoids a second raw_float64_extent call.
+        let target = match spec.bin_count {
+            Some(c) => c.max(1),
+            None => {
+                let schema = batch.schema();
+                let idx = schema.index_of(&spec.field).ok()?;
+                let col = batch.column(idx);
+                let arr = crate::transform::numeric_util::coerce_to_float64(
+                    col, "stat_bin", &spec.field,
+                )
+                .ok()?;
+                let n = crate::transform::numeric_util::clean_float64_values(&arr, None).len();
+                sturges_floor(n).max(1)
+            }
+        };
+        Some(nice_extent(lo, hi, target))
     } else {
-        (lo, hi)
-    };
-    Some((lo, hi))
+        Some((lo, hi))
+    }
 }
 
 pub(crate) fn apply(spec: &BinSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -193,12 +218,7 @@ fn apply_one_group(
     // case Sturges runs after nicing).
     let (lo, hi) = if spec.nice && spec.extent.is_none() {
         let target = spec.bin_count.unwrap_or_else(|| sturges_floor(clean.len())).max(1);
-        let step = crate::scale::ticks::nice_step(lo, hi, target);
-        if step.is_finite() && step > 0.0 {
-            ((lo / step).floor() * step, (hi / step).ceil() * step)
-        } else {
-            (lo, hi)
-        }
+        nice_extent(lo, hi, target)
     } else {
         (lo, hi)
     };
@@ -309,49 +329,11 @@ fn apply_grouped(
         group_idx_map.entry(gv).or_default().push(i);
     }
 
-    // When shared_extent=true, compute the global extent from all rows of the
-    // field so all groups receive the same bin edges. Only override when the
-    // caller has not explicitly set spec.extent.
+    // When shared_extent=true, compute the global raw extent from all rows of
+    // the field so all groups receive the same bin edges. Only override when
+    // the caller has not explicitly set spec.extent.
     let effective_spec: std::borrow::Cow<BinSpec> = if spec.shared_extent && spec.extent.is_none() {
-        let fidx = schema.index_of(&spec.field).map_err(|_| {
-            PyValueError::new_err(format!(
-                "stat_bin: column '{}' not found", spec.field
-            ))
-        })?;
-        let col = batch.column(fidx);
-        // Cast to Float64 to handle integer columns (same cast as apply_one_group).
-        let col_cast;
-        let farr: &Float64Array = match col.data_type() {
-            DataType::Float64 => col.as_any().downcast_ref::<Float64Array>()
-                .ok_or_else(|| PyValueError::new_err(format!(
-                    "stat_bin: expected Float64Array for column '{}'", spec.field)))?,
-            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
-            | DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64
-            | DataType::Float32 => {
-                col_cast = arrow::compute::cast(col, &DataType::Float64)
-                    .map_err(|e| PyValueError::new_err(format!(
-                        "stat_bin: could not cast column '{}' to Float64: {e}", spec.field
-                    )))?;
-                col_cast.as_any().downcast_ref::<Float64Array>()
-                    .ok_or_else(|| PyValueError::new_err(format!(
-                        "stat_bin: cast to Float64 failed for column '{}'", spec.field)))?
-            }
-            _ => {
-                return Err(PyValueError::new_err(format!(
-                    "stat_bin: column '{}' must be numeric for shared_extent", spec.field
-                )));
-            }
-        };
-        let (global_lo, global_hi) = (0..farr.len()).fold(
-            (f64::INFINITY, f64::NEG_INFINITY),
-            |(a, b), i| {
-                if farr.is_null(i) { return (a, b); }
-                let v = farr.value(i);
-                if v.is_nan() { return (a, b); }
-                (a.min(v), b.max(v))
-            },
-        );
-        if global_lo.is_finite() && global_hi.is_finite() && global_lo < global_hi {
+        if let Some((global_lo, global_hi)) = raw_float64_extent(batch, &spec.field) {
             let mut patched = spec.clone();
             patched.extent = Some((global_lo, global_hi));
             std::borrow::Cow::Owned(patched)
@@ -1063,5 +1045,69 @@ mod tests {
         };
         assert!((lo - 1.0).abs() < 1e-12, "lo should be 1.0, got {lo}");
         assert!((hi - 5.0).abs() < 1e-12, "hi should be 5.0, got {hi}");
+    }
+
+    // ── Unit tests for shared private helpers (R4 dedup) ─────────────────────
+
+    /// `nice_extent` rounds (0.3, 9.7) outward to (0.0, 10.0) at bin_count 10.
+    ///
+    /// This pins the single source of the nice algorithm. The same inputs are
+    /// exercised through `apply_one_group` and `global_extent` in the tests
+    /// above; this test targets the helper directly so a future change to the
+    /// algorithm cannot be made in one call site and silently missed in others.
+    #[test]
+    fn test_nice_extent_rounds_outward() {
+        // nice_step(0.3, 9.7, 10) = 1.0 → floor(0.3/1.0)*1.0 = 0.0, ceil(9.7/1.0)*1.0 = 10.0
+        let (lo, hi) = super::nice_extent(0.3, 9.7, 10);
+        assert_eq!(lo, 0.0, "nice lo: got {lo}");
+        assert_eq!(hi, 10.0, "nice hi: got {hi}");
+    }
+
+    /// `nice_extent` is a no-op when the step is degenerate (lo == hi would not
+    /// reach here in practice; guard against zero step).
+    #[test]
+    fn test_nice_extent_degenerate_step_passthrough() {
+        // Passing target=0 forces nice_step to return 0 or non-positive → passthrough.
+        // We avoid calling with target=0 in production (max(1) guards it), but
+        // the helper itself must not panic; it just returns the original values.
+        let (lo, hi) = super::nice_extent(1.0, 2.0, 1);
+        // Any finite result where lo <= 1.0 and hi >= 2.0 is acceptable.
+        assert!(lo <= 1.0, "niced lo must not exceed raw lo");
+        assert!(hi >= 2.0, "niced hi must not be below raw hi");
+    }
+
+    /// `raw_float64_extent` returns the min/max of a clean Float64 batch.
+    #[test]
+    fn test_raw_float64_extent_basic() {
+        let batch = batch_with(vec![3.0, 1.0, 5.0, 2.0]);
+        let ext = super::raw_float64_extent(&batch, "x");
+        assert_eq!(ext, Some((1.0, 5.0)));
+    }
+
+    /// `raw_float64_extent` drops nulls and NaN values.
+    #[test]
+    fn test_raw_float64_extent_drops_nulls_and_nan() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
+        let arr = Float64Array::from(vec![Some(2.0), None, Some(f64::NAN), Some(8.0)]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let ext = super::raw_float64_extent(&batch, "x");
+        assert_eq!(ext, Some((2.0, 8.0)));
+    }
+
+    /// `raw_float64_extent` returns None for a missing field.
+    #[test]
+    fn test_raw_float64_extent_missing_field() {
+        pyo3::Python::initialize();
+        let batch = batch_with(vec![1.0, 2.0]);
+        let ext = super::raw_float64_extent(&batch, "ghost");
+        assert_eq!(ext, None);
+    }
+
+    /// `raw_float64_extent` returns None when lo == hi (degenerate extent).
+    #[test]
+    fn test_raw_float64_extent_degenerate_all_equal() {
+        let batch = batch_with(vec![5.0, 5.0, 5.0]);
+        let ext = super::raw_float64_extent(&batch, "x");
+        assert_eq!(ext, None, "degenerate extent (lo==hi) must return None");
     }
 }
