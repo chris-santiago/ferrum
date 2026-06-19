@@ -391,51 +391,18 @@ pub type MetadataOutput = (
 );
 
 impl MetadataColumns {
-    /// Build tooltip/href/description vectors for **all** rows (in original row
-    /// order). Suitable for marks where every row maps 1-to-1 to a node and no
-    /// rows are skipped.
-    pub fn build_metadata(
-        &self,
-        _ctx: &DrawCtx,
-    ) -> MetadataOutput {
-        let tooltips = if self.tooltip_cols.is_empty() {
-            None
-        } else {
-            // Use the first col's length as the row count; all cols should have the same length.
-            let n = self.tooltip_cols.first().map(|(_, c)| c.len()).unwrap_or(0);
-            Some((0..n).map(|i| {
-                FsTooltipContent {
-                    fields: self.tooltip_cols.iter()
-                        .map(|(name, col)| FsTooltipField {
-                            name: name.clone(),
-                            value: col.get(i).and_then(|v| v.clone()).unwrap_or_default(),
-                        })
-                        .collect(),
-                }
-            }).collect())
-        };
-        let hrefs = self.href.clone();
-        let descriptions = self.description.clone();
-        (tooltips, hrefs, descriptions)
-    }
-
-    /// Build tooltip/href/description vectors **aligned to a subset of kept rows**.
+    /// Build tooltip/href/description vectors **aligned to the emitted nodes**.
     ///
-    /// When a mark renderer skips some rows (e.g. null category or degenerate
-    /// zero-span wedge via `continue`), the emitted `nodes` are a strict subset
-    /// of the original batch rows. Calling `build_metadata` in that case would
-    /// return per-row vectors of length `n_rows`; the SVG walker indexes these
-    /// by node-enumeration index, so node `j` would receive row `j`'s metadata
-    /// instead of its true source row — producing wrong tooltip/href/description
-    /// on any mark with skipped rows.
+    /// `data_indices` is the source-row index for each emitted node, in node
+    /// order.  This method gathers exactly those rows from each metadata column,
+    /// producing output vectors of the same length as `data_indices`.  The result
+    /// is node-order aligned: node `j` receives `data_indices[j]`'s metadata.
     ///
-    /// This method takes the `data_indices` of the kept nodes (in node order)
-    /// and gathers exactly those rows from each metadata column, producing output
-    /// vectors of the same length as `data_indices`. The result is always
-    /// correctly aligned: node `j` receives `data_indices[j]`'s metadata.
-    ///
-    /// Callers that never skip rows should use `build_metadata` instead (zero
-    /// allocation overhead, same semantics).
+    /// This is the single metadata entry point for all mark builders.
+    /// Builders that emit every row in order pass `0..n_rows`; builders that
+    /// skip rows, emit multiple nodes per row, or group rows pass a custom
+    /// index vector from their [`MarkNodes`](crate::render::mark_nodes::MarkNodes)
+    /// accumulator.
     pub fn build_metadata_for_indices(
         &self,
         data_indices: &[usize],
