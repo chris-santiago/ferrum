@@ -2127,10 +2127,11 @@ def _merge_child_scenes(
             merged["height"] = y_offset - spacing
             merged["width"] = max(merged["width"], w)
 
+    header_h = 0.0
     if figure_chrome is not None:
-        _inject_figure_chrome(merged, **figure_chrome)
+        header_h = _inject_figure_chrome(merged, **figure_chrome)
 
-    merged_packed = _merge_packed_data(child_packed, child_offsets)
+    merged_packed = _merge_packed_data(child_packed, child_offsets, y_offset=header_h)
     return _json.dumps(merged), merged_packed
 
 
@@ -2208,11 +2209,12 @@ def _merge_child_scenes_grid(
 
     merged["height"] = y_offset - spacing
 
+    header_h = 0.0
     if figure_chrome is not None:
-        _inject_figure_chrome(merged, **figure_chrome)
+        header_h = _inject_figure_chrome(merged, **figure_chrome)
 
     all_packed = [p for _, p in rendered]
-    merged_packed = _merge_packed_data(all_packed, child_offsets)
+    merged_packed = _merge_packed_data(all_packed, child_offsets, y_offset=header_h)
     return _json.dumps(merged), merged_packed
 
 
@@ -2279,11 +2281,12 @@ def _merge_child_scenes_sparse_grid(
     merged["width"] = n_cols * cell_w + (n_cols - 1) * spacing
     merged["height"] = n_rows * cell_h + (n_rows - 1) * spacing
 
+    header_h = 0.0
     if figure_chrome is not None:
-        _inject_figure_chrome(merged, **figure_chrome)
+        header_h = _inject_figure_chrome(merged, **figure_chrome)
 
     all_packed = [p for _, _, _, p in rendered]
-    merged_packed = _merge_packed_data(all_packed, child_offsets)
+    merged_packed = _merge_packed_data(all_packed, child_offsets, y_offset=header_h)
     return _json.dumps(merged), merged_packed
 
 
@@ -2367,11 +2370,12 @@ def _merge_child_scenes_nonuniform_grid(
     merged["width"] = total_width
     merged["height"] = total_height
 
+    header_h = 0.0
     if figure_chrome is not None:
-        _inject_figure_chrome(merged, **figure_chrome)
+        header_h = _inject_figure_chrome(merged, **figure_chrome)
 
     all_packed = [p for _, _, _, p in rendered]
-    merged_packed = _merge_packed_data(all_packed, child_offsets)
+    merged_packed = _merge_packed_data(all_packed, child_offsets, y_offset=header_h)
     return _json.dumps(merged), merged_packed
 
 
@@ -2447,7 +2451,7 @@ def _inject_figure_chrome(
     subtitle: Optional[str],
     caption: Optional[str],
     chrome: dict,
-) -> None:  # called via **figure_chrome (_FigureChrome unpacked)
+) -> float:  # called via **figure_chrome (_FigureChrome unpacked)
     """Inject a figure-level title / subtitle / caption band into *merged*.
 
     This is the **single** shared implementation of the interactive on-canvas
@@ -2483,9 +2487,20 @@ def _inject_figure_chrome(
     chrome : dict
         Positioning kwargs (``left_inset`` / ``right_inset`` / ``anchor``)
         resolved from the composite's configure layers, matching the SVG path.
+
+    Returns
+    -------
+    float
+        The header band height (``header_h``) applied to shift every panel's
+        scene nodes down.  Returned so the caller can apply the **same**
+        downward shift to the panels' packed GPU-instance bytes (which live in
+        a separate binary sidecar, not in *merged*), keeping packed marks
+        aligned with the shifted plot_area / axes.  ``0.0`` when no chrome text
+        is present or the band has no header (caption-only), in which case no
+        offset is applied anywhere.
     """
     if title is None and subtitle is None and caption is None:
-        return
+        return 0.0
 
     from ferrum._core import figure_title_nodes
 
@@ -2529,6 +2544,10 @@ def _inject_figure_chrome(
     # Grow the merged canvas to fit the header + footer bands (width unchanged).
     merged["height"] = panel_h + header_h + footer_h
 
+    # Report the header shift so the caller can apply the identical downward
+    # offset to the packed GPU-instance bytes (see _merge_packed_data).
+    return float(header_h)
+
 
 def _render_single_with_figure_chrome(chart, figure_chrome: "_FigureChrome") -> tuple[str, bytes]:
     """Render one chart's scene and wrap it in the figure-chrome band.
@@ -2550,7 +2569,12 @@ def _render_single_with_figure_chrome(chart, figure_chrome: "_FigureChrome") -> 
         return scene_json, packed
 
     scene = _json.loads(scene_json)
-    _inject_figure_chrome(scene, **figure_chrome)
+    header_h = _inject_figure_chrome(scene, **figure_chrome)
+    # Shift the packed GPU instances down by the same header band so they stay
+    # aligned with the scene nodes _inject_figure_chrome just shifted.  No
+    # panel-id remap here (single child), so the offset stays 0.
+    if header_h:
+        packed = _merge_packed_data([packed], [0], y_offset=header_h)
     return _json.dumps(scene), packed
 
 
@@ -2654,11 +2678,51 @@ def _offset_node(node: dict, dx: float, dy: float) -> None:
             _offset_node(child, dx, dy)
 
 
-def _merge_packed_data(packed_list: list[bytes], panel_id_offsets: list[int]) -> bytes:
+# Packed GPU-instance layout (mirrors ferrum-core pack_instances.rs and the
+# CircleInstance / RectInstance structs in ferrum-wasm scene_load.rs).
+#   kind 0 (CircleInstance): 16 f32 = 64-byte stride; cy is f32[1] (byte 4).
+#   kind 1 (RectInstance):   18 f32 = 72-byte stride;  y is f32[1] (byte 4).
+# The Y field is the second f32 in both records, so its byte offset within an
+# instance is always 4.  Only the Y value is shifted under the figure-title
+# band — X, radius/size, color and style fields are untouched.
+_PACKED_INSTANCE_SIZES = {0: 64, 1: 72}  # kind -> sizeof(Instance)
+_PACKED_Y_FIELD_OFFSET = 4  # byte offset of the Y f32 within each instance
+
+
+def _offset_packed_batch_y(
+    buf: bytearray, instance_start: int, kind: int, count: int, dy: float
+) -> None:
+    """Add *dy* to the Y f32 of every instance in one packed batch.
+
+    *buf* is the assembled output buffer; *instance_start* is the byte index in
+    *buf* where this batch's instance data begins (just past its 20-byte
+    header).  The Y field is the second f32 of each ``CircleInstance`` /
+    ``RectInstance`` record (byte offset ``_PACKED_Y_FIELD_OFFSET`` within the
+    instance), and only that field is mutated.
+    """
+    import struct
+
+    stride = _PACKED_INSTANCE_SIZES[kind]
+    for i in range(count):
+        y_pos = instance_start + i * stride + _PACKED_Y_FIELD_OFFSET
+        (y,) = struct.unpack_from("<f", buf, y_pos)
+        struct.pack_into("<f", buf, y_pos, y + dy)
+
+
+def _merge_packed_data(
+    packed_list: list[bytes],
+    panel_id_offsets: list[int],
+    *,
+    y_offset: float = 0.0,
+) -> bytes:
     """Merge packed binary data from multiple child scenes.
 
     Rewrites the ``panel_idx`` field in each batch's 20-byte header to
     account for the panel-id offset of each child in the composed layout.
+    When *y_offset* is non-zero, also shifts the Y coordinate of every packed
+    GPU instance down by that many pixels, so packed (>1000-mark) circle/rect
+    batches stay aligned with the scene-graph nodes that
+    :func:`_inject_figure_chrome` shifts down by the figure-title header band.
 
     Binary format per batch::
 
@@ -2682,10 +2746,14 @@ def _merge_packed_data(packed_list: list[bytes], panel_id_offsets: list[int]) ->
     panel_id_offsets : list[int]
         Cumulative panel-id offset for each child (same length as
         *packed_list*).
+    y_offset : float, default 0.0
+        Pixels to add to every packed instance's Y coordinate.  This is the
+        ``header_h`` returned by :func:`_inject_figure_chrome` for a titled
+        composite; ``0.0`` for a non-titled composite leaves the instance
+        bytes byte-identical to the unmerged children (only ``panel_idx`` in
+        the header changes, exactly as before).
     """
     import struct
-
-    _INSTANCE_SIZES = {0: 64, 1: 72}  # kind -> sizeof(Instance)
 
     result = bytearray()
     for packed, offset in zip(packed_list, panel_id_offsets):
@@ -2694,13 +2762,13 @@ def _merge_packed_data(packed_list: list[bytes], panel_id_offsets: list[int]) ->
         pos = 0
         while pos + 20 <= len(packed):
             panel_idx, batch_idx, kind, count, flags = struct.unpack_from("<5I", packed, pos)
-            if kind not in _INSTANCE_SIZES:
+            if kind not in _PACKED_INSTANCE_SIZES:
                 break  # unknown kind — stop parsing this child
 
             # Rewrite panel_idx with the composition offset
             header = struct.pack("<5I", panel_idx + offset, batch_idx, kind, count, flags)
 
-            batch_end = pos + 20 + count * _INSTANCE_SIZES[kind]
+            batch_end = pos + 20 + count * _PACKED_INSTANCE_SIZES[kind]
 
             if flags & 0x2:
                 batch_end += count * 4  # u32 data indices
@@ -2713,8 +2781,15 @@ def _merge_packed_data(packed_list: list[bytes], panel_id_offsets: list[int]) ->
             if batch_end > len(packed):
                 break  # truncated data — stop parsing this child
 
+            # Append the rewritten header + the batch body (instances + any
+            # trailing data_indices / tooltips), then shift only the Y field of
+            # each instance in-place when a figure-title band was injected.
+            instance_start = len(result) + 20
             result.extend(header)
             result.extend(packed[pos + 20 : batch_end])
+            if y_offset:
+                _offset_packed_batch_y(result, instance_start, kind, count, y_offset)
+
             pos = batch_end
 
     return bytes(result)
