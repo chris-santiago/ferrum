@@ -519,6 +519,25 @@ class _CompositeBase(_ChartLike):
 
         return _extract_title_text(self._figure_title)
 
+    def _figure_chrome_kwargs(self) -> dict:
+        """Bundle figure chrome for the interactive scene-merge functions.
+
+        Returns the ``figure_chrome`` payload consumed by every
+        ``_merge_child_scenes*`` helper: the title / subtitle / caption text
+        plus the positioning ``chrome`` sub-dict resolved from this
+        composite's configure layers (the same kwargs the SVG path passes to
+        ``compose_svg_*``).  This keeps the interactive on-canvas band in step
+        with the SVG band from a single source of chrome values.
+        """
+        return {
+            "title": self._figure_title,
+            "subtitle": self._figure_subtitle,
+            "caption": self._figure_caption,
+            "chrome": chrome_kwargs(
+                merge_configure_layers(getattr(self, "_configure_layers", None))
+            ),
+        }
+
     def __copy__(self):
         """Shallow copy that duplicates mutable list attributes."""
         new = object.__new__(type(self))
@@ -671,7 +690,12 @@ class HConcatChart(_CompositeBase):
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) by merging child scenes horizontally."""
         charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
-        return _merge_child_scenes(charts, self.spacing, layout="horizontal")
+        return _merge_child_scenes(
+            charts,
+            self.spacing,
+            layout="horizontal",
+            figure_chrome=self._figure_chrome_kwargs(),
+        )
 
     def to_svg(self) -> str:
         """Render the horizontally concatenated charts to an SVG string.
@@ -754,7 +778,12 @@ class VConcatChart(_CompositeBase):
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) by merging child scenes vertically."""
         charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
-        return _merge_child_scenes(charts, self.spacing, layout="vertical")
+        return _merge_child_scenes(
+            charts,
+            self.spacing,
+            layout="vertical",
+            figure_chrome=self._figure_chrome_kwargs(),
+        )
 
     def to_svg(self) -> str:
         """Render the vertically concatenated charts to an SVG string.
@@ -913,8 +942,6 @@ class JointChart(_CompositeBase):
           - center        at (row=1, col=0)
           - right marginal at (row=1, col=1)
         """
-        from ferrum._interactive import _render_scene
-
         center = self._inject_parent_config(self.center)
         top = self._inject_parent_config(self.top) if self.top is not None else None
         right = self._inject_parent_config(self.right) if self.right is not None else None
@@ -922,9 +949,9 @@ class JointChart(_CompositeBase):
         has_top = top is not None
         has_right = right is not None
 
-        # No marginals: render center directly.
+        # No marginals: render center directly (still wrap the figure band).
         if not has_top and not has_right:
-            return _render_scene(center)
+            return _render_single_with_figure_chrome(center, self._figure_chrome_kwargs())
 
         # Build grid cells matching the SVG path layout.
         cells: list[tuple[int, int, object]] = []
@@ -938,7 +965,11 @@ class JointChart(_CompositeBase):
             # Horizontal stack: center at (0,0), right at (0,1).
             cells = [(0, 0, center), (0, 1, right)]
 
-        return _merge_child_scenes_nonuniform_grid(cells, self.spacing)
+        return _merge_child_scenes_nonuniform_grid(
+            cells,
+            self.spacing,
+            figure_chrome=self._figure_chrome_kwargs(),
+        )
 
     def to_svg(self) -> str:
         """Render the joint chart to an SVG string.
@@ -967,6 +998,7 @@ class JointChart(_CompositeBase):
         cells = [top_svg, None, center.to_svg(), right_svg]
         marginal_share = 1.0 / (self.ratio + 1)
         center_share = self.ratio / (self.ratio + 1)
+        chrome = chrome_kwargs(merge_configure_layers(getattr(self, "_configure_layers", None)))
         return compose_svg_grid(
             cells,
             rows=2,
@@ -974,6 +1006,10 @@ class JointChart(_CompositeBase):
             row_ratios=[marginal_share, center_share],
             col_ratios=[center_share, marginal_share],
             spacing=self.spacing,
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
+            **chrome,
         )
 
     def __repr__(self) -> str:
@@ -1359,14 +1395,23 @@ class RepeatChart(_CompositeBase):
             row_index = {v: i for i, v in enumerate(self.row)}
             col_index = {v: i for i, v in enumerate(self.column)}
             indexed = [(row_index[r], col_index[c], chart) for r, c, chart in cells]
-            return _merge_child_scenes_sparse_grid(indexed, self.spacing)
+            return _merge_child_scenes_sparse_grid(
+                indexed,
+                self.spacing,
+                figure_chrome=self._figure_chrome_kwargs(),
+            )
 
         expanded_charts = [chart for _, _, chart in cells]
         if self.row is not None and self.column is not None:
             n_cols = len(self.column)
         else:
             n_cols, _ = self._wrap_dimensions(len(expanded_charts))
-        return _merge_child_scenes_grid(expanded_charts, self.spacing, columns=n_cols)
+        return _merge_child_scenes_grid(
+            expanded_charts,
+            self.spacing,
+            columns=n_cols,
+            figure_chrome=self._figure_chrome_kwargs(),
+        )
 
     def to_svg(self) -> str:
         """Render the repeated grid to an SVG string.
@@ -1402,6 +1447,7 @@ class RepeatChart(_CompositeBase):
             grid = [None] * (n_rows * n_cols)
             for idx, (_, _, chart) in enumerate(cells):
                 grid[idx] = chart.to_svg()
+        chrome = chrome_kwargs(merge_configure_layers(getattr(self, "_configure_layers", None)))
         return compose_svg_grid(
             grid,
             rows=n_rows,
@@ -1409,6 +1455,10 @@ class RepeatChart(_CompositeBase):
             row_ratios=[1.0] * n_rows,
             col_ratios=[1.0] * n_cols,
             spacing=self.spacing,
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
+            **chrome,
         )
 
     def _wrap_dimensions(self, n_cells: int) -> tuple:
@@ -1575,11 +1625,9 @@ class ClusterMapChart(_CompositeBase):
         has_row = row_dendro is not None
         has_col = col_dendro is not None
 
-        # No dendrograms: render heatmap directly.
+        # No dendrograms: render heatmap directly (still wrap the figure band).
         if not has_row and not has_col:
-            from ferrum._interactive import _render_scene
-
-            return _render_scene(heatmap)
+            return _render_single_with_figure_chrome(heatmap, self._figure_chrome_kwargs())
 
         # Build grid cells matching the SVG path layout.
         cells: list[tuple[int, int, object]] = []
@@ -1597,7 +1645,11 @@ class ClusterMapChart(_CompositeBase):
             # Vertical: col_dendro at (0,0), heatmap at (1,0).
             cells = [(0, 0, col_dendro), (1, 0, heatmap)]
 
-        return _merge_child_scenes_nonuniform_grid(cells, self.spacing)
+        return _merge_child_scenes_nonuniform_grid(
+            cells,
+            self.spacing,
+            figure_chrome=self._figure_chrome_kwargs(),
+        )
 
     def to_svg(self) -> str:
         """Render the cluster map to an SVG string.
@@ -1639,6 +1691,7 @@ class ClusterMapChart(_CompositeBase):
         col_svg = col_dendro.to_svg() if col_dendro is not None else None
         row_svg = row_dendro.to_svg() if row_dendro is not None else None
         cells = [None, col_svg, row_svg, heatmap.to_svg()]
+        chrome = chrome_kwargs(merge_configure_layers(getattr(self, "_configure_layers", None)))
         return compose_svg_grid(
             cells,
             rows=2,
@@ -1646,6 +1699,10 @@ class ClusterMapChart(_CompositeBase):
             row_ratios=[d, h],
             col_ratios=[d, h],
             spacing=self.spacing,
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
+            **chrome,
         )
 
     def __repr__(self) -> str:
@@ -1864,7 +1921,12 @@ class ConcatChart(_CompositeBase):
         render_charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
         n_cols = self._columns if self._columns is not None else len(render_charts)
         n_cols = min(n_cols, len(render_charts))
-        return _merge_child_scenes_grid(render_charts, self.spacing, columns=n_cols)
+        return _merge_child_scenes_grid(
+            render_charts,
+            self.spacing,
+            columns=n_cols,
+            figure_chrome=self._figure_chrome_kwargs(),
+        )
 
     def to_svg(self) -> str:
         """Render the concatenated charts to an SVG string.
@@ -1932,6 +1994,8 @@ def _merge_child_scenes(
     charts: list,
     spacing: float,
     layout: str = "horizontal",
+    *,
+    figure_chrome: Optional[dict] = None,
 ) -> tuple[str, bytes]:
     """Render each child chart and merge their scene JSONs.
 
@@ -1942,6 +2006,10 @@ def _merge_child_scenes(
     spacing : float
         Pixel gap between charts.
     layout : ``"horizontal"`` or ``"vertical"``
+    figure_chrome : dict, optional
+        Figure-level chrome to inject as an on-canvas title band, with keys
+        ``title`` / ``subtitle`` / ``caption`` and a ``chrome`` positioning
+        sub-dict (see :func:`_inject_figure_chrome`).  ``None`` injects no band.
 
     Returns
     -------
@@ -1984,6 +2052,9 @@ def _merge_child_scenes(
             merged["height"] = y_offset - spacing
             merged["width"] = max(merged["width"], w)
 
+    if figure_chrome is not None:
+        _inject_figure_chrome(merged, **figure_chrome)
+
     merged_packed = _merge_packed_data(child_packed, child_offsets)
     return _json.dumps(merged), merged_packed
 
@@ -1992,6 +2063,8 @@ def _merge_child_scenes_grid(
     charts: list,
     spacing: float,
     columns: int,
+    *,
+    figure_chrome: Optional[dict] = None,
 ) -> tuple[str, bytes]:
     """Render child charts in a wrapping grid layout.
 
@@ -2007,6 +2080,8 @@ def _merge_child_scenes_grid(
         Pixel gap between charts.
     columns : int
         Number of columns before wrapping.
+    figure_chrome : dict, optional
+        Figure-level chrome band to inject (see :func:`_inject_figure_chrome`).
 
     Returns
     -------
@@ -2058,6 +2133,9 @@ def _merge_child_scenes_grid(
 
     merged["height"] = y_offset - spacing
 
+    if figure_chrome is not None:
+        _inject_figure_chrome(merged, **figure_chrome)
+
     all_packed = [p for _, p in rendered]
     merged_packed = _merge_packed_data(all_packed, child_offsets)
     return _json.dumps(merged), merged_packed
@@ -2066,6 +2144,8 @@ def _merge_child_scenes_grid(
 def _merge_child_scenes_sparse_grid(
     cells: list[tuple[int, int, object]],
     spacing: float,
+    *,
+    figure_chrome: Optional[dict] = None,
 ) -> tuple[str, bytes]:
     """Render child charts in a sparse grid layout (for corner-mode repeat).
 
@@ -2080,6 +2160,8 @@ def _merge_child_scenes_sparse_grid(
         Each element is a ``(row_index, col_index, chart)`` triple.
     spacing : float
         Pixel gap between adjacent cells.
+    figure_chrome : dict, optional
+        Figure-level chrome band to inject (see :func:`_inject_figure_chrome`).
 
     Returns
     -------
@@ -2122,6 +2204,9 @@ def _merge_child_scenes_sparse_grid(
     merged["width"] = n_cols * cell_w + (n_cols - 1) * spacing
     merged["height"] = n_rows * cell_h + (n_rows - 1) * spacing
 
+    if figure_chrome is not None:
+        _inject_figure_chrome(merged, **figure_chrome)
+
     all_packed = [p for _, _, _, p in rendered]
     merged_packed = _merge_packed_data(all_packed, child_offsets)
     return _json.dumps(merged), merged_packed
@@ -2130,6 +2215,8 @@ def _merge_child_scenes_sparse_grid(
 def _merge_child_scenes_nonuniform_grid(
     cells: list[tuple[int, int, object]],
     spacing: float,
+    *,
+    figure_chrome: Optional[dict] = None,
 ) -> tuple[str, bytes]:
     """Render child charts in a sparse grid with per-row/per-column sizing.
 
@@ -2145,6 +2232,8 @@ def _merge_child_scenes_nonuniform_grid(
         Each element is a ``(row_index, col_index, chart)`` triple.
     spacing : float
         Pixel gap between adjacent cells.
+    figure_chrome : dict, optional
+        Figure-level chrome band to inject (see :func:`_inject_figure_chrome`).
 
     Returns
     -------
@@ -2202,6 +2291,9 @@ def _merge_child_scenes_nonuniform_grid(
 
     merged["width"] = total_width
     merged["height"] = total_height
+
+    if figure_chrome is not None:
+        _inject_figure_chrome(merged, **figure_chrome)
 
     all_packed = [p for _, _, _, p in rendered]
     merged_packed = _merge_packed_data(all_packed, child_offsets)
@@ -2271,6 +2363,120 @@ def _merge_one_child(
             merged[key].append(n)
 
     return n_panels
+
+
+def _inject_figure_chrome(
+    merged: dict,
+    *,
+    title: Optional[str],
+    subtitle: Optional[str],
+    caption: Optional[str],
+    chrome: dict,
+) -> None:
+    """Inject a figure-level title / subtitle / caption band into *merged*.
+
+    This is the **single** shared implementation of the interactive on-canvas
+    figure-chrome band, called by every composite scene-merge function so the
+    band renders identically for HConcat / VConcat / Concat / Joint /
+    ClusterMap / Repeat.  It is the interactive counterpart of the SVG band the
+    Rust ``compose_svg_*`` compositors emit: the layout math (band heights,
+    node x / y, anchor) lives in the Rust ``figure_title_nodes`` helper; this
+    function only injects the returned nodes and offsets / grows the merged
+    scene by the returned band heights.
+
+    When no chrome text is present this is a no-op, so a composite with no
+    figure title produces a byte-identical merged scene to before.
+
+    The ``width`` / ``height`` passed to ``figure_title_nodes`` are the merged
+    panels' pre-chrome bounding box (``merged["width"]`` / ``merged["height"]``
+    as set by the caller before this runs).  The title/subtitle header band is
+    positioned identically to SVG for all composites.  The caption (footer)
+    absolute y matches SVG for the concat family (HConcat / VConcat / Concat /
+    Repeat), where the interactive body height equals the SVG body height.  For
+    JointChart and ClusterMapChart the interactive body is native panel size
+    rather than the ratio-scaled viewBox the SVG path uses, so the caption y
+    will differ from the SVG (pre-existing W5 limitation — interactive
+    nonuniform-grid layout is flat horizontal, not a 2×2 grid).
+
+    Parameters
+    ----------
+    merged : dict
+        The merged scene dict, with ``width`` / ``height`` already set to the
+        composed panels' pre-chrome bounding box.  Mutated in place.
+    title, subtitle, caption : str or None
+        Figure-level chrome text.  All ``None`` -> no-op.
+    chrome : dict
+        Positioning kwargs (``left_inset`` / ``right_inset`` / ``anchor``)
+        resolved from the composite's configure layers, matching the SVG path.
+    """
+    if title is None and subtitle is None and caption is None:
+        return
+
+    from ferrum._core import figure_title_nodes
+
+    panel_w = merged.get("width", 0) or 0.0
+    panel_h = merged.get("height", 0) or 0.0
+    nodes_json, header_h, footer_h = figure_title_nodes(
+        width=float(panel_w),
+        height=float(panel_h),
+        title=title,
+        subtitle=subtitle,
+        caption=caption,
+        **chrome,
+    )
+
+    # Offset every child scene node DOWN by the header band height so the
+    # panels sit below the title/subtitle.  The chrome nodes themselves are
+    # already in outer-canvas space (caption y already includes header_h +
+    # panel_h) and must NOT be offset.
+    if header_h:
+        for panel in merged.get("panels", []):
+            for area_key in ("plot_area", "clip"):
+                area = panel.get(area_key)
+                if area is not None:
+                    area["y"] = area.get("y", 0) + header_h
+            for batch in panel.get("marks", []):
+                for node in batch.get("nodes", []):
+                    _offset_node(node, 0.0, header_h)
+            for key in ("axes", "grid", "annotations", "strip_title"):
+                for node in panel.get(key, []):
+                    _offset_node(node, 0.0, header_h)
+        for key in ("title", "legend", "decorations"):
+            for node in merged.get(key, []):
+                _offset_node(node, 0.0, header_h)
+
+    # Inject the chrome nodes (already absolute) into the merged title list.
+    # Note: for JointChart/ClusterMapChart the caption y is relative to the
+    # interactive body height, which differs from the SVG ratio-viewBox body
+    # (W5 limitation — interactive nonuniform-grid layout).
+    merged.setdefault("title", []).extend(_json.loads(nodes_json))
+
+    # Grow the merged canvas to fit the header + footer bands (width unchanged).
+    merged["height"] = panel_h + header_h + footer_h
+
+
+def _render_single_with_figure_chrome(chart, figure_chrome: dict) -> tuple[str, bytes]:
+    """Render one chart's scene and wrap it in the figure-chrome band.
+
+    Used by the asymmetric composites (Joint / ClusterMap) on their
+    single-panel fast path (no marginals / dendrograms), where the body is a
+    lone child scene rather than a merged grid.  When *figure_chrome* carries
+    no title text this returns the child scene unchanged (byte-identical to
+    ``_render_scene``), preserving backward compatibility.
+    """
+    from ferrum._interactive import _render_scene
+
+    scene_json, packed = _render_scene(chart)
+    if (
+        figure_chrome.get("title") is None
+        and figure_chrome.get("subtitle") is None
+        and figure_chrome.get("caption") is None
+    ):
+        return scene_json, packed
+
+    scene = _json.loads(scene_json)
+    _inject_figure_chrome(scene, **figure_chrome)
+    return _json.dumps(scene), packed
 
 
 def _empty_scene() -> dict:

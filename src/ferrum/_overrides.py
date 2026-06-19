@@ -19,6 +19,13 @@ if TYPE_CHECKING:
 # (e.g. boxplot outlier when outliers=False) are accepted as no-ops.
 LAYER_NAME_CATALOG: dict[str, frozenset[str]] = {}
 
+# Figure-level chrome keys that ``_CompositeBase.properties`` intercepts and
+# stores on the composed figure rather than fanning to inner panels.  The
+# factory ``properties={...}`` dict path must route these the same way the
+# chained ``.properties(title=...)`` call does, so they don't leak into a
+# sub-panel's SVG.
+_FIGURE_CHROME_KEYS = ("title", "subtitle", "caption")
+
 
 def register_layer_names(kind: str, names: frozenset[str]) -> None:
     """Register possible sub-layer names for *kind* (additive)."""
@@ -42,8 +49,24 @@ def _apply_overrides(
     each child chart via ``_rebuild_with_charts``.
     """
     from ferrum.chart import Chart
+    from ferrum.composition import _CompositeBase
 
     if not isinstance(chart, Chart):
+        # Split figure-level chrome out of the properties dict for composites.
+        # Chrome (title/subtitle/caption) must store on the figure via
+        # ``composite.properties(**chrome)`` — the same interception the chained
+        # ``.properties(title=...)`` call uses — and only the non-chrome
+        # remainder may fan to inner panels.  This mirrors
+        # ``_CompositeBase.properties`` so the dict path and the chained path
+        # agree.
+        figure_chrome: dict[str, Any] = {}
+        child_properties = properties
+        if properties is not None and isinstance(chart, _CompositeBase):
+            figure_chrome = {k: properties[k] for k in _FIGURE_CHROME_KEYS if k in properties}
+            child_properties = {
+                k: v for k, v in properties.items() if k not in _FIGURE_CHROME_KEYS
+            } or None
+
         try:
 
             def _apply(c: Any) -> Any:
@@ -51,16 +74,19 @@ def _apply_overrides(
                     c,
                     mark=mark,
                     encode=encode,
-                    properties=properties,
+                    properties=child_properties,
                     layers=layers,
                     _skip_unknown_mark_keys=True,
                 )
 
-            return chart._rebuild_with_charts(_apply)
+            chart = chart._rebuild_with_charts(_apply)
         except (NotImplementedError, AttributeError):
-            if properties is not None and hasattr(chart, "properties"):
-                chart = chart.properties(**properties)
-            return chart
+            if child_properties is not None and hasattr(chart, "properties"):
+                chart = chart.properties(**child_properties)
+
+        if figure_chrome:
+            chart = chart.properties(**figure_chrome)
+        return chart
 
     if mark is not None:
         chart = _apply_mark_overrides(chart, mark, _skip_unknown=_skip_unknown_mark_keys)

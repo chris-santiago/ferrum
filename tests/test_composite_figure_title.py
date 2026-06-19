@@ -222,3 +222,254 @@ def test_to_html_default_title_without_figure_title(base_chart):
     joint = fm.JointChart(base_chart)
     html = joint.to_html()
     assert "<title>Ferrum chart</title>" in html
+
+
+# ---------------------------------------------------------------------------
+# SVG figure band (Part 1): Joint / Cluster / Repeat render the title at the
+# figure level, not inside an inner panel.
+# ---------------------------------------------------------------------------
+
+
+def _inner_panel_svgs(composite) -> list[str]:
+    """Render each inner panel chart of *composite* to its own SVG string."""
+    panels = []
+    for chart in composite.charts:
+        # ``charts`` may contain Chart or LayerChart; both expose ``to_svg``.
+        panels.append(chart.to_svg())
+    return panels
+
+
+def test_joint_svg_renders_figure_title(base_chart, hist_chart):
+    joint = fm.JointChart(base_chart, top=hist_chart, right=hist_chart)
+    svg = joint.properties(title="JointBand").to_svg()
+    assert "JointBand" in svg
+    # The title is on the composed figure, not baked into an inner panel.
+    for panel_svg in _inner_panel_svgs(joint):
+        assert "JointBand" not in panel_svg
+
+
+def test_clustermap_svg_renders_figure_title(base_chart, hist_chart):
+    cm = fm.ClusterMapChart(base_chart, row_dendrogram=hist_chart, col_dendrogram=hist_chart)
+    svg = cm.properties(title="ClusterBand").to_svg()
+    assert "ClusterBand" in svg
+    assert "ClusterBand" not in cm.heatmap.to_svg()
+
+
+def test_repeat_svg_renders_figure_title(df):
+    template = fm.Chart(df).mark_point().encode(x=fm.Repeat.column, y=fm.Repeat.row)
+    rep = fm.RepeatChart(template, row=["x", "y"], column=["x", "y"])
+    svg = rep.properties(title="RepeatBand").to_svg()
+    assert "RepeatBand" in svg
+    # No materialized cell chart carries the figure title.
+    for _r, _c, cell in rep.expand():
+        assert "RepeatBand" not in cell.to_svg()
+
+
+def test_joint_svg_renders_subtitle_and_caption(base_chart, hist_chart):
+    joint = fm.JointChart(base_chart, top=hist_chart)
+    svg = joint.properties(title="T", subtitle="Sub", caption="Cap").to_svg()
+    assert "T" in svg
+    assert "Sub" in svg
+    assert "Cap" in svg
+
+
+def test_joint_svg_byte_identical_without_figure_title(base_chart, hist_chart):
+    """Backward compat: a composite with no figure title renders unchanged."""
+    joint = fm.JointChart(base_chart, top=hist_chart, right=hist_chart)
+    before = joint.to_svg()
+    # ``.properties()`` with no chrome kwargs must not perturb the SVG.
+    after = joint.properties().to_svg()
+    assert before == after
+
+
+# ---------------------------------------------------------------------------
+# Interactive on-canvas band (Part 2): the merged scene carries the
+# figure-title text node(s) and the canvas grows; inner panels carry no title.
+# ---------------------------------------------------------------------------
+
+
+def _scene_text_contents(scene: dict) -> list[str]:
+    """Collect every text-node ``content`` in a scene's top-level title list."""
+    return [n.get("content") for n in scene.get("title", []) if n.get("type") == "text"]
+
+
+def _panel_text_contents(scene: dict) -> list[str]:
+    """Collect text-node contents inside panels (per-panel chrome)."""
+    out: list[str] = []
+    for panel in scene.get("panels", []):
+        for node in panel.get("strip_title", []):
+            if node.get("type") == "text":
+                out.append(node.get("content"))
+    return out
+
+
+def _render_interactive_scene(composite) -> dict:
+    import json
+
+    scene_json, _packed = composite._render_interactive()
+    return json.loads(scene_json)
+
+
+def test_hconcat_interactive_band_and_growth(base_chart, hist_chart):
+    composite = base_chart | hist_chart
+    base = _render_interactive_scene(composite)
+    titled = _render_interactive_scene(composite.properties(title="HCBand"))
+
+    assert "HCBand" in _scene_text_contents(titled)
+    # Canvas grew vertically to fit the header band; width is unchanged.
+    assert titled["height"] > base["height"]
+    assert titled["width"] == base["width"]
+
+
+def test_vconcat_interactive_band(base_chart, hist_chart):
+    titled = _render_interactive_scene((base_chart & hist_chart).properties(title="VCBand"))
+    assert "VCBand" in _scene_text_contents(titled)
+
+
+def test_concat_interactive_band(base_chart, hist_chart):
+    composite = fm.ConcatChart(base_chart, hist_chart, columns=2)
+    titled = _render_interactive_scene(composite.properties(title="CCBand"))
+    assert "CCBand" in _scene_text_contents(titled)
+
+
+def test_joint_interactive_band_with_marginals(base_chart, hist_chart):
+    joint = fm.JointChart(base_chart, top=hist_chart, right=hist_chart)
+    base = _render_interactive_scene(joint)
+    titled = _render_interactive_scene(joint.properties(title="JIBand"))
+
+    assert "JIBand" in _scene_text_contents(titled)
+    assert titled["height"] > base["height"]
+    # The title is figure-level, not a per-panel strip title.
+    assert "JIBand" not in _panel_text_contents(titled)
+
+
+def test_joint_interactive_band_no_marginals(base_chart):
+    """Single-panel joint (no marginals) still wraps the figure band."""
+    joint = fm.JointChart(base_chart)
+    base = _render_interactive_scene(joint)
+    titled = _render_interactive_scene(joint.properties(title="JISolo"))
+
+    assert "JISolo" in _scene_text_contents(titled)
+    assert titled["height"] > base["height"]
+
+
+def test_clustermap_interactive_band(base_chart, hist_chart):
+    cm = fm.ClusterMapChart(base_chart, row_dendrogram=hist_chart, col_dendrogram=hist_chart)
+    titled = _render_interactive_scene(cm.properties(title="CMBand"))
+    assert "CMBand" in _scene_text_contents(titled)
+
+
+def test_clustermap_interactive_band_no_dendrograms(base_chart):
+    cm = fm.ClusterMapChart(base_chart)
+    base = _render_interactive_scene(cm)
+    titled = _render_interactive_scene(cm.properties(title="CMSolo"))
+    assert "CMSolo" in _scene_text_contents(titled)
+    assert titled["height"] > base["height"]
+
+
+def test_repeat_interactive_band(df):
+    template = fm.Chart(df).mark_point().encode(x=fm.Repeat.column, y=fm.Repeat.row)
+    rep = fm.RepeatChart(template, row=["x", "y"], column=["x", "y"])
+    titled = _render_interactive_scene(rep.properties(title="RIBand"))
+    assert "RIBand" in _scene_text_contents(titled)
+
+
+def test_repeat_corner_interactive_band(df):
+    template = fm.Chart(df).mark_point().encode(x=fm.Repeat.column, y=fm.Repeat.row)
+    rep = fm.RepeatChart(template, row=["x", "y"], column=["x", "y"], corner=True)
+    titled = _render_interactive_scene(rep.properties(title="RCBand"))
+    assert "RCBand" in _scene_text_contents(titled)
+
+
+def test_interactive_caption_grows_canvas(base_chart, hist_chart):
+    composite = base_chart | hist_chart
+    base = _render_interactive_scene(composite)
+    captioned = _render_interactive_scene(composite.properties(caption="Footer"))
+    assert "Footer" in _scene_text_contents(captioned)
+    # A caption is a footer band: it grows the canvas without a header offset.
+    assert captioned["height"] > base["height"]
+
+
+def test_interactive_byte_identical_without_figure_title(base_chart, hist_chart):
+    """Backward compat: no figure title -> merged scene unchanged."""
+    composite = base_chart | hist_chart
+    before_json, before_packed = composite._render_interactive()
+    after_json, after_packed = composite.properties()._render_interactive()
+    assert before_json == after_json
+    assert before_packed == after_packed
+
+
+def test_interactive_parity_with_svg_caption_y(base_chart, hist_chart):
+    """The interactive caption baseline matches the SVG band (parity contract).
+
+    Both paths feed the composed-figure body width/height to the same Rust
+    layout helper, so the caption text node's ``y`` equals the SVG caption ``y``.
+    """
+    import json
+
+    from ferrum._chrome import chrome_kwargs, merge_configure_layers
+    from ferrum._core import figure_title_nodes
+
+    composite = (base_chart | hist_chart).properties(caption="Cap")
+    # The merged body height the interactive path uses (pre-chrome) is the base
+    # composite's merged height with no chrome injected.
+    base_scene = _render_interactive_scene(base_chart | hist_chart)
+    chrome = chrome_kwargs(merge_configure_layers(getattr(composite, "_configure_layers", None)))
+    nodes_json, _hh, _fh = figure_title_nodes(
+        width=float(base_scene["width"]),
+        height=float(base_scene["height"]),
+        caption="Cap",
+        **chrome,
+    )
+    expected_cap_y = next(n["y"] for n in json.loads(nodes_json) if n.get("content") == "Cap")
+
+    titled = _render_interactive_scene(composite)
+    actual_cap_y = next(n["y"] for n in titled["title"] if n.get("content") == "Cap")
+    assert actual_cap_y == expected_cap_y
+
+
+# ---------------------------------------------------------------------------
+# Factory dict-path (Part 3): properties={"title": ...} stores chrome at the
+# figure level (does not leak into the inner panel).
+# ---------------------------------------------------------------------------
+
+
+def test_jointplot_dict_path_title_on_figure(df):
+    joint = fm.jointplot(df, x="x", y="y", properties={"title": "DictTitle"})
+    assert joint._figure_title == "DictTitle"
+    # The inner center panel SVG must not embed the figure title.
+    assert "DictTitle" not in joint.center.to_svg()
+    # The composed figure SVG does render it.
+    assert "DictTitle" in joint.to_svg()
+
+
+def test_jointplot_dict_path_chrome_matches_chained(df):
+    via_dict = fm.jointplot(df, x="x", y="y", properties={"title": "T", "subtitle": "S"})
+    chained = fm.jointplot(df, x="x", y="y").properties(title="T", subtitle="S")
+    assert via_dict._figure_title == chained._figure_title == "T"
+    assert via_dict._figure_subtitle == chained._figure_subtitle == "S"
+    assert via_dict.center._title is None
+
+
+def test_jointplot_dict_path_non_chrome_reaches_center(df):
+    joint = fm.jointplot(df, x="x", y="y", properties={"width": 320, "title": "T"})
+    assert joint._figure_title == "T"
+    assert joint.center._width == 320
+    assert joint.center._title is None
+
+
+def test_clustermap_dict_path_title_on_figure():
+    # ``clustermap`` consumes a wide (matrix-shaped) dataframe; numeric columns
+    # are the heatmap values and the row labels come from the leading column.
+    wide = pl.DataFrame(
+        {
+            "row": ["a", "b", "c", "d"],
+            "x": [1.0, 0.5, 0.3, 0.9],
+            "y": [0.5, 1.0, 0.7, 0.2],
+            "z": [0.3, 0.7, 1.0, 0.6],
+        }
+    )
+    cm = fm.clustermap(wide, properties={"title": "CMDict"})
+    assert cm._figure_title == "CMDict"
+    assert "CMDict" not in cm.heatmap.to_svg()
+    assert "CMDict" in cm.to_svg()
