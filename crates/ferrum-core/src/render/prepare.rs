@@ -1749,6 +1749,22 @@ fn fix_transform_extents_for_facet(
                     None => t.clone(),
                 }
             }
+            // DensityData carries a value-axis `extent: Option<(f64,f64)>`.
+            // Without a pin, each facet panel would compute its own KDE range —
+            // the same #7 defect class. DensityData does not nice (mirrors KDE):
+            // the pinned extent is the raw global min/max over the full batch
+            // (archaeology bug #7 extended to DensityData by round-3 T1).
+            TransformSpec::DensityData(spec) if spec.extent.is_none() => {
+                match crate::transform::density_data::global_extent(spec, batch) {
+                    Some(extent) => TransformSpec::DensityData(
+                        crate::transform::density_data::DensityDataSpec {
+                            extent: Some(extent),
+                            ..spec.clone()
+                        },
+                    ),
+                    None => t.clone(),
+                }
+            }
             _ => t.clone(),
         })
         .collect()
@@ -2444,6 +2460,103 @@ mod tests {
             pinned.extent_y,
             Some((0.0, 101.0)),
             "extent_y must be pinned to the global y-range when user left it None"
+        );
+    }
+
+    // --- archaeology #7 round-3 T1: DensityData facet extent pin ----------------
+
+    /// A batch with two panels whose value ranges are fully DISJOINT.
+    /// Panel "A" has x in [1, 3], panel "B" has x in [10, 30].
+    /// Used to drive `fix_transform_extents_for_facet` for DensityData: an
+    /// unpinned per-panel KDE would give each panel a different x extent.
+    fn density_disjoint_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("panel", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![
+                    1.0, 2.0, 3.0,    // panel A
+                    10.0, 20.0, 30.0, // panel B
+                ])),
+                Arc::new(StringArray::from(vec!["A", "A", "A", "B", "B", "B"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn base_density_spec() -> crate::transform::density_data::DensityDataSpec {
+        crate::transform::density_data::DensityDataSpec {
+            field: "x".into(),
+            bandwidth: None,
+            groupby: None,
+            extent: None,
+            steps: None,
+            cumulative: false,
+            as_: ("value".into(), "density".into()),
+            name: None,
+        }
+    }
+
+    /// A faceted `DensityData` with `extent=None` must be pinned to the RAW
+    /// global (min, max) over the full pre-facet batch so every panel shares
+    /// the same value axis. This is discriminating: without the T1 fix the
+    /// DensityData arm did not exist in `fix_transform_extents_for_facet` and
+    /// the spec fell through the `_ => t.clone()` arm with extent still `None`.
+    #[test]
+    fn fix_extents_pins_density_data_to_global_extent() {
+        use crate::transform::core::TransformSpec;
+        let batch = density_disjoint_batch();
+        let spec = base_density_spec(); // extent: None
+        let out = fix_transform_extents_for_facet(&[TransformSpec::DensityData(spec.clone())], &batch);
+        let TransformSpec::DensityData(pinned) = &out[0] else {
+            panic!("expected a DensityData transform back");
+        };
+        // Raw global extent over full batch: x ∈ [1.0, 30.0].
+        // DensityData does not nice (mirrors KDE), so the pin is the raw (min, max).
+        assert_eq!(
+            pinned.extent,
+            Some((1.0, 30.0)),
+            "DensityData extent must be pinned to the raw global (1.0, 30.0)"
+        );
+        // Orchestration sanity: matches global_extent's output directly.
+        assert_eq!(
+            pinned.extent,
+            crate::transform::density_data::global_extent(&spec, &batch),
+            "pinned extent must equal global_extent's own output"
+        );
+    }
+
+    /// A user-provided explicit `DensityData` `extent` must never be overridden.
+    #[test]
+    fn fix_extents_density_data_respects_user_extent() {
+        use crate::transform::core::TransformSpec;
+        let batch = density_disjoint_batch();
+        let user = Some((-5.0, 50.0));
+        let spec = crate::transform::density_data::DensityDataSpec {
+            extent: user,
+            ..base_density_spec()
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::DensityData(spec)], &batch);
+        let TransformSpec::DensityData(pinned) = &out[0] else {
+            panic!("expected a DensityData transform back");
+        };
+        assert_eq!(pinned.extent, user, "user DensityData extent must be preserved");
+    }
+
+    /// `DensityData::global_extent` returns raw (min, max) — no nicing, mirroring KDE.
+    /// Guards the contract that DensityData uses raw extent (not niced like Bin).
+    #[test]
+    fn density_data_global_extent_is_raw_not_niced() {
+        use crate::transform::density_data;
+        let batch = density_disjoint_batch();
+        let spec = base_density_spec();
+        assert_eq!(
+            density_data::global_extent(&spec, &batch),
+            Some((1.0, 30.0)),
+            "DensityData global_extent must return the raw (min, max), not a niced value"
         );
     }
 

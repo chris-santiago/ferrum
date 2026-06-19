@@ -38,6 +38,36 @@ fn default_density_as() -> (String, String) {
     ("value".into(), "density".into())
 }
 
+/// Compute the global (pre-facet) raw min/max of the density field over the full
+/// batch. Returns `None` when the column is absent or all values are null/NaN.
+///
+/// DensityData does **not** nice its extent (unlike `bin::global_extent`), because
+/// it controls the KDE grid start and end, not discrete bin edges. This mirrors
+/// `kde::global_extent`. Used by `render::prepare::fix_transform_extents_for_facet`
+/// to pin the value axis before partitioning so every facet panel shares the same
+/// KDE grid range (archaeology bug #7, extended to DensityData by round-3 T1).
+pub(crate) fn global_extent(spec: &DensityDataSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
+    let schema = batch.schema();
+    let idx = schema.index_of(&spec.field).ok()?;
+    let col = batch.column(idx);
+    let arr = col.as_any().downcast_ref::<Float64Array>()?;
+    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
+        if arr.is_null(i) {
+            return (lo, hi);
+        }
+        let v = arr.value(i);
+        if v.is_nan() {
+            return (lo, hi);
+        }
+        (lo.min(v), hi.max(v))
+    });
+    if lo.is_finite() && hi.is_finite() && lo < hi {
+        Some((lo, hi))
+    } else {
+        None
+    }
+}
+
 pub(crate) fn apply(spec: &DensityDataSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).map_err(|_| {
@@ -48,7 +78,7 @@ pub(crate) fn apply(spec: &DensityDataSpec, batch: &RecordBatch) -> PyResult<Rec
         return apply_grouped(spec, batch, idx, groupby);
     }
 
-    apply_one_group(spec, batch, idx, None, None)
+    apply_one_group(spec, batch, idx, None)
 }
 
 fn apply_grouped(
@@ -62,7 +92,7 @@ fn apply_grouped(
 
     // Only support single groupby column for simplicity.
     if groupby.is_empty() {
-        return apply_one_group(spec, batch, field_idx, None, None);
+        return apply_one_group(spec, batch, field_idx, None);
     }
 
     let g_col_name = &groupby[0];
@@ -97,7 +127,7 @@ fn apply_grouped(
     let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
 
     for (group_key, rows) in &groups {
-        let result = apply_one_group(spec, batch, field_idx, Some(rows), None)?;
+        let result = apply_one_group(spec, batch, field_idx, Some(rows))?;
         let x_col = result.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let y_col = result.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         for i in 0..result.num_rows() {
@@ -128,7 +158,6 @@ fn apply_one_group(
     batch: &RecordBatch,
     field_idx: usize,
     only_rows: Option<&[usize]>,
-    _shared_extent: Option<(f64, f64)>,
 ) -> PyResult<RecordBatch> {
     let col = batch
         .column(field_idx)
@@ -308,4 +337,68 @@ mod tests {
             assert!(d.value(i) >= 0.0);
         }
     }
+
+    // ── global_extent helper ──────────────────────────────────────────────────
+
+    fn make_batch(values: Vec<f64>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(values))]).unwrap()
+    }
+
+    fn base_spec() -> DensityDataSpec {
+        DensityDataSpec {
+            field: "x".into(),
+            bandwidth: None,
+            groupby: None,
+            extent: None,
+            steps: None,
+            cumulative: false,
+            as_: ("value".into(), "density".into()),
+            name: None,
+        }
+    }
+
+    /// `global_extent` returns the raw (min, max) — no nicing, mirroring KDE.
+    #[test]
+    fn global_extent_returns_raw_min_max() {
+        let batch = make_batch(vec![1.0, 3.0, 2.5, 7.8, 4.2]);
+        let spec = base_spec();
+        let ext = global_extent(&spec, &batch);
+        assert_eq!(ext, Some((1.0, 7.8)), "global_extent must be (min, max) of values");
+    }
+
+    /// `global_extent` returns `None` when the column is absent.
+    #[test]
+    fn global_extent_missing_field_returns_none() {
+        let schema = Arc::new(Schema::new(vec![Field::new("y", DataType::Float64, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![1.0, 2.0]))],
+        )
+        .unwrap();
+        let spec = base_spec(); // spec.field = "x", not "y"
+        assert_eq!(global_extent(&spec, &batch), None);
+    }
+
+    /// `global_extent` returns `None` when all values are null or NaN.
+    #[test]
+    fn global_extent_all_null_returns_none() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![None, None]))],
+        )
+        .unwrap();
+        let spec = base_spec();
+        assert_eq!(global_extent(&spec, &batch), None);
+    }
+
+    /// `global_extent` skips NaN values without panicking.
+    #[test]
+    fn global_extent_skips_nan() {
+        let batch = make_batch(vec![f64::NAN, 2.0, f64::NAN, 8.0]);
+        let spec = base_spec();
+        assert_eq!(global_extent(&spec, &batch), Some((2.0, 8.0)));
+    }
+
 }
