@@ -3,7 +3,8 @@ use ferrum_scene::{MarkBatchKind, SceneNode, StrokeStyle};
 use crate::layout::TextAnchor;
 use crate::render::arrow_cast::{col_as_f64, col_as_str};
 use crate::render::color::with_opacity;
-use crate::render::draw::{to_scene_color, to_scene_text_style, DrawCtx, MarkBuildResult};
+use crate::render::draw::{to_scene_color, to_scene_text_style, DrawCtx, MarkBuildResult, MetadataColumns};
+use crate::render::mark_nodes::MarkNodes;
 
 /// Axis-aligned bounding box for overlap testing.
 #[derive(Clone, Copy)]
@@ -104,8 +105,21 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     let draw_leader = ctx.mark_style.leader_line.unwrap_or(false);
 
     let n = ctx.batch.num_rows();
-    let mut nodes: Vec<SceneNode> = Vec::with_capacity(n);
-    let mut data_indices: Vec<usize> = Vec::with_capacity(n);
+
+    // Pre-read metadata columns so tooltip/href/description reach every node
+    // (both the Text and, when leader_line is true, the companion Line node).
+    // build_metadata_for_indices is called after the loop using the finalized
+    // data_indices, so metadata is in node order regardless of skipped rows or
+    // multi-node-per-row shapes (archaeology bug #6 fix).
+    let meta = MetadataColumns::from_ctx(ctx);
+
+    // Accumulate nodes and source-row indices in lockstep. For rows without a
+    // leader line, push one Text node. For rows with a leader line, push_many
+    // emits [Text, Line] both tagged with the same source row i, keeping
+    // data_indices[k] == source-row-of-nodes[k] for all k.
+    // Capacity is 2× when leader lines are drawn (one text + one line per row).
+    let capacity = if draw_leader { n * 2 } else { n };
+    let mut acc = MarkNodes::with_capacity(capacity);
 
     // Placed bounding boxes accumulate as we emit each label; used only when
     // collision avoidance is active.
@@ -161,7 +175,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
             (best_dx, best_dy)
         };
 
-        nodes.push(SceneNode::Text {
+        let text_node = SceneNode::Text {
             x: px + dx,
             y: py + dy,
             content,
@@ -170,11 +184,14 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
                 ctx.theme.typography.font_family.as_str(),
                 ctx.mark_style.font_weight.as_deref(), None, ctx.mark_style.opacity,
             ),
-        });
+        };
 
         if draw_leader {
+            // Emit text + leader-line as a two-node group both mapped to row i.
+            // push_many gives data_indices one entry per emitted node, so
+            // nodes.len() == data_indices.len() is maintained (R1 guard enforces).
             let lc = with_opacity(ctx.mark_style.fill, ctx.mark_style.opacity * 0.5);
-            nodes.push(SceneNode::Line {
+            let line_node = SceneNode::Line {
                 x1: px,
                 y1: py,
                 x2: px + dx * 0.8,
@@ -188,19 +205,23 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
                     stroke_cap: None,
                     stroke_join: None,
                 },
-            });
+            };
+            acc.push_many([text_node, line_node], i);
+        } else {
+            acc.push(text_node, i);
         }
-
-        data_indices.push(i);
     }
+
+    let (nodes, data_indices) = acc.finalize();
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
         kind: MarkBatchKind::Label,
         nodes,
         data_indices: Some(data_indices),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
+        tooltips,
+        hrefs,
+        descriptions,
     }
 }
 
@@ -303,6 +324,306 @@ mod tests {
         let deserialized: MarkBatchKind =
             serde_json::from_str(&serialized).expect("deserialize MarkBatchKind::Label");
         assert_eq!(deserialized, MarkBatchKind::Label, "round-trip must restore Label");
+    }
+
+    // ── R2 regression tests ─────────────────────────────────────────
+
+    /// Build a spec + batch that includes a tooltip encoding column alongside x/y.
+    fn spec_and_batch_with_tooltip() -> (ChartSpec, arrow::record_batch::RecordBatch) {
+        use crate::spec::encoding::EncodingSpec;
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Label,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("tip", arrow::datatypes::DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![10.0, 80.0])),
+                Arc::new(Float64Array::from(vec![20.0, 70.0])),
+                Arc::new(StringArray::from(vec!["tip-row-0", "tip-row-1"])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    /// R2 — Leader-line alignment: nodes.len() == data_indices.len() for a
+    /// multi-row batch with leader_line=true.  Pre-fix: nodes.len()==2N,
+    /// data_indices.len()==N (2 vs 1 for a single row, 4 vs 2 for two rows).
+    #[test]
+    fn r2_leader_line_nodes_and_data_indices_are_aligned() {
+        let (spec, batch) = two_point_spec_and_batch();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = resolve_scales(
+            &spec, &batch, (0.0, 100.0), (0.0, 100.0),
+            &ThemeInputs::default(),
+        )
+        .unwrap();
+
+        let mut mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+        mark_style.leader_line = Some(true);
+
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+
+        let result = build(&ctx);
+
+        let n_nodes = result.nodes.len();
+        let n_rows = batch.num_rows(); // 2
+
+        // With leader_line=true: text + line per row → 2*n_rows total nodes.
+        assert_eq!(
+            n_nodes,
+            n_rows * 2,
+            "leader_line=true must produce 2 nodes per row; expected {}, got {}",
+            n_rows * 2,
+            n_nodes,
+        );
+
+        // The critical alignment invariant: data_indices must equal nodes.len().
+        // Pre-fix: data_indices.len()==N, nodes.len()==2N → invariant violated.
+        let data_indices = result.data_indices.as_ref().expect("data_indices must be Some");
+        assert_eq!(
+            data_indices.len(),
+            n_nodes,
+            "data_indices.len() ({}) must equal nodes.len() ({}) (R1 guard enforces this)",
+            data_indices.len(),
+            n_nodes,
+        );
+
+        // Each source row appears twice: once for the Text node, once for the Line.
+        // For 2 rows the sequence should be [0, 0, 1, 1].
+        assert_eq!(
+            data_indices,
+            &vec![0usize, 0, 1, 1],
+            "data_indices must repeat each row index for its text+line pair",
+        );
+    }
+
+    /// R2 — data_indices alignment is correct when no leader line is drawn: each
+    /// row contributes exactly one Text node, so data_indices == [0, 1, ...].
+    #[test]
+    fn r2_no_leader_line_data_indices_one_per_row() {
+        let (spec, batch) = two_point_spec_and_batch();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = resolve_scales(
+            &spec, &batch, (0.0, 100.0), (0.0, 100.0),
+            &ThemeInputs::default(),
+        )
+        .unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+
+        let result = build(&ctx);
+        let n_nodes = result.nodes.len();
+        let data_indices = result.data_indices.as_ref().expect("data_indices must be Some");
+
+        assert_eq!(
+            data_indices.len(),
+            n_nodes,
+            "data_indices.len() must equal nodes.len() for no-leader-line label",
+        );
+        assert_eq!(data_indices, &vec![0usize, 1], "each row maps to exactly one node");
+    }
+
+    /// R2 — Metadata reaches Text node: a tooltip encoding column's value appears
+    /// in the Text node's slot in the tooltip vector.  Pre-fix: tooltips was
+    /// hardcoded to None so no tooltip ever reached any label node.
+    #[test]
+    fn r2_tooltip_reaches_text_node_without_leader_line() {
+        let (spec, batch) = spec_and_batch_with_tooltip();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = resolve_scales(
+            &spec, &batch, (0.0, 100.0), (0.0, 100.0),
+            &ThemeInputs::default(),
+        )
+        .unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+
+        let result = build(&ctx);
+
+        // Tooltip must NOT be None after the fix.
+        let tooltips = result
+            .tooltips
+            .as_ref()
+            .expect("tooltips must be Some when tooltip encoding is present (pre-fix: None)");
+
+        // One tooltip entry per emitted node (2 Text nodes for 2 rows).
+        assert_eq!(tooltips.len(), 2, "one tooltip entry per emitted text node");
+
+        // Node 0 (row 0) must carry "tip-row-0".
+        assert_eq!(
+            tooltips[0].fields[0].value,
+            "tip-row-0",
+            "node 0 must carry row 0 tooltip",
+        );
+        // Node 1 (row 1) must carry "tip-row-1".
+        assert_eq!(
+            tooltips[1].fields[0].value,
+            "tip-row-1",
+            "node 1 must carry row 1 tooltip",
+        );
+    }
+
+    /// R2 — Metadata reaches both Text and Line nodes with leader_line=true: the
+    /// tooltip vector has 2*N entries, with each row's tooltip duplicated for its
+    /// text + line pair.
+    #[test]
+    fn r2_tooltip_reaches_both_nodes_with_leader_line() {
+        let (spec, batch) = spec_and_batch_with_tooltip();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = resolve_scales(
+            &spec, &batch, (0.0, 100.0), (0.0, 100.0),
+            &ThemeInputs::default(),
+        )
+        .unwrap();
+        let mut mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+        mark_style.leader_line = Some(true);
+
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+
+        let result = build(&ctx);
+        let n_nodes = result.nodes.len();
+
+        // 2 rows × 2 nodes per row = 4 nodes total.
+        assert_eq!(n_nodes, 4);
+
+        let tooltips = result
+            .tooltips
+            .as_ref()
+            .expect("tooltips must be Some with tooltip encoding + leader_line");
+
+        assert_eq!(tooltips.len(), n_nodes, "tooltip entry per emitted node");
+
+        // Nodes [0, 1] correspond to row 0; nodes [2, 3] to row 1.
+        assert_eq!(tooltips[0].fields[0].value, "tip-row-0", "node 0 (text, row 0)");
+        assert_eq!(tooltips[1].fields[0].value, "tip-row-0", "node 1 (line, row 0)");
+        assert_eq!(tooltips[2].fields[0].value, "tip-row-1", "node 2 (text, row 1)");
+        assert_eq!(tooltips[3].fields[0].value, "tip-row-1", "node 3 (line, row 1)");
+    }
+
+    /// R2 backward compat: a label without leader_line and without tooltip/href
+    /// still produces the same nodes as before (no metadata changes, same
+    /// geometry).  This test fails if the migration accidentally changes geometry.
+    #[test]
+    fn r2_backward_compat_no_leader_no_metadata() {
+        let (spec, batch) = two_point_spec_and_batch();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = resolve_scales(
+            &spec, &batch, (0.0, 100.0), (0.0, 100.0),
+            &ThemeInputs::default(),
+        )
+        .unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Label);
+
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+
+        let result = build(&ctx);
+
+        // 2 rows → 2 Text nodes, 0 Line nodes.
+        assert_eq!(result.nodes.len(), 2);
+        assert!(result.nodes.iter().all(|n| matches!(n, SceneNode::Text { .. })));
+        // No metadata encoding → these remain None.
+        assert!(result.tooltips.is_none(), "tooltips must be None when no tooltip encoding");
+        assert!(result.hrefs.is_none(), "hrefs must be None when no href encoding");
+        assert!(result.descriptions.is_none(), "descriptions must be None when no description encoding");
     }
 
     // ── F3 regression tests ──────────────────────────────────────────
