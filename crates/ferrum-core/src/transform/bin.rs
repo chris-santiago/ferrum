@@ -41,6 +41,75 @@ pub(crate) struct BinSpec {
 
 fn default_true() -> bool { true }
 
+// Task 9 (render/prepare.rs) will call this when dispatching facet extent pins for Bin.
+#[allow(dead_code)]
+/// Compute the global (optionally niced) `(lo, hi)` extent of `spec.field`
+/// over the full `batch`.
+///
+/// Returns `None` when the field is missing, non-numeric, or all values are
+/// null/NaN. When `spec.nice` is true and `spec.extent` is `None`, applies the
+/// same nicing logic as `apply_one_group` so that panels aligned to this extent
+/// will produce the same bin edges as the grouped path would compute.
+///
+/// This is the pre-facet extent Task 9 uses to pin the value axis before
+/// partitioning, so every facet panel shares the same bin edges.
+pub(crate) fn global_extent(spec: &BinSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
+    // When the caller has already pinned an explicit extent, use it directly.
+    if let Some(e) = spec.extent {
+        return Some(e);
+    }
+    let schema = batch.schema();
+    let idx = schema.index_of(&spec.field).ok()?;
+    let col = batch.column(idx);
+    // Cast to Float64 the same way apply_one_group does.
+    let arr: arrow::array::Float64Array = match col.data_type() {
+        arrow::datatypes::DataType::Float64 => col
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .cloned()?,
+        arrow::datatypes::DataType::Int8
+        | arrow::datatypes::DataType::Int16
+        | arrow::datatypes::DataType::Int32
+        | arrow::datatypes::DataType::Int64
+        | arrow::datatypes::DataType::UInt8
+        | arrow::datatypes::DataType::UInt16
+        | arrow::datatypes::DataType::UInt32
+        | arrow::datatypes::DataType::UInt64
+        | arrow::datatypes::DataType::Float32 => {
+            let casted = arrow::compute::cast(col, &arrow::datatypes::DataType::Float64).ok()?;
+            casted.as_any().downcast_ref::<arrow::array::Float64Array>().cloned()?
+        }
+        _ => return None,
+    };
+    let clean = crate::transform::numeric_util::clean_float64_values(&arr, None);
+    if clean.is_empty() {
+        return None;
+    }
+    let (lo, hi) = clean
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
+    if !(lo.is_finite() && hi.is_finite() && lo < hi) {
+        return None;
+    }
+    // Apply the same nicing as apply_one_group so the global extent aligns with
+    // per-group bin edges. Only when nice=true and no explicit extent is set.
+    let (lo, hi) = if spec.nice {
+        let target = spec
+            .bin_count
+            .unwrap_or_else(|| crate::scale::ticks::sturges_floor(clean.len()))
+            .max(1);
+        let step = crate::scale::ticks::nice_step(lo, hi, target);
+        if step.is_finite() && step > 0.0 {
+            ((lo / step).floor() * step, (hi / step).ceil() * step)
+        } else {
+            (lo, hi)
+        }
+    } else {
+        (lo, hi)
+    };
+    Some((lo, hi))
+}
+
 pub(crate) fn apply(spec: &BinSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
     // Phase 9 finalize: groupby support. Partition input by the groupby column,
     // run bin_one_group per partition, then stack the per-group outputs into a
@@ -856,5 +925,144 @@ mod tests {
         let ends = col_f64(&out, "bin_end");
         assert!((starts.value(0) - 1.0).abs() < 1e-12);
         assert!((ends.value(0) - 5.0).abs() < 1e-12);
+    }
+
+    // ── Task 8: global_extent helper ─────────────────────────────────────────
+
+    /// `global_extent` returns the raw (not niced) extent when `nice=false`.
+    #[test]
+    fn test_bin_global_extent_no_nice() {
+        let batch = batch_with(vec![1.5, 3.7, 2.2, 8.1]);
+        let spec = BinSpec {
+            field: "x".into(),
+            bin_count: Some(4),
+            bin_width: None,
+            extent: None,
+            nice: false,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let ext = super::global_extent(&spec, &batch);
+        let Some((lo, hi)) = ext else {
+            panic!("global_extent must return Some for valid data");
+        };
+        assert!((lo - 1.5).abs() < 1e-12, "lo should be 1.5, got {lo}");
+        assert!((hi - 8.1).abs() < 1e-12, "hi should be 8.1, got {hi}");
+    }
+
+    /// `global_extent` with `nice=true` applies the same nicing as `apply_one_group`,
+    /// so the extent matches what a grouped-path call would produce for this field.
+    #[test]
+    fn test_bin_global_extent_niced_matches_apply_one_group() {
+        // x in [0.13, 9.7], 10 bins, nice=true. The apply path produces [0.0, 10.0].
+        let batch = batch_with(vec![0.13, 1.5, 4.5, 7.7, 9.7]);
+        let spec = BinSpec {
+            field: "x".into(),
+            bin_count: Some(10),
+            bin_width: None,
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let ext = super::global_extent(&spec, &batch);
+        let Some((lo, hi)) = ext else {
+            panic!("global_extent must return Some for valid data");
+        };
+        // nice_step(0.13, 9.7, 10) = 1.0 → floor(0.13/1.0)*1.0 = 0.0, ceil(9.7/1.0)*1.0 = 10.0
+        assert_eq!(lo, 0.0, "niced lo should be 0.0, got {lo}");
+        assert_eq!(hi, 10.0, "niced hi should be 10.0, got {hi}");
+
+        // Also verify that running apply with this pinned extent produces the same
+        // bin edges as running apply without a pinned extent (but with nice=true),
+        // i.e. the niced global extent is consistent with the apply-side nicing.
+        let spec_pinned = BinSpec { extent: Some((lo, hi)), nice: false, ..spec.clone() };
+        let spec_auto = BinSpec { extent: None, nice: true, ..spec.clone() };
+        let out_pinned = apply(&spec_pinned, &batch).unwrap();
+        let out_auto = apply(&spec_auto, &batch).unwrap();
+        assert_eq!(out_pinned.num_rows(), out_auto.num_rows(), "bin count must match");
+        let pinned_starts = col_f64(&out_pinned, "bin_start");
+        let auto_starts = col_f64(&out_auto, "bin_start");
+        for i in 0..out_pinned.num_rows() {
+            assert!(
+                (pinned_starts.value(i) - auto_starts.value(i)).abs() < 1e-12,
+                "bin_start[{i}] mismatch: pinned={}, auto={}",
+                pinned_starts.value(i),
+                auto_starts.value(i)
+            );
+        }
+    }
+
+    /// `global_extent` returns the explicitly-set extent when `spec.extent` is `Some`.
+    #[test]
+    fn test_bin_global_extent_explicit_extent_passthrough() {
+        let batch = batch_with(vec![1.0, 5.0, 10.0]);
+        let spec = BinSpec {
+            field: "x".into(),
+            bin_count: Some(5),
+            bin_width: None,
+            extent: Some((0.0, 20.0)),
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let ext = super::global_extent(&spec, &batch);
+        // When extent is already set, global_extent returns it directly.
+        assert_eq!(ext, Some((0.0, 20.0)), "global_extent must return the explicit extent unchanged");
+    }
+
+    /// `global_extent` returns None on missing field.
+    #[test]
+    fn test_bin_global_extent_missing_field_returns_none() {
+        pyo3::Python::initialize();
+        let batch = batch_with(vec![1.0, 2.0, 3.0]);
+        let spec = BinSpec {
+            field: "nonexistent".into(),
+            bin_count: Some(5),
+            bin_width: None,
+            extent: None,
+            nice: false,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let ext = super::global_extent(&spec, &batch);
+        assert_eq!(ext, None, "global_extent on missing field must return None");
+    }
+
+    /// `global_extent` handles integer columns the same way as `apply_one_group`.
+    #[test]
+    fn test_bin_global_extent_integer_column() {
+        pyo3::Python::initialize();
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int64Array::from(vec![1_i64, 5, 3]))],
+        ).unwrap();
+        let spec = BinSpec {
+            field: "x".into(),
+            bin_count: Some(3),
+            bin_width: None,
+            extent: None,
+            nice: false,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let ext = super::global_extent(&spec, &batch);
+        let Some((lo, hi)) = ext else {
+            panic!("global_extent must return Some for valid Int64 data");
+        };
+        assert!((lo - 1.0).abs() < 1e-12, "lo should be 1.0, got {lo}");
+        assert!((hi - 5.0).abs() < 1e-12, "hi should be 5.0, got {hi}");
     }
 }

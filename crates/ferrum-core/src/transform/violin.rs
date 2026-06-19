@@ -45,8 +45,53 @@ pub(crate) struct ViolinSpec {
     pub n: usize,
     #[serde(default = "default_violin_width")]
     pub width: f64,
+    /// Pinned extent for the per-group KDE grid. When `Some((lo, hi))`, every
+    /// group evaluates its KDE over this range rather than its own data range,
+    /// so all panels/groups share a comparable value axis. Task 9 sets this
+    /// via the `global_extent` helper when faceting is active.
+    /// Uses the same serde attributes as `KdeSpec::extent` and `BinSpec::extent`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub extent: Option<(f64, f64)>,
+    /// When true, all groups within a violin share the same x-grid extent.
+    /// Mirrors `KdeSpec::shared_extent` and `BinSpec::shared_extent`.
+    #[serde(default)]
+    pub shared_extent: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
+}
+
+/// Compute the global `(lo, hi)` extent of `spec.field` over the full `batch`.
+///
+/// Returns `None` when the field is missing, non-numeric, or all values are
+/// null/NaN. This is the pre-facet extent Task 9 uses to pin the value axis
+/// before partitioning, so every facet panel shares the same KDE grid range.
+///
+/// Reuses violin's existing Float64 requirement (the field must already be
+/// Float64, because `apply` hard-errors on non-Float64 before it gets here).
+// Task 9 (render/prepare.rs) will call this from the generalized extent-pin seam.
+#[allow(dead_code)]
+pub(crate) fn global_extent(spec: &ViolinSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
+    let schema = batch.schema();
+    let idx = schema.index_of(&spec.field).ok()?;
+    let arr = batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()?;
+    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
+        if arr.is_null(i) {
+            return (lo, hi);
+        }
+        let v = arr.value(i);
+        if v.is_nan() {
+            return (lo, hi);
+        }
+        (lo.min(v), hi.max(v))
+    });
+    if lo.is_finite() && hi.is_finite() && lo < hi {
+        Some((lo, hi))
+    } else {
+        None
+    }
 }
 
 pub(crate) fn apply(spec: &ViolinSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -213,13 +258,19 @@ pub(crate) fn apply_with_context(
         )
         .map_err(|e| PyValueError::new_err(format!("stat_violin: synth batch: {e}")))?;
 
+        // When a pinned extent is set (e.g. by the facet-prepare layer after
+        // calling `global_extent`), use it for ALL groups so every panel/group
+        // evaluates the KDE on the same x-range, enabling comparable value axes.
+        // Without a pinned extent, fall back to the per-group (lo, hi) derived
+        // from this group's data only (backward-compatible default behaviour).
+        let kde_extent = spec.extent.unwrap_or((lo, hi));
         let kde_spec = KdeSpec {
             field: spec.field.clone(),
             bandwidth: spec.bandwidth.clone(),
             bw_adjust: spec.bw_adjust,
             shared_extent: false,
             n: spec.n,
-            extent: Some((lo, hi)),
+            extent: Some(kde_extent),
             cumulative: false,
             kernel: crate::transform::kde::default_kernel(),
             groupby: None,
@@ -429,6 +480,8 @@ impl PyViolin {
                 bw_adjust,
                 n,
                 width,
+                extent: None,
+                shared_extent: false,
                 name,
             },
         )))
@@ -506,9 +559,11 @@ mod tests {
             field: "v".into(),
             groupby: vec![],
             bandwidth: BandwidthSpec::Scott,
-        bw_adjust: 1.0,
+            bw_adjust: 1.0,
             n: 64,
             width: 0.5,
+            extent: None,
+            shared_extent: false,
             name: None,
         };
         let out = apply(&spec, &b).unwrap();
@@ -554,9 +609,11 @@ mod tests {
             field: "v".into(),
             groupby: vec!["group".into()],
             bandwidth: BandwidthSpec::Scott,
-        bw_adjust: 1.0,
+            bw_adjust: 1.0,
             n: 32,
             width: 0.4,
+            extent: None,
+            shared_extent: false,
             name: None,
         };
         let out = apply(&spec, &b).unwrap();
@@ -606,9 +663,11 @@ mod tests {
                 field: "v".into(),
                 groupby: vec![],
                 bandwidth: bw.clone(),
-        bw_adjust: 1.0,
+                bw_adjust: 1.0,
                 n,
                 width: 0.4,
+                extent: None,
+                shared_extent: false,
                 name: None,
             };
             let out = apply(&spec, &b).unwrap();
@@ -647,6 +706,8 @@ mod tests {
             bw_adjust: 1.0,
             n: 64,
             width: 0.4,
+            extent: None,
+            shared_extent: false,
             name: None,
         };
         let out = apply(&spec, &b).unwrap();
@@ -684,6 +745,8 @@ mod tests {
             bw_adjust: 1.0,
             n: 64,
             width: 0.4,
+            extent: None,
+            shared_extent: false,
             name: None,
         };
         let out = apply(&spec, &b).unwrap();
@@ -729,6 +792,8 @@ mod tests {
             bw_adjust: 1.0,
             n: 32,
             width: 0.4,
+            extent: None,
+            shared_extent: false,
             name: None,
         };
         let out = apply(&spec, &b).unwrap();
@@ -796,6 +861,8 @@ mod tests {
             bw_adjust: 1.0,
             n: 32,
             width: 0.4,
+            extent: None,
+            shared_extent: false,
             name: None,
         };
         let out = apply(&spec, &b).unwrap();
@@ -853,6 +920,8 @@ mod tests {
             bw_adjust: 1.0,
             n: 16,
             width: 0.4,
+            extent: None,
+            shared_extent: false,
             name: None,
         };
         // Must not error: the non-nullable schema declaration was the bug.
@@ -896,6 +965,8 @@ mod tests {
             bw_adjust: 1.0,
             n: 32,
             width: 0.4,
+            extent: None,
+            shared_extent: false,
             name: None,
         };
         let out = apply(&spec, &b).unwrap();
@@ -906,5 +977,204 @@ mod tests {
         let keys: std::collections::BTreeSet<String> = col_str(&out, "group").into_iter().collect();
         assert_eq!(keys.len(), 2);
         assert!(keys.contains("a") && keys.contains("b"));
+    }
+
+    // ── Task 8: extent field + global_extent helper ───────────────────────────
+
+    /// ViolinSpec with `extent: Some((lo, hi))` must use the pinned extent for
+    /// ALL groups, not the per-group data range. Both groups must produce violin_y
+    /// values spanning the full pinned range rather than their own data range.
+    #[test]
+    fn violin_pinned_extent_applies_to_all_groups() {
+        pyo3::Python::initialize();
+        // Group "a": values in [0, 9]. Group "b": values in [100, 109].
+        // Without pinning: group "a" would have y in ~[0,9], group "b" in ~[100,109].
+        // With pinning to (0, 109): both groups must produce violin_y spanning 0..=109.
+        let mut vals: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        vals.extend((100..110).map(|i| i as f64));
+        let mut grps: Vec<&str> = vec!["a"; 10];
+        grps.extend(vec!["b"; 10]);
+        let b = batch_value_group(vals, grps);
+
+        let pinned_lo = 0.0_f64;
+        let pinned_hi = 109.0_f64;
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            extent: Some((pinned_lo, pinned_hi)),
+            shared_extent: false,
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+        let ys = col_f64(&out, "violin_y");
+        let groups_out = col_str(&out, "group");
+
+        // For EVERY group, violin_y must span the pinned range
+        // (first y value should be near pinned_lo, last near pinned_hi).
+        for gname in &["a", "b"] {
+            let group_ys: Vec<f64> = ys
+                .iter()
+                .zip(groups_out.iter())
+                .filter(|(_, g)| g.as_str() == *gname)
+                .map(|(&y, _)| y)
+                .collect();
+            assert!(!group_ys.is_empty(), "group '{gname}' must have output rows");
+            let min_y = group_ys.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max_y = group_ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            assert!(
+                (min_y - pinned_lo).abs() < 1e-9,
+                "group '{gname}': violin_y min should be {pinned_lo}, got {min_y}"
+            );
+            assert!(
+                (max_y - pinned_hi).abs() < 1e-9,
+                "group '{gname}': violin_y max should be {pinned_hi}, got {max_y}"
+            );
+        }
+    }
+
+    /// ViolinSpec with `extent: None` must produce per-group extents (backward compat).
+    #[test]
+    fn violin_no_pinned_extent_uses_per_group_range() {
+        pyo3::Python::initialize();
+        // Group "a": [0, 9]. Group "b": [100, 109].
+        // Without pinning: each group's violin_y must be within its own data range.
+        let mut vals: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        vals.extend((100..110).map(|i| i as f64));
+        let mut grps: Vec<&str> = vec!["a"; 10];
+        grps.extend(vec!["b"; 10]);
+        let b = batch_value_group(vals, grps);
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+        let ys = col_f64(&out, "violin_y");
+        let groups_out = col_str(&out, "group");
+
+        // Group "a" rows should all have y in [0, 9] (per-group range).
+        let a_ys: Vec<f64> = ys
+            .iter()
+            .zip(groups_out.iter())
+            .filter(|(_, g)| g.as_str() == "a")
+            .map(|(&y, _)| y)
+            .collect();
+        let a_max = a_ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        // Without pinning, group "a" should not have y values reaching 100 (group b's range).
+        assert!(
+            a_max < 50.0,
+            "group 'a' without pinning: violin_y max should be near 9, got {a_max}"
+        );
+    }
+
+    /// Serde round-trip: ViolinSpec with explicit `extent` and `shared_extent`
+    /// round-trips through JSON with the new fields preserved.
+    #[test]
+    fn violin_serde_round_trip_with_new_fields() {
+        let spec = ViolinSpec {
+            field: "val".into(),
+            groupby: vec!["cat".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.5,
+            n: 128,
+            width: 0.3,
+            extent: Some((0.0, 10.0)),
+            shared_extent: true,
+            name: Some("violin_out".into()),
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        let parsed: ViolinSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec, "ViolinSpec round-trip must preserve all fields");
+    }
+
+    /// Serde backward compat: JSON without `extent` and `shared_extent` (as
+    /// emitted by old Python code) must deserialize with defaults applied.
+    #[test]
+    fn violin_serde_missing_new_fields_defaults_backward_compat() {
+        // Minimal JSON that a pre-Task-8 Python might emit (no extent/shared_extent).
+        let json = r#"{
+            "field": "val",
+            "groupby": [],
+            "bandwidth": {"kind": "scott"},
+            "bw_adjust": 1.0,
+            "n": 256,
+            "width": 0.4
+        }"#;
+        let parsed: ViolinSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.extent, None, "extent must default to None");
+        assert!(!parsed.shared_extent, "shared_extent must default to false");
+        assert_eq!(parsed.name, None, "name must default to None");
+    }
+
+    /// `global_extent` returns the full-data range over the value field.
+    #[test]
+    fn violin_global_extent_returns_full_data_range() {
+        let vals: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let b = batch("v", vals);
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec![],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+        };
+        let ext = global_extent(&spec, &b);
+        assert_eq!(ext, Some((0.0, 99.0)), "global_extent should return (0.0, 99.0)");
+    }
+
+    /// `global_extent` returns None when the field is missing.
+    #[test]
+    fn violin_global_extent_missing_field_returns_none() {
+        let b = batch("v", vec![1.0, 2.0, 3.0]);
+        let spec = ViolinSpec {
+            field: "nonexistent".into(),
+            groupby: vec![],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+        };
+        let ext = global_extent(&spec, &b);
+        assert_eq!(ext, None, "global_extent on missing field must return None");
+    }
+
+    /// `global_extent` returns None when all values are null.
+    #[test]
+    fn violin_global_extent_all_null_returns_none() {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
+        let arr = Float64Array::from(vec![None::<f64>, None, None]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec![],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+        };
+        let ext = global_extent(&spec, &b);
+        assert_eq!(ext, None, "global_extent on all-null field must return None");
     }
 }
