@@ -177,6 +177,19 @@ class _ChartLike(ConfigureMixin):
 
         return bytes(rasterize_svg(self.to_svg(), scale=scale))
 
+    def _figure_title_text(self) -> str:
+        """Return the resolved figure title text for the document ``<title>``.
+
+        This is the canonical title accessor shared by every chart-like.
+        The base implementation resolves a single chart's ``_title`` (a
+        ``Title`` dataclass or plain string); :class:`_CompositeBase`
+        overrides it to resolve the composite's ``_figure_title``.  Both
+        fall back to ``"Ferrum chart"`` when no title is set.
+        """
+        from ferrum.display import _extract_title_text
+
+        return _extract_title_text(getattr(self, "_title", None))
+
     def to_html(self, *, embed_wasm: bool = True, toolbar: bool = True) -> str:
         """Return the composition as a self-contained interactive HTML document.
 
@@ -205,10 +218,8 @@ class _ChartLike(ConfigureMixin):
         """
         from ferrum._html import assemble_html
 
-        from ferrum.display import _extract_title_text
-
         ic = self.interactive(toolbar=toolbar)
-        title = _extract_title_text(getattr(self, "_title", None))
+        title = self._figure_title_text()
         return assemble_html(
             ic._scene_json,
             packed_data=ic._packed_data,
@@ -393,8 +404,8 @@ class _ChartLike(ConfigureMixin):
     def properties(self, **kwargs):
         """Forward ``properties(**kwargs)`` to every sub-chart.
 
-        This base implementation is used by non-composite subclasses
-        (``LayerChart``, ``RepeatChart``, ``JointChart``, ``ClusterMapChart``).
+        This base implementation is used by ``LayerChart`` and by plain
+        single-chart wrappers that do not override it.
         ``_CompositeBase`` overrides this with a version that intercepts
         figure-level chrome (``title``, ``subtitle``, ``caption``) and stores
         it at the composition level rather than fanning it to every child.
@@ -462,27 +473,57 @@ class _ChartLike(ConfigureMixin):
 
 
 class _CompositeBase(_ChartLike):
-    """Symmetric list-of-charts container for HConcat / VConcat.
+    """Shared base for every composite chart with figure-level chrome.
 
-    Holds an ordered ``charts`` list and a pixel ``spacing`` between cells.
-    ``__or__`` and ``__and__`` chain further compositions; ``theme`` and
-    ``properties`` fan out to every child.  Figure-level chrome
-    (``title``, ``subtitle``, ``caption``) is stored at the composition
-    level and rendered once around the whole figure — it is never fanned
-    to individual child panels.
+    This is the single home for figure-level title / subtitle / caption
+    across all composites — the symmetric list containers (HConcat /
+    VConcat / Concat) *and* the asymmetric panel layouts (Joint / Repeat /
+    ClusterMap).  Figure chrome is stored at the composition level
+    (``_figure_title`` / ``_figure_subtitle`` / ``_figure_caption``),
+    intercepted in :meth:`properties` so it never reaches an inner panel,
+    and surfaced for the HTML document title via :meth:`_figure_title_text`.
+
+    The symmetric containers also use this class's ``__init__`` to hold an
+    ordered ``charts`` list and a pixel ``spacing`` between cells, plus
+    ``__or__`` / ``__and__`` to chain further compositions.  The asymmetric
+    layouts keep their own slot-based ``__init__`` and ``charts`` property;
+    they call :meth:`_init_figure_chrome` to wire the chrome fields.
     """
 
     def __init__(self, charts: List, *, spacing: float = 10.0) -> None:
         self.charts = list(charts)
         self.spacing = spacing
+        self._init_figure_chrome()
+
+    def _init_figure_chrome(self) -> None:
+        """Initialize the figure-chrome fields to their empty state.
+
+        Called from every composite's ``__init__`` (directly for the
+        asymmetric layouts, via :meth:`__init__` for the symmetric ones)
+        so the chrome attributes always exist before :meth:`properties`
+        runs.
+        """
         self._figure_title: Optional[str] = None
         self._figure_subtitle: Optional[str] = None
         self._figure_caption: Optional[str] = None
 
+    def _carry_figure_chrome(self, dst: "_CompositeBase") -> None:
+        """Copy this composite's figure chrome onto *dst* (a new instance)."""
+        dst._figure_title = self._figure_title
+        dst._figure_subtitle = self._figure_subtitle
+        dst._figure_caption = self._figure_caption
+
+    def _figure_title_text(self) -> str:
+        """Resolve the composite's figure title text for the document ``<title>``."""
+        from ferrum.display import _extract_title_text
+
+        return _extract_title_text(self._figure_title)
+
     def __copy__(self):
         """Shallow copy that duplicates mutable list attributes."""
         new = object.__new__(type(self))
-        # Copy __dict__ for dynamic attributes (e.g. _configure_layers).
+        # Copy __dict__ for dynamic attributes (e.g. _configure_layers,
+        # figure-chrome fields, and slot-free attrs on asymmetric layouts).
         if hasattr(self, "__dict__"):
             new.__dict__.update(self.__dict__)
         # Copy slot attributes from the full MRO.
@@ -494,8 +535,11 @@ class _CompositeBase(_ChartLike):
                     setattr(new, slot, getattr(self, slot))
                 except AttributeError:
                     pass
-        # Ensure the mutable charts list is a fresh copy.
-        new.charts = list(self.charts)
+        # Ensure the mutable charts list is a fresh copy.  Asymmetric
+        # layouts expose ``charts`` as a read-only property (derived from
+        # their panels), so only refresh it when it is a writable attribute.
+        if not isinstance(getattr(type(self), "charts", None), property):
+            new.charts = list(self.charts)
         return new
 
     def __or__(self, other):
@@ -537,38 +581,40 @@ class _CompositeBase(_ChartLike):
         figure_caption = kwargs.pop("caption", None)
 
         if kwargs:
-            # Forward remaining kwargs to children as before.
-            result = self._rebuild_with_charts(lambda c: c.properties(**kwargs))
+            # Forward remaining (non-chrome) kwargs to the appropriate panel(s).
+            result = self._forward_child_properties(kwargs)
         else:
             # Nothing to fan — rebuild preserving charts unchanged.
             result = self._rebuild_with_charts(lambda c: c)
 
         _copy_configure_layers(self, result)
 
-        # Apply figure-level chrome (only update when a value was provided).
+        # ``_rebuild_with_charts`` / ``_forward_child_properties`` already
+        # carried this composite's existing chrome onto ``result``; only
+        # override the fields a value was given for.
         if figure_title is not None:
             result._figure_title = figure_title
-        elif self._figure_title is not None:
-            result._figure_title = self._figure_title
-
         if figure_subtitle is not None:
             result._figure_subtitle = figure_subtitle
-        elif self._figure_subtitle is not None:
-            result._figure_subtitle = self._figure_subtitle
-
         if figure_caption is not None:
             result._figure_caption = figure_caption
-        elif self._figure_caption is not None:
-            result._figure_caption = self._figure_caption
 
         return result
 
+    def _forward_child_properties(self, kwargs: dict) -> "_CompositeBase":
+        """Apply non-chrome ``properties`` kwargs to the relevant child panel(s).
+
+        The default fans the kwargs to every member chart, which is correct
+        for the symmetric containers (HConcat / VConcat / Concat) and for the
+        repeat-grid template.  Asymmetric layouts whose marginal panels derive
+        their size from a primary panel (Joint → center, ClusterMap → heatmap)
+        override this to route the kwargs to that primary panel only.
+        """
+        return self._rebuild_with_charts(lambda c: c.properties(**kwargs))
+
     def _rebuild_with_charts(self, fn):
         new = type(self)([fn(c) for c in self.charts], spacing=self.spacing)
-        # Carry figure-level chrome through rebuilds.
-        new._figure_title = self._figure_title
-        new._figure_subtitle = self._figure_subtitle
-        new._figure_caption = self._figure_caption
+        self._carry_figure_chrome(new)
         return new
 
 
@@ -619,9 +665,7 @@ class HConcatChart(_CompositeBase):
             spacing=self.spacing,
             resolve=self._resolve,
         )
-        new._figure_title = self._figure_title
-        new._figure_subtitle = self._figure_subtitle
-        new._figure_caption = self._figure_caption
+        self._carry_figure_chrome(new)
         return new
 
     def _render_interactive(self) -> tuple[str, bytes]:
@@ -704,9 +748,7 @@ class VConcatChart(_CompositeBase):
             spacing=self.spacing,
             resolve=self._resolve,
         )
-        new._figure_title = self._figure_title
-        new._figure_subtitle = self._figure_subtitle
-        new._figure_caption = self._figure_caption
+        self._carry_figure_chrome(new)
         return new
 
     def _render_interactive(self) -> tuple[str, bytes]:
@@ -747,7 +789,7 @@ class VConcatChart(_CompositeBase):
 # --------------------------------------------------------------------------
 
 
-class JointChart(_ChartLike):
+class JointChart(_CompositeBase):
     """Joint distribution view: center chart plus optional top and right marginals.
 
     Lays out a 2 × 2 grid: center chart occupies the bottom-left cell,
@@ -807,6 +849,7 @@ class JointChart(_ChartLike):
         self.right = right
         self.ratio = ratio
         self.spacing = spacing
+        self._init_figure_chrome()
 
     @property
     def charts(self) -> list:
@@ -832,22 +875,14 @@ class JointChart(_ChartLike):
             "share": {"x": share_x, "y": share_y},
         }
 
-    def properties(self, **kwargs):
-        """Forward ``properties(**kwargs)`` to the center chart.
+    def _forward_child_properties(self, kwargs: dict) -> "JointChart":
+        """Route non-chrome ``properties`` kwargs to the center chart only.
 
         The marginals (top, right) are kept unchanged because their width /
         height is derived from the center plus ``ratio`` at render time.
-
-        Parameters
-        ----------
-        **kwargs
-            Keyword arguments accepted by ``Chart.properties`` (e.g.
-            ``width``, ``height``, ``title``).
-
-        Returns
-        -------
-        JointChart
-            A new instance with updated center-chart properties.
+        Figure-level chrome (``title`` / ``subtitle`` / ``caption``) is
+        intercepted by :meth:`_CompositeBase.properties` before this hook
+        runs, so it never reaches the center panel.
         """
         result = JointChart(
             self.center.properties(**kwargs),
@@ -856,17 +891,19 @@ class JointChart(_ChartLike):
             ratio=self.ratio,
             spacing=self.spacing,
         )
-        _copy_configure_layers(self, result)
+        self._carry_figure_chrome(result)
         return result
 
     def _rebuild_with_charts(self, fn):
-        return JointChart(
+        new = JointChart(
             fn(self.center),
             top=(fn(self.top) if self.top is not None else None),
             right=(fn(self.right) if self.right is not None else None),
             ratio=self.ratio,
             spacing=self.spacing,
         )
+        self._carry_figure_chrome(new)
+        return new
 
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) by merging child scenes in a 2x2 grid.
@@ -947,7 +984,7 @@ class JointChart(_ChartLike):
         )
 
 
-class RepeatChart(_ChartLike):
+class RepeatChart(_CompositeBase):
     """Repeat a template chart over a grid of row / column field combinations.
 
     Use ``Repeat.column``, ``Repeat.row``, or ``Repeat.layer`` typed sentinels
@@ -1060,6 +1097,7 @@ class RepeatChart(_ChartLike):
         self.spacing = spacing
         self.columns = columns
         self.resolve = resolve
+        self._init_figure_chrome()
 
     @property
     def charts(self) -> list:
@@ -1257,7 +1295,7 @@ class RepeatChart(_ChartLike):
         raise ValueError(f"unknown Repeat placeholder axis '{placeholder_axis}'")
 
     def _rebuild_with_charts(self, fn):
-        return RepeatChart(
+        new = RepeatChart(
             fn(self.template),
             row=self.row,
             column=self.column,
@@ -1268,6 +1306,8 @@ class RepeatChart(_ChartLike):
             columns=self.columns,
             resolve=self.resolve,
         )
+        self._carry_figure_chrome(new)
+        return new
 
     def share_scale(self, **channels):
         """Share scales across this repeat's cells by merging into ``resolve=``.
@@ -1305,6 +1345,7 @@ class RepeatChart(_ChartLike):
             resolve=merged or None,
         )
         _copy_configure_layers(self, result)
+        self._carry_figure_chrome(result)
         return result
 
     def _render_interactive(self) -> tuple[str, bytes]:
@@ -1394,7 +1435,7 @@ class RepeatChart(_ChartLike):
         )
 
 
-class ClusterMapChart(_ChartLike):
+class ClusterMapChart(_CompositeBase):
     """Clustered heatmap with optional row and column dendrograms.
 
     Lays out a 2 × 2 grid: the heatmap occupies the bottom-right cell,
@@ -1459,6 +1500,7 @@ class ClusterMapChart(_ChartLike):
         self.col_dendrogram = col_dendrogram
         self.dendrogram_ratio = dendrogram_ratio
         self.spacing = spacing
+        self._init_figure_chrome()
 
     @property
     def charts(self) -> list:
@@ -1481,22 +1523,14 @@ class ClusterMapChart(_ChartLike):
             "spacing": self.spacing,
         }
 
-    def properties(self, **kwargs):
-        """Forward ``properties(**kwargs)`` to the heatmap chart.
+    def _forward_child_properties(self, kwargs: dict) -> "ClusterMapChart":
+        """Route non-chrome ``properties`` kwargs to the heatmap chart only.
 
         The dendrogram panels are kept unchanged because their width / height
         is derived from the heatmap plus ``dendrogram_ratio`` at render time.
-
-        Parameters
-        ----------
-        **kwargs
-            Keyword arguments accepted by ``Chart.properties`` (e.g.
-            ``width``, ``height``, ``title``).
-
-        Returns
-        -------
-        ClusterMapChart
-            A new instance with updated heatmap-chart properties.
+        Figure-level chrome (``title`` / ``subtitle`` / ``caption``) is
+        intercepted by :meth:`_CompositeBase.properties` before this hook
+        runs, so it never reaches the heatmap panel.
         """
         result = ClusterMapChart(
             self.heatmap.properties(**kwargs),
@@ -1505,17 +1539,19 @@ class ClusterMapChart(_ChartLike):
             dendrogram_ratio=self.dendrogram_ratio,
             spacing=self.spacing,
         )
-        _copy_configure_layers(self, result)
+        self._carry_figure_chrome(result)
         return result
 
     def _rebuild_with_charts(self, fn):
-        return ClusterMapChart(
+        new = ClusterMapChart(
             fn(self.heatmap),
             row_dendrogram=(fn(self.row_dendrogram) if self.row_dendrogram is not None else None),
             col_dendrogram=(fn(self.col_dendrogram) if self.col_dendrogram is not None else None),
             dendrogram_ratio=self.dendrogram_ratio,
             spacing=self.spacing,
         )
+        self._carry_figure_chrome(new)
+        return new
 
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) by merging child scenes in a 2x2 grid.
@@ -1877,10 +1913,8 @@ class ConcatChart(_CompositeBase):
             spacing=self.spacing,
             resolve=self._resolve,
         )
-        # Carry figure-level chrome through rebuilds (mirrors _CompositeBase._rebuild_with_charts).
-        new._figure_title = self._figure_title
-        new._figure_subtitle = self._figure_subtitle
-        new._figure_caption = self._figure_caption
+        # Carry figure-level chrome through rebuilds.
+        self._carry_figure_chrome(new)
         return new
 
     def __repr__(self) -> str:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 import webbrowser
 from pathlib import Path
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Union, cast
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart
@@ -139,6 +139,21 @@ def _extract_title_text(raw_title: object) -> str:
     if raw_title is not None and hasattr(raw_title, "text"):
         return raw_title.text or "Ferrum chart"
     return str(raw_title) if raw_title else "Ferrum chart"
+
+
+def figure_title_text(chart_like: object) -> str:
+    """Resolve the document ``<title>`` text for any chart-like object.
+
+    Composites expose a canonical ``_figure_title_text()`` accessor that
+    resolves their figure-level title; a plain ``Chart`` carries ``_title``
+    (a ``Title`` dataclass).  This helper dispatches to the accessor when it
+    exists and otherwise reads ``_title``, so every HTML export path sets the
+    browser-tab title consistently.
+    """
+    accessor = getattr(chart_like, "_figure_title_text", None)
+    if callable(accessor):
+        return cast(str, accessor())
+    return _extract_title_text(getattr(chart_like, "_title", None))
 
 
 def _is_jupyter() -> bool:

@@ -244,11 +244,11 @@ class InteractiveChart:
 
         from ferrum._html import assemble_html, _copy_wasm_sidecar
 
-        from ferrum.display import _extract_title_text
+        from ferrum.display import figure_title_text
 
         embed_wasm = kwargs.pop("embed_wasm", True)
         csp_nonce = kwargs.pop("csp_nonce", None)
-        title = _extract_title_text(getattr(self._chart, "_title", None))
+        title = figure_title_text(self._chart)
         html = assemble_html(
             self._scene_json,
             packed_data=self._packed_data,
