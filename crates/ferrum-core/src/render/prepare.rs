@@ -2047,10 +2047,13 @@ mod tests {
         let TransformSpec::Violin(pinned) = &out[0] else {
             panic!("expected a Violin transform back");
         };
+        // Violin pins to the RAW global (min, max) over v = (0.3, 9.7). Unlike
+        // Bin, KDE/Violin do not nice their extent (no bin edges to align), so
+        // the pinned value is the unrounded global range, not (0.0, 10.0).
         assert_eq!(
             pinned.extent,
-            Some((0.0, 10.0)),
-            "Violin extent must be pinned to the global (min, max) over v"
+            Some((0.3, 9.7)),
+            "Violin extent must be pinned to the raw global (min, max) over v"
         );
     }
 
@@ -2078,11 +2081,12 @@ mod tests {
         let TransformSpec::Kde(pinned) = &out[0] else {
             panic!("expected a Kde transform back");
         };
-        // Global extent over v ([0, 10]) regardless of the `g` groupby — this is
-        // the multi-group fix that the old groupby.is_some() early-return blocked.
+        // Raw global extent over v = (0.3, 9.7) regardless of the `g` groupby —
+        // the multi-group fix the old groupby.is_some() early-return blocked. KDE
+        // does not nice (only Bin does), so the pin is the raw global min/max.
         assert_eq!(
             pinned.extent,
-            Some((0.0, 10.0)),
+            Some((0.3, 9.7)),
             "KDE with a groupby must still be pinned to the full-dataset extent"
         );
     }
@@ -2130,6 +2134,84 @@ mod tests {
         };
         assert_eq!(pinned_bin.extent, user, "user Bin extent must be preserved");
         assert_eq!(pinned_kde.extent, user, "user KDE extent must be preserved");
+    }
+
+    /// Pins the niced-vs-raw contract between `bin::global_extent`, `kde::global_extent`,
+    /// and `violin::global_extent`.
+    ///
+    /// For the shared fixture data [0.3, 0.5, 1.2, 4.8, 9.7] (raw range 0.3..9.7):
+    ///
+    /// - **Bin** nices its extent to align bin edges: step=1.0 → (0.0, 10.0).
+    /// - **KDE** and **Violin** pin to the raw (min, max) because they have no bin
+    ///   edges to align: (0.3, 9.7).
+    ///
+    /// This test guards the exact defect class that regressed in archaeology bug #7:
+    /// the `fix_extents_pins_violin_to_global_extent` and
+    /// `fix_extents_pins_kde_with_groupby_multi_group` tests had their assertions
+    /// set to the niced value (0.0, 10.0) instead of the raw value (0.3, 9.7).
+    /// Any future change that makes KDE/Violin nice, or makes Bin not nice, will
+    /// trip this test and force an explicit re-evaluation of the contract.
+    #[test]
+    fn global_extent_nices_for_bin_but_raw_for_kde_and_violin() {
+        use crate::transform::bin::BinSpec;
+        use crate::transform::kde::{BandwidthSpec, KdeSpec};
+        use crate::transform::violin::ViolinSpec;
+
+        let batch = extent_pin_batch();
+
+        let bin_spec = BinSpec {
+            field: "v".into(),
+            bin_count: Some(10),
+            bin_width: None,
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let kde_spec = KdeSpec {
+            field: "v".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            extent: None,
+            cumulative: false,
+            shared_extent: false,
+            kernel: "gaussian".into(),
+            groupby: None,
+            name: None,
+        };
+        let violin_spec = ViolinSpec {
+            field: "v".into(),
+            groupby: Vec::new(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+        };
+
+        // Bin nices: raw (0.3, 9.7) with bin_count=10 → step=1.0 → (0.0, 10.0).
+        assert_eq!(
+            crate::transform::bin::global_extent(&bin_spec, &batch),
+            Some((0.0, 10.0)),
+            "Bin must return the NICED global extent, not the raw (0.3, 9.7)"
+        );
+        // KDE does not nice: returns the raw (min, max).
+        assert_eq!(
+            crate::transform::kde::global_extent(&kde_spec, &batch),
+            Some((0.3, 9.7)),
+            "KDE must return the RAW global extent (0.3, 9.7), not the niced (0.0, 10.0)"
+        );
+        // Violin does not nice: returns the raw (min, max).
+        assert_eq!(
+            crate::transform::violin::global_extent(&violin_spec, &batch),
+            Some((0.3, 9.7)),
+            "Violin must return the RAW global extent (0.3, 9.7), not the niced (0.0, 10.0)"
+        );
     }
 
     fn batch3() -> RecordBatch {
