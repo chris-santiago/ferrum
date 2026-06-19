@@ -29,8 +29,16 @@ fi
 # `#[test]` or `#[cfg(test)]` line as test coverage. Fixed directory pathspecs
 # (quoted) so this does not depend on shell word-splitting behaviour.
 if ! $HAS_TESTS && printf '%s' "$STAGED" | grep -qE '^crates/ferrum-(core|wasm)/src/.*\.rs$'; then
-  if git diff --cached -- 'crates/ferrum-core/src' 'crates/ferrum-wasm/src' \
-      | grep -qE '^\+.*#\[(test|cfg\(test\))'; then
+  # Capture the diff into a variable, then match via a here-string. Piping
+  # `git diff` straight into `grep -q` is broken under macOS system bash (3.2)
+  # with `set -o pipefail`: `grep -q` exits at the first match and closes the
+  # pipe, `git` takes SIGPIPE on its next write (any staged diff larger than the
+  # ~16 KB pipe buffer), and bash 3.2 + pipefail report the pipeline as failed.
+  # A staged Rust source diff that DOES add inline tests then reads as having
+  # none, falsely blocking the commit. The here-string has no pipe, so there is
+  # no SIGPIPE to propagate — deterministic across bash versions.
+  RUST_SRC_DIFF=$(git diff --cached -- 'crates/ferrum-core/src' 'crates/ferrum-wasm/src')
+  if grep -qE '^\+.*#\[(test|cfg\(test\))' <<<"$RUST_SRC_DIFF"; then
     HAS_TESTS=true
   fi
 fi
