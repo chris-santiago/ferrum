@@ -7,9 +7,9 @@
 //!   both x2 & y2 present and both axes quantitative → quantitative-range
 //!   path; only y2 present → ordinal-range; else heatmap.
 
-use crate::layout::Rect;
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::mark_nodes::MarkNodes;
 use crate::render::scale_resolve::{ColorScale, ScaleKind};
 
 fn count_distinct(values: &[Option<String>]) -> usize {
@@ -93,10 +93,11 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
-    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
-    let mut nodes = Vec::new();
-    let mut indices = Vec::new();
+    // Accumulate nodes and source-row indices in lockstep so metadata is
+    // aligned to kept nodes only. Rows are skipped for null/non-finite values
+    // and scale-resolution failures (#6 defect class fix).
+    let mut acc = MarkNodes::with_capacity(n);
 
     for i in 0..n {
         let x_lo = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -171,24 +172,27 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
         );
         style.fill_opacity = row_fill_opacity;
 
-        nodes.push(SceneNode::Rect {
+        acc.push(SceneNode::Rect {
             x: px_left,
             y: py_top,
             w,
             h,
             style,
             corner_radius: ctx.mark_style.corner_radius,
-        });
-        indices.push(i);
+        }, i);
     }
+
+    let (nodes, data_indices) = acc.finalize();
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
         kind: MarkBatchKind::Rect,
         nodes,
-        data_indices: Some(indices),
+        data_indices: Some(data_indices),
         tooltips,
         hrefs,
-        descriptions,    }
+        descriptions,
+    }
 }
 
 fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -221,10 +225,11 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
-    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
-    let mut nodes = Vec::new();
-    let mut indices = Vec::new();
+    // Accumulate nodes and source-row indices in lockstep so metadata is
+    // aligned to kept nodes only. Rows are skipped for null categories, non-finite
+    // values, and scale-resolution failures (#6 defect class fix).
+    let mut acc = MarkNodes::with_capacity(32);
 
     if x_is_ordinal {
         // Normal orientation: x is categorical band, y and y2 are quantitative extents.
@@ -299,15 +304,14 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             );
             style.fill_opacity = row_fill_opacity;
 
-            nodes.push(SceneNode::Rect {
+            acc.push(SceneNode::Rect {
                 x: cx - box_w / 2.0,
                 y: rect_top,
                 w: box_w,
                 h: rect_h,
                 style,
                 corner_radius: ctx.mark_style.corner_radius,
-            });
-            indices.push(i);
+            }, i);
         }
     } else if y_is_ordinal {
         // CoordFlip orientation: y is categorical band, x and x2 are quantitative extents.
@@ -382,27 +386,30 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             );
             style.fill_opacity = row_fill_opacity;
 
-            nodes.push(SceneNode::Rect {
+            acc.push(SceneNode::Rect {
                 x: rect_left,
                 y: cy - box_h / 2.0,
                 w: rect_w,
                 h: box_h,
                 style,
                 corner_radius: ctx.mark_style.corner_radius,
-            });
-            indices.push(i);
+            }, i);
         }
     } else {
         return empty_result();
     }
 
+    let (nodes, data_indices) = acc.finalize();
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
+
     MarkBuildResult {
         kind: MarkBatchKind::Rect,
         nodes,
-        data_indices: Some(indices),
+        data_indices: Some(data_indices),
         tooltips,
         hrefs,
-        descriptions,    }
+        descriptions,
+    }
 }
 
 fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -435,7 +442,6 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
-    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
     // Per-row encoding channels: opacity, fill_opacity, stroke_width.
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
@@ -455,14 +461,18 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         col_as_str(ctx.batch, f).ok().or_else(|| {
             col_as_f64(ctx.batch, f).ok().map(|nums| {
                 nums.into_iter()
-                    .map(|v| v.map(|n| format_numeric(n)))
+                    .map(|v| v.map(format_numeric))
                     .collect()
             })
         })
     });
 
-    let mut nodes = Vec::new();
-    let mut indices = Vec::new();
+    // Accumulate nodes and source-row indices in lockstep so metadata is
+    // aligned to kept nodes only. Rows are skipped for null categories and
+    // scale-resolution failures (#6 defect class fix).
+    // Text annotation nodes share the same source row as their rect node, so
+    // both the rect and its text label are pushed with the same `i`.
+    let mut acc = MarkNodes::with_capacity(xs.len() * 2);
 
     for i in 0..xs.len() {
         let xs_v = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -532,23 +542,24 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         );
         style.fill_opacity = row_fill_opacity;
 
-        nodes.push(SceneNode::Rect {
+        acc.push(SceneNode::Rect {
             x: cx - cell_w / 2.0,
             y: cy - cell_h / 2.0,
             w: cell_w,
             h: cell_h,
             style,
             corner_radius: ctx.mark_style.corner_radius,
-        });
-        indices.push(i);
+        }, i);
 
         // Emit text annotation at cell center when text encoding is present.
+        // The text node shares the same source row `i` so node+metadata stay
+        // aligned even when rows are skipped (#6 defect class fix).
         if let Some(ref texts) = text_values {
             if let Some(Some(content)) = texts.get(i) {
                 if !content.is_empty() {
                     let text_color = ctx.theme.colors.font_color;
                     let font_size = ctx.mark_style.font_size.unwrap_or(11.0);
-                    nodes.push(SceneNode::Text {
+                    acc.push(SceneNode::Text {
                         x: cx,
                         y: cy,
                         content: content.clone(),
@@ -562,19 +573,23 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                             Some("central"),
                             1.0,
                         ),
-                    });
+                    }, i);
                 }
             }
         }
     }
 
+    let (nodes, data_indices) = acc.finalize();
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
+
     MarkBuildResult {
         kind: MarkBatchKind::Rect,
         nodes,
-        data_indices: Some(indices),
+        data_indices: Some(data_indices),
         tooltips,
         hrefs,
-        descriptions,    }
+        descriptions,
+    }
 }
 
 #[cfg(test)]
@@ -1008,5 +1023,648 @@ mod tests {
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         assert!(result.nodes.iter().all(|n| !matches!(n, SceneNode::Rect { .. })));
+    }
+
+    // ── Metadata-alignment regression tests (#6 defect class) ────────────────
+    //
+    // Each test creates a batch where a middle row is skipped (null / degenerate)
+    // and asserts that tooltip metadata on each emitted node points to its TRUE
+    // source row, not its node-position row.
+    //
+    // Fail-before: prior to this migration the three rect builders called
+    // `meta.build_metadata(ctx)` (full per-row vectors) before the loop.
+    // When row 1 (of 3) was skipped, node 1 received row 1's tooltip instead of
+    // row 2's — the #6 defect class. These tests fail on that old code: the second
+    // node's tooltip would be "tip_b" (row 1, skipped) instead of "tip_c" (row 2,
+    // the true source row of node 1).
+    //
+    // Pass-after: migrated builders use MarkNodes + build_metadata_for_indices so
+    // node j always receives its true source row's metadata.
+
+    /// Alignment test for `build_quantitative_range`.
+    ///
+    /// Batch: 3 rows, x=[0,1,2], x2=[1,2,3], y=[0,0,0], y2=[1,null,3].
+    /// Row 1 has a null y2 → skipped. 2 nodes survive: node 0 → row 0 → "tip_a",
+    /// node 1 → row 2 → "tip_c". Old code (build_metadata): node 1 → "tip_b".
+    #[test]
+    fn quantitative_range_skipped_null_y2_tooltip_aligned() {
+        use arrow::array::Float64Array;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x:  Some(EncodingSpec { field: "x".into(),  type_: Some(SDT::Quantitative), ..Default::default() }),
+                x2: Some(EncodingSpec { field: "x2".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y:  Some(EncodingSpec { field: "y".into(),  type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "y2".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",   DataType::Float64, false),
+            Field::new("x2",  DataType::Float64, false),
+            Field::new("y",   DataType::Float64, false),
+            Field::new("y2",  DataType::Float64, true),   // nullable — row 1 null → skip
+            Field::new("tip", DataType::Utf8,    false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0_f64,  1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![1.0_f64,  2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.0_f64,  0.0, 0.0])),
+            Arc::new(Float64Array::from(vec![Some(1.0_f64), None, Some(3.0)])),
+            Arc::new(StringArray::from(vec!["tip_a", "tip_b", "tip_c"])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        // 2 nodes survive (row 1 with null y2 is skipped).
+        assert_eq!(result.nodes.len(), 2,
+            "expected 2 rects after null-y2 skip; got {}", result.nodes.len());
+
+        let tooltips = result.tooltips.expect("tooltips must be Some when tooltip is encoded");
+        assert_eq!(tooltips.len(), 2,
+            "tooltip count ({}) must equal node count (2)", tooltips.len());
+
+        let t0 = &tooltips[0].fields[0].value;
+        assert_eq!(t0, "tip_a", "node 0 tooltip must be row 0's ('tip_a'); got '{t0}'");
+
+        // Node 1 → true source row 2 → "tip_c".
+        // Old code (full-row indexing): node 1 → row 1 → "tip_b" (the alignment bug).
+        let t1 = &tooltips[1].fields[0].value;
+        assert_eq!(t1, "tip_c",
+            "node 1 tooltip must be row 2's ('tip_c'), not row 1's ('tip_b'); \
+             got '{t1}'. Fails on pre-migration code using build_metadata(ctx).");
+    }
+
+    /// Alignment test for `build_ordinal_range` (x-ordinal orientation).
+    ///
+    /// Batch: 3 rows, cat=["a","b","c"], q1=[1,2,3], q3=[4,null,6].
+    /// Row 1 has a null q3 → skipped. 2 nodes survive: node 0 → row 0 → "tip_a",
+    /// node 1 → row 2 → "tip_c". Old code: node 1 → "tip_b".
+    #[test]
+    fn ordinal_range_skipped_null_q3_tooltip_aligned() {
+        use arrow::array::Float64Array;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x:  Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal),      ..Default::default() }),
+                y:  Some(EncodingSpec { field: "q1".into(),  type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "q3".into(),  type_: Some(SDT::Quantitative), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8,    false),
+            Field::new("q1",  DataType::Float64, false),
+            Field::new("q3",  DataType::Float64, true),   // nullable — row 1 null → skip
+            Field::new("tip", DataType::Utf8,    false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            Arc::new(Float64Array::from(vec![1.0_f64, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![Some(4.0_f64), None, Some(6.0)])),
+            Arc::new(StringArray::from(vec!["tip_a", "tip_b", "tip_c"])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        // 2 nodes survive (row 1 with null q3 is skipped).
+        assert_eq!(result.nodes.len(), 2,
+            "expected 2 ordinal-range rects after null-q3 skip; got {}", result.nodes.len());
+
+        let tooltips = result.tooltips.expect("tooltips must be Some when tooltip is encoded");
+        assert_eq!(tooltips.len(), 2,
+            "tooltip count ({}) must equal node count (2)", tooltips.len());
+
+        let t0 = &tooltips[0].fields[0].value;
+        assert_eq!(t0, "tip_a", "node 0 tooltip must be row 0's ('tip_a'); got '{t0}'");
+
+        // Node 1 → true source row 2 → "tip_c".
+        // Old code (full-row indexing via build_metadata): node 1 → row 1 → "tip_b".
+        let t1 = &tooltips[1].fields[0].value;
+        assert_eq!(t1, "tip_c",
+            "node 1 tooltip must be row 2's ('tip_c'), not row 1's ('tip_b'); \
+             got '{t1}'. Fails on pre-migration code using build_metadata(ctx).");
+    }
+
+    /// Alignment test for `build_heatmap`.
+    ///
+    /// The heatmap builder skips rows where the x or y category can't be resolved
+    /// by the ordinal scale (i.e. the category isn't in the scale's domain). This
+    /// is triggered by supplying a manually-constructed scale whose x domain
+    /// includes only ["A", "C"] — so row 1 ("B") fails the `to_pixel_str` lookup
+    /// and is skipped.
+    ///
+    /// 2 rect nodes survive: node 0 → row 0 → "tip_a",
+    /// node 1 → row 2 → "tip_c". Old code (build_metadata): node 1 → "tip_b".
+    #[test]
+    fn heatmap_skipped_unlookup_x_tooltip_aligned() {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::ordinal::OrdinalScale;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "xcat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "ycat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("xcat", DataType::Utf8, false),
+            Field::new("ycat", DataType::Utf8, false),
+            Field::new("tip",  DataType::Utf8, false),
+        ]));
+        // Row 1 has x="B" which is absent from the x-scale domain → skipped.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["A", "B", "C"])),
+            Arc::new(StringArray::from(vec!["p", "p", "p"])),  // same y for simplicity
+            Arc::new(StringArray::from(vec!["tip_a", "tip_b", "tip_c"])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+
+        // Manually build scales so x-domain contains only ["A", "C"], not "B".
+        // Row 1 ("B") will fail to_pixel_str → continue (skipped).
+        let scales = ResolvedScales {
+            x: ScaleKind::Ordinal(OrdinalScale::new_internal(
+                vec!["A".into(), "C".into()],
+                vec![50.0, 250.0],
+                0.0,
+            )),
+            y: ScaleKind::Ordinal(OrdinalScale::new_internal(
+                vec!["p".into()],
+                vec![150.0],
+                0.0,
+            )),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+        };
+
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        // 2 rect nodes survive (row 1 with x="B" not in domain is skipped).
+        let rect_count = result.nodes.iter()
+            .filter(|n| matches!(n, SceneNode::Rect { .. }))
+            .count();
+        assert_eq!(rect_count, 2,
+            "expected 2 heatmap cells after unlookup-x skip; got {rect_count}");
+
+        let tooltips = result.tooltips.expect("tooltips must be Some when tooltip is encoded");
+        assert_eq!(tooltips.len(), result.nodes.len(),
+            "tooltip count ({}) must equal total node count ({})",
+            tooltips.len(), result.nodes.len());
+
+        // Node 0 is the first rect → source row 0 → "tip_a".
+        let t0 = &tooltips[0].fields[0].value;
+        assert_eq!(t0, "tip_a", "node 0 tooltip must be row 0's ('tip_a'); got '{t0}'");
+
+        // Node 1 is the second rect → source row 2 → "tip_c".
+        // Old code (full-row build_metadata): node 1 → row 1 → "tip_b".
+        let t1 = &tooltips[1].fields[0].value;
+        assert_eq!(t1, "tip_c",
+            "node 1 tooltip must be row 2's ('tip_c'), not row 1's ('tip_b'); \
+             got '{t1}'. Fails on pre-migration code using build_metadata(ctx).");
+    }
+
+    /// Href channel alignment test for `build_quantitative_range`.
+    ///
+    /// The href channel is populated independently of tooltips; a row-skip that
+    /// misaligns tooltips misaligns hrefs too. This test exercises the href path
+    /// explicitly to confirm both channels are aligned by the accumulator.
+    ///
+    /// Batch: 3 rows, row 1 has null y2 → skipped. 2 nodes survive.
+    /// Node 0 → row 0 → href "url_a"; node 1 → row 2 → href "url_c".
+    #[test]
+    fn quantitative_range_skipped_row_href_aligned() {
+        use arrow::array::Float64Array;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x:  Some(EncodingSpec { field: "x".into(),  type_: Some(SDT::Quantitative), ..Default::default() }),
+                x2: Some(EncodingSpec { field: "x2".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y:  Some(EncodingSpec { field: "y".into(),  type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "y2".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                href: Some(EncodingSpec { field: "href".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",    DataType::Float64, false),
+            Field::new("x2",   DataType::Float64, false),
+            Field::new("y",    DataType::Float64, false),
+            Field::new("y2",   DataType::Float64, true),   // nullable — row 1 null → skip
+            Field::new("href", DataType::Utf8,    false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0_f64,  1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![1.0_f64,  2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.0_f64,  0.0, 0.0])),
+            Arc::new(Float64Array::from(vec![Some(1.0_f64), None, Some(3.0)])),
+            Arc::new(StringArray::from(vec!["url_a", "url_b", "url_c"])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        assert_eq!(result.nodes.len(), 2,
+            "expected 2 rects after null-y2 skip; got {}", result.nodes.len());
+
+        let hrefs = result.hrefs.expect("hrefs must be Some when href is encoded");
+        assert_eq!(hrefs.len(), 2,
+            "href count ({}) must equal node count (2)", hrefs.len());
+
+        let h0 = hrefs[0].as_deref().unwrap_or("");
+        assert_eq!(h0, "url_a", "node 0 href must be row 0's ('url_a'); got '{h0}'");
+
+        // Node 1 → true source row 2 → "url_c".
+        // Old code would give "url_b" (row 1, the skipped row).
+        let h1 = hrefs[1].as_deref().unwrap_or("");
+        assert_eq!(h1, "url_c",
+            "node 1 href must be row 2's ('url_c'), not row 1's ('url_b'); \
+             got '{h1}'. Fails on pre-migration code using build_metadata(ctx).");
+    }
+
+    /// No-skip backward-compat test for all three rect builders.
+    ///
+    /// When no rows are skipped, `build_metadata_for_indices` on a full
+    /// `[0, 1, 2, ...]` index list produces the same metadata as `build_metadata`
+    /// did — so existing correct charts render byte-identically.
+    #[test]
+    fn no_skip_backward_compat_all_three_builders() {
+        use arrow::array::Float64Array;
+
+        // — build_quantitative_range: 3 rows, all kept —
+        let spec_qr = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x:  Some(EncodingSpec { field: "x".into(),  type_: Some(SDT::Quantitative), ..Default::default() }),
+                x2: Some(EncodingSpec { field: "x2".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y:  Some(EncodingSpec { field: "y".into(),  type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "y2".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema_qr = Arc::new(Schema::new(vec![
+            Field::new("x",   DataType::Float64, false),
+            Field::new("x2",  DataType::Float64, false),
+            Field::new("y",   DataType::Float64, false),
+            Field::new("y2",  DataType::Float64, false),
+            Field::new("tip", DataType::Utf8,    false),
+        ]));
+        let batch_qr = arrow::record_batch::RecordBatch::try_new(schema_qr, vec![
+            Arc::new(Float64Array::from(vec![0.0_f64, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![1.0_f64, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.0_f64, 0.0, 0.0])),
+            Arc::new(Float64Array::from(vec![1.0_f64, 2.0, 3.0])),
+            Arc::new(StringArray::from(vec!["tip_a", "tip_b", "tip_c"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales_qr, _) = resolve_scales(&spec_qr, &batch_qr, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
+        let mark_style_qr = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx_qr = DrawCtx { spec: &spec_qr, panel: &panel, theme: &theme, scales: &scales_qr, batch: &batch_qr, mark_style: &mark_style_qr };
+        let result_qr = super::build(&ctx_qr);
+        assert_eq!(result_qr.nodes.len(), 3, "qr: all 3 rows kept → 3 nodes");
+        let tt_qr = result_qr.tooltips.expect("tooltips present");
+        assert_eq!(tt_qr[0].fields[0].value, "tip_a");
+        assert_eq!(tt_qr[1].fields[0].value, "tip_b");
+        assert_eq!(tt_qr[2].fields[0].value, "tip_c");
+
+        // — build_ordinal_range: 3 rows, all kept —
+        let spec_or = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x:  Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal),      ..Default::default() }),
+                y:  Some(EncodingSpec { field: "q1".into(),  type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "q3".into(),  type_: Some(SDT::Quantitative), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema_or = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8,    false),
+            Field::new("q1",  DataType::Float64, false),
+            Field::new("q3",  DataType::Float64, false),
+            Field::new("tip", DataType::Utf8,    false),
+        ]));
+        let batch_or = arrow::record_batch::RecordBatch::try_new(schema_or, vec![
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            Arc::new(Float64Array::from(vec![1.0_f64, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![4.0_f64, 5.0, 6.0])),
+            Arc::new(StringArray::from(vec!["tip_a", "tip_b", "tip_c"])),
+        ]).unwrap();
+        let (scales_or, _) = resolve_scales(&spec_or, &batch_or, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
+        let mark_style_or = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx_or = DrawCtx { spec: &spec_or, panel: &panel, theme: &theme, scales: &scales_or, batch: &batch_or, mark_style: &mark_style_or };
+        let result_or = super::build(&ctx_or);
+        assert_eq!(result_or.nodes.len(), 3, "or: all 3 rows kept → 3 nodes");
+        let tt_or = result_or.tooltips.expect("tooltips present");
+        assert_eq!(tt_or[0].fields[0].value, "tip_a");
+        assert_eq!(tt_or[1].fields[0].value, "tip_b");
+        assert_eq!(tt_or[2].fields[0].value, "tip_c");
+
+        // — build_heatmap: 3 rows, all kept, no text labels —
+        let spec_hm = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "xcat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "ycat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema_hm = Arc::new(Schema::new(vec![
+            Field::new("xcat", DataType::Utf8, false),
+            Field::new("ycat", DataType::Utf8, false),
+            Field::new("tip",  DataType::Utf8, false),
+        ]));
+        let batch_hm = arrow::record_batch::RecordBatch::try_new(schema_hm, vec![
+            Arc::new(StringArray::from(vec!["A", "B", "C"])),
+            Arc::new(StringArray::from(vec!["p", "q", "r"])),
+            Arc::new(StringArray::from(vec!["tip_a", "tip_b", "tip_c"])),
+        ]).unwrap();
+        let (scales_hm, _) = resolve_scales(&spec_hm, &batch_hm, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
+        let mark_style_hm = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx_hm = DrawCtx { spec: &spec_hm, panel: &panel, theme: &theme, scales: &scales_hm, batch: &batch_hm, mark_style: &mark_style_hm };
+        let result_hm = super::build(&ctx_hm);
+        assert_eq!(result_hm.nodes.len(), 3, "hm: all 3 rows kept → 3 rect nodes");
+        let tt_hm = result_hm.tooltips.expect("tooltips present");
+        assert_eq!(tt_hm.len(), 3, "hm: tooltip count must equal node count");
+        assert_eq!(tt_hm[0].fields[0].value, "tip_a");
+        assert_eq!(tt_hm[1].fields[0].value, "tip_b");
+        assert_eq!(tt_hm[2].fields[0].value, "tip_c");
+    }
+
+    /// Alignment test for `build_heatmap` with a text (label) encoding AND a
+    /// tooltip encoding, with one row skipped via unlookup-x.
+    ///
+    /// The heatmap builder emits 2 nodes per labeled cell (a Rect + a Text).
+    /// This test pins the secondary #6 fix where both nodes are pushed with the
+    /// same source-row index `i`, so metadata for the Text node aligns to the
+    /// same true source row as its Rect sibling — not to the node-position index.
+    ///
+    /// Batch: 3 rows, x=["A","B","C"], y=["p","p","p"], text=["cell_a","cell_b","cell_c"],
+    /// tip=["tip_a","tip_b","tip_c"].
+    /// x-scale domain = ["A","C"] only → row 1 ("B") fails to_pixel_str → skipped.
+    ///
+    /// Surviving 4 nodes: rect(row 0), text(row 0), rect(row 2), text(row 2).
+    /// Assertions:
+    ///   (a) tooltips.len() == nodes.len() == 4
+    ///   (b) each node's tooltip is its true source row's string, not its
+    ///       node-position index's string.
+    ///
+    /// Old code would have placed tooltip[2] = "tip_b" (node-position 2 → row 1,
+    /// the skipped row) instead of "tip_c" (true source row 2).
+    #[test]
+    fn heatmap_text_label_and_tooltip_skipped_row_aligned() {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::ordinal::OrdinalScale;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x:       Some(EncodingSpec { field: "xcat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y:       Some(EncodingSpec { field: "ycat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                text:    Some(EncodingSpec { field: "label".into(), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(),   ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("xcat",  DataType::Utf8, false),
+            Field::new("ycat",  DataType::Utf8, false),
+            Field::new("label", DataType::Utf8, false),
+            Field::new("tip",   DataType::Utf8, false),
+        ]));
+        // Row 1 has x="B" which is absent from the x-scale domain → skipped.
+        // Tooltip strings are distinct so node-position vs. source-row indexing is
+        // detectably wrong: old code would emit "tip_b" instead of "tip_c".
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["A", "B", "C"])),
+            Arc::new(StringArray::from(vec!["p", "p", "p"])),
+            Arc::new(StringArray::from(vec!["cell_a", "cell_b", "cell_c"])),
+            Arc::new(StringArray::from(vec!["tip_a",  "tip_b",  "tip_c"])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+
+        // x-domain excludes "B" → row 1 fails to_pixel_str → skipped.
+        let scales = ResolvedScales {
+            x: ScaleKind::Ordinal(OrdinalScale::new_internal(
+                vec!["A".into(), "C".into()],
+                vec![50.0, 250.0],
+                0.0,
+            )),
+            y: ScaleKind::Ordinal(OrdinalScale::new_internal(
+                vec!["p".into()],
+                vec![150.0],
+                0.0,
+            )),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+        };
+
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        // 2 rows kept (rows 0 and 2), each emitting rect + text → 4 nodes total.
+        assert_eq!(result.nodes.len(), 4,
+            "expected 4 nodes (2 rects + 2 text labels); got {}", result.nodes.len());
+
+        let rect_count = result.nodes.iter()
+            .filter(|n| matches!(n, SceneNode::Rect { .. }))
+            .count();
+        assert_eq!(rect_count, 2, "expected 2 rect nodes among the 4");
+
+        // (a) tooltips.len() must equal node count (2 per kept cell = 4).
+        let tooltips = result.tooltips.expect("tooltips must be Some when tooltip is encoded");
+        assert_eq!(tooltips.len(), 4,
+            "tooltip count ({}) must equal total node count (4); \
+             old code omitted Text-node metadata entries", tooltips.len());
+
+        // (b) Node layout: [rect(row0), text(row0), rect(row2), text(row2)].
+        // Every node must carry its true source row's tooltip.
+        let t0 = &tooltips[0].fields[0].value;
+        let t1 = &tooltips[1].fields[0].value;
+        let t2 = &tooltips[2].fields[0].value;
+        let t3 = &tooltips[3].fields[0].value;
+
+        assert_eq!(t0, "tip_a",
+            "node 0 (rect, row 0) tooltip must be 'tip_a'; got '{t0}'");
+        assert_eq!(t1, "tip_a",
+            "node 1 (text, row 0) tooltip must be 'tip_a'; got '{t1}'");
+        // Old code (node-position indexing): node 2 → position 2 → row 1 → "tip_b".
+        assert_eq!(t2, "tip_c",
+            "node 2 (rect, row 2) tooltip must be 'tip_c', not 'tip_b' (skipped row 1); \
+             got '{t2}'");
+        assert_eq!(t3, "tip_c",
+            "node 3 (text, row 2) tooltip must be 'tip_c', not 'tip_b' (skipped row 1); \
+             got '{t3}'");
+    }
+
+    /// Alignment test for `build_ordinal_range` — CoordFlip (y-ordinal) branch with
+    /// a skipped middle row.
+    ///
+    /// The existing `ordinal_range_skipped_null_q3_tooltip_aligned` test only covers
+    /// the x-ordinal branch (null y2 → skip). This test covers the mirror branch:
+    /// y-ordinal + x/x2 quantitative (CoordFlip / horizontal bar), with row 1 having
+    /// a null x2 → skip.
+    ///
+    /// Batch: 3 rows, cat=["a","b","c"], x1=[0,0,0], x2=[4,null,6].
+    /// Row 1 has null x2 → skipped. 2 nodes survive:
+    ///   node 0 → row 0 → "tip_a"
+    ///   node 1 → row 2 → "tip_c"
+    ///
+    /// Old code (build_metadata full-row indexing): node 1 → row 1 → "tip_b".
+    #[test]
+    fn ordinal_range_coordflip_y_ordinal_skipped_null_x2_tooltip_aligned() {
+        use arrow::array::Float64Array;
+
+        // y-ordinal + x + x2 → CoordFlip branch of build_ordinal_range.
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                y:  Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal),      ..Default::default() }),
+                x:  Some(EncodingSpec { field: "x1".into(),  type_: Some(SDT::Quantitative), ..Default::default() }),
+                x2: Some(EncodingSpec { field: "x2".into(),  type_: Some(SDT::Quantitative), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8,    false),
+            Field::new("x1",  DataType::Float64, false),
+            Field::new("x2",  DataType::Float64, true),   // nullable — row 1 null → skip
+            Field::new("tip", DataType::Utf8,    false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            Arc::new(Float64Array::from(vec![0.0_f64, 0.0, 0.0])),
+            Arc::new(Float64Array::from(vec![Some(4.0_f64), None, Some(6.0)])),
+            Arc::new(StringArray::from(vec!["tip_a", "tip_b", "tip_c"])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 300.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 300.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        // 2 nodes survive (row 1 with null x2 is skipped).
+        assert_eq!(result.nodes.len(), 2,
+            "expected 2 CoordFlip ordinal-range rects after null-x2 skip; got {}",
+            result.nodes.len());
+
+        let tooltips = result.tooltips.expect("tooltips must be Some when tooltip is encoded");
+        assert_eq!(tooltips.len(), 2,
+            "tooltip count ({}) must equal node count (2)", tooltips.len());
+
+        let t0 = &tooltips[0].fields[0].value;
+        assert_eq!(t0, "tip_a", "node 0 tooltip must be row 0's ('tip_a'); got '{t0}'");
+
+        // Node 1 → true source row 2 → "tip_c".
+        // Old code (full-row build_metadata): node 1 → row 1 → "tip_b".
+        let t1 = &tooltips[1].fields[0].value;
+        assert_eq!(t1, "tip_c",
+            "node 1 tooltip must be row 2's ('tip_c'), not row 1's ('tip_b'); \
+             got '{t1}'. Fails on pre-migration code using build_metadata(ctx).");
     }
 }
