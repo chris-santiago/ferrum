@@ -1847,6 +1847,50 @@ class LayerChart(_ChartLike):
         result = self._inject_parent_config(result)
         return result
 
+    def properties(self, **kwargs):
+        """Forward non-chrome ``properties(**kwargs)`` to every layer; store ``title`` locally.
+
+        ``LayerChart`` is a single-plot overlay: it merges its layers into one
+        ``Chart`` at render time via :meth:`_build_merged`, which already applies
+        ``self._title`` to the merged chart.  Because of that, ``title`` must be
+        stored on the ``LayerChart`` itself (not fanned to the inner charts), so that:
+
+        - :meth:`_figure_title_text` (→ ``_title``) returns the correct text for
+          the HTML document ``<title>``.
+        - :meth:`_build_merged` applies the title to the merged chart's on-plot
+          chrome exactly once — inner layers carry no stray title.
+
+        Non-chrome kwargs (``width``, ``height``, ...) are fanned to every layer as
+        usual via the base :meth:`_ChartLike.properties` implementation.
+
+        Parameters
+        ----------
+        **kwargs
+            Same keyword arguments accepted by ``Chart.properties``.  ``title``
+            is intercepted here; all other kwargs are forwarded to each layer.
+
+        Returns
+        -------
+        LayerChart
+            A new ``LayerChart`` instance with ``_title`` updated and / or
+            per-layer properties applied.
+        """
+        title = kwargs.pop("title", None)
+
+        if kwargs:
+            # Fan non-chrome kwargs to every layer.
+            result = self._rebuild_with_charts(lambda c: c.properties(**kwargs))
+            _copy_configure_layers(self, result)
+        else:
+            # Nothing to fan — preserve layers unchanged.
+            result = copy.copy(self)
+            _copy_configure_layers(self, result)
+
+        if title is not None:
+            result._title = title
+
+        return result
+
     def _rebuild_with_charts(self, fn):
         return LayerChart(
             *[fn(c) for c in self._charts],

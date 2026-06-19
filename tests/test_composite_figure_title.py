@@ -200,6 +200,62 @@ def test_layer_accessor_default_when_no_title(base_chart):
     assert layered._figure_title_text() == "Ferrum chart"
 
 
+# ---------------------------------------------------------------------------
+# LayerChart HTML document <title> via .properties(title=) — R8.1
+# ---------------------------------------------------------------------------
+
+
+def test_layer_properties_title_resolves_document_title(base_chart):
+    """LayerChart.properties(title=) must set the HTML document <title>."""
+    layered = fm.LayerChart(base_chart, base_chart).properties(title="R8 Title")
+    assert layered._figure_title_text() == "R8 Title"
+
+
+def test_layer_properties_title_to_html(base_chart):
+    """HTML export must embed the title set via .properties()."""
+    layered = fm.LayerChart(base_chart, base_chart).properties(title="LayerDoc")
+    html = layered.to_html()
+    assert "<title>LayerDoc</title>" in html
+
+
+def test_layer_ctor_title_to_html(base_chart):
+    """Constructor path LayerChart(title=) must also set the HTML document <title>."""
+    layered = fm.LayerChart(base_chart, base_chart, title="CtorDoc")
+    html = layered.to_html()
+    assert "<title>CtorDoc</title>" in html
+
+
+def test_layer_properties_title_no_stray_layer_title(base_chart):
+    """Inner layer charts must not carry the title after .properties(title=)."""
+    layered = fm.LayerChart(base_chart, base_chart).properties(title="NoLeak")
+    # The title must not be fanned to the inner charts.
+    for inner in layered._charts:
+        assert inner._title is None
+
+
+def test_layer_no_title_default_document_title(base_chart):
+    """LayerChart without a title falls back to the default document <title>."""
+    layered = fm.LayerChart(base_chart, base_chart)
+    html = layered.to_html()
+    assert "<title>Ferrum chart</title>" in html
+
+
+def test_layer_properties_width_still_fans_to_children(base_chart):
+    """Non-chrome kwargs (width) must still reach the inner charts."""
+    layered = fm.LayerChart(base_chart, base_chart).properties(width=400)
+    for inner in layered._charts:
+        assert inner._width == 400
+
+
+def test_layer_properties_title_and_width(base_chart):
+    """Title stored on LayerChart, width fanned to children — both work together."""
+    layered = fm.LayerChart(base_chart, base_chart).properties(title="TW", width=350)
+    assert layered._figure_title_text() == "TW"
+    for inner in layered._charts:
+        assert inner._title is None
+        assert inner._width == 350
+
+
 def test_joint_to_html_document_title(base_chart):
     joint = fm.JointChart(base_chart).properties(title="Doc Title")
     html = joint.to_html()
