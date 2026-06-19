@@ -41,8 +41,6 @@ pub(crate) struct BinSpec {
 
 fn default_true() -> bool { true }
 
-// Task 9 (render/prepare.rs) will call this when dispatching facet extent pins for Bin.
-#[allow(dead_code)]
 /// Compute the global (optionally niced) `(lo, hi)` extent of `spec.field`
 /// over the full `batch`.
 ///
@@ -51,8 +49,9 @@ fn default_true() -> bool { true }
 /// same nicing logic as `apply_one_group` so that panels aligned to this extent
 /// will produce the same bin edges as the grouped path would compute.
 ///
-/// This is the pre-facet extent Task 9 uses to pin the value axis before
-/// partitioning, so every facet panel shares the same bin edges.
+/// This is the pre-facet extent that `render::prepare` uses to pin the value
+/// axis before partitioning, so every facet panel shares the same bin edges
+/// (see `fix_transform_extents_for_facet`).
 pub(crate) fn global_extent(spec: &BinSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
     // When the caller has already pinned an explicit extent, use it directly.
     if let Some(e) = spec.extent {

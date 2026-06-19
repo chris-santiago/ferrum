@@ -47,13 +47,12 @@ pub(crate) fn default_bw_adjust() -> f64 { 1.0 }
 /// Compute the global `(lo, hi)` extent of `spec.field` over the full `batch`.
 ///
 /// Returns `None` when the field is missing, non-numeric, or all values are
-/// null/NaN. This is the pre-facet extent Task 9 uses to pin the value axis
-/// before partitioning, so every facet panel shares the same KDE grid range.
+/// null/NaN. This is the pre-facet extent that `render::prepare` uses to pin the
+/// value axis before partitioning, so every facet panel shares the same KDE grid
+/// range (see `fix_transform_extents_for_facet`).
 ///
 /// Reuses `coerce_to_float64` so integer-typed fields behave the same as they
 /// do inside `apply_one_group`.
-// Task 9 (render/prepare.rs) will call this from fix_kde_extents_for_facet.
-#[allow(dead_code)]
 pub(crate) fn global_extent(spec: &KdeSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).ok()?;

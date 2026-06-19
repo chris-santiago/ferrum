@@ -322,14 +322,15 @@ pub fn prepare_render_inputs(
                     .collect()
             };
 
-        // Pre-compute the global KDE extent from the full (pre-partition) batch.
-        // When a KDE transform has `shared_extent=false` and `extent=None`, each
-        // partition would use its own range, causing panels to render on different
-        // x-scales and making peak positions non-comparable. By fixing the extent
-        // to the global range before partitioning, all panels evaluate the KDE on
-        // the same x-range, so marks land at comparable pixel positions on the
-        // shared axis. This is the correct default for faceted density charts.
-        let effective_transforms = fix_kde_extents_for_facet(&spec.transforms, &normalized);
+        // Pin a shared value-axis extent from the full (pre-partition) batch for
+        // every extent-carrying transform (Kde / Bin / Violin) without an explicit
+        // extent. Otherwise each partition would use its own range, causing panels
+        // (and hue groups within panels) to render on different value scales and
+        // making positions non-comparable. By fixing the extent to the global range
+        // before partitioning, all panels and groups share the same value axis.
+        // This is the correct default for faceted density / histogram / violin
+        // charts (archaeology bug #7).
+        let effective_transforms = fix_transform_extents_for_facet(&spec.transforms, &normalized);
 
         let mut merged: HashMap<String, Vec<RecordBatch>> = HashMap::new();
         for ((col_value, row_value), partition_batch) in &partitions {
@@ -1654,58 +1655,66 @@ mod tick_format_tests {
     }
 }
 
-/// Partition a RecordBatch by a Utf8 field, returning `(value, filtered_batch)`
-/// For each KDE transform in `transforms` that has `extent=None` and
-/// `groupby=None` (single-group path), pre-compute the global extent from
-/// the full `batch` and return a new transform list where those KDE specs
-/// carry an explicit `extent`. This ensures that all facet partitions evaluate
-/// the KDE on the same x-range so mark positions are comparable across panels.
+/// Pin a shared value-axis extent across facet panels for every extent-carrying
+/// transform (`Kde`, `Bin`, `Violin`) that has not been given an explicit extent.
 ///
-/// KDE transforms that already have an explicit `extent`, or that use a
-/// `groupby` (multi-group path), or that have `shared_extent=true`, are left
-/// unchanged.
+/// Returns a new transform list where each such spec's `extent` is set to the
+/// global range of its value field over the **full pre-facet `batch`**. Because
+/// the extent is computed before partitioning, every per-panel partition (and
+/// every hue group within a panel) inherits the same value axis, so panels and
+/// groups are visually comparable. This is the correct default for faceted
+/// density / histogram / violin charts (archaeology bug #7).
 ///
-/// All non-KDE transforms are passed through unchanged.
-fn fix_kde_extents_for_facet(
+/// The extent is derived over the entire field column, ignoring `groupby` and
+/// facet partitioning — so the multi-group (hue) case is covered without
+/// special-casing (spec §8). Each transform's owning module computes the extent
+/// (`kde::global_extent` / `bin::global_extent` / `violin::global_extent`); this
+/// seam only orchestrates (it does not re-derive extents in the render layer).
+///
+/// A spec that already carries an explicit `extent` (user-provided) is left
+/// unchanged. All non-extent-carrying transforms are passed through unchanged.
+fn fix_transform_extents_for_facet(
     transforms: &[crate::transform::core::TransformSpec],
     batch: &RecordBatch,
 ) -> Vec<crate::transform::core::TransformSpec> {
-    use arrow::array::Float64Array;
     use crate::transform::core::TransformSpec;
 
-    transforms.iter().map(|t| {
-        let TransformSpec::Kde(kde_spec) = t else { return t.clone(); };
-        // Only fill-in extent when the spec doesn't already have one, has no
-        // groupby (the grouped path manages its own shared_extent logic), and
-        // shared_extent is false (shared_extent=true already handles this).
-        if kde_spec.extent.is_some() || kde_spec.groupby.is_some() {
-            return t.clone();
-        }
-        // Compute global [lo, hi] from the full batch's KDE field.
-        let extent = batch.column_by_name(&kde_spec.field)
-            .and_then(|col| col.as_any().downcast_ref::<Float64Array>())
-            .and_then(|arr| {
-                let (lo, hi) = (0..arr.len()).fold(
-                    (f64::INFINITY, f64::NEG_INFINITY),
-                    |(lo, hi), i| {
-                        if arr.is_null(i) { return (lo, hi); }
-                        let v = arr.value(i);
-                        if v.is_nan() { return (lo, hi); }
-                        (lo.min(v), hi.max(v))
-                    },
-                );
-                if lo.is_finite() && hi.is_finite() && lo < hi { Some((lo, hi)) } else { None }
-            });
-        match extent {
-            Some((lo, hi)) => TransformSpec::Kde(crate::transform::kde::KdeSpec {
-                extent: Some((lo, hi)),
-                ..kde_spec.clone()
-            }),
-            None => t.clone(),
-        }
-    }).collect()
+    transforms
+        .iter()
+        .map(|t| match t {
+            TransformSpec::Kde(spec) if spec.extent.is_none() => {
+                match crate::transform::kde::global_extent(spec, batch) {
+                    Some(extent) => TransformSpec::Kde(crate::transform::kde::KdeSpec {
+                        extent: Some(extent),
+                        ..spec.clone()
+                    }),
+                    None => t.clone(),
+                }
+            }
+            TransformSpec::Bin(spec) if spec.extent.is_none() => {
+                match crate::transform::bin::global_extent(spec, batch) {
+                    Some(extent) => TransformSpec::Bin(crate::transform::bin::BinSpec {
+                        extent: Some(extent),
+                        ..spec.clone()
+                    }),
+                    None => t.clone(),
+                }
+            }
+            TransformSpec::Violin(spec) if spec.extent.is_none() => {
+                match crate::transform::violin::global_extent(spec, batch) {
+                    Some(extent) => TransformSpec::Violin(crate::transform::violin::ViolinSpec {
+                        extent: Some(extent),
+                        ..spec.clone()
+                    }),
+                    None => t.clone(),
+                }
+            }
+            _ => t.clone(),
+        })
+        .collect()
 }
 
+/// Partition a RecordBatch by a Utf8 field, returning `(value, filtered_batch)`
 /// pairs in first-appearance order. Used by facet-before-transform to split the
 /// input into per-panel subsets before running transforms.
 fn partition_batch_by_field(
@@ -1949,6 +1958,178 @@ mod tests {
         assert_eq!(parse_label_overlap(""), None);
         // Unrecognized → bounded to the cascade default (greedy), not an error.
         assert_eq!(parse_label_overlap("nonsense"), Some(LabelOverlap::Greedy));
+    }
+
+    // --- archaeology #7: generalized facet extent pin ---------------------------
+
+    /// A two-column batch: a Float64 value field `v` plus a Utf8 hue field `g`.
+    /// Used to drive `fix_transform_extents_for_facet` over the full pre-facet
+    /// dataset (the global extent must ignore `g`).
+    ///
+    /// Values are [0.3, 0.5, 1.2, 4.8, 9.7] (raw range 0.3..9.7), chosen so
+    /// that nicing with bin_count=10 actually changes the extent: nice_step
+    /// produces step=1.0, which rounds 0.3 down to 0.0 and 9.7 up to 10.0.
+    fn extent_pin_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.3, 0.5, 1.2, 4.8, 9.7])),
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b", "b"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A faceted `Bin` transform with `extent=None` gets its extent pinned to the
+    /// niced global range over the full pre-facet batch.
+    #[test]
+    fn fix_extents_pins_bin_to_niced_global_extent() {
+        use crate::transform::bin::BinSpec;
+        use crate::transform::core::TransformSpec;
+        let batch = extent_pin_batch();
+        let spec = BinSpec {
+            field: "v".into(),
+            bin_count: Some(10),
+            bin_width: None,
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Bin(spec.clone())], &batch);
+        let TransformSpec::Bin(pinned) = &out[0] else {
+            panic!("expected a Bin transform back");
+        };
+        // Concrete expected value: raw range is (0.3, 9.7); nice_step(0.3, 9.7, 10)
+        // → step0=0.94, log10(0.94)≈-0.027 → floor=-1 → pow10=0.1, frac=9.4 ≥ 7.5
+        // → nice_frac=10.0 → step=1.0; niced lo=floor(0.3/1.0)*1.0=0.0,
+        // niced hi=ceil(9.7/1.0)*1.0=10.0.  The niced range differs from the raw
+        // range, so this assertion actively exercises the nicing path.
+        assert_eq!(
+            pinned.extent,
+            Some((0.0, 10.0)),
+            "Bin extent must be the niced (0.0, 10.0), not the raw (0.3, 9.7)"
+        );
+        // Also confirm orchestration: the pinned value matches global_extent's output.
+        assert_eq!(
+            pinned.extent,
+            crate::transform::bin::global_extent(&spec, &batch),
+            "Bin extent must be pinned to the niced global extent"
+        );
+    }
+
+    /// A faceted `Violin` transform with `extent=None` gets its extent pinned to
+    /// the global range over the full pre-facet batch.
+    #[test]
+    fn fix_extents_pins_violin_to_global_extent() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::kde::BandwidthSpec;
+        use crate::transform::violin::ViolinSpec;
+        let batch = extent_pin_batch();
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: Vec::new(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Violin(spec.clone())], &batch);
+        let TransformSpec::Violin(pinned) = &out[0] else {
+            panic!("expected a Violin transform back");
+        };
+        assert_eq!(
+            pinned.extent,
+            Some((0.0, 10.0)),
+            "Violin extent must be pinned to the global (min, max) over v"
+        );
+    }
+
+    /// The previously-excluded multi-group case: a faceted `Kde` transform WITH a
+    /// `groupby` (hue) and `extent=None` now gets pinned to the global extent over
+    /// the full dataset, so panels and hue groups share one value axis (spec §8).
+    #[test]
+    fn fix_extents_pins_kde_with_groupby_multi_group() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::kde::KdeSpec;
+        let batch = extent_pin_batch();
+        let spec = KdeSpec {
+            field: "v".into(),
+            bandwidth: crate::transform::kde::BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            extent: None,
+            cumulative: false,
+            shared_extent: false,
+            kernel: "gaussian".into(),
+            groupby: Some("g".into()),
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Kde(spec.clone())], &batch);
+        let TransformSpec::Kde(pinned) = &out[0] else {
+            panic!("expected a Kde transform back");
+        };
+        // Global extent over v ([0, 10]) regardless of the `g` groupby — this is
+        // the multi-group fix that the old groupby.is_some() early-return blocked.
+        assert_eq!(
+            pinned.extent,
+            Some((0.0, 10.0)),
+            "KDE with a groupby must still be pinned to the full-dataset extent"
+        );
+    }
+
+    /// A user-provided explicit `extent` must never be overridden by the pin.
+    #[test]
+    fn fix_extents_respects_user_extent() {
+        use crate::transform::bin::BinSpec;
+        use crate::transform::core::TransformSpec;
+        use crate::transform::kde::KdeSpec;
+        let batch = extent_pin_batch();
+        let user = Some((-5.0, 100.0));
+        let bin = BinSpec {
+            field: "v".into(),
+            bin_count: Some(10),
+            bin_width: None,
+            extent: user,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let kde = KdeSpec {
+            field: "v".into(),
+            bandwidth: crate::transform::kde::BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            extent: user,
+            cumulative: false,
+            shared_extent: false,
+            kernel: "gaussian".into(),
+            groupby: None,
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(
+            &[TransformSpec::Bin(bin), TransformSpec::Kde(kde)],
+            &batch,
+        );
+        let TransformSpec::Bin(pinned_bin) = &out[0] else {
+            panic!("expected a Bin transform back");
+        };
+        let TransformSpec::Kde(pinned_kde) = &out[1] else {
+            panic!("expected a Kde transform back");
+        };
+        assert_eq!(pinned_bin.extent, user, "user Bin extent must be preserved");
+        assert_eq!(pinned_kde.extent, user, "user KDE extent must be preserved");
     }
 
     fn batch3() -> RecordBatch {

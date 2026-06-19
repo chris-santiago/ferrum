@@ -47,8 +47,8 @@ pub(crate) struct ViolinSpec {
     pub width: f64,
     /// Pinned extent for the per-group KDE grid. When `Some((lo, hi))`, every
     /// group evaluates its KDE over this range rather than its own data range,
-    /// so all panels/groups share a comparable value axis. Task 9 sets this
-    /// via the `global_extent` helper when faceting is active.
+    /// so all panels/groups share a comparable value axis. `render::prepare`
+    /// sets this via the `global_extent` helper when faceting is active.
     /// Uses the same serde attributes as `KdeSpec::extent` and `BinSpec::extent`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub extent: Option<(f64, f64)>,
@@ -63,13 +63,12 @@ pub(crate) struct ViolinSpec {
 /// Compute the global `(lo, hi)` extent of `spec.field` over the full `batch`.
 ///
 /// Returns `None` when the field is missing, non-numeric, or all values are
-/// null/NaN. This is the pre-facet extent Task 9 uses to pin the value axis
-/// before partitioning, so every facet panel shares the same KDE grid range.
+/// null/NaN. This is the pre-facet extent that `render::prepare` uses to pin the
+/// value axis before partitioning, so every facet panel shares the same KDE grid
+/// range (see `fix_transform_extents_for_facet`).
 ///
 /// Reuses violin's existing Float64 requirement (the field must already be
 /// Float64, because `apply` hard-errors on non-Float64 before it gets here).
-// Task 9 (render/prepare.rs) will call this from the generalized extent-pin seam.
-#[allow(dead_code)]
 pub(crate) fn global_extent(spec: &ViolinSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).ok()?;
