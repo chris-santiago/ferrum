@@ -991,6 +991,93 @@ pub fn compose_svg_grid_py(
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
+/// Lay out a figure-level chrome title/subtitle/caption band as scene nodes.
+///
+/// Produces the interactive (WASM) counterpart of the SVG band emitted by
+/// ``compose_svg_horizontal``/``_vertical``/``_grid``. The Python composite
+/// merge injects the returned nodes into the merged scene's ``title`` list and
+/// offsets the merged child panels down by ``header_h`` — mirroring how the SVG
+/// path reserves top space — so the static and interactive renders place the
+/// title band at identical coordinates. Layout lives entirely in Rust; Python
+/// must not recompute any title geometry.
+///
+/// Parameters
+/// ----------
+/// width : float
+///     Width (px) of the composed figure (the merged panels' bounding box).
+///     Drives horizontal placement: ``start`` -> ``left_inset``,
+///     ``middle`` -> ``width / 2``, ``end`` -> ``width - right_inset``.
+/// height : float
+///     Height (px) of the composed panels (excluding chrome). Used to place the
+///     caption baseline below the panels. Has no effect on ``header_h``.
+/// title : str or None, default None
+///     Figure-level title (bold, 16 px, ``#1f2937``).
+/// subtitle : str or None, default None
+///     Figure-level subtitle (normal, 13 px, ``#6b7280``).
+/// caption : str or None, default None
+///     Figure-level caption rendered below the panels (normal, 11 px, ``#6b7280``).
+/// left_inset : float or None, default None
+///     Horizontal inset (px) for ``start``-anchored chrome. Defaults to 16.0.
+/// right_inset : float or None, default None
+///     Horizontal inset (px) for ``end``-anchored chrome. Defaults to 16.0.
+/// anchor : str or None, default None
+///     One of ``"start"``, ``"middle"``, ``"end"``. ``None`` -> ``"start"``.
+///
+/// Returns
+/// -------
+/// tuple[str, float, float]
+///     ``(nodes_json, header_h, footer_h)``.
+///
+///     - ``nodes_json`` — a JSON array string of ``SceneNode::Text`` objects
+///       (same shape as a scene's ``title`` list:
+///       ``[{"type": "text", "x": .., "y": .., "content": "..", "style": {..}}, ..]``);
+///       parse with ``json.loads`` and extend ``merged["title"]``.
+///     - ``header_h`` — vertical band height (px) reserved **above** the panels
+///       (title + subtitle). Offset the merged child scenes downward by this amount
+///       before extending ``merged["title"]`` with the returned nodes. ``0.0`` when
+///       no title/subtitle is present (e.g. caption-only or all-``None``).
+///     - ``footer_h`` — vertical band height (px) reserved **below** the panels
+///       (caption). Grow the merged scene's ``height`` by ``footer_h`` so the
+///       interactive canvas matches the SVG canvas that ``compose_svg_*`` produces.
+///       ``0.0`` when no caption is present.
+///
+///     The caption node's ``y`` is already absolute in outer-canvas space
+///     (``header_h + panel_h + CAPTION_TOP_PAD + CAPTION_FONT_SIZE``), so it must
+///     NOT be offset when ``_offset_node`` is applied to child panels. Only child
+///     scene nodes (marks, axes, decorations) are shifted by ``header_h``; the
+///     returned chrome nodes are injected at their final positions.
+///
+///     The ``height`` parameter must be the merged panels' bounding-box height
+///     **before** chrome is added (i.e. the same ``height`` the SVG compositor uses
+///     as ``panel_h`` inside ``wrap_with_chrome``). For horizontal/vertical/grid
+///     composites this is the inner SVG root's ``height`` after compositing but
+///     before ``wrap_with_chrome`` adds the bands.
+///
+/// Raises
+/// ------
+/// ValueError
+///     If *anchor* is not one of the accepted values, or node serialization fails.
+#[pyfunction]
+#[pyo3(name = "figure_title_nodes")]
+#[pyo3(signature = (width, height, *, title = None, subtitle = None, caption = None, left_inset = None, right_inset = None, anchor = None))]
+#[allow(clippy::too_many_arguments)]
+pub fn figure_title_nodes_py(
+    width: f64,
+    height: f64,
+    title: Option<&str>,
+    subtitle: Option<&str>,
+    caption: Option<&str>,
+    left_inset: Option<f64>,
+    right_inset: Option<f64>,
+    anchor: Option<&str>,
+) -> PyResult<(String, f64, f64)> {
+    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
+    let (nodes, header_h, footer_h) = crate::render::figure_chrome::title_nodes(chrome, width, height);
+    let json = serde_json::to_string(&nodes)
+        .map_err(|e| PyValueError::new_err(format!("figure title node serialization: {e}")))?;
+    Ok((json, header_h, footer_h))
+}
+
 /// Rasterize a complete SVG string to PNG bytes.
 ///
 /// Used by composition types whose ``show_svg()`` produces a complete SVG

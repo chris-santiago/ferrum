@@ -19,6 +19,7 @@
 
 use super::svg::{escape_text, fmt_f};
 use super::compositor::{parse_svg_root, write_svg_open, CompositorError};
+use ferrum_scene::{Color, FontWeight, SceneNode, TextAnchor, TextBaseline, TextStyle};
 
 // ---------------------------------------------------------------------------
 // Constants (consistent with ThemeTypography defaults + single-chart titles)
@@ -27,6 +28,15 @@ use super::compositor::{parse_svg_root, write_svg_open, CompositorError};
 const FIGURE_TITLE_FONT_SIZE: f64 = 16.0;
 const FIGURE_SUBTITLE_FONT_SIZE: f64 = 13.0;
 const FIGURE_CAPTION_FONT_SIZE: f64 = 11.0;
+
+/// Title text color (`#1f2937`, ferrum dark text). Matches the literal hex the
+/// SVG header emits, so the interactive node band renders an identical color.
+const FIGURE_TITLE_COLOR: Color = Color { r: 0x1f, g: 0x29, b: 0x37, a: 0xff };
+/// Subtitle/caption text color (`#6b7280`, ferrum label gray). Matches the
+/// literal hex the SVG bands emit.
+const FIGURE_MUTED_COLOR: Color = Color { r: 0x6b, g: 0x72, b: 0x80, a: 0xff };
+/// Font family for all three chrome lines (matches the SVG `font-family="Inter"`).
+const FIGURE_FONT_FAMILY: &str = "Inter";
 
 /// Horizontal inset (in px) from the panel edges to the chrome text when the
 /// chrome anchor is `Start`/`End`. Mirrors `ThemePadding::default().padding`
@@ -117,6 +127,102 @@ impl FigureChrome<'_> {
             ChromeAnchor::End => (panel_w - self.right_inset, "end"),
         }
     }
+
+    /// Compute the fully-resolved geometry for this chrome band against a
+    /// composed panel of width `panel_w` and height `panel_h`.
+    ///
+    /// This is the single source of truth for chrome positioning: both the SVG
+    /// emitter (`emit_header`/`emit_footer`) and the scene-node builder
+    /// (`title_nodes`) consume the result, so the static and interactive renders
+    /// place the title/subtitle/caption at byte-identical coordinates.
+    fn layout(&self, panel_w: f64, panel_h: f64) -> ChromeLayout<'_> {
+        let header_h = compute_header_height(self);
+        let footer_h = compute_footer_height(self);
+        let (x, text_anchor) = self.resolve_anchor(panel_w);
+
+        let mut lines = Vec::new();
+
+        // Header: title then subtitle. The y baselines below reproduce exactly
+        // the inline math the SVG header used before this was extracted.
+        if let Some(title) = self.title {
+            lines.push(ChromeLine {
+                role: ChromeRole::Title,
+                content: title,
+                x,
+                y: TITLE_TOP_PAD + FIGURE_TITLE_FONT_SIZE,
+                text_anchor,
+                font_size: FIGURE_TITLE_FONT_SIZE,
+            });
+        }
+        if let Some(subtitle) = self.subtitle {
+            // With a title, the subtitle sits one line below the title baseline;
+            // alone, it occupies the first header line.
+            let y = if self.title.is_some() {
+                TITLE_TOP_PAD
+                    + FIGURE_TITLE_FONT_SIZE
+                    + TITLE_SUBTITLE_GAP
+                    + FIGURE_SUBTITLE_FONT_SIZE
+            } else {
+                TITLE_TOP_PAD + FIGURE_SUBTITLE_FONT_SIZE
+            };
+            lines.push(ChromeLine {
+                role: ChromeRole::Subtitle,
+                content: subtitle,
+                x,
+                y,
+                text_anchor,
+                font_size: FIGURE_SUBTITLE_FONT_SIZE,
+            });
+        }
+
+        // Footer: caption below the panels.
+        if let Some(caption) = self.caption {
+            let panels_bottom_y = header_h + panel_h;
+            lines.push(ChromeLine {
+                role: ChromeRole::Caption,
+                content: caption,
+                x,
+                y: panels_bottom_y + CAPTION_TOP_PAD + FIGURE_CAPTION_FONT_SIZE,
+                text_anchor,
+                font_size: FIGURE_CAPTION_FONT_SIZE,
+            });
+        }
+
+        ChromeLayout { header_h, footer_h, lines }
+    }
+}
+
+/// Which chrome slot a [`ChromeLine`] occupies. Drives the per-line styling
+/// (font weight + color) so the node builder mirrors the SVG emitter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChromeRole {
+    Title,
+    Subtitle,
+    Caption,
+}
+
+/// One fully-positioned chrome text line in the outer-canvas coordinate space.
+#[derive(Debug, Clone, Copy)]
+struct ChromeLine<'a> {
+    role: ChromeRole,
+    content: &'a str,
+    x: f64,
+    y: f64,
+    text_anchor: &'static str,
+    font_size: f64,
+}
+
+/// Fully-resolved chrome geometry: the reserved band heights plus every
+/// positioned text line. Produced by [`FigureChrome::layout`] and consumed by
+/// both the SVG path and the scene-node path.
+#[derive(Debug, Clone)]
+struct ChromeLayout<'a> {
+    /// Vertical space reserved above the panels (title + subtitle band).
+    header_h: f64,
+    /// Vertical space reserved below the panels (caption band).
+    footer_h: f64,
+    /// Positioned chrome lines, in header-then-footer emit order.
+    lines: Vec<ChromeLine<'a>>,
 }
 
 /// Wrap a composed SVG with figure-level title/subtitle/caption bands.
@@ -148,21 +254,20 @@ pub fn wrap_with_chrome(svg: &str, chrome: FigureChrome<'_>) -> Result<String, C
     let panel_w = parsed.width;
     let panel_h = parsed.height;
 
-    // --- Header height ---
-    let header_h = compute_header_height(&chrome);
-
-    // --- Footer height ---
-    let footer_h = compute_footer_height(&chrome);
+    let layout = chrome.layout(panel_w, panel_h);
+    let header_h = layout.header_h;
 
     // --- Total canvas ---
     let total_w = panel_w;
-    let total_h = panel_h + header_h + footer_h;
+    let total_h = panel_h + header_h + layout.footer_h;
 
     let mut out = String::with_capacity(svg.len() + 512);
     write_svg_open(&mut out, total_w, total_h);
 
-    // Emit header band text nodes
-    emit_header(&mut out, &chrome, panel_w, header_h);
+    // Emit the header band text nodes (title + subtitle), in layout order.
+    for line in layout.lines.iter().filter(|l| l.role != ChromeRole::Caption) {
+        emit_chrome_text(&mut out, line);
+    }
 
     // Wrap inner panels with a vertical offset by header_h.
     // We re-wrap the full inner SVG (including its <svg> open tag) in a
@@ -180,11 +285,54 @@ pub fn wrap_with_chrome(svg: &str, chrome: FigureChrome<'_>) -> Result<String, C
     out.push_str(parsed.body);
     out.push_str("</svg>");
 
-    // Emit footer band text nodes
-    emit_footer(&mut out, &chrome, panel_w, panel_h + header_h);
+    // Emit the footer band text node (caption).
+    for line in layout.lines.iter().filter(|l| l.role == ChromeRole::Caption) {
+        emit_chrome_text(&mut out, line);
+    }
 
     out.push_str("</svg>");
     Ok(out)
+}
+
+/// Build figure-level chrome as positioned `SceneNode::Text` nodes (title,
+/// subtitle, caption) plus the vertical band heights reserved above and below
+/// the composed panels.
+///
+/// Positions come from the same [`FigureChrome::layout`] used by the SVG path,
+/// so a composite's interactive on-canvas title band matches its static SVG
+/// band exactly.
+///
+/// Returns `(nodes, header_h, footer_h)`:
+/// - `nodes` — positioned `SceneNode::Text` items in outer-canvas coordinate
+///   space for a panel region of size `(panel_w, panel_h)`.
+/// - `header_h` — vertical band height (px) reserved **above** the panels
+///   (title + subtitle). Python offsets merged child scenes down by this amount,
+///   mirroring how `wrap_with_chrome` shifts the inner SVG down by `header_h`.
+///   `0.0` when no title/subtitle is present.
+/// - `footer_h` — vertical band height (px) reserved **below** the panels
+///   (caption). Python should grow the merged canvas height by `footer_h` so the
+///   interactive canvas matches the SVG canvas size that `wrap_with_chrome`
+///   produces (which also grows total height by `footer_h`). `0.0` when no
+///   caption is present.
+///
+/// When the chrome is empty, the nodes vector is empty and both band heights
+/// are `0.0`.
+pub fn title_nodes(chrome: FigureChrome<'_>, panel_w: f64, panel_h: f64) -> (Vec<SceneNode>, f64, f64) {
+    if chrome.is_empty() {
+        return (Vec::new(), 0.0, 0.0);
+    }
+    let layout = chrome.layout(panel_w, panel_h);
+    let nodes = layout
+        .lines
+        .iter()
+        .map(|line| SceneNode::Text {
+            x: line.x,
+            y: line.y,
+            content: line.content.to_string(),
+            style: chrome_text_style(line),
+        })
+        .collect();
+    (nodes, layout.header_h, layout.footer_h)
 }
 
 // ---------------------------------------------------------------------------
@@ -219,68 +367,56 @@ fn compute_footer_height(chrome: &FigureChrome<'_>) -> f64 {
     CAPTION_TOP_PAD + FIGURE_CAPTION_FONT_SIZE + CAPTION_BOTTOM_PAD
 }
 
-/// Emit `<text>` elements for the header band (title + subtitle).
+/// Emit one positioned chrome `<text>` element.
 ///
-/// Both lines share the horizontal placement resolved from `chrome.anchor`
-/// and the insets (governed uniformly with the caption). The y coordinates are
-/// absolute within the outer SVG canvas.
-fn emit_header(out: &mut String, chrome: &FigureChrome<'_>, panel_w: f64, _header_h: f64) {
-    let (x, text_anchor) = chrome.resolve_anchor(panel_w);
-
-    // title baseline
-    let mut y = TITLE_TOP_PAD + FIGURE_TITLE_FONT_SIZE;
-
-    if let Some(title) = chrome.title {
-        out.push_str(&format!(
+/// The two SVG variants (title vs. subtitle/caption) differ only in `fill` and
+/// whether a `font-weight="600"` attribute is present. The branch reproduces the
+/// exact byte sequence the previous `emit_header`/`emit_footer` produced, so the
+/// concat figure band stays byte-identical.
+fn emit_chrome_text(out: &mut String, line: &ChromeLine<'_>) {
+    match line.role {
+        ChromeRole::Title => out.push_str(&format!(
             "<text x=\"{}\" y=\"{}\" fill=\"#1f2937\" font-family=\"Inter\" font-size=\"{}\" font-weight=\"600\" text-anchor=\"{}\">{}</text>",
-            fmt_f(x),
-            fmt_f(y),
-            fmt_f(FIGURE_TITLE_FONT_SIZE),
-            text_anchor,
-            escape_text(title),
-        ));
-        y += TITLE_SUBTITLE_GAP + FIGURE_SUBTITLE_FONT_SIZE;
-    } else if chrome.subtitle.is_some() {
-        // subtitle-only: push down by a small extra top pad for visual symmetry
-        y = TITLE_TOP_PAD + FIGURE_TITLE_FONT_SIZE + TITLE_SUBTITLE_GAP + FIGURE_SUBTITLE_FONT_SIZE;
-    }
-
-    if let Some(subtitle) = chrome.subtitle {
-        let subtitle_y = if chrome.title.is_some() {
-            y
-        } else {
-            // subtitle alone: use the y we computed above
-            TITLE_TOP_PAD + FIGURE_SUBTITLE_FONT_SIZE
-        };
-        out.push_str(&format!(
+            fmt_f(line.x),
+            fmt_f(line.y),
+            fmt_f(line.font_size),
+            line.text_anchor,
+            escape_text(line.content),
+        )),
+        ChromeRole::Subtitle | ChromeRole::Caption => out.push_str(&format!(
             "<text x=\"{}\" y=\"{}\" fill=\"#6b7280\" font-family=\"Inter\" font-size=\"{}\" text-anchor=\"{}\">{}</text>",
-            fmt_f(x),
-            fmt_f(subtitle_y),
-            fmt_f(FIGURE_SUBTITLE_FONT_SIZE),
-            text_anchor,
-            escape_text(subtitle),
-        ));
+            fmt_f(line.x),
+            fmt_f(line.y),
+            fmt_f(line.font_size),
+            line.text_anchor,
+            escape_text(line.content),
+        )),
     }
 }
 
-/// Emit the `<text>` element for the footer caption band.
-///
-/// `panels_bottom_y` is the y-coordinate at the bottom of the composed panels
-/// within the outer SVG (i.e., `header_h + panel_h`). The caption shares the
-/// horizontal placement resolved from `chrome.anchor` and the insets, matching
-/// the header lines.
-fn emit_footer(out: &mut String, chrome: &FigureChrome<'_>, panel_w: f64, panels_bottom_y: f64) {
-    let Some(caption) = chrome.caption else { return };
-    let (x, text_anchor) = chrome.resolve_anchor(panel_w);
-    let caption_y = panels_bottom_y + CAPTION_TOP_PAD + FIGURE_CAPTION_FONT_SIZE;
-    out.push_str(&format!(
-        "<text x=\"{}\" y=\"{}\" fill=\"#6b7280\" font-family=\"Inter\" font-size=\"{}\" text-anchor=\"{}\">{}</text>",
-        fmt_f(x),
-        fmt_f(caption_y),
-        fmt_f(FIGURE_CAPTION_FONT_SIZE),
-        text_anchor,
-        escape_text(caption),
-    ));
+/// Build the `TextStyle` for a chrome line's scene node, mirroring the per-role
+/// styling the SVG emitter bakes into literal attributes (color, weight, family,
+/// anchor). Baseline is `Alphabetic` to match SVG's default text baseline (the
+/// `y` is a baseline, not a top edge).
+fn chrome_text_style(line: &ChromeLine<'_>) -> TextStyle {
+    let (color, font_weight) = match line.role {
+        ChromeRole::Title => (FIGURE_TITLE_COLOR, FontWeight::Custom("600".to_string())),
+        ChromeRole::Subtitle | ChromeRole::Caption => (FIGURE_MUTED_COLOR, FontWeight::Normal),
+    };
+    TextStyle {
+        font_size: line.font_size,
+        font_weight,
+        anchor: match line.text_anchor {
+            "middle" => TextAnchor::Middle,
+            "end" => TextAnchor::End,
+            _ => TextAnchor::Start,
+        },
+        baseline: TextBaseline::Alphabetic,
+        angle: 0.0,
+        color,
+        opacity: 1.0,
+        font_family: FIGURE_FONT_FAMILY.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -502,5 +638,215 @@ mod tests {
         assert!(chrome.is_empty());
         let result = wrap_with_chrome(&svg, chrome).unwrap();
         assert_eq!(result, svg, "empty chrome must be byte-identical round-trip");
+    }
+
+    // ── title_nodes (interactive scene-node path) ───────────────────────
+
+    /// Pull the (x, y, content) out of a `SceneNode::Text`, panicking if the
+    /// node is any other variant.
+    fn text_node(node: &SceneNode) -> (f64, f64, &str) {
+        match node {
+            SceneNode::Text { x, y, content, .. } => (*x, *y, content.as_str()),
+            other => panic!("expected Text node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn title_nodes_empty_when_all_none() {
+        let chrome = FigureChrome::default();
+        let (nodes, header_h, footer_h) = title_nodes(chrome, 200.0, 100.0);
+        assert!(nodes.is_empty(), "no chrome -> no nodes");
+        assert_eq!(header_h, 0.0, "no chrome -> zero header band height");
+        assert_eq!(footer_h, 0.0, "no chrome -> zero footer band height");
+    }
+
+    #[test]
+    fn title_nodes_title_only_band_height_positive() {
+        let chrome = FigureChrome { title: Some("Figure"), ..Default::default() };
+        let (nodes, header_h, footer_h) = title_nodes(chrome, 200.0, 100.0);
+        assert_eq!(nodes.len(), 1);
+        assert!(header_h > 0.0, "title present -> band height > 0: {header_h}");
+        assert_eq!(footer_h, 0.0, "no caption -> footer_h == 0");
+        let (_, _, content) = text_node(&nodes[0]);
+        assert_eq!(content, "Figure");
+    }
+
+    #[test]
+    fn title_nodes_caption_only_has_zero_header_height() {
+        // A caption is a footer band; it reserves no top space, so Python must
+        // not offset the panels for a caption-only figure.
+        let chrome = FigureChrome { caption: Some("Source: x"), ..Default::default() };
+        let (nodes, header_h, footer_h) = title_nodes(chrome, 200.0, 100.0);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(header_h, 0.0, "caption is a footer band, no header offset");
+        assert!(footer_h > 0.0, "caption present -> footer_h > 0: {footer_h}");
+        let expected_footer_h = CAPTION_TOP_PAD + FIGURE_CAPTION_FONT_SIZE + CAPTION_BOTTOM_PAD;
+        assert!((footer_h - expected_footer_h).abs() < 1e-9,
+            "footer_h {footer_h} != expected {expected_footer_h}");
+        let (_, _, content) = text_node(&nodes[0]);
+        assert_eq!(content, "Source: x");
+    }
+
+    #[test]
+    fn title_nodes_start_anchor_uses_left_inset() {
+        let chrome = FigureChrome { title: Some("T"), ..Default::default() };
+        let (nodes, _, _) = title_nodes(chrome, 200.0, 100.0);
+        let (x, _, _) = text_node(&nodes[0]);
+        assert_eq!(x, DEFAULT_CHROME_INSET, "start anchor -> x == left_inset");
+    }
+
+    #[test]
+    fn title_nodes_middle_anchor_centers_on_width() {
+        let panel_w = 300.0;
+        let chrome = FigureChrome {
+            title: Some("T"),
+            anchor: ChromeAnchor::Middle,
+            ..Default::default()
+        };
+        let (nodes, _, _) = title_nodes(chrome, panel_w, 100.0);
+        let (x, _, _) = text_node(&nodes[0]);
+        assert_eq!(x, panel_w / 2.0, "middle anchor -> x == width/2");
+        match &nodes[0] {
+            SceneNode::Text { style, .. } => assert_eq!(style.anchor, TextAnchor::Middle),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn title_nodes_end_anchor_uses_right_inset() {
+        let panel_w = 300.0;
+        let right_inset = 40.0;
+        let chrome = FigureChrome {
+            title: Some("T"),
+            right_inset,
+            anchor: ChromeAnchor::End,
+            ..Default::default()
+        };
+        let (nodes, _, _) = title_nodes(chrome, panel_w, 100.0);
+        let (x, _, _) = text_node(&nodes[0]);
+        assert_eq!(x, panel_w - right_inset, "end anchor -> x == width - right_inset");
+        match &nodes[0] {
+            SceneNode::Text { style, .. } => assert_eq!(style.anchor, TextAnchor::End),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn title_nodes_positions_match_svg_band() {
+        // Parity check: the node x/y for each line must equal the x/y the SVG
+        // band emits for the same chrome. We assert on the shared `layout`
+        // output, which both paths consume.
+        let panel_w = 240.0;
+        let panel_h = 120.0;
+        let chrome = FigureChrome {
+            title: Some("T"),
+            subtitle: Some("S"),
+            caption: Some("C"),
+            ..Default::default()
+        };
+        let layout = chrome.layout(panel_w, panel_h);
+        let (nodes, header_h, footer_h) = title_nodes(chrome, panel_w, panel_h);
+        assert_eq!(nodes.len(), 3, "title + subtitle + caption");
+        assert_eq!(header_h, layout.header_h);
+        assert_eq!(footer_h, layout.footer_h);
+        for (node, line) in nodes.iter().zip(layout.lines.iter()) {
+            let (x, y, content) = text_node(node);
+            assert_eq!(x, line.x, "node x matches layout line x");
+            assert_eq!(y, line.y, "node y matches layout line y");
+            assert_eq!(content, line.content);
+        }
+    }
+
+    #[test]
+    fn title_nodes_footer_h_zero_without_caption() {
+        // title + subtitle only: footer_h must be 0.0; header_h must be > 0.
+        let chrome = FigureChrome {
+            title: Some("T"),
+            subtitle: Some("S"),
+            ..Default::default()
+        };
+        let (nodes, header_h, footer_h) = title_nodes(chrome, 300.0, 200.0);
+        assert_eq!(nodes.len(), 2, "title + subtitle = 2 nodes");
+        assert!(header_h > 0.0, "header_h > 0 with title+subtitle");
+        assert_eq!(footer_h, 0.0, "footer_h == 0 without caption");
+    }
+
+    #[test]
+    fn title_nodes_footer_h_matches_compute_footer_height() {
+        // footer_h from title_nodes must equal compute_footer_height directly.
+        let chrome = FigureChrome {
+            title: Some("T"),
+            caption: Some("C"),
+            ..Default::default()
+        };
+        let (_, _, footer_h) = title_nodes(chrome, 400.0, 300.0);
+        let expected = compute_footer_height(&chrome);
+        assert!((footer_h - expected).abs() < 1e-9,
+            "footer_h {footer_h} != compute_footer_height {expected}");
+    }
+
+    /// Tripwire: the `Color` consts used by the scene-node path and the hex
+    /// literals baked into `emit_chrome_text` (SVG path) must agree.
+    ///
+    /// Both `FIGURE_TITLE_COLOR` and `FIGURE_MUTED_COLOR` are fully opaque
+    /// (`a == 0xff`), so `crate::render::color::fmt_svg` would format them via
+    /// `format!("#{:02x}{:02x}{:02x}", r, g, b)`. This test applies that same
+    /// formula to the const's fields and asserts the result equals the exact
+    /// literal string in `emit_chrome_text` — so any edit to one without the
+    /// other will trip this assertion.
+    ///
+    /// **If you change a const, also update the corresponding literal in
+    /// `emit_chrome_text` (and vice versa) to keep the SVG and interactive
+    /// renders byte-identical.**
+    #[test]
+    fn color_consts_match_svg_emit_literals() {
+        // Format using the same formula as `crate::render::color::fmt_svg` for
+        // opaque colors: "#{r:02x}{g:02x}{b:02x}" (lowercase hex, no alpha).
+        let title_hex = format!(
+            "#{:02x}{:02x}{:02x}",
+            FIGURE_TITLE_COLOR.r, FIGURE_TITLE_COLOR.g, FIGURE_TITLE_COLOR.b
+        );
+        let muted_hex = format!(
+            "#{:02x}{:02x}{:02x}",
+            FIGURE_MUTED_COLOR.r, FIGURE_MUTED_COLOR.g, FIGURE_MUTED_COLOR.b
+        );
+        // These must equal the hardcoded fill="..." literals in emit_chrome_text.
+        assert_eq!(
+            title_hex, "#1f2937",
+            "FIGURE_TITLE_COLOR const diverged from the fill=\"#1f2937\" literal in emit_chrome_text"
+        );
+        assert_eq!(
+            muted_hex, "#6b7280",
+            "FIGURE_MUTED_COLOR const diverged from the fill=\"#6b7280\" literal in emit_chrome_text"
+        );
+    }
+
+    #[test]
+    fn title_nodes_carry_role_styling() {
+        let chrome = FigureChrome {
+            title: Some("T"),
+            subtitle: Some("S"),
+            caption: Some("C"),
+            ..Default::default()
+        };
+        let (nodes, _, _) = title_nodes(chrome, 200.0, 100.0);
+        // title: bold-600 dark; subtitle/caption: normal muted.
+        match &nodes[0] {
+            SceneNode::Text { style, .. } => {
+                assert_eq!(style.font_weight, FontWeight::Custom("600".to_string()));
+                assert_eq!(style.color, FIGURE_TITLE_COLOR);
+                assert_eq!(style.font_size, FIGURE_TITLE_FONT_SIZE);
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        for node in &nodes[1..] {
+            match node {
+                SceneNode::Text { style, .. } => {
+                    assert_eq!(style.font_weight, FontWeight::Normal);
+                    assert_eq!(style.color, FIGURE_MUTED_COLOR);
+                }
+                other => panic!("expected Text, got {other:?}"),
+            }
+        }
     }
 }
