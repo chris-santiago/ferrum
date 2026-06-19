@@ -67,22 +67,32 @@ def _apply_overrides(
                 k: v for k, v in properties.items() if k not in _FIGURE_CHROME_KEYS
             } or None
 
-        try:
+        def _apply(c: Any) -> Any:
+            return _apply_overrides(
+                c,
+                mark=mark,
+                encode=encode,
+                properties=child_properties,
+                layers=layers,
+                _skip_unknown_mark_keys=True,
+            )
 
-            def _apply(c: Any) -> Any:
-                return _apply_overrides(
-                    c,
-                    mark=mark,
-                    encode=encode,
-                    properties=child_properties,
-                    layers=layers,
-                    _skip_unknown_mark_keys=True,
-                )
-
-            chart = chart._rebuild_with_charts(_apply)
-        except (NotImplementedError, AttributeError):
+        rebuild = getattr(chart, "_rebuild_with_charts", None)
+        if rebuild is None:
+            # Chart type has no _rebuild_with_charts method at all — fall back
+            # to applying properties directly on the top-level chart.
             if child_properties is not None and hasattr(chart, "properties"):
                 chart = chart.properties(**child_properties)
+        else:
+            try:
+                chart = rebuild(_apply)
+            except NotImplementedError:
+                # Chart type declares _rebuild_with_charts (abstract slot on
+                # _ChartLike) but has not implemented it — fall back to direct
+                # properties application.  AttributeError from a child's
+                # .properties() call during _apply now propagates uncaught.
+                if child_properties is not None and hasattr(chart, "properties"):
+                    chart = chart.properties(**child_properties)
 
         if figure_chrome:
             chart = chart.properties(**figure_chrome)

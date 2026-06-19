@@ -7,9 +7,38 @@ import json as _json
 import warnings
 from pathlib import Path
 from typing import Dict, List, Optional
+from typing import TypedDict
 
 from ferrum._chrome import chrome_kwargs, merge_configure_layers
 from ferrum._configure_mixin import ConfigureMixin
+
+# ---------------------------------------------------------------------------
+# Shared offset key-set constants
+# ---------------------------------------------------------------------------
+
+# Keys for the two area sub-dicts in a panel node (x/y are offset directly).
+_PANEL_AREA_KEYS: tuple[str, ...] = ("plot_area", "clip")
+
+# Keys for per-node lists inside a panel (each element passed to _offset_node).
+_PANEL_NODE_LIST_KEYS: tuple[str, ...] = ("axes", "grid", "annotations", "strip_title")
+
+# Keys for per-node lists in the outer scene (title / legend / decorations).
+_OUTER_NODE_LIST_KEYS: tuple[str, ...] = ("title", "legend", "decorations")
+
+
+class _FigureChrome(TypedDict):
+    """Figure-level chrome payload threaded through scene-merge helpers.
+
+    Produced by :meth:`_CompositeBase._figure_chrome_kwargs` and consumed by
+    :func:`_inject_figure_chrome` (via every ``_merge_child_scenes*`` function
+    and :func:`_render_single_with_figure_chrome`).  Using a ``TypedDict`` makes
+    the key contract explicit and prevents the dict from silently drifting.
+    """
+
+    title: Optional[str]
+    subtitle: Optional[str]
+    caption: Optional[str]
+    chrome: dict
 
 
 def _embed_chart_spec(c) -> Optional[dict]:
@@ -519,7 +548,7 @@ class _CompositeBase(_ChartLike):
 
         return _extract_title_text(self._figure_title)
 
-    def _figure_chrome_kwargs(self) -> dict:
+    def _figure_chrome_kwargs(self) -> "_FigureChrome":
         """Bundle figure chrome for the interactive scene-merge functions.
 
         Returns the ``figure_chrome`` payload consumed by every
@@ -529,14 +558,12 @@ class _CompositeBase(_ChartLike):
         ``compose_svg_*``).  This keeps the interactive on-canvas band in step
         with the SVG band from a single source of chrome values.
         """
-        return {
-            "title": self._figure_title,
-            "subtitle": self._figure_subtitle,
-            "caption": self._figure_caption,
-            "chrome": chrome_kwargs(
-                merge_configure_layers(getattr(self, "_configure_layers", None))
-            ),
-        }
+        return _FigureChrome(
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
+            chrome=chrome_kwargs(merge_configure_layers(getattr(self, "_configure_layers", None))),
+        )
 
     def __copy__(self):
         """Shallow copy that duplicates mutable list attributes."""
@@ -2039,7 +2066,7 @@ def _merge_child_scenes(
     spacing: float,
     layout: str = "horizontal",
     *,
-    figure_chrome: Optional[dict] = None,
+    figure_chrome: Optional["_FigureChrome"] = None,
 ) -> tuple[str, bytes]:
     """Render each child chart and merge their scene JSONs.
 
@@ -2108,7 +2135,7 @@ def _merge_child_scenes_grid(
     spacing: float,
     columns: int,
     *,
-    figure_chrome: Optional[dict] = None,
+    figure_chrome: Optional["_FigureChrome"] = None,
 ) -> tuple[str, bytes]:
     """Render child charts in a wrapping grid layout.
 
@@ -2189,7 +2216,7 @@ def _merge_child_scenes_sparse_grid(
     cells: list[tuple[int, int, object]],
     spacing: float,
     *,
-    figure_chrome: Optional[dict] = None,
+    figure_chrome: Optional["_FigureChrome"] = None,
 ) -> tuple[str, bytes]:
     """Render child charts in a sparse grid layout (for corner-mode repeat).
 
@@ -2260,7 +2287,7 @@ def _merge_child_scenes_nonuniform_grid(
     cells: list[tuple[int, int, object]],
     spacing: float,
     *,
-    figure_chrome: Optional[dict] = None,
+    figure_chrome: Optional["_FigureChrome"] = None,
 ) -> tuple[str, bytes]:
     """Render child charts in a sparse grid with per-row/per-column sizing.
 
@@ -2399,8 +2426,8 @@ def _merge_one_child(
     if merged["background"] is None and scene.get("background"):
         merged["background"] = scene["background"]
 
-    # Offset and merge title, legend, and decoration nodes.
-    for key in ("title", "legend", "decorations"):
+    # Offset and merge outer-level nodes (title, legend, decorations).
+    for key in _OUTER_NODE_LIST_KEYS:
         for node in scene.get(key, []):
             n = copy.deepcopy(node)
             _offset_node(n, dx, dy)
@@ -2416,7 +2443,7 @@ def _inject_figure_chrome(
     subtitle: Optional[str],
     caption: Optional[str],
     chrome: dict,
-) -> None:
+) -> None:  # called via **figure_chrome (_FigureChrome unpacked)
     """Inject a figure-level title / subtitle / caption band into *merged*.
 
     This is the **single** shared implementation of the interactive on-canvas
@@ -2475,17 +2502,17 @@ def _inject_figure_chrome(
     # panel_h) and must NOT be offset.
     if header_h:
         for panel in merged.get("panels", []):
-            for area_key in ("plot_area", "clip"):
+            for area_key in _PANEL_AREA_KEYS:
                 area = panel.get(area_key)
                 if area is not None:
                     area["y"] = area.get("y", 0) + header_h
             for batch in panel.get("marks", []):
                 for node in batch.get("nodes", []):
                     _offset_node(node, 0.0, header_h)
-            for key in ("axes", "grid", "annotations", "strip_title"):
+            for key in _PANEL_NODE_LIST_KEYS:
                 for node in panel.get(key, []):
                     _offset_node(node, 0.0, header_h)
-        for key in ("title", "legend", "decorations"):
+        for key in _OUTER_NODE_LIST_KEYS:
             for node in merged.get(key, []):
                 _offset_node(node, 0.0, header_h)
 
@@ -2499,7 +2526,7 @@ def _inject_figure_chrome(
     merged["height"] = panel_h + header_h + footer_h
 
 
-def _render_single_with_figure_chrome(chart, figure_chrome: dict) -> tuple[str, bytes]:
+def _render_single_with_figure_chrome(chart, figure_chrome: "_FigureChrome") -> tuple[str, bytes]:
     """Render one chart's scene and wrap it in the figure-chrome band.
 
     Used by the asymmetric composites (Joint / ClusterMap) on their
@@ -2564,7 +2591,7 @@ def _merge_scene_panels(
         panel = copy.deepcopy(panel)
         panel["id"] = panel.get("id", 0) + panel_id_offset
 
-        for area_key in ("plot_area", "clip"):
+        for area_key in _PANEL_AREA_KEYS:
             area = panel.get(area_key, {})
             area["x"] = area.get("x", 0) + dx
             area["y"] = area.get("y", 0) + dy
@@ -2572,14 +2599,9 @@ def _merge_scene_panels(
         for batch in panel.get("marks", []):
             for node in batch.get("nodes", []):
                 _offset_node(node, dx, dy)
-        for node in panel.get("axes", []):
-            _offset_node(node, dx, dy)
-        for node in panel.get("grid", []):
-            _offset_node(node, dx, dy)
-        for node in panel.get("annotations", []):
-            _offset_node(node, dx, dy)
-        for node in panel.get("strip_title", []):
-            _offset_node(node, dx, dy)
+        for key in _PANEL_NODE_LIST_KEYS:
+            for node in panel.get(key, []):
+                _offset_node(node, dx, dy)
 
         merged["panels"].append(panel)
 
