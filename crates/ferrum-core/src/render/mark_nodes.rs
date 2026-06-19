@@ -129,21 +129,23 @@ impl MarkNodes {
 /// The canonical batch-construction alignment guard (spec §7).
 ///
 /// At the seam where a [`MarkBatch`](ferrum_scene::MarkBatch)'s nodes are paired
-/// with their per-node metadata, every present metadata vector must have exactly
-/// one entry per node. A builder whose node count diverges from any metadata
-/// vector's length (the #6 defect class) trips this immediately under a debug build.
+/// with their per-node metadata, every present per-node vector must have exactly
+/// one entry per node. A builder whose node count diverges from any vector's
+/// length (the #6 defect class) trips this immediately under a debug build.
 ///
-/// The three metadata channels — tooltips, hrefs, and descriptions — are
-/// populated **independently** by [`MetadataColumns`]: `tooltip_cols`,
-/// `href`, and `description` are separate fields filled from separate encoding
-/// specs. A chart that carries an href encoding but no tooltip encoding produces
+/// The five channels — tooltips, hrefs, descriptions, data_indices, and keys —
+/// are populated **independently**. A chart with href but no tooltip produces
 /// `tooltips == None` while `hrefs == Some(full_row_vec)`. Checking only
 /// `tooltips` would leave that case silent. This function therefore takes the
-/// length of each present metadata vector as a separate `Option<usize>` and
-/// asserts each one independently, so any misaligned channel trips the guard.
+/// length of each present vector as a separate `Option<usize>` and asserts each
+/// one independently, so any misaligned channel trips the guard.
 ///
-/// Each parameter is `Some(n)` when the corresponding metadata vector is present
-/// (its length), or `None` when that channel carries no metadata for this batch.
+/// `data_indices` and `keys` are the alignment vector and the key channel
+/// respectively; they carry one entry per emitted node (not per input row) and
+/// must equal `nodes.len()` exactly like the metadata channels.
+///
+/// Each parameter is `Some(n)` when the corresponding vector is present (its
+/// length), or `None` when that channel is absent for this batch.
 ///
 /// [`MetadataColumns`]: crate::render::draw::MetadataColumns
 #[inline]
@@ -152,6 +154,8 @@ pub(crate) fn debug_assert_nodes_metadata_aligned(
     tooltips_len: Option<usize>,
     hrefs_len: Option<usize>,
     descriptions_len: Option<usize>,
+    data_indices_len: Option<usize>,
+    keys_len: Option<usize>,
 ) {
     if let Some(meta_len) = tooltips_len {
         debug_assert_eq!(
@@ -177,18 +181,35 @@ pub(crate) fn debug_assert_nodes_metadata_aligned(
              (archaeology bug #6 defect class)",
         );
     }
+    if let Some(di_len) = data_indices_len {
+        debug_assert_eq!(
+            nodes_len, di_len,
+            "mark batch node count ({nodes_len}) must equal data_indices length \
+             ({di_len}); a builder emitted data_indices out of lockstep with its nodes \
+             (archaeology bug #6 defect class — alignment vector itself misaligned)",
+        );
+    }
+    if let Some(k_len) = keys_len {
+        debug_assert_eq!(
+            nodes_len, k_len,
+            "mark batch node count ({nodes_len}) must equal keys length \
+             ({k_len}); a builder emitted keys out of lockstep with its nodes \
+             (archaeology bug #6 defect class)",
+        );
+    }
 }
 
 /// Checked form of the alignment guard for unit testing.
 ///
-/// Returns `Ok(())` when the node count agrees with every present metadata
-/// vector (or when no metadata is present), and `Err((channel, nodes_len,
-/// meta_len))` on the first misaligned channel. `channel` is one of
-/// `"tooltip"`, `"href"`, or `"description"`.
+/// Returns `Ok(())` when the node count agrees with every present per-node
+/// vector (or when a channel is absent), and `Err((channel, nodes_len,
+/// vec_len))` on the first misaligned channel. `channel` is one of
+/// `"tooltip"`, `"href"`, `"description"`, `"data_indices"`, or `"keys"`.
 ///
 /// This lets tests exercise the invariant on a release build without relying
 /// on `debug_assert` being compiled in. The production seam uses
-/// [`debug_assert_nodes_metadata_aligned`]; this mirrors its predicate.
+/// [`debug_assert_nodes_metadata_aligned`]; this mirrors its predicate exactly,
+/// checking all five independent channels.
 //
 // Exercised by the unit tests; the production seam uses the `debug_assert`
 // sibling. Kept as the release-testable form of the same invariant.
@@ -198,6 +219,8 @@ pub(crate) fn check_nodes_metadata_aligned(
     tooltips_len: Option<usize>,
     hrefs_len: Option<usize>,
     descriptions_len: Option<usize>,
+    data_indices_len: Option<usize>,
+    keys_len: Option<usize>,
 ) -> Result<(), (&'static str, usize, usize)> {
     if let Some(meta_len) = tooltips_len {
         if meta_len != nodes_len {
@@ -212,6 +235,16 @@ pub(crate) fn check_nodes_metadata_aligned(
     if let Some(meta_len) = descriptions_len {
         if meta_len != nodes_len {
             return Err(("description", nodes_len, meta_len));
+        }
+    }
+    if let Some(di_len) = data_indices_len {
+        if di_len != nodes_len {
+            return Err(("data_indices", nodes_len, di_len));
+        }
+    }
+    if let Some(k_len) = keys_len {
+        if k_len != nodes_len {
+            return Err(("keys", nodes_len, k_len));
         }
     }
     Ok(())
@@ -317,50 +350,61 @@ mod tests {
 
     // ── Alignment guard ──────────────────────────────────────────────────────
 
+    /// Helper to call `check_nodes_metadata_aligned` with all five channels,
+    /// passing `None` for the two new channels when not needed by a test case.
+    fn check(
+        nodes: usize,
+        tooltips: Option<usize>,
+        hrefs: Option<usize>,
+        descs: Option<usize>,
+        data_indices: Option<usize>,
+        keys: Option<usize>,
+    ) -> Result<(), (&'static str, usize, usize)> {
+        check_nodes_metadata_aligned(nodes, tooltips, hrefs, descs, data_indices, keys)
+    }
+
     /// The checked guard accepts aligned node/metadata lengths and the
     /// no-metadata case (`None`), and rejects a deliberate mismatch on any
-    /// of the three independent metadata channels.
+    /// of the five independent channels.
     #[test]
     fn check_guard_accepts_aligned_rejects_mismatch() {
-        // Aligned: 3 nodes, 3 tooltip entries, no href/desc.
-        assert!(check_nodes_metadata_aligned(3, Some(3), None, None).is_ok());
-        // All three channels aligned.
-        assert!(check_nodes_metadata_aligned(3, Some(3), Some(3), Some(3)).is_ok());
-        // No metadata present at all → nothing to check.
-        assert!(check_nodes_metadata_aligned(3, None, None, None).is_ok());
-        assert!(check_nodes_metadata_aligned(0, None, None, None).is_ok());
+        // Aligned: 3 nodes, 3 tooltip entries, no other channels.
+        assert!(check(3, Some(3), None, None, None, None).is_ok());
+        // All five channels aligned.
+        assert!(check(3, Some(3), Some(3), Some(3), Some(3), Some(3)).is_ok());
+        // No channels present at all → nothing to check.
+        assert!(check(3, None, None, None, None, None).is_ok());
+        assert!(check(0, None, None, None, None, None).is_ok());
         // Misaligned tooltip: 3 nodes but 5 tooltip entries.
-        assert_eq!(
-            check_nodes_metadata_aligned(3, Some(5), None, None),
-            Err(("tooltip", 3, 5))
-        );
+        assert_eq!(check(3, Some(5), None, None, None, None), Err(("tooltip", 3, 5)));
         // Misaligned tooltip the other way.
-        assert_eq!(
-            check_nodes_metadata_aligned(5, Some(3), None, None),
-            Err(("tooltip", 5, 3))
-        );
-        // Misaligned href: tooltips absent (the pre-fix hole), but hrefs are wrong.
-        // This is the case described in the archaeology context: href-without-tooltip
-        // produces `tooltips == None` while `hrefs == Some(full_row_vec)`.
-        assert_eq!(
-            check_nodes_metadata_aligned(2, None, Some(5), None),
-            Err(("href", 2, 5))
-        );
-        // Misaligned description with tooltips absent.
-        assert_eq!(
-            check_nodes_metadata_aligned(2, None, None, Some(4)),
-            Err(("description", 2, 4))
-        );
-        // Tooltips aligned but href misaligned — all three checked independently.
-        assert_eq!(
-            check_nodes_metadata_aligned(3, Some(3), Some(5), None),
-            Err(("href", 3, 5))
-        );
+        assert_eq!(check(5, Some(3), None, None, None, None), Err(("tooltip", 5, 3)));
+        // Misaligned href: tooltips absent, but hrefs are wrong.
+        // href-without-tooltip: `tooltips == None` while `hrefs == Some(full_row_vec)`.
+        assert_eq!(check(2, None, Some(5), None, None, None), Err(("href", 2, 5)));
+        // Misaligned description with tooltips + hrefs absent.
+        assert_eq!(check(2, None, None, Some(4), None, None), Err(("description", 2, 4)));
+        // Tooltips aligned but href misaligned — all channels checked independently.
+        assert_eq!(check(3, Some(3), Some(5), None, None, None), Err(("href", 3, 5)));
         // Tooltips aligned, href aligned, description misaligned.
+        assert_eq!(check(3, Some(3), Some(3), Some(7), None, None), Err(("description", 3, 7)));
+        // Misaligned data_indices: 3 nodes but 5 data_indices entries.
+        // This is the label.rs leader-line shape: 2 nodes per row but 1 data_indices entry
+        // — the pre-R1 guard could not detect it because metadata channels were all None.
+        assert_eq!(check(3, None, None, None, Some(5), None), Err(("data_indices", 3, 5)));
+        // Misaligned data_indices the other way (2 nodes, 3 data_indices).
+        assert_eq!(check(2, None, None, None, Some(3), None), Err(("data_indices", 2, 3)));
+        // All metadata channels aligned, but data_indices misaligned.
         assert_eq!(
-            check_nodes_metadata_aligned(3, Some(3), Some(3), Some(7)),
-            Err(("description", 3, 7))
+            check(3, Some(3), Some(3), Some(3), Some(5), None),
+            Err(("data_indices", 3, 5))
         );
+        // Misaligned keys: 3 nodes but 2 keys entries.
+        assert_eq!(check(3, None, None, None, None, Some(2)), Err(("keys", 3, 2)));
+        // All five aligned — guard is silent.
+        assert!(check(4, Some(4), Some(4), Some(4), Some(4), Some(4)).is_ok());
+        // data_indices aligned, keys aligned, metadata absent.
+        assert!(check(4, None, None, None, Some(4), Some(4)).is_ok());
     }
 
     /// The debug assertion trips on a deliberately misaligned construction
@@ -371,7 +415,7 @@ mod tests {
     #[should_panic(expected = "node count")]
     fn debug_assert_guard_trips_on_misaligned_tooltip() {
         // 2 nodes but 3 tooltip metadata entries — the #6 defect class shape.
-        debug_assert_nodes_metadata_aligned(2, Some(3), None, None);
+        debug_assert_nodes_metadata_aligned(2, Some(3), None, None, None, None);
     }
 
     /// The debug assertion trips when the href channel is misaligned and
@@ -384,7 +428,7 @@ mod tests {
     fn debug_assert_guard_trips_on_href_only_misalignment() {
         // href-without-tooltip: 2 nodes, no tooltips, 5 href entries.
         // The old guard would short-circuit here because tooltips is None.
-        debug_assert_nodes_metadata_aligned(2, None, Some(5), None);
+        debug_assert_nodes_metadata_aligned(2, None, Some(5), None, None, None);
     }
 
     /// The debug assertion trips when the description channel is misaligned
@@ -393,22 +437,52 @@ mod tests {
     #[test]
     #[should_panic(expected = "description metadata length")]
     fn debug_assert_guard_trips_on_description_only_misalignment() {
-        debug_assert_nodes_metadata_aligned(2, None, None, Some(4));
+        debug_assert_nodes_metadata_aligned(2, None, None, Some(4), None, None);
+    }
+
+    /// The debug assertion trips when data_indices is misaligned and all
+    /// metadata channels are absent. This is the pre-R1 guard gap: the label.rs
+    /// leader-line builder emitted 2 nodes per row (text + line) but only 1
+    /// data_indices entry per row. With metadata all None, the three-channel
+    /// guard passed silently — only the extended five-channel guard catches it.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "data_indices length")]
+    fn debug_assert_guard_trips_on_data_indices_misalignment() {
+        // 2 nodes per row, 3 rows = 6 nodes; but only 3 data_indices entries (one per row).
+        // Represents the pre-fix label.rs leader-line shape: 2N nodes, N data_indices.
+        debug_assert_nodes_metadata_aligned(6, None, None, None, Some(3), None);
+    }
+
+    /// The debug assertion trips when keys is misaligned while all other
+    /// channels (including data_indices) are absent.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "keys length")]
+    fn debug_assert_guard_trips_on_keys_misalignment() {
+        // 4 nodes but only 2 keys entries.
+        debug_assert_nodes_metadata_aligned(4, None, None, None, None, Some(2));
     }
 
     /// The debug assertion passes silently when all present channels are
-    /// aligned or when no metadata is present (the no-metadata batch case).
+    /// aligned or when no channels are present (the no-metadata batch case).
     #[test]
     fn debug_assert_guard_silent_when_aligned_or_no_metadata() {
-        // All three aligned.
-        debug_assert_nodes_metadata_aligned(4, Some(4), Some(4), Some(4));
-        // Tooltips aligned, no href/desc.
-        debug_assert_nodes_metadata_aligned(4, Some(4), None, None);
+        // All five aligned.
+        debug_assert_nodes_metadata_aligned(4, Some(4), Some(4), Some(4), Some(4), Some(4));
+        // Tooltips aligned, no other channels.
+        debug_assert_nodes_metadata_aligned(4, Some(4), None, None, None, None);
         // href only, aligned.
-        debug_assert_nodes_metadata_aligned(4, None, Some(4), None);
+        debug_assert_nodes_metadata_aligned(4, None, Some(4), None, None, None);
         // desc only, aligned.
-        debug_assert_nodes_metadata_aligned(4, None, None, Some(4));
-        // No metadata at all.
-        debug_assert_nodes_metadata_aligned(4, None, None, None);
+        debug_assert_nodes_metadata_aligned(4, None, None, Some(4), None, None);
+        // data_indices only, aligned.
+        debug_assert_nodes_metadata_aligned(4, None, None, None, Some(4), None);
+        // keys only, aligned.
+        debug_assert_nodes_metadata_aligned(4, None, None, None, None, Some(4));
+        // data_indices + keys, aligned, metadata absent.
+        debug_assert_nodes_metadata_aligned(4, None, None, None, Some(4), Some(4));
+        // No channels at all.
+        debug_assert_nodes_metadata_aligned(4, None, None, None, None, None);
     }
 }

@@ -403,17 +403,21 @@ pub fn build_scene(
             }
 
             let keys = extract_keys(&layer.encoding, layer_batch, result.data_indices.as_deref());
-            // #6 alignment guard (spec §7): each present metadata vector must
-            // have exactly one entry per node. Tooltips, hrefs, and descriptions
-            // are independent channels — a chart with href but no tooltip
-            // produces `tooltips == None` while `hrefs == Some(full_row_vec)`.
-            // All three are checked independently so any misaligned channel
-            // trips the guard under a debug build.
+            // #6 alignment guard (spec §7): each present per-node vector must
+            // have exactly one entry per node. All five channels — tooltips,
+            // hrefs, descriptions, data_indices, and keys — are independent and
+            // checked independently so any misaligned channel trips the guard
+            // under a debug build. data_indices and keys are the alignment
+            // vector and key channel; covering them here catches builders (like
+            // the pre-fix label.rs) that diverge data_indices while leaving
+            // metadata None (which the three-channel guard could not detect).
             crate::render::mark_nodes::debug_assert_nodes_metadata_aligned(
                 result.nodes.len(),
                 result.tooltips.as_ref().map(|t| t.len()),
                 result.hrefs.as_ref().map(|h| h.len()),
                 result.descriptions.as_ref().map(|d| d.len()),
+                result.data_indices.as_ref().map(|d| d.len()),
+                keys.as_ref().map(|k| k.len()),
             );
             mark_batches.push(MarkBatch {
                 kind: result.kind,
