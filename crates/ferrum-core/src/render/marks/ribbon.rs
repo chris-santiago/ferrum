@@ -19,6 +19,7 @@
 //! When `encoding.y2` is unset the drawer silently skips — ribbon requires y2.
 
 use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::mark_nodes::MarkNodes;
 use crate::render::scale_resolve::ScaleKind;
 
 fn resolve_x_pixels(ctx: &DrawCtx, xf: &str, n: usize) -> Option<(Vec<Option<f64>>, bool)> {
@@ -119,10 +120,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let has_color_groups = color_values.is_some() && ctx.scales.color.is_some();
 
     let meta = MetadataColumns::from_ctx(ctx);
-    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
-    let mut nodes = Vec::new();
-    let mut data_indices = Vec::new();
+    // One closed polygon per color group, attached to the group's representative
+    // source row (the first vertex's row after filtering/sorting). The
+    // accumulator keeps `data_indices` in node order so
+    // `build_metadata_for_indices` aligns each band's tooltip/href to that row
+    // (bug #6). Before the fix, `data_indices` carried one entry per *contributing
+    // row* while metadata was full-row, so node and metadata lengths diverged.
+    let mut acc = MarkNodes::with_capacity(groups.len());
 
     for (key, rows) in groups {
         let mut indices: Vec<usize> = rows
@@ -144,6 +149,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         if indices.len() < 2 {
             continue;
         }
+        // Representative source row for this group's single polygon node: the
+        // first kept vertex's row (in render order). Captured before the ring is
+        // built so the node maps to a stable, well-defined row.
+        let representative_row = indices[0];
         let pixels: Vec<(f64, f64, f64)> = indices
             .iter()
             .filter_map(|&i| {
@@ -192,15 +201,18 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             1.0,
             None,
         );
-        nodes.push(ferrum_scene::SceneNode::Path {
-            commands: cmds,
-            style,
-            closed: true,
-        });
-
-        // Track which rows contributed.
-        data_indices.extend(indices.iter().copied());
+        acc.push(
+            ferrum_scene::SceneNode::Path {
+                commands: cmds,
+                style,
+                closed: true,
+            },
+            representative_row,
+        );
     }
+
+    let (nodes, data_indices) = acc.finalize();
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
         kind: MarkBatchKind::Ribbon,
@@ -208,7 +220,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         data_indices: Some(data_indices),
         tooltips,
         hrefs,
-        descriptions,    }
+        descriptions,
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +404,116 @@ mod tests {
             2,
             "expected one polygon per color group"
         );
+    }
+
+    // ── #6 metadata/node alignment (group marks) ─────────────────────────────
+
+    /// Bug #6: a multi-group ribbon attaches each band polygon to its group's
+    /// REPRESENTATIVE source row (the first kept vertex's row in render order),
+    /// not a per-node position. Groups are BLOCKED (A rows 0..3, B rows 3..6) so
+    /// representatives are rows 0 and 3. Old code (`build_metadata(ctx)`) returns
+    /// full per-row vectors of length 6, while only 2 nodes are emitted, so the
+    /// metadata length diverges from the node count and node 1 mis-maps.
+    #[test]
+    fn ribbon_group_band_aligns_to_representative_row() {
+        use crate::spec::encoding::EncodingSpec;
+        use arrow::array::StringArray;
+        let mut spec = ribbon_spec(true);
+        spec.encoding.color = Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() });
+        spec.encoding.tooltip = Some(EncodingSpec { field: "tip".into(), ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("tip", DataType::Utf8, false),
+        ]));
+        // 2 groups × 3 rows, blocked. y2 within domain to keep projections finite.
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![0.0, 2.0, 4.0, 1.0, 3.0, 5.0])),
+            Arc::new(Float64Array::from(vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0])),
+            Arc::new(StringArray::from(vec!["A", "A", "A", "B", "B", "B"])),
+            Arc::new(StringArray::from(vec!["A", "A", "A", "B", "B", "B"])),
+        ]).unwrap();
+        let result = render(&spec, &batch);
+
+        let path_nodes: Vec<_> = result.nodes.iter()
+            .filter(|n| matches!(n, ferrum_scene::SceneNode::Path { .. })).collect();
+        assert_eq!(path_nodes.len(), 2, "expected one band per color group");
+        let di = result.data_indices.as_ref().expect("data_indices must be Some");
+        assert_eq!(di.len(), result.nodes.len(), "nodes.len() must equal data_indices.len()");
+        assert_eq!(di, &vec![0, 3], "each band maps to its group's first kept vertex row");
+
+        let tooltips = result.tooltips.expect("tooltips must be Some");
+        assert_eq!(tooltips.len(), 2, "tooltip count must equal node count");
+        let vals: Vec<&str> = tooltips.iter().map(|t| t.fields[0].value.as_str()).collect();
+        assert_eq!(vals, vec!["A", "B"],
+            "node j tooltip is its group's representative-row label; \
+             old full-row code (len 6) mis-indexes / mis-sizes the metadata.");
+    }
+
+    /// Bug #6 href channel: href aligns to the representative row with no tooltip
+    /// encoded (href-without-tooltip soundness hole).
+    #[test]
+    fn ribbon_group_href_aligns_to_representative_row() {
+        use crate::spec::encoding::EncodingSpec;
+        use arrow::array::StringArray;
+        let mut spec = ribbon_spec(true);
+        spec.encoding.color = Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() });
+        spec.encoding.href = Some(EncodingSpec { field: "url".into(), ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("url", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![0.0, 2.0, 4.0, 1.0, 3.0, 5.0])),
+            Arc::new(Float64Array::from(vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0])),
+            Arc::new(StringArray::from(vec!["A", "A", "A", "B", "B", "B"])),
+            Arc::new(StringArray::from(vec!["url_A", "url_A", "url_A", "url_B", "url_B", "url_B"])),
+        ]).unwrap();
+        let result = render(&spec, &batch);
+
+        assert!(result.tooltips.is_none(), "no tooltip encoding → tooltips None");
+        let hrefs = result.hrefs.expect("hrefs must be Some when href is encoded");
+        assert_eq!(hrefs.len(), result.nodes.len(), "href count must equal node count");
+        assert_eq!(hrefs[0].as_deref(), Some("url_A"), "node 0 href = group A representative");
+        assert_eq!(hrefs[1].as_deref(), Some("url_B"),
+            "node 1 href = group B representative (row 3); old full-row code gives row 1 → 'url_A'.");
+    }
+
+    /// No-skip backward-compat: a single ungrouped ribbon (one node) keeps its
+    /// representative at the first kept row and the tooltip output is unchanged.
+    #[test]
+    fn ribbon_no_grouping_tooltip_unchanged() {
+        use crate::spec::encoding::EncodingSpec;
+        use arrow::array::StringArray;
+        let mut spec = ribbon_spec(true);
+        spec.encoding.tooltip = Some(EncodingSpec { field: "tip".into(), ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("tip", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.0, 2.0, 4.0, 6.0])),
+            Arc::new(Float64Array::from(vec![1.0, 3.0, 5.0, 6.0])),
+            Arc::new(StringArray::from(vec!["t0", "t1", "t2", "t3"])),
+        ]).unwrap();
+        let result = render(&spec, &batch);
+
+        assert_eq!(result.nodes.len(), 1, "single ribbon → one node");
+        let di = result.data_indices.as_ref().expect("data_indices must be Some");
+        assert_eq!(di, &vec![0], "single group's representative is the first kept row (0)");
+        let tooltips = result.tooltips.expect("tooltips must be Some");
+        assert_eq!(tooltips.len(), 1, "tooltip count == node count");
+        assert_eq!(tooltips[0].fields[0].value, "t0", "representative tooltip is row 0's");
     }
 
     #[test]

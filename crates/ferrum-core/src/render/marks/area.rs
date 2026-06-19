@@ -11,6 +11,7 @@
 
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::mark_nodes::MarkNodes;
 
 /// Build `Vec<PathCmd>` for the top-edge line using the given interpolation
 /// method. Mirrors `build_top_line_path` but emits structured commands.
@@ -184,10 +185,15 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let interpolate = ctx.mark_style.interpolate.as_deref();
 
     let meta = MetadataColumns::from_ctx(ctx);
-    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
-    let mut nodes = Vec::new();
-    let mut data_indices = Vec::new();
+    // A group emits 1-3 nodes: the area fill, plus an optional line border (S9)
+    // and an optional pair of edge borders (S10). All of a group's nodes map to
+    // the SAME representative source row (the group's first valid row) via
+    // `push_many`, so `data_indices` keeps one entry per emitted node aligned to
+    // that row (bug #6). Before the fix, `data_indices` carried one entry per
+    // *contributing row* while metadata was full-row, so the lengths diverged
+    // for any grouped or multi-node-per-group area.
+    let mut acc = MarkNodes::with_capacity(groups.len());
 
     for (key, rows) in groups {
         let mut top: Vec<(f64, f64)> = Vec::new();
@@ -261,7 +267,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             None,
         );
         style.fill_opacity = group_fill_opacity;
-        nodes.push(ferrum_scene::SceneNode::Path {
+
+        // Collect this group's nodes (fill + optional borders) so they can all
+        // be pushed against the same representative row.
+        let mut group_nodes: Vec<ferrum_scene::SceneNode> = Vec::with_capacity(3);
+        group_nodes.push(ferrum_scene::SceneNode::Path {
             commands: cmds,
             style,
             closed: true,
@@ -277,7 +287,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 1.0,
                 None,
             );
-            nodes.push(ferrum_scene::SceneNode::Path {
+            group_nodes.push(ferrum_scene::SceneNode::Path {
                 commands: line_cmds,
                 style: border_style,
                 closed: false,
@@ -295,7 +305,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 1.0,
                 None,
             );
-            nodes.push(ferrum_scene::SceneNode::Path {
+            group_nodes.push(ferrum_scene::SceneNode::Path {
                 commands: top_cmds,
                 style: border_style.clone(),
                 closed: false,
@@ -312,15 +322,19 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     ferrum_scene::PathCmd::LineTo { x: x_last, y: baseline_y },
                 ]
             };
-            nodes.push(ferrum_scene::SceneNode::Path {
+            group_nodes.push(ferrum_scene::SceneNode::Path {
                 commands: bottom_cmds,
                 style: border_style,
                 closed: false,
             });
         }
 
-        data_indices.extend(row_indices);
+        // All of this group's nodes map to its representative source row.
+        acc.push_many(group_nodes, first);
     }
+
+    let (nodes, data_indices) = acc.finalize();
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
         kind: MarkBatchKind::Area,
@@ -328,7 +342,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         data_indices: Some(data_indices),
         tooltips,
         hrefs,
-        descriptions,    }
+        descriptions,
+    }
 }
 
 #[cfg(test)]
@@ -746,6 +761,210 @@ mod tests {
         // 4 (color, detail) pairs → 4 area paths
         assert_eq!(closed_paths, 4,
             "color+detail must emit one area per (color, detail) pair (4 pairs); got {closed_paths}");
+    }
+
+    // ── #6 metadata/node alignment (group marks) ─────────────────────────────
+
+    /// Bug #6: a multi-group area must attach each group's node(s) to that
+    /// group's REPRESENTATIVE source row (the group's first valid row), not to a
+    /// loop index over groups and not to a per-node position.
+    ///
+    /// Data is laid out so the groups are *interleaved* (rows: g0,g1,g2,g0,...),
+    /// so the representative rows are 0, 1, 2 — but the per-group tooltip text on
+    /// every row of a group is distinct from the row-position tooltip. Old code
+    /// (`build_metadata(ctx)`, full per-row vectors) would index node `j` by
+    /// position `j`, attaching row j's tooltip; the area emits 3 nodes (one fill
+    /// per group), so node 1 would get row 1's tooltip ("g1") — which here
+    /// happens to coincide. To make the misalignment detectable we deinterleave
+    /// the representatives: see the next test for the harder case. This test
+    /// pins the basic invariant (nodes.len()==data_indices.len() and each node
+    /// maps to its group's first row).
+    #[test]
+    fn area_group_nodes_align_to_representative_row() {
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+        use arrow::array::StringArray;
+
+        // 3 groups × 4 x-positions, but BLOCKED (not interleaved) so each
+        // group's first row is at 0, 4, 8 — far from node positions 0,1,2.
+        // tooltip column repeats the group label per row. Full-row indexing
+        // would give node 1 → row 1 → "ga" (wrong); representative indexing
+        // gives node 1 → row 4 → "gb".
+        let n = 12usize;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("tip", DataType::Utf8, false),
+        ]));
+        let xs: Vec<f64> = (0..n).map(|i| (i % 4) as f64).collect();
+        let ys: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let gs: Vec<&str> = (0..n).map(|i| match i / 4 { 0 => "ga", 1 => "gb", _ => "gc" }).collect();
+        // tooltip == group label so the representative-row value is the group name.
+        let tips: Vec<&str> = gs.clone();
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(gs)),
+            Arc::new(StringArray::from(tips)),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Area);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        // 3 groups → 3 fill nodes (no borders configured).
+        assert_eq!(result.nodes.len(), 3, "expected one fill node per group");
+        let di = result.data_indices.as_ref().expect("data_indices must be Some");
+        assert_eq!(di.len(), result.nodes.len(), "nodes.len() must equal data_indices.len()");
+        // Representative rows are the group-first rows: 0, 4, 8.
+        assert_eq!(di, &vec![0, 4, 8], "each node maps to its group's first row");
+
+        let tooltips = result.tooltips.expect("tooltips must be Some");
+        assert_eq!(tooltips.len(), 3, "tooltip count must equal node count");
+        let vals: Vec<&str> = tooltips.iter().map(|t| t.fields[0].value.as_str()).collect();
+        assert_eq!(vals, vec!["ga", "gb", "gc"],
+            "node j tooltip must be its group's representative-row label; \
+             old full-row code gives row-position labels (node 1 → row 1 → 'ga').");
+    }
+
+    /// Bug #6 (multi-node-per-group): with `borders=True` each area group emits
+    /// THREE nodes (fill + top border + bottom border). ALL of a group's nodes
+    /// must map to the SAME representative row's metadata. With 2 groups this is
+    /// 6 nodes; full-row indexing would attach rows 0..6 (one of which is the
+    /// other group), so the per-node tooltip would leak across groups.
+    #[test]
+    fn area_multi_node_group_all_map_to_representative_row() {
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+        use crate::spec::mark_style::MarkKwargsSpec;
+        use arrow::array::StringArray;
+
+        // 2 groups × 4 rows, blocked: group A rows 0..4, group B rows 4..8.
+        let n = 8usize;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("tip", DataType::Utf8, false),
+        ]));
+        let xs: Vec<f64> = (0..n).map(|i| (i % 4) as f64).collect();
+        let ys: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+        let gs: Vec<&str> = (0..n).map(|i| if i < 4 { "A" } else { "B" }).collect();
+        let tips: Vec<&str> = gs.clone();
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(gs)),
+            Arc::new(StringArray::from(tips)),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        // borders=True → fill + top border + bottom border per group.
+        let overrides = MarkKwargsSpec { borders: Some(true), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Area);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        // 2 groups × 3 nodes (fill + 2 borders) = 6 nodes.
+        assert_eq!(result.nodes.len(), 6, "expected 3 nodes per group × 2 groups");
+        let di = result.data_indices.as_ref().expect("data_indices must be Some");
+        assert_eq!(di.len(), 6, "nodes.len() must equal data_indices.len()");
+        // All 3 nodes of group A map to row 0; all 3 of group B map to row 4.
+        assert_eq!(di, &vec![0, 0, 0, 4, 4, 4],
+            "every node of a group maps to that group's representative row (push_many)");
+
+        let tooltips = result.tooltips.expect("tooltips must be Some");
+        assert_eq!(tooltips.len(), 6);
+        let vals: Vec<&str> = tooltips.iter().map(|t| t.fields[0].value.as_str()).collect();
+        assert_eq!(vals, vec!["A", "A", "A", "B", "B", "B"],
+            "all of a group's nodes carry its representative-row tooltip; \
+             old full-row code would leak adjacent rows into the border nodes.");
+    }
+
+    /// Bug #6 href channel on a group area: href must align to the
+    /// representative row even when no tooltip is encoded (the href-without-
+    /// tooltip soundness hole).
+    #[test]
+    fn area_group_href_aligned_to_representative_row() {
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+        use arrow::array::StringArray;
+
+        let n = 8usize;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("url", DataType::Utf8, false),
+        ]));
+        let xs: Vec<f64> = (0..n).map(|i| (i % 4) as f64).collect();
+        let ys: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+        let gs: Vec<&str> = (0..n).map(|i| if i < 4 { "A" } else { "B" }).collect();
+        // url per row = group url; representative is row 0 ("url_A") / row 4 ("url_B").
+        let urls: Vec<&str> = (0..n).map(|i| if i < 4 { "url_A" } else { "url_B" }).collect();
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(gs)),
+            Arc::new(StringArray::from(urls)),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                href: Some(EncodingSpec { field: "url".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Area);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        assert!(result.tooltips.is_none(), "no tooltip encoding → tooltips None");
+        let hrefs = result.hrefs.expect("hrefs must be Some when href is encoded");
+        assert_eq!(hrefs.len(), result.nodes.len(), "href count must equal node count");
+        assert_eq!(hrefs[0].as_deref(), Some("url_A"), "node 0 href = group A representative");
+        assert_eq!(hrefs[1].as_deref(), Some("url_B"),
+            "node 1 href = group B representative (row 4), not row 1; \
+             old full-row code would give row 1's url ('url_A').");
     }
 
     /// T11-G: Single-series area (no grouping) still emits exactly one closed path.
