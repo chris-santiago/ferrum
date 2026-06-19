@@ -48,24 +48,19 @@ use ferrum_scene::SceneNode;
 ///
 /// [`push`]: MarkNodes::push
 /// [`push_many`]: MarkNodes::push_many
-//
-// The accumulator and its checked finalize have no non-test caller yet: this
-// task (#6 Task 1) builds the contract; Tasks 2–6 migrate the 14 row-skipping /
-// multi-node / group mark builders onto it. Until then the only exercise is the
-// unit tests below, so silence the dead-code lint with a documented allow rather
-// than a premature migration. Remove this allow once the first builder migrates.
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub(crate) struct MarkNodes {
     nodes: Vec<SceneNode>,
     indices: Vec<usize>,
 }
 
-// See the allow on `MarkNodes`: methods have no non-test caller until Tasks 2–6
-// migrate the builders. Drop this allow with the struct's once one does.
-#[allow(dead_code)]
 impl MarkNodes {
     /// Empty accumulator.
+    // Tasks 3–6 will migrate group-mark builders that prefer `new()` over
+    // `with_capacity` when the output size is unknown upfront. Until then,
+    // suppress the dead-code lint on the unused methods individually rather than
+    // with a blanket impl allow.
+    #[allow(dead_code)]
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -86,6 +81,8 @@ impl MarkNodes {
     /// `Cross` shape emits 2 line nodes, both mapped to their row). Every node
     /// in the iterator gets the same `row` so `data_indices` keeps exactly one
     /// entry per emitted node, per the #6 contract.
+    // Tasks 3–6 will use push_many for multi-node shapes (e.g. point Cross → 2 nodes).
+    #[allow(dead_code)]
     pub(crate) fn push_many(
         &mut self,
         nodes: impl IntoIterator<Item = SceneNode>,
@@ -98,11 +95,15 @@ impl MarkNodes {
     }
 
     /// Number of accumulated nodes (equals the number of source-row indices).
+    // Tasks 3–6 may use len() for pre-loop capacity checks or assertions.
+    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.nodes.len()
     }
 
     /// Whether no nodes have been accumulated.
+    // Tasks 3–6 may use is_empty() for guard conditions on group builders.
+    #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
