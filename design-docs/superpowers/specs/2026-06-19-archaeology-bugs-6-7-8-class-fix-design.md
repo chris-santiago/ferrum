@@ -90,3 +90,11 @@ fn push_many(&mut self, nodes: impl IntoIterator<Item = SceneNode>, row: usize);
 ## 11. Open questions
 
 - **Interactive figure-title representation (#8).** The exact scene-graph representation a single `Chart` uses to carry its on-canvas title into the WASM renderer must be confirmed before composites reuse it, so the merged-scene title band is built from the same mechanism rather than a parallel one. This is a bounded implementation spike, not a design fork; it does not change any contract above.
+
+## 12. Implementation notes (2026-06-19, as-built)
+
+Resolved during implementation; recorded here so the contract matches the code (per CLAUDE.md "spec is the API contract").
+
+- **§6 extent contract — niced applies to Bin only.** The pinned faceted extent is the **niced** global range for `Bin` (so panels align to comparable bin edges) but the **raw** global min/max for `Kde` and `Violin` (no bins to align). §6's "niced global range" phrasing is Bin-specific; KDE/Violin pin the unrounded global extent. Guarded by `global_extent_nices_for_bin_but_raw_for_kde_and_violin`.
+- **§11 spike outcome — no WASM change.** A single `Chart`'s title is built in Rust into `SceneGraph.title` (`Vec<SceneNode>`) and WASM already renders it via `collect_static(&scene.title, …)`. Composites reuse this by injecting figure-title nodes (produced by the Rust `figure_title_nodes` PyO3 helper, which shares `FigureChrome::layout` with the SVG path) into the merged scene's `title`. No WASM edit.
+- **§8 full interactive parity — caption caveat (W5).** Title and subtitle render byte-identically to SVG for **all** composites. The **caption** absolute-y matches SVG for the concat family (HConcat/VConcat/Concat); for `JointChart`/`ClusterMapChart` the caption sits relative to the interactive body, which differs from the SVG body per the **pre-existing W5 limitation** (interactive nonuniform-grid native-size vs SVG ratio-viewBox). Closing it requires a W5 body-layout fix, out of this effort's scope. Title/subtitle parity (the chrome §8 names) is exact for all composites.
