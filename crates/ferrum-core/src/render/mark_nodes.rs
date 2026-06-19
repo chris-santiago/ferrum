@@ -81,8 +81,6 @@ impl MarkNodes {
     /// `Cross` shape emits 2 line nodes, both mapped to their row). Every node
     /// in the iterator gets the same `row` so `data_indices` keeps exactly one
     /// entry per emitted node, per the #6 contract.
-    // Tasks 3–6 will use push_many for multi-node shapes (e.g. point Cross → 2 nodes).
-    #[allow(dead_code)]
     pub(crate) fn push_many(
         &mut self,
         nodes: impl IntoIterator<Item = SceneNode>,

@@ -4,6 +4,7 @@
 
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::mark_nodes::MarkNodes;
 use crate::render::scale_resolve::{ColorScale, ScaleKind, ShapeKind};
 
 /// Parse a shape name string to a `ShapeKind`.
@@ -298,12 +299,18 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Per-row pixel offsets from position adjustment.
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
-    // Metadata: build tooltips and hrefs as parallel vecs.
+    // Metadata columns are read here; metadata vectors are built AFTER the loop
+    // via build_metadata_for_indices so they are in node order, not row order.
+    // This is required because Cross emits 2 nodes per row, so calling
+    // build_metadata(ctx) (which returns n_rows entries) would misalign node j
+    // with the wrong source row's tooltip (archaeology bug #6).
     let meta = MetadataColumns::from_ctx(ctx);
-    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
-    let mut nodes = Vec::new();
-    let mut indices = Vec::new();
+    // Accumulate nodes and source-row indices in lockstep. For single-node shapes
+    // (Circle, Square, etc.) push_many is equivalent to push. For Cross, both line
+    // nodes are mapped to the SAME source row i, so data_indices carries 2 copies
+    // of i — one per emitted node — keeping the alignment invariant.
+    let mut acc = MarkNodes::with_capacity(n);
 
     for i in 0..n {
         // Resolve x-pixel.
@@ -463,17 +470,23 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 angle: row_angle,
             },
         );
-        nodes.extend(shape_nodes);
-        indices.push(i);
+        // push_many maps EVERY emitted node to source row i. For single-node shapes
+        // this is a single push; for Cross it pushes 2 nodes both tagged with row i.
+        // This keeps data_indices[k] == source-row-of-nodes[k] for all k.
+        acc.push_many(shape_nodes, i);
     }
+
+    let (nodes, data_indices) = acc.finalize();
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
         kind: MarkBatchKind::Point,
         nodes,
-        data_indices: Some(indices),
+        data_indices: Some(data_indices),
         tooltips,
         hrefs,
-        descriptions,    }
+        descriptions,
+    }
 }
 
 #[cfg(test)]
@@ -1031,5 +1044,274 @@ mod tests {
             .count();
         assert_eq!(circle_count, 3,
             "Int64 ordinal x must emit one circle per row; got {circle_count}");
+    }
+
+    // ── Task 4: metadata alignment for Cross (multi-node) and skipped rows ────
+
+    /// Build a batch suitable for Cross-shape alignment tests.
+    /// Columns: x, y (both quantitative, no skips), tooltip "lbl".
+    fn cross_batch(n: usize) -> arrow::record_batch::RecordBatch {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let xs: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let ys: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let lbls: Vec<String> = (0..n).map(|i| format!("row{i}")).collect();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("lbl", DataType::Utf8, false),
+        ]));
+        arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(lbls)),
+        ]).unwrap()
+    }
+
+    fn cross_spec() -> ChartSpec {
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "lbl".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: Some(crate::spec::mark_style::MarkKwargsSpec {
+                shape: Some("cross".into()),
+                ..Default::default()
+            }),
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        }
+    }
+
+    fn make_ctx<'a>(
+        spec: &'a ChartSpec,
+        batch: &'a arrow::record_batch::RecordBatch,
+        panel: &'a PanelLayout,
+        theme: &'a ThemeInputs,
+        scales: &'a crate::render::scale_resolve::ResolvedScales,
+        mark_style: &'a crate::render::draw::MarkStyle,
+    ) -> DrawCtx<'a> {
+        DrawCtx { spec, panel, theme, scales, batch, mark_style }
+    }
+
+    /// HEADLINE TEST (spec §9): Cross with ZERO skipped rows.
+    ///
+    /// Cross emits 2 Line nodes per row. With 3 rows and no skips the builder
+    /// must produce 6 nodes (3 crosses × 2 lines) and 6 tooltip entries, each
+    /// pointing at the correct source row.
+    ///
+    /// Pre-migration code pushed 1 index per row (indices=[0,1,2]) for 6 nodes,
+    /// so node 1 (second line of row 0's cross) received row 1's tooltip instead
+    /// of row 0's. This test proves the fix.
+    #[test]
+    fn cross_zero_skip_tooltips_align_to_source_rows() {
+        let n = 3;
+        let batch = cross_batch(n);
+        let spec = cross_spec();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        // Pass the spec's mark_style so the constant "cross" shape is resolved.
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Point);
+        let ctx = make_ctx(&spec, &batch, &panel, &theme, &scales, &mark_style);
+        let result = super::build(&ctx);
+
+        // Each row contributes 2 Line nodes (cross = horizontal + vertical arm).
+        assert_eq!(result.nodes.len(), 2 * n,
+            "cross: expected {} nodes (2 per row), got {}", 2 * n, result.nodes.len());
+        assert!(result.nodes.iter().all(|n| matches!(n, SceneNode::Line { .. })),
+            "all cross nodes must be Line variants");
+
+        let tooltips = result.tooltips.as_ref().expect("tooltip encoding must produce tooltips");
+        assert_eq!(tooltips.len(), 2 * n,
+            "tooltip count must equal node count (2*n_rows); got {}", tooltips.len());
+
+        // Node 0 and node 1 are BOTH the first row's cross arms → tooltip = "row0".
+        // Node 2 and node 3 are the second row's cross arms → tooltip = "row1".
+        // Node 4 and node 5 are the third row's cross arms → tooltip = "row2".
+        // Pre-migration: node 1 would incorrectly carry "row1" (off-by-one).
+        for row in 0..n {
+            for arm in 0..2 {
+                let node_idx = row * 2 + arm;
+                let tip = &tooltips[node_idx];
+                let val = tip.fields.first().map(|f| f.value.as_str()).unwrap_or("");
+                assert_eq!(
+                    val, format!("row{row}"),
+                    "node {node_idx} (row {row}, arm {arm}) expected tooltip 'row{row}', got '{val}'"
+                );
+            }
+        }
+
+        // data_indices: [..., row, row, ...] — each row appears twice consecutively.
+        let indices = result.data_indices.as_ref().expect("data_indices must be Some");
+        assert_eq!(indices.len(), 2 * n);
+        for row in 0..n {
+            assert_eq!(indices[row * 2],     row, "data_indices[{}] must be {row}", row * 2);
+            assert_eq!(indices[row * 2 + 1], row, "data_indices[{}] must be {row}", row * 2 + 1);
+        }
+    }
+
+    /// Skipped-row alignment test: single-node shape (Circle) with a null row.
+    ///
+    /// Row 1 has x=NaN → is skipped by the renderer. The kept nodes are for rows
+    /// 0 and 2. Their tooltips must be "row0" and "row2", not "row0" and "row1".
+    #[test]
+    fn circle_with_null_row_tooltips_align_to_kept_source_rows() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("lbl", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, f64::NAN, 2.0])), // row 1 skipped (NaN x)
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(StringArray::from(vec!["row0", "row1", "row2"])),
+        ]).unwrap();
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "lbl".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None, layers: None, coord: None,
+            mark_style: None, // default shape = Circle
+            position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
+        let ctx = make_ctx(&spec, &batch, &panel, &theme, &scales, &mark_style);
+        let result = super::build(&ctx);
+
+        // 2 kept rows → 2 circle nodes.
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Circle { .. })).count(), 2,
+            "expected 2 circles (row 1 skipped)");
+
+        let tooltips = result.tooltips.as_ref().expect("tooltips must be present");
+        assert_eq!(tooltips.len(), 2, "tooltip count must equal node count");
+
+        let val0 = tooltips[0].fields.first().map(|f| f.value.as_str()).unwrap_or("");
+        let val1 = tooltips[1].fields.first().map(|f| f.value.as_str()).unwrap_or("");
+        assert_eq!(val0, "row0", "node 0 tooltip must come from source row 0; got '{val0}'");
+        assert_eq!(val1, "row2", "node 1 tooltip must come from source row 2 (row 1 skipped); got '{val1}'");
+    }
+
+    /// Href-channel alignment test: point chart with href encoding and a skipped
+    /// row. The kept nodes must carry the href of their true source rows.
+    #[test]
+    fn circle_href_aligns_to_kept_source_rows() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("url", DataType::Utf8, false),
+        ]));
+        // Row 1: y=NaN → skipped. Rows 0 and 2 kept.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![0.0, f64::NAN, 2.0])), // row 1 skipped (NaN y)
+            Arc::new(StringArray::from(vec![
+                "https://example.com/0",
+                "https://example.com/1",
+                "https://example.com/2",
+            ])),
+        ]).unwrap();
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                href: Some(EncodingSpec { field: "url".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None, layers: None, coord: None,
+            mark_style: None,
+            position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
+        let ctx = make_ctx(&spec, &batch, &panel, &theme, &scales, &mark_style);
+        let result = super::build(&ctx);
+
+        // 2 kept nodes.
+        assert_eq!(result.nodes.len(), 2, "expected 2 nodes (row 1 skipped)");
+
+        let hrefs = result.hrefs.as_ref().expect("href encoding must produce hrefs");
+        assert_eq!(hrefs.len(), 2, "href count must equal node count");
+
+        assert_eq!(hrefs[0].as_deref(), Some("https://example.com/0"),
+            "node 0 href must come from source row 0");
+        assert_eq!(hrefs[1].as_deref(), Some("https://example.com/2"),
+            "node 1 href must come from source row 2 (row 1 skipped)");
+    }
+
+    /// Backward-compat test: Circle points with no skipped rows and no metadata
+    /// must produce the same geometry as before (byte-stable node count and
+    /// positions). This guards that the accumulator path does not alter geometry
+    /// for the common single-node case.
+    #[test]
+    fn circle_no_skip_no_metadata_backward_compat() {
+        let spec = three_row_spec();
+        let batch = three_row_batch();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        // 3 rows → 3 circles (single-node path, no skips).
+        assert_eq!(result.nodes.len(), 3);
+        assert!(result.nodes.iter().all(|n| matches!(n, SceneNode::Circle { .. })));
+
+        // data_indices must be 1:1 with source rows.
+        let indices = result.data_indices.as_ref().expect("data_indices must be Some");
+        assert_eq!(indices.as_slice(), &[0, 1, 2]);
+
+        // No tooltip encoding → no tooltips.
+        assert!(result.tooltips.is_none());
+        assert!(result.hrefs.is_none());
+        assert!(result.descriptions.is_none());
     }
 }
