@@ -196,6 +196,30 @@ pub(crate) fn apply_with_context(
         groups.insert(Vec::new(), all);
     }
 
+    // Determine the evaluation extent for each group's internal KDE.
+    //
+    // Precedence (highest to lowest):
+    //   1. `spec.extent` is `Some` — an explicit user or facet-pin; wins unconditionally.
+    //      Every group uses this pinned range (existing behaviour, unchanged).
+    //   2. `spec.shared_extent == true` AND the batch has >1 group — compute the
+    //      cross-group global extent (min/max over ALL values, ignoring group partition)
+    //      and pin every group's KDE to that range so groups share a comparable value axis.
+    //      Mirrors `kde::apply_grouped` when `shared_extent=true`.
+    //   3. Neither — per-group extent derived from each group's own data (backward-compat
+    //      default when `shared_extent=false` and no explicit `extent`).
+    let shared_kde_extent: Option<(f64, f64)> = if spec.extent.is_some() {
+        // Case 1: explicit pin already present — apply_loop uses spec.extent directly.
+        None // sentinel: per-group loop will use spec.extent via unwrap_or
+    } else if spec.shared_extent && groups.len() > 1 {
+        // Case 2: compute cross-group global extent over the full value column.
+        // Delegates to the module-level `global_extent` helper, which applies the
+        // same null/NaN-skipping fold and `lo < hi` finiteness guard.
+        global_extent(spec, batch)
+    } else {
+        // Case 3: per-group extent (shared_extent=false, the backward-compat default).
+        None
+    };
+
     // Per-group KDE → mirrored polygon vertices.
     let mut group_ids: Vec<u32> = Vec::new();
     let mut keys_out: Vec<Vec<KeyValue>> = Vec::new();
@@ -257,12 +281,13 @@ pub(crate) fn apply_with_context(
         )
         .map_err(|e| PyValueError::new_err(format!("stat_violin: synth batch: {e}")))?;
 
-        // When a pinned extent is set (e.g. by the facet-prepare layer after
-        // calling `global_extent`), use it for ALL groups so every panel/group
-        // evaluates the KDE on the same x-range, enabling comparable value axes.
-        // Without a pinned extent, fall back to the per-group (lo, hi) derived
-        // from this group's data only (backward-compatible default behaviour).
-        let kde_extent = spec.extent.unwrap_or((lo, hi));
+        // Resolve the KDE evaluation extent for this group using the precedence
+        // rule established above the loop:
+        //   spec.extent (user/facet pin) > shared_kde_extent (cross-group global)
+        //   > (lo, hi) (this group's own data range).
+        let kde_extent = spec.extent
+            .or(shared_kde_extent)
+            .unwrap_or((lo, hi));
         let kde_spec = KdeSpec {
             field: spec.field.clone(),
             bandwidth: spec.bandwidth.clone(),
@@ -412,7 +437,8 @@ pub(crate) struct PyViolin(pub(crate) crate::transform::core::TransformSpec);
 #[pymethods]
 impl PyViolin {
     #[new]
-    #[pyo3(signature = (field, *, groupby = vec![], bandwidth = None, bw_adjust = 1.0, n = 256, width = 0.4, name = None))]
+    #[pyo3(signature = (field, *, groupby = vec![], bandwidth = None, bw_adjust = 1.0, n = 256, width = 0.4, shared_extent = false, name = None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         field: &str,
         groupby: Vec<String>,
@@ -420,6 +446,7 @@ impl PyViolin {
         bw_adjust: f64,
         n: usize,
         width: f64,
+        shared_extent: bool,
         name: Option<String>,
     ) -> PyResult<Self> {
         if !bw_adjust.is_finite() || bw_adjust <= 0.0 {
@@ -480,7 +507,7 @@ impl PyViolin {
                 n,
                 width,
                 extent: None,
-                shared_extent: false,
+                shared_extent,
                 name,
             },
         )))
@@ -1073,6 +1100,213 @@ mod tests {
         assert!(
             a_max < 50.0,
             "group 'a' without pinning: violin_y max should be near 9, got {a_max}"
+        );
+    }
+
+    // ── Task R6: shared_extent wiring ─────────────────────────────────────────
+
+    /// R6 — shared_extent=true pins all groups to the cross-group global extent.
+    ///
+    /// Groups "a" ([0,9]) and "b" ([100,109]) have disjoint per-group ranges.
+    /// With shared_extent=true, every group's violin_y must span the full
+    /// cross-group range [0, 109] instead of each group's own narrow range.
+    #[test]
+    fn violin_shared_extent_true_pins_all_groups_to_global_range() {
+        pyo3::Python::initialize();
+        // Group "a": values in [0, 9]. Group "b": values in [100, 109].
+        let mut vals: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        vals.extend((100..110).map(|i| i as f64));
+        let mut grps: Vec<&str> = vec!["a"; 10];
+        grps.extend(vec!["b"; 10]);
+        let b = batch_value_group(vals, grps);
+
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            extent: None,
+            shared_extent: true, // <-- the field under test
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+        let ys = col_f64(&out, "violin_y");
+        let groups_out = col_str(&out, "group");
+
+        // Global extent over the full batch is [0, 109].
+        let expected_lo = 0.0_f64;
+        let expected_hi = 109.0_f64;
+
+        // Every group must have violin_y values that span the cross-group range.
+        for gname in &["a", "b"] {
+            let group_ys: Vec<f64> = ys
+                .iter()
+                .zip(groups_out.iter())
+                .filter(|(_, g)| g.as_str() == *gname)
+                .map(|(&y, _)| y)
+                .collect();
+            assert!(!group_ys.is_empty(), "group '{gname}' must have output rows");
+            let min_y = group_ys.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max_y = group_ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            assert!(
+                (min_y - expected_lo).abs() < 1e-9,
+                "shared_extent=true: group '{gname}' violin_y min should be {expected_lo}, got {min_y}"
+            );
+            assert!(
+                (max_y - expected_hi).abs() < 1e-9,
+                "shared_extent=true: group '{gname}' violin_y max should be {expected_hi}, got {max_y}"
+            );
+        }
+    }
+
+    /// R6 regression — shared_extent=false keeps per-group extents (backward compat).
+    ///
+    /// Same disjoint groups as above, but with shared_extent=false each group
+    /// must be pinned only to its own data range, NOT the cross-group global.
+    #[test]
+    fn violin_shared_extent_false_uses_per_group_range() {
+        pyo3::Python::initialize();
+        // Group "a": values in [0, 9]. Group "b": values in [100, 109].
+        let mut vals: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        vals.extend((100..110).map(|i| i as f64));
+        let mut grps: Vec<&str> = vec!["a"; 10];
+        grps.extend(vec!["b"; 10]);
+        let b = batch_value_group(vals, grps);
+
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            extent: None,
+            shared_extent: false, // <-- per-group behavior
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+        let ys = col_f64(&out, "violin_y");
+        let groups_out = col_str(&out, "group");
+
+        // Group "a" violin_y must stay in [0, 9] — NOT reaching 100 (group b's range).
+        let a_ys: Vec<f64> = ys
+            .iter()
+            .zip(groups_out.iter())
+            .filter(|(_, g)| g.as_str() == "a")
+            .map(|(&y, _)| y)
+            .collect();
+        let a_max = a_ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            a_max < 50.0,
+            "shared_extent=false: group 'a' violin_y max should be near 9 (per-group), got {a_max}"
+        );
+
+        // Group "b" violin_y must stay in [100, 109] — NOT reaching 0 (group a's range).
+        let b_ys: Vec<f64> = ys
+            .iter()
+            .zip(groups_out.iter())
+            .filter(|(_, g)| g.as_str() == "b")
+            .map(|(&y, _)| y)
+            .collect();
+        let b_min = b_ys.iter().cloned().fold(f64::INFINITY, f64::min);
+        assert!(
+            b_min > 50.0,
+            "shared_extent=false: group 'b' violin_y min should be near 100 (per-group), got {b_min}"
+        );
+    }
+
+    /// R6 — explicit `extent=Some(...)` takes precedence over shared_extent.
+    ///
+    /// Even when shared_extent=true, if the user (or facet-prepare) has set
+    /// spec.extent explicitly, that pinned extent must win for ALL groups.
+    #[test]
+    fn violin_explicit_extent_wins_over_shared_extent() {
+        pyo3::Python::initialize();
+        // Group "a": [0, 9]. Group "b": [100, 109]. Cross-group global = [0, 109].
+        // Explicit pin = (-10, 200) — wider than the global; must win.
+        let mut vals: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        vals.extend((100..110).map(|i| i as f64));
+        let mut grps: Vec<&str> = vec!["a"; 10];
+        grps.extend(vec!["b"; 10]);
+        let b = batch_value_group(vals, grps);
+
+        let pinned_lo = -10.0_f64;
+        let pinned_hi = 200.0_f64;
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec!["group".into()],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            extent: Some((pinned_lo, pinned_hi)), // explicit pin
+            shared_extent: true,                  // must NOT override the explicit pin
+            name: None,
+        };
+        let out = apply(&spec, &b).unwrap();
+        let ys = col_f64(&out, "violin_y");
+        let groups_out = col_str(&out, "group");
+
+        for gname in &["a", "b"] {
+            let group_ys: Vec<f64> = ys
+                .iter()
+                .zip(groups_out.iter())
+                .filter(|(_, g)| g.as_str() == *gname)
+                .map(|(&y, _)| y)
+                .collect();
+            assert!(!group_ys.is_empty(), "group '{gname}' must have output rows");
+            let min_y = group_ys.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max_y = group_ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            assert!(
+                (min_y - pinned_lo).abs() < 1e-9,
+                "explicit extent wins: group '{gname}' violin_y min should be {pinned_lo}, got {min_y}"
+            );
+            assert!(
+                (max_y - pinned_hi).abs() < 1e-9,
+                "explicit extent wins: group '{gname}' violin_y max should be {pinned_hi}, got {max_y}"
+            );
+        }
+    }
+
+    /// R6 — shared_extent=true with only ONE group falls back to per-group behavior.
+    ///
+    /// shared_extent only applies when there are multiple groups. A single-group
+    /// violin with shared_extent=true must behave identically to shared_extent=false
+    /// (per-group data range), since there is nothing to share.
+    #[test]
+    fn violin_shared_extent_single_group_behaves_as_per_group() {
+        pyo3::Python::initialize();
+        let vals: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        let b = batch("v", vals);
+
+        let spec_shared = ViolinSpec {
+            field: "v".into(),
+            groupby: vec![],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            extent: None,
+            shared_extent: true,
+            name: None,
+        };
+        let spec_per_group = ViolinSpec {
+            shared_extent: false,
+            ..spec_shared.clone()
+        };
+
+        let out_shared = apply(&spec_shared, &b).unwrap();
+        let out_per = apply(&spec_per_group, &b).unwrap();
+
+        let ys_shared = col_f64(&out_shared, "violin_y");
+        let ys_per = col_f64(&out_per, "violin_y");
+
+        // Both must produce the same y values (byte-identical since only 1 group exists).
+        assert_eq!(
+            ys_shared, ys_per,
+            "single-group violin: shared_extent=true must produce identical output to shared_extent=false"
         );
     }
 

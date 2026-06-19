@@ -554,7 +554,7 @@ class StatisticalMarksMixin:
         )
 
     def mark_violin(
-        self, *, bandwidth="scott", inner="box", position=None, **mark_kwargs
+        self, *, bandwidth="scott", inner="box", shared_extent=False, position=None, **mark_kwargs
     ) -> "Chart":
         """Render violin plots via the ``Violin`` transform.
 
@@ -573,6 +573,11 @@ class StatisticalMarksMixin:
             ``"quartile"`` -- three horizontal quartile rules,
             ``"point"`` -- individual data points (strip),
             ``"none"`` -- no inner mark.
+        shared_extent : bool, default False
+            When ``True``, all groups share the same KDE evaluation range
+            (cross-group global min/max), making the value axis directly
+            comparable across groups.  When ``False`` (default), each group
+            evaluates its KDE on its own per-group data range.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -597,7 +602,7 @@ class StatisticalMarksMixin:
         return self._set_composite_mark(
             "violin",
             desugar_violin,
-            {"bandwidth": bandwidth, "inner": inner, **mark_kwargs},
+            {"bandwidth": bandwidth, "inner": inner, "shared_extent": shared_extent, **mark_kwargs},
             placeholder="polygon",
             position=position,
         )

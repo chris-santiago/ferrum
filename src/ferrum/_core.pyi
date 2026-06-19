@@ -534,6 +534,8 @@ class Violin:
         bandwidth: object = "scott",  # str ("scott"|"silverman") or float
         n: int = 256,
         width: float = 0.4,
+        extent: Optional[Tuple[float, float]] = None,
+        shared_extent: bool = False,
         name: Optional[str] = None,
     ) -> None: ...
 

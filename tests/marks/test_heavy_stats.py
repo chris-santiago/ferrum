@@ -80,6 +80,73 @@ def test_violin_invalid_inner_raises(df_xy):
         fe.Chart(df_xy).mark_violin(inner="bogus").encode(x="x", y="y")._build_spec()
 
 
+def test_violin_shared_extent_kwarg_propagates_to_transform():
+    """R6: mark_violin(shared_extent=True) serializes shared_extent into the Violin transform."""
+    df = pl.DataFrame(
+        {
+            "grp": ["a"] * 20 + ["b"] * 20,
+            "val": list(range(20)) + list(range(100, 120)),
+        }
+    )
+    spec = fe.Chart(df).mark_violin(inner=None, shared_extent=True).encode(
+        x="grp", y="val"
+    )._build_spec()
+    json_str = spec.to_json()
+    # shared_extent=true must appear in the serialized spec.
+    assert '"shared_extent":true' in json_str, (
+        "mark_violin(shared_extent=True) must emit shared_extent in the transform JSON"
+    )
+
+
+def test_violin_shared_extent_false_is_default():
+    """R6: mark_violin() with no shared_extent kwarg defaults to shared_extent=false."""
+    df = pl.DataFrame({"grp": ["a"] * 10 + ["b"] * 10, "val": list(range(20))})
+    spec = fe.Chart(df).mark_violin(inner=None).encode(x="grp", y="val")._build_spec()
+    json_str = spec.to_json()
+    # Default must NOT emit shared_extent (it is skipped when false per serde default).
+    assert '"shared_extent":true' not in json_str, (
+        "mark_violin() without shared_extent must not emit shared_extent:true in transform JSON"
+    )
+
+
+def test_violin_shared_extent_produces_shared_value_range():
+    """R6: mark_violin(shared_extent=True) renders groups on a shared value range.
+
+    Groups 'a' ([0,9]) and 'b' ([100,109]) have disjoint per-group ranges.
+    With shared_extent=True, the SVG must contain y-coordinate values
+    spanning the cross-group range in both groups' polygon paths.
+    """
+    df = pl.DataFrame(
+        {
+            "grp": ["a"] * 10 + ["b"] * 10,
+            "val": list(range(10)) + list(range(100, 110)),
+        }
+    )
+    # shared_extent=True: both groups share the full [0, 109] y range.
+    svg_shared = (
+        fe.Chart(df)
+        .mark_violin(inner=None, shared_extent=True)
+        .encode(x="grp", y="val")
+        .to_svg()
+    )
+    # shared_extent=False (default): each group uses its own y range.
+    svg_per = (
+        fe.Chart(df)
+        .mark_violin(inner=None, shared_extent=False)
+        .encode(x="grp", y="val")
+        .to_svg()
+    )
+    # Both must produce non-empty SVG.
+    assert "<svg" in svg_shared
+    assert "<svg" in svg_per
+    # The shared-extent render must produce different output than per-group
+    # (shared forces the same y-grid, per-group gives narrower ranges per group).
+    assert svg_shared != svg_per, (
+        "shared_extent=True and shared_extent=False must produce different SVG "
+        "for groups with disjoint value ranges"
+    )
+
+
 # ---- mark_qq ----
 
 
