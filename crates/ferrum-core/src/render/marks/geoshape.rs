@@ -15,7 +15,7 @@ use geojson::{Geometry, Value as GeoValue};
 
 use crate::render::arrow_cast::col_as_str;
 use crate::render::color::with_opacity;
-use crate::render::draw::{to_scene_color, to_scene_stroke, DrawCtx, MarkBuildResult};
+use crate::render::draw::{to_scene_color, to_scene_stroke, DrawCtx, MarkBuildResult, MetadataColumns};
 use crate::spec::coord::CoordKind as SpecCoord;
 
 const GEOMETRY_COL: &str = "__geometry__";
@@ -191,13 +191,16 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         }
     }
 
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
+
     MarkBuildResult {
         kind: MarkBatchKind::Polygon,
         nodes,
         data_indices: Some(data_indices),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
+        tooltips,
+        hrefs,
+        descriptions,
     }
 }
 
@@ -430,6 +433,234 @@ mod tests {
             "Polygon with one hole must produce 2 rings (exterior + hole), got {ring_count:?}. \
              This fails if the renderer reverts to `rings.first()` and discards interior rings."
         );
+    }
+
+    // ── R3: metadata wiring tests ─────────────────────────────────────────
+
+    /// Build a two-row RecordBatch: each row has a geometry column and a tooltip
+    /// column, so we can verify that each emitted node carries its row's tooltip.
+    fn batch_with_geometry_and_tooltip(
+        geojson_rows: &[&str],
+        tooltip_vals: &[&str],
+    ) -> arrow::record_batch::RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("__geometry__", DataType::Utf8, true),
+            Field::new("label", DataType::Utf8, true),
+        ]));
+        let geom_arr: StringArray = geojson_rows.iter().map(|&s| Some(s)).collect();
+        let tip_arr: StringArray = tooltip_vals.iter().map(|&s| Some(s)).collect();
+        arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![Arc::new(geom_arr), Arc::new(tip_arr)],
+        )
+        .unwrap()
+    }
+
+    /// Spec with a tooltip encoding pointing at `label`.
+    fn geo_spec_with_tooltip() -> ChartSpec {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Geoshape,
+            encoding: Encoding {
+                tooltip: Some(EncodingSpec { field: "label".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(CoordKind::Geo { projection: GeoProjection::Equirectangular }),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        }
+    }
+
+    /// Spec with an href encoding pointing at `link`.
+    fn geo_spec_with_href() -> ChartSpec {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Geoshape,
+            encoding: Encoding {
+                href: Some(EncodingSpec { field: "link".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(CoordKind::Geo { projection: GeoProjection::Equirectangular }),
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        }
+    }
+
+    // ── Test 5: tooltip encoding reaches each emitted node ───────────────
+
+    #[test]
+    fn r3_geoshape_tooltip_reaches_each_node() {
+        // Two rows, each a simple polygon. With tooltip encoding, each emitted
+        // Polygon node must carry its row's tooltip value.
+        let geojson_a = r#"{"type":"Polygon","coordinates":[[[-90.0,40.0],[-80.0,40.0],[-80.0,50.0],[-90.0,50.0],[-90.0,40.0]]]}"#;
+        let geojson_b = r#"{"type":"Polygon","coordinates":[[[-70.0,30.0],[-60.0,30.0],[-60.0,40.0],[-70.0,40.0],[-70.0,30.0]]]}"#;
+        let spec = geo_spec_with_tooltip();
+        let batch = batch_with_geometry_and_tooltip(
+            &[geojson_a, geojson_b],
+            &["Region A", "Region B"],
+        );
+        let theme = ThemeInputs::default();
+        let panel = rect_panel();
+        let scales = dummy_scales();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape);
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+        let result = build(&ctx);
+
+        // Exactly two polygon nodes emitted (one per row).
+        assert_eq!(result.nodes.len(), 2, "expected 2 polygon nodes, got {}", result.nodes.len());
+
+        // Tooltips must be populated (fail-before: was always None).
+        let tooltips = result.tooltips.as_ref().expect("tooltips must be Some when tooltip encoding is set");
+        assert_eq!(tooltips.len(), result.nodes.len(), "tooltips must align with nodes");
+
+        // Row 0 → "Region A", row 1 → "Region B".
+        assert_eq!(tooltips[0].fields[0].value, "Region A",
+            "node 0 must carry row-0 tooltip; got {:?}", tooltips[0].fields[0].value);
+        assert_eq!(tooltips[1].fields[0].value, "Region B",
+            "node 1 must carry row-1 tooltip; got {:?}", tooltips[1].fields[0].value);
+    }
+
+    // ── Test 6: multi-node feature → all nodes carry the same row's tooltip ─
+
+    #[test]
+    fn r3_geoshape_multipolygon_all_nodes_carry_row_tooltip() {
+        // A MultiPolygon in row 0 emits two Polygon nodes, both must carry
+        // row 0's tooltip ("multi-feature").
+        let geojson_multi = r#"{"type":"MultiPolygon","coordinates":[
+            [[[-90.0,40.0],[-80.0,40.0],[-80.0,50.0],[-90.0,50.0],[-90.0,40.0]]],
+            [[[-70.0,30.0],[-60.0,30.0],[-60.0,40.0],[-70.0,40.0],[-70.0,30.0]]]
+        ]}"#;
+        let spec = geo_spec_with_tooltip();
+        let batch = batch_with_geometry_and_tooltip(&[geojson_multi], &["multi-feature"]);
+        let theme = ThemeInputs::default();
+        let panel = rect_panel();
+        let scales = dummy_scales();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape);
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+        let result = build(&ctx);
+
+        // Two Polygon nodes from one MultiPolygon row.
+        assert_eq!(result.nodes.len(), 2,
+            "MultiPolygon must emit 2 nodes, got {}", result.nodes.len());
+
+        let tooltips = result.tooltips.as_ref().expect("tooltips must be Some");
+        assert_eq!(tooltips.len(), 2, "tooltips must align with nodes");
+
+        // Both nodes map to row 0, so both carry the same tooltip.
+        assert_eq!(tooltips[0].fields[0].value, "multi-feature",
+            "first multi-polygon node must carry row-0 tooltip");
+        assert_eq!(tooltips[1].fields[0].value, "multi-feature",
+            "second multi-polygon node must carry row-0 tooltip");
+    }
+
+    // ── Test 7: href encoding reaches each emitted node ──────────────────
+
+    #[test]
+    fn r3_geoshape_href_reaches_each_node() {
+        use arrow::array::StringArray;
+
+        let geojson_a = r#"{"type":"Polygon","coordinates":[[[-90.0,40.0],[-80.0,40.0],[-80.0,50.0],[-90.0,50.0],[-90.0,40.0]]]}"#;
+        let geojson_b = r#"{"type":"Polygon","coordinates":[[[-70.0,30.0],[-60.0,30.0],[-60.0,40.0],[-70.0,40.0],[-70.0,30.0]]]}"#;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("__geometry__", DataType::Utf8, true),
+            Field::new("link", DataType::Utf8, true),
+        ]));
+        let geom_arr: StringArray = [geojson_a, geojson_b].iter().map(|&s| Some(s)).collect();
+        let link_arr: StringArray = ["https://a.example", "https://b.example"].iter().map(|&s| Some(s)).collect();
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![Arc::new(geom_arr), Arc::new(link_arr)],
+        ).unwrap();
+
+        let spec = geo_spec_with_href();
+        let theme = ThemeInputs::default();
+        let panel = rect_panel();
+        let scales = dummy_scales();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape);
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+        let result = build(&ctx);
+
+        assert_eq!(result.nodes.len(), 2);
+        let hrefs = result.hrefs.as_ref().expect("hrefs must be Some when href encoding is set");
+        assert_eq!(hrefs.len(), 2);
+        assert_eq!(hrefs[0].as_deref(), Some("https://a.example"),
+            "node 0 must carry row-0 href");
+        assert_eq!(hrefs[1].as_deref(), Some("https://b.example"),
+            "node 1 must carry row-1 href");
+    }
+
+    // ── Test 8: backward compat — no metadata encoding → metadata None ───
+
+    #[test]
+    fn r3_geoshape_no_metadata_encoding_metadata_is_none() {
+        // A chart without tooltip/href/description encodings must produce
+        // None for all three metadata fields — behavior is byte-identical to
+        // the pre-R3 code for this case.
+        let geojson = r#"{"type":"Polygon","coordinates":[[[-90.0,40.0],[-80.0,40.0],[-80.0,50.0],[-90.0,50.0],[-90.0,40.0]]]}"#;
+        let spec = geo_spec(); // no encodings
+        let batch = batch_with_geometry(geojson);
+        let theme = ThemeInputs::default();
+        let panel = rect_panel();
+        let scales = dummy_scales();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Geoshape);
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &scales,
+            batch: &batch,
+            mark_style: &mark_style,
+        };
+        let result = build(&ctx);
+
+        assert_eq!(result.nodes.len(), 1, "must emit exactly one polygon node");
+        assert!(result.tooltips.is_none(), "tooltips must be None when no tooltip encoding");
+        assert!(result.hrefs.is_none(), "hrefs must be None when no href encoding");
+        assert!(result.descriptions.is_none(), "descriptions must be None when no description encoding");
     }
 }
 

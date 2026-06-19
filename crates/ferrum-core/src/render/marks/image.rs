@@ -30,7 +30,7 @@
 use arrow::array::{BinaryArray, Float64Array, UInt32Array};
 
 use crate::render::color::{ContinuousScheme, NamedContinuous};
-use crate::render::draw::{col_as_f64, col_as_str, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_str, DrawCtx, MetadataColumns};
 use crate::render::rasterize::encode_png;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -153,13 +153,16 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
         data_indices.push(i);
     }
 
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
+
     MarkBuildResult {
         kind: MarkBatchKind::Image,
         nodes,
         data_indices: Some(data_indices),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
+        tooltips,
+        hrefs,
+        descriptions,
     }
 }
 
@@ -279,6 +282,10 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let svg_w = (svg_x_far - svg_x).abs();
     let svg_h = (svg_y_bot - svg_y_top).abs();
 
+    let raster_indices = [0usize];
+    let meta = MetadataColumns::from_ctx(ctx);
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&raster_indices);
+
     MarkBuildResult {
         kind: MarkBatchKind::Image,
         nodes: vec![SceneNode::Image {
@@ -292,9 +299,9 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             },
         }],
         data_indices: Some(vec![0]),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
+        tooltips,
+        hrefs,
+        descriptions,
     }
 }
 
@@ -673,5 +680,167 @@ mod tests {
         };
         let result = build(&ctx);
         assert_eq!(result.nodes.len(), 2, "plain URL row should be silently skipped");
+    }
+
+    // ── R3: metadata wiring tests ─────────────────────────────────────────
+
+    /// Build a multi-row URL-tile batch that also carries a `tooltip` string column.
+    fn url_tile_batch_with_tooltip(
+        xs: Vec<f64>,
+        ys: Vec<f64>,
+        urls: Vec<&str>,
+        tips: Vec<&str>,
+    ) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("url", DataType::Utf8, false),
+            Field::new("tip", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs)),
+                Arc::new(Float64Array::from(ys)),
+                Arc::new(StringArray::from(urls)),
+                Arc::new(StringArray::from(tips)),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// URL-tile spec with tooltip encoding added.
+    fn url_tile_spec_with_tooltip(x_domain: (f64, f64), y_domain: (f64, f64)) -> ChartSpec {
+        let x_scale = ScaleSpec::Linear {
+            common: crate::spec::encoding::ContinuousScaleCommon {
+                domain: Some(vec![x_domain.0, x_domain.1]),
+                range: None, clamp: false, padding: None, scheme: None, domain_param: None,
+            },
+            nice: false, zero: false,
+        };
+        let y_scale = ScaleSpec::Linear {
+            common: crate::spec::encoding::ContinuousScaleCommon {
+                domain: Some(vec![y_domain.0, y_domain.1]),
+                range: None, clamp: false, padding: None, scheme: None, domain_param: None,
+            },
+            nice: false, zero: false,
+        };
+        ChartSpec {
+            data: crate::spec::data_ref::DataRef::default(),
+            mark: Mark::Image,
+            encoding: Encoding {
+                x: Some(EncodingSpec {
+                    field: "x".into(), type_: None,
+                    scale: Some(x_scale), ..Default::default()
+                }),
+                y: Some(EncodingSpec {
+                    field: "y".into(), type_: None,
+                    scale: Some(y_scale), ..Default::default()
+                }),
+                url: Some(EncodingSpec { field: "url".into(), type_: None, ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        }
+    }
+
+    // ── Test: URL-tile tooltip reaches each emitted node ─────────────────
+
+    #[test]
+    fn r3_image_url_tile_tooltip_reaches_each_node() {
+        let spec = url_tile_spec_with_tooltip((0.0, 6.0), (0.0, 6.0));
+        let url = red_1x1_png_url();
+        let batch = url_tile_batch_with_tooltip(
+            vec![1.0, 3.0, 5.0],
+            vec![2.0, 4.0, 2.0],
+            vec![url.as_str(), url.as_str(), url.as_str()],
+            vec!["tile-A", "tile-B", "tile-C"],
+        );
+        let theme = ThemeInputs::default();
+        let panel = unit_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image);
+        let ctx = DrawCtx {
+            spec: &spec, panel: &panel, theme: &theme,
+            scales: &scales, batch: &batch, mark_style: &mark_style,
+        };
+        let result = build(&ctx);
+
+        assert_eq!(result.nodes.len(), 3, "expected 3 Image nodes");
+
+        // Fail-before: tooltips was always None; pass-after: Some with per-node values.
+        let tooltips = result.tooltips.as_ref()
+            .expect("tooltips must be Some when tooltip encoding is set");
+        assert_eq!(tooltips.len(), 3, "tooltip vector must align with nodes");
+        assert_eq!(tooltips[0].fields[0].value, "tile-A", "node 0 tooltip must be 'tile-A'");
+        assert_eq!(tooltips[1].fields[0].value, "tile-B", "node 1 tooltip must be 'tile-B'");
+        assert_eq!(tooltips[2].fields[0].value, "tile-C", "node 2 tooltip must be 'tile-C'");
+    }
+
+    // ── Test: backward compat — URL-tile without metadata encoding ────────
+
+    #[test]
+    fn r3_image_url_tile_no_metadata_encoding_metadata_is_none() {
+        // Chart without tooltip/href/description — metadata fields must be None.
+        let spec = url_tile_spec((0.0, 6.0), (0.0, 6.0));
+        let url = red_1x1_png_url();
+        let batch = url_tile_batch(
+            vec![1.0, 3.0],
+            vec![2.0, 4.0],
+            vec![url.as_str(), url.as_str()],
+        );
+        let theme = ThemeInputs::default();
+        let panel = unit_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image);
+        let ctx = DrawCtx {
+            spec: &spec, panel: &panel, theme: &theme,
+            scales: &scales, batch: &batch, mark_style: &mark_style,
+        };
+        let result = build(&ctx);
+
+        assert_eq!(result.nodes.len(), 2);
+        assert!(result.tooltips.is_none(), "tooltips must be None when no tooltip encoding");
+        assert!(result.hrefs.is_none(), "hrefs must be None when no href encoding");
+        assert!(result.descriptions.is_none(), "descriptions must be None when no description encoding");
+    }
+
+    // ── Test: backward compat — raster path without metadata encoding ─────
+
+    #[test]
+    fn r3_image_raster_no_metadata_encoding_metadata_is_none() {
+        let n_cells = 2 * 2;
+        let mut pixel_data: Vec<u8> = Vec::with_capacity(n_cells * 8);
+        for i in 0..n_cells {
+            let v = i as f64 / (n_cells - 1) as f64;
+            pixel_data.extend_from_slice(&v.to_le_bytes());
+        }
+        let spec = image_spec((0.0, 1.0), (0.0, 1.0));
+        let batch = raster_batch(0.0, 1.0, 0.0, 1.0, 2, 2, pixel_data);
+        let theme = ThemeInputs::default();
+        let panel = unit_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Image);
+        let ctx = DrawCtx {
+            spec: &spec, panel: &panel, theme: &theme,
+            scales: &scales, batch: &batch, mark_style: &mark_style,
+        };
+        let result = build(&ctx);
+
+        assert_eq!(result.nodes.len(), 1, "raster path must emit exactly one node");
+        assert!(result.tooltips.is_none(), "raster without tooltip encoding: tooltips must be None");
+        assert!(result.hrefs.is_none(), "raster without href encoding: hrefs must be None");
+        assert!(result.descriptions.is_none(), "raster without description encoding: descriptions must be None");
     }
 }
