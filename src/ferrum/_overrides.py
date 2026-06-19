@@ -49,19 +49,28 @@ def _apply_overrides(
     each child chart via ``_rebuild_with_charts``.
     """
     from ferrum.chart import Chart
-    from ferrum.composition import _CompositeBase
+    from ferrum.composition import LayerChart, _CompositeBase
 
     if not isinstance(chart, Chart):
-        # Split figure-level chrome out of the properties dict for composites.
-        # Chrome (title/subtitle/caption) must store on the figure via
-        # ``composite.properties(**chrome)`` — the same interception the chained
-        # ``.properties(title=...)`` call uses — and only the non-chrome
-        # remainder may fan to inner panels.  This mirrors
-        # ``_CompositeBase.properties`` so the dict path and the chained path
-        # agree.
+        # Split figure-level chrome out of the properties dict for any chart-like
+        # that intercepts chrome in its .properties() override.  Currently that is
+        # _CompositeBase (all composite figures) and LayerChart (single-plot
+        # overlay whose .properties(title=) stores the title on _title rather
+        # than fanning it to inner layers).
+        #
+        # Chrome (title/subtitle/caption) is routed through
+        # ``chart.properties(**chrome)`` AFTER the child rebuild, so each type's
+        # overridden .properties() handles it correctly:
+        #   - _CompositeBase: stores title/subtitle/caption at the figure level.
+        #   - LayerChart: stores title on _title; fans subtitle/caption to the
+        #     merged chart (LayerChart has no figure band; subtitle/caption
+        #     behaviour on LayerChart is intentionally identical to the chained
+        #     .properties() path).
+        #
+        # Only the NON-chrome remainder is fanned to children via _rebuild.
         figure_chrome: dict[str, Any] = {}
         child_properties = properties
-        if properties is not None and isinstance(chart, _CompositeBase):
+        if properties is not None and isinstance(chart, (_CompositeBase, LayerChart)):
             figure_chrome = {k: properties[k] for k in _FIGURE_CHROME_KEYS if k in properties}
             child_properties = {
                 k: v for k, v in properties.items() if k not in _FIGURE_CHROME_KEYS

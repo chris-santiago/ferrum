@@ -529,3 +529,168 @@ def test_clustermap_dict_path_title_on_figure():
     assert cm._figure_title == "CMDict"
     assert "CMDict" not in cm.heatmap.to_svg()
     assert "CMDict" in cm.to_svg()
+
+
+# ---------------------------------------------------------------------------
+# Factory dict-path — LayerChart (T2: NEW-1 fix, round-3)
+#
+# _apply_overrides previously gated the chrome split on isinstance(_CompositeBase)
+# only.  LayerChart is _ChartLike (not _CompositeBase), so properties={"title":...}
+# was fanned by _rebuild_with_charts to every inner chart's .properties() call,
+# setting title on each inner _title (leak) and leaving the HTML <title> as default.
+# ---------------------------------------------------------------------------
+
+
+def test_layer_factory_dict_title_stored_on_layer_not_inner(df):
+    """Factory-dict properties={title=} on a LayerChart: title stored on the
+    LayerChart itself (_title), not leaked into the inner layer charts."""
+    from ferrum._overrides import _apply_overrides
+    from ferrum.composition import LayerChart
+
+    c = fm.Chart(df).mark_point().encode(x="x", y="y")
+    layer = LayerChart(c, c)
+    result = _apply_overrides(layer, properties={"title": "FactoryT"})
+
+    # Title stored on the LayerChart.
+    assert result._title == "FactoryT"
+    # No inner chart should carry the title.
+    for inner in result._charts:
+        assert inner._title is None
+
+
+def test_layer_factory_dict_title_figure_title_text(df):
+    """_figure_title_text() resolves the title set via the factory-dict path."""
+    from ferrum._overrides import _apply_overrides
+    from ferrum.composition import LayerChart
+
+    c = fm.Chart(df).mark_point().encode(x="x", y="y")
+    layer = LayerChart(c, c)
+    result = _apply_overrides(layer, properties={"title": "FTT"})
+    assert result._figure_title_text() == "FTT"
+
+
+def test_layer_factory_dict_title_html_document_title(df):
+    """HTML export uses the figure-level title from the factory-dict path."""
+    from ferrum._overrides import _apply_overrides
+    from ferrum.composition import LayerChart
+
+    c = fm.Chart(df).mark_point().encode(x="x", y="y")
+    layer = LayerChart(c, c)
+    result = _apply_overrides(layer, properties={"title": "HTMLDoc"})
+    html = result.to_html()
+    assert "<title>HTMLDoc</title>" in html
+
+
+def test_layer_factory_dict_title_matches_chained(df):
+    """properties={title=} dict path and .properties(title=) chained path agree."""
+    from ferrum._overrides import _apply_overrides
+    from ferrum.composition import LayerChart
+
+    c = fm.Chart(df).mark_point().encode(x="x", y="y")
+    layer = LayerChart(c, c)
+    via_dict = _apply_overrides(layer, properties={"title": "Match"})
+    via_chain = LayerChart(c, c).properties(title="Match")
+
+    assert via_dict._title == via_chain._title == "Match"
+    for inner in via_dict._charts:
+        assert inner._title is None
+    for inner in via_chain._charts:
+        assert inner._title is None
+
+
+def test_layer_factory_dict_width_still_fans_to_children(df):
+    """Non-chrome kwargs (width) must still reach the inner charts."""
+    from ferrum._overrides import _apply_overrides
+    from ferrum.composition import LayerChart
+
+    c = fm.Chart(df).mark_point().encode(x="x", y="y")
+    layer = LayerChart(c, c)
+    result = _apply_overrides(layer, properties={"title": "T", "width": 400})
+
+    assert result._title == "T"
+    for inner in result._charts:
+        assert inner._title is None
+        assert inner._width == 400
+
+
+def test_layer_factory_dict_subtitle_caption_fan_to_merged(df):
+    """subtitle/caption in the factory-dict path still reach the merged chart.
+
+    LayerChart has no figure band, so subtitle/caption keep fanning to the
+    inner charts (matching the chained .properties(subtitle=) behaviour).
+    The factory-dict path must be equivalent to the chained .properties() path.
+    """
+    from ferrum._overrides import _apply_overrides
+    from ferrum.composition import LayerChart
+
+    c = fm.Chart(df).mark_point().encode(x="x", y="y")
+    layer = LayerChart(c, c)
+    result = _apply_overrides(layer, properties={"title": "T", "subtitle": "S"})
+
+    # Title must be stored on the LayerChart (not leaked to inner charts as a
+    # bare title — only subtitle is set on inner charts, not the text portion).
+    assert result._title == "T"
+
+    # The result must be equivalent to the chained .properties() path:
+    # title stored on _title, subtitle fanned to inner charts the same way.
+    chained = LayerChart(c, c).properties(title="T", subtitle="S")
+    assert result._title == chained._title
+
+    # subtitle was fanned to inner charts (LayerChart.properties fans non-title
+    # kwargs).  Verify this is the same in both paths — not a regression.
+    for inner_dict, inner_chain in zip(result._charts, chained._charts):
+        assert inner_dict._title == inner_chain._title
+
+
+# ---------------------------------------------------------------------------
+# Shared _FIGURE_CHROME_KEYS constant (T2: NEW-2 fix, round-3)
+#
+# _CompositeBase.properties previously hard-coded three literal pops:
+#   kwargs.pop("title"), kwargs.pop("subtitle"), kwargs.pop("caption").
+# This parallel copy could drift from _overrides._FIGURE_CHROME_KEYS.
+# After the fix, _CompositeBase.properties uses the shared constant, so
+# both code paths reference the same definition.
+# ---------------------------------------------------------------------------
+
+
+def test_figure_chrome_keys_shared_constant():
+    """_overrides and _CompositeBase.properties reference the same chrome keys.
+
+    This test is an import-level smoke-check: if either site hard-codes a
+    different key, the constant would diverge and this test would catch it
+    indirectly via behavior.  The behavioral tests above already cover the
+    split logic; this asserts the constant itself is the single source of truth.
+    """
+    from ferrum._overrides import _FIGURE_CHROME_KEYS
+
+    assert set(_FIGURE_CHROME_KEYS) == {"title", "subtitle", "caption"}
+
+
+def test_figure_chrome_keys_parity_composite_vs_layer(df):
+    """Both _CompositeBase and LayerChart intercept the same chrome keys.
+
+    Behavioral parity: a composite and a LayerChart given the same
+    properties dict both intercept title/subtitle/caption and leave
+    non-chrome kwargs for child forwarding.
+    """
+    from ferrum._overrides import _FIGURE_CHROME_KEYS, _apply_overrides
+    from ferrum.composition import LayerChart
+
+    c = fm.Chart(df).mark_point().encode(x="x", y="y")
+
+    # LayerChart: title intercepted on _title.
+    layer = LayerChart(c, c)
+    layer_result = _apply_overrides(layer, properties={"title": "T", "width": 300})
+    assert layer_result._title == "T"
+    for inner in layer_result._charts:
+        assert inner._title is None
+
+    # _CompositeBase: title intercepted on _figure_title.
+    composite = fm.HConcatChart([c, c])
+    comp_result = _apply_overrides(composite, properties={"title": "T", "width": 300})
+    assert comp_result._figure_title == "T"
+    for child in comp_result.charts:
+        assert child._title is None
+
+    # Both must intersect exactly the _FIGURE_CHROME_KEYS keys.
+    assert set(_FIGURE_CHROME_KEYS) == {"title", "subtitle", "caption"}

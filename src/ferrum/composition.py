@@ -11,6 +11,7 @@ from typing import TypedDict
 
 from ferrum._chrome import chrome_kwargs, merge_configure_layers
 from ferrum._configure_mixin import ConfigureMixin
+from ferrum._overrides import _FIGURE_CHROME_KEYS
 
 # ---------------------------------------------------------------------------
 # Shared offset key-set constants
@@ -622,9 +623,12 @@ class _CompositeBase(_ChartLike):
             chrome stored and / or child properties updated.
         """
         # Separate figure-level chrome from per-child kwargs.
-        figure_title = kwargs.pop("title", None)
-        figure_subtitle = kwargs.pop("subtitle", None)
-        figure_caption = kwargs.pop("caption", None)
+        # Use the shared _FIGURE_CHROME_KEYS constant so the key set stays
+        # in sync with the factory-dict split in _overrides._apply_overrides.
+        chrome_vals = {k: kwargs.pop(k, None) for k in _FIGURE_CHROME_KEYS}
+        figure_title = chrome_vals["title"]
+        figure_subtitle = chrome_vals["subtitle"]
+        figure_caption = chrome_vals["caption"]
 
         if kwargs:
             # Forward remaining (non-chrome) kwargs to the appropriate panel(s).
