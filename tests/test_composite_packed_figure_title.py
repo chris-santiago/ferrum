@@ -339,3 +339,136 @@ def test_concat_grid_titled_shifts_packed_y(big_point_chart):
     assert len(base_ys) == len(titled_ys) > 0
     for by, ty in zip(base_ys, titled_ys):
         assert ty == pytest.approx(by + header_h, abs=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Finding-B discriminating tests: per-panel (dx, dy) offset in packed data.
+# ---------------------------------------------------------------------------
+
+
+def _packed_xs_by_panel(packed: bytes) -> dict[int, list[float]]:
+    """Return packed instance X coords grouped by panel_idx."""
+    by_panel: dict[int, list[float]] = {}
+    for panel_idx, kind, count, instance_start in _iter_packed_batches(packed):
+        xs: list[float] = []
+        stride = _INSTANCE_SIZES[kind]
+        for i in range(count):
+            (x,) = struct.unpack_from("<f", packed, instance_start + i * stride)
+            xs.append(x)
+        by_panel.setdefault(panel_idx, []).extend(xs)
+    return by_panel
+
+
+def _packed_ys_by_panel(packed: bytes) -> dict[int, list[float]]:
+    """Return packed instance Y coords grouped by panel_idx."""
+    by_panel: dict[int, list[float]] = {}
+    for panel_idx, kind, count, instance_start in _iter_packed_batches(packed):
+        ys: list[float] = []
+        stride = _INSTANCE_SIZES[kind]
+        for i in range(count):
+            y_pos = instance_start + i * stride + _Y_FIELD_OFFSET
+            (y,) = struct.unpack_from("<f", packed, y_pos)
+            ys.append(y)
+        by_panel.setdefault(panel_idx, []).extend(ys)
+    return by_panel
+
+
+def test_hconcat_packed_x_offset_by_panel_dx(big_point_chart):
+    """Finding-B headline test: hconcat panel-1 packed instances are shifted
+    by the panel's dx relative to panel-0 instances.
+
+    Before the fix: panel-0 and panel-1 X coordinates are identical (dx never
+    applied) → the assertion fails.  After the fix: panel-1 min X ≈ panel-0
+    min X + (panel1_plot_x - panel0_plot_x).
+    """
+    import json
+
+    composite = big_point_chart | big_point_chart
+    scene_json, packed = composite._render_interactive()
+    scene = json.loads(scene_json)
+
+    xs_by_panel = _packed_xs_by_panel(packed)
+    assert set(xs_by_panel.keys()) == {0, 1}, (
+        f"expected packed data for panel 0 and 1; got panels {set(xs_by_panel.keys())}"
+    )
+    assert len(xs_by_panel[0]) > 1000, "panel 0 must have >1000 packed instances"
+    assert len(xs_by_panel[1]) > 1000, "panel 1 must have >1000 packed instances"
+
+    panel0_plot_x = scene["panels"][0]["plot_area"]["x"]
+    panel1_plot_x = scene["panels"][1]["plot_area"]["x"]
+    dx = panel1_plot_x - panel0_plot_x
+    assert dx > 0, "hconcat: panel 1 plot_area.x must be greater than panel 0"
+
+    panel0_min_x = min(xs_by_panel[0])
+    panel1_min_x = min(xs_by_panel[1])
+    assert panel1_min_x == pytest.approx(panel0_min_x + dx, abs=1e-2), (
+        f"panel-1 packed min X ({panel1_min_x:.3f}) must equal panel-0 min X "
+        f"({panel0_min_x:.3f}) + dx ({dx:.3f}); diff = "
+        f"{panel1_min_x - panel0_min_x:.3f} vs expected {dx:.3f}"
+    )
+
+
+def test_vconcat_packed_y_offset_by_panel_dy(big_point_chart):
+    """Finding-B: vconcat panel-1 packed instances are shifted by the panel's
+    dy relative to panel-0 instances.
+
+    Before the fix: panel-0 and panel-1 Y coordinates are identical (dy never
+    applied to packed data, only the scene nodes) → the assertion fails.
+    After the fix: panel-1 min Y ≈ panel-0 min Y + (panel1_plot_y - panel0_plot_y).
+    """
+    import json
+
+    composite = big_point_chart & big_point_chart
+    scene_json, packed = composite._render_interactive()
+    scene = json.loads(scene_json)
+
+    ys_by_panel = _packed_ys_by_panel(packed)
+    assert set(ys_by_panel.keys()) == {0, 1}, (
+        f"expected packed data for panel 0 and 1; got panels {set(ys_by_panel.keys())}"
+    )
+    assert len(ys_by_panel[0]) > 1000, "panel 0 must have >1000 packed instances"
+    assert len(ys_by_panel[1]) > 1000, "panel 1 must have >1000 packed instances"
+
+    panel0_plot_y = scene["panels"][0]["plot_area"]["y"]
+    panel1_plot_y = scene["panels"][1]["plot_area"]["y"]
+    dy = panel1_plot_y - panel0_plot_y
+    assert dy > 0, "vconcat: panel 1 plot_area.y must be greater than panel 0"
+
+    panel0_min_y = min(ys_by_panel[0])
+    panel1_min_y = min(ys_by_panel[1])
+    assert panel1_min_y == pytest.approx(panel0_min_y + dy, abs=1e-2), (
+        f"panel-1 packed min Y ({panel1_min_y:.3f}) must equal panel-0 min Y "
+        f"({panel0_min_y:.3f}) + dy ({dy:.3f}); diff = "
+        f"{panel1_min_y - panel0_min_y:.3f} vs expected {dy:.3f}"
+    )
+
+
+def test_hconcat_packed_marks_within_panel_plot_area(big_point_chart):
+    """Alignment sanity: every packed instance X must fall within its panel's
+    plot_area X range (allowing a small radius/pixel margin).
+
+    Before the fix: panel-1 marks render at panel-0 coordinates, outside their
+    scissor rect → every panel-1 instance violates this bound.
+    After the fix: all instances fall within their panel's plot_area.
+    """
+    import json
+
+    composite = big_point_chart | big_point_chart
+    scene_json, packed = composite._render_interactive()
+    scene = json.loads(scene_json)
+
+    xs_by_panel = _packed_xs_by_panel(packed)
+    assert xs_by_panel, "hconcat must produce packed instances"
+
+    margin = 10.0  # allow a small margin for circle radius overhang
+    for panel_idx, xs in xs_by_panel.items():
+        plot_area = scene["panels"][panel_idx]["plot_area"]
+        plot_x_min = plot_area["x"] - margin
+        plot_x_max = plot_area["x"] + plot_area["w"] + margin
+        out_of_bounds = [x for x in xs if x < plot_x_min or x > plot_x_max]
+        assert not out_of_bounds, (
+            f"panel {panel_idx}: {len(out_of_bounds)} packed instances fall outside "
+            f"plot_area X range [{plot_area['x']:.1f}, "
+            f"{plot_area['x'] + plot_area['w']:.1f}] (margin={margin}); "
+            f"sample out-of-bounds: {out_of_bounds[:5]}"
+        )

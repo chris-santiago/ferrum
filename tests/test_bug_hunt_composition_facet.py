@@ -1193,7 +1193,7 @@ def test_merge_packed_data_empty_input():
 
     Targets composition._merge_packed_data line 1944: zip over empty lists.
     """
-    result = _merge_packed_data([], [])
+    result = _merge_packed_data([], [], [])
     assert result == b""
 
 
@@ -1202,7 +1202,7 @@ def test_merge_packed_data_with_empty_bytes():
 
     Targets composition._merge_packed_data line 1945: 'if not packed: continue'.
     """
-    result = _merge_packed_data([b"", b""], [0, 0])
+    result = _merge_packed_data([b"", b""], [0, 0], [(0.0, 0.0), (0.0, 0.0)])
     assert result == b""
 
 
@@ -3283,7 +3283,7 @@ def test_merge_packed_data_truncated_header():
     Targets composition._merge_packed_data while loop condition: pos + 20 <= len(packed).
     """
     # Less than 20 bytes: header cannot be parsed, should silently skip.
-    result = _merge_packed_data([b"\x00" * 10], [0])
+    result = _merge_packed_data([b"\x00" * 10], [0], [(0.0, 0.0)])
     assert result == b""
 
 
@@ -3296,7 +3296,7 @@ def test_merge_packed_data_unknown_kind_stops_parsing():
 
     # Create a 20-byte header with kind=99 (unknown)
     header = struct.pack("<5I", 0, 0, 99, 0, 0)
-    result = _merge_packed_data([header], [0])
+    result = _merge_packed_data([header], [0], [(0.0, 0.0)])
     assert result == b""
 
 

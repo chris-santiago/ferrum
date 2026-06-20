@@ -1508,7 +1508,7 @@ def test_b5_merge_packed_data_unit():
     instance_data_b = b"\x00" * (3 * 64)  # 3 CircleInstances
     packed_b = header_b + instance_data_b
 
-    result = _merge_packed_data([packed_a, packed_b], [0, 1])
+    result = _merge_packed_data([packed_a, packed_b], [0, 1], [(0.0, 0.0), (0.0, 0.0)])
     assert len(result) == len(packed_a) + len(packed_b), (
         f"merged packed data length mismatch: {len(result)} != {len(packed_a) + len(packed_b)}"
     )
@@ -1557,7 +1557,7 @@ def test_b5_merge_packed_data_with_flags():
 
     packed = header + instance_data + data_indices + tooltips
 
-    result = _merge_packed_data([packed], [5])
+    result = _merge_packed_data([packed], [5], [(0.0, 0.0)])
     assert len(result) == len(packed), f"length mismatch: {len(result)} != {len(packed)}"
 
     # panel_idx should be 0+5=5
@@ -1572,7 +1572,7 @@ def test_b5_merge_packed_data_empty_inputs():
     """_merge_packed_data with all-empty inputs returns empty bytes."""
     from ferrum.composition import _merge_packed_data
 
-    result = _merge_packed_data([b"", b""], [0, 1])
+    result = _merge_packed_data([b"", b""], [0, 1], [(0.0, 0.0), (0.0, 0.0)])
     assert result == b""
 
 

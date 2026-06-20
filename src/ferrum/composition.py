@@ -2108,11 +2108,13 @@ def _merge_child_scenes(
     y_offset = 0.0
     panel_id_offset = 0
     child_offsets: list[int] = []
+    child_xy: list[tuple[float, float]] = []
 
     for scene in child_scenes:
         child_offsets.append(panel_id_offset)
         dx = x_offset if layout == "horizontal" else 0.0
         dy = y_offset if layout == "vertical" else 0.0
+        child_xy.append((dx, dy))
         n_panels = _merge_one_child(merged, scene, dx, dy, panel_id_offset)
         panel_id_offset += n_panels
 
@@ -2131,7 +2133,7 @@ def _merge_child_scenes(
     if figure_chrome is not None:
         header_h = _inject_figure_chrome(merged, **figure_chrome)
 
-    merged_packed = _merge_packed_data(child_packed, child_offsets, y_offset=header_h)
+    merged_packed = _merge_packed_data(child_packed, child_offsets, child_xy, y_offset=header_h)
     return _json.dumps(merged), merged_packed
 
 
@@ -2187,6 +2189,7 @@ def _merge_child_scenes_grid(
     y_offset = 0.0
     panel_id_offset = 0
     child_offsets: list[int] = []
+    child_xy: list[tuple[float, float]] = []
 
     for row in rows:
         row_width = 0.0
@@ -2195,6 +2198,7 @@ def _merge_child_scenes_grid(
 
         for scene, packed in row:
             child_offsets.append(panel_id_offset)
+            child_xy.append((x_offset, y_offset))
             n_panels = _merge_one_child(merged, scene, x_offset, y_offset, panel_id_offset)
             panel_id_offset += n_panels
 
@@ -2214,7 +2218,7 @@ def _merge_child_scenes_grid(
         header_h = _inject_figure_chrome(merged, **figure_chrome)
 
     all_packed = [p for _, p in rendered]
-    merged_packed = _merge_packed_data(all_packed, child_offsets, y_offset=header_h)
+    merged_packed = _merge_packed_data(all_packed, child_offsets, child_xy, y_offset=header_h)
     return _json.dumps(merged), merged_packed
 
 
@@ -2270,11 +2274,13 @@ def _merge_child_scenes_sparse_grid(
     merged = _empty_scene()
     panel_id_offset = 0
     child_offsets: list[int] = []
+    child_xy: list[tuple[float, float]] = []
 
     for _row_idx, col_idx, scene, _packed in rendered:
         child_offsets.append(panel_id_offset)
         dx = col_idx * (cell_w + spacing)
         dy = _row_idx * (cell_h + spacing)
+        child_xy.append((dx, dy))
         n_panels = _merge_one_child(merged, scene, dx, dy, panel_id_offset)
         panel_id_offset += n_panels
 
@@ -2286,7 +2292,7 @@ def _merge_child_scenes_sparse_grid(
         header_h = _inject_figure_chrome(merged, **figure_chrome)
 
     all_packed = [p for _, _, _, p in rendered]
-    merged_packed = _merge_packed_data(all_packed, child_offsets, y_offset=header_h)
+    merged_packed = _merge_packed_data(all_packed, child_offsets, child_xy, y_offset=header_h)
     return _json.dumps(merged), merged_packed
 
 
@@ -2359,11 +2365,13 @@ def _merge_child_scenes_nonuniform_grid(
     merged = _empty_scene()
     panel_id_offset = 0
     child_offsets: list[int] = []
+    child_xy: list[tuple[float, float]] = []
 
     for row_idx, col_idx, scene, _packed in rendered:
         child_offsets.append(panel_id_offset)
         dx = col_x[col_idx]
         dy = row_y[row_idx]
+        child_xy.append((dx, dy))
         n_panels = _merge_one_child(merged, scene, dx, dy, panel_id_offset)
         panel_id_offset += n_panels
 
@@ -2375,7 +2383,7 @@ def _merge_child_scenes_nonuniform_grid(
         header_h = _inject_figure_chrome(merged, **figure_chrome)
 
     all_packed = [p for _, _, _, p in rendered]
-    merged_packed = _merge_packed_data(all_packed, child_offsets, y_offset=header_h)
+    merged_packed = _merge_packed_data(all_packed, child_offsets, child_xy, y_offset=header_h)
     return _json.dumps(merged), merged_packed
 
 
@@ -2572,9 +2580,10 @@ def _render_single_with_figure_chrome(chart, figure_chrome: "_FigureChrome") -> 
     header_h = _inject_figure_chrome(scene, **figure_chrome)
     # Shift the packed GPU instances down by the same header band so they stay
     # aligned with the scene nodes _inject_figure_chrome just shifted.  No
-    # panel-id remap here (single child), so the offset stays 0.
+    # panel-id remap here (single child) and no lateral placement offset,
+    # so child_xy is [(0.0, 0.0)].
     if header_h:
-        packed = _merge_packed_data([packed], [0], y_offset=header_h)
+        packed = _merge_packed_data([packed], [0], [(0.0, 0.0)], y_offset=header_h)
     return _json.dumps(scene), packed
 
 
@@ -2680,38 +2689,50 @@ def _offset_node(node: dict, dx: float, dy: float) -> None:
 
 # Packed GPU-instance layout (mirrors ferrum-core pack_instances.rs and the
 # CircleInstance / RectInstance structs in ferrum-wasm scene_load.rs).
-#   kind 0 (CircleInstance): 16 f32 = 64-byte stride; cy is f32[1] (byte 4).
-#   kind 1 (RectInstance):   18 f32 = 72-byte stride;  y is f32[1] (byte 4).
-# The Y field is the second f32 in both records, so its byte offset within an
-# instance is always 4.  Only the Y value is shifted under the figure-title
-# band — X, radius/size, color and style fields are untouched.
+#   kind 0 (CircleInstance): 16 f32 = 64-byte stride; cx is f32[0] (byte 0),
+#                             cy is f32[1] (byte 4).
+#   kind 1 (RectInstance):   18 f32 = 72-byte stride; position_x is f32[0]
+#                             (byte 0), position_y is f32[1] (byte 4).
+# X is the first f32 (byte 0) and Y is the second f32 (byte 4) in both
+# records.  Composition translates both fields by the per-panel (dx, dy)
+# placement offset so packed instances land in the same absolute frame as
+# their plot_area and scene-graph nodes.
 _PACKED_INSTANCE_SIZES = {0: 64, 1: 72}  # kind -> sizeof(Instance)
+_PACKED_X_FIELD_OFFSET = 0  # byte offset of the X f32 within each instance
 _PACKED_Y_FIELD_OFFSET = 4  # byte offset of the Y f32 within each instance
 
 
-def _offset_packed_batch_y(
-    buf: bytearray, instance_start: int, kind: int, count: int, dy: float
+def _offset_packed_batch_xy(
+    buf: bytearray, instance_start: int, kind: int, count: int, dx: float, dy: float
 ) -> None:
-    """Add *dy* to the Y f32 of every instance in one packed batch.
+    """Add *(dx, dy)* to the X and Y f32 of every instance in one packed batch.
 
     *buf* is the assembled output buffer; *instance_start* is the byte index in
     *buf* where this batch's instance data begins (just past its 20-byte
-    header).  The Y field is the second f32 of each ``CircleInstance`` /
-    ``RectInstance`` record (byte offset ``_PACKED_Y_FIELD_OFFSET`` within the
-    instance), and only that field is mutated.
+    header).  For both ``CircleInstance`` and ``RectInstance``, X is the first
+    f32 (``_PACKED_X_FIELD_OFFSET`` = 0) and Y is the second f32
+    (``_PACKED_Y_FIELD_OFFSET`` = 4).  When *dx* or *dy* is zero, that axis is
+    skipped so callers that only shift one axis incur no extra writes.
     """
     import struct
 
     stride = _PACKED_INSTANCE_SIZES[kind]
     for i in range(count):
-        y_pos = instance_start + i * stride + _PACKED_Y_FIELD_OFFSET
-        (y,) = struct.unpack_from("<f", buf, y_pos)
-        struct.pack_into("<f", buf, y_pos, y + dy)
+        base = instance_start + i * stride
+        if dx != 0.0:
+            x_pos = base + _PACKED_X_FIELD_OFFSET
+            (x,) = struct.unpack_from("<f", buf, x_pos)
+            struct.pack_into("<f", buf, x_pos, x + dx)
+        if dy != 0.0:
+            y_pos = base + _PACKED_Y_FIELD_OFFSET
+            (y,) = struct.unpack_from("<f", buf, y_pos)
+            struct.pack_into("<f", buf, y_pos, y + dy)
 
 
 def _merge_packed_data(
     packed_list: list[bytes],
     panel_id_offsets: list[int],
+    child_xy_offsets: list[tuple[float, float]],
     *,
     y_offset: float = 0.0,
 ) -> bytes:
@@ -2719,10 +2740,16 @@ def _merge_packed_data(
 
     Rewrites the ``panel_idx`` field in each batch's 20-byte header to
     account for the panel-id offset of each child in the composed layout.
-    When *y_offset* is non-zero, also shifts the Y coordinate of every packed
-    GPU instance down by that many pixels, so packed (>1000-mark) circle/rect
-    batches stay aligned with the scene-graph nodes that
-    :func:`_inject_figure_chrome` shifts down by the figure-title header band.
+    Also translates every packed GPU instance by the per-child composition
+    offset *(child_dx, child_dy)* plus the global figure-title band
+    *y_offset*, so packed (>1000-mark) circle/rect batches stay aligned with
+    the scene-graph nodes and ``plot_area`` rects that
+    :func:`_merge_scene_panels` and :func:`_inject_figure_chrome` place in
+    the same absolute composite frame.
+
+    When both the per-child dx/dy and the global *y_offset* are zero the
+    instance bytes are left byte-identical to the unmerged child (only
+    ``panel_idx`` in the header changes).
 
     Binary format per batch::
 
@@ -2755,17 +2782,22 @@ def _merge_packed_data(
     panel_id_offsets : list[int]
         Cumulative panel-id offset for each child (same length as
         *packed_list*).
+    child_xy_offsets : list[tuple[float, float]]
+        Per-child ``(dx, dy)`` panel-grid placement offsets (same length as
+        *packed_list*).  These are the same offsets passed to
+        :func:`_merge_scene_panels` for the corresponding child.  A child at
+        ``(0.0, 0.0)`` with *y_offset* == 0.0 stays byte-identical.
     y_offset : float, default 0.0
-        Pixels to add to every packed instance's Y coordinate.  This is the
-        ``header_h`` returned by :func:`_inject_figure_chrome` for a titled
-        composite; ``0.0`` for a non-titled composite leaves the instance
-        bytes byte-identical to the unmerged children (only ``panel_idx`` in
-        the header changes, exactly as before).
+        Global pixels to add to every packed instance's Y coordinate.  This
+        is the ``header_h`` returned by :func:`_inject_figure_chrome` for a
+        titled composite; ``0.0`` for a non-titled composite.
     """
     import struct
 
     result = bytearray()
-    for packed, offset in zip(packed_list, panel_id_offsets):
+    for packed, offset, (child_dx, child_dy) in zip(
+        packed_list, panel_id_offsets, child_xy_offsets
+    ):
         if not packed:
             continue
         pos = 0
@@ -2813,13 +2845,16 @@ def _merge_packed_data(
                 break  # truncated data — stop parsing this child
 
             # Append the rewritten header + the batch body (instances + any
-            # trailing data_indices / tooltips), then shift only the Y field of
-            # each instance in-place when a figure-title band was injected.
+            # trailing data_indices / tooltips), then translate the X and Y
+            # fields of every instance by the combined per-panel placement
+            # offset and the global figure-title band.
             instance_start = len(result) + 20
             result.extend(header)
             result.extend(packed[pos + 20 : batch_end])
-            if y_offset:
-                _offset_packed_batch_y(result, instance_start, kind, count, y_offset)
+            total_dx = child_dx
+            total_dy = child_dy + y_offset
+            if total_dx != 0.0 or total_dy != 0.0:
+                _offset_packed_batch_xy(result, instance_start, kind, count, total_dx, total_dy)
 
             pos = batch_end
 
