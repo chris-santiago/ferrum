@@ -24,7 +24,7 @@ MarkStr = Literal[
     "ribbon",
 ]
 
-def process_batch(data: Any) -> Any:
+def process_batch(reader: Any) -> Any:
     """
     Convert a Python record batch through the ferrum transform pipeline.
 
@@ -406,6 +406,7 @@ class Bin:
         extent: Optional[Tuple[float, float]] = None,
         nice: bool = True,
         cumulative: bool = False,
+        shared_extent: bool = False,
         groupby: Optional[str] = None,
         name: Optional[str] = None,
     ) -> None: ...
@@ -416,8 +417,8 @@ class Bin2D:
         x: str,
         y: str,
         *,
-        bins_x: Union[str, int, float] = "sturges",
-        bins_y: Union[str, int, float] = "sturges",
+        bins_x: Optional[Union[str, int, float]] = None,
+        bins_y: Optional[Union[str, int, float]] = None,
         extent_x: Optional[Tuple[float, float]] = None,
         extent_y: Optional[Tuple[float, float]] = None,
         cumulative: bool = False,
@@ -499,7 +500,7 @@ class AggregateOp:
     def __init__(self, field: str, fn_: str, as_: str) -> None: ...
 
 class Aggregate:
-    def __init__(self, ops: List[AggregateOp], *, groupby: Optional[List[str]] = None) -> None: ...
+    def __init__(self, ops: List[AggregateOp], *, groupby: Optional[List[str]] = None, name: Optional[str] = None) -> None: ...
 
 class Summary:
     def __init__(
@@ -511,6 +512,7 @@ class Summary:
         ci: float = 0.95,
         n_boot: int = 1000,
         seed: int = 0,
+        name: Optional[str] = None,
     ) -> None: ...
 
 class Outliers:
@@ -540,7 +542,7 @@ class Violin:
         self,
         field: str,
         *,
-        groupby: Optional[List[str]] = None,
+        groupby: List[str] = ...,
         bandwidth: object = None,  # str ("scott"|"silverman") or float; None → scott
         bw_adjust: float = 1.0,
         n: int = 256,
@@ -569,7 +571,7 @@ class Raster:
         *,
         aggregate: str = "count",
         field: Optional[str] = None,
-        resolution: Union[str, int, Tuple[int, int]] = "screen",
+        resolution: Optional[Union[str, int, Tuple[int, int]]] = None,
         min_count: Optional[int] = None,
         log_scale: bool = False,
         name: Optional[str] = None,
@@ -596,6 +598,8 @@ class Swarm:
         point_size: float = 5.0,
         spacing: float = 1.0,
         side: str = "both",
+        orient: str = "vertical",
+        dodge: Optional[str] = None,
         name: Optional[str] = None,
     ) -> None: ...
 
