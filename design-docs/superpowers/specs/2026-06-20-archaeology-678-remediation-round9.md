@@ -1,0 +1,38 @@
+# Archaeology Remediation — Round 9 (convergence): round-8 sweep findings
+
+*Date: 2026-06-20. Ninth pass. Round-8 unscoped sweep (5 chris-code agents): python-quality + interactive CONVERGED; 3 findings remain, ALL extending classes this effort already claimed to close (the T4 shared-faceted-scale invariant and the finding-C stub-parity class). Reports: `.git/sdd/round8-{rust-quality,audit-scene,audit-pyo3}.md`. Fixed autonomously (in-class completions of decisions already made). Then loop again (round 10).*
+
+## Findings → tasks
+
+### T1 — F1 (S3): shared faceted CATEGORICAL data-aware sort drifts per-panel
+`scale_resolve/positional.rs:104-118` (Ordinal|Nominal arm). T4's `distinct_positional_categories_shared` fixed category membership/order from the global batch, but immediately after, `apply_sort_to_domain` is called with `sort_ctx.batch = located.batch` (the PER-PANEL batch, no `include_final` guard). For data-aware `sort` forms (`"x"`/`"-x"`/`"y"`/`"-y"` shorthand and `{field,op,order}`), each panel re-sorts the shared category vector by its OWN aggregate → category→pixel index (`OrdinalScale::scale_internal` maps by domain index) disagrees with the global axis order → marks land under the wrong tick. Alphabetical/explicit-array sorts are batch-independent and unaffected.
+**Fix:** in the Ordinal|Nominal arm, when `include_final` and `transform_outputs` carries `FINAL_OUTPUT_KEY` with the category+value fields, build the `SortContext.batch` from the GLOBAL batch (mirroring how `distinct_positional_categories_shared` already chose global), so the per-panel data-aware sort agrees with the global/provisional axis sort. Keep per-panel for `Independent` (`include_final == false`). Regression test: two panels, nominal x, `sort="-y"`, per-panel y-aggregates that invert the global ranking → assert each panel's resolved x-domain order == global order.
+
+### T2 — finding-C completion v2 (3 BUG): stub signature mismatches on UNtouched bindings + non-programmatic parity test
+`src/ferrum/_core.pyi`. The round-7 probe-based parity test only checks construction of named kwargs, so it missed signature drift on classes T2 didn't touch:
+- **EncodingSpec** (`_core.pyi:41`): stub `(field, type_=None)` omits the 11 keyword-only ctor params the real binding has (`scale, title, axis, legend, sort, stack, condition, impute, scheme, format, format_type` — `spec/encoding.rs:397-402`). The sole caller (`chart.py:3264` `EncodingSpec(field, **d)`) routinely passes them; a typed caller breaks. Also add the readable getter attrs (scale/title/axis/legend/sort/stack/impute/scheme/format/format_type) to the class-attribute block.
+- **TimeScale** (`_core.pyi:159-167`): `range` is wrongly REQUIRED (real `range=None`, `scale/time.rs:162`); `utc=False` kwarg is entirely MISSING. Make `range` optional-with-None-default; add `utc: bool = False` (+ attribute).
+- **hat_matrix_stats** (`_core.pyi:1099`): first param declared `X`; real binding name is `x_table` (`transform/stats.rs:272`). A keyword call `hat_matrix_stats(X=...)` crashes. Rename to `x_table`.
+**Fix the class:** strengthen `tests/test_core_stub_parity.py` with a PROGRAMMATIC live-vs-stub check that, for every `#[pyfunction]` (introspectable via `__text_signature__`) and the introspectable spec/scale classes, diffs param NAMES + DEFAULTS between the stub AST and the live signature — so ANY future drift is caught, not just probed kwargs. (Classes whose `#[new]` shows only `(*args,**kwargs)` to introspection stay on construction probes.)
+**Non-goals:** WARN-1 (ChartSpec `facet`/`mark_style` declared as readable attrs but write-only) and WARN-2 (ContinuousScheme Rust docstring non-constructible example) — record as known gaps; no active crash/drop. Fix WARN-1 only if trivial (drop the two attrs from the readable block or comment them write-only).
+
+### T3 — non-positional faceted shared scale (S3 BUG): color/size/opacity drift per-panel vs global legend
+`scale_resolve/auxiliary.rs:16-104` (`build_size_scale`, `build_opacity_scale`) and `scale_resolve/color.rs:70-106` (`build_color_scale` continuous arm) resolve their domain from the per-panel `primary_batch`, never unioning `FINAL_OUTPUT_KEY`, while the colorbar/size-legend (`prepare.rs:737,785,934-1029`) are built from the GLOBAL `provisional_scales`. So a faceted continuous color/size/opacity chart normalizes marks per-panel while the legend is global → a `sz=10` mark in one panel renders identically to a `sz=100` mark in another (empirically confirmed). SAME class as T4 (marks must agree with the shared display), non-positional channels. Spec-consistent: `ferrum-spec.md:822` lists `"color"` in the `resolve` scale map; shared is the documented default.
+**Fix (mirror T4):** thread an `include_final`-equivalent into `build_size_scale`/`build_opacity_scale`/`build_color_scale` (continuous arm) so a faceted chart whose channel resolves `Shared` unions `FINAL_OUTPUT_KEY` for the domain, matching the global legend. Gate strictly per-channel on `resolve == Shared` (extend `facet_shared_flags`/add a sibling for color/size/opacity); `Independent` keeps per-panel (escape hatch preserved). Discrete color already unions across outputs — only the CONTINUOUS color arm + size + opacity need the change. Re-verify/regenerate any faceted continuous-color/size/opacity goldens (orchestrator blesses PNGs).
+
+## Plan (lean-plan)
+> Subagent-driven; rust-coder/python-coder; THREE SEPARATE gates per task (spec→quality→review-lite); announce model+agent; chris-code agents only; orchestrator runs the FULL suite after each task + blesses any golden PNG.
+
+### Stage 1 (parallel — disjoint: rust vs python)
+- **T1 [F1]** Rust: `scale_resolve/positional.rs` (+`domain.rs` if SortContext construction moves) — global SortContext batch for shared categorical data-aware sort. Regression test (nominal x, `sort="-y"`, inverted per-panel ranking).
+- **T2 [finding-C v2]** Python: `src/ferrum/_core.pyi` (EncodingSpec/TimeScale/hat_matrix_stats) + `tests/test_core_stub_parity.py` (programmatic signature diff).
+
+### Stage 2 (after T1 — shares scale_resolve/mod.rs)
+- **T3 [non-positional shared]** Rust: `scale_resolve/{auxiliary,color,mod}.rs` (+ scene_build callsite if a flag must be threaded) — faceted Shared color/size/opacity union FINAL_OUTPUT_KEY. Tests (faceted continuous color/size/opacity: panel mark normalized to GLOBAL domain == legend; Independent per-panel preserved). Golden re-verify.
+
+### Constraints
+- No matplotlib; no global mutable state. `cargo test` must pass. Build `unset CONDA_PREFIX && uv run --no-sync maturin develop`. Rust `DYLD_LIBRARY_PATH=/opt/homebrew/Caskroom/miniforge/base/lib cargo test -p ferrum-core` (+`-p ferrum-wasm`, no DYLD). Python `uv run --no-sync pytest <path> -p no:randomly -q` (NO DYLD). RUN tests; orchestrator runs FULL suite after each task.
+- T1/T3 gate strictly on `resolve == Shared` (Independent + explicit-domain + non-faceted byte-identical). T3 changes only continuous color + size + opacity (discrete color already shared). Goldens visually inspected before commit (orchestrator blesses PNGs).
+
+### Acceptance
+- Shared faceted categorical with data-aware sort: per-panel domain order == global order, marks under correct ticks (T1). EncodingSpec/TimeScale/hat_matrix_stats stubs match live bindings + parity test catches signature drift programmatically (T2). Faceted continuous color/size/opacity marks normalize to the global domain matching the legend; Independent preserved (T3). Full suite green; goldens blessed. Round-10 unscoped sweep surfaces no confirmed correctness issue → converged.
