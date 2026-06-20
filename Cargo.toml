@@ -4,7 +4,7 @@ members = ["crates/ferrum-core", "crates/ferrum-scene", "crates/ferrum-wasm"]
 default-members = ["crates/ferrum-core", "crates/ferrum-scene"]
 
 [workspace.package]
-version = "0.17.0"
+version = "0.17.1"
 edition = "2021"
 license = "MIT"
 authors = ["Chris Santiago <cjsantiago@gatech.edu>"]

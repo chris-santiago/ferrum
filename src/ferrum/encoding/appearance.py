@@ -22,7 +22,7 @@ from ferrum.encoding.base import ChannelBase
 #
 _APPEARANCE_BASE = frozenset({"type", "legend"})
 _APPEARANCE_FULL = _APPEARANCE_BASE | {"scale", "title"}
-_APPEARANCE_CONDITION = _APPEARANCE_FULL | {"condition"}   # == old _RENDERED_HONORED
+_APPEARANCE_CONDITION = _APPEARANCE_FULL | {"condition"}  # == old _RENDERED_HONORED
 _APPEARANCE_SORT = _APPEARANCE_CONDITION | {"sort"}
 _APPEARANCE_SCHEME = _APPEARANCE_CONDITION | {"scheme"}
 
@@ -74,7 +74,9 @@ class Color(ChannelBase):
     # ``legend=None`` (or ``False``) suppresses the categorical color legend
     # at the renderer level. Used by direct-label diagnostic charts to
     # avoid a redundant legend alongside endpoint-anchored series labels.
-    _honored_kwargs = _APPEARANCE_SORT | {"scheme"}  # {"type","legend","scale","title","condition","sort","scheme"}
+    _honored_kwargs = _APPEARANCE_SORT | {
+        "scheme"
+    }  # {"type","legend","scale","title","condition","sort","scheme"}
 
 
 class Size(ChannelBase):

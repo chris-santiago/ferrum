@@ -6,6 +6,39 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.17.1
+
+*2026-06-20*
+
+Closes the remaining known-gap and bug issues from the v0.17.0 review and lands a
+large internal cohesion pass (full Python + Rust review → 13 findings, all
+behavior-preserving). The user-visible changes are a handful of default-behavior
+and channel fixes; the bulk of the release is internal refactoring that leaves
+render output byte-identical (verified against the golden suite). No breaking API
+changes.
+
+### Added
+
+- [`silhouette_chart`][ferrum.silhouette_chart] and [`pca_scree_chart`][ferrum.pca_scree_chart] gained an opt-in `subtitle=` parameter (default `None`, fully backward-compatible), matching the classification/regression chart family.
+- `EncodingSpec.condition` is now a readable attribute (previously write-only at construction).
+
+### Fixed
+
+- **`facet(col=X)`** without an explicit `ncols` now lays panels **side-by-side** (a single horizontal row) instead of stacking them vertically, matching Altair/seaborn. `facet(row=X)`, the generic `facet(field=X)` wrap, and any explicit `ncols=` are unchanged. ([#24](https://github.com/chris-santiago/ferrum/issues/24))
+- **`mark_line`** now honors the `fill_opacity` encoding channel (previously silently dropped). ([#5](https://github.com/chris-santiago/ferrum/issues/5))
+- The **`shape`** encoding now honors `sort` (alphabetical, data-aware `"x"/"-x"/"y"/"-y"`, sort-field object, and explicit array). ([#26](https://github.com/chris-santiago/ferrum/issues/26))
+- A **conditional-only color encoding** (base `color` unset + a `when(Color(...))` selection) now builds a categorical legend, so a `bind="legend"` toggle has entries to toggle. ([#9](https://github.com/chris-santiago/ferrum/issues/9))
+- Interactive **data-label z-order** no longer flips on the first zoom/pan tick — labels keep their paint order relative to annotations/axes (the placement now uses a DOM-order-preserving update). ([#10](https://github.com/chris-santiago/ferrum/issues/10))
+- Setting both `color=` and `stroke=` now emits a one-time warning that `stroke` is ignored (previously dropped silently).
+
+### Changed
+
+- Large internal cohesion refactor across the Python and Rust layers, all behavior-preserving (byte-identical output): a shared opacity resolver across the five core marks; one serde→Python getter helper and one appearance-channel honored-kwargs contract; `chart.py` facet machinery extracted to `_facet.py` with a type-safe `_Facet`; `prepare.rs` split into `prepare/{mod,legend,extent}`; shared figure-family annotation/facet helpers; and the symmetric concat composites deduped onto a parameterized `_CompositeBase`. No public API or render-output change.
+
+### Known gaps
+
+- `ShapeKind::Square` glyphs can exceed the panel clip in facets ([#25](https://github.com/chris-santiago/ferrum/issues/25), investigated as not-reproducible/cosmetic); completing the `chart.py` decomposition needs `_NamedTransform` co-relocation ([#28](https://github.com/chris-santiago/ferrum/issues/28)).
+
 ## 0.17.0
 
 *2026-06-20*

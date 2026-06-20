@@ -43,7 +43,11 @@ _EXPECTED: dict[type, frozenset[str]] = {
 }
 
 
-@pytest.mark.parametrize("channel_cls,expected", list(_EXPECTED.items()), ids=lambda x: getattr(x, "__name__", str(x)))
+@pytest.mark.parametrize(
+    "channel_cls,expected",
+    list(_EXPECTED.items()),
+    ids=[cls.__name__ for cls in _EXPECTED],
+)
 def test_appearance_channel_honored_kwargs(channel_cls: type, expected: frozenset[str]) -> None:
     """Each appearance channel's _honored_kwargs must equal the expected set exactly."""
     actual = channel_cls._honored_kwargs

@@ -29,6 +29,7 @@ _CATS = ("A", "B", "C")
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+
 def _legend_labels(svg: str) -> list[str]:
     """Return the ordered list of legend labels for the shape channel.
 
@@ -48,24 +49,24 @@ def _legend_labels(svg: str) -> list[str]:
 
 # ── data ─────────────────────────────────────────────────────────────────────
 
+
 def _make_df() -> pl.DataFrame:
     """3-category data; A appears first, then B, then C."""
-    return pl.DataFrame({
-        "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-        "y": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
-        "g": ["A", "B", "C", "A", "B", "C"],
-    })
-
-
-def _chart(df: pl.DataFrame, **shape_kwargs) -> fm.Chart:
-    return (
-        fm.Chart(df)
-        .mark_point()
-        .encode(x="x:Q", y="y:Q", shape=fm.Shape("g", **shape_kwargs))
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "y": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            "g": ["A", "B", "C", "A", "B", "C"],
+        }
     )
 
 
+def _chart(df: pl.DataFrame, **shape_kwargs) -> fm.Chart:
+    return fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q", shape=fm.Shape("g", **shape_kwargs))
+
+
 # ── tests ─────────────────────────────────────────────────────────────────────
+
 
 def test_shape_absent_sort_first_appearance_order():
     """Without sort the legend lists categories in first-appearance order: A, B, C."""
@@ -79,11 +80,13 @@ def test_shape_absent_sort_first_appearance_order():
 def test_shape_sort_ascending_reorders_legend():
     """sort='ascending' reorders the legend alphabetically: A, B, C."""
     # Data arrives C, A, B so first-appearance order differs from alphabetical.
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [10.0, 20.0, 30.0],
-        "g": ["C", "A", "B"],
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [10.0, 20.0, 30.0],
+            "g": ["C", "A", "B"],
+        }
+    )
     svg = _chart(df, sort="ascending").to_svg()
     labels = _legend_labels(svg)
     assert labels == ["A", "B", "C"], (
@@ -93,13 +96,15 @@ def test_shape_sort_ascending_reorders_legend():
 
 def test_shape_sort_ascending_differs_from_no_sort():
     """When first-appearance order != alphabetical, ascending sort changes the SVG."""
-    df = pl.DataFrame({
-        "x": [1.0, 2.0, 3.0],
-        "y": [10.0, 20.0, 30.0],
-        "g": ["C", "A", "B"],          # first-appearance: C, A, B
-    })
+    df = pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0],
+            "y": [10.0, 20.0, 30.0],
+            "g": ["C", "A", "B"],  # first-appearance: C, A, B
+        }
+    )
     svg_nosort = _chart(df).to_svg()
-    svg_asc    = _chart(df, sort="ascending").to_svg()
+    svg_asc = _chart(df, sort="ascending").to_svg()
     assert svg_nosort != svg_asc, (
         "sort='ascending' must produce a different SVG when first-appearance order "
         "differs from alphabetical order"
@@ -119,10 +124,8 @@ def test_shape_sort_descending_differs_from_no_sort():
     """sort='descending' produces a different SVG than absent sort."""
     df = _make_df()
     svg_nosort = _chart(df).to_svg()
-    svg_desc   = _chart(df, sort="descending").to_svg()
-    assert svg_nosort != svg_desc, (
-        "sort='descending' must change the rendered SVG vs absent sort"
-    )
+    svg_desc = _chart(df, sort="descending").to_svg()
+    assert svg_nosort != svg_desc, "sort='descending' must change the rendered SVG vs absent sort"
 
 
 def test_shape_sort_explicit_array_reorders_legend():
@@ -137,7 +140,7 @@ def test_shape_sort_explicit_array_reorders_legend():
 def test_shape_sort_explicit_array_differs_from_no_sort():
     """Explicit-array sort SVG differs from no-sort SVG (real discriminator)."""
     df = _make_df()
-    svg_nosort  = _chart(df).to_svg()
+    svg_nosort = _chart(df).to_svg()
     svg_explicit = _chart(df, sort=["C", "A", "B"]).to_svg()
     assert svg_nosort != svg_explicit, (
         "explicit-array sort must produce a different SVG than absent sort"

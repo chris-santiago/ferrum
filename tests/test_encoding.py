@@ -276,7 +276,9 @@ def test_stroke_dropped_by_color_stroke_field_is_absent_from_spec():
     from ferrum._warn import reset_warnings
 
     reset_warnings()
-    df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0], "c": ["x", "y", "z"], "d": ["p", "q", "r"]})
+    df = pl.DataFrame(
+        {"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0], "c": ["x", "y", "z"], "d": ["p", "q", "r"]}
+    )
 
     with warnings.catch_warnings(record=True):
         warnings.simplefilter("always")
