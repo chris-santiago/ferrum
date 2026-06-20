@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import json as _json
+import struct
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 from typing import TypedDict
@@ -84,6 +86,23 @@ def _validate_resolve(resolve: Optional[Dict[str, str]], label: str) -> None:
             raise ValueError(
                 f"{label}: resolve[{ch!r}]={mode!r}; expected 'shared' or 'independent'"
             )
+
+
+def _validate_share_modes(channels: Dict[str, str]) -> None:
+    """Raise ``ValueError`` when any ``share_scale`` value is not a valid mode.
+
+    Shared by :meth:`_ChartLike.share_scale` and
+    :meth:`RepeatChart.share_scale` so the ``"shared"``/``"independent"``
+    vocabulary is validated in one place.
+
+    Parameters
+    ----------
+    channels : dict
+        Channel name → mode mapping from a ``share_scale`` call.
+    """
+    for ch, mode in channels.items():
+        if mode not in ("shared", "independent"):
+            raise ValueError(f"share_scale: {ch}={mode!r}; expected 'shared' or 'independent'")
 
 
 def _apply_resolve(charts: list, resolve: Optional[Dict[str, str]]) -> list:
@@ -386,9 +405,7 @@ class _ChartLike(ConfigureMixin):
         >>> combined = (chart_a | chart_b).share_scale(x="shared")
         >>> grid = fm.JointChart(center, top=hist_x, right=hist_y).share_scale(y="shared")
         """
-        for ch, mode in channels.items():
-            if mode not in ("shared", "independent"):
-                raise ValueError(f"share_scale: {ch}={mode!r}; expected 'shared' or 'independent'")
+        _validate_share_modes(channels)
         shared = [ch for ch, mode in channels.items() if mode == "shared"]
         if not shared:
             return self
@@ -1395,9 +1412,7 @@ class RepeatChart(_CompositeBase):
         RepeatChart
             A new ``RepeatChart`` with the merged ``resolve=`` config.
         """
-        for ch, mode in channels.items():
-            if mode not in ("shared", "independent"):
-                raise ValueError(f"share_scale: {ch}={mode!r}; expected 'shared' or 'independent'")
+        _validate_share_modes(channels)
         merged = dict(self.resolve or {})
         merged.update(channels)
         result = RepeatChart(
@@ -2065,6 +2080,61 @@ class ConcatChart(_CompositeBase):
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class _PlacedChild:
+    """One child's rendered scene + packed bytes at its computed placement.
+
+    Carries the per-child ``(panel_id_offset, dx, dy, scene, packed)`` placement
+    as a single record so the packed-instance offset cannot drift from the
+    scene-node offset (both read ``dx``/``dy`` from the same field).  Built by
+    each ``_merge_child_scenes*`` variant's placement loop and consumed by
+    :func:`_assemble_placed_children`.
+    """
+
+    scene: dict  # parsed child scene JSON
+    packed: bytes  # child packed GPU-instance bytes
+    dx: float  # lateral placement offset
+    dy: float  # vertical placement offset
+    panel_id_offset: int  # cumulative panel-id base for this child
+
+
+def _assemble_placed_children(
+    placed: list["_PlacedChild"],
+    width: float,
+    height: float,
+    figure_chrome: Optional["_FigureChrome"],
+) -> tuple[str, bytes]:
+    """Merge placed children into one scene + packed buffer.
+
+    Builds a fresh :func:`_empty_scene`, sets *width*/*height*, runs
+    :func:`_merge_one_child` for each placement in order, injects figure chrome
+    (only when *figure_chrome* is not ``None``, after the merge loop), then
+    merges packed bytes with ``y_offset = header_h``.  Returns
+    ``(scene_json, packed)``.
+
+    Only ever called on the non-empty path; each variant keeps its own
+    empty-children early-return guard.
+    """
+    merged = _empty_scene()
+    merged["width"] = width
+    merged["height"] = height
+
+    for pc in placed:
+        _merge_one_child(merged, pc.scene, pc.dx, pc.dy, pc.panel_id_offset)
+
+    header_h = 0.0
+    if figure_chrome is not None:
+        header_h = _inject_figure_chrome(merged, **figure_chrome)
+
+    merged_packed = _merge_packed_data(
+        [pc.packed for pc in placed],
+        [pc.panel_id_offset for pc in placed],
+        [(pc.dx, pc.dy) for pc in placed],
+        y_offset=header_h,
+    )
+    return _json.dumps(merged), merged_packed
+
+
 def _merge_child_scenes(
     charts: list,
     spacing: float,
@@ -2103,38 +2173,31 @@ def _merge_child_scenes(
     if not child_scenes:
         return '{"panels":[],"width":0,"height":0}', b""
 
-    merged = _empty_scene()
     x_offset = 0.0
     y_offset = 0.0
     panel_id_offset = 0
-    child_offsets: list[int] = []
-    child_xy: list[tuple[float, float]] = []
+    width = 0
+    height = 0
+    placed: list[_PlacedChild] = []
 
-    for scene in child_scenes:
-        child_offsets.append(panel_id_offset)
+    for scene, packed in zip(child_scenes, child_packed):
         dx = x_offset if layout == "horizontal" else 0.0
         dy = y_offset if layout == "vertical" else 0.0
-        child_xy.append((dx, dy))
-        n_panels = _merge_one_child(merged, scene, dx, dy, panel_id_offset)
-        panel_id_offset += n_panels
+        placed.append(_PlacedChild(scene, packed, dx, dy, panel_id_offset))
+        panel_id_offset += len(scene.get("panels", []))
 
         w = scene.get("width", 0)
         h = scene.get("height", 0)
         if layout == "horizontal":
             x_offset += w + spacing
-            merged["width"] = x_offset - spacing
-            merged["height"] = max(merged["height"], h)
+            width = x_offset - spacing
+            height = max(height, h)
         else:
             y_offset += h + spacing
-            merged["height"] = y_offset - spacing
-            merged["width"] = max(merged["width"], w)
+            height = y_offset - spacing
+            width = max(width, w)
 
-    header_h = 0.0
-    if figure_chrome is not None:
-        header_h = _inject_figure_chrome(merged, **figure_chrome)
-
-    merged_packed = _merge_packed_data(child_packed, child_offsets, child_xy, y_offset=header_h)
-    return _json.dumps(merged), merged_packed
+    return _assemble_placed_children(placed, width, height, figure_chrome)
 
 
 def _merge_child_scenes_grid(
@@ -2184,12 +2247,11 @@ def _merge_child_scenes_grid(
     for i in range(0, len(rendered), columns):
         rows.append(rendered[i : i + columns])
 
-    # Merge each row horizontally, then merge rows vertically.
-    merged = _empty_scene()
+    # Place each row horizontally, then stack rows vertically.
     y_offset = 0.0
     panel_id_offset = 0
-    child_offsets: list[int] = []
-    child_xy: list[tuple[float, float]] = []
+    width = 0
+    placed: list[_PlacedChild] = []
 
     for row in rows:
         row_width = 0.0
@@ -2197,10 +2259,8 @@ def _merge_child_scenes_grid(
         x_offset = 0.0
 
         for scene, packed in row:
-            child_offsets.append(panel_id_offset)
-            child_xy.append((x_offset, y_offset))
-            n_panels = _merge_one_child(merged, scene, x_offset, y_offset, panel_id_offset)
-            panel_id_offset += n_panels
+            placed.append(_PlacedChild(scene, packed, x_offset, y_offset, panel_id_offset))
+            panel_id_offset += len(scene.get("panels", []))
 
             w = scene.get("width", 0)
             h = scene.get("height", 0)
@@ -2208,18 +2268,12 @@ def _merge_child_scenes_grid(
             row_width = x_offset - spacing
             row_height = max(row_height, h)
 
-        merged["width"] = max(merged["width"], row_width)
+        width = max(width, row_width)
         y_offset += row_height + spacing
 
-    merged["height"] = y_offset - spacing
+    height = y_offset - spacing
 
-    header_h = 0.0
-    if figure_chrome is not None:
-        header_h = _inject_figure_chrome(merged, **figure_chrome)
-
-    all_packed = [p for _, p in rendered]
-    merged_packed = _merge_packed_data(all_packed, child_offsets, child_xy, y_offset=header_h)
-    return _json.dumps(merged), merged_packed
+    return _assemble_placed_children(placed, width, height, figure_chrome)
 
 
 def _merge_child_scenes_sparse_grid(
@@ -2270,30 +2324,20 @@ def _merge_child_scenes_sparse_grid(
     n_rows = max_row + 1
     n_cols = max_col + 1
 
-    # Merge each cell at its (row, col) position.
-    merged = _empty_scene()
+    # Place each cell at its (row, col) position.
     panel_id_offset = 0
-    child_offsets: list[int] = []
-    child_xy: list[tuple[float, float]] = []
+    placed: list[_PlacedChild] = []
 
-    for _row_idx, col_idx, scene, _packed in rendered:
-        child_offsets.append(panel_id_offset)
+    for row_idx, col_idx, scene, packed in rendered:
         dx = col_idx * (cell_w + spacing)
-        dy = _row_idx * (cell_h + spacing)
-        child_xy.append((dx, dy))
-        n_panels = _merge_one_child(merged, scene, dx, dy, panel_id_offset)
-        panel_id_offset += n_panels
+        dy = row_idx * (cell_h + spacing)
+        placed.append(_PlacedChild(scene, packed, dx, dy, panel_id_offset))
+        panel_id_offset += len(scene.get("panels", []))
 
-    merged["width"] = n_cols * cell_w + (n_cols - 1) * spacing
-    merged["height"] = n_rows * cell_h + (n_rows - 1) * spacing
+    width = n_cols * cell_w + (n_cols - 1) * spacing
+    height = n_rows * cell_h + (n_rows - 1) * spacing
 
-    header_h = 0.0
-    if figure_chrome is not None:
-        header_h = _inject_figure_chrome(merged, **figure_chrome)
-
-    all_packed = [p for _, _, _, p in rendered]
-    merged_packed = _merge_packed_data(all_packed, child_offsets, child_xy, y_offset=header_h)
-    return _json.dumps(merged), merged_packed
+    return _assemble_placed_children(placed, width, height, figure_chrome)
 
 
 def _merge_child_scenes_nonuniform_grid(
@@ -2361,30 +2405,17 @@ def _merge_child_scenes_nonuniform_grid(
         x += col_widths[c] + (spacing if i < len(sorted_cols) - 1 else 0)
     total_width = x
 
-    # Merge each cell at its computed position.
-    merged = _empty_scene()
+    # Place each cell at its computed position.
     panel_id_offset = 0
-    child_offsets: list[int] = []
-    child_xy: list[tuple[float, float]] = []
+    placed: list[_PlacedChild] = []
 
-    for row_idx, col_idx, scene, _packed in rendered:
-        child_offsets.append(panel_id_offset)
+    for row_idx, col_idx, scene, packed in rendered:
         dx = col_x[col_idx]
         dy = row_y[row_idx]
-        child_xy.append((dx, dy))
-        n_panels = _merge_one_child(merged, scene, dx, dy, panel_id_offset)
-        panel_id_offset += n_panels
+        placed.append(_PlacedChild(scene, packed, dx, dy, panel_id_offset))
+        panel_id_offset += len(scene.get("panels", []))
 
-    merged["width"] = total_width
-    merged["height"] = total_height
-
-    header_h = 0.0
-    if figure_chrome is not None:
-        header_h = _inject_figure_chrome(merged, **figure_chrome)
-
-    all_packed = [p for _, _, _, p in rendered]
-    merged_packed = _merge_packed_data(all_packed, child_offsets, child_xy, y_offset=header_h)
-    return _json.dumps(merged), merged_packed
+    return _assemble_placed_children(placed, total_width, total_height, figure_chrome)
 
 
 def _merge_one_child(
@@ -2714,8 +2745,6 @@ def _offset_packed_batch_xy(
     (``_PACKED_Y_FIELD_OFFSET`` = 4).  When *dx* or *dy* is zero, that axis is
     skipped so callers that only shift one axis incur no extra writes.
     """
-    import struct
-
     stride = _PACKED_INSTANCE_SIZES[kind]
     for i in range(count):
         base = instance_start + i * stride
@@ -2792,8 +2821,6 @@ def _merge_packed_data(
         is the ``header_h`` returned by :func:`_inject_figure_chrome` for a
         titled composite; ``0.0`` for a non-titled composite.
     """
-    import struct
-
     result = bytearray()
     for packed, offset, (child_dx, child_dy) in zip(
         packed_list, panel_id_offsets, child_xy_offsets
