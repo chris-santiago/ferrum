@@ -39,6 +39,7 @@ def _silhouette_chart_from_source(
     source: Any,
     *,
     k: int | None = None,
+    subtitle: str | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
     properties: dict | None = None,
@@ -48,11 +49,20 @@ def _silhouette_chart_from_source(
     """Silhouette chart from a ModelSource. The source method packs
     samples into a 0..n-1 ``y_position`` stack order so the bars render
     tightly per cluster.
+
+    ``subtitle`` is opt-in: the silhouette mark sets no chart title, so a
+    subtitle is only attached (under a ``"Silhouette Plot"`` title) when a
+    caller passes one. ``subtitle=None`` (default) leaves the chart
+    title-less, byte-identical to the prior output.
     """
     import ferrum
 
     df = source.silhouette(k=k)
     chart = ferrum.Chart(df).mark_silhouette()
+    if subtitle is not None:
+        chart = chart.properties(
+            title=ferrum.Title("Silhouette Plot", subtitle=subtitle),
+        )
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
     )
@@ -64,13 +74,19 @@ def _pca_scree_chart_from_source(
     n_components: int | None = None,
     cumulative_line: bool = True,
     threshold: float | None = 0.95,
+    subtitle: str | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
 ):
-    """PCA scree chart with optional cumulative line + threshold rule."""
+    """PCA scree chart with optional cumulative line + threshold rule.
+
+    ``subtitle`` is opt-in: it threads into the existing ``"PCA Explained
+    Variance"`` title; ``subtitle=None`` (default) is byte-identical to the
+    prior output.
+    """
     import ferrum
     from ferrum._layer import _Layer
 
@@ -79,7 +95,9 @@ def _pca_scree_chart_from_source(
         cumulative_line=cumulative_line,
         threshold_line=threshold,
     )
-    chart = chart.properties(title=ferrum.Title("PCA Explained Variance"))
+    chart = chart.properties(
+        title=ferrum.Title("PCA Explained Variance", subtitle=subtitle),
+    )
     if cumulative_line:
         chart = chart.layer(
             _Layer(
@@ -99,13 +117,19 @@ def _pca_scree_chart_from_variance_df(
     *,
     cumulative_line: bool = True,
     threshold: float | None = 0.95,
+    subtitle: str | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
 ):
-    """PCA scree chart from a pre-computed variance DataFrame (Rust SVD path)."""
+    """PCA scree chart from a pre-computed variance DataFrame (Rust SVD path).
+
+    ``subtitle`` is opt-in: it threads into the existing ``"PCA Explained
+    Variance"`` title; ``subtitle=None`` (default) is byte-identical to the
+    prior output.
+    """
     import ferrum
     from ferrum._layer import _Layer
 
@@ -113,7 +137,9 @@ def _pca_scree_chart_from_variance_df(
         cumulative_line=cumulative_line,
         threshold_line=threshold,
     )
-    chart = chart.properties(title=ferrum.Title("PCA Explained Variance"))
+    chart = chart.properties(
+        title=ferrum.Title("PCA Explained Variance", subtitle=subtitle),
+    )
     if cumulative_line:
         chart = chart.layer(
             _Layer(
@@ -336,6 +362,7 @@ def pca_scree_chart(
     n_components: int | None = None,
     cumulative_line: bool = True,
     threshold: float | None = 0.95,
+    subtitle: str | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -369,6 +396,8 @@ def pca_scree_chart(
         When a float is given, draws a horizontal reference rule at
         that cumulative-variance level (e.g. ``0.95`` marks where 95%
         of variance is explained). Pass ``None`` to omit the rule.
+    subtitle : str or None, default None
+        Optional subtitle rendered beneath the active chart title.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     mark : dict, optional
@@ -435,6 +464,7 @@ def pca_scree_chart(
             df,
             cumulative_line=cumulative_line,
             threshold=threshold,
+            subtitle=subtitle,
             mark=mark,
             encode=encode,
             properties=properties,
@@ -448,6 +478,7 @@ def pca_scree_chart(
         n_components=n_components,
         cumulative_line=cumulative_line,
         threshold=threshold,
+        subtitle=subtitle,
         mark=mark,
         encode=encode,
         properties=properties,
@@ -677,6 +708,7 @@ def silhouette_chart(
     model: Any,
     X: Any = None,
     *,
+    subtitle: str | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -698,6 +730,10 @@ def silhouette_chart(
     X : array-like, optional
         Feature matrix. Required when ``model`` is a raw
         estimator; ignored when it is already a ``ModelSource``.
+    subtitle : str or None, default None
+        Optional subtitle. The silhouette mark sets no chart title, so a
+        subtitle is only drawn (under a ``"Silhouette Plot"`` title) when
+        one is supplied; the default leaves the chart title-less.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     mark : dict, optional
@@ -728,6 +764,7 @@ def silhouette_chart(
     source = _resolve_source(model, X, None, random_state=random_state)
     return _silhouette_chart_from_source(
         source,
+        subtitle=subtitle,
         mark=mark,
         encode=encode,
         properties=properties,

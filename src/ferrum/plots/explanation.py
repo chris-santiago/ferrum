@@ -28,7 +28,12 @@ if TYPE_CHECKING:
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
-from ferrum.plots._helpers import _finalize_chart, _require, _resolve_source
+from ferrum.plots._helpers import (
+    _finalize_chart,
+    _require,
+    _resolve_source,
+    _should_facet_by_class,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +213,7 @@ def _shap_beeswarm_chart_from_source(
         .drop("_feature_order")
     )
 
-    is_faceted = per_class and plot_df["class_label"].n_unique() > 1
+    is_faceted = _should_facet_by_class(plot_df, per_class=per_class)
     x_min = float(plot_df["shap_value"].min())
     x_max = float(plot_df["shap_value"].max())
     pad = max(abs(x_min), abs(x_max)) * 0.05 if (x_min < x_max) else 1.0
@@ -280,7 +285,7 @@ def _shap_bar_chart_from_source(
         max_display=max_display,
         x_scale_domain=domain,
     )
-    if per_class and agg["class_label"].n_unique() > 1:
+    if _should_facet_by_class(agg, per_class=per_class):
         chart = chart.facet(col="class_label")
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme

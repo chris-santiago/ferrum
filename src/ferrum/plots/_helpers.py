@@ -5,11 +5,14 @@ Shared by the ``ferrum.plots.*`` domain modules.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import polars as pl
 
 from ferrum._overrides import _apply_overrides
+
+if TYPE_CHECKING:
+    from ferrum.chart import Chart
 
 
 def _inject_cook_outliers(
@@ -170,6 +173,78 @@ def _dedupe_aggregated(df: pl.DataFrame, *group_keys: str) -> pl.DataFrame:
     """
     keep = df.unique(subset=list(group_keys), keep="first", maintain_order=True)
     return keep.sort(list(group_keys), nulls_last=True)
+
+
+def _inject_metric_into_legend_labels(
+    df: pl.DataFrame,
+    *,
+    color_field: str,
+    x_col: str,
+    y_col: str,
+    metric_fn: Callable[[Any, Any], float],
+    metric_name: str,
+    curve_filter: Callable[[pl.DataFrame], pl.DataFrame] | None = None,
+) -> pl.DataFrame:
+    """Rename each ``color_field`` value to embed its per-series metric.
+
+    Computes ``metric_fn`` over each color-group's ``(x_col, y_col)`` and
+    rewrites the group's legend value to ``"{group} ({metric_name} = {v:.3f})"``,
+    so the legend itself carries the AUC/AP value. Shared by the ROC
+    (``metric_name="AUC"``, no filter) and PR (``metric_name="AP"``,
+    ``curve_filter`` drops null-precision iso-curve sentinel rows) builders;
+    each caller's current text/format is reproduced exactly.
+
+    ``curve_filter`` (when given) restricts the rows used to enumerate
+    groups and compute the metric, but the rename is always applied to the
+    full ``df`` — so any group present only in filtered-out rows is left
+    unrenamed, matching the original per-builder behavior.
+    """
+    import numpy as np
+
+    group_df = curve_filter(df) if curve_filter is not None else df
+    groups = group_df[color_field].unique().to_list()
+    rename_map: dict[str, str] = {}
+    for g in groups:
+        subset = group_df.filter(pl.col(color_field) == g)
+        x_g = np.asarray(subset[x_col].to_list(), dtype=float)
+        y_g = np.asarray(subset[y_col].to_list(), dtype=float)
+        value = metric_fn(x_g, y_g)
+        rename_map[str(g)] = f"{g} ({metric_name} = {value:.3f})"
+    return df.with_columns(pl.col(color_field).cast(pl.Utf8).replace(rename_map).alias(color_field))
+
+
+def _charts_with_endpoint_labels(
+    chart: "Chart",
+    *,
+    label_field: str,
+    x_col: str,
+    y_col: str,
+) -> "Chart":
+    """Append endpoint direct labels to ``chart`` for each ``label_field`` series.
+
+    Thin wrapper over :func:`ferrum._direct_label._direct_label_endpoint`
+    that the gain / lift / learning-curve builders share. The underlying
+    helper is unchanged, so output is byte-identical to a direct call.
+    """
+    from ferrum._direct_label import _direct_label_endpoint
+
+    return _direct_label_endpoint(
+        chart,
+        label_field=label_field,
+        x_col=x_col,
+        y_col=y_col,
+    )
+
+
+def _should_facet_by_class(df: pl.DataFrame, *, per_class: bool) -> bool:
+    """Decide whether a SHAP chart facets by ``class_label``.
+
+    A chart facets only when ``per_class`` is requested *and* the data
+    carries more than one class. Shared by the SHAP beeswarm and bar
+    builders, which previously inlined ``per_class and
+    df["class_label"].n_unique() > 1`` at separate sites.
+    """
+    return per_class and df["class_label"].n_unique() > 1
 
 
 def _coerce_to_polars(data: Any) -> pl.DataFrame:
