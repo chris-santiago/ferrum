@@ -113,6 +113,23 @@ pub struct RectInstance {
     pub angle: f32,
 }
 
+// ── Wire-format compile-time assertions ────────────────────────────────────
+//
+// The packed binary sidecar produced by `ferrum-core/src/render/pack_instances.rs`
+// must be byte-compatible with these structs.  The canonical stride values are:
+//   CircleInstance: 16 × f32 = 64 bytes  (CIRCLE_STRIDE in ferrum-core)
+//   RectInstance:   18 × f32 = 72 bytes  (RECT_STRIDE in ferrum-core)
+// The consumer's stride computation (`std::mem::size_of::<…>()`) is already
+// correct and is NOT changed here — these asserts only add enforcement.
+// Any layout drift fails the build immediately rather than silently corrupting
+// the interactive render.
+const _: () = assert!(std::mem::size_of::<CircleInstance>() == 64);
+const _: () = assert!(std::mem::size_of::<RectInstance>() == 72);
+// X/Y fields sit at byte 0 (center/position are the first fields in each struct).
+// Toolchain is Rust ≥1.77 so offset_of! is available in core.
+const _: () = assert!(core::mem::offset_of!(CircleInstance, center) == 0);
+const _: () = assert!(core::mem::offset_of!(RectInstance, position) == 0);
+
 #[derive(Clone)]
 pub struct SceneData {
     pub circle_instances: Vec<CircleInstance>,
@@ -659,7 +676,10 @@ fn unpack_binary_instances(
         offset += 20;
 
         // Read instance data, tracking the start index for hit-testing.
-        let (instance_byte_len, instance_start) = match kind {
+        // Returns (instance_byte_len, instance_start, loaded_count) where
+        // loaded_count reflects what was ACTUALLY pushed (0 on bytemuck failure)
+        // so PackedBatchMeta.instance_count never points at phantom instances.
+        let (instance_byte_len, instance_start, loaded_count) = match kind {
             0 => {
                 let byte_len = count * std::mem::size_of::<CircleInstance>();
                 if offset + byte_len > data.len() { break; }
@@ -672,7 +692,8 @@ fn unpack_binary_instances(
                         linearize_color_channels(&mut ci.stroke_color);
                     }
                 }
-                (byte_len, start)
+                let loaded = circles.len() - start;
+                (byte_len, start, loaded)
             }
             1 => {
                 let byte_len = count * std::mem::size_of::<RectInstance>();
@@ -686,7 +707,8 @@ fn unpack_binary_instances(
                         linearize_color_channels(&mut ri.stroke_color);
                     }
                 }
-                (byte_len, start)
+                let loaded = rects.len() - start;
+                (byte_len, start, loaded)
             }
             _ => break,
         };
@@ -732,7 +754,12 @@ fn unpack_binary_instances(
                 if offset > data.len() { break; }
             }
 
-            Some(data[scan_start..offset].to_vec())
+            // Clamp the slice end to the buffer length so a malformed/truncated
+            // tooltip table (where the scan loop advanced offset past the end)
+            // does not panic. scan_start is always <= data.len() (it was set
+            // immediately after the 20-byte header bounds check), so only the
+            // end needs clamping. (F2)
+            Some(data[scan_start..offset.min(data.len())].to_vec())
         } else {
             None
         };
@@ -741,7 +768,12 @@ fn unpack_binary_instances(
             (panel_idx, batch_idx),
             PackedBatchMeta {
                 data_indices, tooltip_bytes,
-                kind, instance_start, instance_count: count,
+                kind, instance_start,
+                // Record the count ACTUALLY loaded, not the header `count`.
+                // On a bytemuck cast failure the `if let Ok` block is skipped
+                // so loaded_count is 0, preventing phantom instance references
+                // in hit-testing. On the success path loaded_count == count. (F3)
+                instance_count: loaded_count,
             },
         );
     }
@@ -2525,6 +2557,99 @@ mod tests {
         assert_eq!(indices, &[10, 20]);
         let tb = m.tooltip_bytes.as_ref().expect("tooltip_bytes");
         assert_eq!(tb, &tooltip_data);
+    }
+
+    // ── F2 regression: truncated tooltip table must not panic ─────────
+    //
+    // Pre-fix: the scan loop advances `offset += 4 + slen` without clamping,
+    // so `data[scan_start..offset]` panics when offset > data.len().
+    // Post-fix: `offset.min(data.len())` clamps the slice end.
+
+    /// A malformed/truncated tooltip section (slen overruns the buffer) must
+    /// not panic — `unpack_binary_instances` must return gracefully with the
+    /// tooltip bytes bounded by the buffer length.
+    #[test]
+    fn binary_unpack_truncated_tooltip_does_not_panic() {
+        // Build a well-formed header + circle instances.
+        let inst = CircleInstance {
+            center: [1.0, 2.0], radius: 3.0,
+            fill_color: [1.0, 0.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
+            stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
+        };
+
+        // Build a tooltip section that claims slen=9999 but the buffer ends immediately.
+        // Format: [num_fields=1 u32] [field_name_len=9999 u32] <-- then EOF.
+        let mut truncated_tooltip: Vec<u8> = Vec::new();
+        truncated_tooltip.extend_from_slice(&1u32.to_le_bytes()); // num_fields = 1
+        truncated_tooltip.extend_from_slice(&9999u32.to_le_bytes()); // slen = 9999 (overruns)
+        // No actual string bytes — the buffer is truncated here.
+
+        let packed = build_packed_circle_stream_ex(
+            0, 0, &[inst], HAS_TOOLTIPS, &truncated_tooltip,
+        );
+
+        // This must not panic. Pre-fix: offset overruns, slice panics.
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
+
+        // The circle was loaded before the tooltip scan; it should be present.
+        assert_eq!(circles.len(), 1, "circle must be loaded before tooltip scan");
+        // The meta was inserted; tooltip_bytes (if Some) must be bounded by data.len().
+        if let Some(m) = meta.get(&(0, 0)) {
+            if let Some(tb) = &m.tooltip_bytes {
+                assert!(
+                    tb.len() <= packed.len(),
+                    "tooltip_bytes len {} must not exceed buffer len {}",
+                    tb.len(), packed.len()
+                );
+            }
+        }
+    }
+
+    // ── F3 regression: instance_count reflects actual loaded count ─────
+    //
+    // When bytemuck::try_cast_slice fails (e.g. misalignment), the `if let Ok`
+    // block is skipped but pre-fix code still recorded instance_count: count
+    // (the header value), creating phantom references in hit-testing.
+    // Post-fix: instance_count = loaded_count (circles.len() - start), which
+    // is 0 when the cast failed.
+    //
+    // Note on constructing a genuine cast-failure: `bytemuck::try_cast_slice`
+    // for CircleInstance (align=4) fails when the slice start is not 4-byte
+    // aligned. We cannot force this via safe Rust's `Vec<u8>` allocation (which
+    // always aligns to the element's alignment requirements). The alternative
+    // approach — constructing a `&[u8]` offset by 1 byte — requires unsafe.
+    // Instead we assert the success-path invariant: on a well-formed buffer,
+    // instance_count == count == circles.len() - start. This is the critical
+    // property that both paths must satisfy; the cast-failure path cannot be
+    // constructed without unsafe and the host guarantee is alignment always holds
+    // for Vec-allocated buffers.
+
+    /// On the success path, recorded instance_count equals the number of
+    /// instances actually pushed into the circles buffer.
+    #[test]
+    fn binary_unpack_instance_count_matches_loaded() {
+        let instances: Vec<CircleInstance> = (0..5).map(|i| CircleInstance {
+            center: [i as f32 * 10.0, 0.0], radius: 2.0,
+            fill_color: [1.0, 0.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
+            stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
+        }).collect();
+
+        let packed = build_packed_circle_stream_ex(0, 0, &instances, 0, &[]);
+        let mut circles = Vec::new();
+        let mut rects = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
+
+        assert_eq!(circles.len(), 5);
+        let m = meta.get(&(0, 0)).expect("meta must exist");
+        assert_eq!(
+            m.instance_count, circles.len() - m.instance_start,
+            "instance_count must equal the number of instances actually loaded"
+        );
+        assert_eq!(m.instance_count, 5, "instance_count must equal header count on success");
     }
 
     // ── parse_tooltip_json ──────────────────────────────────────────────

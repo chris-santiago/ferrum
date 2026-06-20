@@ -86,6 +86,21 @@ def _circles(svg: str) -> int:
     return len(re.findall(r"<circle", svg))
 
 
+def _data_circle_xy(svg: str) -> list[tuple[float, float]]:
+    """Return (cx, cy) for every data-mark ``<circle>`` (theme radius ≈ 3.x).
+
+    Legend swatches use r="4"; data marks use the theme point radius (~3.385),
+    so the radius discriminates marks from legend swatches.
+    """
+    out: list[tuple[float, float]] = []
+    for cx, cy, r in re.findall(
+        r'<circle cx="([0-9.]+)" cy="([0-9.]+)" r="([0-9.]+)"', svg
+    ):
+        if abs(float(r) - 4.0) > 1e-6:
+            out.append((float(cx), float(cy)))
+    return out
+
+
 def _paths(svg: str) -> list[str]:
     """Return all ``<path d="...">`` d-string values from the SVG."""
     return re.findall(r'<path d="([^"]+)"', svg)
@@ -640,6 +655,28 @@ def test_faceted_independent_y_produces_distinct_tick_domains(
         f"All independent ticks: {ticks_independent}"
     )
 
+    # T4 escape-hatch mark-position guard: under independent y, EACH panel's marks
+    # fill its OWN panel (the 'low' panel's y∈[0,2] spreads across the full panel
+    # height, unlike the bunched shared case). This proves the per-panel escape
+    # hatch is preserved — the complement of the shared-mode mark assertion.
+    circles_ind = _data_circle_xy(svg_independent)
+    assert len(circles_ind) == 6, (
+        f"expected 6 data marks in independent-y SVG, got {len(circles_ind)}: {circles_ind}"
+    )
+    cys = sorted(c[1] for c in circles_ind)
+    mid_cy = (cys[0] + cys[-1]) / 2
+    top = sorted(c[1] for c in circles_ind if c[1] < mid_cy)
+    bottom = sorted(c[1] for c in circles_ind if c[1] >= mid_cy)
+    top_span = (top[-1] - top[0]) if len(top) >= 2 else 0.0
+    bottom_span = (bottom[-1] - bottom[0]) if len(bottom) >= 2 else 0.0
+    # Both panels' marks fill their own height under independent scaling.
+    assert top_span > 50.0 and bottom_span > 50.0, (
+        f"share_scale(y='independent'): each panel's y-marks must fill its own "
+        f"height (top span={top_span:.1f}px, bottom span={bottom_span:.1f}px). "
+        "A small span would mean the marks are still on a shared domain — the "
+        "independent escape hatch must scale each panel to its own y-range."
+    )
+
 
 def test_faceted_independent_y_respects_format_override(
     scale_resolution_df: pl.DataFrame,
@@ -736,4 +773,32 @@ def test_faceted_shared_y_produces_identical_per_panel_domains(
     assert max(float_ticks) >= 95.0, (
         f"Shared y-scale: expected a tick near 100 (group 'high' range) but "
         f"maximum tick is {max(float_ticks)}.  Ticks: {_y_tick_labels(svg)}"
+    )
+
+    # T4 mark-position guard: axis ticks already showed the global domain even
+    # when the bug was live (the bug was per-panel MARK scaling, not the axis).
+    # Assert the MARKS map through the shared global y-domain [0, 102]:
+    #   - The 'low' panel's y∈{0,1,2} marks are bunched together at the very
+    #     bottom of the [0,102] range (their cy values span only a few pixels).
+    #   - Under the per-panel bug they would fill the whole panel (cy span ≈ the
+    #     panel height), since 0/1/2 would scale to the panel's local [0,2] domain.
+    circles = _data_circle_xy(svg)
+    assert len(circles) == 6, f"expected 6 data marks, got {len(circles)}: {circles}"
+    cys = sorted(c[1] for c in circles)
+    mid_cy = (cys[0] + cys[-1]) / 2
+    # The 'low' panel is the one whose three marks have the SMALLER cy-spread
+    # (bunched on the global domain). Identify by splitting into two cy clusters.
+    top = sorted(c[1] for c in circles if c[1] < mid_cy)
+    bottom = sorted(c[1] for c in circles if c[1] >= mid_cy)
+    top_span = (top[-1] - top[0]) if len(top) >= 2 else 0.0
+    bottom_span = (bottom[-1] - bottom[0]) if len(bottom) >= 2 else 0.0
+    low_panel_span = min(top_span, bottom_span)
+    # Full vertical mark extent across both panels (a proxy for panel height).
+    full_span = cys[-1] - cys[0]
+    assert low_panel_span < 0.15 * full_span, (
+        f"Shared y: the 'low' panel's y∈[0,2] marks span {low_panel_span:.1f}px, "
+        f"{100 * low_panel_span / full_span:.0f}% of the {full_span:.1f}px extent. "
+        "On the shared global [0,102] domain they must be bunched (<15%); a wide "
+        "spread means per-panel MARK scaling — the marks would disagree with the "
+        "shared axis (the T4 bug)."
     )

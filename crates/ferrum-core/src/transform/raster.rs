@@ -61,6 +61,67 @@ pub(crate) struct RasterSpec {
     pub log_scale: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
+    /// Internal facet-extent pin (x-axis). NOT a user kwarg. Set by
+    /// `fix_transform_extents_for_facet` to pin the raster grid extent so every
+    /// facet panel emits the same `x_min/x_max` in its output and the shared
+    /// scale maps each panel's image to its true sub-range. Skipped in
+    /// serialization when None so non-faceted JSON output is byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub extent_x: Option<(f64, f64)>,
+    /// Internal facet-extent pin (y-axis). See `extent_x`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub extent_y: Option<(f64, f64)>,
+}
+
+/// Compute the global 2-D extent `(x_lo, x_hi, y_lo, y_hi)` of `spec.x`/`spec.y`
+/// over the full `batch`. Used by `fix_transform_extents_for_facet` to pin every
+/// facet panel to a comparable raster grid so the output `x_min/x_max/y_min/y_max`
+/// columns span the global domain and each panel's image occupies its true
+/// sub-range under the shared scale.
+///
+/// Returns the RAW per-axis `(min, max)` (no nicing). Raster does not nice its
+/// extent — the raw range drives the grid directly. Returns `None` when either
+/// field is missing, non-Float64, all values are null/NaN, or a range is
+/// degenerate.
+///
+/// When `spec.extent_x`/`spec.extent_y` are already set, each is returned
+/// unchanged so the faceted pin never clobbers an explicit value.
+pub(crate) fn global_extent(
+    spec: &RasterSpec,
+    batch: &RecordBatch,
+) -> Option<(f64, f64, f64, f64)> {
+    let (x_lo, x_hi) = match spec.extent_x {
+        Some(e) => e,
+        None => raw_axis_extent(batch, &spec.x)?,
+    };
+    let (y_lo, y_hi) = match spec.extent_y {
+        Some(e) => e,
+        None => raw_axis_extent(batch, &spec.y)?,
+    };
+    Some((x_lo, x_hi, y_lo, y_hi))
+}
+
+fn raw_axis_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f64)> {
+    let schema = batch.schema();
+    let idx = schema.index_of(field).ok()?;
+    if schema.field(idx).data_type() != &arrow::datatypes::DataType::Float64 {
+        return None;
+    }
+    let arr = batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<Float64Array>()?;
+    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
+        if arr.is_null(i) { return (lo, hi); }
+        let v = arr.value(i);
+        if v.is_nan() { return (lo, hi); }
+        (lo.min(v), hi.max(v))
+    });
+    if lo.is_finite() && hi.is_finite() && lo < hi {
+        Some((lo, hi))
+    } else {
+        None
+    }
 }
 
 pub(crate) fn apply(spec: &RasterSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -206,32 +267,40 @@ pub(crate) fn apply_with_context(
     }
 
     // 6. Compute extent.
+    // When an internal facet-extent pin is set (`spec.extent_x`/`spec.extent_y`),
+    // use it instead of the per-partition fold so every facet panel emits the
+    // same x_min/x_max/y_min/y_max and the shared scale positions each panel's
+    // image correctly over its true sub-range of the global domain.
     let (xmin, xmax, ymin, ymax) = if xs.is_empty() {
-        (0.0, 1.0, 0.0, 1.0)
+        // Use pinned extent when available, even for an empty partition, so the
+        // image node anchor still spans the global domain.
+        let (xlo, xhi) = spec.extent_x.unwrap_or((0.0, 1.0));
+        let (ylo, yhi) = spec.extent_y.unwrap_or((0.0, 1.0));
+        (xlo, xhi, ylo, yhi)
     } else {
-        let (mut xlo, mut xhi) = (f64::INFINITY, f64::NEG_INFINITY);
-        let (mut ylo, mut yhi) = (f64::INFINITY, f64::NEG_INFINITY);
-        for i in 0..xs.len() {
-            if xs[i] < xlo {
-                xlo = xs[i];
+        let (xlo, xhi) = match spec.extent_x {
+            Some((lo, hi)) => (lo, hi),
+            None => {
+                let (lo, mut hi) = xs.iter().fold(
+                    (f64::INFINITY, f64::NEG_INFINITY),
+                    |(lo, hi), &v| (lo.min(v), hi.max(v)),
+                );
+                // Degenerate: pad zero-width extent so binning still works.
+                if lo == hi { hi = lo + 1.0; }
+                (lo, hi)
             }
-            if xs[i] > xhi {
-                xhi = xs[i];
+        };
+        let (ylo, yhi) = match spec.extent_y {
+            Some((lo, hi)) => (lo, hi),
+            None => {
+                let (lo, mut hi) = ys.iter().fold(
+                    (f64::INFINITY, f64::NEG_INFINITY),
+                    |(lo, hi), &v| (lo.min(v), hi.max(v)),
+                );
+                if lo == hi { hi = lo + 1.0; }
+                (lo, hi)
             }
-            if ys[i] < ylo {
-                ylo = ys[i];
-            }
-            if ys[i] > yhi {
-                yhi = ys[i];
-            }
-        }
-        // Degenerate: pad zero-width extent so binning still works.
-        if xlo == xhi {
-            xhi = xlo + 1.0;
-        }
-        if ylo == yhi {
-            yhi = ylo + 1.0;
-        }
+        };
         (xlo, xhi, ylo, yhi)
     };
 
@@ -533,6 +602,8 @@ impl PyRaster {
             min_count,
             log_scale,
             name,
+            extent_x: None,
+            extent_y: None,
         })))
     }
 
@@ -638,6 +709,8 @@ mod tests {
             min_count: None,
             log_scale: false,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let out = apply(&spec, &b).unwrap();
         let width = out.column_by_name("width").unwrap()
@@ -679,6 +752,8 @@ mod tests {
             min_count: None,
             log_scale: false,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let out = apply(&spec, &b).unwrap();
         assert_eq!(out.num_rows(), 1);
@@ -714,6 +789,8 @@ mod tests {
             min_count: None,
             log_scale: false,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let out = apply(&spec, &b).unwrap();
 
@@ -770,6 +847,8 @@ mod tests {
             min_count: None,
             log_scale: false,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let out_mean = apply(&spec_mean, &b).unwrap();
         let p00 = pixel_at(&out_mean, 0, 0);
@@ -787,6 +866,8 @@ mod tests {
             min_count: None,
             log_scale: false,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let out_sum = apply(&spec_sum, &b).unwrap();
         let q00 = pixel_at(&out_sum, 0, 0);
@@ -812,6 +893,8 @@ mod tests {
             min_count: None,
             log_scale: false,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let out = apply(&spec, &b).unwrap();
         let p00 = pixel_at(&out, 0, 0);
@@ -843,6 +926,8 @@ mod tests {
             min_count: Some(10),
             log_scale: false,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let out = apply(&spec, &b).unwrap();
         let p00 = pixel_at(&out, 0, 0);
@@ -872,6 +957,8 @@ mod tests {
             min_count: None,
             log_scale: true,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let out = apply(&spec, &b).unwrap();
         let p00 = pixel_at(&out, 0, 0);
@@ -896,6 +983,8 @@ mod tests {
             min_count: None,
             log_scale: false,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let ctx = TransformContext::default();
         let out = apply_with_context(&spec, &b, &ctx).unwrap();
@@ -915,5 +1004,127 @@ mod tests {
             .value(0);
         assert_eq!(width, 256);
         assert_eq!(height, 256);
+    }
+
+    // ── Regression tests for the faceted extent pin (defect class #7) ────────
+
+    #[test]
+    fn raster_global_extent_returns_raw_range() {
+        pyo3::Python::initialize();
+        let b = make_xy_batch(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            vec![10.0, 20.0, 30.0, 40.0, 50.0],
+        );
+        let spec = RasterSpec {
+            x: "x".into(),
+            y: "y".into(),
+            aggregate: "count".into(),
+            field: None,
+            resolution: ResolutionSpec::Fixed(4),
+            min_count: None,
+            log_scale: false,
+            name: None,
+            extent_x: None,
+            extent_y: None,
+        };
+        let ext = global_extent(&spec, &b).expect("should have extent");
+        assert!((ext.0 - 1.0).abs() < 1e-12, "x_lo={}", ext.0);
+        assert!((ext.1 - 5.0).abs() < 1e-12, "x_hi={}", ext.1);
+        assert!((ext.2 - 10.0).abs() < 1e-12, "y_lo={}", ext.2);
+        assert!((ext.3 - 50.0).abs() < 1e-12, "y_hi={}", ext.3);
+    }
+
+    #[test]
+    fn raster_global_extent_preserves_user_set_axes() {
+        pyo3::Python::initialize();
+        let b = make_xy_batch(
+            vec![1.0, 5.0],
+            vec![10.0, 50.0],
+        );
+        let spec = RasterSpec {
+            x: "x".into(),
+            y: "y".into(),
+            aggregate: "count".into(),
+            field: None,
+            resolution: ResolutionSpec::Fixed(4),
+            min_count: None,
+            log_scale: false,
+            name: None,
+            extent_x: Some((0.0, 10.0)),
+            extent_y: None,
+        };
+        let ext = global_extent(&spec, &b).expect("should have extent");
+        assert!((ext.0 - 0.0).abs() < 1e-12, "x_lo should be user-set 0.0, got {}", ext.0);
+        assert!((ext.1 - 10.0).abs() < 1e-12, "x_hi should be user-set 10.0, got {}", ext.1);
+        assert!((ext.2 - 10.0).abs() < 1e-12, "y_lo from batch={}", ext.2);
+        assert!((ext.3 - 50.0).abs() < 1e-12, "y_hi from batch={}", ext.3);
+    }
+
+    #[test]
+    fn raster_pinned_extent_emits_global_xmin_xmax_for_disjoint_partitions() {
+        // Partition A: x in [0, 1]; partition B: x in [5, 10].
+        // Without pin: A emits x_min=0/x_max=1, B emits x_min=5/x_max=10 → misaligned.
+        // With pin [0,10]: both emit x_min=0/x_max=10 → aligned on shared scale.
+        pyo3::Python::initialize();
+
+        let spec_unpinned = RasterSpec {
+            x: "x".into(), y: "y".into(),
+            aggregate: "count".into(), field: None,
+            resolution: ResolutionSpec::Fixed(2),
+            min_count: None, log_scale: false, name: None,
+            extent_x: None, extent_y: None,
+        };
+        let batch_a = make_xy_batch(vec![0.1, 0.5, 0.9], vec![0.1, 0.5, 0.9]);
+        let batch_b = make_xy_batch(vec![5.1, 7.5, 9.9], vec![5.1, 7.5, 9.9]);
+
+        let out_a_u = apply(&spec_unpinned, &batch_a).unwrap();
+        let out_b_u = apply(&spec_unpinned, &batch_b).unwrap();
+
+        let xmax_a_u = out_a_u.column_by_name("x_max").unwrap()
+            .as_any().downcast_ref::<Float64Array>().unwrap().value(0);
+        let xmax_b_u = out_b_u.column_by_name("x_max").unwrap()
+            .as_any().downcast_ref::<Float64Array>().unwrap().value(0);
+        // Without pin, extents differ (fail-before: A≈0.9, B≈9.9).
+        assert!(
+            (xmax_a_u - xmax_b_u).abs() > 1.0,
+            "SETUP CHECK: unpinned xmax should differ (a={xmax_a_u}, b={xmax_b_u})"
+        );
+
+        // With pinned extent [0,10] × [0,10]:
+        let spec_pinned = RasterSpec {
+            x: "x".into(), y: "y".into(),
+            aggregate: "count".into(), field: None,
+            resolution: ResolutionSpec::Fixed(2),
+            min_count: None, log_scale: false, name: None,
+            extent_x: Some((0.0, 10.0)),
+            extent_y: Some((0.0, 10.0)),
+        };
+        let out_a_p = apply(&spec_pinned, &batch_a).unwrap();
+        let out_b_p = apply(&spec_pinned, &batch_b).unwrap();
+
+        let f64_col = |batch: &RecordBatch, name: &str| -> f64 {
+            batch.column_by_name(name).unwrap()
+                .as_any().downcast_ref::<Float64Array>().unwrap().value(0)
+        };
+
+        // Both panels emit the same x_min/x_max (pass-after).
+        assert!((f64_col(&out_a_p, "x_min") - 0.0).abs() < 1e-12, "A x_min should be 0");
+        assert!((f64_col(&out_a_p, "x_max") - 10.0).abs() < 1e-12, "A x_max should be 10");
+        assert!((f64_col(&out_b_p, "x_min") - 0.0).abs() < 1e-12, "B x_min should be 0");
+        assert!((f64_col(&out_b_p, "x_max") - 10.0).abs() < 1e-12, "B x_max should be 10");
+    }
+
+    #[test]
+    fn raster_non_faceted_spec_serializes_without_extent_fields() {
+        let spec = RasterSpec {
+            x: "xc".into(), y: "yc".into(),
+            aggregate: "count".into(), field: None,
+            resolution: ResolutionSpec::Fixed(4),
+            min_count: None, log_scale: false, name: None,
+            extent_x: None, extent_y: None,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("extent_x"), "extent_x must not appear when None: {json}");
+        assert!(!json.contains("extent_y"), "extent_y must not appear when None: {json}");
     }
 }

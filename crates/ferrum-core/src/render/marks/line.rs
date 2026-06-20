@@ -18,6 +18,7 @@
 
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx};
+use crate::render::mark_nodes::MarkNodes;
 use crate::render::scale_resolve::ScaleKind;
 
 /// Build a `Vec<PathCmd>` from a sequence of (x, y) pixel points using the
@@ -178,10 +179,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
     let meta = MetadataColumns::from_ctx(ctx);
-    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
-    let mut nodes = Vec::new();
-    let mut data_indices = Vec::new();
+    // Each group emits exactly one node (a `Path` for non-linear interpolation,
+    // else a `Polyline`), attached to the group's representative source row (the
+    // first valid point's row). The accumulator keeps `data_indices` in node
+    // order so `build_metadata_for_indices` aligns each line's tooltip/href to
+    // that row (bug #6). Before the fix, `data_indices` carried one entry per
+    // *contributing row* while metadata was full-row, so the lengths diverged.
+    let mut acc = MarkNodes::with_capacity(groups.len());
 
     for (key, rows) in groups {
         let mut points: Vec<(f64, f64)> = Vec::new();
@@ -196,7 +201,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         }
         if points.len() < 2 { continue; }
 
-        // Sample stroke-channel values from the first row of the group.
+        // Sample stroke-channel values from the first valid row of the group;
+        // this same row represents the group's node for metadata (bug #6).
         let first = row_indices.first().copied().unwrap_or(0);
         let group_stroke_opacity = so_vals.as_ref()
             .and_then(|v| v.get(first).copied().flatten())
@@ -227,7 +233,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         };
         let stroke_color = with_opacity(stroke_color, group_opacity);
 
-        if use_path {
+        let node = if use_path {
             let cmds = build_line_cmds(&points, interpolate);
             let mut style = to_scene_fill_stroke(
                 None,
@@ -237,11 +243,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 effective_dash,
             );
             style.stroke_opacity = group_stroke_opacity;
-            nodes.push(ferrum_scene::SceneNode::Path {
+            ferrum_scene::SceneNode::Path {
                 commands: cmds,
                 style,
                 closed: false,
-            });
+            }
         } else {
             let mut stroke_style = to_scene_stroke(
                 stroke_color,
@@ -252,13 +258,16 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 ctx.mark_style.stroke_join.as_deref(),
             );
             stroke_style.stroke_opacity = group_stroke_opacity;
-            nodes.push(ferrum_scene::SceneNode::Polyline {
+            ferrum_scene::SceneNode::Polyline {
                 points: points.clone(),
                 style: stroke_style,
-            });
-        }
-        data_indices.extend(row_indices);
+            }
+        };
+        acc.push(node, first);
     }
+
+    let (nodes, data_indices) = acc.finalize();
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
         kind: MarkBatchKind::Line,
@@ -266,7 +275,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         data_indices: Some(data_indices),
         tooltips,
         hrefs,
-        descriptions,    }
+        descriptions,
+    }
 }
 
 #[cfg(test)]
@@ -489,6 +499,133 @@ mod tests {
             .count();
         assert_eq!(polyline_count, 3,
             "Int64 ordinal x must emit one polyline per color series; got {polyline_count}");
+    }
+
+    // ── #6 metadata/node alignment (group marks) ─────────────────────────────
+
+    /// Bug #6: a multi-group line attaches each group's polyline to that group's
+    /// REPRESENTATIVE source row (its first valid point's row), not a per-node
+    /// position. Groups are BLOCKED (color "A" rows 0..3, "B" rows 3..6) so the
+    /// representative rows are 0 and 3 — distinct from node positions 0,1. Old
+    /// code (`build_metadata(ctx)`) attaches row j → node j, so node 1 would get
+    /// row 1's tooltip ("A") instead of group B's ("B").
+    #[test]
+    fn line_group_polyline_aligns_to_representative_row() {
+        use crate::spec::encoding::DataType as SDT;
+        let mut spec = line_spec();
+        spec.encoding.color = Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Nominal), ..Default::default() });
+        spec.encoding.tooltip = Some(EncodingSpec { field: "tip".into(), ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("tip", DataType::Utf8, false),
+        ]));
+        // 2 groups × 3 rows, blocked.
+        let xs: Vec<f64> = vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0];
+        let ys: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let gs: Vec<&str> = vec!["A", "A", "A", "B", "B", "B"];
+        let tips: Vec<&str> = gs.clone();
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(gs)),
+            Arc::new(StringArray::from(tips)),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        assert_eq!(result.nodes.len(), 2, "expected one polyline per group");
+        let di = result.data_indices.as_ref().expect("data_indices must be Some");
+        assert_eq!(di.len(), result.nodes.len(), "nodes.len() must equal data_indices.len()");
+        assert_eq!(di, &vec![0, 3], "each polyline maps to its group's first valid row");
+
+        let tooltips = result.tooltips.expect("tooltips must be Some");
+        let vals: Vec<&str> = tooltips.iter().map(|t| t.fields[0].value.as_str()).collect();
+        assert_eq!(vals, vec!["A", "B"],
+            "node j tooltip is its group's representative-row label; \
+             old full-row code gives node 1 → row 1 → 'A' (the bug).");
+    }
+
+    /// Bug #6: alignment holds for the `Path` node variant too (non-linear
+    /// interpolation emits a Path instead of a Polyline). The href channel must
+    /// align to the representative row even with no tooltip encoded.
+    #[test]
+    fn line_path_variant_href_aligns_to_representative_row() {
+        use crate::spec::encoding::DataType as SDT;
+        let mut spec = line_spec();
+        spec.encoding.color = Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Nominal), ..Default::default() });
+        spec.encoding.href = Some(EncodingSpec { field: "url".into(), ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("url", DataType::Utf8, false),
+        ]));
+        let xs: Vec<f64> = vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0];
+        let ys: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let gs: Vec<&str> = vec!["A", "A", "A", "B", "B", "B"];
+        let urls: Vec<&str> = vec!["url_A", "url_A", "url_A", "url_B", "url_B", "url_B"];
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(gs)),
+            Arc::new(StringArray::from(urls)),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        // "basis" interpolation → use_path = true → Path nodes.
+        let overrides = MarkKwargsSpec { interpolate: Some("basis".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        // Path variant: nodes are Path, not Polyline.
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { .. })).count(), 2,
+            "non-linear interpolation must emit Path nodes");
+        assert!(result.tooltips.is_none(), "no tooltip encoding → tooltips None");
+        let hrefs = result.hrefs.expect("hrefs must be Some when href is encoded");
+        assert_eq!(hrefs.len(), result.nodes.len(), "href count must equal node count");
+        assert_eq!(hrefs[0].as_deref(), Some("url_A"), "node 0 href = group A representative");
+        assert_eq!(hrefs[1].as_deref(), Some("url_B"),
+            "node 1 href = group B representative (row 3); old full-row code gives row 1 → 'url_A'.");
+    }
+
+    /// No-skip backward-compat: a single-series line (one node, no skipped rows)
+    /// keeps its representative row at the first row, and tooltip output matches
+    /// the original-row-order semantics for the kept node.
+    #[test]
+    fn line_no_grouping_tooltip_unchanged() {
+        let mut spec = line_spec();
+        spec.encoding.tooltip = Some(EncodingSpec { field: "tip".into(), ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("tip", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+            Arc::new(StringArray::from(vec!["t0", "t1", "t2", "t3"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        assert_eq!(result.nodes.len(), 1, "single series → one polyline");
+        let di = result.data_indices.as_ref().expect("data_indices must be Some");
+        assert_eq!(di, &vec![0], "single group's representative is row 0");
+        let tooltips = result.tooltips.expect("tooltips must be Some");
+        assert_eq!(tooltips.len(), 1, "tooltip count == node count");
+        assert_eq!(tooltips[0].fields[0].value, "t0", "representative tooltip is row 0's");
     }
 
     /// D8 regression: Int64 detail column must split line into one polyline per

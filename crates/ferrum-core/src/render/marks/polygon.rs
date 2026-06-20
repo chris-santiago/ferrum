@@ -17,6 +17,7 @@ use arrow::array::{Array, Float64Array, Int64Array, UInt32Array};
 
 use crate::render::color::{with_opacity, ContinuousScheme, NamedContinuous};
 use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::mark_nodes::MarkNodes;
 use crate::render::scale_resolve::ColorScale;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -161,10 +162,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
     let meta = MetadataColumns::from_ctx(ctx);
-    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
-    let mut nodes = Vec::new();
-    let mut indices = Vec::new();
+    // One node per group, attached to the group's representative source row
+    // (`group_indices[0]`, the first row of the group). The accumulator keeps
+    // `data_indices` in node order so `build_metadata_for_indices` aligns each
+    // polygon's tooltip/href/description to that representative row (bug #6).
+    let mut acc = MarkNodes::with_capacity(groups.len());
 
     // --- Emit one polygon per group ---
     for group_indices in groups.values() {
@@ -221,26 +224,32 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let fill = with_opacity(fill, group_opacity);
 
         let exterior: Vec<[f64; 2]> = ring.iter().map(|&(x, y)| [x, y]).collect();
-        nodes.push(SceneNode::Polygon {
-            rings: vec![exterior],
-            style: to_scene_fill_stroke(
-                Some(fill),
-                ctx.mark_style.stroke,
-                ctx.mark_style.stroke_width,
-                group_opacity,
-                None,
-            ),
-        });
-        indices.push(first_row);
+        acc.push(
+            SceneNode::Polygon {
+                rings: vec![exterior],
+                style: to_scene_fill_stroke(
+                    Some(fill),
+                    ctx.mark_style.stroke,
+                    ctx.mark_style.stroke_width,
+                    group_opacity,
+                    None,
+                ),
+            },
+            first_row,
+        );
     }
+
+    let (nodes, data_indices) = acc.finalize();
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
         kind: MarkBatchKind::Polygon,
         nodes,
-        data_indices: Some(indices),
+        data_indices: Some(data_indices),
         tooltips,
         hrefs,
-        descriptions,    }
+        descriptions,
+    }
 }
 
 #[cfg(test)]
@@ -495,6 +504,146 @@ mod tests {
             alpha0, alpha1,
             "per-row opacity encoding must produce different alphas on polygons; both were {alpha0}"
         );
+    }
+
+    // ── #6 metadata/node alignment (group marks) ─────────────────────────────
+
+    /// Bug #6: a multi-group polygon attaches each polygon to its detail group's
+    /// REPRESENTATIVE source row (`group_indices[0]`, the first row of the
+    /// group), not a per-node position. 3 detail groups, each 3 rows → first
+    /// rows at 0, 3, 6 — distinct from node positions 0,1,2. Old code
+    /// (`build_metadata(ctx)`) returns full per-row vectors (length 9) while only
+    /// 3 nodes are emitted, so the metadata length diverges and node j mis-maps.
+    #[test]
+    fn polygon_group_aligns_to_representative_row() {
+        use arrow::array::{Int64Array, StringArray};
+
+        let mut spec = polygon_spec(Some("group_id"), None);
+        spec.encoding.tooltip = Some(EncodingSpec { field: "tip".into(), ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("group_id", DataType::Int64, false),
+            Field::new("tip", DataType::Utf8, false),
+        ]));
+        // group_id sorted-key order (100,200,300) matches block order; each
+        // group's first row is at 0, 3, 6. Per-row tip == group label.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![
+                0.0, 1.0, 0.5,    2.0, 3.0, 2.5,    4.0, 5.0, 4.5,
+            ])),
+            Arc::new(Float64Array::from(vec![
+                0.0, 0.0, 1.0,    0.0, 0.0, 1.0,    0.0, 0.0, 1.0,
+            ])),
+            Arc::new(Int64Array::from(vec![
+                100i64, 100, 100,   200, 200, 200,   300, 300, 300,
+            ])),
+            Arc::new(StringArray::from(vec![
+                "g100", "g100", "g100",  "g200", "g200", "g200",  "g300", "g300", "g300",
+            ])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = rect_panel();
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 5.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+        };
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        assert_eq!(result.nodes.len(), 3, "expected one polygon per detail group");
+        let di = result.data_indices.as_ref().expect("data_indices must be Some");
+        assert_eq!(di.len(), result.nodes.len(), "nodes.len() must equal data_indices.len()");
+        assert_eq!(di, &vec![0, 3, 6], "each polygon maps to its group's first row");
+
+        let tooltips = result.tooltips.expect("tooltips must be Some");
+        assert_eq!(tooltips.len(), 3, "tooltip count must equal node count");
+        let vals: Vec<&str> = tooltips.iter().map(|t| t.fields[0].value.as_str()).collect();
+        assert_eq!(vals, vec!["g100", "g200", "g300"],
+            "node j tooltip is its group's representative-row label; \
+             old full-row code (len 9) mis-indexes / mis-sizes the metadata.");
+    }
+
+    /// Bug #6 href channel: href aligns to the representative row with no tooltip
+    /// encoded (href-without-tooltip soundness hole).
+    #[test]
+    fn polygon_group_href_aligns_to_representative_row() {
+        use arrow::array::{Int64Array, StringArray};
+
+        let mut spec = polygon_spec(Some("group_id"), None);
+        spec.encoding.href = Some(EncodingSpec { field: "url".into(), ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("group_id", DataType::Int64, false),
+            Field::new("url", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![
+                0.0, 1.0, 0.5,    2.0, 3.0, 2.5,    4.0, 5.0, 4.5,
+            ])),
+            Arc::new(Float64Array::from(vec![
+                0.0, 0.0, 1.0,    0.0, 0.0, 1.0,    0.0, 0.0, 1.0,
+            ])),
+            Arc::new(Int64Array::from(vec![
+                100i64, 100, 100,   200, 200, 200,   300, 300, 300,
+            ])),
+            Arc::new(StringArray::from(vec![
+                "u100", "u100", "u100",  "u200", "u200", "u200",  "u300", "u300", "u300",
+            ])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = rect_panel();
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 5.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+        };
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        assert!(result.tooltips.is_none(), "no tooltip encoding → tooltips None");
+        let hrefs = result.hrefs.expect("hrefs must be Some when href is encoded");
+        assert_eq!(hrefs.len(), result.nodes.len(), "href count must equal node count");
+        assert_eq!(hrefs.iter().map(|h| h.as_deref()).collect::<Vec<_>>(),
+            vec![Some("u100"), Some("u200"), Some("u300")],
+            "each polygon's href is its group's representative-row url; \
+             old full-row code mis-sizes/mis-indexes the href vector.");
+    }
+
+    /// No-skip backward-compat: a single ungrouped polygon (one node) keeps its
+    /// representative at row 0 and tooltip output is unchanged.
+    #[test]
+    fn polygon_no_grouping_tooltip_unchanged() {
+        use arrow::array::StringArray;
+        let mut spec = polygon_spec(None, None);
+        spec.encoding.tooltip = Some(EncodingSpec { field: "tip".into(), ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("tip", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.5])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0])),
+            Arc::new(StringArray::from(vec!["t0", "t1", "t2"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = rect_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        assert_eq!(result.nodes.len(), 1, "single ungrouped polygon → one node");
+        let di = result.data_indices.as_ref().expect("data_indices must be Some");
+        assert_eq!(di, &vec![0], "single group's representative is row 0");
+        let tooltips = result.tooltips.expect("tooltips must be Some");
+        assert_eq!(tooltips.len(), 1, "tooltip count == node count");
+        assert_eq!(tooltips[0].fields[0].value, "t0", "representative tooltip is row 0's");
     }
 
     #[test]

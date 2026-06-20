@@ -680,6 +680,64 @@ fn numeric_extent(col: &dyn arrow::array::Array) -> (f64, f64) {
     super::arrow_cast::finite_min_max_f64(col).unwrap_or((0.0, 1.0))
 }
 
+/// Select the batch for categorical domain resolution in faceted charts.
+///
+/// When `facet_shared` is true, returns the global `FINAL_OUTPUT_KEY` batch
+/// (so every panel uses global first-appearance order, matching the legend).
+/// Falls back to `primary_batch` when:
+/// - `facet_shared` is false (non-faceted chart)
+/// - `FINAL_OUTPUT_KEY` is absent from `transform_outputs`
+/// - The field is absent from the global batch
+///
+/// Used by both `color.rs` (categorical color) and `auxiliary.rs` (shape) so
+/// that the same global-domain guarantee applies to all categorical channels.
+pub(super) fn shared_categorical_batch<'a>(
+    primary_batch: &'a RecordBatch,
+    field: &str,
+    transform_outputs: &'a HashMap<String, RecordBatch>,
+    facet_shared: bool,
+) -> &'a RecordBatch {
+    if !facet_shared {
+        return primary_batch;
+    }
+    use crate::transform::core::FINAL_OUTPUT_KEY;
+    let Some(global_batch) = transform_outputs.get(FINAL_OUTPUT_KEY) else {
+        return primary_batch;
+    };
+    if global_batch.column_by_name(field).is_none() {
+        return primary_batch;
+    }
+    global_batch
+}
+
+/// Union a per-panel (lo, hi) numeric extent with the global `FINAL_OUTPUT_KEY`
+/// batch's extent for `field`.
+///
+/// Returns the unioned range, which equals the global range since the per-panel
+/// batch is a partition of the global batch. Falls back to `panel_extent` when:
+/// - `FINAL_OUTPUT_KEY` is absent from `transform_outputs`
+/// - The field is absent from the global batch
+/// - The global column has no finite values
+///
+/// Used by both continuous-color (`color.rs`) and auxiliary (`auxiliary.rs`)
+/// scale builders for the T3 faceted-shared-extent fix.
+pub(super) fn union_panel_with_global_extent(
+    panel_extent: (f64, f64),
+    field: &str,
+    transform_outputs: &HashMap<String, RecordBatch>,
+) -> (f64, f64) {
+    use crate::transform::core::FINAL_OUTPUT_KEY;
+    let Some(global_batch) = transform_outputs.get(FINAL_OUTPUT_KEY) else {
+        return panel_extent;
+    };
+    let Some(col) = global_batch.column_by_name(field) else {
+        return panel_extent;
+    };
+    let (g_lo, g_hi) = numeric_extent(col.as_ref());
+    let (p_lo, p_hi) = panel_extent;
+    (p_lo.min(g_lo), p_hi.max(g_hi))
+}
+
 fn distinct_values_in_order(
     batch: &RecordBatch,
     field: &str,
@@ -695,6 +753,67 @@ fn distinct_positional_categories(
     field: &str,
 ) -> Result<Vec<String>, RenderError> {
     super::arrow_cast::distinct_positional_categories(batch, field)
+}
+
+/// T4: per-channel "shared faceted positional scale" flags `(x_shared, y_shared)`.
+///
+/// `true` only when the chart is faceted AND that channel's
+/// [`ResolveMode`](crate::layout::facet::ResolveMode) is `Shared` (the default
+/// when `resolve` is omitted). Non-faceted charts and `Independent` channels
+/// yield `false`, so [`build_axis_scale`] keeps per-panel-only domain resolution
+/// byte-identically. Passed to `build_axis_scale` → `numeric_domain_union` /
+/// `distinct_positional_categories_shared` as `include_final`.
+fn facet_shared_flags(spec: &ChartSpec) -> (bool, bool) {
+    use crate::layout::facet::ResolveMode;
+    match &spec.facet {
+        Some(facet) => (
+            facet.resolve.x == ResolveMode::Shared,
+            facet.resolve.y == ResolveMode::Shared,
+        ),
+        None => (false, false),
+    }
+}
+
+/// T3: "shared faceted auxiliary scale" flag for non-positional channels
+/// (continuous color, size, opacity).
+///
+/// Returns `true` when the chart is faceted (`spec.facet.is_some()`). There is
+/// no independent option for these channels — `FacetResolve` only has `x`/`y`
+/// fields — so the gate is simply whether the chart is faceted at all. Passing
+/// `false` for non-faceted charts keeps the per-panel-only domain resolution
+/// byte-identical to pre-T3 behavior.
+fn facet_aux_shared(spec: &ChartSpec) -> bool {
+    spec.facet.is_some()
+}
+
+// ── Private helpers ─────────────────────────────────────────────────────────
+
+/// Build the four auxiliary (non-positional) scales for a chart spec.
+///
+/// Computes `force_cat` and `aux_shared` internally from `spec` so the three
+/// dispatch sites in `resolve_scales_with_outputs` share one definition. Warning
+/// push order is: `color_warns` (via `extend`), then `shape_warn` (via `push`).
+#[allow(clippy::type_complexity)]
+fn build_auxiliary_scales(
+    spec: &ChartSpec,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    theme: &ThemeInputs,
+    warnings: &mut Vec<crate::render::RenderWarning>,
+) -> Result<(Option<ColorScale>, Option<SizeScale>, Option<ShapeScale>, Option<OpacityScale>), RenderError> {
+    // FA-5: area marks always group color discretely; force categorical.
+    let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
+    // T3: when the chart is faceted, auxiliary non-positional channels (continuous
+    // color, size, opacity) union the global FINAL_OUTPUT_KEY batch so per-panel
+    // marks normalize through the same domain as the global legend/colorbar.
+    let aux_shared = facet_aux_shared(spec);
+    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared)?;
+    warnings.extend(color_warns);
+    let size = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+    let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
+    if let Some(w) = shape_warn { warnings.push(w); }
+    let opacity = build_opacity_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+    Ok((color, size, shape, opacity))
 }
 
 // ── Main entry points ───────────────────────────────────────────────────────
@@ -735,6 +854,16 @@ pub fn resolve_scales_with_outputs(
 ) -> Result<(ResolvedScales, Vec<crate::render::RenderWarning>), RenderError> {
     let mut warnings = Vec::new();
 
+    // T4: per-channel "shared faceted positional scale" flag. When this chart is
+    // faceted AND the channel resolves `ResolveMode::Shared` (the documented
+    // default), the auto-inferred positional domain unions the global all-panels
+    // batch (`transform_outputs[FINAL_OUTPUT_KEY]`) so per-panel marks scale
+    // through the same global domain the shared axis displays. Strictly gated:
+    // `false` when not faceted (single panel already has the global batch as
+    // primary → byte-identical) and `false` for `Independent` channels (the
+    // per-panel escape hatch stays byte-identical).
+    let (x_shared, y_shared) = facet_shared_flags(spec);
+
     // Geoshape marks read geometry from __geometry__ column and don't use x/y scales.
     // Return dummy unit scales so the renderer can proceed; the mark builder ignores them.
     if matches!(spec.mark, crate::spec::mark::Mark::Geoshape) {
@@ -763,18 +892,11 @@ pub fn resolve_scales_with_outputs(
             let x_enc = spec.encoding.x.as_ref().unwrap();
             let x2_enc = spec.encoding.x2.as_ref();
             let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
-            let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, &mut warnings)?;
+            let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, &mut warnings)?;
             let dummy_y = ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 1.0], vec![y_pixel_range.1, y_pixel_range.0], false, false,
             ));
-            // FA-5: area marks always group color discretely; force categorical.
-            let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
-            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat)?;
-            warnings.extend(color_warns);
-            let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
-            let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
-            if let Some(w) = shape_warn { warnings.push(w); }
-            let opacity = build_opacity_scale(&spec.encoding, primary_batch, theme)?;
+            let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
             return Ok((ResolvedScales { x, y: dummy_y, color, size, shape, opacity, x2: None, y2: None }, warnings));
         }
         if !has_x && has_y {
@@ -782,18 +904,11 @@ pub fn resolve_scales_with_outputs(
             let y2_enc = spec.encoding.y2.as_ref();
             let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
             let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
-            let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, &mut warnings)?;
+            let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, &mut warnings)?;
             let dummy_x = ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 1.0], vec![x_pixel_range.0, x_pixel_range.1], false, false,
             ));
-            // FA-5: area marks always group color discretely; force categorical.
-            let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
-            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat)?;
-            warnings.extend(color_warns);
-            let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
-            let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
-            if let Some(w) = shape_warn { warnings.push(w); }
-            let opacity = build_opacity_scale(&spec.encoding, primary_batch, theme)?;
+            let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
             return Ok((ResolvedScales { x: dummy_x, y, color, size, shape, opacity, x2: None, y2: None }, warnings));
         }
     }
@@ -829,12 +944,12 @@ pub fn resolve_scales_with_outputs(
         x: Some(x_enc.field.as_str()),
         y: Some(y_enc.field.as_str()),
     };
-    let mut x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, &mut warnings)?;
+    let mut x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, &mut warnings)?;
     // Stack-aware y-axis: resolve against the post-Stack batch when the
     // spec carries a matching Stack adjustment. See
     // `position::axis_batch_for_y` for the rationale.
     let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
-    let mut y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, &mut warnings)?;
+    let mut y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, &mut warnings)?;
 
     // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the
     // data domain; expand=false removes the default 5% inward padding.
@@ -845,24 +960,9 @@ pub fn resolve_scales_with_outputs(
     // resolved against the chart-level transformed batch (i.e. __final__),
     // matching Phase 8a behavior. (build_color_scale is the one exception —
     // it accepts transform_outputs because composite-mark color fields may
-    // live in a named output rather than primary.)
-    //
-    // FA-5: area marks always group color as discrete categories
-    // (col_as_ordinal_category_str), so their color scale must be Categorical
-    // regardless of the column's Arrow dtype.  This ensures legend swatches
-    // and area fill colors both use the same palette.
-    let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
-    let (color, color_warns) = build_color_scale(
-        &spec.encoding, primary_batch, transform_outputs, theme, force_cat,
-    )?;
-    warnings.extend(color_warns);
-
-    let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
-    let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
-    if let Some(w) = shape_warn {
-        warnings.push(w);
-    }
-    let opacity = build_opacity_scale(&spec.encoding, primary_batch, theme)?;
+    // live in a named output rather than primary.) FA-5 (force_cat) and T3
+    // (aux_shared) logic lives in `build_auxiliary_scales`.
+    let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
 
     let x2_field_name = x2_enc.map(|e| e.field.clone());
     let y2_field_name = y2_enc.map(|e| e.field.clone());

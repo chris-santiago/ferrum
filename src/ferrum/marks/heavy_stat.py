@@ -214,6 +214,7 @@ def desugar_violin(
     x_sort: Any = None,
     y_sort: Any = None,
     color_field: str | None = None,
+    shared_extent: bool = False,
 ) -> "MarkDesugarResult":
     """Violin-plot composite mark desugar.
 
@@ -266,6 +267,12 @@ def desugar_violin(
         violins are overlaid (distinct fills, ``fill_opacity=0.5``) within each
         x-category band.  When ``None`` the output is byte-identical to a
         single-group violin.
+    shared_extent : bool, default False
+        When ``True``, all groups within the violin share the same KDE
+        evaluation range (the cross-group global min/max), making the value
+        axis directly comparable across groups.  When ``False`` (default),
+        each group's KDE is evaluated on its own per-group data range.
+        Mirrors ``mark_density(multiple="stack"/"fill")`` behavior.
 
     Returns
     -------
@@ -316,7 +323,15 @@ def desugar_violin(
     if color_field is not None:
         body_encoding["color"] = color_field
 
-    transforms = [Violin(field=y_field, groupby=groupby, bandwidth=bandwidth, name="violin")]
+    transforms = [
+        Violin(
+            field=y_field,
+            groupby=groupby,
+            bandwidth=bandwidth,
+            shared_extent=shared_extent,
+            name="violin",
+        )
+    ]
     violin_layer = _Layer(
         name="body",
         mark="polygon",

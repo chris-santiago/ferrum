@@ -36,6 +36,24 @@ pub(crate) fn polar_geom(ctx: &DrawCtx<'_>) -> Option<PolarGeom> {
     Some(PolarGeom { cx, cy, inner_radius, outer_radius, start_angle, pad_angle })
 }
 
+/// Resolve the radial (radius) scale from the theta channel convention.
+///
+/// Under the Python polar remapping, `theta="x"` puts the angular channel on `x`
+/// and the radial (value) channel on `y`, so the radial scale is `scales.y`.
+/// `theta="y"` mirrors: the radial channel is `x` and the radial scale is `scales.x`.
+///
+/// This is the single canonical definition of the theta→radius axis convention,
+/// shared by the arc mark (`arc.rs`) and the polar-bar mark path (`bar.rs::build_polar`).
+pub(crate) fn polar_radius_scale(
+    theta_ch: crate::spec::coord::PolarThetaChannel,
+    scales: &crate::render::scale_resolve::ResolvedScales,
+) -> &crate::render::scale_resolve::ScaleKind {
+    match theta_ch {
+        crate::spec::coord::PolarThetaChannel::X => &scales.y,
+        crate::spec::coord::PolarThetaChannel::Y => &scales.x,
+    }
+}
+
 /// Map a radial *data* value to a pixel radius, linearly interpolating the
 /// radial domain onto the `[inner_radius, outer_radius]` pixel band. The
 /// radial channel is `y` (when `theta="x"`) or `x` (when `theta="y"`);

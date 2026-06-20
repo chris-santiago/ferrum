@@ -59,6 +59,28 @@ pub struct ConditionalUpdates {
     pub rect_instances: Vec<RectInstance>,
 }
 
+/// Compute the total number of packed circle and rect instances.
+///
+/// The loader (load_scene_with_packed) builds the flat instance arrays
+/// packed-FIRST: all packed instances are prepended, then non-packed instances
+/// are appended in scene-graph walk order. Non-packed batches therefore start
+/// at the total packed count. Both `apply_crossfilter_to_panel` and
+/// `resolve_conditionals_with_packed` need this same basis; centralising it
+/// here keeps the two paths in lock-step and removes a copy-paste drift risk.
+fn packed_base_offsets(packed_batch_meta: &HashMap<(u32, u32), PackedBatchMeta>) -> (usize, usize) {
+    let total_packed_circles: usize = packed_batch_meta
+        .values()
+        .filter(|m| m.kind == 0)
+        .map(|m| m.instance_count)
+        .sum();
+    let total_packed_rects: usize = packed_batch_meta
+        .values()
+        .filter(|m| m.kind == 1)
+        .map(|m| m.instance_count)
+        .sum();
+    (total_packed_circles, total_packed_rects)
+}
+
 /// Apply a crossfilter dim to a single target panel's marks (D6 `Filter`
 /// binding).
 ///
@@ -93,25 +115,25 @@ pub(crate) fn apply_crossfilter_to_panel(
     let if_not = EncodingValue::Opacity { value: dimmed_opacity };
     let channel = ChannelName::Opacity;
 
-    let mut circle_offset = 0usize;
-    let mut rect_offset = 0usize;
+    let (total_packed_circles, total_packed_rects) = packed_base_offsets(packed_batch_meta);
+    let mut circle_offset = total_packed_circles;
+    let mut rect_offset = total_packed_rects;
 
     for (panel_idx, panel) in panels.iter().enumerate() {
         for (batch_idx, batch) in panel.marks.iter().enumerate() {
             let key = (panel_idx as u32, batch_idx as u32);
 
             if let Some(meta) = packed_batch_meta.get(&key) {
+                // Packed batch: use meta.instance_start (absolute index).
+                // Do NOT advance circle_offset/rect_offset for packed batches.
                 if panel_idx == target_panel && !matches!(selection, SelectionState::Empty) {
                     apply_conditional_to_packed(
                         &channel, &if_selected, &if_not, selection, meta, circles, rects,
                     );
                 }
-                match meta.kind {
-                    0 => circle_offset += meta.instance_count,
-                    1 => rect_offset += meta.instance_count,
-                    _ => {}
-                }
             } else {
+                // Non-packed batch: instances live at circle_offset/rect_offset
+                // (after all packed instances in the flat array).
                 let (n_circles, n_rects) = count_instances(batch);
                 if panel_idx == target_panel
                     && !matches!(selection, SelectionState::Empty)
@@ -173,8 +195,19 @@ pub fn resolve_conditionals_with_packed(
     let mut circles = base_circles.to_vec();
     let mut rects = base_rects.to_vec();
 
-    let mut circle_offset = 0usize;
-    let mut rect_offset = 0usize;
+    // The loader (load_scene_with_packed) builds the flat instance arrays
+    // packed-FIRST: all packed instances are prepended by
+    // `unpack_binary_instances`, then non-packed instances are appended in
+    // scene-graph walk order. Non-packed batches therefore start at the total
+    // packed count, not at 0. Initialise the non-packed running offsets here
+    // so they address the correct flat-array positions regardless of the scene
+    // order of packed vs. non-packed batches.
+    //
+    // Packed batches use meta.instance_start (an absolute index, already
+    // correct) and do not advance these offsets.
+    let (total_packed_circles, total_packed_rects) = packed_base_offsets(packed_batch_meta);
+    let mut circle_offset = total_packed_circles;
+    let mut rect_offset = total_packed_rects;
 
     for (panel_idx, panel) in panels.iter().enumerate() {
         for (batch_idx, batch) in panel.marks.iter().enumerate() {
@@ -185,6 +218,8 @@ pub fn resolve_conditionals_with_packed(
                 // rect_instances at meta.instance_start..+instance_count.
                 // batch.nodes is empty for packed batches, so we must use
                 // the packed metadata to locate and process instances.
+                // Note: packed batches do NOT advance circle_offset/rect_offset
+                // because those accumulators track non-packed positions only.
                 for cond in conditionals {
                     let Some(sel) = selections.get(&cond.selection_name) else {
                         continue;
@@ -202,15 +237,9 @@ pub fn resolve_conditionals_with_packed(
                         &mut rects,
                     );
                 }
-
-                // Advance offsets by the packed instance count.
-                match meta.kind {
-                    0 => circle_offset += meta.instance_count,
-                    1 => rect_offset += meta.instance_count,
-                    _ => {}
-                }
             } else {
-                // Non-packed batch: use the existing scene-graph-node path.
+                // Non-packed batch: instances live at circle_offset/rect_offset
+                // in the flat arrays (after all packed instances).
                 let (n_circles, n_rects) = count_instances(batch);
 
                 for cond in conditionals {
@@ -2297,6 +2326,273 @@ mod tests {
             (result.circle_instances[2].opacity - 1.0).abs() < 0.01,
             "non-packed circle after packed batch must be selected (opacity=1.0), got {}",
             result.circle_instances[2].opacity
+        );
+    }
+
+    // ── T3: non-packed-BEFORE-packed ordering regression ─────────────────────
+    //
+    // The loader builds the flat array packed-FIRST: all packed instances are
+    // prepended by `unpack_binary_instances`, then the scene-graph walk appends
+    // non-packed instances. When a non-packed batch appears BEFORE a same-kind
+    // packed batch in scene order, the running `circle_offset` (= 0 at that
+    // point in scene order) is wrong — the non-packed instance actually lives at
+    // `total_packed` in the flat array. This test captures the correct behavior
+    // after the fix: the non-packed instance at flat index 3 (after 3 packed
+    // circles) must be dimmed by the conditional, and the packed region must not
+    // be corrupted.
+    #[test]
+    fn nonpacked_before_packed_same_kind_dims_correct_instances() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+
+        // Panel with two batches in SCENE order:
+        //   batch 0: non-packed, 1 circle (data_idx=50) — should be dimmed
+        //   batch 1: packed,     3 circles               — should be untouched
+        //
+        // LOADER flat layout (packed-FIRST):
+        //   circles[0..3] = packed batch 1 instances
+        //   circles[3]    = non-packed batch 0 instance
+        //
+        // With the bug: circle_offset=0 when batch 0 is processed → writes into
+        // circles[0], corrupting the packed region.
+        // After fix: circle_offset starts at total_packed_circles=3, so batch 0
+        // correctly addresses circles[3].
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None, y_domain: None, expand: true, clip: true,
+            },
+            grid: vec![],
+            marks: vec![
+                // Batch 0 (scene order 0): non-packed, 1 circle.
+                MarkBatch {
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![
+                        SceneNode::Circle { cx: 100.0, cy: 100.0, r: 5.0, style: style.clone() },
+                    ],
+                    data_indices: Some(vec![50]),
+                    tooltips: None, hrefs: None, keys: None,
+                    blend: BlendMode::Normal,
+                    descriptions: None, stroke_cap: None, stroke_join: None,
+                    packed_instances: None,
+                },
+                // Batch 1 (scene order 1): packed, 3 circles.
+                MarkBatch {
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![], // empty — packed
+                    data_indices: None,
+                    tooltips: None, hrefs: None, keys: None,
+                    blend: BlendMode::Normal,
+                    descriptions: None, stroke_cap: None, stroke_join: None,
+                    packed_instances: None,
+                },
+            ],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+
+        // Select data index 50 — that is the non-packed circle.
+        let conditionals = vec![ConditionalEncoding {
+            selection_name: "sel".to_string(),
+            channel: ChannelName::Opacity,
+            if_selected: EncodingValue::Opacity { value: 1.0 },
+            if_not: EncodingValue::Opacity { value: 0.15 },
+        }];
+        let mut selections = HashMap::new();
+        selections.insert(
+            "sel".to_string(),
+            SelectionState::Point {
+                indices: vec![50],
+                field_values: Vec::new(),
+            },
+        );
+
+        // Flat array — loader layout (packed-FIRST):
+        //   [0] packed circle 0  (data_idx=0)
+        //   [1] packed circle 1  (data_idx=1)
+        //   [2] packed circle 2  (data_idx=2)
+        //   [3] non-packed circle (data_idx=50, should be selected)
+        let neutral = [0.0_f32, 0.0, 0.0, 1.0];
+        let mk_circle = |cx: f32| CircleInstance {
+            center: [cx, 50.0], radius: 5.0, fill_color: neutral,
+            stroke_color: [0.0; 4], stroke_width: 0.0, opacity: 0.5,
+            stroke_opacity: 0.0, stroke_dash: 0.0, angle: 0.0,
+        };
+        let base_circles = vec![
+            mk_circle(10.0), // packed [0]
+            mk_circle(20.0), // packed [1]
+            mk_circle(30.0), // packed [2]
+            mk_circle(100.0), // non-packed [3]
+        ];
+
+        // Packed meta: batch (0,1) = 3 circles starting at index 0.
+        // batch (0,0) is non-packed so it has no entry.
+        let mut packed_meta = HashMap::new();
+        packed_meta.insert(
+            (0u32, 1u32),
+            PackedBatchMeta {
+                data_indices: Some(vec![0, 1, 2]),
+                tooltip_bytes: None,
+                kind: 0, // circles
+                instance_start: 0,
+                instance_count: 3,
+            },
+        );
+
+        let result = resolve_conditionals_with_packed(
+            &panels, &conditionals, &selections, &base_circles, &[], &packed_meta,
+        );
+
+        // The packed region (circles[0..3]) should receive if_not = 0.15 from the
+        // packed conditional arm (none of data_idx 0,1,2 matches the selected 50).
+        // NOTE: this assertion is documentation-only and does NOT discriminate the
+        // bug — with the old buggy offset (circle_offset=0) the packed conditional
+        // arm still runs and overwrites circles[0] back to 0.15, so this loop
+        // passes even without the fix. The load-bearing discriminator is the
+        // circles[3] assertion below.
+        for i in 0..3 {
+            assert!(
+                (result.circle_instances[i].opacity - 0.15).abs() < 0.01,
+                "packed circle[{}] must be dimmed (opacity=0.15, not selected), got {}",
+                i, result.circle_instances[i].opacity
+            );
+        }
+
+        // DISCRIMINATOR: the non-packed circle at flat index 3 has data_idx=50
+        // which IS selected. With the old bug (circle_offset=0) the non-packed
+        // write hits circles[0] instead of circles[3], so circles[3] stays at
+        // the neutral opacity 0.5. After the fix it must be 1.0 (if_selected).
+        assert!(
+            (result.circle_instances[3].opacity - 1.0).abs() < 0.01,
+            "non-packed circle[3] (data_idx=50) must be selected (opacity=1.0), got {}",
+            result.circle_instances[3].opacity
+        );
+    }
+
+    // Crossfilter variant of the same bug: apply_crossfilter_to_panel must also
+    // use the packed-FIRST basis for non-packed batch offsets.
+    #[test]
+    fn crossfilter_nonpacked_before_packed_dims_correct_instances() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatchKind, Panel, Rect, SceneNode,
+        };
+
+        let style = FillStroke {
+            fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+
+        // Same panel layout: non-packed batch BEFORE packed batch in scene order.
+        // Flat layout (loader): [packed x3][non-packed x1]
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None, y_domain: None, expand: true, clip: true,
+            },
+            grid: vec![],
+            marks: vec![
+                // Batch 0 (scene order): non-packed, 1 circle at (400, 50).
+                MarkBatch {
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![
+                        SceneNode::Circle { cx: 400.0, cy: 50.0, r: 5.0, style: style.clone() },
+                    ],
+                    data_indices: Some(vec![0]),
+                    tooltips: None, hrefs: None, keys: None,
+                    blend: BlendMode::Normal,
+                    descriptions: None, stroke_cap: None, stroke_join: None,
+                    packed_instances: None,
+                },
+                // Batch 1 (scene order): packed, 3 circles.
+                MarkBatch {
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![],
+                    data_indices: None,
+                    tooltips: None, hrefs: None, keys: None,
+                    blend: BlendMode::Normal,
+                    descriptions: None, stroke_cap: None, stroke_join: None,
+                    packed_instances: None,
+                },
+            ],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+
+        // Crossfilter brush covers x in [0, 100]: packed circles at x=10,20,30
+        // are inside (kept full opacity), non-packed at x=400 is outside (dimmed).
+        let sel = SelectionState::Interval {
+            x_range: Some((0.0, 100.0)),
+            y_range: None,
+        };
+
+        let mk_circle = |cx: f32| CircleInstance {
+            center: [cx, 50.0], radius: 5.0, fill_color: [0.0; 4],
+            stroke_color: [0.0; 4], stroke_width: 0.0, opacity: 1.0,
+            stroke_opacity: 0.0, stroke_dash: 0.0, angle: 0.0,
+        };
+        // Flat layout (loader): [packed x3][non-packed x1]
+        let mut circles = vec![
+            mk_circle(10.0), // packed [0], inside brush
+            mk_circle(20.0), // packed [1], inside brush
+            mk_circle(30.0), // packed [2], inside brush
+            mk_circle(400.0), // non-packed [3], outside brush
+        ];
+        let mut rects: Vec<RectInstance> = vec![];
+
+        let mut packed_meta = HashMap::new();
+        packed_meta.insert(
+            (0u32, 1u32),
+            PackedBatchMeta {
+                data_indices: None,
+                tooltip_bytes: None,
+                kind: 0,
+                instance_start: 0,
+                instance_count: 3,
+            },
+        );
+
+        apply_crossfilter_to_panel(
+            &panels, 0, &sel, 0.15, &mut circles, &mut rects, &packed_meta,
+        );
+
+        // Packed circles (inside brush) must keep full opacity.
+        for i in 0..3 {
+            assert!(
+                (circles[i].opacity - 1.0).abs() < 0.01,
+                "packed circle[{}] inside brush must stay at opacity=1.0, got {}",
+                i, circles[i].opacity
+            );
+        }
+
+        // Non-packed circle at [3] (x=400, outside brush) must be dimmed.
+        assert!(
+            (circles[3].opacity - 0.15).abs() < 0.01,
+            "non-packed circle[3] outside brush must be dimmed (opacity=0.15), got {}",
+            circles[3].opacity
         );
     }
 

@@ -44,6 +44,41 @@ pub(crate) struct KdeSpec {
 
 pub(crate) fn default_bw_adjust() -> f64 { 1.0 }
 
+/// Compute the global `(lo, hi)` extent of `spec.field` over the full `batch`.
+///
+/// Returns `None` when the field is missing, non-numeric, or all values are
+/// null/NaN. This is the pre-facet extent that `render::prepare` uses to pin the
+/// value axis before partitioning, so every facet panel shares the same KDE grid
+/// range (see `fix_transform_extents_for_facet`).
+///
+/// Reuses `coerce_to_float64` so integer-typed fields behave the same as they
+/// do inside `apply_one_group`.
+pub(crate) fn global_extent(spec: &KdeSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
+    let schema = batch.schema();
+    let idx = schema.index_of(&spec.field).ok()?;
+    let arr = crate::transform::numeric_util::coerce_to_float64(
+        batch.column(idx),
+        "kde_global_extent",
+        &spec.field,
+    )
+    .ok()?;
+    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
+        if arr.is_null(i) {
+            return (lo, hi);
+        }
+        let v = arr.value(i);
+        if v.is_nan() {
+            return (lo, hi);
+        }
+        (lo.min(v), hi.max(v))
+    });
+    if lo.is_finite() && hi.is_finite() && lo < hi {
+        Some((lo, hi))
+    } else {
+        None
+    }
+}
+
 pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
     if let Some(g) = &spec.groupby {
         return apply_grouped(spec, batch, g);
@@ -1112,5 +1147,94 @@ mod tests {
             parsed.kernel, "gaussian",
             "missing 'kernel' field must default to 'gaussian' for backward compat"
         );
+    }
+
+    // ── Task 8: global_extent helper ─────────────────────────────────────────
+
+    /// `global_extent` returns the full-data range over the KDE field.
+    #[test]
+    fn test_kde_global_extent_returns_full_range() {
+        let batch = batch_with("x", vec![3.0, 1.0, 5.0, 2.0, 4.0]);
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            extent: None,
+            cumulative: false,
+            shared_extent: false,
+            kernel: default_kernel(),
+            groupby: None,
+            name: None,
+        };
+        let ext = super::global_extent(&spec, &batch);
+        assert_eq!(ext, Some((1.0, 5.0)), "global_extent should be (min, max) = (1.0, 5.0)");
+    }
+
+    /// `global_extent` handles integer columns via coerce_to_float64.
+    #[test]
+    fn test_kde_global_extent_integer_column() {
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int64Array::from(vec![10_i64, 20, 30]))],
+        ).unwrap();
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 16,
+            extent: None,
+            cumulative: false,
+            shared_extent: false,
+            kernel: default_kernel(),
+            groupby: None,
+            name: None,
+        };
+        let ext = super::global_extent(&spec, &batch);
+        assert_eq!(ext, Some((10.0, 30.0)), "global_extent on Int64 column should return (10.0, 30.0)");
+    }
+
+    /// `global_extent` returns None on missing field.
+    #[test]
+    fn test_kde_global_extent_missing_field_returns_none() {
+        let batch = batch_with("x", vec![1.0, 2.0, 3.0]);
+        let spec = KdeSpec {
+            field: "nonexistent".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 16,
+            extent: None,
+            cumulative: false,
+            shared_extent: false,
+            kernel: default_kernel(),
+            groupby: None,
+            name: None,
+        };
+        let ext = super::global_extent(&spec, &batch);
+        assert_eq!(ext, None, "global_extent on missing field must return None");
+    }
+
+    /// `global_extent` returns None when all values are null or NaN.
+    #[test]
+    fn test_kde_global_extent_all_null_returns_none() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
+        let arr = Float64Array::from(vec![None::<f64>, None, None]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 16,
+            extent: None,
+            cumulative: false,
+            shared_extent: false,
+            kernel: default_kernel(),
+            groupby: None,
+            name: None,
+        };
+        let ext = super::global_extent(&spec, &batch);
+        assert_eq!(ext, None, "global_extent on all-null field must return None");
     }
 }

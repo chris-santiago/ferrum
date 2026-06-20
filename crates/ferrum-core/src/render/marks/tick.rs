@@ -7,6 +7,7 @@
 //!   ordinal x only → vertical crossbars centered on each category band.
 
 use crate::render::draw::{col_as_f64, col_as_positional_category_str, x_field, y_field, DrawCtx};
+use crate::render::mark_nodes::MarkNodes;
 use crate::render::scale_resolve::ScaleKind;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -41,10 +42,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
 
     let meta = MetadataColumns::from_ctx(ctx);
-    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
-    let mut nodes = Vec::new();
-    let mut indices = Vec::new();
 
+    // All modes use the accumulator pattern: push each emitted node with its
+    // source row index, finalize, then build metadata for kept indices only
+    // (#6 defect class fix — metadata aligned to nodes, not all rows).
     let xf_opt = x_field(ctx, spec);
 
     // No x field: either ordinal-y-only or quantitative-y-rug.
@@ -66,22 +67,24 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 };
                 let tick_half = (panel.w / n_cats as f64) * ctx.mark_style.band_size.unwrap_or(0.3);
                 let baseline_x = panel.x;
+                let mut acc = MarkNodes::with_capacity(ys.len());
                 for i in 0..ys.len() {
                     let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
                     let cy = match ctx.scales.y.to_pixel_str(yv) { Some(p) => p, None => continue };
                     let cy = cy + y_offsets[i];
                     let bx = baseline_x + x_offsets[i];
-                    nodes.push(SceneNode::Line {
+                    acc.push(SceneNode::Line {
                         x1: bx,
                         y1: cy,
                         x2: bx + 2.0 * tick_half,
                         y2: cy,
                         style: row_stroke(i),
-                    });
-                    indices.push(i);
+                    }, i);
                 }
+                let (nodes, data_indices) = acc.finalize();
+                let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
                 return MarkBuildResult {
-                    kind: MarkBatchKind::Tick, nodes, data_indices: Some(indices),
+                    kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
                     tooltips, hrefs, descriptions,
                 };
             }
@@ -96,22 +99,29 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 },
             };
             let baseline_x = panel.x;
+            let mut acc = MarkNodes::with_capacity(ys.len());
             for i in 0..ys.len() {
                 let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
                 let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
                 let py = py + y_offsets[i];
                 let bx = baseline_x + x_offsets[i];
-                nodes.push(SceneNode::Line {
+                acc.push(SceneNode::Line {
                     x1: bx, y1: py,
                     x2: bx + tick_len, y2: py,
                     style: row_stroke(i),
-                });
-                indices.push(i);
+                }, i);
             }
+            let (nodes, data_indices) = acc.finalize();
+            let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
+            return MarkBuildResult {
+                kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
+                tooltips, hrefs, descriptions,
+            };
         }
+        // No x and no y: return empty.
         return MarkBuildResult {
-            kind: MarkBatchKind::Tick, nodes, data_indices: Some(indices),
-            tooltips, hrefs, descriptions,
+            kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
+            tooltips: None, hrefs: None, descriptions: None,
         };
     }
 
@@ -134,6 +144,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 set.len().max(1)
             };
             let tick_half = (panel.w / n_cats as f64) * ctx.mark_style.band_size.unwrap_or(0.3);
+            let mut acc = MarkNodes::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
                 let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -141,22 +152,24 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 let py = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
                 let cx = cx + x_offsets[i];
                 let py = py + y_offsets[i];
-                nodes.push(SceneNode::Line {
+                acc.push(SceneNode::Line {
                     x1: cx - tick_half,
                     y1: py,
                     x2: cx + tick_half,
                     y2: py,
                     style: row_stroke(i),
-                });
-                indices.push(i);
+                }, i);
             }
+            let (nodes, data_indices) = acc.finalize();
+            let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
             return MarkBuildResult {
                 kind: MarkBatchKind::Tick,
                 nodes,
-                data_indices: Some(indices),
+                data_indices: Some(data_indices),
                 tooltips,
                 hrefs,
-                descriptions,            };
+                descriptions,
+            };
         }
     }
 
@@ -177,6 +190,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 set.len().max(1)
             };
             let tick_half = (panel.h / n_cats as f64) * ctx.mark_style.band_size.unwrap_or(0.3);
+            let mut acc = MarkNodes::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
                 let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
@@ -184,22 +198,24 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 let cy = match ctx.scales.y.to_pixel_str(yv) { Some(p) => p, None => continue };
                 let px = px + x_offsets[i];
                 let cy = cy + y_offsets[i];
-                nodes.push(SceneNode::Line {
+                acc.push(SceneNode::Line {
                     x1: px,
                     y1: cy - tick_half,
                     x2: px,
                     y2: cy + tick_half,
                     style: row_stroke(i),
-                });
-                indices.push(i);
+                }, i);
             }
+            let (nodes, data_indices) = acc.finalize();
+            let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
             return MarkBuildResult {
                 kind: MarkBatchKind::Tick,
                 nodes,
-                data_indices: Some(indices),
+                data_indices: Some(data_indices),
                 tooltips,
                 hrefs,
-                descriptions,            };
+                descriptions,
+            };
         }
     }
 
@@ -219,22 +235,24 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         };
         let tick_half = (panel.h / n_cats as f64) * ctx.mark_style.band_size.unwrap_or(0.3);
         let baseline_y = panel.y + panel.h;
+        let mut acc = MarkNodes::with_capacity(xs.len());
         for i in 0..xs.len() {
             let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
             let cx = match ctx.scales.x.to_pixel_str(xv) { Some(p) => p, None => continue };
             let cx = cx + x_offsets[i];
             let by = baseline_y + y_offsets[i];
-            nodes.push(SceneNode::Line {
+            acc.push(SceneNode::Line {
                 x1: cx,
                 y1: by,
                 x2: cx,
                 y2: by - 2.0 * tick_half,
                 style: row_stroke(i),
-            });
-            indices.push(i);
+            }, i);
         }
+        let (nodes, data_indices) = acc.finalize();
+        let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
         return MarkBuildResult {
-            kind: MarkBatchKind::Tick, nodes, data_indices: Some(indices),
+            kind: MarkBatchKind::Tick, nodes, data_indices: Some(data_indices),
             tooltips, hrefs, descriptions,
         };
     }
@@ -246,29 +264,33 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         tooltips: None, hrefs: None, descriptions: None,
     }};
     let baseline_y = panel.y + panel.h;
+    let mut acc = MarkNodes::with_capacity(xs.len());
     for (i, xopt) in xs.iter().enumerate() {
         let xv = match xopt { Some(v) if v.is_finite() => *v, _ => continue };
         let px = match ctx.scales.x.to_pixel_f64(xv) { Some(p) => p, None => continue };
         let px = px + x_offsets[i];
         let by = baseline_y + y_offsets[i];
-        nodes.push(SceneNode::Line {
+        acc.push(SceneNode::Line {
             x1: px,
             y1: by,
             x2: px,
             y2: by - tick_len,
             style: row_stroke(i),
-        });
-        indices.push(i);
+        }, i);
     }
     let _ = y_field(ctx, spec);
+
+    let (nodes, data_indices) = acc.finalize();
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
         kind: MarkBatchKind::Tick,
         nodes,
-        data_indices: Some(indices),
+        data_indices: Some(data_indices),
         tooltips,
         hrefs,
-        descriptions,    }
+        descriptions,
+    }
 }
 
 #[cfg(test)]
@@ -541,5 +563,172 @@ mod tests {
             }
         });
         assert!(has_height, "ordinal-x-only tick lines must have non-zero vertical extent");
+    }
+
+    // ── Metadata-alignment regression tests (#6 defect class) ────────────────
+    //
+    // Tick has six modes; all now use MarkNodes. Tests cover:
+    //   - quantitative-x rug (primary skip path tested below)
+    //   - ordinal-x + quantitative-y (second mode, href channel)
+    //
+    // Fail-before: `build_metadata(ctx)` produced full per-row vectors before any
+    // loop. When row 1 was skipped, node 1 received row 1's metadata (the bug).
+    //
+    // Pass-after: `MarkNodes` + `build_metadata_for_indices` aligns to kept rows.
+
+    fn make_panel() -> PanelLayout {
+        PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        }
+    }
+
+    /// Regression: quantitative-x rug tick with a non-finite x skips that row.
+    /// The tooltip on each surviving node must point to its true source row.
+    ///
+    /// Batch: 3 rows, x=[10.0, NaN, 90.0], tooltip=["tip_a","tip_b","tip_c"].
+    /// Row 1 (NaN x) is skipped → 2 nodes. Node 1 must have "tip_c", not "tip_b".
+    #[test]
+    fn tick_quant_x_skipped_nan_tooltip_aligned() {
+        use crate::spec::encoding::DataType as SDT;
+        use arrow::array::StringArray;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",   DataType::Float64, false),
+            Field::new("tip", DataType::Utf8,    false),
+        ]));
+        // Row 1 has NaN x → skipped by `v.is_finite()` guard.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, f64::NAN, 90.0])),
+            Arc::new(StringArray::from(vec!["tip_a", "tip_b", "tip_c"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        assert_eq!(result.nodes.len(), 2,
+            "expected 2 tick nodes after NaN-x skip; got {}", result.nodes.len());
+
+        let tooltips = result.tooltips.expect("tooltips must be Some when tooltip is encoded");
+        assert_eq!(tooltips.len(), 2, "tooltip count must equal node count");
+
+        let t0 = &tooltips[0].fields[0].value;
+        assert_eq!(t0, "tip_a", "node 0 tooltip must be 'tip_a' (row 0); got '{t0}'");
+
+        // Node 1 → row 2 → "tip_c". Old code (full-row): "tip_b" (the bug).
+        let t1 = &tooltips[1].fields[0].value;
+        assert_eq!(t1, "tip_c",
+            "node 1 tooltip must be 'tip_c' (row 2), not 'tip_b' (row 1); got '{t1}'. \
+             This fails on pre-migration code using build_metadata(ctx).");
+    }
+
+    /// Href-channel alignment on the ordinal-x + quantitative-y mode.
+    /// Row 1 has a null y-value → skipped. Href on node 1 must be "url_c" (row 2),
+    /// not "url_b" (row 1, old bug).
+    #[test]
+    fn tick_ordinal_x_quant_y_skipped_null_y_href_aligned() {
+        use crate::spec::encoding::DataType as SDT;
+        use arrow::array::StringArray;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                href: Some(EncodingSpec { field: "url".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8,    false),
+            Field::new("val", DataType::Float64, true),   // nullable — row 1 null → skip
+            Field::new("url", DataType::Utf8,    false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            Arc::new(Float64Array::from(vec![Some(10.0_f64), None, Some(80.0)])),
+            Arc::new(StringArray::from(vec!["url_a", "url_b", "url_c"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        assert_eq!(result.nodes.len(), 2,
+            "expected 2 tick nodes after null-y skip; got {}", result.nodes.len());
+
+        let hrefs = result.hrefs.expect("hrefs must be Some when href is encoded");
+        assert_eq!(hrefs.len(), 2, "href count must equal node count");
+        assert_eq!(hrefs[0].as_deref(), Some("url_a"), "node 0 href must be 'url_a'");
+        assert_eq!(hrefs[1].as_deref(), Some("url_c"),
+            "node 1 href must be 'url_c' (row 2), not 'url_b' (row 1); \
+             old build_metadata would give 'url_b'");
+    }
+
+    /// No-skip backward-compat (quantitative-x rug mode): all rows are finite →
+    /// all nodes produced, tooltips in original row order.
+    #[test]
+    fn tick_no_skip_tooltips_unchanged() {
+        use crate::spec::encoding::DataType as SDT;
+        use arrow::array::StringArray;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",   DataType::Float64, false),
+            Field::new("tip", DataType::Utf8,    false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0, 90.0])),
+            Arc::new(StringArray::from(vec!["tip_a", "tip_b", "tip_c"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        assert_eq!(result.nodes.len(), 3, "all 3 rows must produce tick nodes");
+        let tooltips = result.tooltips.expect("tooltips must be Some");
+        assert_eq!(tooltips.len(), 3, "tooltip count must equal node count");
+        let values: Vec<&str> = tooltips.iter().map(|t| t.fields[0].value.as_str()).collect();
+        assert_eq!(values, vec!["tip_a", "tip_b", "tip_c"],
+            "no-skip: tooltips must be in original row order");
     }
 }

@@ -19,6 +19,13 @@ if TYPE_CHECKING:
 # (e.g. boxplot outlier when outliers=False) are accepted as no-ops.
 LAYER_NAME_CATALOG: dict[str, frozenset[str]] = {}
 
+# Figure-level chrome keys that ``_CompositeBase.properties`` intercepts and
+# stores on the composed figure rather than fanning to inner panels.  The
+# factory ``properties={...}`` dict path must route these the same way the
+# chained ``.properties(title=...)`` call does, so they don't leak into a
+# sub-panel's SVG.
+_FIGURE_CHROME_KEYS = ("title", "subtitle", "caption")
+
 
 def register_layer_names(kind: str, names: frozenset[str]) -> None:
     """Register possible sub-layer names for *kind* (additive)."""
@@ -42,25 +49,63 @@ def _apply_overrides(
     each child chart via ``_rebuild_with_charts``.
     """
     from ferrum.chart import Chart
+    from ferrum.composition import LayerChart, _CompositeBase
 
     if not isinstance(chart, Chart):
-        try:
+        # Split figure-level chrome out of the properties dict for any chart-like
+        # that intercepts chrome in its .properties() override.  Currently that is
+        # _CompositeBase (all composite figures) and LayerChart (single-plot
+        # overlay whose .properties(title=) stores the title on _title rather
+        # than fanning it to inner layers).
+        #
+        # Chrome (title/subtitle/caption) is routed through
+        # ``chart.properties(**chrome)`` AFTER the child rebuild, so each type's
+        # overridden .properties() handles it correctly:
+        #   - _CompositeBase: stores title/subtitle/caption at the figure level.
+        #   - LayerChart: stores title on _title; fans subtitle/caption to the
+        #     merged chart (LayerChart has no figure band; subtitle/caption
+        #     behaviour on LayerChart is intentionally identical to the chained
+        #     .properties() path).
+        #
+        # Only the NON-chrome remainder is fanned to children via _rebuild.
+        figure_chrome: dict[str, Any] = {}
+        child_properties = properties
+        if properties is not None and isinstance(chart, (_CompositeBase, LayerChart)):
+            figure_chrome = {k: properties[k] for k in _FIGURE_CHROME_KEYS if k in properties}
+            child_properties = {
+                k: v for k, v in properties.items() if k not in _FIGURE_CHROME_KEYS
+            } or None
 
-            def _apply(c: Any) -> Any:
-                return _apply_overrides(
-                    c,
-                    mark=mark,
-                    encode=encode,
-                    properties=properties,
-                    layers=layers,
-                    _skip_unknown_mark_keys=True,
-                )
+        def _apply(c: Any) -> Any:
+            return _apply_overrides(
+                c,
+                mark=mark,
+                encode=encode,
+                properties=child_properties,
+                layers=layers,
+                _skip_unknown_mark_keys=True,
+            )
 
-            return chart._rebuild_with_charts(_apply)
-        except (NotImplementedError, AttributeError):
-            if properties is not None and hasattr(chart, "properties"):
-                chart = chart.properties(**properties)
-            return chart
+        rebuild = getattr(chart, "_rebuild_with_charts", None)
+        if rebuild is None:
+            # Chart type has no _rebuild_with_charts method at all — fall back
+            # to applying properties directly on the top-level chart.
+            if child_properties is not None and hasattr(chart, "properties"):
+                chart = chart.properties(**child_properties)
+        else:
+            try:
+                chart = rebuild(_apply)
+            except NotImplementedError:
+                # Chart type declares _rebuild_with_charts (abstract slot on
+                # _ChartLike) but has not implemented it — fall back to direct
+                # properties application.  AttributeError from a child's
+                # .properties() call during _apply now propagates uncaught.
+                if child_properties is not None and hasattr(chart, "properties"):
+                    chart = chart.properties(**child_properties)
+
+        if figure_chrome:
+            chart = chart.properties(**figure_chrome)
+        return chart
 
     if mark is not None:
         chart = _apply_mark_overrides(chart, mark, _skip_unknown=_skip_unknown_mark_keys)

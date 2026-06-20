@@ -59,6 +59,14 @@
 
 > **Open (noted 2026-06-01, flexibility D7):** `build_polar` in `render/marks/bar.rs` (polar/coxcomb bars) emits `tooltips: None`/`hrefs: None` and applies only flat `mark_style.opacity`, whereas the arc annular path (`build_annular`) wires per-row tooltips and per-row opacity. So a polar `mark_bar` with `tooltip=`/per-row `opacity=` silently loses them. Out of D7's geometry scope; wire to match `build_annular` when polar bars are next touched. Also: the polar channel-mapping convention (theta="x"→radius=y etc.) is duplicated between `arc.rs` and `bar.rs` — extract a shared `polar_channels(ctx)` helper if a third polar mark lands.
 
+> **✅ Resolved (2026-06-19, GitHub issues #6/#7/#8, branch `fix/archaeology-bugs-6-7-8-class`):** all three fixed as defect **classes**, not the single instances the issues named. A prior attempt (deleted branch `fix/archaeology-bugs-5-8`) fixed one instance of each and passed every cheap gate while leaving the class live — see the session post-mortem `.claude/output/2026-06-19-session-postmortem-agentic-coding.md`. This pass scoped the full surface up front (spec `design-docs/superpowers/specs/2026-06-19-archaeology-bugs-6-7-8-class-fix-design.md`).
+> - **D7 / #6 (metadata/node misalignment):** not one builder — a class across **14 mark builders**. Introduced a `MarkNodes` node+index accumulator (`render/mark_nodes.rs`) so a node cannot be emitted without its source row, with a construction-seam `debug_assert` guarding `nodes.len() == metadata.len()` for each of the tooltip/href/description channels. Migrated bar (5), rect (3, + heatmap rect/text), point (Cross 2-nodes/row — misaligned even with **zero** skipped rows), segment/text/tick/rule (all modes), and the group marks area/line/ribbon/polygon (representative-row). `build_metadata(ctx)` (full-row) deleted. Commits `cb10548`, `782edcf`, `22f5fe0`, `0d9b00b`, `4ffdaed`, `b5f56c0`. Extracted shared `polar_radius_scale` (the duplication this note flagged).
+> - **N1 (packed-tooltip corruption >1000 nodes):** *folded into #6* — it is the packed/WASM face of the same misalignment. Fixing the builders to node-order metadata makes the existing `get_tooltip(node_idx)` correct; **no WASM change** (the investigated `data_indices[node_idx]` WASM lookup was explicitly rejected). Packed-path regression tests added. Commit `5324ae3`.
+> - **D2 / #7 (faceted Bin/Violin extent drift):** generalized `fix_kde_extents_for_facet` → `fix_transform_extents_for_facet` (`render/prepare.rs`) to dispatch over Kde/Bin/Violin via transform-layer `global_extent` helpers, over the **full pre-facet dataset**, covering the **multi-group/hue** case the old `groupby.is_some()` early-return blocked; also fixed a latent int-column blindness. `ViolinSpec` gained `extent`/`shared_extent`. Bin nices; KDE/Violin pin to the raw global min/max (regression-guarded). Commits `4783bcd`, `5c72e64`, `8d4d74a`; e2e goldens commit `32ad11a`.
+> - **D10 / #8 (Joint/ClusterMap/Repeat title → inner panel):** consolidated figure-chrome into `_CompositeBase` and reparented JointChart/ClusterMapChart/RepeatChart onto it (`.properties(title=)` now stores figure-level, never reaches inner panels); threaded chrome into the 3 grid `to_svg` sites (**this closes the forward-caution above** — those sites now pass `**chrome_kwargs(...)`); added full interactive on-canvas parity via a Rust `figure_title_nodes` helper (no WASM change) + a single shared `_inject_figure_chrome`; fixed `to_html` to read the figure title; closed the factory `properties={}` dict-path split. Caption absolute-y matches SVG for the concat family; Joint/ClusterMap caption-y is gated on the pre-existing **W5** interactive-layout limitation (title/subtitle parity is exact). Commits `c3d1b56`, `c4b1716`, `e72b25a`, `d1efe2c`.
+> - **N2 (selection `stroke_width` whole-scene rejection):** **could not be reproduced** from source — the contract is sound end-to-end (`ChannelName::StrokeWidth`/`EncodingValue::StrokeWidth`, matching snake_case serde, conditional application, existing W7 tests). Dropped as not-real (the post-mortem itself overclaimed it); no code change.
+> Full suite after: **pytest 5688 / 0; cargo 2427 / 0.**
+
 ---
 
 ## Python Silent Drops (accepted by Python API, never reach Rust)
@@ -353,3 +361,52 @@ below.
 | [#23](https://github.com/chris-santiago/ferrum/issues/23) | feat | enhancement (public mark_polygon) |
 
 Note on verification upgrades: **FA-11** was reclassified from drift-prevention to an active **bug** (`fill_opacity` is silently unread on `mark_line`). **B5-followup** is a Python-side gap only (Rust `AxisStyleSpec` already carries `label_flush`).
+
+---
+
+## 2026-06-19 — issues #6/#7/#8 class-fix + round-5 convergence (`fix/archaeology-bugs-6-7-8-class`)
+
+The three GH-issue bugs were fixed **as defect classes, not instances** (per the session postmortem), then an unscoped review/audit sweep surfaced four more findings (A–D) that were also fixed. The branch ran an autonomous review→remediate loop (rounds 1–5).
+
+**Issue bugs resolved (class-level, pending merge):**
+
+- **#6 / D7** (polar bar tooltip/href misalign) → **RESOLVED as a class.** Root cause was builders constructing the node list with skips/fan-out/grouping while metadata stayed indexed by source row. Introduced `MarkNodes` accumulator (`render/mark_nodes.rs`) so a node cannot be added without its source row; migrated all 14 row-skipping / multi-node / group builders; added a construction-seam `debug_assert_nodes_metadata_aligned` guard over all 5 channels (tooltips/hrefs/descriptions/data_indices/keys). Also fixed `label.rs` leader-line multi-node misalignment and geoshape/image metadata-drop found by the round-1 sweep.
+- **#7 / D2** (faceted Bin/Violin extent drift) → **RESOLVED as a class.** `fix_transform_extents_for_facet` (`render/prepare.rs`) now pins the pre-facet shared extent for **all** extent-carrying transforms: Kde, Bin, Violin, Kde2D, Bin2D, DensityData (each with a `global_extent` helper). `ViolinSpec.shared_extent` wired end-to-end (R6).
+- **#8 / D10** (Joint/ClusterMap title → inner panel) → **RESOLVED.** Single chrome home in `_CompositeBase`; Rust `figure_title_nodes` PyO3 helper sharing `FigureChrome::layout` with the SVG path; `_inject_figure_chrome` injects title nodes + offsets children for every composite; factory-dict chrome split in `_overrides`.
+
+**Round-5 unscoped-sweep findings (all fixed on this branch):**
+
+- **A (CRITICAL)** — `_merge_packed_data` tooltip-table misparse (assumed a u32 length-prefix; real format has none) dropped/blanked panels for any interactive composite with a >1000-mark child. Fixed: scan the table field-by-field mirroring `scene_load.rs`. Corrected 3 tests that enshrined the wrong byte format.
+- **B (HIGH)** — packed GPU instances never received the per-panel concat `(dx, dy)`, so packed marks rendered at the top-left child's coords while scissored to their own offset plot_area. Fixed: `_offset_packed_batch_xy` + per-child `child_xy_offsets` threaded through all 5 merge call sites.
+- **C** — `_core.pyi` stub drift (wrong `Violin extent=`; ~19 classes + ~16 functions undeclared). Fixed + a bidirectional stub↔module parity test.
+- **D** — Rust hardening: clamped the `scene_load.rs` tooltip-scan slice (latent panic), recorded the actually-loaded `instance_count` (no phantom GPU instances), unified `violin`/`density_data` `global_extent` to `coerce_to_float64` (int-field shared-extent gap).
+
+**Known gaps recorded during round-5 P4 triage (pre-existing, not fixed here):**
+
+| ID | Sev | Item |
+|---|---|---|
+| KG-1 | S2 | **`groupby` type asymmetry across sibling transforms** — `Violin.groupby` is `Vec<String>` (list) while `Kde`/`Kde2D`/`Smooth.groupby` is `Option<String>` (single). The `_core.pyi` stub faithfully mirrors this (`Optional[List[str]]` vs `Optional[str]`); the asymmetry itself is a Rust-API sibling-drift issue (same family as **FA-7**). Defer: unifying requires an API decision + Python-layer changes; no active bug (callers use the form each accepts). |
+| KG-2 | S2 | **`global_extent` residual drift** — after F1, the six extent helpers split into a 1-D inline-fold family (kde/violin/density_data) and a 2-D extracted-helper family (bin_2d/kde_2d `raw_axis_extent`, duplicated verbatim) + bin's `raw_float64_extent`. The fold logic is now uniform; hoisting `raw_axis_extent` into `numeric_util` alongside `coerce_to_float64` would remove the last duplication. Defer: pre-existing, cosmetic, drift-prevention only. |
+| KG-3 | S1 | **`MarkBatch.keys`** — built and carried through the packed/interactive path but consumed only by interactive linked-selection (interactive-only); confirm a consumer exists or mark dead. Overlaps the round-1 guard work (keys now in the alignment guard). |
+| KG-4 | S1 | **per-mark `description`** — populated for SVG `aria`/`<desc>` but has no WASM/interactive consumer (SVG-only). Same family as the deferred geoshape/image/label **hover-tooltip** limitation (round-3 non-goal). |
+| KG-5 | S1 | **dead WASM API** — `onWheel`/`onPan`/`resetZoom`/`selectInRect` exported but unused by the current JS loader (adjacent to issue **#17** share_x/y dead-API cleanup). |
+| — | — | **`deny_unknown_fields` asymmetry** (mark_style/coord/facet/position silently drop unknown dict keys while title/axis/legend fail loud) is **already tracked as issue [#2](https://github.com/chris-santiago/ferrum/issues/2) (B6)** — not re-filed. |
+
+---
+
+## 2026-06-20 — convergence (rounds 7–12, `fix/archaeology-bugs-6-7-8-class`)
+
+The autonomous review→remediate loop ran to convergence: a round-12 unscoped sweep (5 chris-code agents — rust/python quality + scene-pipeline/interactive/pyo3 audits) surfaced **zero in-class correctness defects**. Final suite: cargo `ferrum-core` 1603 + `ferrum-wasm` 405 + pytest 5774, all green.
+
+**Classes closed (verified across rounds):** #6 metadata/node alignment (MarkNodes + 5-channel seam guard, all builders); #7 faceted transform-extent, **completed to all extent-DERIVING transforms** (Hex/Raster/DataBin added round-7 to the carrying set Kde/Bin/Violin/Kde2D/Bin2D/DensityData); #8 composite figure-title; round-5 findings A (packed tooltip-table misparse), B (per-panel packed dx/dy offset), C (`_core.pyi` stub drift → now guarded by a **programmatic** live-vs-stub signature-parity test), D (scene_load panic/instance-count hardening, violin/density `global_extent` coerce); the **faceted SHARED-SCALE class across EVERY data-driven channel** — positional x/y (round-7 T4, foundational) + categorical data-aware sort (round-9 T1) + continuous color/size/opacity (round-9 T3) + categorical color (round-9 T3 follow-up) + **shape** (round-11, the last channel); plus the pre-existing interactive **conditional/crossfilter packed-ordering** bug (round-7 T3, user-approved on-branch).
+
+**New known gaps (pre-existing, out of the remediated classes — recorded, NOT fixed on this branch).** All four filed as GitHub issues (2026-06-20): KG-6 → [#24](https://github.com/chris-santiago/ferrum/issues/24), KG-7 → [#25](https://github.com/chris-santiago/ferrum/issues/25), KG-8 → [#26](https://github.com/chris-santiago/ferrum/issues/26), KG-9 → [#27](https://github.com/chris-santiago/ferrum/issues/27).
+
+| ID | Sev | Issue | Item |
+|---|---|---|---|
+| KG-6 | S2 | [#24](https://github.com/chris-santiago/ferrum/issues/24) | **`facet(col=X)` defaults to `ncols=1`** → panels stack vertically instead of side-by-side (Altair/seaborn convention). Commit `226ba24` (2026-05-11), an established tested contract (`test_d2_facet.py:333` passes `ncols=3` explicitly). NOT a col/row swap — `row=`/`col=` both wrap with `ncols=1`. Fix = infer `ncols = n_distinct(col)` for col-only wrap (grid mode already does). Facet LAYOUT subsystem, not scale resolution. (`src/ferrum/chart.py:2822`.) **Default-layout change → user decision + golden blast radius.** |
+| KG-7 | S2 | [#25](https://github.com/chris-santiago/ferrum/issues/25) | **`ShapeKind::Square` coordinate render bug** — square glyph marks can land outside the panel clip bounds in faceted charts (discovered during round-11 shape-test development; the test discriminates on `<circle>` cy to sidestep it). Rendering/coordinate issue in the point/shape mark path, not scale resolution. Pre-existing. |
+| KG-8 | S1 | [#26](https://github.com/chris-santiago/ferrum/issues/26) | **shape encoding ignores `sort`** — `build_shape_scale` never honored `EncodingSpec.sort` (orders glyphs by first-appearance only). Pre-existing; sibling of the positional/color sort paths. |
+| KG-9 | S1 | [#27](https://github.com/chris-santiago/ferrum/issues/27) | **pyo3 stub fidelity nits** — `EncodingSpec.condition` is a ctor kwarg with no readable getter (write-only); 5 stub defaults are concrete where the live signature shows `=...` (all verified to match the true runtime default, so the stub is *more* informative, not wrong). No caller impact. |
+
+KG-1..KG-5 above remain open/inactive. The faceted shared-scale fix gates strictly on `ResolveMode::Shared` (the documented default) for positional channels and on `spec.facet.is_some()` for the non-positional channels (which have no per-channel independent option); `Independent`, explicit `Scale(domain=)`, and non-faceted output are byte-identical throughout.

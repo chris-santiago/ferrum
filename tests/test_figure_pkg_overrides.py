@@ -224,10 +224,15 @@ class TestHeatmap:
 
 class TestPairplot:
     def test_properties_title(self, iris_df):
+        # Chained ``.properties(title=)`` on a RepeatChart now stores the
+        # title at the figure level (consolidated chrome, archaeology #8)
+        # rather than leaking it into the template panel's SVG.  The
+        # figure-level SVG band for RepeatChart is threaded separately
+        # (Task 13); here we assert the structural contract.
         chart = fm.pairplot(iris_df, vars=["sl", "sw"])
         updated = chart.properties(title="Pair Custom")
-        svg = updated.to_svg()
-        assert "Pair Custom" in svg
+        assert updated._figure_title == "Pair Custom"
+        assert updated.template._title is None
 
     def test_override_properties_on_pairplot(self, iris_df):
         svg = fm.pairplot(

@@ -20,6 +20,43 @@
 
 use ferrum_scene::{Color, FillStroke, MarkBatchKind, SceneGraph, SceneNode};
 
+// ── Wire-format stride constants ────────────────────────────────────────────
+//
+// These are the single authoritative definition of the packed GPU-instance
+// byte layout shared between this producer and `ferrum-wasm/src/scene_load.rs`
+// (the consumer).  The consumer keeps its own `std::mem::size_of`-derived
+// stride but has a compile-time assertion that its struct size equals these
+// canonical values.  Any future layout change must update BOTH crates.
+//
+// Canonical values (must equal current literals):
+//   CIRCLE_FLOATS = 16   → CIRCLE_STRIDE = 64 bytes
+//   RECT_FLOATS   = 18   → RECT_STRIDE   = 72 bytes
+//   FIELD_X_OFFSET = 0   (X is f32[0] in both layouts)
+//   FIELD_Y_OFFSET = 4   (Y is f32[1], one f32 = 4 bytes later)
+
+/// Number of f32 fields per packed circle instance.
+pub const CIRCLE_FLOATS: usize = 16;
+/// Number of f32 fields per packed rect instance.
+pub const RECT_FLOATS: usize = 18;
+/// Byte stride for one packed circle instance (16 × 4 = 64).
+pub const CIRCLE_STRIDE: usize = CIRCLE_FLOATS * 4;
+/// Byte stride for one packed rect instance (18 × 4 = 72).
+pub const RECT_STRIDE: usize = RECT_FLOATS * 4;
+/// Byte offset of the X-position field within a packed instance (f32[0]).
+// Format-documentation const; referenced only under #[cfg(test)]. The consumer
+// (ferrum-wasm) and the Python mirror encode this offset by value, not by importing
+// this symbol (the enclosing module is pub(crate)), so it reads as dead code in a
+// normal build.
+#[allow(dead_code)]
+pub const FIELD_X_OFFSET: usize = 0;
+/// Byte offset of the Y-position field within a packed instance (f32[1]).
+// Format-documentation const; referenced only under #[cfg(test)]. The consumer
+// (ferrum-wasm) and the Python mirror encode this offset by value, not by importing
+// this symbol (the enclosing module is pub(crate)), so it reads as dead code in a
+// normal build.
+#[allow(dead_code)]
+pub const FIELD_Y_OFFSET: usize = 4;
+
 /// Minimum node count for a batch to qualify for packing.
 const PACK_THRESHOLD: usize = 1000;
 
@@ -168,8 +205,7 @@ fn all_rects(nodes: &[SceneNode]) -> bool {
 ///   stroke_r, stroke_g, stroke_b, stroke_a,
 ///   stroke_width, opacity, stroke_opacity, stroke_dash, angle
 pub fn pack_circle_batch(nodes: &[SceneNode]) -> Vec<u8> {
-    const FLOATS_PER_CIRCLE: usize = 16;
-    let mut buf = Vec::with_capacity(nodes.len() * FLOATS_PER_CIRCLE * 4);
+    let mut buf = Vec::with_capacity(nodes.len() * CIRCLE_STRIDE);
 
     for node in nodes {
         if let SceneNode::Circle { cx, cy, r, style } = node {
@@ -199,8 +235,7 @@ pub fn pack_circle_batch(nodes: &[SceneNode]) -> Vec<u8> {
 ///   stroke_r, stroke_g, stroke_b, stroke_a,
 ///   stroke_width, opacity, stroke_opacity, stroke_dash, angle
 pub fn pack_rect_batch(nodes: &[SceneNode]) -> Vec<u8> {
-    const FLOATS_PER_RECT: usize = 18;
-    let mut buf = Vec::with_capacity(nodes.len() * FLOATS_PER_RECT * 4);
+    let mut buf = Vec::with_capacity(nodes.len() * RECT_STRIDE);
 
     for node in nodes {
         if let SceneNode::Rect {
@@ -359,9 +394,9 @@ mod tests {
             .collect();
 
         assert_eq!(floats.len(), 16);
-        // center
-        assert!((floats[0] - 100.0).abs() < 1e-6, "center_x");
-        assert!((floats[1] - 200.0).abs() < 1e-6, "center_y");
+        // center: X at FIELD_X_OFFSET (byte 0 → float index 0), Y at FIELD_Y_OFFSET (byte 4 → float index 1)
+        assert!((floats[FIELD_X_OFFSET / 4] - 100.0).abs() < 1e-6, "center_x");
+        assert!((floats[FIELD_Y_OFFSET / 4] - 200.0).abs() < 1e-6, "center_y");
         // radius
         assert!((floats[2] - 10.0).abs() < 1e-6, "radius");
         // fill_color: (255/255, 0, 0, (255/255)*fill_opacity) = (1.0, 0.0, 0.0, 1.0)
@@ -579,6 +614,36 @@ mod tests {
         assert!(batch.tooltips.is_none(), "tooltips cleared");
     }
 
+    // ── R2: stride-enforcement tests ─────────────────────────────────────
+    // These tests assert that packing exactly one instance produces exactly
+    // CIRCLE_STRIDE / RECT_STRIDE bytes.  If the push sequence in
+    // pack_circle_batch / pack_rect_batch ever drifts from the named consts,
+    // the test fails — not silently corrupt interactive renders.
+
+    #[test]
+    fn pack_circle_batch_single_instance_equals_circle_stride() {
+        let nodes = vec![SceneNode::Circle {
+            cx: 10.0,
+            cy: 20.0,
+            r: 5.0,
+            style: test_style(128, 1.0),
+        }];
+        assert_eq!(pack_circle_batch(&nodes).len(), CIRCLE_STRIDE);
+    }
+
+    #[test]
+    fn pack_rect_batch_single_instance_equals_rect_stride() {
+        let nodes = vec![SceneNode::Rect {
+            x: 10.0,
+            y: 20.0,
+            w: 30.0,
+            h: 40.0,
+            style: test_style(128, 1.0),
+            corner_radius: 0.0,
+        }];
+        assert_eq!(pack_rect_batch(&nodes).len(), RECT_STRIDE);
+    }
+
     #[test]
     fn stroke_dash_index_maps_correctly() {
         assert!((stroke_dash_index(&None) - 0.0).abs() < 1e-6);
@@ -707,5 +772,212 @@ mod tests {
             "rect stroke alpha must be raw ({expected}), got {} — shader handles opacity/stroke_opacity",
             floats[12]
         );
+    }
+
+    // ── N1 packed-path regression: node-order metadata survives round-trip ──
+    //
+    // Bug #6/N1: builders that skipped rows or emitted multiple nodes per row
+    // called `build_metadata(ctx)` (full per-row vectors) so the packed string
+    // table had metadata in DATA ORDER, not NODE ORDER.  `get_tooltip(node_idx)`
+    // and `tooltip_field_value(bytes, i, ...)` both index by node position, so
+    // packed batches with non-identity render order silently showed wrong tooltips.
+    //
+    // After Tasks 2–6, every builder uses `build_metadata_for_indices`, which
+    // produces metadata in NODE ORDER: `tooltips[k]` is always the tooltip for
+    // node `k` (whose source row is `data_indices[k]`).  The packed string table
+    // is therefore also in node order.  These tests prove the round-trip is
+    // correct: decode-by-node-position yields the right value for reordered and
+    // multi-node-per-row batches alike, with no `data_indices` remap.
+
+    /// Decode `tooltip_bytes` (the packed string table produced by `pack_tooltips`)
+    /// for node at position `node_idx`.  Mirrors the logic in
+    /// `ferrum_wasm::scene_load::parse_tooltip_json` / `tooltip_field_value`.
+    fn decode_tooltip(tooltip_bytes: &[u8], node_idx: usize, field_idx: usize) -> String {
+        let mut offset = 0usize;
+        // num_fields
+        let num_fields = u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        // skip field names
+        for _ in 0..num_fields {
+            let slen = u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4 + slen;
+        }
+        // skip to node_idx row
+        for _ in 0..node_idx * num_fields {
+            let slen = u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4 + slen;
+        }
+        // skip to field_idx within the row
+        for _ in 0..field_idx {
+            let slen = u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4 + slen;
+        }
+        let slen = u32::from_le_bytes(tooltip_bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        std::str::from_utf8(&tooltip_bytes[offset..offset + slen]).unwrap().to_string()
+    }
+
+    /// Locate the tooltip section inside the full packed-bytes output and return
+    /// a slice starting at the `[num_fields: u32]` header.  Panics if the batch
+    /// does not have `HAS_TOOLTIPS` set.
+    fn tooltip_bytes_from_packed(packed: &[u8], n_nodes: usize, has_data_indices: bool) -> &[u8] {
+        let header = 20usize;
+        let instance_bytes = n_nodes * 16 * 4; // circles only in these tests
+        let flags = u32::from_le_bytes(packed[16..20].try_into().unwrap());
+        assert!(flags & HAS_TOOLTIPS != 0, "HAS_TOOLTIPS flag must be set");
+        let di_bytes = if has_data_indices { n_nodes * 4 } else { 0 };
+        &packed[header + instance_bytes + di_bytes..]
+    }
+
+    /// N1 case A: reordered batch (render order != data order).
+    ///
+    /// Scenario: 1100 data rows; the builder emitted nodes in REVERSED render
+    /// order (as if a sort was applied).  `data_indices` is [1099, 1098, …, 0].
+    /// Tooltips are built in NODE ORDER by `build_metadata_for_indices`, so
+    /// `tooltips[k] = row data_indices[k] = row (1099 - k)`.
+    ///
+    /// After packing, decoding the string table by node position `k` must yield
+    /// the tooltip for node `k` (= source row `1099 - k`), NOT for data row `k`.
+    /// No `data_indices` remap is applied by the consumer — the packed table is
+    /// already in node order.
+    #[test]
+    fn n1_packed_reordered_batch_node_order_tooltips_round_trip() {
+        use ferrum_scene::*;
+
+        let n = PACK_THRESHOLD + 100; // 1100 nodes, well above threshold
+
+        // Nodes in render order (reversed from data order).
+        let nodes: Vec<SceneNode> = (0..n)
+            .map(|k| SceneNode::Circle {
+                cx: k as f64,
+                cy: k as f64,
+                r: 3.0,
+                style: test_style(70, 1.0),
+            })
+            .collect();
+
+        // data_indices[k] = n-1-k  (render order is reversed vs data order)
+        let data_indices: Vec<usize> = (0..n).map(|k| n - 1 - k).collect();
+
+        // Tooltips in NODE ORDER: tooltips[k] describes node k, whose source row
+        // is data_indices[k] = n-1-k.  This is what build_metadata_for_indices
+        // produces after the Task 2-6 migration.
+        let tooltips: Vec<TooltipContent> = (0..n)
+            .map(|k| {
+                let source_row = n - 1 - k;
+                TooltipContent {
+                    fields: vec![TooltipField {
+                        name: "row".into(),
+                        value: format!("src_{source_row}"),
+                    }],
+                }
+            })
+            .collect();
+
+        let mut scene = test_scene_with_metadata(
+            MarkBatchKind::Point,
+            nodes,
+            Some(data_indices),
+            Some(tooltips),
+        );
+
+        let packed = extract_packed_bytes(&mut scene);
+
+        // Verify flags
+        let flags = u32::from_le_bytes(packed[16..20].try_into().unwrap());
+        assert_eq!(flags, HAS_DATA_INDICES | HAS_TOOLTIPS);
+
+        let tip_bytes = tooltip_bytes_from_packed(&packed, n, true);
+
+        // The consumer calls get_tooltip(node_idx) which decodes by node position.
+        // For node k, expected value is "src_{n-1-k}" (the source row for that node).
+        for k in [0, 1, n / 2, n - 2, n - 1] {
+            let expected_src = n - 1 - k;
+            let decoded = decode_tooltip(tip_bytes, k, 0);
+            assert_eq!(
+                decoded,
+                format!("src_{expected_src}"),
+                "node {k}: expected src_{expected_src} but decoded '{decoded}' — node-position indexing must yield node-order metadata",
+            );
+        }
+    }
+
+    /// N1 case B: multi-node-per-row (Cross-like) batch.
+    ///
+    /// Scenario: 600 data rows; each row emits 2 nodes (e.g. a Cross shape).
+    /// Total nodes = 1200 (above threshold).  `data_indices` has repeats:
+    /// [0, 0, 1, 1, 2, 2, …, 599, 599].
+    /// Tooltips are built in NODE ORDER: `tooltips[k]` is for source row
+    /// `data_indices[k]`, so every pair of consecutive nodes shares the same
+    /// tooltip (both point to the same data row).
+    ///
+    /// After packing, decoding by node position must yield the correct value
+    /// for every node, including the second copy of each row's tooltip.
+    #[test]
+    fn n1_packed_multi_node_per_row_cross_like_round_trip() {
+        use ferrum_scene::*;
+
+        let n_rows = 600usize;
+        let n_nodes = n_rows * 2; // 2 nodes per row, total 1200 > PACK_THRESHOLD
+
+        // Build nodes: 2 circle nodes per row (different cx to distinguish them).
+        let nodes: Vec<SceneNode> = (0..n_rows)
+            .flat_map(|row| {
+                [
+                    SceneNode::Circle { cx: row as f64, cy: 0.0, r: 3.0, style: test_style(70, 1.0) },
+                    SceneNode::Circle { cx: row as f64, cy: 5.0, r: 3.0, style: test_style(70, 1.0) },
+                ]
+            })
+            .collect();
+
+        // data_indices: each row appears twice (both nodes map to the same source row).
+        let data_indices: Vec<usize> = (0..n_rows).flat_map(|row| [row, row]).collect();
+
+        // Tooltips in NODE ORDER: tooltips[k] = tooltip for node k = tooltip for
+        // data_indices[k]-th row.  Because each row appears twice, every pair of
+        // consecutive tooltips has the same source-row label.
+        let tooltips: Vec<TooltipContent> = data_indices
+            .iter()
+            .map(|&src_row| TooltipContent {
+                fields: vec![TooltipField {
+                    name: "row".into(),
+                    value: format!("src_{src_row}"),
+                }],
+            })
+            .collect();
+
+        assert_eq!(nodes.len(), n_nodes);
+        assert_eq!(data_indices.len(), n_nodes);
+        assert_eq!(tooltips.len(), n_nodes);
+
+        let mut scene = test_scene_with_metadata(
+            MarkBatchKind::Point,
+            nodes,
+            Some(data_indices),
+            Some(tooltips),
+        );
+
+        let packed = extract_packed_bytes(&mut scene);
+        let flags = u32::from_le_bytes(packed[16..20].try_into().unwrap());
+        assert_eq!(flags, HAS_DATA_INDICES | HAS_TOOLTIPS);
+
+        let tip_bytes = tooltip_bytes_from_packed(&packed, n_nodes, true);
+
+        // For every data row, check both of its nodes decode to "src_{row}".
+        for row in [0, 1, n_rows / 2, n_rows - 2, n_rows - 1] {
+            let node_a = row * 2;
+            let node_b = row * 2 + 1;
+            let expected = format!("src_{row}");
+            let dec_a = decode_tooltip(tip_bytes, node_a, 0);
+            let dec_b = decode_tooltip(tip_bytes, node_b, 0);
+            assert_eq!(
+                dec_a, expected,
+                "node {node_a} (first copy of row {row}): expected '{expected}', got '{dec_a}'",
+            );
+            assert_eq!(
+                dec_b, expected,
+                "node {node_b} (second copy of row {row}): expected '{expected}', got '{dec_b}'",
+            );
+        }
     }
 }

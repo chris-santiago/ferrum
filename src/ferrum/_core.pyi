@@ -24,7 +24,7 @@ MarkStr = Literal[
     "ribbon",
 ]
 
-def process_batch(data: Any) -> Any:
+def process_batch(reader: Any) -> Any:
     """
     Convert a Python record batch through the ferrum transform pipeline.
 
@@ -38,7 +38,33 @@ def process_batch(data: Any) -> Any:
 class EncodingSpec:
     field: str
     type_: Optional[str]
-    def __init__(self, field: str, type_: Optional[DataTypeStr] = None) -> None: ...
+    scale: Optional[Any]
+    title: Optional[str]
+    axis: Optional[Any]
+    legend: Optional[Any]
+    sort: Optional[Any]
+    stack: Optional[str]
+    impute: Optional[Any]
+    scheme: Optional[str]
+    format: Optional[str]
+    format_type: Optional[str]
+    def __init__(
+        self,
+        field: str,
+        type_: Optional[DataTypeStr] = None,
+        *,
+        scale: Optional[Any] = None,
+        title: Optional[str] = None,
+        axis: Optional[Any] = None,
+        legend: Optional[Any] = None,
+        sort: Optional[Any] = None,
+        stack: Optional[str] = None,
+        condition: Optional[Any] = None,
+        impute: Optional[Any] = None,
+        scheme: Optional[str] = None,
+        format: Optional[str] = None,
+        format_type: Optional[str] = None,
+    ) -> None: ...
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
@@ -153,17 +179,19 @@ class LogScale:
 
 class TimeScale:
     domain: list[float]
-    range: list[float]
+    range: list[float] | None
     clamp: bool
     padding: float | None
+    utc: bool
     def __init__(
         self,
         *,
         domain: Sequence[float],
-        range: Sequence[float],
+        range: Sequence[float] | None = None,
         clamp: bool = False,
         nice: bool = False,
         padding: float | None = None,
+        utc: bool = False,
     ) -> None: ...
     def scale(self, x: float) -> float: ...
     def invert(self, y: float) -> float: ...
@@ -406,6 +434,7 @@ class Bin:
         extent: Optional[Tuple[float, float]] = None,
         nice: bool = True,
         cumulative: bool = False,
+        shared_extent: bool = False,
         groupby: Optional[str] = None,
         name: Optional[str] = None,
     ) -> None: ...
@@ -416,8 +445,8 @@ class Bin2D:
         x: str,
         y: str,
         *,
-        bins_x: Union[str, int, float] = "sturges",
-        bins_y: Union[str, int, float] = "sturges",
+        bins_x: Optional[Union[str, int, float]] = None,
+        bins_y: Optional[Union[str, int, float]] = None,
         extent_x: Optional[Tuple[float, float]] = None,
         extent_y: Optional[Tuple[float, float]] = None,
         cumulative: bool = False,
@@ -439,10 +468,15 @@ class Kde:
         self,
         field: str,
         *,
-        bandwidth: object = "scott",  # str ("scott"|"silverman") or float
+        bandwidth: object = None,  # str ("scott"|"silverman") or float; None → scott
+        bw_adjust: float = 1.0,
         n: int = 512,
         extent: Optional[Tuple[float, float]] = None,
         cumulative: bool = False,
+        shared_extent: bool = False,
+        kernel: str = "gaussian",
+        groupby: Optional[str] = None,
+        name: Optional[str] = None,
     ) -> None: ...
 
 class Kde2D:
@@ -451,9 +485,10 @@ class Kde2D:
         x: str,
         y: str,
         *,
-        bandwidth: object = "scott",
+        bandwidth: object = None,  # str ("scott"|"silverman") or float; None → scott
         n: int = 128,
         extent: Optional[Tuple[float, float, float, float]] = None,
+        groupby: Optional[str] = None,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -482,14 +517,18 @@ class Smooth:
         x_bins: Optional[int] = None,
         x_estimator: Optional[str] = None,
         output: str = "fitted",
+        inject_zero_ref: bool = False,
+        inject_metrics: bool = False,
+        groupby: Optional[str] = None,
         name: Optional[str] = None,
+        x_range: Optional[Tuple[float, float]] = None,
     ) -> None: ...
 
 class AggregateOp:
     def __init__(self, field: str, fn_: str, as_: str) -> None: ...
 
 class Aggregate:
-    def __init__(self, ops: List[AggregateOp], *, groupby: Optional[List[str]] = None) -> None: ...
+    def __init__(self, ops: List[AggregateOp], *, groupby: Optional[List[str]] = None, name: Optional[str] = None) -> None: ...
 
 class Summary:
     def __init__(
@@ -501,6 +540,7 @@ class Summary:
         ci: float = 0.95,
         n_boot: int = 1000,
         seed: int = 0,
+        name: Optional[str] = None,
     ) -> None: ...
 
 class Outliers:
@@ -531,9 +571,11 @@ class Violin:
         field: str,
         *,
         groupby: List[str] = ...,
-        bandwidth: object = "scott",  # str ("scott"|"silverman") or float
+        bandwidth: object = None,  # str ("scott"|"silverman") or float; None → scott
+        bw_adjust: float = 1.0,
         n: int = 256,
         width: float = 0.4,
+        shared_extent: bool = False,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -557,7 +599,7 @@ class Raster:
         *,
         aggregate: str = "count",
         field: Optional[str] = None,
-        resolution: Union[str, int, Tuple[int, int]] = "screen",
+        resolution: Optional[Union[str, int, Tuple[int, int]]] = None,
         min_count: Optional[int] = None,
         log_scale: bool = False,
         name: Optional[str] = None,
@@ -584,6 +626,8 @@ class Swarm:
         point_size: float = 5.0,
         spacing: float = 1.0,
         side: str = "both",
+        orient: str = "vertical",
+        dodge: Optional[str] = None,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -673,6 +717,187 @@ class Robust:
         max_iter: int = 25,
         tol: float = 1e-8,
         output: str = "fitted",
+        inject_zero_ref: bool = False,
+        inject_metrics: bool = False,
+        name: Optional[str] = None,
+        x_range: Optional[Tuple[float, float]] = None,
+    ) -> None: ...
+
+# ---------- Data transforms (Vega-lite-style, declared missing from stub) ----------
+
+class DataAggregate:
+    def __init__(
+        self,
+        *,
+        groupby: Optional[List[str]] = None,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class DataBin:
+    def __init__(
+        self,
+        field: str,
+        *,
+        as_: Optional[str] = None,
+        maxbins: Optional[int] = None,
+        step: Optional[float] = None,
+        nice: bool = True,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class DataCalculate:
+    def __init__(
+        self,
+        expr: str,
+        as_field: str,
+        *,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class DataFilter:
+    def __init__(
+        self,
+        predicate: str,
+        *,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class DataFold:
+    def __init__(
+        self,
+        fields: List[str],
+        *,
+        as_key: str = "key",
+        as_value: str = "value",
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class DataPivot:
+    def __init__(
+        self,
+        field: str,
+        value: str,
+        *,
+        groupby: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+        op: str = "sum",
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class DataStack:
+    def __init__(
+        self,
+        field: str,
+        groupby: List[str],
+        *,
+        offset: str = "zero",
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class DataWindow:
+    def __init__(
+        self,
+        *,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class DensityData:
+    def __init__(
+        self,
+        field: str,
+        *,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class Flatten:
+    def __init__(
+        self,
+        fields: List[str],
+        *,
+        as_: Optional[List[str]] = None,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class Impute:
+    def __init__(
+        self,
+        field: str,
+        *,
+        method: str = "value",
+        value: Optional[float] = None,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class JoinAggregate:
+    def __init__(
+        self,
+        *,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class LoessData:
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        bandwidth: float = 0.3,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class PyIdentity:
+    def __init__(self, name: str) -> None: ...
+
+class ReferenceLine:
+    def __init__(
+        self,
+        x_field: str,
+        y_field: str,
+        *,
+        x: Tuple[float, float] = (0.0, 1.0),
+        y: Tuple[float, float] = (0.0, 1.0),
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class RegressionData:
+    def __init__(
+        self,
+        x: str,
+        y: str,
+        *,
+        method: str = "linear",
+        order: int = 1,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class Sample:
+    def __init__(
+        self,
+        n: int,
+        *,
+        seed: int = 42,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class TimeUnit:
+    def __init__(
+        self,
+        field: str,
+        unit: str,
+        *,
+        utc: bool = False,
+        as_: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None: ...
+
+class TopK:
+    def __init__(
+        self,
+        n: int,
+        field: str,
+        *,
+        op: str = "sum",
+        sort: str = "descending",
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -706,6 +931,7 @@ def render_svg(
     viewport: tuple[float, float],
     theme: Optional[dict] = None,
     config: Optional[dict] = None,
+    chart_config: Optional[dict] = None,
 ) -> str:
     """
     Render a chart spec to an SVG string.
@@ -724,6 +950,7 @@ def render_png(
     viewport: tuple[float, float],
     theme: Optional[dict] = None,
     config: Optional[dict] = None,
+    chart_config: Optional[dict] = None,
 ) -> bytes:
     """
     Render a chart spec to PNG bytes.
@@ -734,6 +961,62 @@ def render_png(
     >>> png_bytes = fm.render_png(chart_spec_json, layout_json, data_batch)
     """
     ...
+
+# ---------- Missing functions (previously undeclared) ----------
+
+def calinski_harabasz_score(x_table: Any, labels: Any) -> float: ...
+def figure_title_nodes(
+    width: float,
+    height: float,
+    *,
+    title: Optional[str] = None,
+    subtitle: Optional[str] = None,
+    caption: Optional[str] = None,
+    left_inset: Optional[float] = None,
+    right_inset: Optional[float] = None,
+    anchor: Optional[str] = None,
+) -> Tuple[str, float, float]: ...
+def mds_classical(
+    x_table: Any,
+    n_components: int,
+    input_type: str = "features",
+    metric: str = "euclidean",
+) -> Any: ...
+def pca_scores(x_table: Any, n_components: Optional[int] = None) -> Any: ...
+def pca_variance(x_table: Any, n_components: Optional[int] = None) -> Any: ...
+def py_rank1d(x_table: Any, algorithm: Any, top_k: Any) -> Any: ...
+def py_rank1d_with_y(x_table: Any, y: Any, algorithm: Any, top_k: Any) -> Any: ...
+def py_rank2d(x_table: Any, algorithm: Any) -> Any: ...
+def py_rankdata_average(x: Any) -> Any: ...
+def py_shapiro_w(x: Any) -> Any: ...
+def rasterize_svg(svg: str, *, scale: float = 2.0) -> bytes: ...
+def render_interactive(
+    spec: Any,
+    data: Any,
+    *,
+    viewport: Any,
+    theme: Any = None,
+    config: Any = None,
+    chart_config: Any = None,
+) -> Tuple[str, bytes]: ...
+def silhouette_samples(x_table: Any, labels: Any, metric: str = "euclidean") -> Any: ...
+def silhouette_score(x_table: Any, labels: Any, metric: str = "euclidean") -> float: ...
+def tsne_embedding(
+    x_table: Any,
+    n_components: int,
+    seed: int,
+    perplexity: Optional[float] = None,
+    learning_rate: Optional[float] = None,
+    n_iter: Optional[int] = None,
+) -> Any: ...
+def umap_embedding(
+    x_table: Any,
+    n_components: int,
+    seed: int,
+    n_neighbors: Optional[int] = None,
+    min_dist: Optional[float] = None,
+    n_epochs: Optional[int] = None,
+) -> Any: ...
 
 # ---------- SVG compositor (Phase 8a Task 11) ----------
 
@@ -841,7 +1124,7 @@ def kendall_tau_b(x: Sequence[float], y: Sequence[float]) -> _KendallResult: ...
 # Arrow arrays are passed as Any (pyarrow is a runtime dep, not a type dep).
 # RecordBatch returns are also typed as Any for the same reason.
 
-def hat_matrix_stats(X: Any, y_true: Any, y_pred: Any) -> Any: ...
+def hat_matrix_stats(x_table: Any, y_true: Any, y_pred: Any) -> Any: ...
 def studentized_residual_no_x(y_true: Any, y_pred: Any) -> Any: ...
 def roc_curve_kernel(y_true: Any, y_score: Any, drop_intermediate: bool) -> Any: ...
 def roc_auc(y_true: Any, y_score: Any) -> float: ...

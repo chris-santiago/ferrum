@@ -30,6 +30,65 @@ fn default_kde2d_n() -> usize {
     128
 }
 
+/// Compute the global 2-D extent `(x_lo, x_hi, y_lo, y_hi)` of `spec.x`/`spec.y`
+/// over the full `batch`.
+///
+/// Returns the RAW per-axis `(min, max)` (no nicing — a KDE surface has no bin
+/// edges to align), matching the data-derived extent `apply_one_group` computes
+/// when `spec.extent` is `None`. Returns `None` when either field is missing,
+/// non-numeric, all values are null/NaN, or an axis range is degenerate
+/// (`lo >= hi` or non-finite).
+///
+/// When `spec.extent` is already set (user-provided), it is returned unchanged so
+/// the faceted pin never clobbers an explicit extent.
+///
+/// This is the pre-facet extent that `render::prepare` uses to pin the 2-D grid
+/// range before partitioning, so every facet panel shares the same KDE grid
+/// axes (see `fix_transform_extents_for_facet`). Reuses `coerce_to_float64` so
+/// integer-typed fields behave the same as they do inside `apply_one_group`.
+pub(crate) fn global_extent(
+    spec: &Kde2DSpec,
+    batch: &RecordBatch,
+) -> Option<(f64, f64, f64, f64)> {
+    // When the caller has already pinned an explicit extent, use it directly.
+    if let Some(e) = spec.extent {
+        return Some(e);
+    }
+    let (x_lo, x_hi) = raw_axis_extent(batch, &spec.x)?;
+    let (y_lo, y_hi) = raw_axis_extent(batch, &spec.y)?;
+    Some((x_lo, x_hi, y_lo, y_hi))
+}
+
+/// Raw per-axis `(min, max)` over a single Float64-coercible column, dropping
+/// null/NaN. Returns `None` on a missing/non-numeric field, an empty cleaned
+/// column, or a degenerate range. Mirrors `kde::global_extent`'s single-axis
+/// fold so the 2-D and 1-D extents agree on the cast/clean/fold convention.
+fn raw_axis_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f64)> {
+    let schema = batch.schema();
+    let idx = schema.index_of(field).ok()?;
+    let arr = crate::transform::numeric_util::coerce_to_float64(
+        batch.column(idx),
+        "kde_2d_global_extent",
+        field,
+    )
+    .ok()?;
+    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
+        if arr.is_null(i) {
+            return (lo, hi);
+        }
+        let v = arr.value(i);
+        if v.is_nan() {
+            return (lo, hi);
+        }
+        (lo.min(v), hi.max(v))
+    });
+    if lo.is_finite() && hi.is_finite() && lo < hi {
+        Some((lo, hi))
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Kde2DSpec {
     pub x: String,
@@ -921,6 +980,73 @@ mod tests {
             err.to_string().contains("ghost"),
             "error message must mention the missing column: {err}"
         );
+    }
+
+    // ── R5: global_extent helper ─────────────────────────────────────────────
+
+    /// `global_extent` returns the RAW per-axis (min, max) over both fields,
+    /// ignoring any groupby and applying no nicing.
+    #[test]
+    fn kde_2d_global_extent_returns_raw_per_axis_range() {
+        pyo3::Python::initialize();
+        // x spans 0.3..9.7, y spans -2.0..5.0; no nicing should be applied.
+        let xs = vec![0.3, 0.5, 1.2, 4.8, 9.7];
+        let ys = vec![-2.0, 0.0, 1.0, 3.0, 5.0];
+        let spec = Kde2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n: 16,
+            extent: None,
+            groupby: None,
+            name: None,
+        };
+        let b = batch_xy(xs, ys);
+        let ext = super::global_extent(&spec, &b);
+        assert_eq!(
+            ext,
+            Some((0.3, 9.7, -2.0, 5.0)),
+            "Kde2D global_extent must be the raw per-axis (xmin, xmax, ymin, ymax)"
+        );
+    }
+
+    /// `global_extent` returns the explicit extent unchanged when `spec.extent`
+    /// is already set, so the faceted pin never clobbers a user value.
+    #[test]
+    fn kde_2d_global_extent_explicit_passthrough() {
+        pyo3::Python::initialize();
+        let spec = Kde2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n: 16,
+            extent: Some((-100.0, 100.0, -50.0, 50.0)),
+            groupby: None,
+            name: None,
+        };
+        let b = batch_xy(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 2.0]);
+        assert_eq!(
+            super::global_extent(&spec, &b),
+            Some((-100.0, 100.0, -50.0, 50.0)),
+            "global_extent must return the explicit extent unchanged"
+        );
+    }
+
+    /// `global_extent` returns None when an axis field is missing.
+    #[test]
+    fn kde_2d_global_extent_missing_field_returns_none() {
+        pyo3::Python::initialize();
+        let spec = Kde2DSpec {
+            x: "ghost".into(),
+            y: "y".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n: 16,
+            extent: None,
+            groupby: None,
+            name: None,
+        };
+        let b = batch_xy(vec![0.0, 1.0], vec![0.0, 1.0]);
+        assert_eq!(super::global_extent(&spec, &b), None);
     }
 
     #[test]

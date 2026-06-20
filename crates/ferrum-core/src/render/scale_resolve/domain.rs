@@ -7,6 +7,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::render::{RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
+use crate::transform::core::FINAL_OUTPUT_KEY;
 
 /// Result of looking up a field across the primary batch and named
 /// transform outputs. Carries both the source batch and the resolved
@@ -364,8 +365,8 @@ fn sort_domain_by_aggregate(
 /// Extent rule:
 ///   - If `primary_batch` contains the field, use it as the starting
 ///     extent (preserves single-batch / faceted-panel semantics —
-///     `FINAL_OUTPUT_KEY` is NOT unioned, so per-panel scales remain
-///     independent when nothing else references a named output).
+///     `FINAL_OUTPUT_KEY` is NOT unioned by default, so per-panel scales
+///     remain independent when nothing else references a named output).
 ///   - Additionally union the field's extent across every named output
 ///     that some layer references via `data_source`. Required when a
 ///     layer's `data_source` points at a named transform whose output
@@ -377,6 +378,14 @@ fn sort_domain_by_aggregate(
 ///     unioning across all named outputs that contain it (Phase 8b
 ///     composite-mark rule — e.g. boxplot whisker fields living in the
 ///     `box` named output).
+///   - When `include_final` is set (faceted chart, this channel resolves
+///     `ResolveMode::Shared`), the global all-panels batch at
+///     [`FINAL_OUTPUT_KEY`] is *also* unioned even though the field is
+///     present in `primary_batch` (the per-panel partition). This makes a
+///     faceted raw field's positional domain span every panel, so marks
+///     scale through the same global domain the shared axis displays
+///     (T4 fix). Non-faceted and `Independent`-mode callers pass `false`,
+///     keeping the per-panel-only behavior byte-identical.
 ///   - The paired field (x2/y2) follows the same lookup discipline.
 pub(in crate::render) fn numeric_domain_union(
     channel: &str,
@@ -385,6 +394,7 @@ pub(in crate::render) fn numeric_domain_union(
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     spec: &ChartSpec,
+    include_final: bool,
 ) -> Result<(f64, f64), RenderError> {
     let layer_data_sources: std::collections::HashSet<&str> = match &spec.layers {
         Some(layers) => layers.iter().filter_map(|l| l.data_source.as_deref()).collect(),
@@ -409,7 +419,12 @@ pub(in crate::render) fn numeric_domain_union(
         }
         for (key, batch) in transform_outputs.iter() {
             let key_is_referenced = layer_data_sources.contains(key.as_str());
-            if !primary_has || key_is_referenced {
+            // Faceted + Shared: also union the global all-panels batch so the
+            // per-panel domain spans every panel (T4). `FINAL_OUTPUT_KEY` is the
+            // concatenated all-panels output already present at the per-panel
+            // callsite; without this it is excluded whenever `primary_has`.
+            let key_is_final = include_final && key == FINAL_OUTPUT_KEY;
+            if !primary_has || key_is_referenced || key_is_final {
                 if let Some(c) = batch.column_by_name(f) {
                     accumulate(c.as_ref(), f)?;
                 }
@@ -473,6 +488,55 @@ pub(in crate::render) fn numeric_domain_union(
 
 fn column_min_max_f64(col: &dyn Array) -> Result<(f64, f64), String> {
     crate::render::arrow_cast::min_max_f64(col)
+}
+
+/// Distinct positional (x:N / y:N) categories for an ordinal/band axis, unioning
+/// the per-panel partition with the global all-panels batch when faceted+Shared.
+///
+/// - `panel_batch` is the located per-panel batch the non-shared path uses.
+/// - When `include_final` is false this is byte-identical to
+///   [`crate::render::arrow_cast::distinct_positional_categories`] on
+///   `panel_batch` — non-faceted and `Independent`-mode callers see no change.
+/// - When `include_final` is true (faceted, this channel resolves
+///   `ResolveMode::Shared`) the domain is the union of the panel's categories
+///   with the global set at [`FINAL_OUTPUT_KEY`], **in global first-appearance
+///   order**. Deriving the order from the single global batch (a superset of
+///   every panel) is what makes the categorical domain identical in every panel
+///   — the shared-axis invariant. Per-panel-only categories (which cannot occur,
+///   since the global batch is the concat of all panels) would still be honored
+///   by the trailing union, never dropped.
+///
+/// Order semantics for the non-shared path are unchanged: it returns the
+/// per-panel first-appearance order untouched.
+pub(in crate::render) fn distinct_positional_categories_shared(
+    panel_batch: &RecordBatch,
+    field: &str,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    include_final: bool,
+) -> Result<Vec<String>, RenderError> {
+    let panel_domain =
+        crate::render::arrow_cast::distinct_positional_categories(panel_batch, field)?;
+    if !include_final {
+        return Ok(panel_domain);
+    }
+    let Some(global_batch) = transform_outputs.get(FINAL_OUTPUT_KEY) else {
+        return Ok(panel_domain);
+    };
+    if global_batch.column_by_name(field).is_none() {
+        return Ok(panel_domain);
+    }
+    // Global first-appearance order is the shared domain: a superset of every
+    // panel, so it is identical across panels and preserves the global order.
+    let mut domain =
+        crate::render::arrow_cast::distinct_positional_categories(global_batch, field)?;
+    // Defensive union: append any panel category absent from the global set so a
+    // category can never disappear from a panel's scale (no-op in practice).
+    for cat in panel_domain {
+        if !domain.contains(&cat) {
+            domain.push(cat);
+        }
+    }
+    Ok(domain)
 }
 
 #[cfg(test)]

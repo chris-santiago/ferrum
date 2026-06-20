@@ -17,6 +17,7 @@ pub(crate) mod rasterize;
 pub(crate) mod draw;
 pub(crate) mod png;
 pub(crate) mod binding;
+pub(crate) mod mark_nodes;
 pub(crate) mod marks;
 pub(crate) mod position;
 pub mod compositor;

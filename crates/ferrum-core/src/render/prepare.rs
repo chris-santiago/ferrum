@@ -322,14 +322,16 @@ pub fn prepare_render_inputs(
                     .collect()
             };
 
-        // Pre-compute the global KDE extent from the full (pre-partition) batch.
-        // When a KDE transform has `shared_extent=false` and `extent=None`, each
-        // partition would use its own range, causing panels to render on different
-        // x-scales and making peak positions non-comparable. By fixing the extent
-        // to the global range before partitioning, all panels evaluate the KDE on
-        // the same x-range, so marks land at comparable pixel positions on the
-        // shared axis. This is the correct default for faceted density charts.
-        let effective_transforms = fix_kde_extents_for_facet(&spec.transforms, &normalized);
+        // Pin a shared value-axis extent from the full (pre-partition) batch for
+        // every extent-carrying transform (Kde / Bin / Violin / Kde2D / Bin2D)
+        // without an explicit extent. Otherwise each partition would use its own
+        // range, causing panels (and hue groups within panels) to render on
+        // different value scales and making positions non-comparable. By fixing
+        // the extent to the global range before partitioning, all panels and
+        // groups share the same value axis. This is the correct default for
+        // faceted density / histogram / violin / 2-D density / heatmap charts
+        // (archaeology bug #7; extended to Kde2D/Bin2D by R5).
+        let effective_transforms = fix_transform_extents_for_facet(&spec.transforms, &normalized);
 
         let mut merged: HashMap<String, Vec<RecordBatch>> = HashMap::new();
         for ((col_value, row_value), partition_batch) in &partitions {
@@ -1654,58 +1656,166 @@ mod tick_format_tests {
     }
 }
 
-/// Partition a RecordBatch by a Utf8 field, returning `(value, filtered_batch)`
-/// For each KDE transform in `transforms` that has `extent=None` and
-/// `groupby=None` (single-group path), pre-compute the global extent from
-/// the full `batch` and return a new transform list where those KDE specs
-/// carry an explicit `extent`. This ensures that all facet partitions evaluate
-/// the KDE on the same x-range so mark positions are comparable across panels.
+/// Pin a shared value-axis extent across facet panels for every extent-carrying
+/// transform — the 1-D trio (`Kde`, `Bin`, `Violin`) and the 2-D pair (`Kde2D`,
+/// `Bin2D`) — that has not been given an explicit extent.
 ///
-/// KDE transforms that already have an explicit `extent`, or that use a
-/// `groupby` (multi-group path), or that have `shared_extent=true`, are left
-/// unchanged.
+/// Returns a new transform list where each such spec's extent field is set to the
+/// global range of its value field(s) over the **full pre-facet `batch`**. Because
+/// the extent is computed before partitioning, every per-panel partition (and
+/// every hue group within a panel) inherits the same value axis, so panels and
+/// groups are visually comparable. This is the correct default for faceted
+/// density / histogram / violin charts and faceted 2-D density / heatmap / contour
+/// charts (archaeology bug #7, extended to 2-D by R5).
 ///
-/// All non-KDE transforms are passed through unchanged.
-fn fix_kde_extents_for_facet(
+/// The extent is derived over the entire field column(s), ignoring `groupby` and
+/// facet partitioning — so the multi-group (hue) case is covered without
+/// special-casing (spec §8). Each transform's owning module computes the extent
+/// (`kde::global_extent` / `bin::global_extent` / `violin::global_extent` /
+/// `kde_2d::global_extent` / `bin_2d::global_extent`); this seam only orchestrates
+/// (it does not re-derive extents in the render layer). 1-D `Bin` nices its extent
+/// to align bin edges; `Kde`/`Violin`/`Kde2D` return the raw range; `Bin2D` also
+/// returns raw because `Bin2D::apply` never nices.
+///
+/// A spec that already carries an explicit extent (user-provided) is left
+/// unchanged; `Bin2D`'s per-axis `extent_x`/`extent_y` are pinned independently so
+/// a partially-specified extent keeps the user axis and pins only the unset one.
+/// All non-extent-carrying transforms are passed through unchanged.
+fn fix_transform_extents_for_facet(
     transforms: &[crate::transform::core::TransformSpec],
     batch: &RecordBatch,
 ) -> Vec<crate::transform::core::TransformSpec> {
-    use arrow::array::Float64Array;
     use crate::transform::core::TransformSpec;
 
-    transforms.iter().map(|t| {
-        let TransformSpec::Kde(kde_spec) = t else { return t.clone(); };
-        // Only fill-in extent when the spec doesn't already have one, has no
-        // groupby (the grouped path manages its own shared_extent logic), and
-        // shared_extent is false (shared_extent=true already handles this).
-        if kde_spec.extent.is_some() || kde_spec.groupby.is_some() {
-            return t.clone();
-        }
-        // Compute global [lo, hi] from the full batch's KDE field.
-        let extent = batch.column_by_name(&kde_spec.field)
-            .and_then(|col| col.as_any().downcast_ref::<Float64Array>())
-            .and_then(|arr| {
-                let (lo, hi) = (0..arr.len()).fold(
-                    (f64::INFINITY, f64::NEG_INFINITY),
-                    |(lo, hi), i| {
-                        if arr.is_null(i) { return (lo, hi); }
-                        let v = arr.value(i);
-                        if v.is_nan() { return (lo, hi); }
-                        (lo.min(v), hi.max(v))
-                    },
-                );
-                if lo.is_finite() && hi.is_finite() && lo < hi { Some((lo, hi)) } else { None }
-            });
-        match extent {
-            Some((lo, hi)) => TransformSpec::Kde(crate::transform::kde::KdeSpec {
-                extent: Some((lo, hi)),
-                ..kde_spec.clone()
-            }),
-            None => t.clone(),
-        }
-    }).collect()
+    transforms
+        .iter()
+        .map(|t| match t {
+            TransformSpec::Kde(spec) if spec.extent.is_none() => {
+                match crate::transform::kde::global_extent(spec, batch) {
+                    Some(extent) => TransformSpec::Kde(crate::transform::kde::KdeSpec {
+                        extent: Some(extent),
+                        ..spec.clone()
+                    }),
+                    None => t.clone(),
+                }
+            }
+            TransformSpec::Bin(spec) if spec.extent.is_none() => {
+                match crate::transform::bin::global_extent(spec, batch) {
+                    Some(extent) => TransformSpec::Bin(crate::transform::bin::BinSpec {
+                        extent: Some(extent),
+                        ..spec.clone()
+                    }),
+                    None => t.clone(),
+                }
+            }
+            TransformSpec::Violin(spec) if spec.extent.is_none() => {
+                match crate::transform::violin::global_extent(spec, batch) {
+                    Some(extent) => TransformSpec::Violin(crate::transform::violin::ViolinSpec {
+                        extent: Some(extent),
+                        ..spec.clone()
+                    }),
+                    None => t.clone(),
+                }
+            }
+            // 2-D extent pin (archaeology R5): close the #7 class for 2-D
+            // transforms. A faceted 2-D density (Kde2D) or 2-D-binned heatmap
+            // (Bin2D) without an explicit extent would otherwise drift per panel
+            // exactly as the 1-D trio did. Pin the spec's extent field(s) to the
+            // global 2-D range over the full pre-facet batch, only when unset.
+            TransformSpec::Kde2D(spec) if spec.extent.is_none() => {
+                match crate::transform::kde_2d::global_extent(spec, batch) {
+                    Some(extent) => TransformSpec::Kde2D(crate::transform::kde_2d::Kde2DSpec {
+                        extent: Some(extent),
+                        ..spec.clone()
+                    }),
+                    None => t.clone(),
+                }
+            }
+            // Bin2D carries a separate `extent_x`/`extent_y` pair rather than a
+            // 4-tuple. Pin each axis only when that axis is unset, so a partially
+            // user-specified extent (e.g. only `extent_x`) keeps the user value
+            // on the set axis and gains the global pin on the unset one.
+            TransformSpec::Bin2D(spec)
+                if spec.extent_x.is_none() || spec.extent_y.is_none() =>
+            {
+                match crate::transform::bin_2d::global_extent(spec, batch) {
+                    Some((x_lo, x_hi, y_lo, y_hi)) => {
+                        TransformSpec::Bin2D(crate::transform::bin_2d::Bin2DSpec {
+                            extent_x: spec.extent_x.or(Some((x_lo, x_hi))),
+                            extent_y: spec.extent_y.or(Some((y_lo, y_hi))),
+                            ..spec.clone()
+                        })
+                    }
+                    None => t.clone(),
+                }
+            }
+            // DensityData carries a value-axis `extent: Option<(f64,f64)>`.
+            // Without a pin, each facet panel would compute its own KDE range —
+            // the same #7 defect class. DensityData does not nice (mirrors KDE):
+            // the pinned extent is the raw global min/max over the full batch
+            // (archaeology bug #7 extended to DensityData by round-3 T1).
+            TransformSpec::DensityData(spec) if spec.extent.is_none() => {
+                match crate::transform::density_data::global_extent(spec, batch) {
+                    Some(extent) => TransformSpec::DensityData(
+                        crate::transform::density_data::DensityDataSpec {
+                            extent: Some(extent),
+                            ..spec.clone()
+                        },
+                    ),
+                    None => t.clone(),
+                }
+            }
+            // Extent-DERIVING transforms (archaeology defect class #7 completion):
+            // Hex, Raster, and DataBin compute their grid or bin boundaries from
+            // the per-partition data range, so each facet panel drifts to its own
+            // geometry. Pin each to the global pre-facet range, using the same
+            // per-axis `.or(Some(...))` pattern as Bin2D so a user-set axis is
+            // never clobbered.
+            TransformSpec::Hex(spec)
+                if spec.extent_x.is_none() || spec.extent_y.is_none() =>
+            {
+                match crate::transform::hex::global_extent(spec, batch) {
+                    Some((x_lo, x_hi, y_lo, y_hi)) => {
+                        TransformSpec::Hex(crate::transform::hex::HexSpec {
+                            extent_x: spec.extent_x.or(Some((x_lo, x_hi))),
+                            extent_y: spec.extent_y.or(Some((y_lo, y_hi))),
+                            ..spec.clone()
+                        })
+                    }
+                    None => t.clone(),
+                }
+            }
+            TransformSpec::Raster(spec)
+                if spec.extent_x.is_none() || spec.extent_y.is_none() =>
+            {
+                match crate::transform::raster::global_extent(spec, batch) {
+                    Some((x_lo, x_hi, y_lo, y_hi)) => {
+                        TransformSpec::Raster(crate::transform::raster::RasterSpec {
+                            extent_x: spec.extent_x.or(Some((x_lo, x_hi))),
+                            extent_y: spec.extent_y.or(Some((y_lo, y_hi))),
+                            ..spec.clone()
+                        })
+                    }
+                    None => t.clone(),
+                }
+            }
+            TransformSpec::DataBin(spec) if spec.extent.is_none() => {
+                match crate::transform::data_bin::global_extent(spec, batch) {
+                    Some(extent) => {
+                        TransformSpec::DataBin(crate::transform::data_bin::DataBinSpec {
+                            extent: Some(extent),
+                            ..spec.clone()
+                        })
+                    }
+                    None => t.clone(),
+                }
+            }
+            _ => t.clone(),
+        })
+        .collect()
 }
 
+/// Partition a RecordBatch by a Utf8 field, returning `(value, filtered_batch)`
 /// pairs in first-appearance order. Used by facet-before-transform to split the
 /// input into per-panel subsets before running transforms.
 fn partition_batch_by_field(
@@ -1949,6 +2059,761 @@ mod tests {
         assert_eq!(parse_label_overlap(""), None);
         // Unrecognized → bounded to the cascade default (greedy), not an error.
         assert_eq!(parse_label_overlap("nonsense"), Some(LabelOverlap::Greedy));
+    }
+
+    // --- archaeology #7: generalized facet extent pin ---------------------------
+
+    /// A two-column batch: a Float64 value field `v` plus a Utf8 hue field `g`.
+    /// Used to drive `fix_transform_extents_for_facet` over the full pre-facet
+    /// dataset (the global extent must ignore `g`).
+    ///
+    /// Values are [0.3, 0.5, 1.2, 4.8, 9.7] (raw range 0.3..9.7), chosen so
+    /// that nicing with bin_count=10 actually changes the extent: nice_step
+    /// produces step=1.0, which rounds 0.3 down to 0.0 and 9.7 up to 10.0.
+    fn extent_pin_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.3, 0.5, 1.2, 4.8, 9.7])),
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b", "b"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A faceted `Bin` transform with `extent=None` gets its extent pinned to the
+    /// niced global range over the full pre-facet batch.
+    #[test]
+    fn fix_extents_pins_bin_to_niced_global_extent() {
+        use crate::transform::bin::BinSpec;
+        use crate::transform::core::TransformSpec;
+        let batch = extent_pin_batch();
+        let spec = BinSpec {
+            field: "v".into(),
+            bin_count: Some(10),
+            bin_width: None,
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Bin(spec.clone())], &batch);
+        let TransformSpec::Bin(pinned) = &out[0] else {
+            panic!("expected a Bin transform back");
+        };
+        // Concrete expected value: raw range is (0.3, 9.7); nice_step(0.3, 9.7, 10)
+        // → step0=0.94, log10(0.94)≈-0.027 → floor=-1 → pow10=0.1, frac=9.4 ≥ 7.5
+        // → nice_frac=10.0 → step=1.0; niced lo=floor(0.3/1.0)*1.0=0.0,
+        // niced hi=ceil(9.7/1.0)*1.0=10.0.  The niced range differs from the raw
+        // range, so this assertion actively exercises the nicing path.
+        assert_eq!(
+            pinned.extent,
+            Some((0.0, 10.0)),
+            "Bin extent must be the niced (0.0, 10.0), not the raw (0.3, 9.7)"
+        );
+        // Also confirm orchestration: the pinned value matches global_extent's output.
+        assert_eq!(
+            pinned.extent,
+            crate::transform::bin::global_extent(&spec, &batch),
+            "Bin extent must be pinned to the niced global extent"
+        );
+    }
+
+    /// A faceted `Violin` transform with `extent=None` gets its extent pinned to
+    /// the global range over the full pre-facet batch.
+    #[test]
+    fn fix_extents_pins_violin_to_global_extent() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::kde::BandwidthSpec;
+        use crate::transform::violin::ViolinSpec;
+        let batch = extent_pin_batch();
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: Vec::new(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Violin(spec.clone())], &batch);
+        let TransformSpec::Violin(pinned) = &out[0] else {
+            panic!("expected a Violin transform back");
+        };
+        // Violin pins to the RAW global (min, max) over v = (0.3, 9.7). Unlike
+        // Bin, KDE/Violin do not nice their extent (no bin edges to align), so
+        // the pinned value is the unrounded global range, not (0.0, 10.0).
+        assert_eq!(
+            pinned.extent,
+            Some((0.3, 9.7)),
+            "Violin extent must be pinned to the raw global (min, max) over v"
+        );
+    }
+
+    /// The previously-excluded multi-group case: a faceted `Kde` transform WITH a
+    /// `groupby` (hue) and `extent=None` now gets pinned to the global extent over
+    /// the full dataset, so panels and hue groups share one value axis (spec §8).
+    #[test]
+    fn fix_extents_pins_kde_with_groupby_multi_group() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::kde::KdeSpec;
+        let batch = extent_pin_batch();
+        let spec = KdeSpec {
+            field: "v".into(),
+            bandwidth: crate::transform::kde::BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            extent: None,
+            cumulative: false,
+            shared_extent: false,
+            kernel: "gaussian".into(),
+            groupby: Some("g".into()),
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Kde(spec.clone())], &batch);
+        let TransformSpec::Kde(pinned) = &out[0] else {
+            panic!("expected a Kde transform back");
+        };
+        // Raw global extent over v = (0.3, 9.7) regardless of the `g` groupby —
+        // the multi-group fix the old groupby.is_some() early-return blocked. KDE
+        // does not nice (only Bin does), so the pin is the raw global min/max.
+        assert_eq!(
+            pinned.extent,
+            Some((0.3, 9.7)),
+            "KDE with a groupby must still be pinned to the full-dataset extent"
+        );
+    }
+
+    /// A user-provided explicit `extent` must never be overridden by the pin.
+    #[test]
+    fn fix_extents_respects_user_extent() {
+        use crate::transform::bin::BinSpec;
+        use crate::transform::core::TransformSpec;
+        use crate::transform::kde::KdeSpec;
+        let batch = extent_pin_batch();
+        let user = Some((-5.0, 100.0));
+        let bin = BinSpec {
+            field: "v".into(),
+            bin_count: Some(10),
+            bin_width: None,
+            extent: user,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let kde = KdeSpec {
+            field: "v".into(),
+            bandwidth: crate::transform::kde::BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            extent: user,
+            cumulative: false,
+            shared_extent: false,
+            kernel: "gaussian".into(),
+            groupby: None,
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(
+            &[TransformSpec::Bin(bin), TransformSpec::Kde(kde)],
+            &batch,
+        );
+        let TransformSpec::Bin(pinned_bin) = &out[0] else {
+            panic!("expected a Bin transform back");
+        };
+        let TransformSpec::Kde(pinned_kde) = &out[1] else {
+            panic!("expected a Kde transform back");
+        };
+        assert_eq!(pinned_bin.extent, user, "user Bin extent must be preserved");
+        assert_eq!(pinned_kde.extent, user, "user KDE extent must be preserved");
+    }
+
+    /// Pins the niced-vs-raw contract between `bin::global_extent`, `kde::global_extent`,
+    /// and `violin::global_extent`.
+    ///
+    /// For the shared fixture data [0.3, 0.5, 1.2, 4.8, 9.7] (raw range 0.3..9.7):
+    ///
+    /// - **Bin** nices its extent to align bin edges: step=1.0 → (0.0, 10.0).
+    /// - **KDE** and **Violin** pin to the raw (min, max) because they have no bin
+    ///   edges to align: (0.3, 9.7).
+    ///
+    /// This test guards the exact defect class that regressed in archaeology bug #7:
+    /// the `fix_extents_pins_violin_to_global_extent` and
+    /// `fix_extents_pins_kde_with_groupby_multi_group` tests had their assertions
+    /// set to the niced value (0.0, 10.0) instead of the raw value (0.3, 9.7).
+    /// Any future change that makes KDE/Violin nice, or makes Bin not nice, will
+    /// trip this test and force an explicit re-evaluation of the contract.
+    #[test]
+    fn global_extent_nices_for_bin_but_raw_for_kde_and_violin() {
+        use crate::transform::bin::BinSpec;
+        use crate::transform::kde::{BandwidthSpec, KdeSpec};
+        use crate::transform::violin::ViolinSpec;
+
+        let batch = extent_pin_batch();
+
+        let bin_spec = BinSpec {
+            field: "v".into(),
+            bin_count: Some(10),
+            bin_width: None,
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: None,
+            name: None,
+        };
+        let kde_spec = KdeSpec {
+            field: "v".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            extent: None,
+            cumulative: false,
+            shared_extent: false,
+            kernel: "gaussian".into(),
+            groupby: None,
+            name: None,
+        };
+        let violin_spec = ViolinSpec {
+            field: "v".into(),
+            groupby: Vec::new(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+        };
+
+        // Bin nices: raw (0.3, 9.7) with bin_count=10 → step=1.0 → (0.0, 10.0).
+        assert_eq!(
+            crate::transform::bin::global_extent(&bin_spec, &batch),
+            Some((0.0, 10.0)),
+            "Bin must return the NICED global extent, not the raw (0.3, 9.7)"
+        );
+        // KDE does not nice: returns the raw (min, max).
+        assert_eq!(
+            crate::transform::kde::global_extent(&kde_spec, &batch),
+            Some((0.3, 9.7)),
+            "KDE must return the RAW global extent (0.3, 9.7), not the niced (0.0, 10.0)"
+        );
+        // Violin does not nice: returns the raw (min, max).
+        assert_eq!(
+            crate::transform::violin::global_extent(&violin_spec, &batch),
+            Some((0.3, 9.7)),
+            "Violin must return the RAW global extent (0.3, 9.7), not the niced (0.0, 10.0)"
+        );
+    }
+
+    // --- archaeology R5: 2-D facet extent pin (Kde2D / Bin2D) -------------------
+
+    /// A three-column batch: Float64 `x`, Float64 `y`, and a Utf8 facet field `p`.
+    /// Panel "A" lives at x in 0..1, y in 0..1; panel "B" lives at x in 10..11,
+    /// y in 100..101. The two panels' x AND y ranges are fully DISJOINT, so a
+    /// per-panel extent (the pre-R5 bug) would give panel A x∈[0,1]/y∈[0,1] and
+    /// panel B x∈[10,11]/y∈[100,101). The pin computes the global extent over the
+    /// whole batch → x∈[0,11], y∈[0,101] for BOTH panels.
+    fn extent_pin_batch_2d() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("p", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![
+                    0.0, 0.5, 1.0, // panel A
+                    10.0, 10.5, 11.0, // panel B
+                ])),
+                Arc::new(Float64Array::from(vec![
+                    0.0, 0.5, 1.0, // panel A
+                    100.0, 100.5, 101.0, // panel B
+                ])),
+                Arc::new(StringArray::from(vec!["A", "A", "A", "B", "B", "B"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A faceted `Kde2D` with no extent gets pinned to the RAW global 2-D range
+    /// over the full pre-facet batch, so every panel shares the same x AND y
+    /// extents. Discriminating: an unpinned (per-panel) extent would not span the
+    /// global x∈[0,11]/y∈[0,101] range.
+    #[test]
+    fn fix_extents_pins_kde2d_to_global_2d_extent() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::kde::BandwidthSpec;
+        use crate::transform::kde_2d::Kde2DSpec;
+        let batch = extent_pin_batch_2d();
+        let spec = Kde2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n: 16,
+            extent: None,
+            groupby: None,
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Kde2D(spec.clone())], &batch);
+        let TransformSpec::Kde2D(pinned) = &out[0] else {
+            panic!("expected a Kde2D transform back");
+        };
+        // Raw global extent over the whole batch: x∈[0,11], y∈[0,101]. Kde2D does
+        // not nice. The disjoint per-panel ranges make this fail if unpinned.
+        assert_eq!(
+            pinned.extent,
+            Some((0.0, 11.0, 0.0, 101.0)),
+            "Kde2D extent must be pinned to the raw global 2-D range across panels"
+        );
+        // Orchestration sanity: the pinned value matches global_extent's output.
+        assert_eq!(
+            pinned.extent,
+            crate::transform::kde_2d::global_extent(&spec, &batch),
+        );
+    }
+
+    /// A faceted `Bin2D` with no extent gets pinned per-axis to the RAW global
+    /// range over the full pre-facet batch, so every panel shares the same x AND
+    /// y bin edges. Bin2D never nices, so the pin is the raw range.
+    #[test]
+    fn fix_extents_pins_bin2d_to_global_2d_extent() {
+        use crate::transform::bin_2d::{Bin2DSpec, BinSpec2DAxis};
+        use crate::transform::core::TransformSpec;
+        let batch = extent_pin_batch_2d();
+        let spec = Bin2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bins_x: BinSpec2DAxis::Fixed { n: 10 },
+            bins_y: BinSpec2DAxis::Fixed { n: 10 },
+            extent_x: None,
+            extent_y: None,
+            cumulative: false,
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Bin2D(spec.clone())], &batch);
+        let TransformSpec::Bin2D(pinned) = &out[0] else {
+            panic!("expected a Bin2D transform back");
+        };
+        assert_eq!(
+            pinned.extent_x,
+            Some((0.0, 11.0)),
+            "Bin2D extent_x must be the raw global x-range across panels"
+        );
+        assert_eq!(
+            pinned.extent_y,
+            Some((0.0, 101.0)),
+            "Bin2D extent_y must be the raw global y-range across panels"
+        );
+    }
+
+    /// A user-provided explicit 2-D extent must never be overridden by the pin.
+    /// Covers both Kde2D (4-tuple) and Bin2D (per-axis extent_x/extent_y).
+    #[test]
+    fn fix_extents_respects_user_2d_extent() {
+        use crate::transform::bin_2d::{Bin2DSpec, BinSpec2DAxis};
+        use crate::transform::core::TransformSpec;
+        use crate::transform::kde::BandwidthSpec;
+        use crate::transform::kde_2d::Kde2DSpec;
+        let batch = extent_pin_batch_2d();
+
+        let user_kde = (-5.0, 50.0, -5.0, 500.0);
+        let kde = Kde2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n: 16,
+            extent: Some(user_kde),
+            groupby: None,
+            name: None,
+        };
+        // Bin2D with BOTH axes user-set must be left fully untouched.
+        let user_bin_x = (-1.0, 20.0);
+        let user_bin_y = (-2.0, 200.0);
+        let bin = Bin2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bins_x: BinSpec2DAxis::Fixed { n: 10 },
+            bins_y: BinSpec2DAxis::Fixed { n: 10 },
+            extent_x: Some(user_bin_x),
+            extent_y: Some(user_bin_y),
+            cumulative: false,
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(
+            &[TransformSpec::Kde2D(kde), TransformSpec::Bin2D(bin)],
+            &batch,
+        );
+        let TransformSpec::Kde2D(pinned_kde) = &out[0] else {
+            panic!("expected a Kde2D transform back");
+        };
+        let TransformSpec::Bin2D(pinned_bin) = &out[1] else {
+            panic!("expected a Bin2D transform back");
+        };
+        assert_eq!(pinned_kde.extent, Some(user_kde), "user Kde2D extent must be preserved");
+        assert_eq!(pinned_bin.extent_x, Some(user_bin_x), "user Bin2D extent_x must be preserved");
+        assert_eq!(pinned_bin.extent_y, Some(user_bin_y), "user Bin2D extent_y must be preserved");
+    }
+
+    /// A faceted `Bin2D` with `extent_x` user-set but `extent_y = None` goes through
+    /// the dispatch arm's `.or` composition: the user-provided `extent_x` is kept
+    /// unchanged while `extent_y` is pinned to the global y-range over the full
+    /// pre-facet batch. This guards against a future x/y transposition in the arm
+    /// (e.g. accidentally writing `extent_x: spec.extent_y.or(...)`) by asserting
+    /// the final pinned values at both axes simultaneously.
+    #[test]
+    fn fix_extents_bin2d_partial_user_extent_keeps_x_pins_y() {
+        use crate::transform::bin_2d::{Bin2DSpec, BinSpec2DAxis};
+        use crate::transform::core::TransformSpec;
+        let batch = extent_pin_batch_2d();
+
+        // User has explicitly set extent_x but left extent_y as None.
+        let user_x = (2.0, 15.0);
+        let spec = Bin2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bins_x: BinSpec2DAxis::Fixed { n: 10 },
+            bins_y: BinSpec2DAxis::Fixed { n: 10 },
+            extent_x: Some(user_x),
+            extent_y: None,
+            cumulative: false,
+            name: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Bin2D(spec.clone())], &batch);
+        let TransformSpec::Bin2D(pinned) = &out[0] else {
+            panic!("expected a Bin2D transform back");
+        };
+        // The user-provided extent_x must survive unchanged.
+        assert_eq!(
+            pinned.extent_x,
+            Some(user_x),
+            "user extent_x must be preserved when extent_y is None"
+        );
+        // extent_y was None; the pin must fill it with the global y-range [0, 101].
+        // Raw y values in the fixture: 0.0, 0.5, 1.0, 100.0, 100.5, 101.0.
+        assert_eq!(
+            pinned.extent_y,
+            Some((0.0, 101.0)),
+            "extent_y must be pinned to the global y-range when user left it None"
+        );
+    }
+
+    // --- archaeology #7 round-7 T1: Hex / Raster / DataBin dispatch tests -------
+
+    /// A faceted `Hex` with no extent gets both axes pinned to the RAW global
+    /// range over the full pre-facet batch. The two-panel fixture has disjoint
+    /// x ∈ [0,1] vs [10,11] and y ∈ [0,1] vs [100,101]; the global raw range is
+    /// x∈[0,11], y∈[0,101]. An un-pinned hex lattice would anchor differently per
+    /// panel, making the bin edges incomparable across panels.
+    #[test]
+    fn fix_extents_pins_hex_to_global_2d_extent() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::hex::HexSpec;
+        let batch = extent_pin_batch_2d();
+        let spec = HexSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bin_size: None,
+            aggregate: "count".into(),
+            field: None,
+            name: None,
+            extent_x: None,
+            extent_y: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Hex(spec.clone())], &batch);
+        let TransformSpec::Hex(pinned) = &out[0] else {
+            panic!("expected a Hex transform back");
+        };
+        assert_eq!(
+            pinned.extent_x,
+            Some((0.0, 11.0)),
+            "Hex extent_x must be pinned to the raw global x-range across panels"
+        );
+        assert_eq!(
+            pinned.extent_y,
+            Some((0.0, 101.0)),
+            "Hex extent_y must be pinned to the raw global y-range across panels"
+        );
+    }
+
+    /// A faceted `Hex` with `extent_x` user-set but `extent_y = None` keeps the
+    /// user value on x and pins y to the global raw range. Guards against an
+    /// accidental x/y transposition in the dispatch arm.
+    #[test]
+    fn fix_extents_hex_partial_user_extent_keeps_x_pins_y() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::hex::HexSpec;
+        let batch = extent_pin_batch_2d();
+
+        let user_x = (2.0, 15.0);
+        let spec = HexSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bin_size: None,
+            aggregate: "count".into(),
+            field: None,
+            name: None,
+            extent_x: Some(user_x),
+            extent_y: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Hex(spec.clone())], &batch);
+        let TransformSpec::Hex(pinned) = &out[0] else {
+            panic!("expected a Hex transform back");
+        };
+        assert_eq!(
+            pinned.extent_x,
+            Some(user_x),
+            "user extent_x must be preserved when extent_y is None"
+        );
+        assert_eq!(
+            pinned.extent_y,
+            Some((0.0, 101.0)),
+            "extent_y must be pinned to the global y-range when user left it None"
+        );
+    }
+
+    /// A faceted `Raster` with no extent gets both axes pinned to the RAW global
+    /// range over the full pre-facet batch: x∈[0,11], y∈[0,101].
+    #[test]
+    fn fix_extents_pins_raster_to_global_2d_extent() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::raster::{RasterSpec, ResolutionSpec};
+        let batch = extent_pin_batch_2d();
+        let spec = RasterSpec {
+            x: "x".into(),
+            y: "y".into(),
+            aggregate: "count".into(),
+            field: None,
+            resolution: ResolutionSpec::Fixed(4),
+            min_count: None,
+            log_scale: false,
+            name: None,
+            extent_x: None,
+            extent_y: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Raster(spec.clone())], &batch);
+        let TransformSpec::Raster(pinned) = &out[0] else {
+            panic!("expected a Raster transform back");
+        };
+        assert_eq!(
+            pinned.extent_x,
+            Some((0.0, 11.0)),
+            "Raster extent_x must be pinned to the raw global x-range across panels"
+        );
+        assert_eq!(
+            pinned.extent_y,
+            Some((0.0, 101.0)),
+            "Raster extent_y must be pinned to the raw global y-range across panels"
+        );
+    }
+
+    /// A faceted `Raster` with `extent_x` user-set but `extent_y = None` keeps
+    /// the user value on x and pins y to the global raw range. Guards against an
+    /// accidental x/y transposition in the dispatch arm.
+    #[test]
+    fn fix_extents_raster_partial_user_extent_keeps_x_pins_y() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::raster::{RasterSpec, ResolutionSpec};
+        let batch = extent_pin_batch_2d();
+
+        let user_x = (2.0, 15.0);
+        let spec = RasterSpec {
+            x: "x".into(),
+            y: "y".into(),
+            aggregate: "count".into(),
+            field: None,
+            resolution: ResolutionSpec::Fixed(4),
+            min_count: None,
+            log_scale: false,
+            name: None,
+            extent_x: Some(user_x),
+            extent_y: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Raster(spec.clone())], &batch);
+        let TransformSpec::Raster(pinned) = &out[0] else {
+            panic!("expected a Raster transform back");
+        };
+        assert_eq!(
+            pinned.extent_x,
+            Some(user_x),
+            "user extent_x must be preserved when extent_y is None"
+        );
+        assert_eq!(
+            pinned.extent_y,
+            Some((0.0, 101.0)),
+            "extent_y must be pinned to the global y-range when user left it None"
+        );
+    }
+
+    /// A faceted `DataBin` with `extent = None` gets pinned to the RAW global
+    /// `(min, max)` over the full pre-facet batch. The fixture has `v` values
+    /// [0.3, 0.5, 1.2, 4.8, 9.7] (raw range 0.3..9.7). Unlike `Bin`, DataBin
+    /// does not nice the pinned extent — the raw range drives the bin boundary
+    /// computation directly.
+    #[test]
+    fn fix_extents_pins_data_bin_to_global_raw_extent() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::data_bin::DataBinSpec;
+        let batch = extent_pin_batch();
+        let spec = DataBinSpec {
+            field: "v".into(),
+            as_: None,
+            maxbins: Some(10),
+            step: None,
+            nice: false,
+            name: None,
+            extent: None,
+        };
+        let out =
+            fix_transform_extents_for_facet(&[TransformSpec::DataBin(spec.clone())], &batch);
+        let TransformSpec::DataBin(pinned) = &out[0] else {
+            panic!("expected a DataBin transform back");
+        };
+        // Raw range over [0.3, 0.5, 1.2, 4.8, 9.7] = (0.3, 9.7). DataBin never
+        // nices the pin, so the pinned value is the exact raw (min, max).
+        assert_eq!(
+            pinned.extent,
+            Some((0.3, 9.7)),
+            "DataBin extent must be pinned to the raw global (min, max) across panels"
+        );
+    }
+
+    /// A faceted `DataBin` with a user-provided `extent` must never have it
+    /// overridden. The dispatch arm guards on `spec.extent.is_none()`, so this
+    /// confirms the guard fires correctly and the user value is left untouched.
+    #[test]
+    fn fix_extents_data_bin_user_extent_is_preserved() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::data_bin::DataBinSpec;
+        let batch = extent_pin_batch();
+
+        let user_extent = (0.0, 20.0);
+        let spec = DataBinSpec {
+            field: "v".into(),
+            as_: None,
+            maxbins: Some(10),
+            step: None,
+            nice: false,
+            name: None,
+            extent: Some(user_extent),
+        };
+        let out =
+            fix_transform_extents_for_facet(&[TransformSpec::DataBin(spec.clone())], &batch);
+        let TransformSpec::DataBin(pinned) = &out[0] else {
+            panic!("expected a DataBin transform back");
+        };
+        assert_eq!(
+            pinned.extent,
+            Some(user_extent),
+            "user DataBin extent must never be clobbered by the pin"
+        );
+    }
+
+    // --- archaeology #7 round-3 T1: DensityData facet extent pin ----------------
+
+    /// A batch with two panels whose value ranges are fully DISJOINT.
+    /// Panel "A" has x in [1, 3], panel "B" has x in [10, 30].
+    /// Used to drive `fix_transform_extents_for_facet` for DensityData: an
+    /// unpinned per-panel KDE would give each panel a different x extent.
+    fn density_disjoint_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("panel", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![
+                    1.0, 2.0, 3.0,    // panel A
+                    10.0, 20.0, 30.0, // panel B
+                ])),
+                Arc::new(StringArray::from(vec!["A", "A", "A", "B", "B", "B"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn base_density_spec() -> crate::transform::density_data::DensityDataSpec {
+        crate::transform::density_data::DensityDataSpec {
+            field: "x".into(),
+            bandwidth: None,
+            groupby: None,
+            extent: None,
+            steps: None,
+            cumulative: false,
+            as_: ("value".into(), "density".into()),
+            name: None,
+        }
+    }
+
+    /// A faceted `DensityData` with `extent=None` must be pinned to the RAW
+    /// global (min, max) over the full pre-facet batch so every panel shares
+    /// the same value axis. This is discriminating: without the T1 fix the
+    /// DensityData arm did not exist in `fix_transform_extents_for_facet` and
+    /// the spec fell through the `_ => t.clone()` arm with extent still `None`.
+    #[test]
+    fn fix_extents_pins_density_data_to_global_extent() {
+        use crate::transform::core::TransformSpec;
+        let batch = density_disjoint_batch();
+        let spec = base_density_spec(); // extent: None
+        let out = fix_transform_extents_for_facet(&[TransformSpec::DensityData(spec.clone())], &batch);
+        let TransformSpec::DensityData(pinned) = &out[0] else {
+            panic!("expected a DensityData transform back");
+        };
+        // Raw global extent over full batch: x ∈ [1.0, 30.0].
+        // DensityData does not nice (mirrors KDE), so the pin is the raw (min, max).
+        assert_eq!(
+            pinned.extent,
+            Some((1.0, 30.0)),
+            "DensityData extent must be pinned to the raw global (1.0, 30.0)"
+        );
+        // Orchestration sanity: matches global_extent's output directly.
+        assert_eq!(
+            pinned.extent,
+            crate::transform::density_data::global_extent(&spec, &batch),
+            "pinned extent must equal global_extent's own output"
+        );
+    }
+
+    /// A user-provided explicit `DensityData` `extent` must never be overridden.
+    #[test]
+    fn fix_extents_density_data_respects_user_extent() {
+        use crate::transform::core::TransformSpec;
+        let batch = density_disjoint_batch();
+        let user = Some((-5.0, 50.0));
+        let spec = crate::transform::density_data::DensityDataSpec {
+            extent: user,
+            ..base_density_spec()
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::DensityData(spec)], &batch);
+        let TransformSpec::DensityData(pinned) = &out[0] else {
+            panic!("expected a DensityData transform back");
+        };
+        assert_eq!(pinned.extent, user, "user DensityData extent must be preserved");
+    }
+
+    /// `DensityData::global_extent` returns raw (min, max) — no nicing, mirroring KDE.
+    /// Guards the contract that DensityData uses raw extent (not niced like Bin).
+    #[test]
+    fn density_data_global_extent_is_raw_not_niced() {
+        use crate::transform::density_data;
+        let batch = density_disjoint_batch();
+        let spec = base_density_spec();
+        assert_eq!(
+            density_data::global_extent(&spec, &batch),
+            Some((1.0, 30.0)),
+            "DensityData global_extent must return the raw (min, max), not a niced value"
+        );
     }
 
     fn batch3() -> RecordBatch {

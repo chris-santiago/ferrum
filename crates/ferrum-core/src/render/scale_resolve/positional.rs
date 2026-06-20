@@ -16,8 +16,12 @@ use crate::spec::encoding::DataType as SpecDataType;
 
 use crate::render::{RenderError, RenderWarning};
 
-use super::domain::{apply_sort_to_domain, locate_field, numeric_domain_union, SortContext};
+use super::domain::{
+    apply_sort_to_domain, distinct_positional_categories_shared, locate_field,
+    numeric_domain_union, SortContext,
+};
 use super::{distinct_positional_categories, infer_spec_type, ScaleKind};
+use crate::transform::core::FINAL_OUTPUT_KEY;
 
 /// The x/y field names bound at chart level, used to resolve data-aware sort
 /// forms (channel shorthand `"-y"` etc.). Threaded into `build_axis_scale` so an
@@ -63,6 +67,12 @@ pub(in crate::render) fn build_axis_scale(
     transform_outputs: &HashMap<String, RecordBatch>,
     pixel_range: (f64, f64),
     spec: &ChartSpec,
+    // Faceted + this channel resolves `ResolveMode::Shared`: the auto-inferred
+    // domain also unions the global all-panels batch (`FINAL_OUTPUT_KEY`) so a
+    // faceted raw field's positional domain spans every panel (T4). `false` for
+    // non-faceted charts and `Independent`-mode channels → byte-identical
+    // per-panel behavior. Ignored on the explicit `enc.scale` bypass.
+    include_final: bool,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
     let located = locate_field(&enc.field, primary_batch, transform_outputs)
@@ -86,17 +96,37 @@ pub(in crate::render) fn build_axis_scale(
         SpecDataType::Quantitative => {
             let (min, max) = numeric_domain_union(
                 channel, &enc.field, paired_enc.map(|p| p.field.as_str()),
-                primary_batch, transform_outputs, spec,
+                primary_batch, transform_outputs, spec, include_final,
             )?;
             Ok(ScaleKind::Linear(LinearScale::new_internal(
                 vec![min, max], vec![inset.0, inset.1], false, false,
             )))
         }
         SpecDataType::Ordinal | SpecDataType::Nominal => {
-            let mut domain = distinct_positional_categories(located.batch, &enc.field)?;
+            let mut domain = distinct_positional_categories_shared(
+                located.batch, &enc.field, transform_outputs, include_final,
+            )?;
+            // For data-aware sort forms (`"-y"`, `"y"`, `{field, op, order}`),
+            // `apply_sort_to_domain` computes a per-category aggregate from
+            // `sort_ctx.batch`.  When the channel resolves Shared (`include_final`),
+            // using the per-panel batch causes each panel to re-sort the shared
+            // category vector by its OWN aggregate, placing marks under the wrong
+            // tick.  Mirror `distinct_positional_categories_shared`: use the global
+            // batch (`FINAL_OUTPUT_KEY`) so every panel's data-aware sort agrees
+            // with the global/provisional axis order.  Fall back to the per-panel
+            // batch when the global batch is absent (defensive, same as the
+            // membership helper).  For Independent channels (`include_final == false`)
+            // keep the per-panel batch so that escape hatch remains byte-identical.
+            let sort_batch = if include_final {
+                transform_outputs
+                    .get(FINAL_OUTPUT_KEY)
+                    .unwrap_or(located.batch)
+            } else {
+                located.batch
+            };
             let sort_ctx = SortContext {
                 category_field: &enc.field,
-                batch: located.batch,
+                batch: sort_batch,
                 x_field: positional_fields.x,
                 y_field: positional_fields.y,
             };
@@ -108,7 +138,7 @@ pub(in crate::render) fn build_axis_scale(
         SpecDataType::Temporal => {
             let (min, max) = numeric_domain_union(
                 channel, &enc.field, paired_enc.map(|p| p.field.as_str()),
-                primary_batch, transform_outputs, spec,
+                primary_batch, transform_outputs, spec, include_final,
             )?;
             Ok(ScaleKind::Time(TimeScale::new_internal(
                 vec![min, max], vec![inset.0, inset.1], false, false,

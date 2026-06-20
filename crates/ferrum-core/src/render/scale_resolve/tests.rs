@@ -272,7 +272,8 @@ fn explicit_log_scale_overrides_auto_detection() {
 fn size_scale_defaults_to_theme_point_size_range() {
     let batch = make_batch_q_q_n_n_q();
     let theme = ThemeInputs::default();
-    let scale = build_size_scale(&make_spec_with_size().encoding, &batch, &theme)
+    let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
+    let scale = build_size_scale(&make_spec_with_size().encoding, &batch, &outputs, false, &theme)
         .unwrap()
         .unwrap();
     assert_eq!(scale.min_px(), 4.0);
@@ -282,7 +283,8 @@ fn size_scale_defaults_to_theme_point_size_range() {
 #[test]
 fn shape_scale_picks_from_8_shape_palette_in_order() {
     let batch = make_batch_q_q_n_n_q();
-    let (scale, warn) = build_shape_scale(&make_spec_with_shape().encoding, &batch).unwrap();
+    let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
+    let (scale, warn) = build_shape_scale(&make_spec_with_shape().encoding, &batch, &outputs, false).unwrap();
     let scale = scale.unwrap();
     assert!(warn.is_none());
     assert_eq!(scale.shapes.len(), 3);
@@ -498,7 +500,8 @@ fn resolved_scales_x2_y2_default_to_none_for_8a_charts() {
 fn opacity_scale_defaults_to_0_1_to_1_0() {
     let batch = make_batch_q_q_n_n_q();
     let theme = ThemeInputs::default();
-    let scale = build_opacity_scale(&make_spec_with_opacity().encoding, &batch, &theme)
+    let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
+    let scale = build_opacity_scale(&make_spec_with_opacity().encoding, &batch, &outputs, false, &theme)
         .unwrap()
         .unwrap();
     assert_eq!(scale.min_opacity(), 0.1);
@@ -2260,4 +2263,1536 @@ fn d2d_independent_resolve_yields_per_panel_domains() {
         "panel A domain [{a_lo},{a_hi}] must be contained in global [{g_lo},{g_hi}]");
     assert!(b_lo >= g_lo - 0.1 && b_hi <= g_hi + 0.1,
         "panel B domain [{b_lo},{b_hi}] must be contained in global [{g_lo},{g_hi}]");
+}
+
+// ── T4: shared faceted positional scale for RAW fields ───────────────────────
+//
+// The per-panel callsite (`scene_build.rs`) passes the panel's own partition as
+// `primary_batch` and the global all-panels batch as
+// `transform_outputs[FINAL_OUTPUT_KEY]`. Before T4 a faceted RAW field's
+// positional domain was the per-panel min/max only — marks were per-panel-scaled
+// while the shared axis showed the global domain (marks and axis disagree).
+//
+// These tests drive `resolve_scales_with_outputs` exactly as `scene_build.rs`
+// does: panel batch as primary, global batch under `__final__`. A faceted spec
+// with the default (Shared) resolve must union the global batch so the per-panel
+// domain spans every panel; an Independent spec must keep per-panel domains.
+
+/// Helper: a `__final__`-keyed transform_outputs map carrying the global batch,
+/// mirroring what `prep.transform_outputs` holds at the per-panel callsite.
+fn final_outputs(global: RecordBatch) -> HashMapForTests {
+    let mut m: HashMapForTests = std::collections::HashMap::new();
+    m.insert(crate::transform::core::FINAL_OUTPUT_KEY.to_string(), global);
+    m
+}
+
+type HashMapForTests = std::collections::HashMap<String, RecordBatch>;
+
+/// Build a faceted point spec on x/y with the given per-channel resolve modes.
+fn faceted_xy_spec(
+    x_resolve: crate::layout::facet::ResolveMode,
+    y_resolve: crate::layout::facet::ResolveMode,
+) -> ChartSpec {
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: Some(FacetSpec {
+            field: "panel".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve { x: x_resolve, y: y_resolve },
+        }),
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+fn xy_batch(x_vals: Vec<f64>, y_vals: Vec<f64>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(x_vals)),
+            Arc::new(Float64Array::from(y_vals)),
+        ],
+    )
+    .unwrap()
+}
+
+/// T4 numeric, x-channel: a faceted RAW x with disjoint per-panel ranges
+/// (panel A x∈[0,10], panel B x∈[0,100]) must resolve panel A's x domain to the
+/// GLOBAL [0,100] under Shared. Panel A's x=10 mark then lands at ~10% of the
+/// plot width, NOT the right edge.
+#[test]
+fn t4_shared_facet_numeric_x_unions_global_domain() {
+    let panel_a = xy_batch(vec![0.0, 5.0, 10.0], vec![0.0, 1.0, 2.0]);
+    let panel_b = xy_batch(vec![0.0, 50.0, 100.0], vec![0.0, 1.0, 2.0]);
+    let global = xy_batch(
+        vec![0.0, 5.0, 10.0, 0.0, 50.0, 100.0],
+        vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
+    );
+    let outputs = final_outputs(global);
+    let spec = faceted_xy_spec(
+        crate::layout::facet::ResolveMode::Shared,
+        crate::layout::facet::ResolveMode::Shared,
+    );
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    // Panel A resolved exactly as scene_build does: panel batch primary, global
+    // batch under __final__.
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    let (a_lo, a_hi) = scales_a.x.data_domain().expect("panel A x domain");
+    assert!(
+        a_lo <= 0.0 + 1e-6 && a_hi >= 100.0 - 1e-6,
+        "Shared facet: panel A x domain must span the GLOBAL [0,100], got [{a_lo},{a_hi}]"
+    );
+
+    // Mark-position discrimination: panel A's x=10 mark must NOT be at the right
+    // edge. On the global [0,100] domain with a 5% inward pad over (0,100),
+    // x=10 maps to ~5 + 0.10 * 90 = ~14px, far left of the 100px right edge.
+    let px_10 = scales_a.x.to_pixel_f64(10.0).expect("x=10 must project");
+    let px_100 = scales_a.x.to_pixel_f64(100.0).expect("x=100 must project");
+    assert!(
+        px_10 < 0.30 * 100.0,
+        "Shared facet: panel A x=10 must land in the left third (global domain), got {px_10}px"
+    );
+    assert!(
+        (px_100 - 95.0).abs() < 2.0,
+        "Shared facet: x=100 (global max) must land near the right edge, got {px_100}px"
+    );
+    // The per-panel max (x=10) is far from the panel-relative right edge.
+    assert!(
+        px_100 - px_10 > 50.0,
+        "x=10 and x=100 must be far apart on the shared domain: 10@{px_10}px, 100@{px_100}px"
+    );
+}
+
+/// T4 numeric, y-channel: a faceted RAW y with disjoint per-panel ranges must
+/// resolve each panel's y domain to the GLOBAL union under Shared.
+#[test]
+fn t4_shared_facet_numeric_y_unions_global_domain() {
+    let panel_a = xy_batch(vec![0.0, 1.0, 2.0], vec![0.0, 2.5, 5.0]);
+    let panel_b = xy_batch(vec![0.0, 1.0, 2.0], vec![100.0, 150.0, 200.0]);
+    let global = xy_batch(
+        vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
+        vec![0.0, 2.5, 5.0, 100.0, 150.0, 200.0],
+    );
+    let outputs = final_outputs(global);
+    let spec = faceted_xy_spec(
+        crate::layout::facet::ResolveMode::Shared,
+        crate::layout::facet::ResolveMode::Shared,
+    );
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 200.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    let (a_lo, a_hi) = scales_a.y.data_domain().expect("panel A y domain");
+    assert!(
+        a_lo <= 0.0 + 1e-6 && a_hi >= 200.0 - 1e-6,
+        "Shared facet: panel A y domain must span GLOBAL [0,200], got [{a_lo},{a_hi}]"
+    );
+
+    // Resolve panel B to confirm it also gets the global domain.
+    let (scales_b, _) =
+        resolve_scales_with_outputs(&spec, &panel_b, &outputs, pr, pr, &theme).unwrap();
+    let (b_lo, b_hi) = scales_b.y.data_domain().expect("panel B y domain");
+    assert!(
+        b_lo <= 0.0 + 1e-6 && b_hi >= 200.0 - 1e-6,
+        "Shared facet: panel B y domain must span GLOBAL [0,200], got [{b_lo},{b_hi}]"
+    );
+
+    // Mark-position discrimination (y-axis is INVERTED: small data y → large pixel y
+    // / bottom of plot). Panel A's max data-y is 5, which occupies only the bottom
+    // 2.5% of the global [0,200] domain. On a 200px plot range it must land near the
+    // bottom (large pixel ≈ 190 px), not near the top as per-panel scaling would
+    // produce (where y=5 would be the panel-relative max → pixel ≈ 5 px).
+    //
+    // With a 5% inward pad over [0,200] the pixel range is ~[190, 10] (bottom→top),
+    // so y=5 → ~190 - 0.025 * 180 ≈ 185.5 px.  We just assert it lands in the top
+    // 30% of PIXEL space (px < 0.70 * 200 = 140) which is the BOTTOM 70% of DATA
+    // space — far from the panel-relative top that per-panel scaling would yield.
+    let py_5 = scales_a.y.to_pixel_f64(5.0).expect("y=5 must project");
+    let py_0 = scales_a.y.to_pixel_f64(0.0).expect("y=0 must project");
+    let py_200 = scales_a.y.to_pixel_f64(200.0).expect("y=200 must project");
+    // y-axis inversion: the bottom of the data range (y=0) maps to the largest
+    // pixel value; the top of the data range (y=200) maps to the smallest.
+    assert!(
+        py_0 > py_200,
+        "y-axis must be inverted: y=0 pixel ({py_0}) must be > y=200 pixel ({py_200})"
+    );
+    // y=5 (panel A's data max, but only 2.5% of the global range) must be near the
+    // bottom of the plot, i.e. near y=0 in pixel terms — NOT near y=200 pixel pos.
+    assert!(
+        (py_5 - py_0).abs() < 0.10 * (py_0 - py_200),
+        "Shared facet: panel A y=5 must land near the BOTTOM of the global domain \
+         (within 10% of y=0 pixel pos); per-panel scaling would wrongly put it at \
+         the TOP. Got py_5={py_5}, py_0={py_0}, py_200={py_200}"
+    );
+    // y=200 (global max) must land near the top edge.
+    assert!(
+        (py_200 - pr.0).abs() < 2.0 * (pr.1 - pr.0) / 200.0 * 10.0,
+        "Shared facet: y=200 (global max) must land near the top edge, got {py_200}px"
+    );
+}
+
+/// T4 Independent-mode preservation: with `share_scale(x="independent")` (here,
+/// `ResolveMode::Independent` on x), panel A's x domain must stay per-panel
+/// ([0,10]) — the escape hatch is byte-identical to the pre-T4 behavior. The
+/// global batch under __final__ must be ignored for that channel.
+#[test]
+fn t4_independent_facet_numeric_x_keeps_per_panel_domain() {
+    let panel_a = xy_batch(vec![0.0, 5.0, 10.0], vec![0.0, 1.0, 2.0]);
+    let global = xy_batch(
+        vec![0.0, 5.0, 10.0, 0.0, 50.0, 100.0],
+        vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
+    );
+    let outputs = final_outputs(global);
+    let spec = faceted_xy_spec(
+        crate::layout::facet::ResolveMode::Independent,
+        crate::layout::facet::ResolveMode::Shared,
+    );
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    let (a_lo, a_hi) = scales_a.x.data_domain().expect("panel A x domain");
+    assert!(
+        a_lo <= 0.0 + 1e-6 && a_hi <= 10.0 + 1e-6 && a_hi >= 10.0 - 1e-6,
+        "Independent facet: panel A x domain must stay per-panel [0,10], got [{a_lo},{a_hi}]"
+    );
+    // Mark-position discrimination: with the per-panel domain, x=10 (panel max)
+    // lands at the panel-relative right edge (~95px after the 5% inward pad).
+    let px_10 = scales_a.x.to_pixel_f64(10.0).expect("x=10 must project");
+    assert!(
+        px_10 > 0.70 * 100.0,
+        "Independent facet: panel A x=10 (its own max) must be near the right edge, got {px_10}px"
+    );
+}
+
+/// T4 categorical/band arm: a faceted categorical x where panel A is missing a
+/// category present only in panel B must, under Shared, get the FULL category
+/// set (shared band layout) so band widths/positions match the shared axis.
+#[test]
+fn t4_shared_facet_categorical_x_unions_global_categories() {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec, ResolveMode};
+
+    let cat_batch = |cats: Vec<&str>| -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", ArrowDataType::Utf8, false),
+            Field::new("y", ArrowDataType::Float64, false),
+        ]));
+        let n = cats.len();
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(cats)),
+                Arc::new(Float64Array::from(vec![1.0; n])),
+            ],
+        )
+        .unwrap()
+    };
+
+    // Panel A has only {a, c}; panel B has {b, c}. Global has {a, b, c}.
+    let panel_a = cat_batch(vec!["a", "c"]);
+    let global = cat_batch(vec!["a", "c", "b", "c"]);
+    let outputs = final_outputs(global);
+
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Bar,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "cat".into(), type_: Some(SpecDataType::Nominal), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: Some(FacetSpec {
+            field: "panel".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve { x: ResolveMode::Shared, y: ResolveMode::Shared },
+        }),
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    };
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    // Panel A (only {a,c}) must still place a band for category 'b' (present in
+    // the global set) so its band layout matches the shared axis.
+    let px_b = scales_a.x.to_pixel_str("b");
+    assert!(
+        px_b.is_some(),
+        "Shared facet: panel A x scale must include category 'b' from the global set"
+    );
+    // All three categories must resolve, and to distinct band centers.
+    let pa = scales_a.x.to_pixel_str("a").expect("a");
+    let pb = scales_a.x.to_pixel_str("b").expect("b");
+    let pc = scales_a.x.to_pixel_str("c").expect("c");
+    assert!(
+        (pa - pb).abs() > 1.0 && (pb - pc).abs() > 1.0 && (pa - pc).abs() > 1.0,
+        "Shared facet: a/b/c bands must occupy distinct slots: a@{pa}, b@{pb}, c@{pc}"
+    );
+}
+
+/// T4 categorical Independent-mode preservation: with x Independent, panel A
+/// (only {a,c}) must NOT see category 'b' — per-panel category set preserved.
+#[test]
+fn t4_independent_facet_categorical_x_keeps_per_panel_categories() {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec, ResolveMode};
+
+    let cat_batch = |cats: Vec<&str>| -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", ArrowDataType::Utf8, false),
+            Field::new("y", ArrowDataType::Float64, false),
+        ]));
+        let n = cats.len();
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(cats)),
+                Arc::new(Float64Array::from(vec![1.0; n])),
+            ],
+        )
+        .unwrap()
+    };
+    let panel_a = cat_batch(vec!["a", "c"]);
+    let global = cat_batch(vec!["a", "c", "b", "c"]);
+    let outputs = final_outputs(global);
+
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Bar,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "cat".into(), type_: Some(SpecDataType::Nominal), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: Some(FacetSpec {
+            field: "panel".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve { x: ResolveMode::Independent, y: ResolveMode::Shared },
+        }),
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    };
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    assert!(
+        scales_a.x.to_pixel_str("b").is_none(),
+        "Independent facet: panel A must NOT include category 'b' from other panels"
+    );
+    assert!(scales_a.x.to_pixel_str("a").is_some(), "panel A keeps 'a'");
+    assert!(scales_a.x.to_pixel_str("c").is_some(), "panel A keeps 'c'");
+}
+
+/// Non-faceted byte-identity guard: with `facet = None`, the flag is false, and a
+/// single batch resolves the same domain whether or not `__final__` carries a
+/// wider batch (the flag gates that union off). Mirrors the non-faceted invariant.
+#[test]
+fn t4_non_faceted_ignores_final_output() {
+    let primary = xy_batch(vec![0.0, 5.0, 10.0], vec![0.0, 1.0, 2.0]);
+    // A wider __final__ batch must NOT widen a non-faceted chart's domain.
+    let wider = xy_batch(vec![0.0, 50.0, 100.0], vec![0.0, 1.0, 2.0]);
+    let outputs = final_outputs(wider);
+    let spec = make_spec_with_color_xy_only();
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales, _) =
+        resolve_scales_with_outputs(&spec, &primary, &outputs, pr, pr, &theme).unwrap();
+    let (lo, hi) = scales.x.data_domain().expect("x domain");
+    assert!(
+        lo <= 0.0 + 1e-6 && hi <= 10.0 + 1e-6 && hi >= 10.0 - 1e-6,
+        "Non-faceted: domain must stay [0,10] (flag false → __final__ not unioned), got [{lo},{hi}]"
+    );
+}
+
+// ── T4 data-aware sort: shared faceted categorical uses global batch ──────────
+//
+// Regression for F1 (round-8 sweep): `apply_sort_to_domain` was called with
+// `SortContext.batch = located.batch` (per-panel) even when `include_final` is
+// true (faceted Shared). Data-aware sort forms (`"-y"` etc.) aggregate per
+// category from that batch, so each panel re-sorted the shared category vector
+// by its OWN aggregate — marks land under the wrong tick.
+//
+// Fix: when `include_final`, build `SortContext.batch` from the global
+// `FINAL_OUTPUT_KEY` batch (mirroring `distinct_positional_categories_shared`).
+
+/// Build a batch with columns `cat` (Utf8) and `y` (Float64).
+fn cat_y_batch(cats: Vec<&str>, ys: Vec<f64>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("cat", ArrowDataType::Utf8, false),
+        Field::new("y", ArrowDataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(cats)),
+            Arc::new(Float64Array::from(ys)),
+        ],
+    )
+    .unwrap()
+}
+
+/// Build a faceted bar spec with nominal x (`field="cat"`, `sort="-y"`) and
+/// quantitative y, using the given per-channel resolve modes.
+fn faceted_nominal_sort_spec(
+    x_resolve: crate::layout::facet::ResolveMode,
+) -> ChartSpec {
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Bar,
+        encoding: Encoding {
+            x: Some(EncodingSpec {
+                field: "cat".into(),
+                type_: Some(SpecDataType::Nominal),
+                sort: Some(serde_json::json!("-y")),
+                ..Default::default()
+            }),
+            y: Some(EncodingSpec {
+                field: "y".into(),
+                type_: Some(SpecDataType::Quantitative),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: Some(FacetSpec {
+            field: "panel".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve { x: x_resolve, y: crate::layout::facet::ResolveMode::Shared },
+        }),
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+/// T4 data-aware sort (Shared): two facet panels whose per-panel y-aggregates
+/// INVERT the global ranking.
+///
+/// Panel A:  a=100, b=50, c=10  → per-panel sort("-y") order: ["a","b","c"]
+/// Panel B:  a=1,   b=5,  c=10  → per-panel sort("-y") order: ["c","b","a"]
+/// Global:   a=101, b=55, c=20  → global sort("-y")   order: ["a","b","c"]
+///
+/// Under the buggy code, each panel would use its OWN aggregate to re-sort the
+/// shared category vector:
+///   - Panel A ends up with ["a","b","c"] (accidentally matches global).
+///   - Panel B ends up with ["c","b","a"] (WRONG — mark "a" lands under "c").
+///
+/// After the fix both panels must agree with the global ranking ["a","b","c"].
+#[test]
+fn t4_shared_facet_categorical_data_aware_sort_uses_global_batch() {
+    use crate::layout::facet::ResolveMode;
+
+    // Per-panel data: panel A has high a, panel B has high c.
+    let panel_a = cat_y_batch(vec!["a", "a", "b", "b", "c", "c"],
+                               vec![50.0, 50.0, 25.0, 25.0, 5.0, 5.0]);
+    let panel_b = cat_y_batch(vec!["a", "a", "b", "b", "c", "c"],
+                               vec![0.5,  0.5,  2.5,  2.5,  5.0, 5.0]);
+
+    // Global batch = concat of both panels.
+    // Sums: a=101, b=55, c=20.  Descending order: ["a","b","c"].
+    let global = cat_y_batch(
+        vec!["a", "a", "b", "b", "c", "c", "a", "a", "b", "b", "c", "c"],
+        vec![50.0, 50.0, 25.0, 25.0, 5.0, 5.0, 0.5, 0.5, 2.5, 2.5, 5.0, 5.0],
+    );
+    let outputs = final_outputs(global);
+
+    let spec = faceted_nominal_sort_spec(ResolveMode::Shared);
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 300.0);
+
+    // Panel A: resolve the x scale (shared faceted, sort="-y").
+    let (scales_a, warnings_a) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    assert!(
+        warnings_a.is_empty(),
+        "panel A: unexpected sort warnings: {warnings_a:?}"
+    );
+
+    // Panel B: resolve the x scale (shared faceted, sort="-y").
+    let (scales_b, warnings_b) =
+        resolve_scales_with_outputs(&spec, &panel_b, &outputs, pr, pr, &theme).unwrap();
+    assert!(
+        warnings_b.is_empty(),
+        "panel B: unexpected sort warnings: {warnings_b:?}"
+    );
+
+    // Global order is a > b > c (descending sums: 101 > 55 > 20).
+    // Both panels must map "a" to a LOWER pixel (leftmost) than "b", and
+    // "b" lower than "c", since OrdinalScale assigns pixels left-to-right
+    // in domain order.  The shared axis sort is [-y] descending → a,b,c.
+    let px_a_a = scales_a.x.to_pixel_str("a").expect("panel A: 'a' must be in domain");
+    let px_a_b = scales_a.x.to_pixel_str("b").expect("panel A: 'b' must be in domain");
+    let px_a_c = scales_a.x.to_pixel_str("c").expect("panel A: 'c' must be in domain");
+    assert!(
+        px_a_a < px_a_b && px_a_b < px_a_c,
+        "panel A: global sort('-y') must give domain order a<b<c (pixels left→right), \
+         got a@{px_a_a}, b@{px_a_b}, c@{px_a_c}"
+    );
+
+    let px_b_a = scales_b.x.to_pixel_str("a").expect("panel B: 'a' must be in domain");
+    let px_b_b = scales_b.x.to_pixel_str("b").expect("panel B: 'b' must be in domain");
+    let px_b_c = scales_b.x.to_pixel_str("c").expect("panel B: 'c' must be in domain");
+    assert!(
+        px_b_a < px_b_b && px_b_b < px_b_c,
+        "panel B: global sort('-y') must give domain order a<b<c (pixels left→right), \
+         got a@{px_b_a}, b@{px_b_b}, c@{px_b_c} \
+         (buggy: panel B's per-panel order would be c<b<a)"
+    );
+
+    // Both panels must agree on the same pixel positions (same shared domain/scale).
+    assert!(
+        (px_a_a - px_b_a).abs() < 1e-9 &&
+        (px_a_b - px_b_b).abs() < 1e-9 &&
+        (px_a_c - px_b_c).abs() < 1e-9,
+        "shared panels must have identical pixel positions: \
+         A:[{px_a_a},{px_a_b},{px_a_c}] vs B:[{px_b_a},{px_b_b},{px_b_c}]"
+    );
+}
+
+/// T4 data-aware sort (Independent): per-panel sort order is preserved when
+/// x resolves `Independent`. Panel B's per-panel aggregate has c > b > a, so
+/// under Independent, panel B's domain must be ["c","b","a"].
+#[test]
+fn t4_independent_facet_categorical_data_aware_sort_uses_per_panel_batch() {
+    use crate::layout::facet::ResolveMode;
+
+    let panel_b = cat_y_batch(vec!["a", "a", "b", "b", "c", "c"],
+                               vec![0.5,  0.5,  2.5,  2.5,  5.0, 5.0]);
+    let global = cat_y_batch(
+        vec!["a", "a", "b", "b", "c", "c", "a", "a", "b", "b", "c", "c"],
+        vec![50.0, 50.0, 25.0, 25.0, 5.0, 5.0, 0.5, 0.5, 2.5, 2.5, 5.0, 5.0],
+    );
+    let outputs = final_outputs(global);
+
+    let spec = faceted_nominal_sort_spec(ResolveMode::Independent);
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 300.0);
+
+    let (scales_b, warnings_b) =
+        resolve_scales_with_outputs(&spec, &panel_b, &outputs, pr, pr, &theme).unwrap();
+    assert!(
+        warnings_b.is_empty(),
+        "panel B Independent: unexpected sort warnings: {warnings_b:?}"
+    );
+
+    // Panel B independent: per-panel sums are a=1, b=5, c=10.
+    // Descending → domain order ["c","b","a"]: c is leftmost, a rightmost.
+    let px_b_a = scales_b.x.to_pixel_str("a").expect("panel B: 'a' must be in domain");
+    let px_b_b = scales_b.x.to_pixel_str("b").expect("panel B: 'b' must be in domain");
+    let px_b_c = scales_b.x.to_pixel_str("c").expect("panel B: 'c' must be in domain");
+    assert!(
+        px_b_c < px_b_b && px_b_b < px_b_a,
+        "panel B Independent: per-panel sort('-y') must give domain order c<b<a \
+         (pixels left→right: c has highest per-panel y sum), \
+         got a@{px_b_a}, b@{px_b_b}, c@{px_b_c}"
+    );
+}
+
+// ── T3: shared faceted auxiliary scale (size / continuous-color / opacity) ──────
+//
+// T3 mirrors T4 for non-positional channels. A faceted chart's size, continuous
+// color, and opacity scales are built ONCE from the global data for the legend/
+// colorbar (`prepare.rs`), but the per-panel marks were resolved from the
+// per-panel batch. This meant a `sz=10` mark in a panel whose data range is
+// [1,10] rendered at the SAME size as a `sz=100` mark in a panel with data range
+// [1,100] — both normalized to their panel's max — even though the global legend
+// clearly shows different sizes for 10 and 100.
+//
+// Fix: when `facet_shared` is true, union the per-panel extent with the global
+// FINAL_OUTPUT_KEY batch, so per-panel marks normalize through the global domain.
+//
+// These tests drive `resolve_scales_with_outputs` with a per-panel batch as
+// primary and the global all-panels batch under `__final__`, mirroring exactly
+// how `scene_build.rs` calls it.
+
+/// Build a faceted point spec on x/y with a size encoding.
+fn faceted_size_spec() -> ChartSpec {
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            size: Some(EncodingSpec {
+                field: "sz".into(),
+                type_: Some(DataType::Quantitative),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: Some(FacetSpec {
+            field: "panel".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve::default(),
+        }),
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+/// Build a faceted point spec on x/y with a continuous (Float64) color encoding.
+fn faceted_continuous_color_spec() -> ChartSpec {
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            color: Some(EncodingSpec {
+                field: "c".into(),
+                type_: Some(DataType::Quantitative),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: Some(FacetSpec {
+            field: "panel".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve::default(),
+        }),
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+/// Build a faceted point spec on x/y with an opacity encoding.
+fn faceted_opacity_spec() -> ChartSpec {
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            opacity: Some(EncodingSpec {
+                field: "op".into(),
+                type_: Some(DataType::Quantitative),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: Some(FacetSpec {
+            field: "panel".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve::default(),
+        }),
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+/// Build a 3-column batch (x, y, sz/c/op) for T3 tests.
+fn t3_sz_batch(x_vals: Vec<f64>, y_vals: Vec<f64>, sz_vals: Vec<f64>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x",  ArrowDataType::Float64, false),
+        Field::new("y",  ArrowDataType::Float64, false),
+        Field::new("sz", ArrowDataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(x_vals)),
+            Arc::new(Float64Array::from(y_vals)),
+            Arc::new(Float64Array::from(sz_vals)),
+        ],
+    )
+    .unwrap()
+}
+
+fn t3_c_batch(x_vals: Vec<f64>, y_vals: Vec<f64>, c_vals: Vec<f64>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("c", ArrowDataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(x_vals)),
+            Arc::new(Float64Array::from(y_vals)),
+            Arc::new(Float64Array::from(c_vals)),
+        ],
+    )
+    .unwrap()
+}
+
+fn t3_op_batch(x_vals: Vec<f64>, y_vals: Vec<f64>, op_vals: Vec<f64>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x",  ArrowDataType::Float64, false),
+        Field::new("y",  ArrowDataType::Float64, false),
+        Field::new("op", ArrowDataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(x_vals)),
+            Arc::new(Float64Array::from(y_vals)),
+            Arc::new(Float64Array::from(op_vals)),
+        ],
+    )
+    .unwrap()
+}
+
+/// T3 size: panel A has sz∈[1,10]; panel B has sz∈[1,100]; global∈[1,100].
+///
+/// Before T3: panel A's sz=10 normalized to 1.0 (max_px) since 10 was the panel
+/// max. After T3: panel A's sz=10 normalizes to the SAME pixel as panel B's
+/// sz=10 (both use the global [1,100] domain), landing at ~10% of the size range.
+#[test]
+fn t3_shared_facet_size_unions_global_domain() {
+    let panel_a = t3_sz_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec![1.0, 10.0]);
+    let panel_b = t3_sz_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec![1.0, 100.0]);
+    let global  = t3_sz_batch(
+        vec![0.0, 1.0, 0.0, 1.0], vec![0.0, 1.0, 0.0, 1.0], vec![1.0, 10.0, 1.0, 100.0],
+    );
+    let outputs = final_outputs(global);
+    let spec = faceted_size_spec();
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    let (scales_b, _) =
+        resolve_scales_with_outputs(&spec, &panel_b, &outputs, pr, pr, &theme).unwrap();
+
+    let size_a = scales_a.size.expect("panel A must have size scale");
+    let size_b = scales_b.size.expect("panel B must have size scale");
+
+    // Both panels must use the global domain [1, 100].
+    let (a_lo, a_hi) = size_a.inner.data_domain().expect("size A domain");
+    let (b_lo, b_hi) = size_b.inner.data_domain().expect("size B domain");
+    assert!(
+        a_lo <= 1.0 + 1e-6 && a_hi >= 100.0 - 1e-6,
+        "T3: panel A size domain must span GLOBAL [1,100], got [{a_lo},{a_hi}]"
+    );
+    assert!(
+        b_lo <= 1.0 + 1e-6 && b_hi >= 100.0 - 1e-6,
+        "T3: panel B size domain must span GLOBAL [1,100], got [{b_lo},{b_hi}]"
+    );
+
+    // Mark-size discrimination: panel A's sz=10 must NOT be the max-pixel mark.
+    // On the global [1,100] domain, sz=10 is ~10% of the way from min to max.
+    // So its pixel radius must be far from max_px.
+    let px_sz10_a = size_a.inner.to_pixel_f64(10.0).expect("sz=10 must project on panel A");
+    let px_sz100_a = size_a.inner.to_pixel_f64(100.0).expect("sz=100 must project on panel A");
+    assert!(
+        px_sz10_a < 0.5 * (size_a.min_px() + size_a.max_px()),
+        "T3: panel A sz=10 must be below the midpoint of the size range (global domain); \
+         got px={px_sz10_a}, mid={}",
+        0.5 * (size_a.min_px() + size_a.max_px())
+    );
+    assert!(
+        (px_sz100_a - size_a.max_px()).abs() < 1e-6,
+        "T3: sz=100 (global max) must map to max_px on panel A; got {px_sz100_a}"
+    );
+
+    // Panel A and B must agree: sz=10 maps to the same pixel on both (global domain).
+    let px_sz10_b = size_b.inner.to_pixel_f64(10.0).expect("sz=10 must project on panel B");
+    assert!(
+        (px_sz10_a - px_sz10_b).abs() < 1e-6,
+        "T3: sz=10 must map to the same pixel on both panels (shared global domain); \
+         panel_A={px_sz10_a}, panel_B={px_sz10_b}"
+    );
+}
+
+/// T3 continuous color: panel A has c∈[1,10]; panel B has c∈[1,100]; global∈[1,100].
+///
+/// Before T3: panel A's c=10 normalized to t=1.0 (scheme max color) since 10 was
+/// the panel-A max. After T3: c=10 normalizes to t≈0.09 on the global [1,100]
+/// domain, producing a much lighter color. Panel A and panel B must produce the
+/// same color for c=10 (they use the same global domain).
+#[test]
+fn t3_shared_facet_continuous_color_unions_global_domain() {
+    let panel_a = t3_c_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec![1.0, 10.0]);
+    let panel_b = t3_c_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec![1.0, 100.0]);
+    let global  = t3_c_batch(
+        vec![0.0, 1.0, 0.0, 1.0], vec![0.0, 1.0, 0.0, 1.0], vec![1.0, 10.0, 1.0, 100.0],
+    );
+    let outputs = final_outputs(global);
+    let spec = faceted_continuous_color_spec();
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    let (scales_b, _) =
+        resolve_scales_with_outputs(&spec, &panel_b, &outputs, pr, pr, &theme).unwrap();
+
+    let color_a = scales_a.color.expect("panel A must have color scale");
+    let color_b = scales_b.color.expect("panel B must have color scale");
+
+    // Both must be Continuous (Float64 field, Quantitative type).
+    let (domain_a, _mid_a) = match &color_a {
+        ColorScale::Continuous { domain, midpoint, .. } => (*domain, *midpoint),
+        other => panic!("panel A color scale must be Continuous, got {other:?}"),
+    };
+    let (domain_b, _mid_b) = match &color_b {
+        ColorScale::Continuous { domain, midpoint, .. } => (*domain, *midpoint),
+        other => panic!("panel B color scale must be Continuous, got {other:?}"),
+    };
+
+    // Both panels must use the global domain [1, 100].
+    assert!(
+        domain_a.0 <= 1.0 + 1e-6 && domain_a.1 >= 100.0 - 1e-6,
+        "T3: panel A color domain must span GLOBAL [1,100], got {:?}", domain_a
+    );
+    assert!(
+        domain_b.0 <= 1.0 + 1e-6 && domain_b.1 >= 100.0 - 1e-6,
+        "T3: panel B color domain must span GLOBAL [1,100], got {:?}", domain_b
+    );
+
+    // Mark-color discrimination: panel A's c=10 must NOT be the scheme maximum.
+    // On global [1,100], c=10 → t ≈ (10-1)/(100-1) ≈ 0.091 (near the dark end of
+    // viridis). The scheme max color (t=1.0) is the bright yellow. They must differ.
+    let color_at_10_a = color_a.lookup_f64(10.0).expect("c=10 must project on panel A");
+    let color_at_100_a = color_a.lookup_f64(100.0).expect("c=100 must project on panel A");
+    // Viridis: t≈0.09 is dark purple; t=1.0 is bright yellow. They clearly differ.
+    assert_ne!(
+        (color_at_10_a.red, color_at_10_a.green, color_at_10_a.blue),
+        (color_at_100_a.red, color_at_100_a.green, color_at_100_a.blue),
+        "T3: c=10 and c=100 must produce different colors on global [1,100] domain"
+    );
+
+    // Panel A and B must produce the same color for c=10.
+    let color_at_10_b = color_b.lookup_f64(10.0).expect("c=10 must project on panel B");
+    assert_eq!(
+        (color_at_10_a.red, color_at_10_a.green, color_at_10_a.blue),
+        (color_at_10_b.red, color_at_10_b.green, color_at_10_b.blue),
+        "T3: c=10 must produce the same color on both panels (shared global domain); \
+         panel_A=({},{},{}) panel_B=({},{},{})",
+        color_at_10_a.red, color_at_10_a.green, color_at_10_a.blue,
+        color_at_10_b.red, color_at_10_b.green, color_at_10_b.blue
+    );
+}
+
+/// T3 opacity: panel A has op∈[1,10]; panel B has op∈[1,100]; global∈[1,100].
+///
+/// Before T3: panel A's op=10 normalized to max_opacity since 10 was the panel max.
+/// After T3: op=10 normalizes to ~10% of the opacity range on the global [1,100]
+/// domain. Both panels must produce the same opacity for op=10.
+#[test]
+fn t3_shared_facet_opacity_unions_global_domain() {
+    let panel_a = t3_op_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec![1.0, 10.0]);
+    let panel_b = t3_op_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec![1.0, 100.0]);
+    let global  = t3_op_batch(
+        vec![0.0, 1.0, 0.0, 1.0], vec![0.0, 1.0, 0.0, 1.0], vec![1.0, 10.0, 1.0, 100.0],
+    );
+    let outputs = final_outputs(global);
+    let spec = faceted_opacity_spec();
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    let (scales_b, _) =
+        resolve_scales_with_outputs(&spec, &panel_b, &outputs, pr, pr, &theme).unwrap();
+
+    let opacity_a = scales_a.opacity.expect("panel A must have opacity scale");
+    let opacity_b = scales_b.opacity.expect("panel B must have opacity scale");
+
+    // Both panels must use the global domain [1, 100].
+    let (a_lo, a_hi) = opacity_a.inner.data_domain().expect("opacity A domain");
+    let (b_lo, b_hi) = opacity_b.inner.data_domain().expect("opacity B domain");
+    assert!(
+        a_lo <= 1.0 + 1e-6 && a_hi >= 100.0 - 1e-6,
+        "T3: panel A opacity domain must span GLOBAL [1,100], got [{a_lo},{a_hi}]"
+    );
+    assert!(
+        b_lo <= 1.0 + 1e-6 && b_hi >= 100.0 - 1e-6,
+        "T3: panel B opacity domain must span GLOBAL [1,100], got [{b_lo},{b_hi}]"
+    );
+
+    // Panel A's op=10 must NOT produce max_opacity under the global domain.
+    let op_at_10_a = opacity_a.inner.to_pixel_f64(10.0)
+        .expect("op=10 must project on panel A");
+    let op_at_100_a = opacity_a.inner.to_pixel_f64(100.0)
+        .expect("op=100 must project on panel A");
+    assert!(
+        op_at_10_a < 0.5 * (opacity_a.min_opacity() + opacity_a.max_opacity()),
+        "T3: panel A op=10 must be below the midpoint of the opacity range (global domain); \
+         got op={op_at_10_a}, mid={}",
+        0.5 * (opacity_a.min_opacity() + opacity_a.max_opacity())
+    );
+    assert!(
+        (op_at_100_a - opacity_a.max_opacity()).abs() < 1e-6,
+        "T3: op=100 (global max) must map to max_opacity on panel A; got {op_at_100_a}"
+    );
+
+    // Panel A and B must produce the same opacity for op=10.
+    let op_at_10_b = opacity_b.inner.to_pixel_f64(10.0)
+        .expect("op=10 must project on panel B");
+    assert!(
+        (op_at_10_a - op_at_10_b).abs() < 1e-6,
+        "T3: op=10 must map to the same opacity on both panels (shared global domain); \
+         panel_A={op_at_10_a}, panel_B={op_at_10_b}"
+    );
+}
+
+/// T3 non-faceted byte-identity: a non-faceted size/color/opacity chart must
+/// resolve identically to the pre-T3 behavior (no global union). The per-panel
+/// extent dominates, no FINAL_OUTPUT_KEY lookup occurs.
+#[test]
+fn t3_non_faceted_size_color_opacity_byte_identical() {
+    // Non-faceted chart: primary batch has sz/c/op∈[1,10]; global batch has [1,100].
+    // Before and after T3, the non-faceted path must NOT union the global batch,
+    // so the domain stays [1,10] (per-panel is all data).
+    let panel_only = {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",  ArrowDataType::Float64, false),
+            Field::new("y",  ArrowDataType::Float64, false),
+            Field::new("sz", ArrowDataType::Float64, false),
+            Field::new("c",  ArrowDataType::Float64, false),
+            Field::new("op", ArrowDataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![1.0, 10.0])),
+                Arc::new(Float64Array::from(vec![1.0, 10.0])),
+                Arc::new(Float64Array::from(vec![1.0, 10.0])),
+            ],
+        )
+        .unwrap()
+    };
+    // A global batch with a wider range (to confirm it's NOT unioned).
+    let global = {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",  ArrowDataType::Float64, false),
+            Field::new("y",  ArrowDataType::Float64, false),
+            Field::new("sz", ArrowDataType::Float64, false),
+            Field::new("c",  ArrowDataType::Float64, false),
+            Field::new("op", ArrowDataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0])),
+                Arc::new(Float64Array::from(vec![1.0, 100.0])),
+                Arc::new(Float64Array::from(vec![1.0, 100.0])),
+                Arc::new(Float64Array::from(vec![1.0, 100.0])),
+            ],
+        )
+        .unwrap()
+    };
+    let outputs = final_outputs(global);
+
+    // Use non-faceted specs (no facet field).
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            size: Some(EncodingSpec {
+                field: "sz".into(),
+                type_: Some(DataType::Quantitative),
+                ..Default::default()
+            }),
+            color: Some(EncodingSpec {
+                field: "c".into(),
+                type_: Some(DataType::Quantitative),
+                ..Default::default()
+            }),
+            opacity: Some(EncodingSpec {
+                field: "op".into(),
+                type_: Some(DataType::Quantitative),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,  // non-faceted
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    };
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales, _) =
+        resolve_scales_with_outputs(&spec, &panel_only, &outputs, pr, pr, &theme).unwrap();
+
+    // Size domain must be [1, 10] (per-panel only, no global union).
+    let size = scales.size.expect("must have size scale");
+    let (sz_lo, sz_hi) = size.inner.data_domain().expect("size domain");
+    assert!(
+        (sz_lo - 1.0).abs() < 1e-6 && (sz_hi - 10.0).abs() < 1e-6,
+        "T3 non-faceted: size domain must be PER-PANEL [1,10], not global [1,100]; \
+         got [{sz_lo},{sz_hi}]"
+    );
+
+    // Continuous color domain must be [1, 10] (per-panel only).
+    let color = scales.color.expect("must have color scale");
+    let domain_c = match &color {
+        ColorScale::Continuous { domain, .. } => *domain,
+        other => panic!("expected Continuous color, got {other:?}"),
+    };
+    assert!(
+        (domain_c.0 - 1.0).abs() < 1e-6 && (domain_c.1 - 10.0).abs() < 1e-6,
+        "T3 non-faceted: color domain must be PER-PANEL [1,10], not global [1,100]; \
+         got {:?}", domain_c
+    );
+
+    // Opacity domain must be [1, 10] (per-panel only).
+    let opacity = scales.opacity.expect("must have opacity scale");
+    let (op_lo, op_hi) = opacity.inner.data_domain().expect("opacity domain");
+    assert!(
+        (op_lo - 1.0).abs() < 1e-6 && (op_hi - 10.0).abs() < 1e-6,
+        "T3 non-faceted: opacity domain must be PER-PANEL [1,10], not global [1,100]; \
+         got [{op_lo},{op_hi}]"
+    );
+}
+
+// ── T3-cat: categorical faceted color uses global first-appearance order ──────
+
+/// Build a batch with (x, y, k) columns for categorical-color T3 tests.
+fn t3_cat_batch(x_vals: Vec<f64>, y_vals: Vec<f64>, k_vals: Vec<&str>) -> RecordBatch {
+    use arrow::array::StringArray;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("k", ArrowDataType::Utf8, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(x_vals)),
+            Arc::new(Float64Array::from(y_vals)),
+            Arc::new(StringArray::from(k_vals)),
+        ],
+    )
+    .unwrap()
+}
+
+/// Build a faceted point spec on x/y with a nominal (Utf8) color encoding.
+fn faceted_categorical_color_spec() -> ChartSpec {
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            color: Some(EncodingSpec {
+                field: "k".into(),
+                type_: Some(DataType::Nominal),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: Some(FacetSpec {
+            field: "panel".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve::default(),
+        }),
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+/// T3-cat: categorical color is assigned by GLOBAL first-appearance order so
+/// the same category string maps to the same palette color in every panel.
+///
+/// Reproduction of the reviewer's green/#2563eb-vs-#dc2626 scenario:
+/// - Panel A rows arrive in order ["green", "blue"] → per-panel: green=0, blue=1.
+/// - Panel B rows arrive in order ["blue", "green"] → per-panel: blue=0, green=1.
+/// Without the fix: panel A gives green→palette[0] and panel B gives green→palette[1]
+/// (different colors). With the fix: both panels use the global batch whose first-
+/// appearance order is ["green", "blue"] → green=0 in both panels (same color).
+///
+/// fail-before/pass-after: confirmed by temporarily swapping domain_batch back
+/// to primary_batch and observing palette[0] ≠ palette[1].
+#[test]
+fn t3_categorical_color_faceted_uses_global_first_appearance_order() {
+    // Panel A: rows arrive green first, then blue.
+    let panel_a = t3_cat_batch(
+        vec![0.0, 1.0], vec![0.0, 1.0], vec!["green", "blue"],
+    );
+    // Panel B: rows arrive blue first, then green — reversed order.
+    let panel_b = t3_cat_batch(
+        vec![0.0, 1.0], vec![0.0, 1.0], vec!["blue", "green"],
+    );
+    // Global batch: all rows concatenated, first appearance is green (from panel A rows first).
+    let global = t3_cat_batch(
+        vec![0.0, 1.0, 0.0, 1.0],
+        vec![0.0, 1.0, 0.0, 1.0],
+        vec!["green", "blue", "blue", "green"],
+    );
+    let outputs = final_outputs(global);
+    let spec = faceted_categorical_color_spec();
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    let (scales_b, _) =
+        resolve_scales_with_outputs(&spec, &panel_b, &outputs, pr, pr, &theme).unwrap();
+
+    let color_a = scales_a.color.expect("panel A must have color scale");
+    let color_b = scales_b.color.expect("panel B must have color scale");
+
+    // Both panels must use the GLOBAL first-appearance domain ["green", "blue"].
+    let (domain_a, palette_a) = match &color_a {
+        ColorScale::Categorical { domain, palette } => (domain.clone(), palette.clone()),
+        other => panic!("panel A color must be Categorical, got {other:?}"),
+    };
+    let (domain_b, palette_b) = match &color_b {
+        ColorScale::Categorical { domain, palette } => (domain.clone(), palette.clone()),
+        other => panic!("panel B color must be Categorical, got {other:?}"),
+    };
+
+    // Both domains must equal the global first-appearance order: ["green", "blue"].
+    assert_eq!(
+        domain_a, vec!["green".to_string(), "blue".to_string()],
+        "T3-cat: panel A domain must follow GLOBAL first-appearance order [green, blue]; got {domain_a:?}"
+    );
+    assert_eq!(
+        domain_b, vec!["green".to_string(), "blue".to_string()],
+        "T3-cat: panel B domain must follow GLOBAL first-appearance order [green, blue]; got {domain_b:?}"
+    );
+
+    // "green" must map to the SAME palette color in both panels.
+    // Both panels have domain = ["green", "blue"], so green → index 0.
+    let green_a = palette_a[0];
+    let green_b = palette_b[0];
+    assert_eq!(
+        (green_a.red, green_a.green, green_a.blue),
+        (green_b.red, green_b.green, green_b.blue),
+        "T3-cat: 'green' must map to the same palette color in both panels (shared global domain); \
+         panel_A=rgb({},{},{}) panel_B=rgb({},{},{})",
+        green_a.red, green_a.green, green_a.blue,
+        green_b.red, green_b.green, green_b.blue,
+    );
+
+    // Sanity: "blue" must map to palette[1] (second position in global order).
+    let blue_a = palette_a[1];
+    let blue_b = palette_b[1];
+    assert_eq!(
+        (blue_a.red, blue_a.green, blue_a.blue),
+        (blue_b.red, blue_b.green, blue_b.blue),
+        "T3-cat: 'blue' must map to the same palette color in both panels; \
+         panel_A=rgb({},{},{}) panel_B=rgb({},{},{})",
+        blue_a.red, blue_a.green, blue_a.blue,
+        blue_b.red, blue_b.green, blue_b.blue,
+    );
+
+    // The two categories must have DIFFERENT colors (palette[0] ≠ palette[1]).
+    assert_ne!(
+        (green_a.red, green_a.green, green_a.blue),
+        (blue_a.red, blue_a.green, blue_a.blue),
+        "T3-cat: 'green' and 'blue' must be assigned different palette colors; \
+         both got rgb({},{},{})", green_a.red, green_a.green, green_a.blue,
+    );
+}
+
+/// Minimal non-faceted x/y point spec for the byte-identity guard.
+fn make_spec_with_color_xy_only() -> ChartSpec {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+// ── T3-shape: faceted SHAPE encoding uses global first-appearance order ────────
+//
+// The last data-driven channel to close the faceted shared-scale class.
+// build_shape_scale was building its domain from the per-panel batch, causing
+// the same category to map to a DIFFERENT glyph in panels whose local
+// first-appearance order differed from the global order.  The shape legend
+// is built globally (from FINAL_OUTPUT_KEY), so panels and legend disagree.
+//
+// Fix: shared_categorical_batch selects the global batch when facet_shared=true,
+// exactly as categorical color does via the same helper.
+
+/// Build a (x, y, grp) batch for T3-shape tests.
+fn t3_shape_batch(x_vals: Vec<f64>, y_vals: Vec<f64>, grp_vals: Vec<&str>) -> RecordBatch {
+    use arrow::array::StringArray;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("grp", ArrowDataType::Utf8, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(x_vals)),
+            Arc::new(Float64Array::from(y_vals)),
+            Arc::new(StringArray::from(grp_vals)),
+        ],
+    )
+    .unwrap()
+}
+
+/// Build a faceted point spec on x/y with a nominal shape encoding.
+fn faceted_shape_spec() -> ChartSpec {
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            shape: Some(EncodingSpec {
+                field: "grp".into(),
+                type_: Some(DataType::Nominal),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: Some(FacetSpec {
+            field: "panel".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve::default(),
+        }),
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+/// T3-shape: shape domain is assigned by GLOBAL first-appearance order so
+/// the same category string maps to the same glyph in every panel.
+///
+/// Reproduction scenario:
+/// - Global order: x, y, z  →  {x:Circle, y:Square, z:Cross}
+/// - Panel A rows: grp=[x, y]    → per-panel: x=0 (Circle), y=1 (Square)
+/// - Panel B rows: grp=[y, z]    → per-panel: y=0 (Circle), z=1 (Square)
+///
+/// Without the fix: panel A gives y→Square, panel B gives y→Circle.
+/// With the fix: both panels use the global domain [x, y, z] so y→Square
+/// in every panel.
+///
+/// fail-before/pass-after: confirmed by the structural analysis — before this
+/// fix, `build_shape_scale` called `distinct_values_in_order(batch, ...)` on
+/// the per-panel batch (no facet_shared param), which was identical to the
+/// categorical-color bug that f13b7da fixed. The test asserts the shape domain
+/// equals global first-appearance order in BOTH panels, which is impossible
+/// under the per-panel path for panel B (its local order is [y, z], not [x, y, z]).
+#[test]
+fn t3_shape_faceted_uses_global_first_appearance_order() {
+    // Panel A: rows arrive in order x, y (local domain = [x, y]).
+    let panel_a = t3_shape_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec!["x", "y"]);
+    // Panel B: rows arrive in order y, z — reversed/disjoint (local domain = [y, z]).
+    let panel_b = t3_shape_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec!["y", "z"]);
+    // Global batch: all rows concatenated; first-appearance order = [x, y, z].
+    let global = t3_shape_batch(
+        vec![0.0, 1.0, 0.0, 1.0],
+        vec![0.0, 1.0, 0.0, 1.0],
+        vec!["x", "y", "y", "z"],
+    );
+    let outputs = final_outputs(global);
+    let spec = faceted_shape_spec();
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    let (scales_b, _) =
+        resolve_scales_with_outputs(&spec, &panel_b, &outputs, pr, pr, &theme).unwrap();
+
+    let shape_a = scales_a.shape.expect("panel A must have shape scale");
+    let shape_b = scales_b.shape.expect("panel B must have shape scale");
+
+    // Both panels must use the GLOBAL first-appearance domain [x, y, z].
+    assert_eq!(
+        shape_a.domain,
+        vec!["x".to_string(), "y".to_string(), "z".to_string()],
+        "T3-shape: panel A domain must follow GLOBAL first-appearance order [x, y, z]; got {:?}",
+        shape_a.domain,
+    );
+    assert_eq!(
+        shape_b.domain,
+        vec!["x".to_string(), "y".to_string(), "z".to_string()],
+        "T3-shape: panel B domain must follow GLOBAL first-appearance order [x, y, z]; got {:?}",
+        shape_b.domain,
+    );
+
+    // "y" must map to the SAME glyph in both panels.
+    // Global domain: x=0 (Circle), y=1 (Square), z=2 (Cross).
+    let glyph_y_a = shape_a.lookup("y").expect("y must be in panel A shape domain");
+    let glyph_y_b = shape_b.lookup("y").expect("y must be in panel B shape domain");
+    assert_eq!(
+        glyph_y_a, glyph_y_b,
+        "T3-shape: 'y' must map to the same glyph in both panels (shared global domain); \
+         panel_A={:?} panel_B={:?}",
+        glyph_y_a, glyph_y_b,
+    );
+    // Confirm it's the expected glyph: global index 1 → Square.
+    assert_eq!(
+        glyph_y_a,
+        ShapeKind::Square,
+        "T3-shape: 'y' must be at global index 1 (Square); got {:?}",
+        glyph_y_a,
+    );
+
+    // Sanity: all three categories must have distinct glyphs.
+    let glyph_x = shape_a.lookup("x").expect("x in panel A");
+    let glyph_z = shape_b.lookup("z").expect("z in panel B");
+    assert_eq!(glyph_x, ShapeKind::Circle, "T3-shape: 'x' must be global index 0 (Circle)");
+    assert_eq!(glyph_z, ShapeKind::Cross, "T3-shape: 'z' must be global index 2 (Cross)");
+}
+
+/// T3-shape non-faceted byte-identity guard: without a facet spec, the shape
+/// domain must be the per-panel first-appearance order, identical to pre-fix
+/// behavior. The presence of a wider global batch in transform_outputs must NOT
+/// affect a non-faceted chart's shape domain.
+#[test]
+fn t3_shape_non_faceted_byte_identical() {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+
+    // Per-panel batch: local order is [y, x] (y appears first).
+    let panel = t3_shape_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec!["y", "x"]);
+    // Global batch has a wider domain [x, y, z] with x first — but non-faceted
+    // charts must NOT use it.
+    let global = t3_shape_batch(
+        vec![0.0, 1.0, 2.0],
+        vec![0.0, 1.0, 2.0],
+        vec!["x", "y", "z"],
+    );
+    let outputs = final_outputs(global);
+
+    // Non-faceted spec: no facet field.
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            shape: Some(EncodingSpec {
+                field: "grp".into(),
+                type_: Some(DataType::Nominal),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None, // non-faceted
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    };
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales, _) =
+        resolve_scales_with_outputs(&spec, &panel, &outputs, pr, pr, &theme).unwrap();
+
+    let shape = scales.shape.expect("shape scale must be resolved");
+
+    // Non-faceted: domain must be PER-PANEL first-appearance order [y, x],
+    // NOT the global [x, y, z].
+    assert_eq!(
+        shape.domain,
+        vec!["y".to_string(), "x".to_string()],
+        "T3-shape non-faceted: domain must be PER-PANEL order [y, x], not global [x, y, z]; \
+         got {:?}",
+        shape.domain,
+    );
+    // "y" is at local index 0 → Circle.
+    let glyph_y = shape.lookup("y").expect("y must be in domain");
+    assert_eq!(
+        glyph_y,
+        ShapeKind::Circle,
+        "T3-shape non-faceted: 'y' must be at per-panel index 0 (Circle); got {:?}",
+        glyph_y,
+    );
 }

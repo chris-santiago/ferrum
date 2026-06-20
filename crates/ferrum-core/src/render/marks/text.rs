@@ -6,8 +6,9 @@
 //! `format_numeric(y)`.
 
 use crate::layout::TextAnchor;
-use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx};
 use crate::render::format::{format_numeric, format_time, format_with_spec};
+use crate::render::mark_nodes::MarkNodes;
 use crate::render::scale_resolve::ScaleKind;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -104,10 +105,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
     let meta = MetadataColumns::from_ctx(ctx);
-    let (tooltips, hrefs, descriptions) = meta.build_metadata(ctx);
 
-    let mut nodes = Vec::new();
-    let mut indices = Vec::new();
+    // Accumulate nodes and source-row indices in lockstep so metadata is
+    // aligned to kept nodes only (#6 defect class fix).
+    let mut acc = MarkNodes::with_capacity(n_x);
 
     for i in 0..n_x {
         let px = if let Some(xs) = &xs_f {
@@ -191,7 +192,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .filter(|v| v.is_finite())
             .unwrap_or(base_angle);
 
-        nodes.push(SceneNode::Text {
+        acc.push(SceneNode::Text {
             x: px + dx,
             y: py + dy,
             content: label,
@@ -205,17 +206,20 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 ctx.mark_style.baseline.as_deref(),
                 row_opacity,
             ),
-        });
-        indices.push(i);
+        }, i);
     }
+
+    let (nodes, data_indices) = acc.finalize();
+    let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
         kind: MarkBatchKind::Text,
         nodes,
-        data_indices: Some(indices),
+        data_indices: Some(data_indices),
         tooltips,
         hrefs,
-        descriptions,    }
+        descriptions,
+    }
 }
 
 #[cfg(test)]
@@ -391,5 +395,188 @@ mod tests {
             "mark_text must still produce MarkBatchKind::Text, got {:?}",
             result.kind
         );
+    }
+
+    // ── Metadata-alignment regression tests (#6 defect class) ────────────────
+    //
+    // Text emits 1 node per kept row. A null text value causes `continue`, so
+    // node indices diverge from row indices as soon as any row is skipped.
+    //
+    // Fail-before: `build_metadata(ctx)` produced full per-row vectors before the
+    // loop; node j got row j's metadata regardless of skips. These tests would
+    // have failed: node 1's tooltip would be "tip_b" (skipped row) not "tip_c".
+    //
+    // Pass-after: `MarkNodes` + `build_metadata_for_indices` aligns metadata to
+    // kept nodes only.
+
+    fn make_panel() -> PanelLayout {
+        PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        }
+    }
+
+    /// Regression: `build_text` with a null text-channel value skips that row.
+    /// The tooltip on each surviving node must point to its true source row.
+    ///
+    /// Batch: 3 rows, text=[Some("a"), None, Some("c")],
+    /// tooltip=["tip_a","tip_b","tip_c"]. Row 1 (null text) is skipped → 2
+    /// nodes. Node 1 must have "tip_c" (row 2), not "tip_b" (row 1, old bug).
+    #[test]
+    fn text_skipped_null_text_tooltip_aligned() {
+        use crate::spec::encoding::DataType as SDT;
+        use arrow::array::StringArray;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                text: Some(EncodingSpec { field: "lbl".into(), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",   DataType::Float64, false),
+            Field::new("y",   DataType::Float64, false),
+            Field::new("lbl", DataType::Utf8,    true),   // nullable — row 1 null → skip
+            Field::new("tip", DataType::Utf8,    false),
+        ]));
+        // Row 1 has null label → skipped (the `None => continue` on the text value).
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0, 90.0])),
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0, 90.0])),
+            Arc::new(StringArray::from(vec![Some("a"), None, Some("c")])),
+            Arc::new(StringArray::from(vec!["tip_a", "tip_b", "tip_c"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Text);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        // 2 nodes survive (row 1 with null label is skipped).
+        assert_eq!(result.nodes.len(), 2,
+            "expected 2 text nodes after null-label skip; got {}", result.nodes.len());
+
+        let tooltips = result.tooltips.expect("tooltips must be Some when tooltip is encoded");
+        assert_eq!(tooltips.len(), 2, "tooltip count must equal node count");
+
+        let t0 = &tooltips[0].fields[0].value;
+        assert_eq!(t0, "tip_a", "node 0 tooltip must be 'tip_a' (row 0); got '{t0}'");
+
+        // Node 1 → row 2 → "tip_c". Old code: "tip_b" (row 1, the alignment bug).
+        let t1 = &tooltips[1].fields[0].value;
+        assert_eq!(t1, "tip_c",
+            "node 1 tooltip must be 'tip_c' (row 2), not 'tip_b' (row 1); got '{t1}'. \
+             This fails on pre-migration code using build_metadata(ctx).");
+    }
+
+    /// Href-channel alignment: a null text value skips row 1; href on node 1
+    /// must point to row 2's url ("url_c"), not row 1's ("url_b").
+    #[test]
+    fn text_skipped_null_text_href_aligned() {
+        use crate::spec::encoding::DataType as SDT;
+        use arrow::array::StringArray;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                text: Some(EncodingSpec { field: "lbl".into(), ..Default::default() }),
+                href: Some(EncodingSpec { field: "url".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",   DataType::Float64, false),
+            Field::new("y",   DataType::Float64, false),
+            Field::new("lbl", DataType::Utf8,    true),
+            Field::new("url", DataType::Utf8,    false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0, 90.0])),
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0, 90.0])),
+            Arc::new(StringArray::from(vec![Some("a"), None, Some("c")])),
+            Arc::new(StringArray::from(vec!["url_a", "url_b", "url_c"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Text);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        assert_eq!(result.nodes.len(), 2, "expected 2 text nodes");
+        let hrefs = result.hrefs.expect("hrefs must be Some when href is encoded");
+        assert_eq!(hrefs.len(), 2, "href count must equal node count");
+        assert_eq!(hrefs[0].as_deref(), Some("url_a"), "node 0 href must be 'url_a'");
+        assert_eq!(hrefs[1].as_deref(), Some("url_c"),
+            "node 1 href must be 'url_c' (row 2), not 'url_b' (row 1); \
+             old build_metadata would give 'url_b'");
+    }
+
+    /// No-skip backward-compat: when no rows are skipped all tooltips appear in
+    /// original row order — same result as the old `build_metadata(ctx)` path.
+    #[test]
+    fn text_no_skip_tooltips_unchanged() {
+        use crate::spec::encoding::DataType as SDT;
+        use arrow::array::StringArray;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                text: Some(EncodingSpec { field: "lbl".into(), ..Default::default() }),
+                tooltip: Some(EncodingSpec { field: "tip".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",   DataType::Float64, false),
+            Field::new("y",   DataType::Float64, false),
+            Field::new("lbl", DataType::Utf8,    false),
+            Field::new("tip", DataType::Utf8,    false),
+        ]));
+        // All rows have non-null text → no skipping.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0, 90.0])),
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0, 90.0])),
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            Arc::new(StringArray::from(vec!["tip_a", "tip_b", "tip_c"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Text);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        assert_eq!(result.nodes.len(), 3, "all 3 rows must produce nodes");
+        let tooltips = result.tooltips.expect("tooltips must be Some");
+        assert_eq!(tooltips.len(), 3, "tooltip count must equal node count");
+        let values: Vec<&str> = tooltips.iter().map(|t| t.fields[0].value.as_str()).collect();
+        assert_eq!(values, vec!["tip_a", "tip_b", "tip_c"],
+            "no-skip: tooltips must be in original row order");
     }
 }
