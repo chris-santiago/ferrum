@@ -657,21 +657,33 @@ def test_faceted_independent_y_produces_distinct_tick_domains(
     # fill its OWN panel (the 'low' panel's y∈[0,2] spreads across the full panel
     # height, unlike the bunched shared case). This proves the per-panel escape
     # hatch is preserved — the complement of the shared-mode mark assertion.
+    #
+    # col= facets are laid out side-by-side (issue #24), so both panels share the
+    # same vertical space; splitting by cy would collapse one panel.  Instead we
+    # split LEFT vs RIGHT by the cx midpoint and measure each panel's cy spread.
     circles_ind = _data_circle_xy(svg_independent)
     assert len(circles_ind) == 6, (
         f"expected 6 data marks in independent-y SVG, got {len(circles_ind)}: {circles_ind}"
     )
-    cys = sorted(c[1] for c in circles_ind)
-    mid_cy = (cys[0] + cys[-1]) / 2
-    top = sorted(c[1] for c in circles_ind if c[1] < mid_cy)
-    bottom = sorted(c[1] for c in circles_ind if c[1] >= mid_cy)
-    top_span = (top[-1] - top[0]) if len(top) >= 2 else 0.0
-    bottom_span = (bottom[-1] - bottom[0]) if len(bottom) >= 2 else 0.0
+    cxs = sorted(c[0] for c in circles_ind)
+    mid_cx = (cxs[0] + cxs[-1]) / 2
+    left_panel = [c for c in circles_ind if c[0] < mid_cx]
+    right_panel = [c for c in circles_ind if c[0] >= mid_cx]
+    left_cy_span = (
+        (max(c[1] for c in left_panel) - min(c[1] for c in left_panel))
+        if len(left_panel) >= 2
+        else 0.0
+    )
+    right_cy_span = (
+        (max(c[1] for c in right_panel) - min(c[1] for c in right_panel))
+        if len(right_panel) >= 2
+        else 0.0
+    )
     # Both panels' marks fill their own height under independent scaling.
-    assert top_span > 50.0 and bottom_span > 50.0, (
+    assert left_cy_span > 50.0 and right_cy_span > 50.0, (
         f"share_scale(y='independent'): each panel's y-marks must fill its own "
-        f"height (top span={top_span:.1f}px, bottom span={bottom_span:.1f}px). "
-        "A small span would mean the marks are still on a shared domain — the "
+        f"height (left panel cy span={left_cy_span:.1f}px, right panel cy span={right_cy_span:.1f}px). "
+        "A small span means marks are still on the shared global domain — the "
         "independent escape hatch must scale each panel to its own y-range."
     )
 

@@ -120,58 +120,68 @@ def _numeric_text_entries(svg: str) -> list[tuple[float, float, float]]:
 def x_axis_extents(svg: str) -> list[AxisExtent]:
     """Per-panel x-axis tick extents for a column-faceted chart.
 
-    Groups numeric ``<text>`` elements by their rounded y-coordinate.  Each
-    group with at least 3 entries corresponds to one panel's x-axis tick row.
-    Returns a list of (lo, hi) sorted by y-position (top panel first).
+    Column facets are laid out side-by-side (issue #24), so every panel's
+    x-axis tick row shares the same bottom y-coordinate while spanning a
+    distinct x-band.  We take the bottom-most tick row (the x-axis row with the
+    largest y among rows of at least 3 numeric entries) and split it into panels
+    by value-reset: tick values ascend within a panel and drop at the boundary
+    where the next panel's x-axis restarts from its own minimum value.
+
+    Returns a list of (lo, hi) sorted by panel order (left panel first).
     """
     entries = _numeric_text_entries(svg)
-    y_groups: dict[int, list[float]] = defaultdict(list)
-    for _, y, val in entries:
-        y_groups[round(y)].append(val)
-    rows = [(y, vals) for y, vals in y_groups.items() if len(vals) >= 3]
-    rows.sort()
-    return [AxisExtent(min(vals), max(vals)) for _, vals in rows]
+    y_groups: dict[int, list[tuple[float, float]]] = defaultdict(list)
+    for x, y, val in entries:
+        y_groups[round(y)].append((x, val))
+    rows = [(y, ents) for y, ents in y_groups.items() if len(ents) >= 3]
+    if not rows:
+        return []
+    # x-axis tick rows sit at the bottom of each panel; take the lowest row.
+    _, axis_row = max(rows, key=lambda r: r[0])
+    return _split_axis_groups_by_position(axis_row)
 
 
 def y_axis_extents(svg: str) -> list[AxisExtent]:
     """Per-panel y-axis tick extents for a column-faceted chart.
 
-    All panels' y-axis ticks share the same x-coordinate (leftmost y-axis).
-    Entries are split into panel groups by detecting y-position gaps larger
-    than 3× the average tick spacing.
+    Column facets are laid out side-by-side (issue #24), so each panel carries
+    its own y-axis at a distinct x-coordinate.  We group numeric ``<text>``
+    elements by their rounded x-coordinate; every column with at least 3 entries
+    is one panel's y-axis.
 
-    Returns a list of (lo, hi) sorted by panel order (top panel first).
+    Returns a list of (lo, hi) sorted by panel order (left panel first).
     """
     entries = _numeric_text_entries(svg)
-    # Collect entries grouped by x-coordinate (same x = same y-axis column).
-    x_groups: dict[int, list[tuple[float, float]]] = defaultdict(list)
-    for x, y, val in entries:
-        x_groups[round(x)].append((y, val))
+    x_groups: dict[int, list[float]] = defaultdict(list)
+    for x, _, val in entries:
+        x_groups[round(x)].append(val)
+    cols = [(x, vals) for x, vals in x_groups.items() if len(vals) >= 3]
+    cols.sort()
+    return [AxisExtent(min(vals), max(vals)) for _, vals in cols]
 
-    # The y-axis column is the leftmost group with at least 3 entries.
-    axis_cols = {x: ents for x, ents in x_groups.items() if len(ents) >= 3}
-    if not axis_cols:
+
+def _split_axis_groups_by_position(
+    positioned_vals: list[tuple[float, float]],
+) -> list[AxisExtent]:
+    """Split (position, value) tick entries into per-panel extents.
+
+    Side-by-side panels (issue #24) each render the SAME shared value range, so
+    the tick values ascend within a panel and then RESET (drop) at the next
+    panel's leftmost tick.  We sort by *position* and break into a new group
+    whenever the value decreases — the unambiguous panel boundary even when
+    panels are tightly tick-packed and the x-gap between them is small.
+    Returns each group's (min, max) value, left panel first.
+    """
+    ents = sorted(positioned_vals)
+    if not ents:
         return []
-
-    axis_x = min(axis_cols)
-    ents = sorted(axis_cols[axis_x])  # sorted by y-position ascending
-
-    if len(ents) < 2:
-        return [AxisExtent(ents[0][1], ents[0][1])]
-
-    # Split by gaps to identify panel boundaries.
-    avg_spacing = (ents[-1][0] - ents[0][0]) / (len(ents) - 1)
-    panel_groups: list[list[float]] = []
-    current: list[float] = [ents[0][1]]
+    groups: list[list[float]] = [[ents[0][1]]]
     for i in range(1, len(ents)):
-        if ents[i][0] - ents[i - 1][0] > avg_spacing * 3:
-            panel_groups.append(current)
-            current = [ents[i][1]]
+        if ents[i][1] < ents[i - 1][1]:  # value reset → next panel
+            groups.append([ents[i][1]])
         else:
-            current.append(ents[i][1])
-    panel_groups.append(current)
-
-    return [AxisExtent(min(g), max(g)) for g in panel_groups]
+            groups[-1].append(ents[i][1])
+    return [AxisExtent(min(g), max(g)) for g in groups]
 
 
 def _extents_all_equal(extents: list[AxisExtent]) -> bool:
@@ -579,20 +589,22 @@ def _data_circles(svg: str) -> list[tuple[float, float]]:
     return out
 
 
-def _split_panels_by_cy(circles: list[tuple[float, float]]) -> tuple[list, list]:
-    """Split data circles into the top and bottom panels by cy (row-stacked facet).
+def _split_panels_by_cx(circles: list[tuple[float, float]]) -> tuple[list, list]:
+    """Split data circles into the left and right panels by cx (side-by-side facet).
 
-    The fixture stacks two panels vertically, so the top panel's marks have
-    smaller cy than the bottom panel's. Returns (top_panel, bottom_panel), each
-    a list of (cx, cy) sorted by cx.
+    Column facets lay two panels out side-by-side (issue #24), occupying the left
+    and right halves of the canvas.  We split at the midpoint of the overall cx
+    span: a robust 2-panel separator under both shared scaling (panel A's marks
+    bunch left) and independent scaling (each panel's marks fill its own half).
+    Returns (left_panel, right_panel), each a list of (cx, cy) sorted by cx.
     """
     if not circles:
         return [], []
-    cys = sorted(c[1] for c in circles)
-    mid = (cys[0] + cys[-1]) / 2
-    top = sorted((c for c in circles if c[1] < mid), key=lambda c: c[0])
-    bottom = sorted((c for c in circles if c[1] >= mid), key=lambda c: c[0])
-    return top, bottom
+    cxs = [c[0] for c in circles]
+    mid = (min(cxs) + max(cxs)) / 2
+    left = sorted((c for c in circles if c[0] < mid), key=lambda c: c[0])
+    right = sorted((c for c in circles if c[0] >= mid), key=lambda c: c[0])
+    return left, right
 
 
 @pytest.fixture
@@ -603,7 +615,7 @@ def raw_disjoint_df() -> pl.DataFrame:
     Global x ∈ [0, 100].
 
     Under Shared (default), panel A's x=10 mark must land near the LEFT of its
-    panel (10% of the global [0,100] domain), not at the right edge.
+    panel (10% of the panel's [0,100] domain), not at the right edge.
     """
     return pl.DataFrame(
         {
@@ -617,16 +629,16 @@ def raw_disjoint_df() -> pl.DataFrame:
 class TestRawFieldSharedFacet:
     """T4 mark-position discrimination for faceted RAW fields.
 
-    The fixture stacks two panels vertically (the panels share the full canvas
-    width, so a SHARED x-axis spans 0–100 in both). Panel A holds x∈{0,5,10};
-    panel B holds x∈{0,50,100}. Under the shared global [0,100] domain, panel A's
-    x=10 mark must land at the SAME cx as panel B's x=10 position (the '10' tick),
-    far LEFT of where x=100 lands. Under the per-panel bug, panel A's x=10 would
-    fill its own panel and land near the right edge instead.
+    The fixture lays two panels side-by-side (issue #24); both panels share the
+    full canvas height, so a SHARED x-axis spans 0–100 within each panel. Panel A
+    holds x∈{0,5,10}; panel B holds x∈{0,50,100}. Under the shared global [0,100]
+    domain, panel A's marks bunch in the LEFT ~10% of its panel while panel B's
+    marks fill its panel. Under the per-panel bug, panel A's x=10 would fill its
+    own panel and land near its right edge instead.
     """
 
     def test_shared_x_marks_use_global_domain(self, raw_disjoint_df: pl.DataFrame) -> None:
-        """Panel A's x=10 mark lands at the global '10' position, not the right edge."""
+        """Panel A's x∈[0,10] occupies only ~10% of its panel, not the full width."""
         svg = (
             fm.Chart(raw_disjoint_df)
             .mark_point()
@@ -636,40 +648,28 @@ class TestRawFieldSharedFacet:
         )
         circles = _data_circles(svg)
         assert len(circles) == 6, f"expected 6 data marks, got {len(circles)}: {circles}"
-        top, bottom = _split_panels_by_cy(circles)
-        assert len(top) == 3 and len(bottom) == 3, (
-            f"each panel must have 3 marks: top={top}, bottom={bottom}"
+        left, right = _split_panels_by_cx(circles)
+        assert len(left) == 3 and len(right) == 3, (
+            f"each panel must have 3 marks: left={left}, right={right}"
         )
-        # The full x-mark extent across BOTH panels: x=0 (min) → x=100 (max).
-        all_cx = sorted(c[0] for c in circles)
-        x0_px, x100_px = all_cx[0], all_cx[-1]
-        full_span = x100_px - x0_px
+        left_span = left[-1][0] - left[0][0]
+        right_span = right[-1][0] - right[0][0]
 
         # Panel A is the one whose marks are x∈{0,5,10} — its 3 cx values are
-        # bunched in the left ~10% of the global span. Identify it as the panel
-        # with the SMALLER cx-spread.
-        top_span = top[-1][0] - top[0][0]
-        bottom_span = bottom[-1][0] - bottom[0][0]
-        panel_a = top if top_span < bottom_span else bottom
-        a_span = min(top_span, bottom_span)
+        # bunched in the left ~10% of its panel. Identify it as the panel with
+        # the SMALLER cx-spread; panel B (x∈{0,50,100}) fills its panel width.
+        a_span = min(left_span, right_span)
+        b_span = max(left_span, right_span)
 
-        # Under the SHARED global [0,100] domain, panel A's x∈[0,10] occupies only
-        # ~10% of the full span. Under the per-panel bug it would occupy the FULL
-        # panel width (≈ full_span). Require panel A's span be < 25% of the full
-        # span — impossible under per-panel scaling, easy under shared.
-        assert a_span < 0.25 * full_span, (
-            f"Panel A x∈[0,10] spans {a_span:.1f}px of the {full_span:.1f}px global "
-            f"extent ({100 * a_span / full_span:.0f}%). Under the shared [0,100] "
-            "domain it must be <25%; a larger fraction means per-panel scaling (the "
-            "T4 bug placed panel A's x=10 at the right edge while the axis showed 100)."
-        )
-        # Panel A's x=10 (its max) must sit near the global '10' position — close to
-        # x=0, far from x=100.
-        a_max_cx = panel_a[-1][0]
-        assert a_max_cx - x0_px < 0.20 * full_span, (
-            f"Panel A's x=10 mark is at cx={a_max_cx:.1f}, {a_max_cx - x0_px:.1f}px "
-            f"from x=0 — should be within 20% of the {full_span:.1f}px global span "
-            "(the '10' tick), not near the right edge."
+        # Under the SHARED [0,100] domain, panel A's x∈[0,10] occupies only ~10%
+        # of a full panel width (≈ panel B's span). Under the per-panel bug it
+        # would fill its own panel (≈ b_span). Require a_span < 25% of b_span —
+        # impossible under per-panel scaling, easy under shared.
+        assert a_span < 0.25 * b_span, (
+            f"Panel A x∈[0,10] spans {a_span:.1f}px of the {b_span:.1f}px full panel "
+            f"width ({100 * a_span / b_span:.0f}%). Under the shared [0,100] domain it "
+            "must be <25%; a larger fraction means per-panel scaling (the T4 bug "
+            "placed panel A's x=10 at the right edge while the axis showed 100)."
         )
 
     def test_independent_x_marks_use_per_panel_domain(self, raw_disjoint_df: pl.DataFrame) -> None:
@@ -684,17 +684,17 @@ class TestRawFieldSharedFacet:
         )
         circles = _data_circles(svg)
         assert len(circles) == 6, f"expected 6 data marks, got {len(circles)}: {circles}"
-        top, bottom = _split_panels_by_cy(circles)
-        assert len(top) == 3 and len(bottom) == 3, (
-            f"each panel must have 3 marks: top={top}, bottom={bottom}"
+        left, right = _split_panels_by_cx(circles)
+        assert len(left) == 3 and len(right) == 3, (
+            f"each panel must have 3 marks: left={left}, right={right}"
         )
-        top_span = top[-1][0] - top[0][0]
-        bottom_span = bottom[-1][0] - bottom[0][0]
+        left_span = left[-1][0] - left[0][0]
+        right_span = right[-1][0] - right[0][0]
         # Independent: EACH panel fills its own width, so BOTH panels' x-mark spans
         # are large and roughly equal (x=0..10 and x=0..100 both fill the panel).
-        assert top_span > 300.0 and bottom_span > 300.0, (
+        assert left_span > 200.0 and right_span > 200.0, (
             f"Independent mode: each panel's x-marks must fill its own width "
-            f"(top span={top_span:.1f}px, bottom span={bottom_span:.1f}px). "
+            f"(left span={left_span:.1f}px, right span={right_span:.1f}px). "
             "Both should be wide; the per-panel escape hatch must be preserved."
         )
 
@@ -925,18 +925,25 @@ class TestT3AuxSharedFacet:
             f"different colors on Viridis); got: {fill_strs}"
         )
 
-        # Stronger check: collect fills per-panel by cx clustering.
-        cxs = sorted(set(round(cx, 1) for cx, _, _ in circles))
-        # Two panels: smaller cx-cluster = panel A, larger = panel B.
+        # Stronger check: compare each panel's HIGH-color mark.  Column facets
+        # lay panels side-by-side (issue #24): split into left/right halves by
+        # cx, then pick each panel's high-c mark.  In the fixture the high-c mark
+        # (c=10 in A, c=100 in B) is the y=1 point — the one with the SMALLEST cy
+        # in its panel.  (We cannot rely on lexical hex order: panel A's c=10 fill
+        # can sort before its c=1 fill.)
+        cxs = sorted(round(cx, 1) for cx, _, _ in circles)
         assert len(cxs) >= 2, f"expected marks in at least 2 cx columns, got {cxs}"
         mid_cx = (cxs[0] + cxs[-1]) / 2
-        a_fills = sorted(set(f for cx, _, f in circles if cx < mid_cx))
-        b_fills = sorted(set(f for cx, _, f in circles if cx >= mid_cx))
+        a_circles = [(cy, f) for cx, cy, f in circles if cx < mid_cx]
+        b_circles = [(cy, f) for cx, cy, f in circles if cx >= mid_cx]
+        assert a_circles and b_circles, (
+            f"each panel must have marks: panel A={a_circles}, panel B={b_circles}"
+        )
 
         # Panel A's c=10 fill must NOT equal Panel B's c=100 fill (global domain).
         # Under per-panel bug: both A-max and B-max map to t=1.0 → same fill.
-        a_max_fill = a_fills[-1] if a_fills else None
-        b_max_fill = b_fills[-1] if b_fills else None
+        a_max_fill = min(a_circles)[1]  # smallest cy = highest y = high-c mark
+        b_max_fill = min(b_circles)[1]
         assert a_max_fill != b_max_fill, (
             f"T3: panel A's c=10 fill ({a_max_fill}) must differ from panel B's "
             f"c=100 fill ({b_max_fill}). Under per-panel scaling both would be the "

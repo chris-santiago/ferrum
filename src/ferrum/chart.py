@@ -473,6 +473,13 @@ class _Facet:
     ``Chart.share_scale()``.  Keys are channel names (``"x"``, ``"y"``);
     values are ``"shared"`` or ``"independent"``.  Absent keys default to
     ``"shared"`` in the Rust layer.
+
+    ``wrap_orient`` records the original orientation of a ``"wrap"`` facet so
+    serialization can infer a side-by-side ``ncols`` for column facets:
+    ``"col"`` (``facet(col=X)`` alone → one horizontal row), ``"row"``
+    (``facet(row=X)`` alone → vertical stack), or ``None`` (generic
+    ``facet(field=X)`` wrap, which stays a vertical stack unless ``ncols`` is
+    given).  Unused for ``mode_kind == "grid"``.
     """
 
     mode_kind: str
@@ -482,6 +489,7 @@ class _Facet:
     ncols: Optional[int] = None
     nrows: Optional[int] = None
     resolve: Optional[dict] = None
+    wrap_orient: Optional[str] = None
 
 
 from ferrum.encoding import _channel_class_map, _channel_class_for, _apply_channel_aliases
@@ -1804,9 +1812,21 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                     mode_kind="grid", col=col_enc.field, row=row_enc.field, ncols=ncols, nrows=nrows
                 )
             elif col_enc is not None:
-                new._facet = _Facet(mode_kind="wrap", field=col_enc.field, ncols=ncols, nrows=nrows)
+                new._facet = _Facet(
+                    mode_kind="wrap",
+                    field=col_enc.field,
+                    ncols=ncols,
+                    nrows=nrows,
+                    wrap_orient="col",
+                )
             elif row_enc is not None:
-                new._facet = _Facet(mode_kind="wrap", field=row_enc.field, ncols=ncols, nrows=nrows)
+                new._facet = _Facet(
+                    mode_kind="wrap",
+                    field=row_enc.field,
+                    ncols=ncols,
+                    nrows=nrows,
+                    wrap_orient="row",
+                )
 
         return new
 
@@ -2302,6 +2322,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 field=field,
                 ncols=ncols,
                 nrows=nrows,
+                wrap_orient=None,
             )
         elif row is not None and col is not None:
             new._facet = _Facet(
@@ -2317,6 +2338,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 field=col,
                 ncols=ncols,
                 nrows=nrows,
+                wrap_orient="col",
             )
         elif row is not None:
             new._facet = _Facet(
@@ -2324,6 +2346,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 field=row,
                 nrows=nrows,
                 ncols=ncols,
+                wrap_orient="row",
             )
         else:
             raise ValueError("facet() requires either `field=`, or `row=`/`col=`")
@@ -2819,7 +2842,16 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 resolve_dict = dict(f.resolve)
 
         if f.mode_kind == "wrap":
-            ncols = f.ncols or 1  # u32 required; default 1
+            # ncols selection (KG-6 / issue #24): an explicit ncols always wins.
+            # A column facet (`facet(col=X)` with no ncols) lays its panels in a
+            # single horizontal row, so ncols = n_distinct(field).  Row facets and
+            # the generic `facet(field=X)` wrap stay a vertical stack (ncols = 1).
+            if f.ncols is not None:
+                ncols = f.ncols
+            elif f.wrap_orient == "col":
+                ncols = self._infer_facet_cardinality(f.field)  # side-by-side row
+            else:  # "row" or generic wrap
+                ncols = 1
             d: dict = {"field": f.field, "mode": {"kind": "wrap", "ncols": int(ncols)}}
             if resolve_dict is not None:
                 d["resolve"] = resolve_dict
