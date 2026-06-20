@@ -786,6 +786,36 @@ fn facet_aux_shared(spec: &ChartSpec) -> bool {
     spec.facet.is_some()
 }
 
+// ── Private helpers ─────────────────────────────────────────────────────────
+
+/// Build the four auxiliary (non-positional) scales for a chart spec.
+///
+/// Computes `force_cat` and `aux_shared` internally from `spec` so the three
+/// dispatch sites in `resolve_scales_with_outputs` share one definition. Warning
+/// push order is: `color_warns` (via `extend`), then `shape_warn` (via `push`).
+#[allow(clippy::type_complexity)]
+fn build_auxiliary_scales(
+    spec: &ChartSpec,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    theme: &ThemeInputs,
+    warnings: &mut Vec<crate::render::RenderWarning>,
+) -> Result<(Option<ColorScale>, Option<SizeScale>, Option<ShapeScale>, Option<OpacityScale>), RenderError> {
+    // FA-5: area marks always group color discretely; force categorical.
+    let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
+    // T3: when the chart is faceted, auxiliary non-positional channels (continuous
+    // color, size, opacity) union the global FINAL_OUTPUT_KEY batch so per-panel
+    // marks normalize through the same domain as the global legend/colorbar.
+    let aux_shared = facet_aux_shared(spec);
+    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared)?;
+    warnings.extend(color_warns);
+    let size = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+    let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
+    if let Some(w) = shape_warn { warnings.push(w); }
+    let opacity = build_opacity_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+    Ok((color, size, shape, opacity))
+}
+
 // ── Main entry points ───────────────────────────────────────────────────────
 
 /// Build scales from spec + post-transform batch + pixel ranges.
@@ -866,15 +896,7 @@ pub fn resolve_scales_with_outputs(
             let dummy_y = ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 1.0], vec![y_pixel_range.1, y_pixel_range.0], false, false,
             ));
-            // FA-5: area marks always group color discretely; force categorical.
-            let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
-            let aux_shared = facet_aux_shared(spec);
-            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared)?;
-            warnings.extend(color_warns);
-            let size = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
-            let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
-            if let Some(w) = shape_warn { warnings.push(w); }
-            let opacity = build_opacity_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+            let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
             return Ok((ResolvedScales { x, y: dummy_y, color, size, shape, opacity, x2: None, y2: None }, warnings));
         }
         if !has_x && has_y {
@@ -886,15 +908,7 @@ pub fn resolve_scales_with_outputs(
             let dummy_x = ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 1.0], vec![x_pixel_range.0, x_pixel_range.1], false, false,
             ));
-            // FA-5: area marks always group color discretely; force categorical.
-            let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
-            let aux_shared = facet_aux_shared(spec);
-            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared)?;
-            warnings.extend(color_warns);
-            let size = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
-            let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
-            if let Some(w) = shape_warn { warnings.push(w); }
-            let opacity = build_opacity_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+            let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
             return Ok((ResolvedScales { x: dummy_x, y, color, size, shape, opacity, x2: None, y2: None }, warnings));
         }
     }
@@ -946,29 +960,9 @@ pub fn resolve_scales_with_outputs(
     // resolved against the chart-level transformed batch (i.e. __final__),
     // matching Phase 8a behavior. (build_color_scale is the one exception —
     // it accepts transform_outputs because composite-mark color fields may
-    // live in a named output rather than primary.)
-    //
-    // FA-5: area marks always group color as discrete categories
-    // (col_as_ordinal_category_str), so their color scale must be Categorical
-    // regardless of the column's Arrow dtype.  This ensures legend swatches
-    // and area fill colors both use the same palette.
-    //
-    // T3: when the chart is faceted, auxiliary non-positional channels (continuous
-    // color, size, opacity) union the global FINAL_OUTPUT_KEY batch so per-panel
-    // marks normalize through the same domain as the global legend/colorbar.
-    let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
-    let aux_shared = facet_aux_shared(spec);
-    let (color, color_warns) = build_color_scale(
-        &spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared,
-    )?;
-    warnings.extend(color_warns);
-
-    let size = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
-    let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
-    if let Some(w) = shape_warn {
-        warnings.push(w);
-    }
-    let opacity = build_opacity_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+    // live in a named output rather than primary.) FA-5 (force_cat) and T3
+    // (aux_shared) logic lives in `build_auxiliary_scales`.
+    let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
 
     let x2_field_name = x2_enc.map(|e| e.field.clone());
     let y2_field_name = y2_enc.map(|e| e.field.clone());

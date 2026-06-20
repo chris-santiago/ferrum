@@ -113,6 +113,23 @@ pub struct RectInstance {
     pub angle: f32,
 }
 
+// ── Wire-format compile-time assertions ────────────────────────────────────
+//
+// The packed binary sidecar produced by `ferrum-core/src/render/pack_instances.rs`
+// must be byte-compatible with these structs.  The canonical stride values are:
+//   CircleInstance: 16 × f32 = 64 bytes  (CIRCLE_STRIDE in ferrum-core)
+//   RectInstance:   18 × f32 = 72 bytes  (RECT_STRIDE in ferrum-core)
+// The consumer's stride computation (`std::mem::size_of::<…>()`) is already
+// correct and is NOT changed here — these asserts only add enforcement.
+// Any layout drift fails the build immediately rather than silently corrupting
+// the interactive render.
+const _: () = assert!(std::mem::size_of::<CircleInstance>() == 64);
+const _: () = assert!(std::mem::size_of::<RectInstance>() == 72);
+// X/Y fields sit at byte 0 (center/position are the first fields in each struct).
+// Toolchain is Rust ≥1.77 so offset_of! is available in core.
+const _: () = assert!(core::mem::offset_of!(CircleInstance, center) == 0);
+const _: () = assert!(core::mem::offset_of!(RectInstance, position) == 0);
+
 #[derive(Clone)]
 pub struct SceneData {
     pub circle_instances: Vec<CircleInstance>,

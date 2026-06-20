@@ -20,6 +20,43 @@
 
 use ferrum_scene::{Color, FillStroke, MarkBatchKind, SceneGraph, SceneNode};
 
+// ── Wire-format stride constants ────────────────────────────────────────────
+//
+// These are the single authoritative definition of the packed GPU-instance
+// byte layout shared between this producer and `ferrum-wasm/src/scene_load.rs`
+// (the consumer).  The consumer keeps its own `std::mem::size_of`-derived
+// stride but has a compile-time assertion that its struct size equals these
+// canonical values.  Any future layout change must update BOTH crates.
+//
+// Canonical values (must equal current literals):
+//   CIRCLE_FLOATS = 16   → CIRCLE_STRIDE = 64 bytes
+//   RECT_FLOATS   = 18   → RECT_STRIDE   = 72 bytes
+//   FIELD_X_OFFSET = 0   (X is f32[0] in both layouts)
+//   FIELD_Y_OFFSET = 4   (Y is f32[1], one f32 = 4 bytes later)
+
+/// Number of f32 fields per packed circle instance.
+pub const CIRCLE_FLOATS: usize = 16;
+/// Number of f32 fields per packed rect instance.
+pub const RECT_FLOATS: usize = 18;
+/// Byte stride for one packed circle instance (16 × 4 = 64).
+pub const CIRCLE_STRIDE: usize = CIRCLE_FLOATS * 4;
+/// Byte stride for one packed rect instance (18 × 4 = 72).
+pub const RECT_STRIDE: usize = RECT_FLOATS * 4;
+/// Byte offset of the X-position field within a packed instance (f32[0]).
+// Format-documentation const; referenced only under #[cfg(test)]. The consumer
+// (ferrum-wasm) and the Python mirror encode this offset by value, not by importing
+// this symbol (the enclosing module is pub(crate)), so it reads as dead code in a
+// normal build.
+#[allow(dead_code)]
+pub const FIELD_X_OFFSET: usize = 0;
+/// Byte offset of the Y-position field within a packed instance (f32[1]).
+// Format-documentation const; referenced only under #[cfg(test)]. The consumer
+// (ferrum-wasm) and the Python mirror encode this offset by value, not by importing
+// this symbol (the enclosing module is pub(crate)), so it reads as dead code in a
+// normal build.
+#[allow(dead_code)]
+pub const FIELD_Y_OFFSET: usize = 4;
+
 /// Minimum node count for a batch to qualify for packing.
 const PACK_THRESHOLD: usize = 1000;
 
@@ -168,8 +205,7 @@ fn all_rects(nodes: &[SceneNode]) -> bool {
 ///   stroke_r, stroke_g, stroke_b, stroke_a,
 ///   stroke_width, opacity, stroke_opacity, stroke_dash, angle
 pub fn pack_circle_batch(nodes: &[SceneNode]) -> Vec<u8> {
-    const FLOATS_PER_CIRCLE: usize = 16;
-    let mut buf = Vec::with_capacity(nodes.len() * FLOATS_PER_CIRCLE * 4);
+    let mut buf = Vec::with_capacity(nodes.len() * CIRCLE_STRIDE);
 
     for node in nodes {
         if let SceneNode::Circle { cx, cy, r, style } = node {
@@ -199,8 +235,7 @@ pub fn pack_circle_batch(nodes: &[SceneNode]) -> Vec<u8> {
 ///   stroke_r, stroke_g, stroke_b, stroke_a,
 ///   stroke_width, opacity, stroke_opacity, stroke_dash, angle
 pub fn pack_rect_batch(nodes: &[SceneNode]) -> Vec<u8> {
-    const FLOATS_PER_RECT: usize = 18;
-    let mut buf = Vec::with_capacity(nodes.len() * FLOATS_PER_RECT * 4);
+    let mut buf = Vec::with_capacity(nodes.len() * RECT_STRIDE);
 
     for node in nodes {
         if let SceneNode::Rect {
@@ -359,9 +394,9 @@ mod tests {
             .collect();
 
         assert_eq!(floats.len(), 16);
-        // center
-        assert!((floats[0] - 100.0).abs() < 1e-6, "center_x");
-        assert!((floats[1] - 200.0).abs() < 1e-6, "center_y");
+        // center: X at FIELD_X_OFFSET (byte 0 → float index 0), Y at FIELD_Y_OFFSET (byte 4 → float index 1)
+        assert!((floats[FIELD_X_OFFSET / 4] - 100.0).abs() < 1e-6, "center_x");
+        assert!((floats[FIELD_Y_OFFSET / 4] - 200.0).abs() < 1e-6, "center_y");
         // radius
         assert!((floats[2] - 10.0).abs() < 1e-6, "radius");
         // fill_color: (255/255, 0, 0, (255/255)*fill_opacity) = (1.0, 0.0, 0.0, 1.0)
@@ -577,6 +612,36 @@ mod tests {
         assert!(batch.nodes.is_empty(), "nodes cleared");
         assert!(batch.data_indices.is_none(), "data_indices cleared");
         assert!(batch.tooltips.is_none(), "tooltips cleared");
+    }
+
+    // ── R2: stride-enforcement tests ─────────────────────────────────────
+    // These tests assert that packing exactly one instance produces exactly
+    // CIRCLE_STRIDE / RECT_STRIDE bytes.  If the push sequence in
+    // pack_circle_batch / pack_rect_batch ever drifts from the named consts,
+    // the test fails — not silently corrupt interactive renders.
+
+    #[test]
+    fn pack_circle_batch_single_instance_equals_circle_stride() {
+        let nodes = vec![SceneNode::Circle {
+            cx: 10.0,
+            cy: 20.0,
+            r: 5.0,
+            style: test_style(128, 1.0),
+        }];
+        assert_eq!(pack_circle_batch(&nodes).len(), CIRCLE_STRIDE);
+    }
+
+    #[test]
+    fn pack_rect_batch_single_instance_equals_rect_stride() {
+        let nodes = vec![SceneNode::Rect {
+            x: 10.0,
+            y: 20.0,
+            w: 30.0,
+            h: 40.0,
+            style: test_style(128, 1.0),
+            corner_radius: 0.0,
+        }];
+        assert_eq!(pack_rect_batch(&nodes).len(), RECT_STRIDE);
     }
 
     #[test]
