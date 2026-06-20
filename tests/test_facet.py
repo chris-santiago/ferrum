@@ -131,6 +131,61 @@ def test_encode_facet_preserves_ncols_from_prior_facet_call():
     assert c._facet.ncols == 3
 
 
+def test_facet_col_no_ncols_infers_side_by_side() -> None:
+    """facet(col=X) with no explicit ncols must emit ncols == n_distinct(X).
+
+    KG-6 / issue #24: col-only facets without an explicit ncols default to a
+    single horizontal row of panels (side-by-side), matching Altair and seaborn.
+    The serialized facet dict's ``mode.ncols`` must equal the number of distinct
+    values in the column field.
+
+    Variants:
+    - col= only (no ncols): ncols == n_distinct → side-by-side
+    - row= only (no ncols): ncols == 1 → vertical stack
+    - field= (no ncols): ncols == 1 → vertical stack
+    - col= with explicit ncols=2: ncols == 2 regardless of n_distinct
+    """
+    df = pl.DataFrame(
+        {
+            "x": [1, 2, 3, 4, 5, 6],
+            "y": [1, 2, 3, 4, 5, 6],
+            "g": ["a", "b", "c", "a", "b", "c"],  # 3 distinct values
+        }
+    )
+
+    # col= only → ncols must equal n_distinct(g) = 3
+    chart_col = Chart(df).mark_point().encode(x="x", y="y").facet(col="g")
+    facet_dict_col = chart_col._build_facet_dict()
+    assert facet_dict_col["mode"]["ncols"] == 3, (
+        f"facet(col='g') with n_distinct=3 must emit ncols=3 (side-by-side), "
+        f"got ncols={facet_dict_col['mode']['ncols']}"
+    )
+
+    # row= only → ncols must be 1 (vertical stack)
+    chart_row = Chart(df).mark_point().encode(x="x", y="y").facet(row="g")
+    facet_dict_row = chart_row._build_facet_dict()
+    assert facet_dict_row["mode"]["ncols"] == 1, (
+        f"facet(row='g') must emit ncols=1 (vertical stack), "
+        f"got ncols={facet_dict_row['mode']['ncols']}"
+    )
+
+    # field= → ncols must be 1 (vertical stack)
+    chart_field = Chart(df).mark_point().encode(x="x", y="y").facet(field="g")
+    facet_dict_field = chart_field._build_facet_dict()
+    assert facet_dict_field["mode"]["ncols"] == 1, (
+        f"facet(field='g') must emit ncols=1 (vertical stack), "
+        f"got ncols={facet_dict_field['mode']['ncols']}"
+    )
+
+    # col= with explicit ncols=2 → ncols must be 2 (explicit wins)
+    chart_explicit = Chart(df).mark_point().encode(x="x", y="y").facet(col="g", ncols=2)
+    facet_dict_explicit = chart_explicit._build_facet_dict()
+    assert facet_dict_explicit["mode"]["ncols"] == 2, (
+        f"facet(col='g', ncols=2) must emit ncols=2 (explicit overrides default), "
+        f"got ncols={facet_dict_explicit['mode']['ncols']}"
+    )
+
+
 def test_faceted_svg_contains_strip_titles():
     """Phase 7 strip-title implementation emits text elements for each facet.
 

@@ -284,13 +284,256 @@ fn size_scale_defaults_to_theme_point_size_range() {
 fn shape_scale_picks_from_8_shape_palette_in_order() {
     let batch = make_batch_q_q_n_n_q();
     let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
-    let (scale, warn) = build_shape_scale(&make_spec_with_shape().encoding, &batch, &outputs, false).unwrap();
+    let (scale, warns) = build_shape_scale(&make_spec_with_shape().encoding, &batch, &outputs, false).unwrap();
     let scale = scale.unwrap();
-    assert!(warn.is_none());
+    assert!(warns.is_empty());
     assert_eq!(scale.shapes.len(), 3);
     assert_eq!(scale.shapes[0], ShapeKind::Circle);
     assert_eq!(scale.shapes[1], ShapeKind::Square);
     assert_eq!(scale.shapes[2], ShapeKind::Cross);
+}
+
+// --- KG-8: shape encoding honors sort ---
+
+/// Helper: build a spec with shape encoding and an optional sort value.
+fn make_spec_with_shape_sort(sort_json: Option<serde_json::Value>) -> ChartSpec {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            shape: Some(EncodingSpec {
+                field: "species".into(),
+                type_: None,
+                sort: sort_json,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+/// KG-8 baseline: absent sort keeps first-appearance order (byte-identical).
+/// Data rows: "cat", "bird", "dog" → domain must be ["cat", "bird", "dog"].
+#[test]
+fn shape_absent_sort_preserves_first_appearance_order() {
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("species", ArrowDataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            Arc::new(StringArray::from(vec!["cat", "bird", "dog"])),
+        ],
+    )
+    .unwrap();
+    let spec = make_spec_with_shape_sort(None);
+    let outputs = std::collections::HashMap::new();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false).unwrap();
+    let scale = scale.unwrap();
+    assert!(warns.is_empty());
+    // First-appearance order: cat=0, bird=1, dog=2
+    assert_eq!(scale.domain, vec!["cat", "bird", "dog"]);
+    // Shape assignments must match that order
+    assert_eq!(scale.shapes[0], ShapeKind::Circle);   // cat → circle
+    assert_eq!(scale.shapes[1], ShapeKind::Square);   // bird → square
+    assert_eq!(scale.shapes[2], ShapeKind::Cross);    // dog  → cross
+}
+
+/// KG-8: sort="ascending" reorders domain alphabetically.
+/// Data: "cat", "bird", "dog" → domain must be ["bird", "cat", "dog"].
+#[test]
+fn shape_sort_ascending_reorders_domain_alphabetically() {
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("species", ArrowDataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            Arc::new(StringArray::from(vec!["cat", "bird", "dog"])),
+        ],
+    )
+    .unwrap();
+    let spec = make_spec_with_shape_sort(Some(serde_json::json!("ascending")));
+    let outputs = std::collections::HashMap::new();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false).unwrap();
+    let scale = scale.unwrap();
+    assert!(warns.is_empty());
+    assert_eq!(scale.domain, vec!["bird", "cat", "dog"]);
+    // After sort, bird is at index 0 → circle, cat → square, dog → cross
+    assert_eq!(scale.shapes[0], ShapeKind::Circle);
+    assert_eq!(scale.shapes[1], ShapeKind::Square);
+    assert_eq!(scale.shapes[2], ShapeKind::Cross);
+}
+
+/// KG-8: sort="descending" reorders domain in reverse alphabetical order.
+/// Data: "cat", "bird", "dog" → domain must be ["dog", "cat", "bird"].
+#[test]
+fn shape_sort_descending_reorders_domain_reverse_alphabetically() {
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("species", ArrowDataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            Arc::new(StringArray::from(vec!["cat", "bird", "dog"])),
+        ],
+    )
+    .unwrap();
+    let spec = make_spec_with_shape_sort(Some(serde_json::json!("descending")));
+    let outputs = std::collections::HashMap::new();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false).unwrap();
+    let scale = scale.unwrap();
+    assert!(warns.is_empty());
+    assert_eq!(scale.domain, vec!["dog", "cat", "bird"]);
+}
+
+/// KG-8: sort="-y" (data-aware channel shorthand) orders the shape domain
+/// by the per-category sum of y values, descending.
+///
+/// Data: cat rows y=[10,30], bird rows y=[20], dog rows y=[40].
+/// y-sums: cat=40, bird=20, dog=40. Tie between cat and dog resolved by
+/// `sort_by` (stable on equal keys → original relative order preserved for
+/// ties: cat appears before dog in first-appearance).
+/// Expected descending by sum: dog=40, cat=40, bird=20 — but since
+/// `sort_by` is stable and cat precedes dog in domain, the tie-break keeps
+/// cat before dog. Expected: ["cat", "dog", "bird"] or ["dog", "cat", "bird"]
+/// depending on sort stability. We assert bird is last (lowest sum) and does
+/// NOT have the circle glyph — the discriminating part.
+#[test]
+fn shape_sort_data_aware_minus_y_orders_by_y_aggregate_descending() {
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("species", ArrowDataType::Utf8, false),
+    ]));
+    // cat: y=10,30 (sum=40), bird: y=20 (sum=20), dog: y=40 (sum=40)
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+            Arc::new(StringArray::from(vec!["cat", "bird", "cat", "dog"])),
+        ],
+    )
+    .unwrap();
+    let spec = make_spec_with_shape_sort(Some(serde_json::json!("-y")));
+    let outputs = std::collections::HashMap::new();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false).unwrap();
+    let scale = scale.unwrap();
+    assert!(warns.is_empty(), "no warnings expected for valid -y sort: {warns:?}");
+    // bird has the lowest y-sum (20) → must be last in the descending domain
+    assert_eq!(scale.domain.last(), Some(&"bird".to_string()), "bird must be last (lowest y-sum)");
+    // bird must NOT get the circle glyph (index 0)
+    let bird_idx = scale.domain.iter().position(|v| v == "bird").unwrap();
+    assert_ne!(scale.shapes[bird_idx], ShapeKind::Circle, "bird must not get circle after -y sort");
+}
+
+/// KG-8: explicit-array sort form reorders the domain to match the array order.
+/// sort=["dog","bird","cat"] → domain must be ["dog", "bird", "cat"].
+#[test]
+fn shape_sort_explicit_array_overrides_first_appearance_order() {
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("species", ArrowDataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            Arc::new(StringArray::from(vec!["cat", "bird", "dog"])),
+        ],
+    )
+    .unwrap();
+    let spec = make_spec_with_shape_sort(Some(serde_json::json!(["dog", "bird", "cat"])));
+    let outputs = std::collections::HashMap::new();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false).unwrap();
+    let scale = scale.unwrap();
+    assert!(warns.is_empty());
+    assert_eq!(scale.domain, vec!["dog", "bird", "cat"]);
+    // dog is now at index 0 → circle
+    assert_eq!(scale.shapes[0], ShapeKind::Circle);
+    // bird at index 1 → square
+    assert_eq!(scale.shapes[1], ShapeKind::Square);
+    // cat at index 2 → cross
+    assert_eq!(scale.shapes[2], ShapeKind::Cross);
+}
+
+/// KG-8: a data-aware sort referencing a missing field emits SortSpecIgnored
+/// and leaves the domain in first-appearance order (never panics).
+#[test]
+fn shape_sort_missing_field_emits_warning_not_panic() {
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("species", ArrowDataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            Arc::new(StringArray::from(vec!["cat", "bird", "dog"])),
+        ],
+    )
+    .unwrap();
+    // Sort by a field that doesn't exist in the batch
+    let sort_obj = serde_json::json!({"field": "nonexistent_column", "op": "mean", "order": "descending"});
+    let spec = make_spec_with_shape_sort(Some(sort_obj));
+    let outputs = std::collections::HashMap::new();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, false).unwrap();
+    let scale = scale.unwrap();
+    // Must emit a SortSpecIgnored warning
+    assert!(!warns.is_empty(), "expected SortSpecIgnored warning for missing field");
+    assert!(
+        warns.iter().any(|w| matches!(w, crate::render::RenderWarning::SortSpecIgnored { .. })),
+        "expected SortSpecIgnored warning, got: {warns:?}"
+    );
+    // Domain must remain in first-appearance order
+    assert_eq!(scale.domain, vec!["cat", "bird", "dog"]);
 }
 
 // --- Phase 8b: y2/x2 extends the primary axis domain ---

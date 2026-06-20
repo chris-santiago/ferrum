@@ -120,18 +120,22 @@ class Shape(ChannelBase):
     the shape legend in the rendered SVG.  ``legend=Legend(title=..., format=...)``
     customizes the legend title.  When ``legend`` is omitted, a categorical shape
     legend is rendered automatically showing one glyph per distinct category value.
-    ``condition`` is accepted but reserved for future use.
+    ``sort`` is honored: pass ``"ascending"``, ``"descending"``, a list of strings
+    for an explicit domain order, or a channel shorthand such as ``"-y"`` to sort
+    by the per-category aggregate of another channel.  ``condition`` is accepted
+    but reserved for future use.
 
     Examples
     --------
     >>> import ferrum as fm
     >>> fm.Chart(df).encode(x="hp", y="mpg", shape=fm.Shape("origin", type_="N"))
+    >>> fm.Chart(df).encode(x="hp", y="mpg", shape=fm.Shape("origin", sort="descending"))
     >>> fm.Chart(df).encode(x="hp", y="mpg", shape=fm.Shape("origin", legend=None))
     """
 
     _channel_name = "shape"
 
-    _honored_kwargs = _RENDERED_HONORED
+    _honored_kwargs = frozenset(["type", "scale", "title", "legend", "sort", "condition"])
 
 
 class Opacity(ChannelBase):

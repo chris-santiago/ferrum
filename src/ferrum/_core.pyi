@@ -44,6 +44,7 @@ class EncodingSpec:
     legend: Optional[Any]
     sort: Optional[Any]
     stack: Optional[str]
+    condition: Optional[Any]
     impute: Optional[Any]
     scheme: Optional[str]
     format: Optional[str]
