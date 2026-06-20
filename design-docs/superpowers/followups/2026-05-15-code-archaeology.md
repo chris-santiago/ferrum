@@ -361,3 +361,33 @@ below.
 | [#23](https://github.com/chris-santiago/ferrum/issues/23) | feat | enhancement (public mark_polygon) |
 
 Note on verification upgrades: **FA-11** was reclassified from drift-prevention to an active **bug** (`fill_opacity` is silently unread on `mark_line`). **B5-followup** is a Python-side gap only (Rust `AxisStyleSpec` already carries `label_flush`).
+
+---
+
+## 2026-06-19 — issues #6/#7/#8 class-fix + round-5 convergence (`fix/archaeology-bugs-6-7-8-class`)
+
+The three GH-issue bugs were fixed **as defect classes, not instances** (per the session postmortem), then an unscoped review/audit sweep surfaced four more findings (A–D) that were also fixed. The branch ran an autonomous review→remediate loop (rounds 1–5).
+
+**Issue bugs resolved (class-level, pending merge):**
+
+- **#6 / D7** (polar bar tooltip/href misalign) → **RESOLVED as a class.** Root cause was builders constructing the node list with skips/fan-out/grouping while metadata stayed indexed by source row. Introduced `MarkNodes` accumulator (`render/mark_nodes.rs`) so a node cannot be added without its source row; migrated all 14 row-skipping / multi-node / group builders; added a construction-seam `debug_assert_nodes_metadata_aligned` guard over all 5 channels (tooltips/hrefs/descriptions/data_indices/keys). Also fixed `label.rs` leader-line multi-node misalignment and geoshape/image metadata-drop found by the round-1 sweep.
+- **#7 / D2** (faceted Bin/Violin extent drift) → **RESOLVED as a class.** `fix_transform_extents_for_facet` (`render/prepare.rs`) now pins the pre-facet shared extent for **all** extent-carrying transforms: Kde, Bin, Violin, Kde2D, Bin2D, DensityData (each with a `global_extent` helper). `ViolinSpec.shared_extent` wired end-to-end (R6).
+- **#8 / D10** (Joint/ClusterMap title → inner panel) → **RESOLVED.** Single chrome home in `_CompositeBase`; Rust `figure_title_nodes` PyO3 helper sharing `FigureChrome::layout` with the SVG path; `_inject_figure_chrome` injects title nodes + offsets children for every composite; factory-dict chrome split in `_overrides`.
+
+**Round-5 unscoped-sweep findings (all fixed on this branch):**
+
+- **A (CRITICAL)** — `_merge_packed_data` tooltip-table misparse (assumed a u32 length-prefix; real format has none) dropped/blanked panels for any interactive composite with a >1000-mark child. Fixed: scan the table field-by-field mirroring `scene_load.rs`. Corrected 3 tests that enshrined the wrong byte format.
+- **B (HIGH)** — packed GPU instances never received the per-panel concat `(dx, dy)`, so packed marks rendered at the top-left child's coords while scissored to their own offset plot_area. Fixed: `_offset_packed_batch_xy` + per-child `child_xy_offsets` threaded through all 5 merge call sites.
+- **C** — `_core.pyi` stub drift (wrong `Violin extent=`; ~19 classes + ~16 functions undeclared). Fixed + a bidirectional stub↔module parity test.
+- **D** — Rust hardening: clamped the `scene_load.rs` tooltip-scan slice (latent panic), recorded the actually-loaded `instance_count` (no phantom GPU instances), unified `violin`/`density_data` `global_extent` to `coerce_to_float64` (int-field shared-extent gap).
+
+**Known gaps recorded during round-5 P4 triage (pre-existing, not fixed here):**
+
+| ID | Sev | Item |
+|---|---|---|
+| KG-1 | S2 | **`groupby` type asymmetry across sibling transforms** — `Violin.groupby` is `Vec<String>` (list) while `Kde`/`Kde2D`/`Smooth.groupby` is `Option<String>` (single). The `_core.pyi` stub faithfully mirrors this (`Optional[List[str]]` vs `Optional[str]`); the asymmetry itself is a Rust-API sibling-drift issue (same family as **FA-7**). Defer: unifying requires an API decision + Python-layer changes; no active bug (callers use the form each accepts). |
+| KG-2 | S2 | **`global_extent` residual drift** — after F1, the six extent helpers split into a 1-D inline-fold family (kde/violin/density_data) and a 2-D extracted-helper family (bin_2d/kde_2d `raw_axis_extent`, duplicated verbatim) + bin's `raw_float64_extent`. The fold logic is now uniform; hoisting `raw_axis_extent` into `numeric_util` alongside `coerce_to_float64` would remove the last duplication. Defer: pre-existing, cosmetic, drift-prevention only. |
+| KG-3 | S1 | **`MarkBatch.keys`** — built and carried through the packed/interactive path but consumed only by interactive linked-selection (interactive-only); confirm a consumer exists or mark dead. Overlaps the round-1 guard work (keys now in the alignment guard). |
+| KG-4 | S1 | **per-mark `description`** — populated for SVG `aria`/`<desc>` but has no WASM/interactive consumer (SVG-only). Same family as the deferred geoshape/image/label **hover-tooltip** limitation (round-3 non-goal). |
+| KG-5 | S1 | **dead WASM API** — `onWheel`/`onPan`/`resetZoom`/`selectInRect` exported but unused by the current JS loader (adjacent to issue **#17** share_x/y dead-API cleanup). |
+| — | — | **`deny_unknown_fields` asymmetry** (mark_style/coord/facet/position silently drop unknown dict keys while title/axis/legend fail loud) is **already tracked as issue [#2](https://github.com/chris-santiago/ferrum/issues/2) (B6)** — not re-filed. |
