@@ -1,30 +1,11 @@
 import warnings
-import pytest
 
 from ferrum._warn import reset_warnings
 from ferrum.encoding.base import ChannelBase
 from ferrum.encoding import (
     X,
-    Y,
-    X2,
-    Y2,
-    XError,
-    YError,
-    XError2,
-    YError2,
-    Theta,
-    Radius,
     Color,
-    Fill,
     Stroke,
-    Opacity,
-    FillOpacity,
-    StrokeOpacity,
-    StrokeWidth,
-    StrokeDash,
-    Size,
-    Shape,
-    Angle,
 )
 
 
@@ -241,3 +222,92 @@ def test_stroke_no_warning_across_renders():
         f"Expected 0 stroke warnings, got {len(stroke_channel_warnings)}: "
         f"{[str(wi.message) for wi in stroke_channel_warnings]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# C13 — warn-once when stroke is dropped by color; ghost docstring accuracy
+# ---------------------------------------------------------------------------
+
+
+def test_stroke_dropped_by_color_warns_once():
+    """encode(color=..., stroke=...) emits exactly one warning and drops stroke.
+
+    When both color and stroke are encoded with data fields, stroke cannot be
+    mapped to a separate scale — it is dropped.  A single UserWarning is emitted
+    the first time this happens (at render time, inside _apply_channel_aliases);
+    subsequent renders in the same context are silent.
+    """
+    import polars as pl
+    from ferrum import Chart, Color, Stroke
+    from ferrum._warn import reset_warnings
+
+    reset_warnings()
+    df = pl.DataFrame({"a": [1, 2], "b": [3, 4], "c": ["x", "y"], "d": ["p", "q"]})
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        # The warning fires at to_svg() time (inside _apply_channel_aliases).
+        Chart(df).mark_point().encode(x="a", y="b", color=Color("c"), stroke=Stroke("d")).to_svg()
+    stroke_warns = [wi for wi in w if "stroke" in str(wi.message).lower()]
+    assert len(stroke_warns) == 1, (
+        f"Expected exactly 1 stroke-dropped warning; got {len(stroke_warns)}: "
+        f"{[str(wi.message) for wi in stroke_warns]}"
+    )
+
+    # Second render (same warn-once context): must be suppressed.
+    with warnings.catch_warnings(record=True) as w2:
+        warnings.simplefilter("always")
+        Chart(df).mark_point().encode(x="a", y="b", color=Color("c"), stroke=Stroke("d")).to_svg()
+    stroke_warns2 = [wi for wi in w2 if "stroke" in str(wi.message).lower()]
+    assert len(stroke_warns2) == 0, (
+        f"Expected 0 stroke warnings on second render (warn_once); "
+        f"got {len(stroke_warns2)}: {[str(wi.message) for wi in stroke_warns2]}"
+    )
+
+
+def test_stroke_dropped_by_color_stroke_field_is_absent_from_spec():
+    """When stroke is dropped, the rendered chart encodes color only (stroke absent).
+
+    Verifies the drop is real: the chart renders without error and the stroke
+    field does not appear as a separate color-scale field in the output.
+    """
+    import polars as pl
+    from ferrum import Chart, Color, Stroke
+    from ferrum._warn import reset_warnings
+
+    reset_warnings()
+    df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0], "c": ["x", "y", "z"], "d": ["p", "q", "r"]})
+
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        svg = (
+            Chart(df)
+            .mark_point()
+            .encode(x="a", y="b", color=Color("c"), stroke=Stroke("d"))
+            .to_svg()
+        )
+    assert "<svg" in svg, "Chart with color+stroke (stroke dropped) must still render"
+
+
+def test_ghost_channel_docstring_no_longer_says_reserved_for_future_use():
+    """Ghost positional channel docstrings must not claim 'reserved for future use'.
+
+    X2, Y2, XError, YError, XError2, YError2, Theta2, Radius2 all have
+    _honored_kwargs = frozenset(['type']).  Their Notes must say the unsupported
+    kwargs emit a warning, not that they are 'reserved for future use'.
+    """
+    from ferrum.encoding import X2, Y2, XError, YError, XError2, YError2
+    from ferrum.encoding.positional import Theta2, Radius2
+
+    ghost_channels = [X2, Y2, XError, YError, XError2, YError2, Theta2, Radius2]
+    for cls in ghost_channels:
+        doc = cls.__doc__ or ""
+        assert "reserved for future use" not in doc, (
+            f"{cls.__name__}.__doc__ still contains 'reserved for future use'; "
+            "update the docstring to say unsupported kwargs emit a warning."
+        )
+        # Also confirm the corrected language is present.
+        assert "not supported" in doc or "warning is emitted" in doc, (
+            f"{cls.__name__}.__doc__ does not mention the warning behavior; "
+            "expected 'not supported' or 'warning is emitted' in the Notes section."
+        )

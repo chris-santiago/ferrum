@@ -159,7 +159,7 @@ def _apply_channel_aliases(enc: dict, mk: dict) -> tuple[dict, dict]:
     if "fill" in enc and "color" not in enc:
         enc["color"] = enc["fill"]
 
-    # Stroke -> color (when color absent); silent drop otherwise.
+    # Stroke -> color (when color absent); warn-once and drop otherwise.
     if "stroke" in enc:
         stroke_ch = enc["stroke"]
         if "color" not in enc:
@@ -168,9 +168,16 @@ def _apply_channel_aliases(enc: dict, mk: dict) -> tuple[dict, dict]:
             # Can't map to a scale -- inject as a mark_style grouping hint.
             # mark_style.stroke expects a hex color, not a field name, so
             # this is a best-effort: when the user maps a field to stroke
-            # while color is already mapped, the stroke encoding is silently
-            # stored but produces no visual effect.
-            pass
+            # while color is already mapped, the stroke encoding produces no
+            # visual effect.  Warn once so callers know the channel was dropped.
+            from ferrum._warn import warn_once
+
+            warn_once(
+                "encoding",
+                "stroke_dropped_by_color",
+                "encode(stroke=...) is ignored when color= is also encoded; "
+                "stroke is aliased to color only when color is absent.",
+            )
 
     # Detail -> mark_style.detail
     if "detail" in enc:
