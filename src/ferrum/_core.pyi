@@ -38,7 +38,33 @@ def process_batch(reader: Any) -> Any:
 class EncodingSpec:
     field: str
     type_: Optional[str]
-    def __init__(self, field: str, type_: Optional[DataTypeStr] = None) -> None: ...
+    scale: Optional[Any]
+    title: Optional[str]
+    axis: Optional[Any]
+    legend: Optional[Any]
+    sort: Optional[Any]
+    stack: Optional[str]
+    impute: Optional[Any]
+    scheme: Optional[str]
+    format: Optional[str]
+    format_type: Optional[str]
+    def __init__(
+        self,
+        field: str,
+        type_: Optional[DataTypeStr] = None,
+        *,
+        scale: Optional[Any] = None,
+        title: Optional[str] = None,
+        axis: Optional[Any] = None,
+        legend: Optional[Any] = None,
+        sort: Optional[Any] = None,
+        stack: Optional[str] = None,
+        condition: Optional[Any] = None,
+        impute: Optional[Any] = None,
+        scheme: Optional[str] = None,
+        format: Optional[str] = None,
+        format_type: Optional[str] = None,
+    ) -> None: ...
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
@@ -153,17 +179,19 @@ class LogScale:
 
 class TimeScale:
     domain: list[float]
-    range: list[float]
+    range: list[float] | None
     clamp: bool
     padding: float | None
+    utc: bool
     def __init__(
         self,
         *,
         domain: Sequence[float],
-        range: Sequence[float],
+        range: Sequence[float] | None = None,
         clamp: bool = False,
         nice: bool = False,
         padding: float | None = None,
+        utc: bool = False,
     ) -> None: ...
     def scale(self, x: float) -> float: ...
     def invert(self, y: float) -> float: ...
@@ -1096,7 +1124,7 @@ def kendall_tau_b(x: Sequence[float], y: Sequence[float]) -> _KendallResult: ...
 # Arrow arrays are passed as Any (pyarrow is a runtime dep, not a type dep).
 # RecordBatch returns are also typed as Any for the same reason.
 
-def hat_matrix_stats(X: Any, y_true: Any, y_pred: Any) -> Any: ...
+def hat_matrix_stats(x_table: Any, y_true: Any, y_pred: Any) -> Any: ...
 def studentized_residual_no_x(y_true: Any, y_pred: Any) -> Any: ...
 def roc_curve_kernel(y_true: Any, y_score: Any, drop_intermediate: bool) -> Any: ...
 def roc_auc(y_true: Any, y_score: Any) -> float: ...
