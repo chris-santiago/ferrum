@@ -549,3 +549,269 @@ class TestFacetSharedExtentGoldens:
             .to_svg()
         )
         self._check_or_update("kde_facet_multi_group.svg", svg)
+
+
+# ---------------------------------------------------------------------------
+# 9. T4 — shared faceted positional scale for RAW fields (no transform)
+# ---------------------------------------------------------------------------
+#
+# Archaeology round-7 T4. A faceted RAW (untransformed) continuous/categorical
+# field with the default ResolveMode::Shared must position marks through the
+# GLOBAL all-panels domain, not its own per-panel partition. Before T4 a faceted
+# scatter scaled each panel's marks to that panel's local range while the shared
+# axis showed the global domain — marks and axis labels DISAGREED. These tests
+# assert on mark PIXEL positions (the existing facet tests only check axis ticks,
+# which already showed the global domain even when the bug was live).
+
+RAW_GOLDENS_DIR = Path(__file__).parent / "goldens" / "facet_shared_raw"
+
+
+def _data_circles(svg: str) -> list[tuple[float, float]]:
+    """Return (cx, cy) for every data-mark ``<circle>`` (theme radius ≈ 3.x).
+
+    Legend swatches use r="4"; data points use the theme point radius (~3.385),
+    so the radius discriminates marks from swatches.
+    """
+    out: list[tuple[float, float]] = []
+    for cx, cy, r in re.findall(
+        r'<circle cx="([0-9.]+)" cy="([0-9.]+)" r="([0-9.]+)"', svg
+    ):
+        if abs(float(r) - 4.0) > 1e-6:
+            out.append((float(cx), float(cy)))
+    return out
+
+
+def _split_panels_by_cy(circles: list[tuple[float, float]]) -> tuple[list, list]:
+    """Split data circles into the top and bottom panels by cy (row-stacked facet).
+
+    The fixture stacks two panels vertically, so the top panel's marks have
+    smaller cy than the bottom panel's. Returns (top_panel, bottom_panel), each
+    a list of (cx, cy) sorted by cx.
+    """
+    if not circles:
+        return [], []
+    cys = sorted(c[1] for c in circles)
+    mid = (cys[0] + cys[-1]) / 2
+    top = sorted((c for c in circles if c[1] < mid), key=lambda c: c[0])
+    bottom = sorted((c for c in circles if c[1] >= mid), key=lambda c: c[0])
+    return top, bottom
+
+
+@pytest.fixture
+def raw_disjoint_df() -> pl.DataFrame:
+    """Two panels with disjoint RAW x ranges (no transform).
+
+    Panel 'A': x ∈ {0, 5, 10}.   Panel 'B': x ∈ {0, 50, 100}.
+    Global x ∈ [0, 100].
+
+    Under Shared (default), panel A's x=10 mark must land near the LEFT of its
+    panel (10% of the global [0,100] domain), not at the right edge.
+    """
+    return pl.DataFrame(
+        {
+            "x": [0.0, 5.0, 10.0, 0.0, 50.0, 100.0],
+            "y": [0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
+            "cat": ["A", "A", "A", "B", "B", "B"],
+        }
+    )
+
+
+class TestRawFieldSharedFacet:
+    """T4 mark-position discrimination for faceted RAW fields.
+
+    The fixture stacks two panels vertically (the panels share the full canvas
+    width, so a SHARED x-axis spans 0–100 in both). Panel A holds x∈{0,5,10};
+    panel B holds x∈{0,50,100}. Under the shared global [0,100] domain, panel A's
+    x=10 mark must land at the SAME cx as panel B's x=10 position (the '10' tick),
+    far LEFT of where x=100 lands. Under the per-panel bug, panel A's x=10 would
+    fill its own panel and land near the right edge instead.
+    """
+
+    def test_shared_x_marks_use_global_domain(self, raw_disjoint_df: pl.DataFrame) -> None:
+        """Panel A's x=10 mark lands at the global '10' position, not the right edge."""
+        svg = (
+            fm.Chart(raw_disjoint_df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q")
+            .facet(col="cat")
+            .to_svg()
+        )
+        circles = _data_circles(svg)
+        assert len(circles) == 6, f"expected 6 data marks, got {len(circles)}: {circles}"
+        top, bottom = _split_panels_by_cy(circles)
+        assert len(top) == 3 and len(bottom) == 3, (
+            f"each panel must have 3 marks: top={top}, bottom={bottom}"
+        )
+        # The full x-mark extent across BOTH panels: x=0 (min) → x=100 (max).
+        all_cx = sorted(c[0] for c in circles)
+        x0_px, x100_px = all_cx[0], all_cx[-1]
+        full_span = x100_px - x0_px
+
+        # Panel A is the one whose marks are x∈{0,5,10} — its 3 cx values are
+        # bunched in the left ~10% of the global span. Identify it as the panel
+        # with the SMALLER cx-spread.
+        top_span = top[-1][0] - top[0][0]
+        bottom_span = bottom[-1][0] - bottom[0][0]
+        panel_a = top if top_span < bottom_span else bottom
+        a_span = min(top_span, bottom_span)
+
+        # Under the SHARED global [0,100] domain, panel A's x∈[0,10] occupies only
+        # ~10% of the full span. Under the per-panel bug it would occupy the FULL
+        # panel width (≈ full_span). Require panel A's span be < 25% of the full
+        # span — impossible under per-panel scaling, easy under shared.
+        assert a_span < 0.25 * full_span, (
+            f"Panel A x∈[0,10] spans {a_span:.1f}px of the {full_span:.1f}px global "
+            f"extent ({100 * a_span / full_span:.0f}%). Under the shared [0,100] "
+            "domain it must be <25%; a larger fraction means per-panel scaling (the "
+            "T4 bug placed panel A's x=10 at the right edge while the axis showed 100)."
+        )
+        # Panel A's x=10 (its max) must sit near the global '10' position — close to
+        # x=0, far from x=100.
+        a_max_cx = panel_a[-1][0]
+        assert a_max_cx - x0_px < 0.20 * full_span, (
+            f"Panel A's x=10 mark is at cx={a_max_cx:.1f}, {a_max_cx - x0_px:.1f}px "
+            f"from x=0 — should be within 20% of the {full_span:.1f}px global span "
+            "(the '10' tick), not near the right edge."
+        )
+
+    def test_independent_x_marks_use_per_panel_domain(
+        self, raw_disjoint_df: pl.DataFrame
+    ) -> None:
+        """share_scale(x='independent') keeps per-panel scaling (escape hatch)."""
+        svg = (
+            fm.Chart(raw_disjoint_df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q")
+            .facet(col="cat")
+            .share_scale(x="independent")
+            .to_svg()
+        )
+        circles = _data_circles(svg)
+        assert len(circles) == 6, f"expected 6 data marks, got {len(circles)}: {circles}"
+        top, bottom = _split_panels_by_cy(circles)
+        assert len(top) == 3 and len(bottom) == 3, (
+            f"each panel must have 3 marks: top={top}, bottom={bottom}"
+        )
+        top_span = top[-1][0] - top[0][0]
+        bottom_span = bottom[-1][0] - bottom[0][0]
+        # Independent: EACH panel fills its own width, so BOTH panels' x-mark spans
+        # are large and roughly equal (x=0..10 and x=0..100 both fill the panel).
+        assert top_span > 300.0 and bottom_span > 300.0, (
+            f"Independent mode: each panel's x-marks must fill its own width "
+            f"(top span={top_span:.1f}px, bottom span={bottom_span:.1f}px). "
+            "Both should be wide; the per-panel escape hatch must be preserved."
+        )
+
+    def test_shared_categorical_panel_keeps_all_bands(self) -> None:
+        """A faceted categorical x where a panel is missing a category present in
+        another panel must, under Shared, still lay out all categories' bands.
+
+        Fixture:
+          Panel A has categories {a, c}; Panel B has categories {b, c}.
+          Global union is {a, b, c}.
+
+        Under SHARED: every panel renders all three bands, so 'a', 'b', and 'c'
+        each appear as axis tick labels exactly twice in the SVG (once per panel).
+
+        Under INDEPENDENT: panel A renders only {a, c} and panel B only {b, c},
+        so 'a' appears once, 'b' appears once, and 'c' appears twice.
+
+        This discrimination fails if the shared-categorical bug is re-introduced:
+        a regression would revert shared mode to per-panel domains, causing 'a'
+        and 'b' to appear only once each even in the shared SVG.
+        """
+        df = pl.DataFrame(
+            {
+                "cat": ["a", "c", "b", "c"],
+                "y": [1.0, 2.0, 3.0, 4.0],
+                "panel": ["A", "A", "B", "B"],
+            }
+        )
+        svg_shared = (
+            fm.Chart(df).mark_bar().encode(x="cat:N", y="y:Q").facet(col="panel").to_svg()
+        )
+        svg_indep = (
+            fm.Chart(df)
+            .mark_bar()
+            .encode(x="cat:N", y="y:Q")
+            .facet(col="panel")
+            .share_scale(x="independent")
+            .to_svg()
+        )
+
+        def _category_label_counts(svg: str) -> dict[str, int]:
+            """Count occurrences of each single-letter category label in axis tick <text> elements."""
+            counts: dict[str, int] = {}
+            for attrs, text in re.findall(r"<text\s+([^>]*)>([^<]*)</text>", svg):
+                label = text.strip()
+                if label in ("a", "b", "c"):
+                    counts[label] = counts.get(label, 0) + 1
+            return counts
+
+        shared_counts = _category_label_counts(svg_shared)
+        indep_counts = _category_label_counts(svg_indep)
+
+        # Under SHARED: all three categories appear in every panel (2 panels),
+        # so each label must appear exactly twice.
+        assert shared_counts.get("a") == 2, (
+            f"Shared mode: expected 'a' to appear twice (once per panel, global union), "
+            f"got {shared_counts.get('a', 0)}. "
+            "If 'a' appears only once, panel B is not showing the full band union."
+        )
+        assert shared_counts.get("b") == 2, (
+            f"Shared mode: expected 'b' to appear twice (once per panel, global union), "
+            f"got {shared_counts.get('b', 0)}. "
+            "If 'b' appears only once, panel A is not showing the full band union."
+        )
+        assert shared_counts.get("c") == 2, (
+            f"Shared mode: expected 'c' to appear twice (once per panel), "
+            f"got {shared_counts.get('c', 0)}."
+        )
+
+        # Under INDEPENDENT: each panel shows only its own categories,
+        # so 'a' and 'b' each appear only once (in their own panel).
+        assert indep_counts.get("a", 0) == 1, (
+            f"Independent mode: expected 'a' once (panel A only), "
+            f"got {indep_counts.get('a', 0)}."
+        )
+        assert indep_counts.get("b", 0) == 1, (
+            f"Independent mode: expected 'b' once (panel B only), "
+            f"got {indep_counts.get('b', 0)}."
+        )
+        assert indep_counts.get("c", 0) == 2, (
+            f"Independent mode: expected 'c' twice (present in both panels), "
+            f"got {indep_counts.get('c', 0)}."
+        )
+
+
+class TestRawFieldSharedFacetGolden:
+    """Golden for a faceted RAW scatter on the shared domain (orchestrator-blessed)."""
+
+    def _check_or_update(self, name: str, svg: str) -> None:
+        RAW_GOLDENS_DIR.mkdir(parents=True, exist_ok=True)
+        golden = RAW_GOLDENS_DIR / name
+        if UPDATE:
+            golden.write_text(svg)
+            return
+        if not golden.exists():
+            pytest.fail(
+                f"golden {name!r} does not exist; rerun with FERRUM_UPDATE_GOLDENS=1 to regenerate"
+            )
+        from tests._snapshots import assert_svg_eq
+
+        assert_svg_eq(
+            svg,
+            golden.read_text(),
+            name=name,
+            regen_hint="FERRUM_UPDATE_GOLDENS=1 uv run pytest tests/test_facet_shared_extent.py",
+        )
+
+    def test_golden_raw_scatter_shared_facet(self, raw_disjoint_df: pl.DataFrame) -> None:
+        svg = (
+            fm.Chart(raw_disjoint_df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q")
+            .facet(col="cat")
+            .to_svg()
+        )
+        self._check_or_update("raw_scatter_shared_facet.svg", svg)

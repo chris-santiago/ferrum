@@ -2261,3 +2261,435 @@ fn d2d_independent_resolve_yields_per_panel_domains() {
     assert!(b_lo >= g_lo - 0.1 && b_hi <= g_hi + 0.1,
         "panel B domain [{b_lo},{b_hi}] must be contained in global [{g_lo},{g_hi}]");
 }
+
+// ── T4: shared faceted positional scale for RAW fields ───────────────────────
+//
+// The per-panel callsite (`scene_build.rs`) passes the panel's own partition as
+// `primary_batch` and the global all-panels batch as
+// `transform_outputs[FINAL_OUTPUT_KEY]`. Before T4 a faceted RAW field's
+// positional domain was the per-panel min/max only — marks were per-panel-scaled
+// while the shared axis showed the global domain (marks and axis disagree).
+//
+// These tests drive `resolve_scales_with_outputs` exactly as `scene_build.rs`
+// does: panel batch as primary, global batch under `__final__`. A faceted spec
+// with the default (Shared) resolve must union the global batch so the per-panel
+// domain spans every panel; an Independent spec must keep per-panel domains.
+
+/// Helper: a `__final__`-keyed transform_outputs map carrying the global batch,
+/// mirroring what `prep.transform_outputs` holds at the per-panel callsite.
+fn final_outputs(global: RecordBatch) -> HashMapForTests {
+    let mut m: HashMapForTests = std::collections::HashMap::new();
+    m.insert(crate::transform::core::FINAL_OUTPUT_KEY.to_string(), global);
+    m
+}
+
+type HashMapForTests = std::collections::HashMap<String, RecordBatch>;
+
+/// Build a faceted point spec on x/y with the given per-channel resolve modes.
+fn faceted_xy_spec(
+    x_resolve: crate::layout::facet::ResolveMode,
+    y_resolve: crate::layout::facet::ResolveMode,
+) -> ChartSpec {
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: Some(FacetSpec {
+            field: "panel".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve { x: x_resolve, y: y_resolve },
+        }),
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+fn xy_batch(x_vals: Vec<f64>, y_vals: Vec<f64>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(x_vals)),
+            Arc::new(Float64Array::from(y_vals)),
+        ],
+    )
+    .unwrap()
+}
+
+/// T4 numeric, x-channel: a faceted RAW x with disjoint per-panel ranges
+/// (panel A x∈[0,10], panel B x∈[0,100]) must resolve panel A's x domain to the
+/// GLOBAL [0,100] under Shared. Panel A's x=10 mark then lands at ~10% of the
+/// plot width, NOT the right edge.
+#[test]
+fn t4_shared_facet_numeric_x_unions_global_domain() {
+    let panel_a = xy_batch(vec![0.0, 5.0, 10.0], vec![0.0, 1.0, 2.0]);
+    let panel_b = xy_batch(vec![0.0, 50.0, 100.0], vec![0.0, 1.0, 2.0]);
+    let global = xy_batch(
+        vec![0.0, 5.0, 10.0, 0.0, 50.0, 100.0],
+        vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
+    );
+    let outputs = final_outputs(global);
+    let spec = faceted_xy_spec(
+        crate::layout::facet::ResolveMode::Shared,
+        crate::layout::facet::ResolveMode::Shared,
+    );
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    // Panel A resolved exactly as scene_build does: panel batch primary, global
+    // batch under __final__.
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    let (a_lo, a_hi) = scales_a.x.data_domain().expect("panel A x domain");
+    assert!(
+        a_lo <= 0.0 + 1e-6 && a_hi >= 100.0 - 1e-6,
+        "Shared facet: panel A x domain must span the GLOBAL [0,100], got [{a_lo},{a_hi}]"
+    );
+
+    // Mark-position discrimination: panel A's x=10 mark must NOT be at the right
+    // edge. On the global [0,100] domain with a 5% inward pad over (0,100),
+    // x=10 maps to ~5 + 0.10 * 90 = ~14px, far left of the 100px right edge.
+    let px_10 = scales_a.x.to_pixel_f64(10.0).expect("x=10 must project");
+    let px_100 = scales_a.x.to_pixel_f64(100.0).expect("x=100 must project");
+    assert!(
+        px_10 < 0.30 * 100.0,
+        "Shared facet: panel A x=10 must land in the left third (global domain), got {px_10}px"
+    );
+    assert!(
+        (px_100 - 95.0).abs() < 2.0,
+        "Shared facet: x=100 (global max) must land near the right edge, got {px_100}px"
+    );
+    // The per-panel max (x=10) is far from the panel-relative right edge.
+    assert!(
+        px_100 - px_10 > 50.0,
+        "x=10 and x=100 must be far apart on the shared domain: 10@{px_10}px, 100@{px_100}px"
+    );
+}
+
+/// T4 numeric, y-channel: a faceted RAW y with disjoint per-panel ranges must
+/// resolve each panel's y domain to the GLOBAL union under Shared.
+#[test]
+fn t4_shared_facet_numeric_y_unions_global_domain() {
+    let panel_a = xy_batch(vec![0.0, 1.0, 2.0], vec![0.0, 2.5, 5.0]);
+    let panel_b = xy_batch(vec![0.0, 1.0, 2.0], vec![100.0, 150.0, 200.0]);
+    let global = xy_batch(
+        vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
+        vec![0.0, 2.5, 5.0, 100.0, 150.0, 200.0],
+    );
+    let outputs = final_outputs(global);
+    let spec = faceted_xy_spec(
+        crate::layout::facet::ResolveMode::Shared,
+        crate::layout::facet::ResolveMode::Shared,
+    );
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 200.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    let (a_lo, a_hi) = scales_a.y.data_domain().expect("panel A y domain");
+    assert!(
+        a_lo <= 0.0 + 1e-6 && a_hi >= 200.0 - 1e-6,
+        "Shared facet: panel A y domain must span GLOBAL [0,200], got [{a_lo},{a_hi}]"
+    );
+
+    // Resolve panel B to confirm it also gets the global domain.
+    let (scales_b, _) =
+        resolve_scales_with_outputs(&spec, &panel_b, &outputs, pr, pr, &theme).unwrap();
+    let (b_lo, b_hi) = scales_b.y.data_domain().expect("panel B y domain");
+    assert!(
+        b_lo <= 0.0 + 1e-6 && b_hi >= 200.0 - 1e-6,
+        "Shared facet: panel B y domain must span GLOBAL [0,200], got [{b_lo},{b_hi}]"
+    );
+
+    // Mark-position discrimination (y-axis is INVERTED: small data y → large pixel y
+    // / bottom of plot). Panel A's max data-y is 5, which occupies only the bottom
+    // 2.5% of the global [0,200] domain. On a 200px plot range it must land near the
+    // bottom (large pixel ≈ 190 px), not near the top as per-panel scaling would
+    // produce (where y=5 would be the panel-relative max → pixel ≈ 5 px).
+    //
+    // With a 5% inward pad over [0,200] the pixel range is ~[190, 10] (bottom→top),
+    // so y=5 → ~190 - 0.025 * 180 ≈ 185.5 px.  We just assert it lands in the top
+    // 30% of PIXEL space (px < 0.70 * 200 = 140) which is the BOTTOM 70% of DATA
+    // space — far from the panel-relative top that per-panel scaling would yield.
+    let py_5 = scales_a.y.to_pixel_f64(5.0).expect("y=5 must project");
+    let py_0 = scales_a.y.to_pixel_f64(0.0).expect("y=0 must project");
+    let py_200 = scales_a.y.to_pixel_f64(200.0).expect("y=200 must project");
+    // y-axis inversion: the bottom of the data range (y=0) maps to the largest
+    // pixel value; the top of the data range (y=200) maps to the smallest.
+    assert!(
+        py_0 > py_200,
+        "y-axis must be inverted: y=0 pixel ({py_0}) must be > y=200 pixel ({py_200})"
+    );
+    // y=5 (panel A's data max, but only 2.5% of the global range) must be near the
+    // bottom of the plot, i.e. near y=0 in pixel terms — NOT near y=200 pixel pos.
+    assert!(
+        (py_5 - py_0).abs() < 0.10 * (py_0 - py_200),
+        "Shared facet: panel A y=5 must land near the BOTTOM of the global domain \
+         (within 10% of y=0 pixel pos); per-panel scaling would wrongly put it at \
+         the TOP. Got py_5={py_5}, py_0={py_0}, py_200={py_200}"
+    );
+    // y=200 (global max) must land near the top edge.
+    assert!(
+        (py_200 - pr.0).abs() < 2.0 * (pr.1 - pr.0) / 200.0 * 10.0,
+        "Shared facet: y=200 (global max) must land near the top edge, got {py_200}px"
+    );
+}
+
+/// T4 Independent-mode preservation: with `share_scale(x="independent")` (here,
+/// `ResolveMode::Independent` on x), panel A's x domain must stay per-panel
+/// ([0,10]) — the escape hatch is byte-identical to the pre-T4 behavior. The
+/// global batch under __final__ must be ignored for that channel.
+#[test]
+fn t4_independent_facet_numeric_x_keeps_per_panel_domain() {
+    let panel_a = xy_batch(vec![0.0, 5.0, 10.0], vec![0.0, 1.0, 2.0]);
+    let global = xy_batch(
+        vec![0.0, 5.0, 10.0, 0.0, 50.0, 100.0],
+        vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
+    );
+    let outputs = final_outputs(global);
+    let spec = faceted_xy_spec(
+        crate::layout::facet::ResolveMode::Independent,
+        crate::layout::facet::ResolveMode::Shared,
+    );
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    let (a_lo, a_hi) = scales_a.x.data_domain().expect("panel A x domain");
+    assert!(
+        a_lo <= 0.0 + 1e-6 && a_hi <= 10.0 + 1e-6 && a_hi >= 10.0 - 1e-6,
+        "Independent facet: panel A x domain must stay per-panel [0,10], got [{a_lo},{a_hi}]"
+    );
+    // Mark-position discrimination: with the per-panel domain, x=10 (panel max)
+    // lands at the panel-relative right edge (~95px after the 5% inward pad).
+    let px_10 = scales_a.x.to_pixel_f64(10.0).expect("x=10 must project");
+    assert!(
+        px_10 > 0.70 * 100.0,
+        "Independent facet: panel A x=10 (its own max) must be near the right edge, got {px_10}px"
+    );
+}
+
+/// T4 categorical/band arm: a faceted categorical x where panel A is missing a
+/// category present only in panel B must, under Shared, get the FULL category
+/// set (shared band layout) so band widths/positions match the shared axis.
+#[test]
+fn t4_shared_facet_categorical_x_unions_global_categories() {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec, ResolveMode};
+
+    let cat_batch = |cats: Vec<&str>| -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", ArrowDataType::Utf8, false),
+            Field::new("y", ArrowDataType::Float64, false),
+        ]));
+        let n = cats.len();
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(cats)),
+                Arc::new(Float64Array::from(vec![1.0; n])),
+            ],
+        )
+        .unwrap()
+    };
+
+    // Panel A has only {a, c}; panel B has {b, c}. Global has {a, b, c}.
+    let panel_a = cat_batch(vec!["a", "c"]);
+    let global = cat_batch(vec!["a", "c", "b", "c"]);
+    let outputs = final_outputs(global);
+
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Bar,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "cat".into(), type_: Some(SpecDataType::Nominal), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: Some(FacetSpec {
+            field: "panel".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve { x: ResolveMode::Shared, y: ResolveMode::Shared },
+        }),
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    };
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    // Panel A (only {a,c}) must still place a band for category 'b' (present in
+    // the global set) so its band layout matches the shared axis.
+    let px_b = scales_a.x.to_pixel_str("b");
+    assert!(
+        px_b.is_some(),
+        "Shared facet: panel A x scale must include category 'b' from the global set"
+    );
+    // All three categories must resolve, and to distinct band centers.
+    let pa = scales_a.x.to_pixel_str("a").expect("a");
+    let pb = scales_a.x.to_pixel_str("b").expect("b");
+    let pc = scales_a.x.to_pixel_str("c").expect("c");
+    assert!(
+        (pa - pb).abs() > 1.0 && (pb - pc).abs() > 1.0 && (pa - pc).abs() > 1.0,
+        "Shared facet: a/b/c bands must occupy distinct slots: a@{pa}, b@{pb}, c@{pc}"
+    );
+}
+
+/// T4 categorical Independent-mode preservation: with x Independent, panel A
+/// (only {a,c}) must NOT see category 'b' — per-panel category set preserved.
+#[test]
+fn t4_independent_facet_categorical_x_keeps_per_panel_categories() {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec, ResolveMode};
+
+    let cat_batch = |cats: Vec<&str>| -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", ArrowDataType::Utf8, false),
+            Field::new("y", ArrowDataType::Float64, false),
+        ]));
+        let n = cats.len();
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(cats)),
+                Arc::new(Float64Array::from(vec![1.0; n])),
+            ],
+        )
+        .unwrap()
+    };
+    let panel_a = cat_batch(vec!["a", "c"]);
+    let global = cat_batch(vec!["a", "c", "b", "c"]);
+    let outputs = final_outputs(global);
+
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Bar,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "cat".into(), type_: Some(SpecDataType::Nominal), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: Some(FacetSpec {
+            field: "panel".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve { x: ResolveMode::Independent, y: ResolveMode::Shared },
+        }),
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    };
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    assert!(
+        scales_a.x.to_pixel_str("b").is_none(),
+        "Independent facet: panel A must NOT include category 'b' from other panels"
+    );
+    assert!(scales_a.x.to_pixel_str("a").is_some(), "panel A keeps 'a'");
+    assert!(scales_a.x.to_pixel_str("c").is_some(), "panel A keeps 'c'");
+}
+
+/// Non-faceted byte-identity guard: with `facet = None`, the flag is false, and a
+/// single batch resolves the same domain whether or not `__final__` carries a
+/// wider batch (the flag gates that union off). Mirrors the non-faceted invariant.
+#[test]
+fn t4_non_faceted_ignores_final_output() {
+    let primary = xy_batch(vec![0.0, 5.0, 10.0], vec![0.0, 1.0, 2.0]);
+    // A wider __final__ batch must NOT widen a non-faceted chart's domain.
+    let wider = xy_batch(vec![0.0, 50.0, 100.0], vec![0.0, 1.0, 2.0]);
+    let outputs = final_outputs(wider);
+    let spec = make_spec_with_color_xy_only();
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales, _) =
+        resolve_scales_with_outputs(&spec, &primary, &outputs, pr, pr, &theme).unwrap();
+    let (lo, hi) = scales.x.data_domain().expect("x domain");
+    assert!(
+        lo <= 0.0 + 1e-6 && hi <= 10.0 + 1e-6 && hi >= 10.0 - 1e-6,
+        "Non-faceted: domain must stay [0,10] (flag false → __final__ not unioned), got [{lo},{hi}]"
+    );
+}
+
+/// Minimal non-faceted x/y point spec for the byte-identity guard.
+fn make_spec_with_color_xy_only() -> ChartSpec {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None,
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}

@@ -16,7 +16,10 @@ use crate::spec::encoding::DataType as SpecDataType;
 
 use crate::render::{RenderError, RenderWarning};
 
-use super::domain::{apply_sort_to_domain, locate_field, numeric_domain_union, SortContext};
+use super::domain::{
+    apply_sort_to_domain, distinct_positional_categories_shared, locate_field,
+    numeric_domain_union, SortContext,
+};
 use super::{distinct_positional_categories, infer_spec_type, ScaleKind};
 
 /// The x/y field names bound at chart level, used to resolve data-aware sort
@@ -63,6 +66,12 @@ pub(in crate::render) fn build_axis_scale(
     transform_outputs: &HashMap<String, RecordBatch>,
     pixel_range: (f64, f64),
     spec: &ChartSpec,
+    // Faceted + this channel resolves `ResolveMode::Shared`: the auto-inferred
+    // domain also unions the global all-panels batch (`FINAL_OUTPUT_KEY`) so a
+    // faceted raw field's positional domain spans every panel (T4). `false` for
+    // non-faceted charts and `Independent`-mode channels → byte-identical
+    // per-panel behavior. Ignored on the explicit `enc.scale` bypass.
+    include_final: bool,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
     let located = locate_field(&enc.field, primary_batch, transform_outputs)
@@ -86,14 +95,16 @@ pub(in crate::render) fn build_axis_scale(
         SpecDataType::Quantitative => {
             let (min, max) = numeric_domain_union(
                 channel, &enc.field, paired_enc.map(|p| p.field.as_str()),
-                primary_batch, transform_outputs, spec,
+                primary_batch, transform_outputs, spec, include_final,
             )?;
             Ok(ScaleKind::Linear(LinearScale::new_internal(
                 vec![min, max], vec![inset.0, inset.1], false, false,
             )))
         }
         SpecDataType::Ordinal | SpecDataType::Nominal => {
-            let mut domain = distinct_positional_categories(located.batch, &enc.field)?;
+            let mut domain = distinct_positional_categories_shared(
+                located.batch, &enc.field, transform_outputs, include_final,
+            )?;
             let sort_ctx = SortContext {
                 category_field: &enc.field,
                 batch: located.batch,
@@ -108,7 +119,7 @@ pub(in crate::render) fn build_axis_scale(
         SpecDataType::Temporal => {
             let (min, max) = numeric_domain_union(
                 channel, &enc.field, paired_enc.map(|p| p.field.as_str()),
-                primary_batch, transform_outputs, spec,
+                primary_batch, transform_outputs, spec, include_final,
             )?;
             Ok(ScaleKind::Time(TimeScale::new_internal(
                 vec![min, max], vec![inset.0, inset.1], false, false,

@@ -491,6 +491,14 @@ def _pdp_chart_from_source(
             y=Y("pd_value", title="Partial dependence"),
         )
         .facet(col="feature")
+        # Each feature panel is a DIFFERENT variable with its own x-units, so the
+        # x-axis must resolve per-panel. The facet default is shared (which is
+        # correct when every panel shows the same axis variable); PDP is the one
+        # case where the faceting field IS the x-variable, so we opt out
+        # explicitly. (Before the round-7 T4 shared-faceted-scale fix, raw
+        # positional domains resolved per-panel regardless — PDP relied on that
+        # bug; this makes the per-panel intent explicit and paradigm-correct.)
+        .share_scale(x="independent")
     )
     chart = chart.properties(title=ferrum.Title("Partial Dependence"))
     return _finalize_chart(

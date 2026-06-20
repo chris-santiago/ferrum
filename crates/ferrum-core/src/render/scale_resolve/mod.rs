@@ -697,6 +697,25 @@ fn distinct_positional_categories(
     super::arrow_cast::distinct_positional_categories(batch, field)
 }
 
+/// T4: per-channel "shared faceted positional scale" flags `(x_shared, y_shared)`.
+///
+/// `true` only when the chart is faceted AND that channel's
+/// [`ResolveMode`](crate::layout::facet::ResolveMode) is `Shared` (the default
+/// when `resolve` is omitted). Non-faceted charts and `Independent` channels
+/// yield `false`, so [`build_axis_scale`] keeps per-panel-only domain resolution
+/// byte-identically. Passed to `build_axis_scale` → `numeric_domain_union` /
+/// `distinct_positional_categories_shared` as `include_final`.
+fn facet_shared_flags(spec: &ChartSpec) -> (bool, bool) {
+    use crate::layout::facet::ResolveMode;
+    match &spec.facet {
+        Some(facet) => (
+            facet.resolve.x == ResolveMode::Shared,
+            facet.resolve.y == ResolveMode::Shared,
+        ),
+        None => (false, false),
+    }
+}
+
 // ── Main entry points ───────────────────────────────────────────────────────
 
 /// Build scales from spec + post-transform batch + pixel ranges.
@@ -735,6 +754,16 @@ pub fn resolve_scales_with_outputs(
 ) -> Result<(ResolvedScales, Vec<crate::render::RenderWarning>), RenderError> {
     let mut warnings = Vec::new();
 
+    // T4: per-channel "shared faceted positional scale" flag. When this chart is
+    // faceted AND the channel resolves `ResolveMode::Shared` (the documented
+    // default), the auto-inferred positional domain unions the global all-panels
+    // batch (`transform_outputs[FINAL_OUTPUT_KEY]`) so per-panel marks scale
+    // through the same global domain the shared axis displays. Strictly gated:
+    // `false` when not faceted (single panel already has the global batch as
+    // primary → byte-identical) and `false` for `Independent` channels (the
+    // per-panel escape hatch stays byte-identical).
+    let (x_shared, y_shared) = facet_shared_flags(spec);
+
     // Geoshape marks read geometry from __geometry__ column and don't use x/y scales.
     // Return dummy unit scales so the renderer can proceed; the mark builder ignores them.
     if matches!(spec.mark, crate::spec::mark::Mark::Geoshape) {
@@ -763,7 +792,7 @@ pub fn resolve_scales_with_outputs(
             let x_enc = spec.encoding.x.as_ref().unwrap();
             let x2_enc = spec.encoding.x2.as_ref();
             let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
-            let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, &mut warnings)?;
+            let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, &mut warnings)?;
             let dummy_y = ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 1.0], vec![y_pixel_range.1, y_pixel_range.0], false, false,
             ));
@@ -782,7 +811,7 @@ pub fn resolve_scales_with_outputs(
             let y2_enc = spec.encoding.y2.as_ref();
             let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
             let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
-            let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, &mut warnings)?;
+            let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, &mut warnings)?;
             let dummy_x = ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 1.0], vec![x_pixel_range.0, x_pixel_range.1], false, false,
             ));
@@ -829,12 +858,12 @@ pub fn resolve_scales_with_outputs(
         x: Some(x_enc.field.as_str()),
         y: Some(y_enc.field.as_str()),
     };
-    let mut x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, &mut warnings)?;
+    let mut x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, &mut warnings)?;
     // Stack-aware y-axis: resolve against the post-Stack batch when the
     // spec carries a matching Stack adjustment. See
     // `position::axis_batch_for_y` for the rationale.
     let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
-    let mut y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, &mut warnings)?;
+    let mut y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, &mut warnings)?;
 
     // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the
     // data domain; expand=false removes the default 5% inward padding.
