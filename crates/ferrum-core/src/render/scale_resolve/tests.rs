@@ -273,9 +273,10 @@ fn size_scale_defaults_to_theme_point_size_range() {
     let batch = make_batch_q_q_n_n_q();
     let theme = ThemeInputs::default();
     let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
-    let scale = build_size_scale(&make_spec_with_size().encoding, &batch, &outputs, false, &theme)
-        .unwrap()
+    let (scale, warns) = build_size_scale(&make_spec_with_size().encoding, &batch, &outputs, false, &theme)
         .unwrap();
+    assert!(warns.is_empty());
+    let scale = scale.unwrap();
     assert_eq!(scale.min_px(), 4.0);
     assert_eq!(scale.max_px(), 36.0);
 }
@@ -744,9 +745,10 @@ fn opacity_scale_defaults_to_0_1_to_1_0() {
     let batch = make_batch_q_q_n_n_q();
     let theme = ThemeInputs::default();
     let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
-    let scale = build_opacity_scale(&make_spec_with_opacity().encoding, &batch, &outputs, false, &theme)
-        .unwrap()
+    let (scale, warns) = build_opacity_scale(&make_spec_with_opacity().encoding, &batch, &outputs, false, &theme)
         .unwrap();
+    assert!(warns.is_empty());
+    let scale = scale.unwrap();
     assert_eq!(scale.min_opacity(), 0.1);
     assert_eq!(scale.max_opacity(), 1.0);
 }
