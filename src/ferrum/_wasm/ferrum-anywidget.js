@@ -99,33 +99,38 @@ function _crc32(buf) {
 
 // ── SVG text placement ───────────────────────────────────────────────────
 function _placeTextSvg(svgEl, texts) {
-  const svg = select(svgEl);
-  svg.selectAll('text.ferrum-label').remove();
-  for (const t of texts) {
-    const anchor = t.anchor === 'center' ? 'middle' : t.anchor;
-    let baseline;
-    switch (t.baseline) {
-      case 'top': baseline = 'hanging'; break;
-      case 'middle': baseline = 'central'; break;
-      case 'bottom': baseline = 'text-after-edge'; break;
-      case 'alphabetic': default: baseline = 'auto'; break;
+  // R6 fix: update labels in place via a D3 data-join instead of remove+append.
+  // The old remove+re-append moved every label to the end of the SVG child
+  // list on each zoom/pan tick, flipping their z-order relative to raw-overlay
+  // groups (annotations/axes) that are appended once at first render. A join
+  // keyed by index keeps persisted labels at their original DOM position, so
+  // their paint order (above raw geometry) is preserved across ticks. Legend
+  // click handlers attached by `_wireLegendToggles` survive in-place updates
+  // (the element — and its listener — persists), so no re-binding is needed.
+  const _baseline = (b) => {
+    switch (b) {
+      case 'top': return 'hanging';
+      case 'middle': return 'central';
+      case 'bottom': return 'text-after-edge';
+      case 'alphabetic': default: return 'auto';
     }
-    const el = svg.append('text')
-      .attr('class', 'ferrum-label')
-      .attr('x', t.x)
-      .attr('y', t.y)
-      .attr('text-anchor', anchor)
-      .attr('dominant-baseline', baseline)
-      .attr('font-size', t.fontSize + 'px')
-      .attr('font-weight', t.fontWeight)
-      .attr('font-family', t.fontFamily)
-      .attr('fill', t.color)
-      .attr('pointer-events', 'none')
-      .text(t.content);
-    if (t.angle) {
-      el.attr('transform', `rotate(${t.angle}, ${t.x}, ${t.y})`);
-    }
-  }
+  };
+  select(svgEl)
+    .selectAll('text.ferrum-label')
+    .data(texts)
+    .join('text')
+    .attr('class', 'ferrum-label')
+    .attr('x', (t) => t.x)
+    .attr('y', (t) => t.y)
+    .attr('text-anchor', (t) => (t.anchor === 'center' ? 'middle' : t.anchor))
+    .attr('dominant-baseline', (t) => _baseline(t.baseline))
+    .attr('font-size', (t) => t.fontSize + 'px')
+    .attr('font-weight', (t) => t.fontWeight)
+    .attr('font-family', (t) => t.fontFamily)
+    .attr('fill', (t) => t.color)
+    .attr('pointer-events', 'none')
+    .attr('transform', (t) => (t.angle ? `rotate(${t.angle}, ${t.x}, ${t.y})` : null))
+    .text((t) => t.content);
 }
 
 // ── D6 legend toggle (BindingRole::Legend) ────────────────────────────────
@@ -843,8 +848,13 @@ async function _render(container, sceneJson, adapter) {
       return x >= _legendBox.minX && x <= _legendBox.maxX
         && y >= _legendBox.minY && y <= _legendBox.maxY;
     };
-    // (Re)attach click handlers to legend entry labels. Called after every
-    // _placeTextSvg pass because that helper rebuilds the text elements.
+    // Attach click handlers to legend entry labels. Called after every
+    // _placeTextSvg pass. Since R6, _placeTextSvg updates labels in place
+    // (D3 data-join) rather than recreating them, so a persisted legend label
+    // keeps its listener — the `_ferrumLegendWired` flag correctly skips
+    // re-binding (re-binding would stack duplicate listeners). New labels
+    // (enter selection) are wired on first sight; cursor / pointer-events /
+    // data-legend-category are re-affirmed idempotently each pass.
     const _wireLegendToggles = () => {
       if (_legendCategories.size === 0) return;
       svgEl.querySelectorAll('text.ferrum-label').forEach(el => {

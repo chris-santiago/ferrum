@@ -5,6 +5,7 @@
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::opacity::OpacityResolver;
 use crate::render::scale_resolve::{ColorScale, ScaleKind, ShapeKind};
 
 /// Parse a shape name string to a `ShapeKind`.
@@ -273,11 +274,13 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
-    // Per-row stroke/angle channel values (direct passthrough — no scale transform).
-    let stroke_opacity_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_opacity
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    // fill_opacity / stroke_opacity via the shared resolver (FA-11), sampled
+    // per-row. Defaults: fill_opacity → 1.0, stroke_opacity → 1.0. The opacity
+    // channel is mapped through `ctx.scales.opacity` at the call site below, so
+    // the resolver's opacity output is unused here (its default is irrelevant).
+    let opacity_res = OpacityResolver::load(ctx, false, (ctx.mark_style.opacity, 1.0, 1.0));
 
+    // Per-row stroke/angle channel values (direct passthrough — no scale transform).
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
@@ -287,10 +290,6 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
     let angle_values: Option<Vec<Option<f64>>> = spec.encoding.angle
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
-
-    let fill_opacity_values: Option<Vec<Option<f64>>> = spec.encoding.fill_opacity
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
@@ -416,14 +415,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ShapeKind::Circle
         };
 
-        // Resolve per-row stroke/angle channel values (direct passthrough).
-        let row_stroke_opacity = stroke_opacity_values
-            .as_ref()
-            .and_then(|v| v[i])
-            .filter(|v| v.is_finite())
-            .unwrap_or(1.0)
-            .clamp(0.0, 1.0);
+        // Resolve per-row fill_opacity / stroke_opacity via the shared resolver.
+        let (_, row_fill_opacity, row_stroke_opacity) = opacity_res.at_row(i);
 
+        // Resolve per-row stroke/angle channel values (direct passthrough).
         let row_stroke_width = stroke_width_values
             .as_ref()
             .and_then(|v| v[i])
@@ -440,13 +435,6 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .and_then(|v| v[i])
             .filter(|v| v.is_finite())
             .unwrap_or(0.0);
-
-        let row_fill_opacity = fill_opacity_values
-            .as_ref()
-            .and_then(|v| v[i])
-            .filter(|v| v.is_finite())
-            .unwrap_or(1.0)
-            .clamp(0.0, 1.0);
 
         // When stroke_width encoding produces a positive value but no explicit
         // stroke color exists, use the fill color as the stroke so the width is

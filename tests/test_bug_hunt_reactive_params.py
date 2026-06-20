@@ -381,7 +381,15 @@ class TestTransformFilterStatic:
 
 class TestConditionalStatic:
     def test_color_conditional_renders_otherwise_branch(self):
-        """Nothing selected statically → all marks use the 'otherwise' colour."""
+        """Static render of a color-conditional encoding (nothing selected).
+
+        Post-FA-15 fix: a Color(field) conditional now builds a categorical legend.
+        The data has 3 rows and 2 distinct values in 'c' ("x", "y"), so the SVG
+        contains 3 data-mark circles plus 2 legend-symbol circles = 5 total.
+
+        Static marks render in the default mark color; the conditional 'otherwise'
+        hue is applied at interactive runtime, not baked into the static SVG.
+        """
         df = _df()
         sel = fm.selection_point()
         c = (
@@ -391,7 +399,8 @@ class TestConditionalStatic:
         )
         svg = c.to_svg()
         assert "<svg" in svg
-        assert svg.count("<circle") == 3
+        # 3 data-mark circles + 2 legend-symbol circles (one per distinct "c" value).
+        assert svg.count("<circle") == 5
 
     def test_opacity_conditional_channel_and_kinds(self):
         df = _df()

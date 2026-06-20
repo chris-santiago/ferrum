@@ -10,6 +10,7 @@ use crate::layout::Rect;
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, resolve_fill_color, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::opacity::OpacityResolver;
 use crate::render::scale_resolve::ScaleKind;
 
 /// Load the per-row color-encoding columns for fill resolution, mirroring the
@@ -51,50 +52,48 @@ struct BarBaseStyle<'a> {
     corner_radius: f64,
 }
 
-/// Per-row stroke and fill encoding column vectors loaded from a batch.
+/// Per-row stroke encoding column vectors loaded from a batch.
+///
+/// The `opacity` / `fill_opacity` / `stroke_opacity` channels are resolved by
+/// the shared [`OpacityResolver`] (FA-11) and passed into
+/// [`row_fill_stroke`](StrokeChannels::row_fill_stroke); this struct owns only
+/// the stroke-geometry channels (`width`, `dash`, `angle`).
 struct StrokeChannels {
-    general_opacity: Option<Vec<Option<f64>>>,
-    opacity: Option<Vec<Option<f64>>>,
     width: Option<Vec<Option<f64>>>,
     dash: Option<Vec<Option<f64>>>,
     angle: Option<Vec<Option<f64>>>,
-    fill_opacity: Option<Vec<Option<f64>>>,
 }
 
 impl StrokeChannels {
     fn load(ctx: &DrawCtx) -> Self {
         Self {
-            general_opacity: ctx.spec.encoding.opacity.as_ref()
-                .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
-            opacity: ctx.spec.encoding.stroke_opacity.as_ref()
-                .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
             width: ctx.spec.encoding.stroke_width.as_ref()
                 .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
             dash: ctx.spec.encoding.stroke_dash.as_ref()
                 .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
             angle: ctx.spec.encoding.angle.as_ref()
                 .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
-            fill_opacity: ctx.spec.encoding.fill_opacity.as_ref()
-                .and_then(|e| col_as_f64(ctx.batch, &e.field).ok()),
         }
     }
 
     /// Build a `FillStroke` for row `i`, overriding `base_*` defaults with any
     /// per-row column values.  `corner_radius` is passed through unchanged.
+    ///
+    /// `fill_opacity` / `stroke_opacity` are pre-resolved (finite-checked,
+    /// clamped, defaulted) by the shared [`OpacityResolver`]; bar's
+    /// `fill_opacity ← opacity` fallback lives in that resolver
+    /// (`general_fallback = true`).
     fn row_fill_stroke(
         &self,
         fill: Option<ferrum_scene::Color>,
         stroke: Option<ferrum_scene::Color>,
         base: &BarBaseStyle<'_>,
+        fill_opacity: f64,
+        stroke_opacity: f64,
         i: usize,
     ) -> (ferrum_scene::FillStroke, f64) {
         let (base_sw, opacity, base_dash, corner_radius) =
             (base.stroke_width, base.opacity, base.stroke_dash, base.corner_radius);
-        let stroke_opacity = self.opacity.as_ref()
-            .and_then(|v| v.get(i).copied().flatten())
-            .filter(|v| v.is_finite())
-            .map(|v| v.clamp(0.0, 1.0))
-            .unwrap_or(1.0);
 
         let stroke_width = self.width.as_ref()
             .and_then(|v| v.get(i).copied().flatten())
@@ -111,18 +110,6 @@ impl StrokeChannels {
             .and_then(|v| v.get(i).copied().flatten())
             .filter(|v| v.is_finite())
             .unwrap_or(0.0);
-
-        let general_opacity = self.general_opacity.as_ref()
-            .and_then(|v| v.get(i).copied().flatten())
-            .filter(|v| v.is_finite())
-            .map(|v| v.clamp(0.0, 1.0));
-
-        let fill_opacity = self.fill_opacity.as_ref()
-            .and_then(|v| v.get(i).copied().flatten())
-            .filter(|v| v.is_finite())
-            .map(|v| v.clamp(0.0, 1.0))
-            .or(general_opacity)
-            .unwrap_or(1.0);
 
         // When stroke_width encoding produces a positive value but no explicit
         // stroke color exists, use the fill color as the stroke so the width is
@@ -240,6 +227,11 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
+    // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
+    // sampled per-row. `general_fallback = true` preserves bar's unique
+    // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
+    // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
+    let opacity_res = OpacityResolver::load(ctx, true, (ctx.mark_style.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so that metadata is
@@ -276,7 +268,8 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
             corner_radius: 0.0,
         };
-        let (style, _) = sc.row_fill_stroke(Some(fill_c), stroke_sc, &base_style, i);
+        let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
+        let (style, _) = sc.row_fill_stroke(Some(fill_c), stroke_sc, &base_style, fill_opacity, stroke_opacity, i);
 
         let commands = wedge_path(geom.cx, geom.cy, inner_r, outer_r, angle_start, angle_end);
         acc.push(SceneNode::Path { commands, style, closed: true }, i);
@@ -353,6 +346,11 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
+    // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
+    // sampled per-row. `general_fallback = true` preserves bar's unique
+    // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
+    // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
+    let opacity_res = OpacityResolver::load(ctx, true, (ctx.mark_style.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
@@ -404,7 +402,8 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
             corner_radius: ctx.mark_style.corner_radius,
         };
-        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, i);
+        let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
+        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, fill_opacity, stroke_opacity, i);
 
         acc.push(SceneNode::Rect {
             x: cx - bar_width / 2.0,
@@ -462,6 +461,11 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
+    // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
+    // sampled per-row. `general_fallback = true` preserves bar's unique
+    // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
+    // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
+    let opacity_res = OpacityResolver::load(ctx, true, (ctx.mark_style.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
@@ -502,7 +506,8 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
             corner_radius: ctx.mark_style.corner_radius,
         };
-        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, i);
+        let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
+        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, fill_opacity, stroke_opacity, i);
 
         acc.push(SceneNode::Rect {
             x: left_x,
@@ -587,6 +592,11 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
+    // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
+    // sampled per-row. `general_fallback = true` preserves bar's unique
+    // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
+    // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
+    let opacity_res = OpacityResolver::load(ctx, true, (ctx.mark_style.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
@@ -632,7 +642,8 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
             corner_radius: ctx.mark_style.corner_radius,
         };
-        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, i);
+        let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
+        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, fill_opacity, stroke_opacity, i);
 
         acc.push(SceneNode::Rect {
             x: rect_x,
@@ -680,6 +691,11 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
+    // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
+    // sampled per-row. `general_fallback = true` preserves bar's unique
+    // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
+    // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
+    let opacity_res = OpacityResolver::load(ctx, true, (ctx.mark_style.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
@@ -716,7 +732,8 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
             stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
             corner_radius: ctx.mark_style.corner_radius,
         };
-        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, i);
+        let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
+        let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, fill_opacity, stroke_opacity, i);
 
         acc.push(SceneNode::Rect {
             x: baseline_x,
@@ -1977,5 +1994,99 @@ mod tests {
         let h1 = hrefs[1].as_deref().expect("node 1 href must be Some");
         assert_eq!(h1, "url_c",
             "node 1 href must be row 2's ('url_c'), not row 1's ('url_b'); got '{h1}'");
+    }
+
+    // ── FA-11 (#5): OpacityResolver migration preserves bar's per-row opacity ──
+
+    /// FA-11 guard: a bar with an explicit `fill_opacity` encoding applies it
+    /// per-row (finite-checked, clamped) — unchanged by the resolver dedup.
+    #[test]
+    fn bar_per_row_fill_opacity_unchanged_after_resolver() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), type_: None, ..Default::default() }),
+                fill_opacity: Some(EncodingSpec { field: "fo".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g",  DataType::Utf8,    false),
+            Field::new("v",  DataType::Float64, false),
+            Field::new("fo", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.2, 0.5, 0.9])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let fos: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { style, .. } = n { Some(style.fill_opacity) } else { None }
+        }).collect();
+        assert_eq!(fos.len(), 3, "expected 3 bar rects");
+        let expected = [0.2, 0.5, 0.9];
+        for (i, (got, exp)) in fos.iter().zip(expected).enumerate() {
+            assert!((got - exp).abs() < 1e-9,
+                "bar row {i} fill_opacity expected {exp}, got {got}");
+        }
+    }
+
+    /// FA-11 guard: bar's UNIQUE `fill_opacity ← opacity` fallback
+    /// (`general_fallback = true`) is preserved by the resolver. With no
+    /// `fill_opacity` encoding but an `opacity` encoding present, each bar's
+    /// `fill_opacity` must equal its (clamped) per-row `opacity` value. No other
+    /// mark does this; the resolver flag isolates the quirk.
+    #[test]
+    fn bar_fill_opacity_falls_back_to_opacity_column() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), type_: None, ..Default::default() }),
+                // opacity present, fill_opacity ABSENT → bar falls fill_opacity
+                // back to the opacity column.
+                opacity: Some(EncodingSpec { field: "op".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g",  DataType::Utf8,    false),
+            Field::new("v",  DataType::Float64, false),
+            Field::new("op", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![0.3, 0.7])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let fos: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { style, .. } = n { Some(style.fill_opacity) } else { None }
+        }).collect();
+        assert_eq!(fos.len(), 2, "expected 2 bar rects");
+        assert!((fos[0] - 0.3).abs() < 1e-9,
+            "bar row 0 fill_opacity must fall back to opacity 0.3; got {}", fos[0]);
+        assert!((fos[1] - 0.7).abs() < 1e-9,
+            "bar row 1 fill_opacity must fall back to opacity 0.7; got {}", fos[1]);
     }
 }

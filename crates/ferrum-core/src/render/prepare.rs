@@ -281,6 +281,45 @@ impl PreparedInputs {
     }
 }
 
+/// Walk `spec.conditionals` for `ChannelName::Color` branches whose value is an
+/// `EncodingValue::Field { name }`.  For each such field, extend the output with
+/// `distinct_values_in_order` over `transformed`.  Dedup preserving first-appearance
+/// order.  Returns an empty `Vec` when no field-driven color conditional exists.
+///
+/// Used by the legend-build arm when `provisional_scales.color` is `None` (i.e. no
+/// base color encoding) so that `when(Color(field))` conditionals still produce a
+/// categorical legend whose entries the WASM `bind="legend"` toggle can use.
+fn resolve_conditional_color_domain(
+    spec: &ChartSpec,
+    transformed: &RecordBatch,
+) -> Vec<String> {
+    use ferrum_scene::{ChannelName, EncodingValue};
+    let mut seen = std::collections::HashSet::<String>::new();
+    let mut out = Vec::<String>::new();
+
+    for cond in &spec.conditionals {
+        if cond.channel != ChannelName::Color {
+            continue;
+        }
+        // Collect field names from both branches; each branch may independently
+        // be a Field reference (vs a literal color value).
+        let candidates: [&EncodingValue; 2] = [&cond.if_selected, &cond.if_not];
+        for ev in candidates {
+            if let EncodingValue::Field { name } = ev {
+                // Ignore errors (field not present in batch) — just skip.
+                if let Ok(values) = super::arrow_cast::distinct_values_in_order(transformed, name) {
+                    for v in values {
+                        if seen.insert(v.clone()) {
+                            out.push(v);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn prepare_render_inputs(
     spec: &ChartSpec,
     batch: &RecordBatch,
@@ -784,13 +823,47 @@ pub fn prepare_render_inputs(
                 };
                 (Vec::new(), Some(ColorbarInput { stops, tick_labels, domain: cb_domain }))
             }
-            None => (Vec::new(), None),
+            None => {
+                // #9 [FA-15]: when no base color encoding is set, check whether
+                // a conditional color encoding (`when(Color(field))`) provides a
+                // categorical domain.  If so, build legend entries from the
+                // field's distinct values so `bind="legend"` has categories to
+                // toggle.  Gated on `provisional_scales.color == None` so base-
+                // color charts remain byte-identical.
+                let cond_domain = resolve_conditional_color_domain(spec, &transformed);
+                if cond_domain.is_empty() {
+                    (Vec::new(), None)
+                } else {
+                    let entries = cond_domain
+                        .iter()
+                        .map(|v| LegendEntry { label: v.clone(), symbol: SymbolKind::Circle })
+                        .collect();
+                    (entries, None)
+                }
+            }
             }
         };
 
     // Legend title (Themes-T2.5b): default to the color encoding's field name.
+    // When entries were built from a conditional color field (no base encoding),
+    // derive the title from the first conditional Color Field branch instead.
     let legend_title = if !legend_entries.is_empty() || colorbar.is_some() {
-        spec.encoding.color.as_ref().map(|c| c.field.clone())
+        spec.encoding.color.as_ref().map(|c| c.field.clone()).or_else(|| {
+            // Conditional-color case: find the first Color conditional with a
+            // Field branch and use its field name as the title.
+            use ferrum_scene::{ChannelName, EncodingValue};
+            spec.conditionals.iter().find_map(|cond| {
+                if cond.channel != ChannelName::Color {
+                    return None;
+                }
+                for ev in [&cond.if_selected, &cond.if_not] {
+                    if let EncodingValue::Field { name } = ev {
+                        return Some(name.clone());
+                    }
+                }
+                None
+            })
+        })
     } else {
         None
     };
@@ -3826,6 +3899,115 @@ mod tests {
             Some("1M"),
             "`~s` must format 1_000_000 as '1M'; got {:?}",
             colorbar.tick_labels
+        );
+    }
+
+    // ── #9 [FA-15]: conditional-color legend regression ──────────────────────
+
+    /// Build a batch with an `x`, `y`, and `cat` (categorical) column.
+    fn cat_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("cat", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a", "c"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A spec with `color = None` and a `Color` conditional using Field{name="cat"} in
+    /// `if_selected` must produce non-empty `legend_entries` whose labels match the
+    /// field's distinct values in first-appearance order ("a", "b", "c").
+    #[test]
+    fn conditional_color_field_builds_legend_entries() {
+        use ferrum_scene::{ChannelName, ConditionalEncoding, EncodingValue};
+
+        let mut spec = base_spec();
+        // No base color encoding — this is the conditional-only case.
+        spec.encoding.color = None;
+        spec.conditionals = vec![ConditionalEncoding {
+            selection_name: "sel".into(),
+            channel: ChannelName::Color,
+            if_selected: EncodingValue::Field { name: "cat".into() },
+            if_not: EncodingValue::Color {
+                value: ferrum_scene::Color { r: 200, g: 200, b: 200, a: 255 },
+            },
+        }];
+
+        let batch = cat_batch();
+        let prep =
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+
+        assert!(
+            !prep.legend_entries.is_empty(),
+            "conditional Color Field must produce legend entries when base color is absent"
+        );
+        let labels: Vec<&str> = prep.legend_entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["a", "b", "c"],
+            "legend entries must match distinct values in first-appearance order"
+        );
+        // All symbols should be Circle to match the categorical convention.
+        for entry in &prep.legend_entries {
+            assert_eq!(
+                entry.symbol,
+                SymbolKind::Circle,
+                "conditional-color legend entries must use SymbolKind::Circle"
+            );
+        }
+        // Legend title must be the conditional field name.
+        assert_eq!(
+            prep.legend_title.as_deref(),
+            Some("cat"),
+            "legend title must be the conditional color field name"
+        );
+    }
+
+    /// A chart WITH a base color encoding must be byte-identical to the pre-fix
+    /// behavior — the new path must not activate when `provisional_scales.color` is Some.
+    #[test]
+    fn base_color_chart_legend_unchanged_by_conditional_fix() {
+        // Use the existing `base_spec` + `batch_pop` helpers from the aux-legend tests.
+        // Those live in the same mod so they are accessible here.
+        let mut spec = base_spec();
+        // A categorical base color encoding drives `provisional_scales.color = Some(Categorical)`.
+        spec.encoding.color = Some(EncodingSpec {
+            field: "region".into(),
+            type_: None,
+            ..Default::default()
+        });
+        // Also add a conditional — must NOT affect the base-color legend.
+        use ferrum_scene::{ChannelName, ConditionalEncoding, EncodingValue};
+        spec.conditionals = vec![ConditionalEncoding {
+            selection_name: "sel".into(),
+            channel: ChannelName::Color,
+            if_selected: EncodingValue::Field { name: "region".into() },
+            if_not: EncodingValue::Color {
+                value: ferrum_scene::Color { r: 200, g: 200, b: 200, a: 255 },
+            },
+        }];
+
+        let p = prep(&spec, &batch_pop());
+        // The categorical arm (not the conditional arm) should have populated legend_entries.
+        assert!(
+            !p.legend_entries.is_empty(),
+            "base-color chart must still produce legend entries"
+        );
+        // Entries must equal the domain of the base color field, not vary with the conditional.
+        // `batch_pop` has "Asia", "Europe", "Americas" in first-appearance order.
+        let labels: Vec<&str> = p.legend_entries.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec!["AS", "EU", "AF"],
+            "base-color chart legend entries must not be affected by a conditional"
         );
     }
 }
