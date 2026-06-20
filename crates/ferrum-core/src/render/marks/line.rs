@@ -19,6 +19,7 @@
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::opacity::OpacityResolver;
 use crate::render::scale_resolve::ScaleKind;
 
 /// Build a `Vec<PathCmd>` from a sequence of (x, y) pixel points using the
@@ -169,14 +170,13 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let use_path = interpolate.is_some() && interpolate != Some("linear");
 
     // Per-row stroke channel vectors — sampled at the first valid row of each group.
-    let so_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_opacity.as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let sw_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_width.as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let sd_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_dash.as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
-    let opacity_vals: Option<Vec<Option<f64>>> = spec.encoding.opacity.as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    // opacity / fill_opacity / stroke_opacity resolution (shared resolver, FA-11).
+    // Defaults: opacity → mark_style.opacity, fill_opacity → 1.0, stroke_opacity → 1.0.
+    let opacity_res = OpacityResolver::load(ctx, false, (ctx.mark_style.opacity, 1.0, 1.0));
 
     let meta = MetadataColumns::from_ctx(ctx);
 
@@ -204,11 +204,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // Sample stroke-channel values from the first valid row of the group;
         // this same row represents the group's node for metadata (bug #6).
         let first = row_indices.first().copied().unwrap_or(0);
-        let group_stroke_opacity = so_vals.as_ref()
-            .and_then(|v| v.get(first).copied().flatten())
-            .filter(|v| v.is_finite())
-            .map(|v| v.clamp(0.0, 1.0))
-            .unwrap_or(1.0);
+        // opacity / fill_opacity / stroke_opacity from the group's first row.
+        let (group_opacity, group_fill_opacity, group_stroke_opacity) =
+            opacity_res.at_group_first(first);
         let group_stroke_width = sw_vals.as_ref()
             .and_then(|v| v.get(first).copied().flatten())
             .filter(|v| *v >= 0.0 && v.is_finite())
@@ -218,13 +216,6 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .filter(|v| v.is_finite())
             .and_then(resolve_stroke_dash);
         let effective_dash = dash_vec.as_deref().or(ctx.mark_style.stroke_dash.as_deref());
-
-        // Sample opacity encoding from the first row of the group.
-        let group_opacity = opacity_vals.as_ref()
-            .and_then(|v| v.get(first).copied().flatten())
-            .filter(|v| v.is_finite())
-            .map(|v| v.clamp(0.0, 1.0))
-            .unwrap_or(ctx.mark_style.opacity);
 
         let stroke_color = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) =>
@@ -243,6 +234,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 effective_dash,
             );
             style.stroke_opacity = group_stroke_opacity;
+            // FA-11: honor the fill_opacity channel (was previously dropped).
+            style.fill_opacity = group_fill_opacity;
             ferrum_scene::SceneNode::Path {
                 commands: cmds,
                 style,
@@ -258,6 +251,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 ctx.mark_style.stroke_join.as_deref(),
             );
             stroke_style.stroke_opacity = group_stroke_opacity;
+            // Polyline uses `StrokeStyle`, which has no fill channel — the
+            // fill_opacity channel only applies to the `Path` (FillStroke)
+            // variant emitted under non-linear interpolation.
             ferrum_scene::SceneNode::Polyline {
                 points: points.clone(),
                 style: stroke_style,
@@ -668,5 +664,84 @@ mod tests {
             .count();
         assert_eq!(polyline_count, 3,
             "Int64 detail column must emit one polyline per group (3 groups); got {polyline_count}");
+    }
+
+    // ── FA-11 (#5): mark_line honors the fill_opacity channel ────────────────
+
+    /// FA-11 headline (fail-before / pass-after): a grouped line with a
+    /// `fill_opacity` encoding must emit distinct per-group `fill_opacity` on the
+    /// `Path` (FillStroke) node it builds. `fill_opacity` only applies to the
+    /// non-linear-interpolation `Path` variant (the linear `Polyline` uses
+    /// `StrokeStyle`, which has no fill channel), so this uses "basis"
+    /// interpolation. Before the fix the channel was dropped → both groups were
+    /// `1.0`.
+    #[test]
+    fn line_path_applies_per_group_fill_opacity() {
+        use crate::spec::encoding::DataType as SDT;
+        let mut spec = line_spec();
+        spec.encoding.color = Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Nominal), ..Default::default() });
+        spec.encoding.fill_opacity = Some(EncodingSpec { field: "fo".into(), ..Default::default() });
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("fo", DataType::Float64, false),
+        ]));
+        // 2 groups × 3 rows, blocked. Group A fill_opacity = 0.25, B = 0.75.
+        let xs: Vec<f64> = vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0];
+        let ys: Vec<f64> = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let gs: Vec<&str> = vec!["A", "A", "A", "B", "B", "B"];
+        let fos: Vec<f64> = vec![0.25, 0.25, 0.25, 0.75, 0.75, 0.75];
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(gs)),
+            Arc::new(Float64Array::from(fos)),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        // "basis" → use_path = true → Path nodes carrying a FillStroke.
+        let overrides = MarkKwargsSpec { interpolate: Some("basis".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let fill_opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Path { style, .. } = n { Some(style.fill_opacity) } else { None }
+        }).collect();
+        assert_eq!(fill_opacities.len(), 2, "expected one Path node per group");
+        assert!((fill_opacities[0] - 0.25).abs() < 1e-9,
+            "group A fill_opacity must be 0.25 (was dropped → 1.0 before FA-11); got {}", fill_opacities[0]);
+        assert!((fill_opacities[1] - 0.75).abs() < 1e-9,
+            "group B fill_opacity must be 0.75; got {}", fill_opacities[1]);
+    }
+
+    /// FA-11 guard: without a `fill_opacity` encoding, a `Path`-variant line
+    /// keeps `fill_opacity = 1.0` (the default), so non-fill_opacity charts stay
+    /// byte-identical.
+    #[test]
+    fn line_path_default_fill_opacity_is_one() {
+        let spec = line_spec();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let overrides = MarkKwargsSpec { interpolate: Some("basis".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let path = result.nodes.iter().find_map(|n| {
+            if let SceneNode::Path { style, .. } = n { Some(style) } else { None }
+        }).expect("basis interpolation must emit a Path node");
+        assert!((path.fill_opacity - 1.0).abs() < 1e-12,
+            "absent fill_opacity encoding must leave fill_opacity = 1.0; got {}", path.fill_opacity);
     }
 }

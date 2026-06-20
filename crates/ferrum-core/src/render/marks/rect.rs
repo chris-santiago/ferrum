@@ -10,6 +10,7 @@
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::opacity::OpacityResolver;
 use crate::render::scale_resolve::{ColorScale, ScaleKind};
 
 fn count_distinct(values: &[Option<String>]) -> usize {
@@ -85,9 +86,9 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
-    let fill_opacity_values: Option<Vec<Option<f64>>> = spec.encoding.fill_opacity
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    // fill_opacity via the shared resolver (FA-11), sampled per-row. opacity is
+    // scale-mapped at the call site below; stroke_opacity is not read by rect.
+    let opacity_res = OpacityResolver::load(ctx, false, (ctx.mark_style.opacity, 1.0, 1.0));
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
@@ -141,12 +142,7 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
         };
         let fill = with_opacity(fill, row_opacity);
 
-        let row_fill_opacity = fill_opacity_values
-            .as_ref()
-            .and_then(|v| v[i])
-            .filter(|v| v.is_finite())
-            .map(|v| v.clamp(0.0, 1.0))
-            .unwrap_or(1.0);
+        let (_, row_fill_opacity, _) = opacity_res.at_row(i);
 
         let row_stroke_width = stroke_width_values
             .as_ref()
@@ -217,9 +213,9 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
-    let fill_opacity_values: Option<Vec<Option<f64>>> = spec.encoding.fill_opacity
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    // fill_opacity via the shared resolver (FA-11), sampled per-row. opacity is
+    // scale-mapped at the call sites below; stroke_opacity is not read by rect.
+    let opacity_res = OpacityResolver::load(ctx, false, (ctx.mark_style.opacity, 1.0, 1.0));
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
@@ -276,12 +272,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             };
             let fill = with_opacity(fill, row_opacity);
 
-            let row_fill_opacity = fill_opacity_values
-                .as_ref()
-                .and_then(|v| v[i])
-                .filter(|v| v.is_finite())
-                .map(|v| v.clamp(0.0, 1.0))
-                .unwrap_or(1.0);
+            let (_, row_fill_opacity, _) = opacity_res.at_row(i);
 
             let row_stroke_width = stroke_width_values
                 .as_ref()
@@ -358,12 +349,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             };
             let fill = with_opacity(fill, row_opacity);
 
-            let row_fill_opacity = fill_opacity_values
-                .as_ref()
-                .and_then(|v| v[i])
-                .filter(|v| v.is_finite())
-                .map(|v| v.clamp(0.0, 1.0))
-                .unwrap_or(1.0);
+            let (_, row_fill_opacity, _) = opacity_res.at_row(i);
 
             let row_stroke_width = stroke_width_values
                 .as_ref()
@@ -443,13 +429,12 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
 
-    // Per-row encoding channels: opacity, fill_opacity, stroke_width.
+    // Per-row encoding channels: opacity (scale-mapped at call site),
+    // fill_opacity (shared resolver, FA-11), stroke_width.
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
-    let fill_opacity_values: Option<Vec<Option<f64>>> = spec.encoding.fill_opacity
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    let opacity_res = OpacityResolver::load(ctx, false, (ctx.mark_style.opacity, 1.0, 1.0));
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
@@ -511,12 +496,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
         let fill = with_opacity(fill, row_opacity);
 
-        let row_fill_opacity = fill_opacity_values
-            .as_ref()
-            .and_then(|v| v[i])
-            .filter(|v| v.is_finite())
-            .map(|v| v.clamp(0.0, 1.0))
-            .unwrap_or(1.0);
+        let (_, row_fill_opacity, _) = opacity_res.at_row(i);
 
         let row_stroke_width = stroke_width_values
             .as_ref()

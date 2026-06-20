@@ -20,3 +20,4 @@ pub(crate) mod geoshape;
 pub(crate) mod axis;
 pub(crate) mod legend;
 pub(crate) mod strip_title;
+pub(crate) mod opacity;

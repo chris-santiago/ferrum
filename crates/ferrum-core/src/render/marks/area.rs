@@ -12,6 +12,7 @@
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::opacity::OpacityResolver;
 
 /// Build `Vec<PathCmd>` for the top-edge line using the given interpolation
 /// method. Mirrors `build_top_line_path` but emits structured commands.
@@ -176,11 +177,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Stacked areas use opaque fills so each band is visually distinct.
     let base_opacity = if is_stacked { 1.0 } else { ctx.mark_style.opacity };
 
-    // Per-row opacity/fill_opacity channels — sampled at the first row of each group.
-    let opacity_vals: Option<Vec<Option<f64>>> = spec.encoding.opacity.as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
-    let fill_opacity_vals: Option<Vec<Option<f64>>> = spec.encoding.fill_opacity.as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    // opacity / fill_opacity channels — sampled at the first row of each group
+    // via the shared resolver (FA-11). Defaults: opacity → base_opacity,
+    // fill_opacity → 1.0. Area does not read stroke_opacity (default unused).
+    let opacity_res = OpacityResolver::load(ctx, false, (base_opacity, 1.0, 1.0));
 
     let interpolate = ctx.mark_style.interpolate.as_deref();
 
@@ -232,16 +232,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
         // Sample opacity and fill_opacity from the first row of the group.
         let first = row_indices.first().copied().unwrap_or(0);
-        let effective_opacity = opacity_vals.as_ref()
-            .and_then(|v| v.get(first).copied().flatten())
-            .filter(|v| v.is_finite())
-            .map(|v| v.clamp(0.0, 1.0))
-            .unwrap_or(base_opacity);
-        let group_fill_opacity = fill_opacity_vals.as_ref()
-            .and_then(|v| v.get(first).copied().flatten())
-            .filter(|v| v.is_finite())
-            .map(|v| v.clamp(0.0, 1.0))
-            .unwrap_or(1.0);
+        let (effective_opacity, group_fill_opacity, _) = opacity_res.at_group_first(first);
 
         let cmds = if is_stacked || has_y2 {
             build_stacked_area_cmds(&top, &bottom, interpolate)
@@ -987,5 +978,64 @@ mod tests {
         let result = super::build(&ctx);
         let closed_paths = result.nodes.iter().filter(|n| matches!(n, SceneNode::Path { closed: true, .. })).count();
         assert_eq!(closed_paths, 1, "no-grouping area must emit exactly 1 closed path; got {closed_paths}");
+    }
+
+    // ── FA-11 (#5): OpacityResolver migration preserves area fill_opacity ─────
+
+    /// FA-11 guard: after migrating area to the shared `OpacityResolver`, a
+    /// grouped area with a `fill_opacity` encoding must still emit distinct
+    /// per-group `fill_opacity` on each group's fill `Path` (sampled at the
+    /// group's first valid row). This pins area's behavior as byte-unchanged by
+    /// the resolver dedup.
+    #[test]
+    fn area_group_fill_opacity_unchanged_after_resolver() {
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+        use arrow::array::StringArray;
+        // 2 groups × 3 rows, blocked. Group A fill_opacity = 0.3, B = 0.8.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("fo", DataType::Float64, false),
+        ]));
+        let xs: Vec<f64> = vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0];
+        let ys: Vec<f64> = vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0];
+        let gs: Vec<&str> = vec!["A", "A", "A", "B", "B", "B"];
+        let fos: Vec<f64> = vec![0.3, 0.3, 0.3, 0.8, 0.8, 0.8];
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(gs)),
+            Arc::new(Float64Array::from(fos)),
+        ]).unwrap();
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+                fill_opacity: Some(EncodingSpec { field: "fo".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None, selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Area);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let fill_opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Path { style, closed: true, .. } = n { Some(style.fill_opacity) } else { None }
+        }).collect();
+        assert_eq!(fill_opacities.len(), 2, "expected one fill Path per group");
+        assert!((fill_opacities[0] - 0.3).abs() < 1e-9,
+            "group A fill_opacity must be 0.3; got {}", fill_opacities[0]);
+        assert!((fill_opacities[1] - 0.8).abs() < 1e-9,
+            "group B fill_opacity must be 0.8; got {}", fill_opacities[1]);
     }
 }
