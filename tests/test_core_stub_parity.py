@@ -453,6 +453,22 @@ def test_encoding_spec_accepts_all_keyword_only_params() -> None:
     assert es.scheme == "viridis"
     assert es.format == ".2f"
     assert es.format_type == "number"
+    # condition was write-only before KG-9; verify round-trip read now works.
+    assert es.condition is None
+
+
+def test_encoding_spec_condition_round_trip() -> None:
+    """EncodingSpec.condition is readable and round-trips dict/list/None (issue #27)."""
+    cond_dict = {"selection": "brush", "value": "red"}
+    es_dict = _core.EncodingSpec("color", condition=cond_dict)
+    assert es_dict.condition == cond_dict
+
+    cond_list = [{"selection": "s1"}, {"value": "blue"}]
+    es_list = _core.EncodingSpec("color", condition=cond_list)
+    assert es_list.condition == cond_list
+
+    es_none = _core.EncodingSpec("color")
+    assert es_none.condition is None
 
 
 def test_time_scale_range_is_optional() -> None:

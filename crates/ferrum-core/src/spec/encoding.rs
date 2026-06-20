@@ -523,6 +523,20 @@ impl EncodingSpec {
         }
     }
 
+    /// Conditional encoding rules (selection-driven); returns what was passed at construction.
+    #[getter]
+    fn condition(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
+        match &self.condition {
+            None => Ok(None),
+            Some(s) => {
+                let json = serde_json::to_string(s)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                let json_module = py.import("json")?;
+                Ok(Some(json_module.call_method1("loads", (json,))?.unbind()))
+            }
+        }
+    }
+
     /// Sort order for ordinal/nominal scales ("ascending", "descending", or explicit array).
     #[getter]
     fn sort(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
