@@ -40,6 +40,12 @@ def _iter_packed_batches(packed: bytes):
 
     ``instance_start`` is the byte index where the batch's instance data begins
     (just past the 20-byte header).
+
+    Tooltip scan mirrors ``scene_load.rs::unpack_binary_instances`` (lines ~708-735):
+        [num_fields: u32]
+        num_fields   × [len: u32][name bytes]
+        count×num_fields × [len: u32][value bytes]
+    No overall length prefix.
     """
     pos = 0
     while pos + 20 <= len(packed):
@@ -50,9 +56,26 @@ def _iter_packed_batches(packed: bytes):
         batch_end = instance_start + count * _INSTANCE_SIZES[kind]
         if flags & 0x2:
             batch_end += count * 4
-        if flags & 0x1 and batch_end + 4 <= len(packed):
-            tooltip_len = struct.unpack_from("<I", packed, batch_end)[0]
-            batch_end += 4 + tooltip_len
+        if flags & 0x1:
+            # Scan the string table field-by-field (no overall length prefix).
+            if batch_end + 4 > len(packed):
+                break
+            num_fields = struct.unpack_from("<I", packed, batch_end)[0]
+            batch_end += 4
+            for _ in range(num_fields):
+                if batch_end + 4 > len(packed):
+                    break
+                slen = struct.unpack_from("<I", packed, batch_end)[0]
+                batch_end += 4 + slen
+                if batch_end > len(packed):
+                    break
+            for _ in range(count * num_fields):
+                if batch_end + 4 > len(packed):
+                    break
+                slen = struct.unpack_from("<I", packed, batch_end)[0]
+                batch_end += 4 + slen
+                if batch_end > len(packed):
+                    break
         if batch_end > len(packed):
             break
         yield panel_idx, kind, count, instance_start

@@ -2736,8 +2736,17 @@ def _merge_packed_data(
     - Instance data: ``count * 64`` bytes for kind=0 (CircleInstance),
       ``count * 72`` bytes for kind=1 (RectInstance).
     - If ``flags & 0x2``: ``count * 4`` bytes of u32 data indices.
-    - If ``flags & 0x1``: tooltip string table (u32 byte-length prefix,
-      then that many bytes of content).
+    - If ``flags & 0x1``: tooltip string table in the format produced by
+      ``pack_instances.rs::pack_tooltips``:
+
+      .. code-block:: text
+
+          [num_fields: u32]
+          num_fields   × [name_len: u32][name UTF-8 bytes]
+          count×num_fields × [value_len: u32][value UTF-8 bytes]
+
+      There is NO overall byte-length prefix.  ``count`` is the instance
+      count from the batch header (field index 3).
 
     Parameters
     ----------
@@ -2774,9 +2783,31 @@ def _merge_packed_data(
                 batch_end += count * 4  # u32 data indices
 
             if flags & 0x1:
-                if batch_end + 4 <= len(packed):
-                    tooltip_len = struct.unpack_from("<I", packed, batch_end)[0]
-                    batch_end += 4 + tooltip_len
+                # Scan the tooltip string table field-by-field, mirroring
+                # scene_load.rs::unpack_binary_instances (lines ~708-735).
+                # Format: [num_fields:u32] + num_fields×[len:u32][name] +
+                #         count×num_fields×[len:u32][value].  No overall
+                # length prefix — must walk the table to find its end.
+                if batch_end + 4 > len(packed):
+                    break  # truncated — stop parsing this child
+                num_fields = struct.unpack_from("<I", packed, batch_end)[0]
+                batch_end += 4
+                # Skip field names.
+                for _ in range(num_fields):
+                    if batch_end + 4 > len(packed):
+                        break
+                    slen = struct.unpack_from("<I", packed, batch_end)[0]
+                    batch_end += 4 + slen
+                    if batch_end > len(packed):
+                        break
+                # Skip per-row values: count rows × num_fields entries.
+                for _ in range(count * num_fields):
+                    if batch_end + 4 > len(packed):
+                        break
+                    slen = struct.unpack_from("<I", packed, batch_end)[0]
+                    batch_end += 4 + slen
+                    if batch_end > len(packed):
+                        break
 
             if batch_end > len(packed):
                 break  # truncated data — stop parsing this child

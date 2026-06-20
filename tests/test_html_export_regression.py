@@ -1468,31 +1468,29 @@ def test_b5_packed_data_preserved_in_composition():
 
 
 def test_b5_packed_data_panel_idx_rewritten():
-    """Packed data headers must have panel_idx rewritten with composition offset."""
-    import struct
+    """Packed data headers must have panel_idx rewritten with composition offset.
 
+    A left | right composite of two 1500-point charts must produce packed data
+    whose first batch has panel_idx == 0 and second batch has panel_idx == 1.
+    """
     df = pl.DataFrame({"x": list(range(1500)), "y": list(range(1500))})
     left = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
     right = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(width=200, height=200)
     composed = left | right
     _, packed = composed._render_interactive()
-    # Read first two headers -- first should have panel_idx=0, second should have panel_idx=1
-    assert len(packed) >= 40, f"packed data too short ({len(packed)} bytes) for 2 batches"
-    pi0 = struct.unpack_from("<I", packed, 0)[0]
-    # Find second header by skipping first batch
-    _, _, kind0, count0, flags0 = struct.unpack_from("<5I", packed, 0)
-    batch_size = 20 + count0 * (64 if kind0 == 0 else 72)
-    if flags0 & 0x2:
-        batch_size += count0 * 4
-    if flags0 & 0x1 and batch_size + 4 <= len(packed):
-        tl = struct.unpack_from("<I", packed, batch_size)[0]
-        batch_size += 4 + tl
-    assert batch_size + 20 <= len(packed), (
-        f"packed data too short for second batch header (batch_size={batch_size}, total={len(packed)})"
+
+    batches, _ = _parse_real_packed_batches(packed)
+    assert len(batches) >= 2, (
+        f"expected at least 2 parsed batches, got {len(batches)} "
+        f"(packed length={len(packed)} bytes)"
     )
-    pi1 = struct.unpack_from("<I", packed, batch_size)[0]
-    assert pi0 == 0, f"first batch panel_idx should be 0, got {pi0}"
-    assert pi1 == 1, f"second batch panel_idx should be 1 (rewritten), got {pi1}"
+    assert batches[0]["panel_idx"] == 0, (
+        f"first batch panel_idx should be 0, got {batches[0]['panel_idx']}"
+    )
+    assert batches[1]["panel_idx"] == 1, (
+        f"second batch panel_idx should be 1 (rewritten with composition offset), "
+        f"got {batches[1]['panel_idx']}"
+    )
 
 
 def test_b5_merge_packed_data_unit():
@@ -1526,18 +1524,37 @@ def test_b5_merge_packed_data_unit():
 
 
 def test_b5_merge_packed_data_with_flags():
-    """Unit test for _merge_packed_data with data_indices and tooltips flags."""
+    """Unit test for _merge_packed_data with data_indices and tooltips flags.
+
+    The tooltip section uses the REAL packed format produced by
+    ``pack_instances.rs::pack_tooltips``:
+        [num_fields: u32]
+        num_fields   × [name_len: u32][name UTF-8 bytes]
+        count×num_fields × [value_len: u32][value UTF-8 bytes]
+    There is NO overall byte-length prefix.
+    """
     import struct
 
     from ferrum.composition import _merge_packed_data
 
     # Build a packed batch with flags=0x3 (data_indices + tooltips), kind=1 (rect), count=1
     flags = 0x3
-    header = struct.pack("<5I", 0, 0, 1, 1, flags)  # panel_idx=0, kind=rect, count=1
+    count = 1
+    header = struct.pack("<5I", 0, 0, 1, count, flags)  # panel_idx=0, kind=rect, count=1
     instance_data = b"\x01" * 72  # 1 RectInstance (72 bytes)
     data_indices = struct.pack("<I", 42)  # 1 data index
-    tooltip_content = b"hello"
-    tooltips = struct.pack("<I", len(tooltip_content)) + tooltip_content
+
+    # Real tooltip table: 2 fields ("x" and "y"), 1 row of values.
+    # Layout: [num_fields:u32] [len:u32][name...] ... [len:u32][value...] ...
+    num_fields = 2
+    field_names = [b"x", b"y"]
+    row_values = [b"1.0", b"2.0"]  # 1 row, 2 fields
+    tooltips = struct.pack("<I", num_fields)
+    for name in field_names:
+        tooltips += struct.pack("<I", len(name)) + name
+    for val in row_values:
+        tooltips += struct.pack("<I", len(val)) + val
+
     packed = header + instance_data + data_indices + tooltips
 
     result = _merge_packed_data([packed], [5])
@@ -1547,7 +1564,7 @@ def test_b5_merge_packed_data_with_flags():
     pi = struct.unpack_from("<I", result, 0)[0]
     assert pi == 5, f"panel_idx should be 5; got {pi}"
 
-    # Rest of the data should be identical
+    # All data after the 20-byte header must be byte-identical (merge only rewrites header)
     assert result[20:] == packed[20:], "data after header should be unchanged"
 
 
@@ -1557,6 +1574,141 @@ def test_b5_merge_packed_data_empty_inputs():
 
     result = _merge_packed_data([b"", b""], [0, 1])
     assert result == b""
+
+
+# ---------------------------------------------------------------------------
+# B5-discriminating: multi-batch packed composite with tooltips preserves
+# ALL batches (finding A regression test).
+# ---------------------------------------------------------------------------
+
+
+def _parse_real_packed_batches(packed: bytes) -> tuple[list[dict], int]:
+    """Parse all batches from packed binary data using the REAL format.
+
+    Returns (batches, final_pos) where batches is a list of dicts with keys:
+    panel_idx, batch_idx, kind, count; and final_pos is the byte offset after
+    the last successfully parsed batch.
+    Mirrors scene_load.rs::unpack_binary_instances exactly.
+    """
+    import struct
+
+    INSTANCE_SIZES = {0: 64, 1: 72}
+    batches = []
+    pos = 0
+    while pos + 20 <= len(packed):
+        panel_idx, batch_idx, kind, count, flags = struct.unpack_from("<5I", packed, pos)
+        if kind not in INSTANCE_SIZES:
+            break
+        batch_end = pos + 20 + count * INSTANCE_SIZES[kind]
+        if flags & 0x2:
+            batch_end += count * 4
+        if flags & 0x1:
+            if batch_end + 4 > len(packed):
+                break
+            num_fields = struct.unpack_from("<I", packed, batch_end)[0]
+            batch_end += 4
+            for _ in range(num_fields):
+                if batch_end + 4 > len(packed):
+                    break
+                slen = struct.unpack_from("<I", packed, batch_end)[0]
+                batch_end += 4 + slen
+                if batch_end > len(packed):
+                    break
+            for _ in range(count * num_fields):
+                if batch_end + 4 > len(packed):
+                    break
+                slen = struct.unpack_from("<I", packed, batch_end)[0]
+                batch_end += 4 + slen
+                if batch_end > len(packed):
+                    break
+        if batch_end > len(packed):
+            break
+        batches.append(
+            {"panel_idx": panel_idx, "batch_idx": batch_idx, "kind": kind, "count": count}
+        )
+        pos = batch_end
+    return batches, pos
+
+
+def test_b5_multi_batch_tooltips_both_batches_survive_untitled():
+    """Two >1000-mark scatters composed with `|` must both appear in packed data.
+
+    Before the finding-A fix: the old scan reads num_fields (e.g. 2) as the
+    tooltip byte-length, advances ~6 bytes, desyncs, and the 2nd batch is
+    either dropped or the parse aborts early — this assertion would fail.
+
+    After the fix: both batches are present, panel_idx 0 and 1, count > 1000.
+    """
+    n = 1500
+    df = pl.DataFrame(
+        {
+            "x": [float(i) for i in range(n)],
+            "y": [float(i % 50) for i in range(n)],
+        }
+    )
+    c = fm.Chart(df).mark_point().encode(x="x", y="y")
+    composed = c | c
+
+    _scene_json, packed = composed._render_interactive()
+
+    assert packed, "a >1000-mark point composite must produce non-empty packed data"
+
+    batches, final_pos = _parse_real_packed_batches(packed)
+
+    assert len(batches) == 2, (
+        f"Expected 2 packed batches (one per panel); got {len(batches)}. "
+        "If 0 or 1, the old tooltip-scan misparse is still active."
+    )
+    panel_ids = {b["panel_idx"] for b in batches}
+    assert panel_ids == {0, 1}, f"Expected panel_idx {{0, 1}}; got {panel_ids}"
+    for b in batches:
+        assert b["count"] > 1000, (
+            f"batch for panel {b['panel_idx']} has count={b['count']}, expected >1000"
+        )
+
+    # No trailing garbage: the parser consumed the entire buffer.
+    assert final_pos == len(packed), (
+        f"Parser stopped at byte {final_pos} but packed has {len(packed)} bytes — "
+        "trailing garbage or desync detected"
+    )
+
+
+def test_b5_multi_batch_tooltips_both_batches_survive_titled():
+    """Same as untitled test but with a figure title (exercises tooltip-scan + T3 Y-offset).
+
+    The title injects a header band; _merge_packed_data must both survive the tooltip
+    scan AND apply the Y-offset correctly.  Both batches must be present in the output.
+    """
+    n = 1500
+    df = pl.DataFrame(
+        {
+            "x": [float(i) for i in range(n)],
+            "y": [float(i % 50) for i in range(n)],
+        }
+    )
+    c = fm.Chart(df).mark_point().encode(x="x", y="y")
+    composed = (c | c).properties(title="MultiPanelTitle")
+
+    _scene_json, packed = composed._render_interactive()
+
+    assert packed, "a titled >1000-mark point composite must produce non-empty packed data"
+
+    batches, final_pos = _parse_real_packed_batches(packed)
+
+    assert len(batches) == 2, (
+        f"Expected 2 packed batches in titled composite; got {len(batches)}. "
+        "Tooltip scan or Y-offset is corrupting the second batch."
+    )
+    panel_ids = {b["panel_idx"] for b in batches}
+    assert panel_ids == {0, 1}, f"Expected panel_idx {{0, 1}}; got {panel_ids}"
+    for b in batches:
+        assert b["count"] > 1000, (
+            f"batch for panel {b['panel_idx']} has count={b['count']}, expected >1000"
+        )
+
+    assert final_pos == len(packed), (
+        f"Parser stopped at byte {final_pos} but packed has {len(packed)} bytes"
+    )
 
 
 def test_b3_repeat_corner_interactive_sparse_layout():
