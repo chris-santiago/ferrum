@@ -14,8 +14,8 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
 use crate::layout::{
-    AuxLegendInput, AxesInput, AxisInput, AxisOrient, ColorbarInput, FacetGroup, FacetKey,
-    LegendEntry, LegendOrient, ShapeLegendEntry, SizeLegendEntry, SymbolKind, TickProjection,
+    AxesInput, AxisInput, AxisOrient, ColorbarInput, FacetGroup, FacetKey, LegendEntry,
+    TickProjection,
 };
 use crate::spec::chart::ChartSpec;
 use crate::transform::context::TransformContext;
@@ -23,6 +23,14 @@ use crate::transform::core::{apply_transforms_named, FINAL_OUTPUT_KEY};
 
 use super::scale_resolve::ResolvedScales;
 use super::{RenderError, RenderWarning};
+
+mod extent;
+mod legend;
+
+// Re-exported into this module's namespace so the orchestrator and the inline
+// `#[cfg(test)] mod tests` (which uses `super::*`) resolve the extracted helpers
+// from their cohesive submodules without a path change.
+use extent::fix_transform_extents_for_facet;
 
 /// Key used when unifying wrap-mode and grid-mode partitions: (col_val, Option<row_val>).
 /// `None` row value = wrap mode (single-field facet).
@@ -279,45 +287,6 @@ impl PreparedInputs {
             .get(FINAL_OUTPUT_KEY)
             .expect("apply_transforms_named publishes FINAL_OUTPUT_KEY unconditionally")
     }
-}
-
-/// Walk `spec.conditionals` for `ChannelName::Color` branches whose value is an
-/// `EncodingValue::Field { name }`.  For each such field, extend the output with
-/// `distinct_values_in_order` over `transformed`.  Dedup preserving first-appearance
-/// order.  Returns an empty `Vec` when no field-driven color conditional exists.
-///
-/// Used by the legend-build arm when `provisional_scales.color` is `None` (i.e. no
-/// base color encoding) so that `when(Color(field))` conditionals still produce a
-/// categorical legend whose entries the WASM `bind="legend"` toggle can use.
-fn resolve_conditional_color_domain(
-    spec: &ChartSpec,
-    transformed: &RecordBatch,
-) -> Vec<String> {
-    use ferrum_scene::{ChannelName, EncodingValue};
-    let mut seen = std::collections::HashSet::<String>::new();
-    let mut out = Vec::<String>::new();
-
-    for cond in &spec.conditionals {
-        if cond.channel != ChannelName::Color {
-            continue;
-        }
-        // Collect field names from both branches; each branch may independently
-        // be a Field reference (vs a literal color value).
-        let candidates: [&EncodingValue; 2] = [&cond.if_selected, &cond.if_not];
-        for ev in candidates {
-            if let EncodingValue::Field { name } = ev {
-                // Ignore errors (field not present in batch) — just skip.
-                if let Ok(values) = super::arrow_cast::distinct_values_in_order(transformed, name) {
-                    for v in values {
-                        if seen.insert(v.clone()) {
-                            out.push(v);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
 }
 
 pub fn prepare_render_inputs(
@@ -757,207 +726,17 @@ pub fn prepare_render_inputs(
         Vec::new()
     };
 
-    // Schwabish SB3 (2026-05-11): respect ``legend={"disabled": true}`` on the
-    // color encoding by emitting no legend entries AND no colorbar. The
-    // Python ``Color`` class translates ``legend=None`` / ``legend=False``
-    // from ``encode(color=Color(field, legend=None))`` into this JSON shape
-    // so direct-label diagnostic charts can opt out of redundant legends.
-    let legend_disabled = spec
-        .encoding
-        .color
-        .as_ref()
-        .and_then(|c| c.legend.as_ref())
-        .and_then(|l| l.disabled)
-        .unwrap_or(false);
-    let (legend_entries, colorbar): (Vec<LegendEntry>, Option<ColorbarInput>) =
-        if legend_disabled {
-            (Vec::new(), None)
-        } else {
-            match &provisional_scales.color {
-            Some(super::scale_resolve::ColorScale::Categorical { domain, .. }) => {
-                let entries = domain.iter()
-                    .map(|v| LegendEntry { label: v.clone(), symbol: SymbolKind::Circle })
-                    .collect();
-                (entries, None)
-            }
-            Some(super::scale_resolve::ColorScale::Continuous { domain, scheme, .. }) => {
-                // Sample the scheme at 11 evenly-spaced positions so the
-                // gradient looks smooth without bloating the SVG. The
-                // renderer emits these as `linearGradient` stops.
-                let n_stops = 11;
-                let stops: Vec<(f64, String)> = (0..n_stops).map(|i| {
-                    let t = i as f64 / (n_stops - 1) as f64;
-                    let color = scheme.sample(t);
-                    (t, super::color::fmt_svg(color))
-                }).collect();
-                // Tick labels: check for explicit tickLabels override from the
-                // typed legend spec (e.g. ["Low", "High"] for SHAP beeswarm),
-                // else compute 5 ticks across the domain at 0, 0.25, 0.5, 0.75, 1.0.
-                // When `format=` is set, apply a Python-style format spec to each tick value.
-                let color_legend = spec
-                    .encoding
-                    .color
-                    .as_ref()
-                    .and_then(|c| c.legend.as_ref());
-                let custom_tick_labels: Option<Vec<String>> =
-                    color_legend.and_then(|l| l.tick_labels.clone());
-                let format_spec: Option<&str> =
-                    color_legend.and_then(|l| l.format.as_deref());
-                // `cb_domain` is the numeric span the labels cover — carried for
-                // `tick_min_step` thinning in `compute_layout`. `None` for explicit
-                // non-numeric label overrides (their step is undefined).
-                let (tick_labels, cb_domain) = if let Some(labels) = custom_tick_labels {
-                    (labels, None)
-                } else {
-                    let (lo, hi) = *domain;
-                    let labels = (0..5).map(|i| {
-                        let t = i as f64 / 4.0;
-                        let v = lo + t * (hi - lo);
-                        if let Some(spec_str) = format_spec {
-                            crate::render::format::format_with_spec(v, Some(spec_str))
-                        } else {
-                            format_colorbar_tick(v, lo, hi)
-                        }
-                    }).collect();
-                    (labels, Some((lo, hi)))
-                };
-                (Vec::new(), Some(ColorbarInput { stops, tick_labels, domain: cb_domain }))
-            }
-            None => {
-                // #9 [FA-15]: when no base color encoding is set, check whether
-                // a conditional color encoding (`when(Color(field))`) provides a
-                // categorical domain.  If so, build legend entries from the
-                // field's distinct values so `bind="legend"` has categories to
-                // toggle.  Gated on `provisional_scales.color == None` so base-
-                // color charts remain byte-identical.
-                let cond_domain = resolve_conditional_color_domain(spec, &transformed);
-                if cond_domain.is_empty() {
-                    (Vec::new(), None)
-                } else {
-                    let entries = cond_domain
-                        .iter()
-                        .map(|v| LegendEntry { label: v.clone(), symbol: SymbolKind::Circle })
-                        .collect();
-                    (entries, None)
-                }
-            }
-            }
-        };
-
-    // Legend title (Themes-T2.5b): default to the color encoding's field name.
-    // When entries were built from a conditional color field (no base encoding),
-    // derive the title from the first conditional Color Field branch instead.
-    let legend_title = if !legend_entries.is_empty() || colorbar.is_some() {
-        spec.encoding.color.as_ref().map(|c| c.field.clone()).or_else(|| {
-            // Conditional-color case: find the first Color conditional with a
-            // Field branch and use its field name as the title.
-            use ferrum_scene::{ChannelName, EncodingValue};
-            spec.conditionals.iter().find_map(|cond| {
-                if cond.channel != ChannelName::Color {
-                    return None;
-                }
-                for ev in [&cond.if_selected, &cond.if_not] {
-                    if let EncodingValue::Field { name } = ev {
-                        return Some(name.clone());
-                    }
-                }
-                None
-            })
-        })
-    } else {
-        None
-    };
-
-    // D13 (B5-typed): extract legend style overrides from the typed
-    // `encoding.color.legend` spec. Per-channel precedence: these win over
-    // chart-level `configure_legend` (which fills only what is still `None`).
-    let color_legend = spec
-        .encoding
-        .color
-        .as_ref()
-        .and_then(|c| c.legend.as_ref());
-    let legend_overrides = LegendPreparedOverrides {
-        orient: color_legend.and_then(|l| l.orient.as_deref()).and_then(|s| match s {
-            "right"  => Some(LegendOrient::Right),
-            "left"   => Some(LegendOrient::Left),
-            "top"    => Some(LegendOrient::Top),
-            "bottom" => Some(LegendOrient::Bottom),
-            _ => None,
-        }),
-        title: color_legend.and_then(|l| l.title.clone()),
-        title_font_size: color_legend.and_then(|l| l.title_font_size),
-        columns: color_legend.and_then(|l| l.columns),
-        tick_count: color_legend.and_then(|l| l.tick_count).map(|n| n as usize),
-        label_font_size: color_legend.and_then(|l| l.label_font_size),
-        gradient_length: color_legend.and_then(|l| l.gradient_length),
-        gradient_thickness: color_legend.and_then(|l| l.gradient_thickness),
-        direction: color_legend.and_then(|l| l.direction.as_deref()).and_then(|s| match s {
-            "horizontal" => Some(crate::layout::LegendDirection::Horizontal),
-            "vertical"   => Some(crate::layout::LegendDirection::Vertical),
-            _ => None,
-        }),
-        // `values`: explicit tick/entry labels for the legend. Accepts an array of
-        // strings or numbers. Numbers are formatted to a short decimal string.
-        values: color_legend.and_then(|l| l.values.as_ref()).map(|arr| {
-            arr.iter()
-                .map(|item| {
-                    if let Some(s) = item.as_str() {
-                        s.to_string()
-                    } else if let Some(n) = item.as_f64() {
-                        if n.fract() == 0.0 && n.abs() < 1e15 {
-                            format!("{}", n as i64)
-                        } else {
-                            format!("{:.4}", n).trim_end_matches('0').trim_end_matches('.').to_string()
-                        }
-                    } else {
-                        item.to_string()
-                    }
-                })
-                .collect()
-        }),
-        // `type`: "gradient" forces colorbar path; "symbol" forces categorical entries.
-        legend_type: color_legend.and_then(|l| l.legend_type.clone()),
-        symbol_type: color_legend.and_then(|l| l.symbol_type.clone()),
-        // B5 unit 3: orphan legend styling/positioning fields. Per-channel here;
-        // chart-level `configure_legend(...)` fills any that stay `None`.
-        symbol_stroke_width: color_legend.and_then(|l| l.symbol_stroke_width),
-        row_padding: color_legend.and_then(|l| l.row_padding),
-        column_padding: color_legend.and_then(|l| l.column_padding),
-        label_limit: color_legend.and_then(|l| l.label_limit),
-        clip_height: color_legend.and_then(|l| l.clip_height),
-        tick_min_step: color_legend.and_then(|l| l.tick_min_step),
-        zindex: color_legend.and_then(|l| l.zindex),
-        // B5 unit 6a orphans. Per-channel here; chart-level `configure_legend`
-        // fills any that stay `None`.
-        symbol_size: color_legend.and_then(|l| l.symbol_size),
-        label_color: color_legend.and_then(|l| l.label_color.clone()),
-        offset: color_legend.and_then(|l| l.offset),
-        padding: color_legend.and_then(|l| l.padding),
-        title_padding: color_legend.and_then(|l| l.title_padding),
-    };
-
-    // Multivariate B1: build size/shape auxiliary legends from the resolved
-    // scales. A size/shape channel that shares its field with the color channel
-    // is merged into the color legend rather than emitted as a separate block.
-    let aux_legends = build_aux_legends(spec, &provisional_scales);
-
-    // Same-field merge: when color (continuous) and size share a field, the
-    // combined block is the size legend whose symbols also carry color
-    // (`color_hex`). Suppress the now-redundant colorbar so a single combined
-    // legend renders rather than a colorbar plus a size legend.
-    let colorbar = {
-        let merged_color_size = aux_legends.iter().any(|a| matches!(
-            a,
-            AuxLegendInput::Size { entries, .. }
-                if entries.iter().any(|e| e.color_hex.is_some())
-        ));
-        if merged_color_size { None } else { colorbar }
-    };
-    let legend_title = if colorbar.is_none() && legend_entries.is_empty() {
-        None
-    } else {
-        legend_title
-    };
+    // Color legend / colorbar / aux-legend construction (categorical entries,
+    // continuous colorbar, conditional-color fallback, per-channel style
+    // overrides, size/shape aux legends, and the same-field color+size merge).
+    // See `legend::build_color_legend` for the full behavior.
+    let legend::ColorLegendBundle {
+        legend_entries,
+        colorbar,
+        legend_title,
+        legend_overrides,
+        aux_legends,
+    } = legend::build_color_legend(spec, &transformed, &provisional_scales);
 
     Ok(PreparedInputs {
         transform_outputs,
@@ -975,157 +754,6 @@ pub fn prepare_render_inputs(
         x_tick_count,
         y_tick_count,
     })
-}
-
-/// Read whether a channel's typed `legend` spec carries `disabled: true`
-/// (`legend=None` / `legend=False` from the Python `Size`/`Shape` classes).
-fn legend_channel_disabled(enc: Option<&crate::spec::encoding::EncodingSpec>) -> bool {
-    enc.and_then(|e| e.legend.as_ref())
-        .and_then(|l| l.disabled)
-        .unwrap_or(false)
-}
-
-/// Optional explicit legend title from a channel's typed `legend.title`,
-/// falling back to the channel's field name.
-fn aux_legend_title(enc: &crate::spec::encoding::EncodingSpec) -> Option<String> {
-    let explicit = enc.legend.as_ref().and_then(|l| l.title.clone());
-    explicit.or_else(|| Some(enc.field.clone()))
-}
-
-/// Build the size/shape auxiliary legend blocks.
-///
-/// Size: graduated symbols at ~5 nice round values spanning the size domain
-/// (`nice_ticks`), each scaled to the size scale's pixel radius and labeled
-/// with the value. Shape: one glyph per category in the shape scale.
-///
-/// Same-field merge (Vega-Lite behavior): when the size channel shares its
-/// field with a *continuous* color encoding, the size legend's symbols also
-/// carry the color the shared field maps to (`color_hex`), and the colorbar is
-/// expected to be suppressed by the caller — a single combined block. A size or
-/// shape channel that shares its field with a categorical color encoding is
-/// suppressed entirely (the color legend already labels that field).
-fn build_aux_legends(
-    spec: &ChartSpec,
-    scales: &ResolvedScales,
-) -> Vec<AuxLegendInput> {
-    use crate::render::format::format_with_spec;
-    use crate::scale::ticks::nice_ticks;
-
-    let color_field = spec.encoding.color.as_ref().map(|c| c.field.as_str());
-    let color_is_continuous = matches!(
-        scales.color,
-        Some(crate::render::scale_resolve::ColorScale::Continuous { .. })
-    );
-
-    let mut out = Vec::new();
-
-    // ── Size legend ──────────────────────────────────────────────────────
-    if let (Some(size_scale), Some(size_enc)) = (&scales.size, &spec.encoding.size) {
-        let disabled = legend_channel_disabled(spec.encoding.size.as_ref());
-        let same_field_as_color = color_field == Some(size_enc.field.as_str());
-        // Merge into a categorical color legend → suppress (color labels it).
-        let suppressed = disabled || (same_field_as_color && !color_is_continuous);
-        if !suppressed {
-            let format_spec = size_enc
-                .legend
-                .as_ref()
-                .and_then(|l| l.format.as_deref());
-            if let Some((lo, hi)) = size_scale.inner.data_domain() {
-                let values = nice_ticks(lo, hi, 5);
-                let entries: Vec<SizeLegendEntry> = values
-                    .iter()
-                    .filter_map(|&v| {
-                        // The size scale maps a value to a mark *area* (square
-                        // pixels); the point mark draws radius = sqrt(area/π).
-                        // Match that exactly so legend symbols equal the marks.
-                        let area = size_scale.inner.to_pixel_f64(v)?;
-                        let radius = (area / std::f64::consts::PI).sqrt();
-                        if !(radius.is_finite() && radius > 0.0) {
-                            return None;
-                        }
-                        // Merge color+size on the same continuous field: sample
-                        // the color scale at the value so the symbol varies in
-                        // both radius and color.
-                        let color_hex = if same_field_as_color && color_is_continuous {
-                            scales
-                                .color
-                                .as_ref()
-                                .and_then(|c| c.lookup_f64(v))
-                                .map(crate::render::color::fmt_svg)
-                        } else {
-                            None
-                        };
-                        Some(SizeLegendEntry {
-                            label: format_with_spec(v, format_spec),
-                            radius,
-                            color_hex,
-                        })
-                    })
-                    .collect();
-                if !entries.is_empty() {
-                    out.push(AuxLegendInput::Size {
-                        title: aux_legend_title(size_enc),
-                        entries,
-                    });
-                }
-            }
-        }
-    }
-
-    // ── Shape legend ─────────────────────────────────────────────────────
-    if let (Some(shape_scale), Some(shape_enc)) = (&scales.shape, &spec.encoding.shape) {
-        let disabled = legend_channel_disabled(spec.encoding.shape.as_ref());
-        let same_field_as_color = color_field == Some(shape_enc.field.as_str());
-        // Shape always maps a categorical field; if color encodes the same
-        // categorical field, the color legend already enumerates it — suppress.
-        let suppressed = disabled || same_field_as_color;
-        if !suppressed {
-            let entries: Vec<ShapeLegendEntry> = shape_scale
-                .domain
-                .iter()
-                .zip(shape_scale.shapes.iter())
-                .map(|(label, kind)| ShapeLegendEntry {
-                    label: label.clone(),
-                    shape_name: kind.name().to_string(),
-                })
-                .collect();
-            if !entries.is_empty() {
-                out.push(AuxLegendInput::Shape {
-                    title: aux_legend_title(shape_enc),
-                    entries,
-                });
-            }
-        }
-    }
-
-    out
-}
-
-
-/// Format a single colorbar tick value into a short human-readable label.
-/// Picks decimal precision from the domain span so that small ranges still
-/// show enough digits and large ranges don't waste pixels on noise.
-fn format_colorbar_tick(value: f64, lo: f64, hi: f64) -> String {
-    let span = (hi - lo).abs();
-    let precision: usize = if span == 0.0 || !span.is_finite() {
-        2
-    } else if span >= 100.0 {
-        0
-    } else if span >= 10.0 {
-        1
-    } else if span >= 1.0 {
-        2
-    } else {
-        3
-    };
-    let s = format!("{:.*}", precision, value);
-    // Strip trailing zeros / decimal point when the integer form is exact.
-    if s.contains('.') {
-        let trimmed = s.trim_end_matches('0').trim_end_matches('.').to_string();
-        if trimmed.is_empty() { "0".into() } else { trimmed }
-    } else {
-        s
-    }
 }
 
 /// D10: fill missing (group × x-value) combinations in the batch with a constant y value.
@@ -1729,165 +1357,6 @@ mod tick_format_tests {
     }
 }
 
-/// Pin a shared value-axis extent across facet panels for every extent-carrying
-/// transform — the 1-D trio (`Kde`, `Bin`, `Violin`) and the 2-D pair (`Kde2D`,
-/// `Bin2D`) — that has not been given an explicit extent.
-///
-/// Returns a new transform list where each such spec's extent field is set to the
-/// global range of its value field(s) over the **full pre-facet `batch`**. Because
-/// the extent is computed before partitioning, every per-panel partition (and
-/// every hue group within a panel) inherits the same value axis, so panels and
-/// groups are visually comparable. This is the correct default for faceted
-/// density / histogram / violin charts and faceted 2-D density / heatmap / contour
-/// charts (archaeology bug #7, extended to 2-D by R5).
-///
-/// The extent is derived over the entire field column(s), ignoring `groupby` and
-/// facet partitioning — so the multi-group (hue) case is covered without
-/// special-casing (spec §8). Each transform's owning module computes the extent
-/// (`kde::global_extent` / `bin::global_extent` / `violin::global_extent` /
-/// `kde_2d::global_extent` / `bin_2d::global_extent`); this seam only orchestrates
-/// (it does not re-derive extents in the render layer). 1-D `Bin` nices its extent
-/// to align bin edges; `Kde`/`Violin`/`Kde2D` return the raw range; `Bin2D` also
-/// returns raw because `Bin2D::apply` never nices.
-///
-/// A spec that already carries an explicit extent (user-provided) is left
-/// unchanged; `Bin2D`'s per-axis `extent_x`/`extent_y` are pinned independently so
-/// a partially-specified extent keeps the user axis and pins only the unset one.
-/// All non-extent-carrying transforms are passed through unchanged.
-fn fix_transform_extents_for_facet(
-    transforms: &[crate::transform::core::TransformSpec],
-    batch: &RecordBatch,
-) -> Vec<crate::transform::core::TransformSpec> {
-    use crate::transform::core::TransformSpec;
-
-    transforms
-        .iter()
-        .map(|t| match t {
-            TransformSpec::Kde(spec) if spec.extent.is_none() => {
-                match crate::transform::kde::global_extent(spec, batch) {
-                    Some(extent) => TransformSpec::Kde(crate::transform::kde::KdeSpec {
-                        extent: Some(extent),
-                        ..spec.clone()
-                    }),
-                    None => t.clone(),
-                }
-            }
-            TransformSpec::Bin(spec) if spec.extent.is_none() => {
-                match crate::transform::bin::global_extent(spec, batch) {
-                    Some(extent) => TransformSpec::Bin(crate::transform::bin::BinSpec {
-                        extent: Some(extent),
-                        ..spec.clone()
-                    }),
-                    None => t.clone(),
-                }
-            }
-            TransformSpec::Violin(spec) if spec.extent.is_none() => {
-                match crate::transform::violin::global_extent(spec, batch) {
-                    Some(extent) => TransformSpec::Violin(crate::transform::violin::ViolinSpec {
-                        extent: Some(extent),
-                        ..spec.clone()
-                    }),
-                    None => t.clone(),
-                }
-            }
-            // 2-D extent pin (archaeology R5): close the #7 class for 2-D
-            // transforms. A faceted 2-D density (Kde2D) or 2-D-binned heatmap
-            // (Bin2D) without an explicit extent would otherwise drift per panel
-            // exactly as the 1-D trio did. Pin the spec's extent field(s) to the
-            // global 2-D range over the full pre-facet batch, only when unset.
-            TransformSpec::Kde2D(spec) if spec.extent.is_none() => {
-                match crate::transform::kde_2d::global_extent(spec, batch) {
-                    Some(extent) => TransformSpec::Kde2D(crate::transform::kde_2d::Kde2DSpec {
-                        extent: Some(extent),
-                        ..spec.clone()
-                    }),
-                    None => t.clone(),
-                }
-            }
-            // Bin2D carries a separate `extent_x`/`extent_y` pair rather than a
-            // 4-tuple. Pin each axis only when that axis is unset, so a partially
-            // user-specified extent (e.g. only `extent_x`) keeps the user value
-            // on the set axis and gains the global pin on the unset one.
-            TransformSpec::Bin2D(spec)
-                if spec.extent_x.is_none() || spec.extent_y.is_none() =>
-            {
-                match crate::transform::bin_2d::global_extent(spec, batch) {
-                    Some((x_lo, x_hi, y_lo, y_hi)) => {
-                        TransformSpec::Bin2D(crate::transform::bin_2d::Bin2DSpec {
-                            extent_x: spec.extent_x.or(Some((x_lo, x_hi))),
-                            extent_y: spec.extent_y.or(Some((y_lo, y_hi))),
-                            ..spec.clone()
-                        })
-                    }
-                    None => t.clone(),
-                }
-            }
-            // DensityData carries a value-axis `extent: Option<(f64,f64)>`.
-            // Without a pin, each facet panel would compute its own KDE range —
-            // the same #7 defect class. DensityData does not nice (mirrors KDE):
-            // the pinned extent is the raw global min/max over the full batch
-            // (archaeology bug #7 extended to DensityData by round-3 T1).
-            TransformSpec::DensityData(spec) if spec.extent.is_none() => {
-                match crate::transform::density_data::global_extent(spec, batch) {
-                    Some(extent) => TransformSpec::DensityData(
-                        crate::transform::density_data::DensityDataSpec {
-                            extent: Some(extent),
-                            ..spec.clone()
-                        },
-                    ),
-                    None => t.clone(),
-                }
-            }
-            // Extent-DERIVING transforms (archaeology defect class #7 completion):
-            // Hex, Raster, and DataBin compute their grid or bin boundaries from
-            // the per-partition data range, so each facet panel drifts to its own
-            // geometry. Pin each to the global pre-facet range, using the same
-            // per-axis `.or(Some(...))` pattern as Bin2D so a user-set axis is
-            // never clobbered.
-            TransformSpec::Hex(spec)
-                if spec.extent_x.is_none() || spec.extent_y.is_none() =>
-            {
-                match crate::transform::hex::global_extent(spec, batch) {
-                    Some((x_lo, x_hi, y_lo, y_hi)) => {
-                        TransformSpec::Hex(crate::transform::hex::HexSpec {
-                            extent_x: spec.extent_x.or(Some((x_lo, x_hi))),
-                            extent_y: spec.extent_y.or(Some((y_lo, y_hi))),
-                            ..spec.clone()
-                        })
-                    }
-                    None => t.clone(),
-                }
-            }
-            TransformSpec::Raster(spec)
-                if spec.extent_x.is_none() || spec.extent_y.is_none() =>
-            {
-                match crate::transform::raster::global_extent(spec, batch) {
-                    Some((x_lo, x_hi, y_lo, y_hi)) => {
-                        TransformSpec::Raster(crate::transform::raster::RasterSpec {
-                            extent_x: spec.extent_x.or(Some((x_lo, x_hi))),
-                            extent_y: spec.extent_y.or(Some((y_lo, y_hi))),
-                            ..spec.clone()
-                        })
-                    }
-                    None => t.clone(),
-                }
-            }
-            TransformSpec::DataBin(spec) if spec.extent.is_none() => {
-                match crate::transform::data_bin::global_extent(spec, batch) {
-                    Some(extent) => {
-                        TransformSpec::DataBin(crate::transform::data_bin::DataBinSpec {
-                            extent: Some(extent),
-                            ..spec.clone()
-                        })
-                    }
-                    None => t.clone(),
-                }
-            }
-            _ => t.clone(),
-        })
-        .collect()
-}
-
 /// Partition a RecordBatch by a Utf8 field, returning `(value, filtered_batch)`
 /// pairs in first-appearance order. Used by facet-before-transform to split the
 /// input into per-panel subsets before running transforms.
@@ -2111,6 +1580,7 @@ fn partition_batch_by_two_fields(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::{AuxLegendInput, SymbolKind};
     use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
