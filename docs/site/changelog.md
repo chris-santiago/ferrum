@@ -6,6 +6,47 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.17.0
+
+*2026-06-20*
+
+This release lands the archaeology **#6/#7/#8** remediation to convergence (a
+multi-round review→remediate loop that ended with a 5-agent sweep finding zero
+in-class defects) plus two heavyweight-review cohesion refactors. The headline
+behavior change: **faceted charts now share scales correctly** across every
+data-driven channel, **composite figure titles render**, and the interactive
+(WASM) packed-instance path's metadata/positioning bugs are fixed. The work is
+predominantly behavior fixes; the new public surface is internal PyO3/transform
+plumbing. All output is byte-verified against the golden suite (5774 tests).
+
+### Added
+
+- `MarkNodes` node+index accumulator with a 5-channel alignment guard (tooltips, hrefs, descriptions, data_indices, keys), so every mark builder emits metadata aligned to its source rows.
+- `ViolinSpec` extent fields and a per-transform `global_extent` so faceted density/violin panels can pin a shared value-axis extent.
+- `figure_title_nodes` PyO3 helper backing interactive composite figure titles.
+
+### Fixed
+
+- **Faceted shared scales.** Faceted marks now match the global axis/legend across panels for *every* data-driven channel — positional x/y (raw fields under `resolve="shared"`), categorical data-aware sort, continuous and categorical color, size, opacity, and shape. Previously each panel resolved its own domain, so a mark could render with the wrong position, color, glyph, or normalization relative to the shared legend.
+- **Faceted transform extents.** `Kde`/`Bin`/`Violin`/`Kde2D`/`Bin2D`/`DensityData` and the extent-*deriving* `Hex`/`Raster`/`DataBin` transforms now pin a shared value-axis extent across panels when one is not given explicitly (previously KDE-only).
+- **Composite figure titles** (`title`/`subtitle`/`caption`) render in both SVG and interactive output across all composite families; `LayerChart` titles reach the document `<title>`; packed GPU marks are offset under the title band.
+- **Interactive (WASM) packed path.** Packed instances are offset by the per-panel `(dx, dy)` composition translation and the figure-title band; the tooltip string table is parsed field-by-field; conditional/crossfilter instances index from the packed-first base; and `scene_load` hardens its tooltip-scan and instance-count handling against malformed buffers.
+- **Mark metadata alignment** (`bar`/`rect`/`point`/`segment`/`text`/`tick`/`rule`/group/`geoshape`/`image`): tooltips, hrefs, descriptions, data_indices, and keys now align to the true source row when rows are skipped or reordered.
+- **`_core.pyi` stub parity.** Corrected `EncodingSpec`/`TimeScale`/`hat_matrix_stats` signature drift and added a programmatic live-vs-stub signature-parity test so the class cannot silently recur.
+
+### Changed
+
+- Cohesion refactors (behavior-preserving, byte-identical): collapsed the duplicated packed/scene merge tail into a `_PlacedChild` record + `_assemble_placed_children`; extracted `build_auxiliary_scales` to dedup the triplicated scale dispatch; deduped `share_scale` mode validation; consolidated figure-chrome handling into `_CompositeBase`; single-sourced bin extent/nice logic.
+- Packed GPU wire-format is now enforced: named stride/offset consts + a producer stride test (ferrum-core) and compile-time `size_of`/`offset_of` assertions (ferrum-wasm), so any future layout drift fails the build instead of silently corrupting the interactive render.
+
+### Packaging
+
+- Broader wheel matrix: manylinux2014 + aarch64 + musllinux + Intel macOS, with macOS built as universal2 on Apple Silicon.
+
+### Known gaps
+
+- Four pre-existing, out-of-scope gaps surfaced during the review were filed as issues rather than fixed here: [#24](https://github.com/chris-santiago/ferrum/issues/24) (`facet(col=)` defaults to a single column), [#25](https://github.com/chris-santiago/ferrum/issues/25) (square-shape glyphs can exceed the panel clip in facets), [#26](https://github.com/chris-santiago/ferrum/issues/26) (shape encoding ignores `sort`), [#27](https://github.com/chris-santiago/ferrum/issues/27) (PyO3 stub fidelity nits).
+
 ## 0.16.2
 
 *2026-06-15*

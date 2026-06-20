@@ -528,7 +528,13 @@ class AggregateOp:
     def __init__(self, field: str, fn_: str, as_: str) -> None: ...
 
 class Aggregate:
-    def __init__(self, ops: List[AggregateOp], *, groupby: Optional[List[str]] = None, name: Optional[str] = None) -> None: ...
+    def __init__(
+        self,
+        ops: List[AggregateOp],
+        *,
+        groupby: Optional[List[str]] = None,
+        name: Optional[str] = None,
+    ) -> None: ...
 
 class Summary:
     def __init__(

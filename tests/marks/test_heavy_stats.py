@@ -88,9 +88,12 @@ def test_violin_shared_extent_kwarg_propagates_to_transform():
             "val": list(range(20)) + list(range(100, 120)),
         }
     )
-    spec = fe.Chart(df).mark_violin(inner=None, shared_extent=True).encode(
-        x="grp", y="val"
-    )._build_spec()
+    spec = (
+        fe.Chart(df)
+        .mark_violin(inner=None, shared_extent=True)
+        .encode(x="grp", y="val")
+        ._build_spec()
+    )
     json_str = spec.to_json()
     # shared_extent=true must appear in the serialized spec.
     assert '"shared_extent":true' in json_str, (
@@ -124,17 +127,11 @@ def test_violin_shared_extent_produces_shared_value_range():
     )
     # shared_extent=True: both groups share the full [0, 109] y range.
     svg_shared = (
-        fe.Chart(df)
-        .mark_violin(inner=None, shared_extent=True)
-        .encode(x="grp", y="val")
-        .to_svg()
+        fe.Chart(df).mark_violin(inner=None, shared_extent=True).encode(x="grp", y="val").to_svg()
     )
     # shared_extent=False (default): each group uses its own y range.
     svg_per = (
-        fe.Chart(df)
-        .mark_violin(inner=None, shared_extent=False)
-        .encode(x="grp", y="val")
-        .to_svg()
+        fe.Chart(df).mark_violin(inner=None, shared_extent=False).encode(x="grp", y="val").to_svg()
     )
     # Both must produce non-empty SVG.
     assert "<svg" in svg_shared

@@ -197,8 +197,7 @@ def test_stub_names_exist_in_module() -> None:
     stub_names = _parse_stub_names() - _STUB_ONLY_NAMES
     missing_from_module = stub_names - set(dir(_core))
     assert not missing_from_module, (
-        f"Names declared in _core.pyi but absent from ferrum._core: "
-        f"{sorted(missing_from_module)}"
+        f"Names declared in _core.pyi but absent from ferrum._core: {sorted(missing_from_module)}"
     )
 
 
@@ -211,8 +210,7 @@ def test_module_names_declared_in_stub() -> None:
 
     missing_from_stub = live_names - all_stub_names
     assert not missing_from_stub, (
-        f"Names in ferrum._core but not declared in _core.pyi: "
-        f"{sorted(missing_from_stub)}"
+        f"Names in ferrum._core but not declared in _core.pyi: {sorted(missing_from_stub)}"
     )
 
 
@@ -413,9 +411,7 @@ def test_programmatic_signature_parity() -> None:
                 details.append(f"required: live={live_req} stub={stub_req}")
             if not details:
                 # Defaults differ but names/required match — report defaults.
-                details.append(
-                    f"has_default differs: live={live_params} stub={stub_params}"
-                )
+                details.append(f"has_default differs: live={live_params} stub={stub_params}")
             failures.append(f"{name}: {'; '.join(details)}")
 
     assert not failures, (

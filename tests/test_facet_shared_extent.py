@@ -573,9 +573,7 @@ def _data_circles(svg: str) -> list[tuple[float, float]]:
     so the radius discriminates marks from swatches.
     """
     out: list[tuple[float, float]] = []
-    for cx, cy, r in re.findall(
-        r'<circle cx="([0-9.]+)" cy="([0-9.]+)" r="([0-9.]+)"', svg
-    ):
+    for cx, cy, r in re.findall(r'<circle cx="([0-9.]+)" cy="([0-9.]+)" r="([0-9.]+)"', svg):
         if abs(float(r) - 4.0) > 1e-6:
             out.append((float(cx), float(cy)))
     return out
@@ -674,9 +672,7 @@ class TestRawFieldSharedFacet:
             "(the '10' tick), not near the right edge."
         )
 
-    def test_independent_x_marks_use_per_panel_domain(
-        self, raw_disjoint_df: pl.DataFrame
-    ) -> None:
+    def test_independent_x_marks_use_per_panel_domain(self, raw_disjoint_df: pl.DataFrame) -> None:
         """share_scale(x='independent') keeps per-panel scaling (escape hatch)."""
         svg = (
             fm.Chart(raw_disjoint_df)
@@ -727,9 +723,7 @@ class TestRawFieldSharedFacet:
                 "panel": ["A", "A", "B", "B"],
             }
         )
-        svg_shared = (
-            fm.Chart(df).mark_bar().encode(x="cat:N", y="y:Q").facet(col="panel").to_svg()
-        )
+        svg_shared = fm.Chart(df).mark_bar().encode(x="cat:N", y="y:Q").facet(col="panel").to_svg()
         svg_indep = (
             fm.Chart(df)
             .mark_bar()
@@ -771,12 +765,10 @@ class TestRawFieldSharedFacet:
         # Under INDEPENDENT: each panel shows only its own categories,
         # so 'a' and 'b' each appear only once (in their own panel).
         assert indep_counts.get("a", 0) == 1, (
-            f"Independent mode: expected 'a' once (panel A only), "
-            f"got {indep_counts.get('a', 0)}."
+            f"Independent mode: expected 'a' once (panel A only), got {indep_counts.get('a', 0)}."
         )
         assert indep_counts.get("b", 0) == 1, (
-            f"Independent mode: expected 'b' once (panel B only), "
-            f"got {indep_counts.get('b', 0)}."
+            f"Independent mode: expected 'b' once (panel B only), got {indep_counts.get('b', 0)}."
         )
         assert indep_counts.get("c", 0) == 2, (
             f"Independent mode: expected 'c' twice (present in both panels), "
@@ -837,9 +829,9 @@ def aux_disjoint_df() -> pl.DataFrame:
     """
     return pl.DataFrame(
         {
-            "x":     [0.0, 1.0, 0.0, 1.0],
-            "y":     [0.0, 1.0, 0.0, 1.0],
-            "c":     [1.0, 10.0, 1.0, 100.0],
+            "x": [0.0, 1.0, 0.0, 1.0],
+            "y": [0.0, 1.0, 0.0, 1.0],
+            "c": [1.0, 10.0, 1.0, 100.0],
             "panel": ["A", "A", "B", "B"],
         }
     )
@@ -912,10 +904,7 @@ class TestT3AuxSharedFacet:
         assert len(circles) == 4, f"expected 4 data marks, got {len(circles)}: {circles}"
 
         # Extract fill values for the 4 marks (sorted by cx for determinism).
-        fills = {
-            (round(cx, 1), round(cy, 1)): fill
-            for cx, cy, fill in circles
-        }
+        fills = {(round(cx, 1), round(cy, 1)): fill for cx, cy, fill in circles}
 
         # Both panels use the same x/y range, so cx and cy positions should be
         # identical for the same logical x/y position.  The color is what differs.
@@ -978,9 +967,7 @@ class TestT3AuxSharedFacetGolden:
             regen_hint="FERRUM_UPDATE_GOLDENS=1 uv run pytest tests/test_facet_shared_extent.py",
         )
 
-    def test_golden_faceted_continuous_color_shared(
-        self, aux_disjoint_df: pl.DataFrame
-    ) -> None:
+    def test_golden_faceted_continuous_color_shared(self, aux_disjoint_df: pl.DataFrame) -> None:
         svg = (
             fm.Chart(aux_disjoint_df)
             .mark_point()
@@ -1041,9 +1028,7 @@ class TestT3CatSharedFacet:
             )
         ]
 
-    def test_same_category_same_color_across_panels(
-        self, cat_disjoint_df: pl.DataFrame
-    ) -> None:
+    def test_same_category_same_color_across_panels(self, cat_disjoint_df: pl.DataFrame) -> None:
         """'green' must render with the same fill color in both panels.
 
         The fixture encodes deliberate first-appearance asymmetry:
@@ -1125,7 +1110,7 @@ class TestT3CatSharedFacet:
         #   Panel A: y=0 → k="green" (cy_bottom), y=1 → k="blue"  (cy_top)
         #   Panel B: y=0 → k="blue"  (cy_bottom), y=1 → k="green" (cy_top)
         fill_green_from_a = _bottom_fill(panel_a)  # k="green" in panel A
-        fill_green_from_b = _top_fill(panel_b)     # k="green" in panel B
+        fill_green_from_b = _top_fill(panel_b)  # k="green" in panel B
 
         assert fill_green_from_a == fill_green_from_b, (
             f"T3-cat: 'green' must render with the same fill in both panels. "
@@ -1210,9 +1195,7 @@ class TestT3ShapeSharedFacet:
     def _data_circles(svg: str) -> list[tuple[float, float]]:
         """(cx, cy) for data-mark circles (r != 5.0 legend swatches)."""
         out: list[tuple[float, float]] = []
-        for cx, cy, r in re.findall(
-            r'<circle cx="([0-9.]+)" cy="([0-9.]+)" r="([0-9.]+)"', svg
-        ):
+        for cx, cy, r in re.findall(r'<circle cx="([0-9.]+)" cy="([0-9.]+)" r="([0-9.]+)"', svg):
             r_f = float(r)
             # Legend swatches use r≈5.0; data marks use the theme point radius (~3.385).
             if abs(r_f - 5.0) > 0.5:
@@ -1283,8 +1266,8 @@ class TestT3ShapeSharedFacet:
             f"data circles: {data_circles}"
         )
 
-        a_cy = a_circles[0][1]   # Panel A: Circle for grp="a" at y=0 → HIGH cy
-        b_cy = b_circles[0][1]   # Panel B: grp="a" at y=1 (fix) or grp="b" at y=0 (bug)
+        a_cy = a_circles[0][1]  # Panel A: Circle for grp="a" at y=0 → HIGH cy
+        b_cy = b_circles[0][1]  # Panel B: grp="a" at y=1 (fix) or grp="b" at y=0 (bug)
 
         # After the fix:
         #   Panel A circle at y=0 (grp="a") → a_cy = HIGH cy (near panel bottom)

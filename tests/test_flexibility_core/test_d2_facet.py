@@ -93,9 +93,7 @@ def _data_circle_xy(svg: str) -> list[tuple[float, float]]:
     so the radius discriminates marks from legend swatches.
     """
     out: list[tuple[float, float]] = []
-    for cx, cy, r in re.findall(
-        r'<circle cx="([0-9.]+)" cy="([0-9.]+)" r="([0-9.]+)"', svg
-    ):
+    for cx, cy, r in re.findall(r'<circle cx="([0-9.]+)" cy="([0-9.]+)" r="([0-9.]+)"', svg):
         if abs(float(r) - 4.0) > 1e-6:
             out.append((float(cx), float(cy)))
     return out

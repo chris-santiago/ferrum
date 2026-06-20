@@ -1,6 +1,6 @@
 [project]
 name = "ferrum-viz"
-version = "0.16.2"
+version = "0.17.0"
 description = "Ferrum is a statistical visualization library for Python: a grammar-first charting system that unifies exploratory plots, statistical graphics, interactive views, and model diagnostics, backed by a Rust engine."
 readme = "README.md"
 license-files = ["LICENSE", "NOTICE"]

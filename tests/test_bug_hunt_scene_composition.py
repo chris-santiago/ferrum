@@ -286,7 +286,9 @@ def test_merge_packed_data_all_empty():
 def test_merge_packed_data_mixed_returns_empty_for_invalid_data():
     """_merge_packed_data with a mix of empty and non-empty but invalid
     packed data (too short for a 20-byte header) returns empty bytes."""
-    result = _merge_packed_data([b"", b"\x01\x02\x03", b""], [0, 1, 2], [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)])
+    result = _merge_packed_data(
+        [b"", b"\x01\x02\x03", b""], [0, 1, 2], [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]
+    )
     assert result == b"", "invalid packed data (too short for header) must produce empty bytes"
 
 
