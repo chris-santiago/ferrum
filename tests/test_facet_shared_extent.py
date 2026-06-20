@@ -1139,3 +1139,202 @@ class TestT3CatSharedFacet:
         assert _bottom_fill(panel_a) != _top_fill(panel_a), (
             "T3-cat: 'green' and 'blue' must have distinct fills in panel A"
         )
+
+
+# ---------------------------------------------------------------------------
+# T3-shape: faceted shape encoding uses global first-appearance order
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def shape_disjoint_df() -> pl.DataFrame:
+    """Two-panel dataset with deliberate first-appearance asymmetry for grp.
+
+    Panel A data order: grp=["a", "b"] at y=[0, 1]
+    Panel B data order: grp=["b", "a"] at y=[0, 1]  ← reversed
+
+    Global first-appearance order (all rows): [a, b]  → a=Circle(0), b=Square(1)
+
+    Under the per-panel bug:
+      Panel A local domain [a,b]: a=Circle(0), b=Square(1)  (matches global)
+      Panel B local domain [b,a]: b=Circle(0), a=Square(1)  (disagrees with global)
+
+    So "b" gets Circle in Panel B under the bug (b is at local index 0).
+    After the fix, "b" → Square everywhere (global index 1).
+
+    Discriminating assertion: check which cy position the Circle data marks
+    occupy in each panel. Both panels share the same y-scale (Shared default):
+      - y=0 → high cy (near panel bottom in SVG)
+      - y=1 → low cy (near panel top in SVG)
+
+    After fix: Panel B's Circle is for grp="a" at y=1 → low cy (matches Panel A).
+    Under bug: Panel B's Circle is for grp="b" at y=0 → high cy (differs from Panel A).
+
+    The assertion cy(Panel_A_circle) ≈ cy(Panel_B_circle) is true after fix
+    and false under bug.
+    """
+    return pl.DataFrame(
+        {
+            "x": [0.5, 0.5, 0.5, 0.5],
+            "y": [0.0, 1.0, 0.0, 1.0],
+            "grp": ["a", "b", "b", "a"],
+            "panel": ["A", "A", "B", "B"],
+        }
+    )
+
+
+class TestT3ShapeSharedFacet:
+    """T3-shape: shape glyph is consistent across panels (same category → same shape).
+
+    Global first-appearance order of grp: [a, b] → a=Circle(index 0), b=Square(index 1).
+
+    Panel A data order: grp=[a, b] at y=[0, 1].
+    Panel B data order: grp=[b, a] at y=[0, 1]  ← reversed.
+
+    Under the per-panel bug, Panel B builds its local domain [b, a] → b=Circle(0).
+    After the fix, both panels use global domain [a, b] → a=Circle(0), b=Square(1).
+
+    Discrimination: check the cy positions of Circle data marks (r≈3.385).
+    Each panel has exactly one Circle mark per data row mapping to grp="a".
+    Both panels share the same y-scale (Shared default), so y=1 → low cy and
+    y=0 → high cy are the same numbers in both panels.
+
+    After fix: Panel A circle at y=1 (low cy) ← grp="a"; Panel B circle at y=1
+    (low cy) ← grp="a". Both circles have the same cy.
+
+    Under bug: Panel A circle at y=1 (low cy) ← grp="a"; Panel B circle at y=0
+    (high cy) ← grp="b" (local index 0). Their cy values differ by ~panel height.
+    """
+
+    @staticmethod
+    def _data_circles(svg: str) -> list[tuple[float, float]]:
+        """(cx, cy) for data-mark circles (r != 5.0 legend swatches)."""
+        out: list[tuple[float, float]] = []
+        for cx, cy, r in re.findall(
+            r'<circle cx="([0-9.]+)" cy="([0-9.]+)" r="([0-9.]+)"', svg
+        ):
+            r_f = float(r)
+            # Legend swatches use r≈5.0; data marks use the theme point radius (~3.385).
+            if abs(r_f - 5.0) > 0.5:
+                out.append((float(cx), float(cy)))
+        return out
+
+    @staticmethod
+    def _clip_bounds(svg: str) -> list[tuple[float, float]]:
+        """Return (x_left, x_right) for each panel clip group, sorted by x_left."""
+        bounds = []
+        for _, cx, _, cw, _ in re.findall(
+            r'<clipPath id="([^"]+)"><rect x="([0-9.]+)" y="([0-9.]+)" '
+            r'width="([0-9.]+)" height="([0-9.]+)"',
+            svg,
+        ):
+            bounds.append((float(cx), float(cx) + float(cw)))
+        bounds.sort()
+        return bounds
+
+    def test_same_category_same_circle_cy_across_panels(
+        self, shape_disjoint_df: pl.DataFrame
+    ) -> None:
+        """Under the R11 fix, grp="a" maps to Circle in every panel (global domain).
+
+        Data layout (shape_disjoint_df):
+          Panel A: grp="a" at y=0, grp="b" at y=1
+          Panel B: grp="b" at y=0, grp="a" at y=1  (reversed)
+
+        After fix (global domain [a, b] → a=Circle):
+          Panel A Circle sits at y=0, near the panel bottom (high SVG cy).
+          Panel B Circle sits at y=1, near the panel top (low SVG cy).
+          The two cy values differ by roughly one panel height; Panel A cy > Panel B cy.
+
+        Under the per-panel bug, Panel B's local domain is [b, a], so grp="b"
+        (not grp="a") becomes the Circle at y=0. Both circles then land at the
+        same high cy, making cy_diff collapse to near zero and the assertion fail.
+        """
+        svg = (
+            fm.Chart(shape_disjoint_df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q", shape="grp:N")
+            .facet(col="panel", ncols=2)
+            .to_svg()
+        )
+
+        panel_bounds = self._clip_bounds(svg)
+        assert len(panel_bounds) == 2, (
+            f"T3-shape: expected 2 panel clip groups; got {len(panel_bounds)}"
+        )
+        (a_left, a_right), (b_left, b_right) = panel_bounds
+
+        data_circles = self._data_circles(svg)
+        assert len(data_circles) >= 2, (
+            f"T3-shape: expected ≥2 data circles (one per panel for grp='a'); "
+            f"got {len(data_circles)}: {data_circles}"
+        )
+
+        # Assign circles to panels by cx.
+        a_circles = [(cx, cy) for cx, cy in data_circles if a_left <= cx <= a_right]
+        b_circles = [(cx, cy) for cx, cy in data_circles if b_left <= cx <= b_right]
+
+        assert len(a_circles) >= 1, (
+            f"T3-shape: no circle in Panel A (x={a_left:.1f}..{a_right:.1f}); "
+            f"data circles: {data_circles}"
+        )
+        assert len(b_circles) >= 1, (
+            f"T3-shape: no circle in Panel B (x={b_left:.1f}..{b_right:.1f}); "
+            f"data circles: {data_circles}"
+        )
+
+        a_cy = a_circles[0][1]   # Panel A: Circle for grp="a" at y=0 → HIGH cy
+        b_cy = b_circles[0][1]   # Panel B: grp="a" at y=1 (fix) or grp="b" at y=0 (bug)
+
+        # After the fix:
+        #   Panel A circle at y=0 (grp="a") → a_cy = HIGH cy (near panel bottom)
+        #   Panel B circle at y=1 (grp="a") → b_cy = LOW cy (near panel top)
+        #   → a_cy > b_cy (Panel A circle is LOWER in SVG)
+        #
+        # Under the bug:
+        #   Panel A: local [a,b] → a=Circle at y=0 → a_cy = HIGH cy
+        #   Panel B: local [b,a] → b=Circle at y=0 → b_cy = HIGH cy (SAME as a_cy)
+        #   → a_cy ≈ b_cy (EQUAL, since both grp at y=0 position)
+        #
+        # Both panels share the y-scale (Shared), so y=0 → same cy value in both.
+        # The test asserts: after fix, a_cy and b_cy differ by at least half the
+        # panel height (because y=0 vs y=1 spans the full panel). Under bug, they
+        # are equal (both at y=0).
+        #
+        # Panel height ≈ (plot_bottom - plot_top) = a_right - a_left is width...
+        # Use the clip height from the SVG instead.
+        clip_heights = []
+        for _, cx, cy_str, cw, ch in re.findall(
+            r'<clipPath id="([^"]+)"><rect x="([0-9.]+)" y="([0-9.]+)" '
+            r'width="([0-9.]+)" height="([0-9.]+)"',
+            svg,
+        ):
+            clip_heights.append(float(ch))
+        panel_height = min(clip_heights) if clip_heights else 200.0
+
+        # After fix: circles at different y positions → |a_cy - b_cy| ≈ panel_height * 0.8
+        # Under bug: circles both at y=0 → |a_cy - b_cy| ≈ 0
+        cy_diff = abs(a_cy - b_cy)
+        assert cy_diff > panel_height * 0.3, (
+            f"T3-shape: cy(Panel A circle)={a_cy:.1f}, cy(Panel B circle)={b_cy:.1f}, "
+            f"cy_diff={cy_diff:.1f}, panel_height={panel_height:.1f}. "
+            "After the fix, Panel A's circle is for grp='a' at y=0 (high cy) and "
+            "Panel B's circle is for grp='a' at y=1 (low cy) — they must be "
+            "separated by >30% of the panel height. "
+            "Under the per-panel bug, Panel B's local domain is [b,a] → b=Circle at "
+            "y=0 → same cy as Panel A's circle → cy_diff≈0 → test fails. "
+            "A cy_diff near 0 means Panel B is assigning Circle to grp='b' (y=0) "
+            "instead of grp='a' (y=1) — the faceted shape domain bug."
+        )
+
+        # Additionally: Panel A circle should be at HIGH cy (y=0 → near bottom, SVG down)
+        # and Panel B circle at LOW cy (y=1 → near top). So a_cy > b_cy.
+        assert a_cy > b_cy, (
+            f"T3-shape: Panel A circle must be at higher cy (y=0, near panel bottom) "
+            f"and Panel B circle at lower cy (y=1, near panel top). "
+            f"Got Panel_A cy={a_cy:.1f} and Panel_B cy={b_cy:.1f}. "
+            "Both panels use the shared y-scale so y=0 → same HIGH cy and y=1 → same "
+            "LOW cy. Under the fix: Panel A has grp='a' at y=0 (high cy) and Panel B "
+            "has grp='a' at y=1 (low cy) — a_cy > b_cy. Under the bug, Panel B would "
+            "also have its circle at y=0 (high cy) → a_cy ≈ b_cy (not > by much)."
+        )

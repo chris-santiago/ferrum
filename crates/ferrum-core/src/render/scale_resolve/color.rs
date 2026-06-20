@@ -11,10 +11,9 @@ use crate::spec::encoding::DataType as SpecDataType;
 use crate::render::color::Color;
 use crate::render::palette;
 use crate::render::RenderError;
-use crate::transform::core::FINAL_OUTPUT_KEY;
 
 use super::domain::{apply_sort_to_domain, locate_field, SortContext};
-use super::{distinct_values_in_order, infer_spec_type, numeric_extent, union_panel_with_global_extent, ColorScale};
+use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_categorical_batch, union_panel_with_global_extent, ColorScale};
 
 /// Resolve the color encoding into a `ColorScale`.
 ///
@@ -161,7 +160,7 @@ pub fn build_color_scale(
         // every panel assigns the same palette color to the same category string
         // — matching the global legend.  Falls back to `primary_batch` when the
         // key is absent or the field is missing from the global batch.
-        let domain_batch = categorical_color_batch(primary_batch, &c_enc.field, transform_outputs, facet_shared);
+        let domain_batch = shared_categorical_batch(primary_batch, &c_enc.field, transform_outputs, facet_shared);
 
         // Data-aware sort (channel shorthand `"-y"`, sort-field objects) reorders
         // the legend domain by an aggregate, mirroring the positional-axis path.
@@ -232,32 +231,6 @@ pub fn build_color_scale(
         let scale = build_default_categorical_scale(domain, c_enc, theme, &mut warnings);
         Ok((Some(scale), warnings))
     }
-}
-
-/// Select the batch for categorical color domain resolution.
-///
-/// When `facet_shared` is true, returns the global `FINAL_OUTPUT_KEY` batch
-/// (so every panel uses global first-appearance order, matching the legend).
-/// Falls back to `primary_batch` when:
-/// - `facet_shared` is false (non-faceted chart)
-/// - `FINAL_OUTPUT_KEY` is absent from `transform_outputs`
-/// - The color field is absent from the global batch
-fn categorical_color_batch<'a>(
-    primary_batch: &'a RecordBatch,
-    field: &str,
-    transform_outputs: &'a HashMap<String, RecordBatch>,
-    facet_shared: bool,
-) -> &'a RecordBatch {
-    if !facet_shared {
-        return primary_batch;
-    }
-    let Some(global_batch) = transform_outputs.get(FINAL_OUTPUT_KEY) else {
-        return primary_batch;
-    };
-    if global_batch.column_by_name(field).is_none() {
-        return primary_batch;
-    }
-    global_batch
 }
 
 /// Build a `ColorScale::Categorical` from the default theme palette.

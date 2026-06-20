@@ -680,6 +680,36 @@ fn numeric_extent(col: &dyn arrow::array::Array) -> (f64, f64) {
     super::arrow_cast::finite_min_max_f64(col).unwrap_or((0.0, 1.0))
 }
 
+/// Select the batch for categorical domain resolution in faceted charts.
+///
+/// When `facet_shared` is true, returns the global `FINAL_OUTPUT_KEY` batch
+/// (so every panel uses global first-appearance order, matching the legend).
+/// Falls back to `primary_batch` when:
+/// - `facet_shared` is false (non-faceted chart)
+/// - `FINAL_OUTPUT_KEY` is absent from `transform_outputs`
+/// - The field is absent from the global batch
+///
+/// Used by both `color.rs` (categorical color) and `auxiliary.rs` (shape) so
+/// that the same global-domain guarantee applies to all categorical channels.
+pub(super) fn shared_categorical_batch<'a>(
+    primary_batch: &'a RecordBatch,
+    field: &str,
+    transform_outputs: &'a HashMap<String, RecordBatch>,
+    facet_shared: bool,
+) -> &'a RecordBatch {
+    if !facet_shared {
+        return primary_batch;
+    }
+    use crate::transform::core::FINAL_OUTPUT_KEY;
+    let Some(global_batch) = transform_outputs.get(FINAL_OUTPUT_KEY) else {
+        return primary_batch;
+    };
+    if global_batch.column_by_name(field).is_none() {
+        return primary_batch;
+    }
+    global_batch
+}
+
 /// Union a per-panel (lo, hi) numeric extent with the global `FINAL_OUTPUT_KEY`
 /// batch's extent for `field`.
 ///
@@ -842,7 +872,7 @@ pub fn resolve_scales_with_outputs(
             let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared)?;
             warnings.extend(color_warns);
             let size = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
-            let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
+            let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
             if let Some(w) = shape_warn { warnings.push(w); }
             let opacity = build_opacity_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
             return Ok((ResolvedScales { x, y: dummy_y, color, size, shape, opacity, x2: None, y2: None }, warnings));
@@ -862,7 +892,7 @@ pub fn resolve_scales_with_outputs(
             let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared)?;
             warnings.extend(color_warns);
             let size = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
-            let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
+            let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
             if let Some(w) = shape_warn { warnings.push(w); }
             let opacity = build_opacity_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
             return Ok((ResolvedScales { x: dummy_x, y, color, size, shape, opacity, x2: None, y2: None }, warnings));
@@ -934,7 +964,7 @@ pub fn resolve_scales_with_outputs(
     warnings.extend(color_warns);
 
     let size = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
-    let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
+    let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
     if let Some(w) = shape_warn {
         warnings.push(w);
     }

@@ -283,7 +283,8 @@ fn size_scale_defaults_to_theme_point_size_range() {
 #[test]
 fn shape_scale_picks_from_8_shape_palette_in_order() {
     let batch = make_batch_q_q_n_n_q();
-    let (scale, warn) = build_shape_scale(&make_spec_with_shape().encoding, &batch).unwrap();
+    let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
+    let (scale, warn) = build_shape_scale(&make_spec_with_shape().encoding, &batch, &outputs, false).unwrap();
     let scale = scale.unwrap();
     assert!(warn.is_none());
     assert_eq!(scale.shapes.len(), 3);
@@ -3565,4 +3566,233 @@ fn make_spec_with_color_xy_only() -> ChartSpec {
         chart_description: None,
         params: Vec::new(),
     }
+}
+
+// ── T3-shape: faceted SHAPE encoding uses global first-appearance order ────────
+//
+// The last data-driven channel to close the faceted shared-scale class.
+// build_shape_scale was building its domain from the per-panel batch, causing
+// the same category to map to a DIFFERENT glyph in panels whose local
+// first-appearance order differed from the global order.  The shape legend
+// is built globally (from FINAL_OUTPUT_KEY), so panels and legend disagree.
+//
+// Fix: shared_categorical_batch selects the global batch when facet_shared=true,
+// exactly as categorical color does via the same helper.
+
+/// Build a (x, y, grp) batch for T3-shape tests.
+fn t3_shape_batch(x_vals: Vec<f64>, y_vals: Vec<f64>, grp_vals: Vec<&str>) -> RecordBatch {
+    use arrow::array::StringArray;
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", ArrowDataType::Float64, false),
+        Field::new("y", ArrowDataType::Float64, false),
+        Field::new("grp", ArrowDataType::Utf8, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(x_vals)),
+            Arc::new(Float64Array::from(y_vals)),
+            Arc::new(StringArray::from(grp_vals)),
+        ],
+    )
+    .unwrap()
+}
+
+/// Build a faceted point spec on x/y with a nominal shape encoding.
+fn faceted_shape_spec() -> ChartSpec {
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            shape: Some(EncodingSpec {
+                field: "grp".into(),
+                type_: Some(DataType::Nominal),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: Some(FacetSpec {
+            field: "panel".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve::default(),
+        }),
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+/// T3-shape: shape domain is assigned by GLOBAL first-appearance order so
+/// the same category string maps to the same glyph in every panel.
+///
+/// Reproduction scenario:
+/// - Global order: x, y, z  →  {x:Circle, y:Square, z:Cross}
+/// - Panel A rows: grp=[x, y]    → per-panel: x=0 (Circle), y=1 (Square)
+/// - Panel B rows: grp=[y, z]    → per-panel: y=0 (Circle), z=1 (Square)
+///
+/// Without the fix: panel A gives y→Square, panel B gives y→Circle.
+/// With the fix: both panels use the global domain [x, y, z] so y→Square
+/// in every panel.
+///
+/// fail-before/pass-after: confirmed by the structural analysis — before this
+/// fix, `build_shape_scale` called `distinct_values_in_order(batch, ...)` on
+/// the per-panel batch (no facet_shared param), which was identical to the
+/// categorical-color bug that f13b7da fixed. The test asserts the shape domain
+/// equals global first-appearance order in BOTH panels, which is impossible
+/// under the per-panel path for panel B (its local order is [y, z], not [x, y, z]).
+#[test]
+fn t3_shape_faceted_uses_global_first_appearance_order() {
+    // Panel A: rows arrive in order x, y (local domain = [x, y]).
+    let panel_a = t3_shape_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec!["x", "y"]);
+    // Panel B: rows arrive in order y, z — reversed/disjoint (local domain = [y, z]).
+    let panel_b = t3_shape_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec!["y", "z"]);
+    // Global batch: all rows concatenated; first-appearance order = [x, y, z].
+    let global = t3_shape_batch(
+        vec![0.0, 1.0, 0.0, 1.0],
+        vec![0.0, 1.0, 0.0, 1.0],
+        vec!["x", "y", "y", "z"],
+    );
+    let outputs = final_outputs(global);
+    let spec = faceted_shape_spec();
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales_a, _) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    let (scales_b, _) =
+        resolve_scales_with_outputs(&spec, &panel_b, &outputs, pr, pr, &theme).unwrap();
+
+    let shape_a = scales_a.shape.expect("panel A must have shape scale");
+    let shape_b = scales_b.shape.expect("panel B must have shape scale");
+
+    // Both panels must use the GLOBAL first-appearance domain [x, y, z].
+    assert_eq!(
+        shape_a.domain,
+        vec!["x".to_string(), "y".to_string(), "z".to_string()],
+        "T3-shape: panel A domain must follow GLOBAL first-appearance order [x, y, z]; got {:?}",
+        shape_a.domain,
+    );
+    assert_eq!(
+        shape_b.domain,
+        vec!["x".to_string(), "y".to_string(), "z".to_string()],
+        "T3-shape: panel B domain must follow GLOBAL first-appearance order [x, y, z]; got {:?}",
+        shape_b.domain,
+    );
+
+    // "y" must map to the SAME glyph in both panels.
+    // Global domain: x=0 (Circle), y=1 (Square), z=2 (Cross).
+    let glyph_y_a = shape_a.lookup("y").expect("y must be in panel A shape domain");
+    let glyph_y_b = shape_b.lookup("y").expect("y must be in panel B shape domain");
+    assert_eq!(
+        glyph_y_a, glyph_y_b,
+        "T3-shape: 'y' must map to the same glyph in both panels (shared global domain); \
+         panel_A={:?} panel_B={:?}",
+        glyph_y_a, glyph_y_b,
+    );
+    // Confirm it's the expected glyph: global index 1 → Square.
+    assert_eq!(
+        glyph_y_a,
+        ShapeKind::Square,
+        "T3-shape: 'y' must be at global index 1 (Square); got {:?}",
+        glyph_y_a,
+    );
+
+    // Sanity: all three categories must have distinct glyphs.
+    let glyph_x = shape_a.lookup("x").expect("x in panel A");
+    let glyph_z = shape_b.lookup("z").expect("z in panel B");
+    assert_eq!(glyph_x, ShapeKind::Circle, "T3-shape: 'x' must be global index 0 (Circle)");
+    assert_eq!(glyph_z, ShapeKind::Cross, "T3-shape: 'z' must be global index 2 (Cross)");
+}
+
+/// T3-shape non-faceted byte-identity guard: without a facet spec, the shape
+/// domain must be the per-panel first-appearance order, identical to pre-fix
+/// behavior. The presence of a wider global batch in transform_outputs must NOT
+/// affect a non-faceted chart's shape domain.
+#[test]
+fn t3_shape_non_faceted_byte_identical() {
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{DataType, Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+
+    // Per-panel batch: local order is [y, x] (y appears first).
+    let panel = t3_shape_batch(vec![0.0, 1.0], vec![0.0, 1.0], vec!["y", "x"]);
+    // Global batch has a wider domain [x, y, z] with x first — but non-faceted
+    // charts must NOT use it.
+    let global = t3_shape_batch(
+        vec![0.0, 1.0, 2.0],
+        vec![0.0, 1.0, 2.0],
+        vec!["x", "y", "z"],
+    );
+    let outputs = final_outputs(global);
+
+    // Non-faceted spec: no facet field.
+    let spec = ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Point,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            shape: Some(EncodingSpec {
+                field: "grp".into(),
+                type_: Some(DataType::Nominal),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: None, // non-faceted
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    };
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 100.0);
+
+    let (scales, _) =
+        resolve_scales_with_outputs(&spec, &panel, &outputs, pr, pr, &theme).unwrap();
+
+    let shape = scales.shape.expect("shape scale must be resolved");
+
+    // Non-faceted: domain must be PER-PANEL first-appearance order [y, x],
+    // NOT the global [x, y, z].
+    assert_eq!(
+        shape.domain,
+        vec!["y".to_string(), "x".to_string()],
+        "T3-shape non-faceted: domain must be PER-PANEL order [y, x], not global [x, y, z]; \
+         got {:?}",
+        shape.domain,
+    );
+    // "y" is at local index 0 → Circle.
+    let glyph_y = shape.lookup("y").expect("y must be in domain");
+    assert_eq!(
+        glyph_y,
+        ShapeKind::Circle,
+        "T3-shape non-faceted: 'y' must be at per-panel index 0 (Circle); got {:?}",
+        glyph_y,
+    );
 }
