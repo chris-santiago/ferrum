@@ -11,7 +11,7 @@ import inspect
 import json
 import logging
 import math
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any, Optional, Union
 
 from ferrum._coerce import to_arrow_table
@@ -461,37 +461,11 @@ def _resolve_layer_bins(layers: list) -> tuple[list, list]:
     return new_layers, named_transforms
 
 
-@dataclass(frozen=True)
-class _Facet:
-    """Internal facet spec — frozen dataclass replacing the legacy dict shape.
-
-    ``mode_kind`` is the tagged-union discriminator: ``"wrap"`` uses ``field``;
-    ``"grid"`` uses ``row`` and ``col``. Other fields are sizing hints honored
-    by ``_build_facet_dict()`` when serialising to the Rust ``FacetSpec``.
-
-    ``resolve`` carries per-channel scale-resolution modes set via
-    ``Chart.share_scale()``.  Keys are channel names (``"x"``, ``"y"``);
-    values are ``"shared"`` or ``"independent"``.  Absent keys default to
-    ``"shared"`` in the Rust layer.
-
-    ``wrap_orient`` records the original orientation of a ``"wrap"`` facet so
-    serialization can infer a side-by-side ``ncols`` for column facets:
-    ``"col"`` (``facet(col=X)`` alone → one horizontal row), ``"row"``
-    (``facet(row=X)`` alone → vertical stack), or ``None`` (generic
-    ``facet(field=X)`` wrap, which stays a vertical stack unless ``ncols`` is
-    given).  Unused for ``mode_kind == "grid"``.
-    """
-
-    mode_kind: str
-    field: Optional[str] = None
-    row: Optional[str] = None
-    col: Optional[str] = None
-    ncols: Optional[int] = None
-    nrows: Optional[int] = None
-    resolve: Optional[dict] = None
-    wrap_orient: Optional[str] = None
-
-
+from ferrum._facet import (
+    _Facet,
+    build_facet_dict as _build_facet_dict_fn,
+    infer_facet_cardinality as _infer_facet_cardinality_fn,
+)
 from ferrum.encoding import _channel_class_map, _channel_class_for, _apply_channel_aliases
 from ferrum.selection import ConditionalSpec
 
@@ -2827,79 +2801,17 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
     def _build_facet_dict(self) -> dict:
         """Convert internal _facet to the JSON dict Rust's FacetSpec expects.
 
-        The ``"resolve"`` key is emitted only when at least one channel is set
-        to ``"independent"``.  Absent keys default to ``"shared"`` in Rust, so
-        omitting the key entirely when all channels are shared keeps the output
-        byte-stable with existing goldens.
+        Delegates to :func:`ferrum._facet.build_facet_dict`; the facet machinery
+        lives in ``_facet.py`` (cohesion finding C2/C10).
         """
-        f = self._facet
-        # Build the resolve sub-dict only when there is at least one
-        # non-default (independent) resolution; omit entirely otherwise.
-        resolve_dict: dict | None = None
-        if f.resolve:
-            non_default = {ch: mode for ch, mode in f.resolve.items() if mode == "independent"}
-            if non_default:
-                resolve_dict = dict(f.resolve)
-
-        if f.mode_kind == "wrap":
-            # ncols selection (KG-6 / issue #24): an explicit ncols always wins.
-            # A column facet (`facet(col=X)` with no ncols) lays its panels in a
-            # single horizontal row, so ncols = n_distinct(field).  Row facets and
-            # the generic `facet(field=X)` wrap stay a vertical stack (ncols = 1).
-            if f.ncols is not None:
-                ncols = f.ncols
-            elif f.wrap_orient == "col":
-                ncols = self._infer_facet_cardinality(f.field)  # side-by-side row
-            else:  # "row" or generic wrap
-                ncols = 1
-            d: dict = {"field": f.field, "mode": {"kind": "wrap", "ncols": int(ncols)}}
-            if resolve_dict is not None:
-                d["resolve"] = resolve_dict
-            return d
-        # grid: col is the primary (column) field; row is the secondary (row) field.
-        field = f.col if f.col is not None else (f.field or "")
-        # Infer nrows/ncols from the data when the user did not supply them.
-        # This is the common case: facet(row="a", col="b") without explicit
-        # nrows/ncols.  Without inference the geometry defaults to 1×1, dropping
-        # all but one panel.
-        nrows = f.nrows if f.nrows is not None else self._infer_facet_cardinality(f.row)
-        ncols = f.ncols if f.ncols is not None else self._infer_facet_cardinality(f.col)
-        d = {
-            "field": field,
-            "mode": {"kind": "grid", "nrows": int(nrows), "ncols": int(ncols)},
-        }
-        if f.row is not None:
-            d["row"] = f.row
-        if resolve_dict is not None:
-            d["resolve"] = resolve_dict
-        return d
+        return _build_facet_dict_fn(self._facet, self._data)
 
     def _infer_facet_cardinality(self, col_name: Optional[str]) -> int:
         """Return the number of distinct values in *col_name* from self._data.
 
-        Falls back to 1 when *col_name* is None, the data is absent, or the
-        column is not found — so the existing behaviour is preserved for cases
-        where inference is not possible.
+        Delegates to :func:`ferrum._facet.infer_facet_cardinality`.
         """
-        if col_name is None or self._data is None:
-            return 1
-        try:
-            import polars as pl
-
-            if isinstance(self._data, pl.DataFrame):
-                if col_name in self._data.columns:
-                    return self._data[col_name].n_unique()
-                return 1
-            # PyArrow fallback
-            import pyarrow as pa
-
-            tbl = self._data if isinstance(self._data, pa.Table) else to_arrow_table(self._data)
-            if col_name in tbl.schema.names:
-                col = tbl.column(col_name)
-                return len(col.unique())
-            return 1
-        except Exception:
-            return 1
+        return _infer_facet_cardinality_fn(self._data, col_name)
 
     # ---- Properties ----
 
