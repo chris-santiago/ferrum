@@ -11,9 +11,10 @@ use crate::spec::encoding::DataType as SpecDataType;
 use crate::render::color::Color;
 use crate::render::palette;
 use crate::render::RenderError;
+use crate::transform::core::FINAL_OUTPUT_KEY;
 
 use super::domain::{apply_sort_to_domain, locate_field, SortContext};
-use super::{distinct_values_in_order, infer_spec_type, numeric_extent, ColorScale};
+use super::{distinct_values_in_order, infer_spec_type, numeric_extent, union_panel_with_global_extent, ColorScale};
 
 /// Resolve the color encoding into a `ColorScale`.
 ///
@@ -67,12 +68,21 @@ use super::{distinct_values_in_order, infer_spec_type, numeric_extent, ColorScal
 /// Without this flag a Float64/Int64 color column would produce a `Continuous`
 /// scale (gradient colorbar legend) while the area fills sampled discrete points
 /// on that ramp — legend ≠ fill (the FA-5 bug).
+///
+/// # T3 — `facet_shared` for continuous color in faceted charts
+///
+/// When `facet_shared = true` (chart is faceted; color has no independent option),
+/// the auto-inferred continuous color domain is unioned with the global
+/// `FINAL_OUTPUT_KEY` batch's extent, so per-panel marks normalize through the same
+/// domain as the global colorbar. Explicit `scale_explicit_domain` overrides still
+/// win. Non-faceted callers pass `false`; the per-panel-only path is byte-identical.
 pub fn build_color_scale(
     encoding: &crate::spec::encoding::Encoding,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     theme: &ThemeInputs,
     force_categorical: bool,
+    facet_shared: bool,
 ) -> Result<(Option<ColorScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(c_enc) = &encoding.color else {
         return Ok((None, Vec::new()));
@@ -98,7 +108,15 @@ pub fn build_color_scale(
                 got: format!("{:?}", located.col.data_type()),
             });
         }
-        let data_extent = numeric_extent(located.col);
+        // T3: When faceted (Shared), union the per-panel extent with the global
+        // FINAL_OUTPUT_KEY batch so marks normalize through the same domain as the
+        // global colorbar legend.
+        let panel_extent = numeric_extent(located.col);
+        let data_extent = if facet_shared {
+            union_panel_with_global_extent(panel_extent, &c_enc.field, transform_outputs)
+        } else {
+            panel_extent
+        };
         // D1: honor explicit domain from Sequential/Diverging scale specs.
         // When the spec carries domain=[lo, hi] or domain=[lo, mid, hi], use
         // those bounds instead of auto-inferring from the data column. When the
@@ -138,13 +156,23 @@ pub fn build_color_scale(
         let midpoint = scale_diverging_midpoint(c_enc);
         Ok((Some(ColorScale::Continuous { domain: (lo, hi), scheme, midpoint }), Vec::new()))
     } else {
+        // T3/categorical: when the chart is faceted (Shared), resolve the domain
+        // and sort-context batch from the global FINAL_OUTPUT_KEY batch so that
+        // every panel assigns the same palette color to the same category string
+        // — matching the global legend.  Falls back to `primary_batch` when the
+        // key is absent or the field is missing from the global batch.
+        let domain_batch = categorical_color_batch(primary_batch, &c_enc.field, transform_outputs, facet_shared);
+
         // Data-aware sort (channel shorthand `"-y"`, sort-field objects) reorders
         // the legend domain by an aggregate, mirroring the positional-axis path.
         // The category column is the color field; candidate value columns live in
         // the primary batch alongside it.
+        //
+        // When faceted/Shared, use the same global batch for sorting so the
+        // sort order matches the global legend, not the per-panel aggregate.
         let sort_ctx = SortContext {
             category_field: &c_enc.field,
-            batch: primary_batch,
+            batch: domain_batch,
             x_field: encoding.x.as_ref().map(|e| e.field.as_str()),
             y_field: encoding.y.as_ref().map(|e| e.field.as_str()),
         };
@@ -172,10 +200,11 @@ pub fn build_color_scale(
             match parse_result {
                 Ok(parsed) => {
                     // Build the domain from the declared scale.domain (if present),
-                    // falling back to data first-appearance order.
+                    // falling back to data first-appearance order from the
+                    // domain_batch (global when facet_shared).
                     let mut domain = match explicit_ordinal_domain(c_enc) {
                         Some(declared) => declared,
-                        None => distinct_values_in_order(primary_batch, &c_enc.field)?,
+                        None => distinct_values_in_order(domain_batch, &c_enc.field)?,
                     };
                     apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings);
                     let palette: Cow<'static, [Color]> = Cow::Owned(parsed);
@@ -188,7 +217,7 @@ pub fn build_color_scale(
                         entry: bad_entry,
                     });
                     // Fall through to default palette, carrying the warning.
-                    let mut domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
+                    let mut domain = distinct_values_in_order(domain_batch, &c_enc.field)?;
                     apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings);
                     let scale = build_default_categorical_scale(domain, c_enc, theme, &mut warnings);
                     return Ok((Some(scale), warnings));
@@ -198,11 +227,37 @@ pub fn build_color_scale(
 
         // Default path: look up a named categorical palette.
         let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
-        let mut domain = distinct_values_in_order(primary_batch, &c_enc.field)?;
+        let mut domain = distinct_values_in_order(domain_batch, &c_enc.field)?;
         apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings);
         let scale = build_default_categorical_scale(domain, c_enc, theme, &mut warnings);
         Ok((Some(scale), warnings))
     }
+}
+
+/// Select the batch for categorical color domain resolution.
+///
+/// When `facet_shared` is true, returns the global `FINAL_OUTPUT_KEY` batch
+/// (so every panel uses global first-appearance order, matching the legend).
+/// Falls back to `primary_batch` when:
+/// - `facet_shared` is false (non-faceted chart)
+/// - `FINAL_OUTPUT_KEY` is absent from `transform_outputs`
+/// - The color field is absent from the global batch
+fn categorical_color_batch<'a>(
+    primary_batch: &'a RecordBatch,
+    field: &str,
+    transform_outputs: &'a HashMap<String, RecordBatch>,
+    facet_shared: bool,
+) -> &'a RecordBatch {
+    if !facet_shared {
+        return primary_batch;
+    }
+    let Some(global_batch) = transform_outputs.get(FINAL_OUTPUT_KEY) else {
+        return primary_batch;
+    };
+    if global_batch.column_by_name(field).is_none() {
+        return primary_batch;
+    }
+    global_batch
 }
 
 /// Build a `ColorScale::Categorical` from the default theme palette.

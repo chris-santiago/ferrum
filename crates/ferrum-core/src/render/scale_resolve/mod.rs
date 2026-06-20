@@ -680,6 +680,34 @@ fn numeric_extent(col: &dyn arrow::array::Array) -> (f64, f64) {
     super::arrow_cast::finite_min_max_f64(col).unwrap_or((0.0, 1.0))
 }
 
+/// Union a per-panel (lo, hi) numeric extent with the global `FINAL_OUTPUT_KEY`
+/// batch's extent for `field`.
+///
+/// Returns the unioned range, which equals the global range since the per-panel
+/// batch is a partition of the global batch. Falls back to `panel_extent` when:
+/// - `FINAL_OUTPUT_KEY` is absent from `transform_outputs`
+/// - The field is absent from the global batch
+/// - The global column has no finite values
+///
+/// Used by both continuous-color (`color.rs`) and auxiliary (`auxiliary.rs`)
+/// scale builders for the T3 faceted-shared-extent fix.
+pub(super) fn union_panel_with_global_extent(
+    panel_extent: (f64, f64),
+    field: &str,
+    transform_outputs: &HashMap<String, RecordBatch>,
+) -> (f64, f64) {
+    use crate::transform::core::FINAL_OUTPUT_KEY;
+    let Some(global_batch) = transform_outputs.get(FINAL_OUTPUT_KEY) else {
+        return panel_extent;
+    };
+    let Some(col) = global_batch.column_by_name(field) else {
+        return panel_extent;
+    };
+    let (g_lo, g_hi) = numeric_extent(col.as_ref());
+    let (p_lo, p_hi) = panel_extent;
+    (p_lo.min(g_lo), p_hi.max(g_hi))
+}
+
 fn distinct_values_in_order(
     batch: &RecordBatch,
     field: &str,
@@ -714,6 +742,18 @@ fn facet_shared_flags(spec: &ChartSpec) -> (bool, bool) {
         ),
         None => (false, false),
     }
+}
+
+/// T3: "shared faceted auxiliary scale" flag for non-positional channels
+/// (continuous color, size, opacity).
+///
+/// Returns `true` when the chart is faceted (`spec.facet.is_some()`). There is
+/// no independent option for these channels — `FacetResolve` only has `x`/`y`
+/// fields — so the gate is simply whether the chart is faceted at all. Passing
+/// `false` for non-faceted charts keeps the per-panel-only domain resolution
+/// byte-identical to pre-T3 behavior.
+fn facet_aux_shared(spec: &ChartSpec) -> bool {
+    spec.facet.is_some()
 }
 
 // ── Main entry points ───────────────────────────────────────────────────────
@@ -798,12 +838,13 @@ pub fn resolve_scales_with_outputs(
             ));
             // FA-5: area marks always group color discretely; force categorical.
             let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
-            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat)?;
+            let aux_shared = facet_aux_shared(spec);
+            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared)?;
             warnings.extend(color_warns);
-            let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
+            let size = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
             let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
             if let Some(w) = shape_warn { warnings.push(w); }
-            let opacity = build_opacity_scale(&spec.encoding, primary_batch, theme)?;
+            let opacity = build_opacity_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
             return Ok((ResolvedScales { x, y: dummy_y, color, size, shape, opacity, x2: None, y2: None }, warnings));
         }
         if !has_x && has_y {
@@ -817,12 +858,13 @@ pub fn resolve_scales_with_outputs(
             ));
             // FA-5: area marks always group color discretely; force categorical.
             let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
-            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat)?;
+            let aux_shared = facet_aux_shared(spec);
+            let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared)?;
             warnings.extend(color_warns);
-            let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
+            let size = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
             let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
             if let Some(w) = shape_warn { warnings.push(w); }
-            let opacity = build_opacity_scale(&spec.encoding, primary_batch, theme)?;
+            let opacity = build_opacity_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
             return Ok((ResolvedScales { x: dummy_x, y, color, size, shape, opacity, x2: None, y2: None }, warnings));
         }
     }
@@ -880,18 +922,23 @@ pub fn resolve_scales_with_outputs(
     // (col_as_ordinal_category_str), so their color scale must be Categorical
     // regardless of the column's Arrow dtype.  This ensures legend swatches
     // and area fill colors both use the same palette.
+    //
+    // T3: when the chart is faceted, auxiliary non-positional channels (continuous
+    // color, size, opacity) union the global FINAL_OUTPUT_KEY batch so per-panel
+    // marks normalize through the same domain as the global legend/colorbar.
     let force_cat = matches!(spec.mark, crate::spec::mark::Mark::Area);
+    let aux_shared = facet_aux_shared(spec);
     let (color, color_warns) = build_color_scale(
-        &spec.encoding, primary_batch, transform_outputs, theme, force_cat,
+        &spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared,
     )?;
     warnings.extend(color_warns);
 
-    let size = build_size_scale(&spec.encoding, primary_batch, theme)?;
+    let size = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
     let (shape, shape_warn) = build_shape_scale(&spec.encoding, primary_batch)?;
     if let Some(w) = shape_warn {
         warnings.push(w);
     }
-    let opacity = build_opacity_scale(&spec.encoding, primary_batch, theme)?;
+    let opacity = build_opacity_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
 
     let x2_field_name = x2_enc.map(|e| e.field.clone());
     let y2_field_name = y2_enc.map(|e| e.field.clone());

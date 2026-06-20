@@ -815,3 +815,327 @@ class TestRawFieldSharedFacetGolden:
             .to_svg()
         )
         self._check_or_update("raw_scatter_shared_facet.svg", svg)
+
+
+# ---------------------------------------------------------------------------
+# T3: faceted continuous color/size/opacity — marks use global domain
+# ---------------------------------------------------------------------------
+
+AUX_GOLDENS_DIR = Path(__file__).parent / "goldens" / "facet_shared_aux"
+
+
+@pytest.fixture
+def aux_disjoint_df() -> pl.DataFrame:
+    """Two panels with disjoint continuous-color/size/opacity ranges.
+
+    Panel 'A': c ∈ [1, 10].  Panel 'B': c ∈ [1, 100].
+    Global c ∈ [1, 100].
+
+    Under T3 (Shared), panel A's c=10 mark must be normalized against the GLOBAL
+    [1, 100] domain (mapping to ~9% of the colorbar), not panel A's own [1, 10]
+    domain (which would map to 100% and produce the scheme's max color).
+    """
+    return pl.DataFrame(
+        {
+            "x":     [0.0, 1.0, 0.0, 1.0],
+            "y":     [0.0, 1.0, 0.0, 1.0],
+            "c":     [1.0, 10.0, 1.0, 100.0],
+            "panel": ["A", "A", "B", "B"],
+        }
+    )
+
+
+class TestT3AuxSharedFacet:
+    """T3 mark-normalization discriminator for faceted continuous-color charts.
+
+    Panel A's color field spans [1, 10]; panel B's spans [1, 100].  Under the T3
+    fix both panels use the GLOBAL [1, 100] domain, so panel A's c=10 point is a
+    near-dark color (t≈0.09 on Viridis) rather than the scheme maximum (which it
+    would be under the per-panel bug).
+    """
+
+    def _color_at(self, svg: str, cx_target: float, cy_target: float) -> tuple[int, int, int]:
+        """Return the (R, G, B) of the circle closest to (cx_target, cy_target).
+
+        Parses ``fill="rgb(...)"`` attributes on ``<circle>`` elements.
+        """
+        best_dist = float("inf")
+        best_rgb: tuple[int, int, int] | None = None
+        for match in re.finditer(
+            r'<circle[^>]+cx="([0-9.]+)"[^>]+cy="([0-9.]+)"[^>]+fill="([^"]+)"',
+            svg,
+        ):
+            cx, cy = float(match.group(1)), float(match.group(2))
+            dist = abs(cx - cx_target) + abs(cy - cy_target)
+            if dist < best_dist:
+                best_dist = dist
+                fill = match.group(3)
+                m = re.match(r"rgb\((\d+),\s*(\d+),\s*(\d+)\)", fill)
+                if m:
+                    best_rgb = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        assert best_rgb is not None, f"no circle found near ({cx_target}, {cy_target})"
+        return best_rgb
+
+    def _circles(self, svg: str) -> list[tuple[float, float, str]]:
+        """Return (cx, cy, fill) for every data <circle> (non-swatch radius)."""
+        out: list[tuple[float, float, str]] = []
+        for cx, cy, r, fill in re.findall(
+            r'<circle cx="([0-9.]+)" cy="([0-9.]+)" r="([0-9.]+)"[^>]+fill="([^"]+)"',
+            svg,
+        ):
+            if abs(float(r) - 4.0) > 1e-6:
+                out.append((float(cx), float(cy), fill))
+        return out
+
+    def test_shared_facet_continuous_color_global_domain(
+        self, aux_disjoint_df: pl.DataFrame
+    ) -> None:
+        """Panel A's c=10 must NOT produce the scheme max color.
+
+        Under the global [1, 100] domain, c=10 normalizes to t≈0.09, which maps
+        to a near-dark Viridis color. Under the per-panel bug, c=10 = panel A's
+        max → t=1.0 → bright yellow. The two colors are visually distinct, so if
+        panel A's max-value point has the same color as panel B's max-value point
+        (both use global domain → same t=1.0 for c=100), we know the fix is working.
+        Conversely, if panel A's max == some other bright color that differs from
+        panel B's min=1 color, the global domain is in effect.
+        """
+        svg = (
+            fm.Chart(aux_disjoint_df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q", color="c:Q")
+            .facet(col="panel")
+            .to_svg()
+        )
+
+        circles = self._circles(svg)
+        assert len(circles) == 4, f"expected 4 data marks, got {len(circles)}: {circles}"
+
+        # Extract fill values for the 4 marks (sorted by cx for determinism).
+        fills = {
+            (round(cx, 1), round(cy, 1)): fill
+            for cx, cy, fill in circles
+        }
+
+        # Both panels use the same x/y range, so cx and cy positions should be
+        # identical for the same logical x/y position.  The color is what differs.
+        # Under the GLOBAL [1, 100] domain:
+        #   - c=1 → t≈0 → dark purple on Viridis (same in both panels)
+        #   - c=10 (panel A max) → t≈0.09 → still near-dark (NOT the scheme max)
+        #   - c=100 (panel B max) → t≈1.0 → bright yellow
+        # Under the PER-PANEL BUG:
+        #   - c=10 (panel A max) → t=1.0 → bright yellow (same as c=100)
+        #
+        # Discriminating assertion: extract the fill color strings for each mark.
+        # The fill for panel A's c=10 must DIFFER from panel B's c=100 fill
+        # (global domain: t≈0.09 vs t=1.0 → different colors).
+        # Under the per-panel bug both would be t=1.0 → same bright color.
+        fill_strs = sorted(set(f for _, _, f in circles))
+        assert len(fill_strs) >= 2, (
+            f"Expected at least 2 distinct fill colors (c=1 and c=100 produce "
+            f"different colors on Viridis); got: {fill_strs}"
+        )
+
+        # Stronger check: collect fills per-panel by cx clustering.
+        cxs = sorted(set(round(cx, 1) for cx, _, _ in circles))
+        # Two panels: smaller cx-cluster = panel A, larger = panel B.
+        assert len(cxs) >= 2, f"expected marks in at least 2 cx columns, got {cxs}"
+        mid_cx = (cxs[0] + cxs[-1]) / 2
+        a_fills = sorted(set(f for cx, _, f in circles if cx < mid_cx))
+        b_fills = sorted(set(f for cx, _, f in circles if cx >= mid_cx))
+
+        # Panel A's c=10 fill must NOT equal Panel B's c=100 fill (global domain).
+        # Under per-panel bug: both A-max and B-max map to t=1.0 → same fill.
+        a_max_fill = a_fills[-1] if a_fills else None
+        b_max_fill = b_fills[-1] if b_fills else None
+        assert a_max_fill != b_max_fill, (
+            f"T3: panel A's c=10 fill ({a_max_fill}) must differ from panel B's "
+            f"c=100 fill ({b_max_fill}). Under per-panel scaling both would be the "
+            "scheme max color (t=1.0 in each panel). Under the global domain they "
+            "should be different: c=10 → t≈0.09 (dark) vs c=100 → t≈1.0 (bright)."
+        )
+
+
+class TestT3AuxSharedFacetGolden:
+    """Golden for a faceted continuous-color scatter on the global domain."""
+
+    def _check_or_update(self, name: str, svg: str) -> None:
+        AUX_GOLDENS_DIR.mkdir(parents=True, exist_ok=True)
+        golden = AUX_GOLDENS_DIR / name
+        if UPDATE:
+            golden.write_text(svg)
+            return
+        if not golden.exists():
+            pytest.fail(
+                f"golden {name!r} does not exist; rerun with FERRUM_UPDATE_GOLDENS=1 to regenerate"
+            )
+        from tests._snapshots import assert_svg_eq
+
+        assert_svg_eq(
+            svg,
+            golden.read_text(),
+            name=name,
+            regen_hint="FERRUM_UPDATE_GOLDENS=1 uv run pytest tests/test_facet_shared_extent.py",
+        )
+
+    def test_golden_faceted_continuous_color_shared(
+        self, aux_disjoint_df: pl.DataFrame
+    ) -> None:
+        svg = (
+            fm.Chart(aux_disjoint_df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q", color="c:Q")
+            .facet(col="panel")
+            .to_svg()
+        )
+        self._check_or_update("faceted_continuous_color_shared.svg", svg)
+
+
+# ---------------------------------------------------------------------------
+# T3-cat: faceted categorical color uses global first-appearance order
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def cat_disjoint_df() -> pl.DataFrame:
+    """Two-panel dataset where category "green" appears FIRST in panel A
+    but SECOND in panel B, producing per-panel domain order divergence.
+
+    Panel A: x∈{0,1} (local), k=["green","blue"] → per-panel: green=palette[0]
+    Panel B: x∈{0,1} (local), k=["blue","green"] → per-panel: blue=palette[0]
+
+    Under the per-panel bug "green" gets palette[0] in panel A (#2563eb) and
+    palette[1] in panel B (#dc2626) — contradicting the global legend.
+    Under the global-domain fix both panels use global first-appearance order
+    ["green","blue"], so "green" → palette[0] everywhere.
+
+    Note: x uses independent scale (share_scale(x=False)) so each panel's marks
+    occupy distinct spatial columns in the SVG, enabling panel discrimination by cx.
+    """
+    return pl.DataFrame(
+        {
+            "x": [0.0, 1.0, 0.0, 1.0],
+            "y": [0.0, 1.0, 0.0, 1.0],
+            "k": ["green", "blue", "blue", "green"],
+            "panel": ["A", "A", "B", "B"],
+        }
+    )
+
+
+class TestT3CatSharedFacet:
+    """T3-cat: categorical color is consistent across panels (same category → same color).
+
+    Reproduction of the reviewer's #2563eb-vs-#dc2626 scenario: "green" renders
+    as one palette color in panel A and a different one in panel B under the
+    per-panel bug, contradicting the global legend. The fix uses global
+    first-appearance order so the category→color mapping is identical in every panel.
+    """
+
+    def _extract_circles(self, svg: str) -> list[tuple[float, float, str]]:
+        """Return (cx, cy, fill) for every <circle> element with fill="..."."""
+        return [
+            (float(m.group(1)), float(m.group(2)), m.group(3))
+            for m in re.finditer(
+                r'<circle[^>]+cx="([0-9.]+)"[^>]+cy="([0-9.]+)"[^>]+(?:r="[0-9.]+"[^>]+)?fill="([^"]+)"',
+                svg,
+            )
+        ]
+
+    def test_same_category_same_color_across_panels(
+        self, cat_disjoint_df: pl.DataFrame
+    ) -> None:
+        """'green' must render with the same fill color in both panels.
+
+        The fixture encodes deliberate first-appearance asymmetry:
+          Panel A data order: k=["green","blue"] (y=[0,1])
+          Panel B data order: k=["blue","green"]  (y=[0,1])
+
+        Under the per-panel bug, each panel builds its own domain from
+        local first-appearance order:
+          Panel A domain → ["green","blue"] → green=palette[0], blue=palette[1]
+          Panel B domain → ["blue","green"] → blue=palette[0], green=palette[1]
+        So "green" gets palette[0] in panel A but palette[1] in panel B.
+
+        Under the global-domain fix, both panels use the global first-appearance
+        order ["green","blue"], so green=palette[0] and blue=palette[1] everywhere.
+
+        Discriminating assertion: use cy position to identify which category's
+        mark is which within each panel (both panels share the same y-scale, so
+        y=0.0 → cy_bottom and y=1.0 → cy_top in both panels). Split marks into
+        left/right panel halves by cx midpoint (independent x-scale shifts panel B
+        marks to higher cx values). Then verify:
+
+          fill(panel_A, cy_bottom) == fill(panel_B, cy_top)
+
+        because panel_A/cy_bottom is k="green" (y=0 in panel A) and
+        panel_B/cy_top is k="green" (y=1 in panel B) — same category, must be same
+        fill regardless of panel.
+
+        Under the bug: panel_A/cy_bottom = palette[0], panel_B/cy_top = palette[1]
+        → NOT EQUAL → test fails, as required.
+        Under the fix: both are palette[0] → EQUAL → test passes.
+
+        Additionally, the fill at panel_A/cy_bottom must DIFFER from the fill at
+        panel_A/cy_top (different categories must have different colors).
+        """
+        svg = (
+            fm.Chart(cat_disjoint_df)
+            .mark_point()
+            .encode(x="x:Q", y="y:Q", color="k:N")
+            .facet(col="panel")
+            .share_scale(x="independent")  # independent x so panel marks don't overlap spatially
+            .to_svg()
+        )
+
+        # Extract all circles (including legend swatches).
+        all_circles = self._extract_circles(svg)
+        # Data circles: hex or rgb fill, exclude legend swatches near top of figure.
+        data_circles = [
+            (cx, cy, fill)
+            for cx, cy, fill in all_circles
+            if fill.startswith("#") or fill.startswith("rgb(")
+        ]
+
+        assert len(data_circles) >= 4, (
+            f"T3-cat: expected ≥4 data circles (2 per panel); got {len(data_circles)}"
+        )
+
+        # Split into panel A (left half) and panel B (right half) by cx midpoint.
+        # Independent x-scale shifts all panel B marks to higher cx values.
+        cxs = [cx for cx, _, _ in data_circles]
+        mid_cx = (min(cxs) + max(cxs)) / 2
+        panel_a = [(cx, cy, fill) for cx, cy, fill in data_circles if cx <= mid_cx]
+        panel_b = [(cx, cy, fill) for cx, cy, fill in data_circles if cx > mid_cx]
+
+        assert len(panel_a) >= 2, f"T3-cat: expected ≥2 marks in panel A; got {panel_a}"
+        assert len(panel_b) >= 2, f"T3-cat: expected ≥2 marks in panel B; got {panel_b}"
+
+        # Within each panel, use cy to find the bottom mark (y=0.0) and top mark (y=1.0).
+        # cy increases downward in SVG, so the mark with HIGHER cy corresponds to y=0.0
+        # (data-space bottom) and LOWER cy to y=1.0 (data-space top).
+        def _bottom_fill(marks: list[tuple[float, float, str]]) -> str:
+            """Fill of the mark at the highest cy (data y=0.0, bottom of plot)."""
+            return max(marks, key=lambda t: t[1])[2]
+
+        def _top_fill(marks: list[tuple[float, float, str]]) -> str:
+            """Fill of the mark at the lowest cy (data y=1.0, top of plot)."""
+            return min(marks, key=lambda t: t[1])[2]
+
+        # Data layout:
+        #   Panel A: y=0 → k="green" (cy_bottom), y=1 → k="blue"  (cy_top)
+        #   Panel B: y=0 → k="blue"  (cy_bottom), y=1 → k="green" (cy_top)
+        fill_green_from_a = _bottom_fill(panel_a)  # k="green" in panel A
+        fill_green_from_b = _top_fill(panel_b)     # k="green" in panel B
+
+        assert fill_green_from_a == fill_green_from_b, (
+            f"T3-cat: 'green' must render with the same fill in both panels. "
+            f"Panel A (y=0, k='green') fill: {fill_green_from_a!r}. "
+            f"Panel B (y=1, k='green') fill: {fill_green_from_b!r}. "
+            "Under the per-panel bug 'green' gets palette[0] in panel A "
+            "and palette[1] in panel B, producing different colors."
+        )
+
+        # Sanity: the two categories must produce two distinct fills within each panel.
+        assert _bottom_fill(panel_a) != _top_fill(panel_a), (
+            "T3-cat: 'green' and 'blue' must have distinct fills in panel A"
+        )
