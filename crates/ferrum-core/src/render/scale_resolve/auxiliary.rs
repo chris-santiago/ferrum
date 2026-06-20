@@ -9,6 +9,7 @@ use crate::scale::linear::LinearScale;
 
 use crate::render::RenderError;
 
+use super::domain::{apply_sort_to_domain, SortContext};
 use super::{column_min_max_f64, distinct_values_in_order, shared_categorical_batch, union_panel_with_global_extent, OpacityScale, ScaleKind, ShapeKind, ShapeScale, SizeScale, SHAPE_PALETTE};
 
 /// Build a SizeScale if `encoding.size` is present.
@@ -71,7 +72,11 @@ pub fn build_size_scale(
 }
 
 /// Build a ShapeScale if `encoding.shape` is present.
-/// Returns the scale (if built) and an optional overflow warning.
+///
+/// Returns the scale (if built) and a vec of warnings (palette overflow and/or
+/// sort warnings). Mirrors `build_color_scale`'s `Vec<RenderWarning>` return so
+/// the only caller (`build_auxiliary_scales`) can use `warnings.extend(...)` for
+/// both channels consistently.
 ///
 /// `facet_shared`: when `true` (chart is faceted), resolves the categorical
 /// domain from the global `FINAL_OUTPUT_KEY` batch so that every panel assigns
@@ -83,27 +88,38 @@ pub fn build_shape_scale(
     batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     facet_shared: bool,
-) -> Result<(Option<ShapeScale>, Option<crate::render::RenderWarning>), RenderError> {
+) -> Result<(Option<ShapeScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(shape_enc) = &encoding.shape else {
-        return Ok((None, None));
+        return Ok((None, Vec::new()));
     };
     // T3-shape: when faceted (Shared), resolve the domain from the global
     // FINAL_OUTPUT_KEY batch so every panel's glyph assignment matches the
     // global shape legend. Falls back to `batch` when the global batch or
     // field is absent (non-faceted path is byte-identical: facet_shared=false).
     let domain_batch = shared_categorical_batch(batch, &shape_enc.field, transform_outputs, facet_shared);
-    let distinct = distinct_values_in_order(domain_batch, &shape_enc.field)?;
-    let warn = if distinct.len() > SHAPE_PALETTE.len() {
-        Some(crate::render::RenderWarning::ShapePaletteOverflowed {
-            categories: distinct.len() as u32,
-        })
-    } else {
-        None
+    let mut distinct = distinct_values_in_order(domain_batch, &shape_enc.field)?;
+
+    // KG-8: honor `encoding.shape.sort` by reordering the domain in place,
+    // mirroring the categorical color path in color.rs. When no sort is set
+    // the domain stays in first-appearance order (byte-identical to pre-KG-8).
+    let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
+    let sort_ctx = SortContext {
+        category_field: &shape_enc.field,
+        batch: domain_batch,
+        x_field: encoding.x.as_ref().map(|e| e.field.as_str()),
+        y_field: encoding.y.as_ref().map(|e| e.field.as_str()),
     };
+    apply_sort_to_domain(&mut distinct, shape_enc.sort.as_ref(), &sort_ctx, &mut warnings);
+
+    if distinct.len() > SHAPE_PALETTE.len() {
+        warnings.push(crate::render::RenderWarning::ShapePaletteOverflowed {
+            categories: distinct.len() as u32,
+        });
+    }
     let shapes: Vec<ShapeKind> = (0..distinct.len())
         .map(|i| SHAPE_PALETTE[i % SHAPE_PALETTE.len()])
         .collect();
-    Ok((Some(ShapeScale { domain: distinct, shapes }), warn))
+    Ok((Some(ShapeScale { domain: distinct, shapes }), warnings))
 }
 
 /// Build an OpacityScale if `encoding.opacity` is present.
