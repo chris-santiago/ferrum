@@ -46,11 +46,18 @@ fn default_density_as() -> (String, String) {
 /// `kde::global_extent`. Used by `render::prepare::fix_transform_extents_for_facet`
 /// to pin the value axis before partitioning so every facet panel shares the same
 /// KDE grid range (archaeology bug #7, extended to DensityData by round-3 T1).
+///
+/// Uses `coerce_to_float64` (like the KDE sibling) so Int64/Float32/etc.
+/// pre-facet batches produce a valid shared extent instead of returning None.
 pub(crate) fn global_extent(spec: &DensityDataSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).ok()?;
-    let col = batch.column(idx);
-    let arr = col.as_any().downcast_ref::<Float64Array>()?;
+    let arr = crate::transform::numeric_util::coerce_to_float64(
+        batch.column(idx),
+        "density_global_extent",
+        &spec.field,
+    )
+    .ok()?;
     let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
         if arr.is_null(i) {
             return (lo, hi);
@@ -399,6 +406,45 @@ mod tests {
         let batch = make_batch(vec![f64::NAN, 2.0, f64::NAN, 8.0]);
         let spec = base_spec();
         assert_eq!(global_extent(&spec, &batch), Some((2.0, 8.0)));
+    }
+
+    // ── F1 regression: int-field shared-extent gap ────────────────────
+    //
+    // Before the fix, `global_extent` used raw `downcast_ref::<Float64Array>()`
+    // which returns None for an Int64 column. A faceted density on an integer
+    // field would silently get no shared-extent pin (bug #7 for int inputs).
+    // After the fix, `coerce_to_float64` is used, mirroring `kde::global_extent`.
+
+    /// `global_extent` on an Int64 column returns Some((min, max)) — not None.
+    #[test]
+    fn global_extent_int64_field_returns_some() {
+        use arrow::array::Int64Array;
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int64Array::from(vec![5i64, 1, 9, 3]))],
+        )
+        .unwrap();
+        let spec = base_spec(); // spec.field = "x"
+        // Pre-fix: raw downcast returns None for Int64 → no shared extent.
+        // Post-fix: coerce_to_float64 casts Int64 → Float64 → Some((1.0, 9.0)).
+        assert_eq!(
+            global_extent(&spec, &batch),
+            Some((1.0, 9.0)),
+            "global_extent on Int64 column must coerce and return Some"
+        );
+    }
+
+    /// `global_extent` on a Float64 column remains byte-identical after the fix.
+    #[test]
+    fn global_extent_float64_unchanged_by_fix() {
+        let batch = make_batch(vec![3.0, 1.0, 7.5, 2.2]);
+        let spec = base_spec();
+        assert_eq!(
+            global_extent(&spec, &batch),
+            Some((1.0, 7.5)),
+            "global_extent on Float64 must be unchanged by fix"
+        );
     }
 
 }

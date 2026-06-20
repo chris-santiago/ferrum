@@ -67,15 +67,19 @@ pub(crate) struct ViolinSpec {
 /// value axis before partitioning, so every facet panel shares the same KDE grid
 /// range (see `fix_transform_extents_for_facet`).
 ///
-/// Reuses violin's existing Float64 requirement (the field must already be
-/// Float64, because `apply` hard-errors on non-Float64 before it gets here).
+/// Uses `coerce_to_float64` (like the KDE sibling) so Int64/Float32/etc.
+/// pre-facet batches produce a valid shared extent instead of returning None.
+/// (`apply` hard-errors on non-Float64 per group, but `global_extent` is called
+/// on the raw pre-cast batch, which may carry integer-typed columns.)
 pub(crate) fn global_extent(spec: &ViolinSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).ok()?;
-    let arr = batch
-        .column(idx)
-        .as_any()
-        .downcast_ref::<arrow::array::Float64Array>()?;
+    let arr = crate::transform::numeric_util::coerce_to_float64(
+        batch.column(idx),
+        "violin_global_extent",
+        &spec.field,
+    )
+    .ok()?;
     let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
         if arr.is_null(i) {
             return (lo, hi);
@@ -1409,5 +1413,57 @@ mod tests {
         };
         let ext = global_extent(&spec, &b);
         assert_eq!(ext, None, "global_extent on all-null field must return None");
+    }
+
+    // ── F1 regression: int-field shared-extent gap ────────────────────
+    //
+    // Before the fix, `global_extent` used raw `downcast_ref::<Float64Array>()`
+    // which returns None for an Int64 column. A faceted violin on an integer
+    // field would silently get no shared-extent pin (bug #7 for int inputs).
+    // After the fix, `coerce_to_float64` is used, mirroring `kde::global_extent`.
+
+    /// `global_extent` on an Int64 column returns Some((min, max)) — not None.
+    #[test]
+    fn violin_global_extent_int64_field_returns_some() {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, false)]));
+        let arr = Int64Array::from(vec![3i64, 1, 7, 2, 9]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec![],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+        };
+        // Pre-fix: raw downcast returns None for Int64 → no shared extent.
+        // Post-fix: coerce_to_float64 casts Int64 → Float64 → Some((1.0, 9.0)).
+        let ext = global_extent(&spec, &b);
+        assert_eq!(ext, Some((1.0, 9.0)), "global_extent on Int64 column must coerce and return Some");
+    }
+
+    /// `global_extent` on a Float64 column remains byte-identical after the fix.
+    #[test]
+    fn violin_global_extent_float64_field_unchanged() {
+        let vals: Vec<f64> = vec![2.5, 0.1, 8.8, 3.3];
+        let b = batch("v", vals);
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec![],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+        };
+        let ext = global_extent(&spec, &b);
+        assert_eq!(ext, Some((0.1, 8.8)), "global_extent on Float64 must be unchanged by fix");
     }
 }
