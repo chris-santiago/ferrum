@@ -2665,6 +2665,204 @@ fn t4_non_faceted_ignores_final_output() {
     );
 }
 
+// ── T4 data-aware sort: shared faceted categorical uses global batch ──────────
+//
+// Regression for F1 (round-8 sweep): `apply_sort_to_domain` was called with
+// `SortContext.batch = located.batch` (per-panel) even when `include_final` is
+// true (faceted Shared). Data-aware sort forms (`"-y"` etc.) aggregate per
+// category from that batch, so each panel re-sorted the shared category vector
+// by its OWN aggregate — marks land under the wrong tick.
+//
+// Fix: when `include_final`, build `SortContext.batch` from the global
+// `FINAL_OUTPUT_KEY` batch (mirroring `distinct_positional_categories_shared`).
+
+/// Build a batch with columns `cat` (Utf8) and `y` (Float64).
+fn cat_y_batch(cats: Vec<&str>, ys: Vec<f64>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("cat", ArrowDataType::Utf8, false),
+        Field::new("y", ArrowDataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(cats)),
+            Arc::new(Float64Array::from(ys)),
+        ],
+    )
+    .unwrap()
+}
+
+/// Build a faceted bar spec with nominal x (`field="cat"`, `sort="-y"`) and
+/// quantitative y, using the given per-channel resolve modes.
+fn faceted_nominal_sort_spec(
+    x_resolve: crate::layout::facet::ResolveMode,
+) -> ChartSpec {
+    use crate::layout::facet::{FacetMode, FacetResolve, FacetSpec};
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    ChartSpec {
+        data: DataRef::default(),
+        mark: Mark::Bar,
+        encoding: Encoding {
+            x: Some(EncodingSpec {
+                field: "cat".into(),
+                type_: Some(SpecDataType::Nominal),
+                sort: Some(serde_json::json!("-y")),
+                ..Default::default()
+            }),
+            y: Some(EncodingSpec {
+                field: "y".into(),
+                type_: Some(SpecDataType::Quantitative),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        transforms: Vec::new(),
+        facet: Some(FacetSpec {
+            field: "panel".into(),
+            row: None,
+            mode: FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: FacetResolve { x: x_resolve, y: crate::layout::facet::ResolveMode::Shared },
+        }),
+        layers: None,
+        coord: None,
+        mark_style: None,
+        position: None,
+        title: None,
+        axis_x: None,
+        axis_y: None,
+        selections: Vec::new(),
+        conditionals: Vec::new(),
+        chart_description: None,
+        params: Vec::new(),
+    }
+}
+
+/// T4 data-aware sort (Shared): two facet panels whose per-panel y-aggregates
+/// INVERT the global ranking.
+///
+/// Panel A:  a=100, b=50, c=10  → per-panel sort("-y") order: ["a","b","c"]
+/// Panel B:  a=1,   b=5,  c=10  → per-panel sort("-y") order: ["c","b","a"]
+/// Global:   a=101, b=55, c=20  → global sort("-y")   order: ["a","b","c"]
+///
+/// Under the buggy code, each panel would use its OWN aggregate to re-sort the
+/// shared category vector:
+///   - Panel A ends up with ["a","b","c"] (accidentally matches global).
+///   - Panel B ends up with ["c","b","a"] (WRONG — mark "a" lands under "c").
+///
+/// After the fix both panels must agree with the global ranking ["a","b","c"].
+#[test]
+fn t4_shared_facet_categorical_data_aware_sort_uses_global_batch() {
+    use crate::layout::facet::ResolveMode;
+
+    // Per-panel data: panel A has high a, panel B has high c.
+    let panel_a = cat_y_batch(vec!["a", "a", "b", "b", "c", "c"],
+                               vec![50.0, 50.0, 25.0, 25.0, 5.0, 5.0]);
+    let panel_b = cat_y_batch(vec!["a", "a", "b", "b", "c", "c"],
+                               vec![0.5,  0.5,  2.5,  2.5,  5.0, 5.0]);
+
+    // Global batch = concat of both panels.
+    // Sums: a=101, b=55, c=20.  Descending order: ["a","b","c"].
+    let global = cat_y_batch(
+        vec!["a", "a", "b", "b", "c", "c", "a", "a", "b", "b", "c", "c"],
+        vec![50.0, 50.0, 25.0, 25.0, 5.0, 5.0, 0.5, 0.5, 2.5, 2.5, 5.0, 5.0],
+    );
+    let outputs = final_outputs(global);
+
+    let spec = faceted_nominal_sort_spec(ResolveMode::Shared);
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 300.0);
+
+    // Panel A: resolve the x scale (shared faceted, sort="-y").
+    let (scales_a, warnings_a) =
+        resolve_scales_with_outputs(&spec, &panel_a, &outputs, pr, pr, &theme).unwrap();
+    assert!(
+        warnings_a.is_empty(),
+        "panel A: unexpected sort warnings: {warnings_a:?}"
+    );
+
+    // Panel B: resolve the x scale (shared faceted, sort="-y").
+    let (scales_b, warnings_b) =
+        resolve_scales_with_outputs(&spec, &panel_b, &outputs, pr, pr, &theme).unwrap();
+    assert!(
+        warnings_b.is_empty(),
+        "panel B: unexpected sort warnings: {warnings_b:?}"
+    );
+
+    // Global order is a > b > c (descending sums: 101 > 55 > 20).
+    // Both panels must map "a" to a LOWER pixel (leftmost) than "b", and
+    // "b" lower than "c", since OrdinalScale assigns pixels left-to-right
+    // in domain order.  The shared axis sort is [-y] descending → a,b,c.
+    let px_a_a = scales_a.x.to_pixel_str("a").expect("panel A: 'a' must be in domain");
+    let px_a_b = scales_a.x.to_pixel_str("b").expect("panel A: 'b' must be in domain");
+    let px_a_c = scales_a.x.to_pixel_str("c").expect("panel A: 'c' must be in domain");
+    assert!(
+        px_a_a < px_a_b && px_a_b < px_a_c,
+        "panel A: global sort('-y') must give domain order a<b<c (pixels left→right), \
+         got a@{px_a_a}, b@{px_a_b}, c@{px_a_c}"
+    );
+
+    let px_b_a = scales_b.x.to_pixel_str("a").expect("panel B: 'a' must be in domain");
+    let px_b_b = scales_b.x.to_pixel_str("b").expect("panel B: 'b' must be in domain");
+    let px_b_c = scales_b.x.to_pixel_str("c").expect("panel B: 'c' must be in domain");
+    assert!(
+        px_b_a < px_b_b && px_b_b < px_b_c,
+        "panel B: global sort('-y') must give domain order a<b<c (pixels left→right), \
+         got a@{px_b_a}, b@{px_b_b}, c@{px_b_c} \
+         (buggy: panel B's per-panel order would be c<b<a)"
+    );
+
+    // Both panels must agree on the same pixel positions (same shared domain/scale).
+    assert!(
+        (px_a_a - px_b_a).abs() < 1e-9 &&
+        (px_a_b - px_b_b).abs() < 1e-9 &&
+        (px_a_c - px_b_c).abs() < 1e-9,
+        "shared panels must have identical pixel positions: \
+         A:[{px_a_a},{px_a_b},{px_a_c}] vs B:[{px_b_a},{px_b_b},{px_b_c}]"
+    );
+}
+
+/// T4 data-aware sort (Independent): per-panel sort order is preserved when
+/// x resolves `Independent`. Panel B's per-panel aggregate has c > b > a, so
+/// under Independent, panel B's domain must be ["c","b","a"].
+#[test]
+fn t4_independent_facet_categorical_data_aware_sort_uses_per_panel_batch() {
+    use crate::layout::facet::ResolveMode;
+
+    let panel_b = cat_y_batch(vec!["a", "a", "b", "b", "c", "c"],
+                               vec![0.5,  0.5,  2.5,  2.5,  5.0, 5.0]);
+    let global = cat_y_batch(
+        vec!["a", "a", "b", "b", "c", "c", "a", "a", "b", "b", "c", "c"],
+        vec![50.0, 50.0, 25.0, 25.0, 5.0, 5.0, 0.5, 0.5, 2.5, 2.5, 5.0, 5.0],
+    );
+    let outputs = final_outputs(global);
+
+    let spec = faceted_nominal_sort_spec(ResolveMode::Independent);
+    let theme = ThemeInputs::default();
+    let pr = (0.0, 300.0);
+
+    let (scales_b, warnings_b) =
+        resolve_scales_with_outputs(&spec, &panel_b, &outputs, pr, pr, &theme).unwrap();
+    assert!(
+        warnings_b.is_empty(),
+        "panel B Independent: unexpected sort warnings: {warnings_b:?}"
+    );
+
+    // Panel B independent: per-panel sums are a=1, b=5, c=10.
+    // Descending → domain order ["c","b","a"]: c is leftmost, a rightmost.
+    let px_b_a = scales_b.x.to_pixel_str("a").expect("panel B: 'a' must be in domain");
+    let px_b_b = scales_b.x.to_pixel_str("b").expect("panel B: 'b' must be in domain");
+    let px_b_c = scales_b.x.to_pixel_str("c").expect("panel B: 'c' must be in domain");
+    assert!(
+        px_b_c < px_b_b && px_b_b < px_b_a,
+        "panel B Independent: per-panel sort('-y') must give domain order c<b<a \
+         (pixels left→right: c has highest per-panel y sum), \
+         got a@{px_b_a}, b@{px_b_b}, c@{px_b_c}"
+    );
+}
+
 /// Minimal non-faceted x/y point spec for the byte-identity guard.
 fn make_spec_with_color_xy_only() -> ChartSpec {
     use crate::spec::data_ref::DataRef;
