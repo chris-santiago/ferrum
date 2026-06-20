@@ -45,6 +45,15 @@ pub(crate) struct HexSpec {
     pub field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
+    /// Internal facet-extent pin. NOT a user kwarg. Set by
+    /// `fix_transform_extents_for_facet` to pin the hex lattice anchor and
+    /// auto bin_size to a globally-comparable range. Skipped in serialization
+    /// when None so non-faceted JSON output is byte-identical to before.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub extent_x: Option<(f64, f64)>,
+    /// Internal facet-extent pin (y-axis). See `extent_x`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub extent_y: Option<(f64, f64)>,
 }
 
 struct Aggregator {
@@ -177,22 +186,33 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
     }
 
     // Compute extent (for x_min, y_min anchor).
-    let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
-    let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
-    for i in 0..xs.len() {
-        if xs[i] < xmin {
-            xmin = xs[i];
+    // When an internal facet-extent pin is set (`spec.extent_x`/`spec.extent_y`),
+    // use it instead of the per-partition fold so every facet panel derives the
+    // same lattice anchor and the same auto bin_size.
+    let (xmin, xmax) = match spec.extent_x {
+        Some((lo, hi)) => (lo, hi),
+        None => {
+            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            for &v in &xs {
+                if v < lo { lo = v; }
+                if v > hi { hi = v; }
+            }
+            (lo, hi)
         }
-        if xs[i] > xmax {
-            xmax = xs[i];
+    };
+    // ymax is not used for hex bin_size (only x-range drives auto bin_size),
+    // but it may be needed for future anchor adjustments; suppress the lint.
+    let (ymin, _ymax) = match spec.extent_y {
+        Some((lo, hi)) => (lo, hi),
+        None => {
+            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            for &v in &ys {
+                if v < lo { lo = v; }
+                if v > hi { hi = v; }
+            }
+            (lo, hi)
         }
-        if ys[i] < ymin {
-            ymin = ys[i];
-        }
-        if ys[i] > ymax {
-            ymax = ys[i];
-        }
-    }
+    };
 
     // Auto bin_size.
     let bin_size = match spec.bin_size {
@@ -302,6 +322,53 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
     ];
     RecordBatch::try_new(out_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_hex: {e}")))
+}
+
+/// Compute the global 2-D extent `(x_lo, x_hi, y_lo, y_hi)` of `spec.x`/`spec.y`
+/// over the full `batch`. Used by `fix_transform_extents_for_facet` to pin every
+/// facet panel to a comparable hex lattice anchor and auto bin_size.
+///
+/// Returns the RAW per-axis `(min, max)` (no nicing). Nicing and auto bin_size
+/// derive inside `apply` from the pinned range, so every panel derives them
+/// identically. Returns `None` when either field is missing, non-numeric, all
+/// values are null/NaN, or an axis range is degenerate.
+///
+/// When `spec.extent_x`/`spec.extent_y` are already set, each is returned
+/// unchanged so the faceted pin never clobbers an explicit value.
+pub(crate) fn global_extent(
+    spec: &HexSpec,
+    batch: &RecordBatch,
+) -> Option<(f64, f64, f64, f64)> {
+    let (x_lo, x_hi) = match spec.extent_x {
+        Some(e) => e,
+        None => raw_axis_extent(batch, &spec.x)?,
+    };
+    let (y_lo, y_hi) = match spec.extent_y {
+        Some(e) => e,
+        None => raw_axis_extent(batch, &spec.y)?,
+    };
+    Some((x_lo, x_hi, y_lo, y_hi))
+}
+
+fn raw_axis_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f64)> {
+    let schema = batch.schema();
+    let idx = schema.index_of(field).ok()?;
+    let arr = coerce_to_float64(batch.column(idx), "stat_hex", field).ok()?;
+    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
+        if arr.is_null(i) {
+            return (lo, hi);
+        }
+        let v = arr.value(i);
+        if v.is_nan() {
+            return (lo, hi);
+        }
+        (lo.min(v), hi.max(v))
+    });
+    if lo.is_finite() && hi.is_finite() && lo < hi {
+        Some((lo, hi))
+    } else {
+        None
+    }
 }
 
 fn empty_output() -> PyResult<RecordBatch> {
@@ -414,6 +481,8 @@ impl PyHex {
             aggregate: aggregate.to_string(),
             field,
             name,
+            extent_x: None,
+            extent_y: None,
         })))
     }
 
@@ -500,6 +569,8 @@ mod tests {
             aggregate: "count".into(),
             field: None,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let out = apply(&spec, &b).unwrap();
 
@@ -541,6 +612,8 @@ mod tests {
             aggregate: "mean".into(),
             field: None,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         assert!(apply(&spec_no_field, &b).is_err());
 
@@ -552,6 +625,8 @@ mod tests {
             aggregate: "sum".into(),
             field: None,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         assert!(apply(&spec_sum_no, &b).is_err());
 
@@ -563,6 +638,8 @@ mod tests {
             aggregate: "mean".into(),
             field: Some("v".into()),
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let out = apply(&spec_mean, &b).unwrap();
         // 4 columns, vertex rows = 6 * (number of non-empty hexes).
@@ -584,6 +661,8 @@ mod tests {
             aggregate: "count".into(),
             field: None,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let out = apply(&spec, &b).unwrap();
         let ids = col_i64(&out, "hex_id");
@@ -624,6 +703,8 @@ mod tests {
             aggregate: "count".into(),
             field: None,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let out = apply(&spec, &b).expect("Int64 hex should succeed");
         assert_eq!(out.num_columns(), 4);
@@ -657,6 +738,8 @@ mod tests {
             aggregate: "mean".into(),
             field: Some("v".into()),
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let out = apply(&spec, &b).expect("Int64 field hex should succeed");
         assert_eq!(out.num_columns(), 4);
@@ -687,6 +770,8 @@ mod tests {
             aggregate: "count".into(),
             field: None,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let err = apply(&spec, &b).unwrap_err();
         assert!(
@@ -709,6 +794,8 @@ mod tests {
             aggregate: "count".into(),
             field: None,
             name: None,
+            extent_x: None,
+            extent_y: None,
         };
         let out = apply(&spec, &b).unwrap();
         let ids = col_i64(&out, "hex_id");
@@ -740,5 +827,175 @@ mod tests {
         }
         // Total emitted rows = 6 * N hexes.
         assert_eq!(out.num_rows(), 6 * by_id.len());
+    }
+
+    // ── Regression tests for the faceted extent pin (defect class #7) ────────
+
+    #[test]
+    fn hex_global_extent_returns_raw_range() {
+        pyo3::Python::initialize();
+        let b = make_xy_batch(
+            vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            vec![10.0, 20.0, 30.0, 40.0, 50.0],
+        );
+        let spec = HexSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bin_size: None,
+            aggregate: "count".into(),
+            field: None,
+            name: None,
+            extent_x: None,
+            extent_y: None,
+        };
+        let ext = global_extent(&spec, &b).expect("should have extent");
+        assert!((ext.0 - 1.0).abs() < 1e-12, "x_lo={}", ext.0);
+        assert!((ext.1 - 5.0).abs() < 1e-12, "x_hi={}", ext.1);
+        assert!((ext.2 - 10.0).abs() < 1e-12, "y_lo={}", ext.2);
+        assert!((ext.3 - 50.0).abs() < 1e-12, "y_hi={}", ext.3);
+    }
+
+    #[test]
+    fn hex_global_extent_preserves_user_set_axes() {
+        pyo3::Python::initialize();
+        let b = make_xy_batch(
+            vec![1.0, 5.0],
+            vec![10.0, 50.0],
+        );
+        // Pre-set extent_x; global_extent must return it unchanged and compute y from batch.
+        let spec = HexSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bin_size: None,
+            aggregate: "count".into(),
+            field: None,
+            name: None,
+            extent_x: Some((0.0, 10.0)),
+            extent_y: None,
+        };
+        let ext = global_extent(&spec, &b).expect("should have extent");
+        assert!((ext.0 - 0.0).abs() < 1e-12, "x_lo should be user-set 0.0, got {}", ext.0);
+        assert!((ext.1 - 10.0).abs() < 1e-12, "x_hi should be user-set 10.0, got {}", ext.1);
+        assert!((ext.2 - 10.0).abs() < 1e-12, "y_lo from batch={}", ext.2);
+        assert!((ext.3 - 50.0).abs() < 1e-12, "y_hi from batch={}", ext.3);
+    }
+
+    #[test]
+    fn hex_pinned_extent_gives_identical_bin_size_for_disjoint_partitions() {
+        // Two disjoint-range partitions: [0..5] and [100..105].
+        // Without a pinned extent, each partition computes its own auto bin_size:
+        //   partition 1: (5-0)/30 ≈ 0.1667
+        //   partition 2: (105-100)/30 ≈ 0.1667  (same range, still diverge in anchor)
+        // Use clearly different-range partitions to guarantee different bin_sizes:
+        //   partition A: x in [0, 1]  → bin_size = (1-0)/30 ≈ 0.0333
+        //   partition B: x in [0, 10] → bin_size = (10-0)/30 ≈ 0.333
+        // BEFORE: different bin_sizes per partition (fail before fix).
+        // AFTER: same pinned extent [0,10] → same bin_size for both.
+        pyo3::Python::initialize();
+
+        let spec_unpinned_a = HexSpec {
+            x: "x".into(), y: "y".into(),
+            bin_size: None, aggregate: "count".into(),
+            field: None, name: None,
+            extent_x: None, extent_y: None,
+        };
+        let spec_unpinned_b = HexSpec {
+            x: "x".into(), y: "y".into(),
+            bin_size: None, aggregate: "count".into(),
+            field: None, name: None,
+            extent_x: None, extent_y: None,
+        };
+
+        let batch_a = make_xy_batch(
+            vec![0.0, 0.5, 1.0, 0.2, 0.8],
+            vec![0.0, 0.5, 1.0, 0.2, 0.8],
+        );
+        let batch_b = make_xy_batch(
+            vec![0.0, 2.5, 5.0, 7.5, 10.0],
+            vec![0.0, 2.5, 5.0, 7.5, 10.0],
+        );
+
+        let out_a_unpinned = apply(&spec_unpinned_a, &batch_a).unwrap();
+        let out_b_unpinned = apply(&spec_unpinned_b, &batch_b).unwrap();
+
+        // Extract a representative hex_x value to infer bin_size.
+        // Without pinning, max hex_x (vertex) differs between partitions.
+        let max_x_a: f64 = col_f64(&out_a_unpinned, "hex_x").into_iter().fold(f64::NEG_INFINITY, f64::max);
+        let max_x_b: f64 = col_f64(&out_b_unpinned, "hex_x").into_iter().fold(f64::NEG_INFINITY, f64::max);
+        // Partitions have very different x ranges → different max vertex x (fail-before).
+        assert!(
+            (max_x_a - max_x_b).abs() > 1.0,
+            "SETUP CHECK: unpinned partitions must have different extents (max_x_a={max_x_a}, max_x_b={max_x_b})"
+        );
+
+        // AFTER: pin both to the global [0,10] range.
+        let spec_pinned = HexSpec {
+            x: "x".into(), y: "y".into(),
+            bin_size: None, aggregate: "count".into(),
+            field: None, name: None,
+            extent_x: Some((0.0, 10.0)),
+            extent_y: Some((0.0, 10.0)),
+        };
+        let out_a_pinned = apply(&spec_pinned, &batch_a).unwrap();
+        let out_b_pinned = apply(&spec_pinned, &batch_b).unwrap();
+
+        // With the pinned extent, auto bin_size = (10-0)/30 ≈ 0.333 for both.
+        // The max vertex x from each output derives from the same grid → comparable.
+        let max_x_a_pinned: f64 = col_f64(&out_a_pinned, "hex_x").into_iter().fold(f64::NEG_INFINITY, f64::max);
+        let max_x_b_pinned: f64 = col_f64(&out_b_pinned, "hex_x").into_iter().fold(f64::NEG_INFINITY, f64::max);
+
+        // Both partitions see different data ranges but share the same bin_size.
+        // Partition A only has data up to x=1, so its occupied hex cells are in
+        // the same lattice as B. They should NOT produce the same max_x (A has
+        // fewer non-empty hexes), but the BIN_SIZE (derived from pinned extent)
+        // must be the same. We verify bin_size by checking hex vertex spacing.
+        //
+        // For a pointy-top hex of bin_size=r, vertex angles are 30°/90°/150°/...
+        // The width span per hex is 2r. With bin_size=(10-0)/30≈0.333, the x-step
+        // between adjacent hex centers is sqrt(3)*r ≈ 0.577. We check that a
+        // vertex x from partition A is NOT a vertex x from partition B at the
+        // cell-size scale of an unpinned A (≈0.0333), but IS at scale ≈0.333.
+        //
+        // Simpler check: the bin_size for A-pinned equals the bin_size for B-pinned,
+        // by checking that the ratio of max_x_b_pinned / max_x_a_pinned is
+        // NOT 10/1 (which would be the case if they used different bin_sizes
+        // derived from their own ranges). With pinned extent both derive
+        // bin_size from [0,10], so their relative lattice positions are comparable.
+        //
+        // The clearest assertion: with pin, B has data filling more of the lattice
+        // than A, but the lattice step must be the same. We verify this via the
+        // min hex_x of partition B is within the same lattice as A.
+        let min_x_a_pinned: f64 = col_f64(&out_a_pinned, "hex_x").into_iter().fold(f64::INFINITY, f64::min);
+        let min_x_b_pinned: f64 = col_f64(&out_b_pinned, "hex_x").into_iter().fold(f64::INFINITY, f64::min);
+        // Both lattices anchor at (0,0) with the same bin_size, so both have a hex at (0,0).
+        // min hex_x for pointy-top at (0,0) = center_x - R*cos(30°) = 0 - R*√3/2.
+        // We just assert both share the same min (within floating-point tolerance).
+        assert!(
+            (min_x_a_pinned - min_x_b_pinned).abs() < 1e-9,
+            "pinned partitions must share the same lattice anchor: min_x_a={min_x_a_pinned}, min_x_b={min_x_b_pinned}"
+        );
+        // And confirm max_x_b_pinned > max_x_a_pinned (B has data further right).
+        assert!(
+            max_x_b_pinned > max_x_a_pinned,
+            "partition B (more data) should have larger max hex_x than A"
+        );
+    }
+
+    #[test]
+    fn hex_non_faceted_spec_serializes_without_extent_fields() {
+        // Without extent pin, the spec must serialize to JSON without extent_x/extent_y.
+        let spec = HexSpec {
+            x: "xc".into(),
+            y: "yc".into(),
+            bin_size: None,
+            aggregate: "count".into(),
+            field: None,
+            name: None,
+            extent_x: None,
+            extent_y: None,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("extent_x"), "extent_x must not appear when None: {json}");
+        assert!(!json.contains("extent_y"), "extent_y must not appear when None: {json}");
     }
 }

@@ -1765,6 +1765,51 @@ fn fix_transform_extents_for_facet(
                     None => t.clone(),
                 }
             }
+            // Extent-DERIVING transforms (archaeology defect class #7 completion):
+            // Hex, Raster, and DataBin compute their grid or bin boundaries from
+            // the per-partition data range, so each facet panel drifts to its own
+            // geometry. Pin each to the global pre-facet range, using the same
+            // per-axis `.or(Some(...))` pattern as Bin2D so a user-set axis is
+            // never clobbered.
+            TransformSpec::Hex(spec)
+                if spec.extent_x.is_none() || spec.extent_y.is_none() =>
+            {
+                match crate::transform::hex::global_extent(spec, batch) {
+                    Some((x_lo, x_hi, y_lo, y_hi)) => {
+                        TransformSpec::Hex(crate::transform::hex::HexSpec {
+                            extent_x: spec.extent_x.or(Some((x_lo, x_hi))),
+                            extent_y: spec.extent_y.or(Some((y_lo, y_hi))),
+                            ..spec.clone()
+                        })
+                    }
+                    None => t.clone(),
+                }
+            }
+            TransformSpec::Raster(spec)
+                if spec.extent_x.is_none() || spec.extent_y.is_none() =>
+            {
+                match crate::transform::raster::global_extent(spec, batch) {
+                    Some((x_lo, x_hi, y_lo, y_hi)) => {
+                        TransformSpec::Raster(crate::transform::raster::RasterSpec {
+                            extent_x: spec.extent_x.or(Some((x_lo, x_hi))),
+                            extent_y: spec.extent_y.or(Some((y_lo, y_hi))),
+                            ..spec.clone()
+                        })
+                    }
+                    None => t.clone(),
+                }
+            }
+            TransformSpec::DataBin(spec) if spec.extent.is_none() => {
+                match crate::transform::data_bin::global_extent(spec, batch) {
+                    Some(extent) => {
+                        TransformSpec::DataBin(crate::transform::data_bin::DataBinSpec {
+                            extent: Some(extent),
+                            ..spec.clone()
+                        })
+                    }
+                    None => t.clone(),
+                }
+            }
             _ => t.clone(),
         })
         .collect()
@@ -2460,6 +2505,217 @@ mod tests {
             pinned.extent_y,
             Some((0.0, 101.0)),
             "extent_y must be pinned to the global y-range when user left it None"
+        );
+    }
+
+    // --- archaeology #7 round-7 T1: Hex / Raster / DataBin dispatch tests -------
+
+    /// A faceted `Hex` with no extent gets both axes pinned to the RAW global
+    /// range over the full pre-facet batch. The two-panel fixture has disjoint
+    /// x ∈ [0,1] vs [10,11] and y ∈ [0,1] vs [100,101]; the global raw range is
+    /// x∈[0,11], y∈[0,101]. An un-pinned hex lattice would anchor differently per
+    /// panel, making the bin edges incomparable across panels.
+    #[test]
+    fn fix_extents_pins_hex_to_global_2d_extent() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::hex::HexSpec;
+        let batch = extent_pin_batch_2d();
+        let spec = HexSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bin_size: None,
+            aggregate: "count".into(),
+            field: None,
+            name: None,
+            extent_x: None,
+            extent_y: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Hex(spec.clone())], &batch);
+        let TransformSpec::Hex(pinned) = &out[0] else {
+            panic!("expected a Hex transform back");
+        };
+        assert_eq!(
+            pinned.extent_x,
+            Some((0.0, 11.0)),
+            "Hex extent_x must be pinned to the raw global x-range across panels"
+        );
+        assert_eq!(
+            pinned.extent_y,
+            Some((0.0, 101.0)),
+            "Hex extent_y must be pinned to the raw global y-range across panels"
+        );
+    }
+
+    /// A faceted `Hex` with `extent_x` user-set but `extent_y = None` keeps the
+    /// user value on x and pins y to the global raw range. Guards against an
+    /// accidental x/y transposition in the dispatch arm.
+    #[test]
+    fn fix_extents_hex_partial_user_extent_keeps_x_pins_y() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::hex::HexSpec;
+        let batch = extent_pin_batch_2d();
+
+        let user_x = (2.0, 15.0);
+        let spec = HexSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bin_size: None,
+            aggregate: "count".into(),
+            field: None,
+            name: None,
+            extent_x: Some(user_x),
+            extent_y: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Hex(spec.clone())], &batch);
+        let TransformSpec::Hex(pinned) = &out[0] else {
+            panic!("expected a Hex transform back");
+        };
+        assert_eq!(
+            pinned.extent_x,
+            Some(user_x),
+            "user extent_x must be preserved when extent_y is None"
+        );
+        assert_eq!(
+            pinned.extent_y,
+            Some((0.0, 101.0)),
+            "extent_y must be pinned to the global y-range when user left it None"
+        );
+    }
+
+    /// A faceted `Raster` with no extent gets both axes pinned to the RAW global
+    /// range over the full pre-facet batch: x∈[0,11], y∈[0,101].
+    #[test]
+    fn fix_extents_pins_raster_to_global_2d_extent() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::raster::{RasterSpec, ResolutionSpec};
+        let batch = extent_pin_batch_2d();
+        let spec = RasterSpec {
+            x: "x".into(),
+            y: "y".into(),
+            aggregate: "count".into(),
+            field: None,
+            resolution: ResolutionSpec::Fixed(4),
+            min_count: None,
+            log_scale: false,
+            name: None,
+            extent_x: None,
+            extent_y: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Raster(spec.clone())], &batch);
+        let TransformSpec::Raster(pinned) = &out[0] else {
+            panic!("expected a Raster transform back");
+        };
+        assert_eq!(
+            pinned.extent_x,
+            Some((0.0, 11.0)),
+            "Raster extent_x must be pinned to the raw global x-range across panels"
+        );
+        assert_eq!(
+            pinned.extent_y,
+            Some((0.0, 101.0)),
+            "Raster extent_y must be pinned to the raw global y-range across panels"
+        );
+    }
+
+    /// A faceted `Raster` with `extent_x` user-set but `extent_y = None` keeps
+    /// the user value on x and pins y to the global raw range. Guards against an
+    /// accidental x/y transposition in the dispatch arm.
+    #[test]
+    fn fix_extents_raster_partial_user_extent_keeps_x_pins_y() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::raster::{RasterSpec, ResolutionSpec};
+        let batch = extent_pin_batch_2d();
+
+        let user_x = (2.0, 15.0);
+        let spec = RasterSpec {
+            x: "x".into(),
+            y: "y".into(),
+            aggregate: "count".into(),
+            field: None,
+            resolution: ResolutionSpec::Fixed(4),
+            min_count: None,
+            log_scale: false,
+            name: None,
+            extent_x: Some(user_x),
+            extent_y: None,
+        };
+        let out = fix_transform_extents_for_facet(&[TransformSpec::Raster(spec.clone())], &batch);
+        let TransformSpec::Raster(pinned) = &out[0] else {
+            panic!("expected a Raster transform back");
+        };
+        assert_eq!(
+            pinned.extent_x,
+            Some(user_x),
+            "user extent_x must be preserved when extent_y is None"
+        );
+        assert_eq!(
+            pinned.extent_y,
+            Some((0.0, 101.0)),
+            "extent_y must be pinned to the global y-range when user left it None"
+        );
+    }
+
+    /// A faceted `DataBin` with `extent = None` gets pinned to the RAW global
+    /// `(min, max)` over the full pre-facet batch. The fixture has `v` values
+    /// [0.3, 0.5, 1.2, 4.8, 9.7] (raw range 0.3..9.7). Unlike `Bin`, DataBin
+    /// does not nice the pinned extent — the raw range drives the bin boundary
+    /// computation directly.
+    #[test]
+    fn fix_extents_pins_data_bin_to_global_raw_extent() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::data_bin::DataBinSpec;
+        let batch = extent_pin_batch();
+        let spec = DataBinSpec {
+            field: "v".into(),
+            as_: None,
+            maxbins: Some(10),
+            step: None,
+            nice: false,
+            name: None,
+            extent: None,
+        };
+        let out =
+            fix_transform_extents_for_facet(&[TransformSpec::DataBin(spec.clone())], &batch);
+        let TransformSpec::DataBin(pinned) = &out[0] else {
+            panic!("expected a DataBin transform back");
+        };
+        // Raw range over [0.3, 0.5, 1.2, 4.8, 9.7] = (0.3, 9.7). DataBin never
+        // nices the pin, so the pinned value is the exact raw (min, max).
+        assert_eq!(
+            pinned.extent,
+            Some((0.3, 9.7)),
+            "DataBin extent must be pinned to the raw global (min, max) across panels"
+        );
+    }
+
+    /// A faceted `DataBin` with a user-provided `extent` must never have it
+    /// overridden. The dispatch arm guards on `spec.extent.is_none()`, so this
+    /// confirms the guard fires correctly and the user value is left untouched.
+    #[test]
+    fn fix_extents_data_bin_user_extent_is_preserved() {
+        use crate::transform::core::TransformSpec;
+        use crate::transform::data_bin::DataBinSpec;
+        let batch = extent_pin_batch();
+
+        let user_extent = (0.0, 20.0);
+        let spec = DataBinSpec {
+            field: "v".into(),
+            as_: None,
+            maxbins: Some(10),
+            step: None,
+            nice: false,
+            name: None,
+            extent: Some(user_extent),
+        };
+        let out =
+            fix_transform_extents_for_facet(&[TransformSpec::DataBin(spec.clone())], &batch);
+        let TransformSpec::DataBin(pinned) = &out[0] else {
+            panic!("expected a DataBin transform back");
+        };
+        assert_eq!(
+            pinned.extent,
+            Some(user_extent),
+            "user DataBin extent must never be clobbered by the pin"
         );
     }
 
