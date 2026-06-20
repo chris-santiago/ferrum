@@ -535,11 +535,36 @@ class _CompositeBase(_ChartLike):
     ``__or__`` / ``__and__`` to chain further compositions.  The asymmetric
     layouts keep their own slot-based ``__init__`` and ``charts`` property;
     they call :meth:`_init_figure_chrome` to wire the chrome fields.
+
+    **Symmetric-concat layout strategy.**  ``HConcatChart`` and
+    ``VConcatChart`` differ only in their layout axis, so their
+    ``_resolved_charts`` / ``_rebuild_with_charts`` / ``_render_interactive``
+    / ``to_svg`` / ``__repr__`` bodies live here once, parameterized by three
+    class attributes a subclass overrides: :attr:`_layout` (the
+    ``_merge_child_scenes`` layout key), :attr:`_svg_compose_name` (the
+    ``ferrum._core`` SVG compositor to import), and :attr:`_svg_align` (the
+    cross-axis alignment passed to that compositor).  These default to
+    ``None`` on the base; the asymmetric layouts (Joint / Repeat /
+    ClusterMap) and the wrapping-grid ``ConcatChart`` override the symmetric
+    methods wholesale, so the ``None`` defaults are never reached for them.
     """
 
-    def __init__(self, charts: List, *, spacing: float = 10.0) -> None:
+    # Symmetric-concat strategy hooks (overridden by HConcat / VConcat).
+    _layout: Optional[str] = None
+    _svg_compose_name: Optional[str] = None
+    _svg_align: Optional[str] = None
+
+    def __init__(
+        self,
+        charts: List,
+        *,
+        spacing: float = 10.0,
+        resolve: Optional[Dict[str, str]] = None,
+    ) -> None:
+        _validate_resolve(resolve, type(self).__name__)
         self.charts = list(charts)
         self.spacing = spacing
+        self._resolve = resolve
         self._init_figure_chrome()
 
     def _init_figure_chrome(self) -> None:
@@ -679,10 +704,68 @@ class _CompositeBase(_ChartLike):
         """
         return self._rebuild_with_charts(lambda c: c.properties(**kwargs))
 
+    # ------------------------------------------------------------------
+    # Symmetric-concat layout strategy.
+    #
+    # These five methods are the shared bodies of HConcat / VConcat,
+    # parameterized by ``_layout`` / ``_svg_compose_name`` / ``_svg_align``.
+    # The asymmetric layouts (Joint / Repeat / ClusterMap) and the
+    # wrapping-grid ConcatChart override all five, so the ``None`` hook
+    # defaults are never reached for them.
+    # ------------------------------------------------------------------
+
+    def _resolved_charts(self) -> list:
+        """Return charts with shared scales injected per ``resolve``.
+
+        Uses ``getattr`` for ``_resolve`` so this shared base method is safe on
+        any ``_CompositeBase`` subclass: the symmetric concat classes set
+        ``_resolve`` in ``__init__``, while asymmetric subclasses
+        (Joint/Repeat/ClusterMap) never set it and override the render path, so
+        they would otherwise hit an ``AttributeError`` if this base method were
+        ever called on them.
+        """
+        return _apply_resolve(self.charts, getattr(self, "_resolve", None))
+
     def _rebuild_with_charts(self, fn):
-        new = type(self)([fn(c) for c in self.charts], spacing=self.spacing)
+        new = type(self)(
+            [fn(c) for c in self.charts],
+            spacing=self.spacing,
+            resolve=getattr(self, "_resolve", None),
+        )
         self._carry_figure_chrome(new)
         return new
+
+    def _render_interactive(self) -> tuple[str, bytes]:
+        """Render to (scene_json, packed_data) by merging child scenes along ``_layout``."""
+        charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
+        return _merge_child_scenes(
+            charts,
+            self.spacing,
+            layout=self._layout,
+            figure_chrome=self._figure_chrome_kwargs(),
+        )
+
+    def to_svg(self) -> str:
+        """Render the concatenated charts to an SVG string along ``_layout``."""
+        from ferrum import _core
+
+        compose = getattr(_core, self._svg_compose_name)
+        charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
+        svgs = [c.to_svg() for c in charts]
+        chrome = chrome_kwargs(merge_configure_layers(getattr(self, "_configure_layers", None)))
+        return compose(
+            svgs,
+            spacing=self.spacing,
+            align=self._svg_align,
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
+            **chrome,
+        )
+
+    def __repr__(self) -> str:
+        """Return a short developer-readable description."""
+        return f"{type(self).__name__}([{', '.join(repr(c) for c in self.charts)}])"
 
 
 class HConcatChart(_CompositeBase):
@@ -711,66 +794,12 @@ class HConcatChart(_CompositeBase):
     >>> combined.save("side_by_side.svg")
     """
 
-    def __init__(
-        self,
-        charts: List,
-        *,
-        spacing: float = 10.0,
-        resolve: Optional[Dict[str, str]] = None,
-    ) -> None:
-        _validate_resolve(resolve, "HConcatChart")
-        super().__init__(charts, spacing=spacing)
-        self._resolve = resolve
-
-    def _resolved_charts(self) -> list:
-        """Return charts with shared scales injected per ``resolve``."""
-        return _apply_resolve(self.charts, self._resolve)
-
-    def _rebuild_with_charts(self, fn):
-        new = HConcatChart(
-            [fn(c) for c in self.charts],
-            spacing=self.spacing,
-            resolve=self._resolve,
-        )
-        self._carry_figure_chrome(new)
-        return new
-
-    def _render_interactive(self) -> tuple[str, bytes]:
-        """Render to (scene_json, packed_data) by merging child scenes horizontally."""
-        charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
-        return _merge_child_scenes(
-            charts,
-            self.spacing,
-            layout="horizontal",
-            figure_chrome=self._figure_chrome_kwargs(),
-        )
-
-    def to_svg(self) -> str:
-        """Render the horizontally concatenated charts to an SVG string.
-
-        Returns
-        -------
-        str
-            SVG markup with sub-charts placed left-to-right.
-        """
-        from ferrum._core import compose_svg_horizontal
-
-        charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
-        svgs = [c.to_svg() for c in charts]
-        chrome = chrome_kwargs(merge_configure_layers(getattr(self, "_configure_layers", None)))
-        return compose_svg_horizontal(
-            svgs,
-            spacing=self.spacing,
-            align="top",
-            title=self._figure_title,
-            subtitle=self._figure_subtitle,
-            caption=self._figure_caption,
-            **chrome,
-        )
-
-    def __repr__(self) -> str:
-        """Return a short developer-readable description."""
-        return f"HConcatChart([{', '.join(repr(c) for c in self.charts)}])"
+    # Layout-strategy hooks consumed by _CompositeBase's symmetric-concat
+    # methods (_render_interactive / to_svg).  Construction, resolve, rebuild,
+    # and __repr__ are all inherited unchanged.
+    _layout = "horizontal"
+    _svg_compose_name = "compose_svg_horizontal"
+    _svg_align = "top"
 
 
 class VConcatChart(_CompositeBase):
@@ -799,66 +828,12 @@ class VConcatChart(_CompositeBase):
     >>> stacked.save("stacked.svg")
     """
 
-    def __init__(
-        self,
-        charts: List,
-        *,
-        spacing: float = 10.0,
-        resolve: Optional[Dict[str, str]] = None,
-    ) -> None:
-        _validate_resolve(resolve, "VConcatChart")
-        super().__init__(charts, spacing=spacing)
-        self._resolve = resolve
-
-    def _resolved_charts(self) -> list:
-        """Return charts with shared scales injected per ``resolve``."""
-        return _apply_resolve(self.charts, self._resolve)
-
-    def _rebuild_with_charts(self, fn):
-        new = VConcatChart(
-            [fn(c) for c in self.charts],
-            spacing=self.spacing,
-            resolve=self._resolve,
-        )
-        self._carry_figure_chrome(new)
-        return new
-
-    def _render_interactive(self) -> tuple[str, bytes]:
-        """Render to (scene_json, packed_data) by merging child scenes vertically."""
-        charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
-        return _merge_child_scenes(
-            charts,
-            self.spacing,
-            layout="vertical",
-            figure_chrome=self._figure_chrome_kwargs(),
-        )
-
-    def to_svg(self) -> str:
-        """Render the vertically concatenated charts to an SVG string.
-
-        Returns
-        -------
-        str
-            SVG markup with sub-charts stacked top-to-bottom.
-        """
-        from ferrum._core import compose_svg_vertical
-
-        charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
-        svgs = [c.to_svg() for c in charts]
-        chrome = chrome_kwargs(merge_configure_layers(getattr(self, "_configure_layers", None)))
-        return compose_svg_vertical(
-            svgs,
-            spacing=self.spacing,
-            align="left",
-            title=self._figure_title,
-            subtitle=self._figure_subtitle,
-            caption=self._figure_caption,
-            **chrome,
-        )
-
-    def __repr__(self) -> str:
-        """Return a short developer-readable description."""
-        return f"VConcatChart([{', '.join(repr(c) for c in self.charts)}])"
+    # Layout-strategy hooks consumed by _CompositeBase's symmetric-concat
+    # methods (_render_interactive / to_svg).  Construction, resolve, rebuild,
+    # and __repr__ are all inherited unchanged.
+    _layout = "vertical"
+    _svg_compose_name = "compose_svg_vertical"
+    _svg_align = "left"
 
 
 # --------------------------------------------------------------------------
