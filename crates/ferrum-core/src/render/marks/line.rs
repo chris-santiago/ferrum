@@ -19,7 +19,7 @@
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::opacity::OpacityResolver;
+use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::ScaleKind;
 
 /// Build a `Vec<PathCmd>` from a sequence of (x, y) pixel points using the
@@ -176,7 +176,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     // opacity / fill_opacity / stroke_opacity resolution (shared resolver, FA-11).
     // Defaults: opacity → mark_style.opacity, fill_opacity → 1.0, stroke_opacity → 1.0.
-    let opacity_res = OpacityResolver::load(ctx, false, (ctx.mark_style.opacity, 1.0, 1.0));
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
 
     let meta = MetadataColumns::from_ctx(ctx);
 

@@ -36,23 +36,11 @@ pub(crate) fn polar_geom(ctx: &DrawCtx<'_>) -> Option<PolarGeom> {
     Some(PolarGeom { cx, cy, inner_radius, outer_radius, start_angle, pad_angle })
 }
 
-/// Resolve the radial (radius) scale from the theta channel convention.
-///
-/// Under the Python polar remapping, `theta="x"` puts the angular channel on `x`
-/// and the radial (value) channel on `y`, so the radial scale is `scales.y`.
-/// `theta="y"` mirrors: the radial channel is `x` and the radial scale is `scales.x`.
-///
-/// This is the single canonical definition of the theta→radius axis convention,
-/// shared by the arc mark (`arc.rs`) and the polar-bar mark path (`bar.rs::build_polar`).
-pub(crate) fn polar_radius_scale(
-    theta_ch: crate::spec::coord::PolarThetaChannel,
-    scales: &crate::render::scale_resolve::ResolvedScales,
-) -> &crate::render::scale_resolve::ScaleKind {
-    match theta_ch {
-        crate::spec::coord::PolarThetaChannel::X => &scales.y,
-        crate::spec::coord::PolarThetaChannel::Y => &scales.x,
-    }
-}
+// The theta→radius-scale convention (`theta="x"` → radial scale = y, `theta="y"`
+// → radial scale = x) now lives in the shared
+// `marks::channels::polar_channel_resolver` (C9), which both `arc` and
+// `bar::build_polar` consume; the former standalone `polar_radius_scale` helper
+// was subsumed by it.
 
 /// Map a radial *data* value to a pixel radius, linearly interpolating the
 /// radial domain onto the `[inner_radius, outer_radius]` pixel band. The
@@ -105,25 +93,15 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         return MarkBuildResult::empty(MarkBatchKind::Arc);
     };
 
-    // Channel assignment under the Python polar remapping:
+    // Channel assignment under the Python polar remapping (shared resolver, C9):
     //   theta="x" → theta=x, theta2=x2, radius=y, radius2=y2
     //   theta="y" → theta=y, theta2=y2, radius=x, radius2=x2
-    let (theta_field, theta2_field, radius_field, radius2_field, radius_scale) = match theta_ch {
-        PolarThetaChannel::X => (
-            ctx.spec.encoding.x.as_ref().map(|e| e.field.as_str()),
-            ctx.spec.encoding.x2.as_ref().map(|e| e.field.as_str()),
-            ctx.spec.encoding.y.as_ref().map(|e| e.field.as_str()),
-            ctx.spec.encoding.y2.as_ref().map(|e| e.field.as_str()),
-            &ctx.scales.y,
-        ),
-        PolarThetaChannel::Y => (
-            ctx.spec.encoding.y.as_ref().map(|e| e.field.as_str()),
-            ctx.spec.encoding.y2.as_ref().map(|e| e.field.as_str()),
-            ctx.spec.encoding.x.as_ref().map(|e| e.field.as_str()),
-            ctx.spec.encoding.x2.as_ref().map(|e| e.field.as_str()),
-            &ctx.scales.x,
-        ),
-    };
+    let pc = crate::render::marks::channels::polar_channel_resolver(
+        theta_ch, &ctx.spec.encoding, ctx.scales,
+    );
+    let (theta_field, theta2_field, radius_field, radius2_field, radius_scale) = (
+        pc.theta_field, pc.theta2_field, pc.radius_field, pc.radius2_field, pc.radius_scale,
+    );
 
     // Annular mode: a second angular OR radial extent is bound. Note the
     // legacy pie path always populates a dummy radius field equal to theta

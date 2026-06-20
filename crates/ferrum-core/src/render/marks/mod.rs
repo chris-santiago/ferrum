@@ -21,3 +21,4 @@ pub(crate) mod axis;
 pub(crate) mod legend;
 pub(crate) mod strip_title;
 pub(crate) mod opacity;
+pub(crate) mod channels;

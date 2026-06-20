@@ -10,6 +10,7 @@ use crate::render::draw::{
     y_field, DrawCtx,
 };
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 
 /// Resolve a per-row stroke color from the color encoding + color scale, if both
 /// are present. Each row's category value is mapped through `ctx.scales.color`
@@ -27,28 +28,23 @@ fn rule_color_values(ctx: &DrawCtx) -> Option<Vec<Option<Color>>> {
 }
 
 /// Build a per-row stroke style for rule segments, applying encoding column values.
+///
+/// `opacity` / `stroke_opacity` are resolved via the shared [`OpacityResolver`]
+/// (C7) — byte-identical to the prior inline finite-check + clamp + default,
+/// which already matched the resolver's contract exactly. Rule is a stroke-only
+/// mark, so the resolver's `fill_opacity` slot is unused.
 fn rule_stroke_style(
     ctx: &DrawCtx,
     i: usize,
-    so_vals: &Option<Vec<Option<f64>>>,
+    opacity_res: &OpacityResolver,
     sw_vals: &Option<Vec<Option<f64>>>,
     sd_vals: &Option<Vec<Option<f64>>>,
-    opacity_vals: &Option<Vec<Option<f64>>>,
     color_vals: &Option<Vec<Option<Color>>>,
 ) -> ferrum_scene::StrokeStyle {
     use crate::render::color::with_opacity;
     use crate::render::draw::to_scene_stroke;
 
-    let stroke_opacity = so_vals.as_ref()
-        .and_then(|v| v.get(i).copied().flatten())
-        .filter(|v| v.is_finite())
-        .map(|v| v.clamp(0.0, 1.0))
-        .unwrap_or(1.0);
-    let opacity = opacity_vals.as_ref()
-        .and_then(|v| v.get(i).copied().flatten())
-        .filter(|v| v.is_finite())
-        .map(|v| v.clamp(0.0, 1.0))
-        .unwrap_or(ctx.mark_style.opacity);
+    let (opacity, _, stroke_opacity) = opacity_res.at_row(i);
     let stroke_width = sw_vals.as_ref()
         .and_then(|v| v.get(i).copied().flatten())
         .filter(|v| *v >= 0.0 && v.is_finite())
@@ -79,14 +75,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let spec = ctx.spec;
     let panel = ctx.panel.plot_area;
 
-    // Per-row stroke channel vectors.
-    let so_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_opacity.as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    // Per-row stroke channel vectors. `opacity` / `stroke_opacity` are resolved
+    // by the shared OpacityResolver (C7); `stroke_width` / `stroke_dash` stay
+    // local. Rule has no fill, so the resolver's fill default is unused.
+    let opacity_res =
+        OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
     let sw_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_width.as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let sd_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_dash.as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
-    let opacity_vals: Option<Vec<Option<f64>>> = spec.encoding.opacity.as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let color_vals = rule_color_values(ctx);
 
@@ -127,7 +123,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     y1: py + y_offsets[i],
                     x2: px,
                     y2: py2 + y_offsets[i],
-                    style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals, &opacity_vals, &color_vals),
+                    style: rule_stroke_style(ctx, i, &opacity_res, &sw_vals, &sd_vals, &color_vals),
                 }, i);
             }
             let (nodes, data_indices) = acc.finalize();
@@ -163,7 +159,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     y1: py,
                     x2: px2 + x_offsets[i],
                     y2: py,
-                    style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals, &opacity_vals, &color_vals),
+                    style: rule_stroke_style(ctx, i, &opacity_res, &sw_vals, &sd_vals, &color_vals),
                 }, i);
             }
             let (nodes, data_indices) = acc.finalize();
@@ -199,7 +195,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                         y1: py,
                         x2: panel.x + panel.w,
                         y2: py,
-                        style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals, &opacity_vals, &color_vals),
+                        style: rule_stroke_style(ctx, i, &opacity_res, &sw_vals, &sd_vals, &color_vals),
                     }, i);
                 }
                 let (nodes, data_indices) = acc.finalize();
@@ -230,7 +226,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 y1: panel.y,
                 x2: px,
                 y2: panel.y + panel.h,
-                style: rule_stroke_style(ctx, i, &so_vals, &sw_vals, &sd_vals, &opacity_vals, &color_vals),
+                style: rule_stroke_style(ctx, i, &opacity_res, &sw_vals, &sd_vals, &color_vals),
             }, i);
         }
         let (nodes, data_indices) = acc.finalize();

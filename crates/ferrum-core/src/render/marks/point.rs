@@ -3,9 +3,9 @@
 //! Phase 8a: honors per-row size/shape/opacity from ctx.scales when populated.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::opacity::OpacityResolver;
+use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::{ColorScale, ScaleKind, ShapeKind};
 
 /// Parse a shape name string to a `ShapeKind`.
@@ -249,17 +249,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         };
     }
 
-    // Color encoding.
-    let cfield = color_field(ctx, spec);
-    let color_values_str: Option<Vec<Option<String>>> = match (&ctx.scales.color, cfield) {
-        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
-        (None, Some(f)) => col_as_str(ctx.batch, f).ok(),
-        _ => None,
-    };
-    let color_values_f64: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
-        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
-        _ => None,
-    };
+    // Color encoding (shared loader, C9 — byte-identical to the prior inline
+    // (scale_kind, field) → (categorical, numeric) split).
+    let (color_values_str, color_values_f64) =
+        crate::render::marks::channels::color_column_loader(ctx);
 
     // Per-row size / shape / opacity vectors.
     let size_values: Option<Vec<Option<f64>>> = spec.encoding.size
@@ -278,7 +271,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // per-row. Defaults: fill_opacity → 1.0, stroke_opacity → 1.0. The opacity
     // channel is mapped through `ctx.scales.opacity` at the call site below, so
     // the resolver's opacity output is unused here (its default is irrelevant).
-    let opacity_res = OpacityResolver::load(ctx, false, (ctx.mark_style.opacity, 1.0, 1.0));
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
 
     // Per-row stroke/angle channel values (direct passthrough — no scale transform).
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width

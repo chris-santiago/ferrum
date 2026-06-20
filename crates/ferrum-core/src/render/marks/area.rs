@@ -12,7 +12,7 @@
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::opacity::OpacityResolver;
+use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 
 /// Build `Vec<PathCmd>` for the top-edge line using the given interpolation
 /// method. Mirrors `build_top_line_path` but emits structured commands.
@@ -180,7 +180,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // opacity / fill_opacity channels — sampled at the first row of each group
     // via the shared resolver (FA-11). Defaults: opacity → base_opacity,
     // fill_opacity → 1.0. Area does not read stroke_opacity (default unused).
-    let opacity_res = OpacityResolver::load(ctx, false, (base_opacity, 1.0, 1.0));
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (base_opacity, 1.0, 1.0));
 
     let interpolate = ctx.mark_style.interpolate.as_deref();
 

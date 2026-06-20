@@ -5,6 +5,7 @@ use crate::render::draw::{
     col_as_f64, col_as_str, color_field, resolve_stroke_color, x_field, y_field, DrawCtx,
 };
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{to_scene_stroke, MarkBuildResult, MetadataColumns};
@@ -29,10 +30,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty() };
     let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty() };
 
-    // Per-row opacity and stroke_width from encoding columns (if mapped).
-    let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    // Per-row opacity via the shared OpacityResolver (C7); stroke_width stays
+    // local. Segment is a stroke-only mark (no fill / stroke_opacity columns),
+    // so only the resolver's `opacity` slot is read.
+    let opacity_res =
+        OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
 
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
@@ -73,9 +75,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let xo = x_offsets.get(i).copied().unwrap_or(0.0);
         let yo = y_offsets.get(i).copied().unwrap_or(0.0);
 
-        let row_opacity = opacity_values.as_ref()
-            .and_then(|v| v.get(i).copied().flatten())
-            .unwrap_or(ctx.mark_style.opacity);
+        let (row_opacity, _, _) = opacity_res.at_row(i);
         let row_stroke_width = stroke_width_values.as_ref()
             .and_then(|v| v.get(i).copied().flatten())
             .unwrap_or(ctx.mark_style.stroke_width);
@@ -517,5 +517,56 @@ mod tests {
         let values: Vec<&str> = tooltips.iter().map(|t| t.fields[0].value.as_str()).collect();
         assert_eq!(values, vec!["tip_a", "tip_b", "tip_c"],
             "no-skip: tooltips must be in original row order");
+    }
+
+    /// C7 regression guard: after migrating segment's per-row opacity to the
+    /// shared `OpacityResolver`, each segment must still carry its own row's
+    /// opacity. In-range values are byte-stable (no clamp effect); a regression
+    /// that collapses or drops the per-row sample fails here.
+    #[test]
+    fn segment_per_row_opacity_is_sampled_per_row() {
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Segment,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                x2: Some(EncodingSpec { field: "x2".into(), type_: None, ..Default::default() }),
+                y2: Some(EncodingSpec { field: "y2".into(), type_: None, ..Default::default() }),
+                opacity: Some(EncodingSpec { field: "op".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",  DataType::Float64, false),
+            Field::new("y",  DataType::Float64, false),
+            Field::new("x2", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("op", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0_f64, 5.0])),
+            Arc::new(Float64Array::from(vec![0.0_f64, 5.0])),
+            Arc::new(Float64Array::from(vec![10.0_f64, 15.0])),
+            Arc::new(Float64Array::from(vec![10.0_f64, 15.0])),
+            Arc::new(Float64Array::from(vec![0.25_f64, 0.75])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Segment);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.opacity) } else { None }
+        }).collect();
+        assert_eq!(opacities, vec![0.25, 0.75],
+            "each segment must carry its own row's opacity (per-row OpacityResolver sample)");
     }
 }
