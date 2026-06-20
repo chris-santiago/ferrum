@@ -21,15 +21,20 @@ use super::{column_min_max_f64, distinct_values_in_order, shared_categorical_bat
 /// size), unions `batch`'s extent with the global `FINAL_OUTPUT_KEY` batch so
 /// that per-panel marks normalize against the same domain as the global legend.
 /// Non-faceted callers pass `false`; the per-panel-only path is byte-identical.
+///
+/// Returns the scale (if built) and a vec of warnings. Currently emits no
+/// warnings; the `Vec` is returned to match `build_color_scale`/`build_shape_scale`
+/// so `build_auxiliary_scales` can use `warnings.extend(...)` uniformly for all
+/// four channels.
 pub fn build_size_scale(
     encoding: &crate::spec::encoding::Encoding,
     batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     facet_shared: bool,
     theme: &ThemeInputs,
-) -> Result<Option<SizeScale>, RenderError> {
+) -> Result<(Option<SizeScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(size_enc) = &encoding.size else {
-        return Ok(None);
+        return Ok((None, Vec::new()));
     };
     let col = batch
         .column_by_name(&size_enc.field)
@@ -68,7 +73,7 @@ pub fn build_size_scale(
         true,
     ));
     let _ = (lo, hi); // bounds now read from inner.pixel_range() via accessors
-    Ok(Some(SizeScale { inner }))
+    Ok((Some(SizeScale { inner }), Vec::new()))
 }
 
 /// Build a ShapeScale if `encoding.shape` is present.
@@ -128,15 +133,20 @@ pub fn build_shape_scale(
 /// opacity), unions `batch`'s extent with the global `FINAL_OUTPUT_KEY` batch so
 /// that per-panel marks normalize against the same domain as the global legend.
 /// Non-faceted callers pass `false`; the per-panel-only path is byte-identical.
+///
+/// Returns the scale (if built) and a vec of warnings. Currently emits no
+/// warnings; the `Vec` is returned to match `build_color_scale`/`build_shape_scale`
+/// so `build_auxiliary_scales` can use `warnings.extend(...)` uniformly for all
+/// four channels.
 pub fn build_opacity_scale(
     encoding: &crate::spec::encoding::Encoding,
     batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     facet_shared: bool,
     theme: &ThemeInputs,
-) -> Result<Option<OpacityScale>, RenderError> {
+) -> Result<(Option<OpacityScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(op_enc) = &encoding.opacity else {
-        return Ok(None);
+        return Ok((None, Vec::new()));
     };
     let col = batch
         .column_by_name(&op_enc.field)
@@ -159,6 +169,6 @@ pub fn build_opacity_scale(
         true,
         false,
     ));
-    Ok(Some(OpacityScale { inner }))
+    Ok((Some(OpacityScale { inner }), Vec::new()))
 }
 

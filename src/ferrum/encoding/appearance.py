@@ -5,7 +5,29 @@ from __future__ import annotations
 from ferrum.encoding.base import ChannelBase
 
 
-_RENDERED_HONORED = frozenset(["type", "scale", "title", "legend", "condition"])
+# Single source of truth for the appearance-channel honored-kwargs contract.
+#
+# Every appearance channel honors at minimum {"type", "legend"}.  The named
+# constants below build upward compositionally so that each channel's
+# _honored_kwargs is assembled from explicit, named pieces rather than
+# copy-pasted literals.  Final frozensets are IDENTICAL to the previous
+# ad-hoc declarations — this is a declaration de-duplication, not a membership
+# change.
+#
+#   _APPEARANCE_BASE       {"type", "legend"}
+#   _APPEARANCE_FULL       adds scale + title
+#   _APPEARANCE_CONDITION  adds condition  (= old _RENDERED_HONORED)
+#   _APPEARANCE_SORT       adds sort
+#   _APPEARANCE_SCHEME     adds scheme
+#
+_APPEARANCE_BASE = frozenset({"type", "legend"})
+_APPEARANCE_FULL = _APPEARANCE_BASE | {"scale", "title"}
+_APPEARANCE_CONDITION = _APPEARANCE_FULL | {"condition"}   # == old _RENDERED_HONORED
+_APPEARANCE_SORT = _APPEARANCE_CONDITION | {"sort"}
+_APPEARANCE_SCHEME = _APPEARANCE_CONDITION | {"scheme"}
+
+# Preserved alias so any external code that imports _RENDERED_HONORED still works.
+_RENDERED_HONORED = _APPEARANCE_CONDITION
 
 
 # Phase 8a renders these (added to scale_resolve in Task 8):
@@ -52,7 +74,7 @@ class Color(ChannelBase):
     # ``legend=None`` (or ``False``) suppresses the categorical color legend
     # at the renderer level. Used by direct-label diagnostic charts to
     # avoid a redundant legend alongside endpoint-anchored series labels.
-    _honored_kwargs = frozenset(["type", "scheme", "scale", "title", "legend", "sort", "condition"])
+    _honored_kwargs = _APPEARANCE_SORT | {"scheme"}  # {"type","legend","scale","title","condition","sort","scheme"}
 
 
 class Size(ChannelBase):
@@ -93,7 +115,7 @@ class Size(ChannelBase):
 
     _channel_name = "size"
 
-    _honored_kwargs = _RENDERED_HONORED
+    _honored_kwargs = _APPEARANCE_CONDITION  # {"type","legend","scale","title","condition"}
 
 
 class Shape(ChannelBase):
@@ -135,7 +157,7 @@ class Shape(ChannelBase):
 
     _channel_name = "shape"
 
-    _honored_kwargs = frozenset(["type", "scale", "title", "legend", "sort", "condition"])
+    _honored_kwargs = _APPEARANCE_SORT  # {"type","legend","scale","title","condition","sort"}
 
 
 class Opacity(ChannelBase):
@@ -168,7 +190,7 @@ class Opacity(ChannelBase):
 
     _channel_name = "opacity"
 
-    _honored_kwargs = _RENDERED_HONORED
+    _honored_kwargs = _APPEARANCE_CONDITION  # {"type","legend","scale","title","condition"}
 
 
 # Deferred to Phase 9:
@@ -200,7 +222,7 @@ class Fill(ChannelBase):
 
     _channel_name = "fill"
 
-    _honored_kwargs = frozenset(["type", "scheme", "scale", "title", "legend", "condition"])
+    _honored_kwargs = _APPEARANCE_SCHEME  # {"type","legend","scale","title","condition","scheme"}
 
 
 class Stroke(ChannelBase):
@@ -229,7 +251,7 @@ class Stroke(ChannelBase):
 
     _channel_name = "stroke"
 
-    _honored_kwargs = frozenset(["type", "scheme", "scale", "title", "legend", "condition"])
+    _honored_kwargs = _APPEARANCE_SCHEME  # {"type","legend","scale","title","condition","scheme"}
 
 
 class FillOpacity(ChannelBase):
@@ -259,7 +281,7 @@ class FillOpacity(ChannelBase):
 
     _channel_name = "fill_opacity"
 
-    _honored_kwargs = frozenset(["type", "scale", "title", "legend"])
+    _honored_kwargs = _APPEARANCE_FULL  # {"type","legend","scale","title"}
 
 
 class StrokeOpacity(ChannelBase):
@@ -289,7 +311,7 @@ class StrokeOpacity(ChannelBase):
 
     _channel_name = "stroke_opacity"
 
-    _honored_kwargs = frozenset(["type", "legend"])
+    _honored_kwargs = _APPEARANCE_BASE  # {"type","legend"}
 
 
 class StrokeWidth(ChannelBase):
@@ -318,7 +340,7 @@ class StrokeWidth(ChannelBase):
 
     _channel_name = "stroke_width"
 
-    _honored_kwargs = frozenset(["type", "legend"])
+    _honored_kwargs = _APPEARANCE_BASE  # {"type","legend"}
 
 
 class StrokeDash(ChannelBase):
@@ -348,7 +370,7 @@ class StrokeDash(ChannelBase):
 
     _channel_name = "stroke_dash"
 
-    _honored_kwargs = frozenset(["type", "legend"])
+    _honored_kwargs = _APPEARANCE_BASE  # {"type","legend"}
 
 
 class Angle(ChannelBase):
@@ -378,4 +400,4 @@ class Angle(ChannelBase):
 
     _channel_name = "angle"
 
-    _honored_kwargs = frozenset(["type", "legend"])
+    _honored_kwargs = _APPEARANCE_BASE  # {"type","legend"}

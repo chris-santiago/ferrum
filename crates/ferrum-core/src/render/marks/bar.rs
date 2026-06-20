@@ -8,31 +8,18 @@
 #[cfg(test)]
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, resolve_fill_color, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_fill_color, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::opacity::OpacityResolver;
+use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::ScaleKind;
 
-/// Load the per-row color-encoding columns for fill resolution, mirroring the
-/// point renderer: the categorical string column is read for `Categorical`
-/// (and scale-less) charts, the numeric column for `Continuous` charts. The
-/// continuous branch reads `col_as_f64` so `resolve_fill_color` can sample via
-/// `lookup_f64` without an `f64 → String → f64` round-trip.
-type ColorColumns = (Option<Vec<Option<String>>>, Option<Vec<Option<f64>>>);
-
-fn load_color_columns(ctx: &DrawCtx) -> ColorColumns {
-    use crate::render::scale_resolve::ColorScale;
-    let field = color_field(ctx, ctx.spec);
-    let cat = match (&ctx.scales.color, field) {
-        (Some(ColorScale::Categorical { .. }), Some(f)) => col_as_str(ctx.batch, f).ok(),
-        (None, Some(f)) => col_as_str(ctx.batch, f).ok(),
-        _ => None,
-    };
-    let num = match (&ctx.scales.color, field) {
-        (Some(ColorScale::Continuous { .. }), Some(f)) => col_as_f64(ctx.batch, f).ok(),
-        _ => None,
-    };
-    (cat, num)
+/// Load the per-row color-encoding columns for fill resolution via the shared
+/// [`color_column_loader`](crate::render::marks::channels::color_column_loader)
+/// (C9): the categorical string column for `Categorical` (and scale-less) charts,
+/// the numeric column for `Continuous` charts. Byte-identical to the prior local
+/// helper and to `point`'s inline split.
+fn load_color_columns(ctx: &DrawCtx) -> crate::render::marks::channels::ColorColumns {
+    crate::render::marks::channels::color_column_loader(ctx)
 }
 
 #[inline]
@@ -82,7 +69,7 @@ impl StrokeChannels {
     /// `fill_opacity` / `stroke_opacity` are pre-resolved (finite-checked,
     /// clamped, defaulted) by the shared [`OpacityResolver`]; bar's
     /// `fill_opacity ← opacity` fallback lives in that resolver
-    /// (`general_fallback = true`).
+    /// (`OpacityFallback::BarLike`).
     fn row_fill_stroke(
         &self,
         fill: Option<ferrum_scene::Color>,
@@ -167,8 +154,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 /// radius, with no overlap at r=0.
 fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::MarkBuildResult;
-    use crate::render::marks::arc::{polar_geom, polar_radius_scale, radius_to_pixel, wedge_path};
-    use crate::spec::coord::PolarThetaChannel;
+    use crate::render::marks::arc::{polar_geom, radius_to_pixel, wedge_path};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
     let theta_ch = match &ctx.spec.coord {
@@ -178,14 +164,13 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let Some(geom) = polar_geom(ctx) else { return empty_result() };
 
     // Angular channel = theta-mapped axis; radial (value) channel = the other.
-    // polar_radius_scale encodes the canonical theta→radius-scale convention
-    // shared with arc.rs.
-    let (angle_field, value_field) = match theta_ch {
-        PolarThetaChannel::X => (x_field(ctx, ctx.spec), y_field(ctx, ctx.spec)),
-        PolarThetaChannel::Y => (y_field(ctx, ctx.spec), x_field(ctx, ctx.spec)),
-    };
-    let radius_scale = polar_radius_scale(theta_ch, ctx.scales);
-    let (Some(af), Some(vf)) = (angle_field, value_field) else { return empty_result() };
+    // The shared resolver (C9) encodes the canonical theta→radius convention also
+    // used by arc.rs. Byte-identical to the prior inline `match theta_ch`.
+    let pc = crate::render::marks::channels::polar_channel_resolver(
+        theta_ch, &ctx.spec.encoding, ctx.scales,
+    );
+    let radius_scale = pc.radius_scale;
+    let (Some(af), Some(vf)) = (pc.theta_field, pc.radius_field) else { return empty_result() };
 
     // Angular categories: stringify so ordinal and integer-coded angle columns
     // group consistently. Each distinct value (first-appearance order) gets an
@@ -228,10 +213,10 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
-    // sampled per-row. `general_fallback = true` preserves bar's unique
+    // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique
     // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
     // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
-    let opacity_res = OpacityResolver::load(ctx, true, (ctx.mark_style.opacity, 1.0, 1.0));
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so that metadata is
@@ -347,10 +332,10 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
-    // sampled per-row. `general_fallback = true` preserves bar's unique
+    // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique
     // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
     // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
-    let opacity_res = OpacityResolver::load(ctx, true, (ctx.mark_style.opacity, 1.0, 1.0));
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
@@ -462,10 +447,10 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
-    // sampled per-row. `general_fallback = true` preserves bar's unique
+    // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique
     // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
     // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
-    let opacity_res = OpacityResolver::load(ctx, true, (ctx.mark_style.opacity, 1.0, 1.0));
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
@@ -593,10 +578,10 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
-    // sampled per-row. `general_fallback = true` preserves bar's unique
+    // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique
     // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
     // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
-    let opacity_res = OpacityResolver::load(ctx, true, (ctx.mark_style.opacity, 1.0, 1.0));
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
@@ -692,10 +677,10 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
-    // sampled per-row. `general_fallback = true` preserves bar's unique
+    // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique
     // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
     // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
-    let opacity_res = OpacityResolver::load(ctx, true, (ctx.mark_style.opacity, 1.0, 1.0));
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
@@ -2043,7 +2028,7 @@ mod tests {
     }
 
     /// FA-11 guard: bar's UNIQUE `fill_opacity ← opacity` fallback
-    /// (`general_fallback = true`) is preserved by the resolver. With no
+    /// (`OpacityFallback::BarLike`) is preserved by the resolver. With no
     /// `fill_opacity` encoding but an `opacity` encoding present, each bar's
     /// `fill_opacity` must equal its (clamped) per-row `opacity` value. No other
     /// mark does this; the resolver flag isolates the quirk.

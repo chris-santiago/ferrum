@@ -180,9 +180,8 @@ class X2(ChannelBase):
 
     Notes
     -----
-    ``bin``, ``aggregate``, ``scale``, and ``title`` kwargs are accepted but
-    are reserved for future use (no-op today) — they trigger a one-time
-    deprecation warning.
+    ``bin``, ``aggregate``, ``scale``, and ``title`` kwargs are not supported —
+    a one-time warning is emitted if they are passed.
 
     Examples
     --------
@@ -210,9 +209,8 @@ class Y2(ChannelBase):
 
     Notes
     -----
-    ``bin``, ``aggregate``, ``scale``, and ``title`` kwargs are accepted but
-    are reserved for future use (no-op today) — they trigger a one-time
-    deprecation warning.
+    ``bin``, ``aggregate``, ``scale``, and ``title`` kwargs are not supported —
+    a one-time warning is emitted if they are passed.
 
     Examples
     --------
@@ -239,8 +237,8 @@ class XError(ChannelBase):
 
     Notes
     -----
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
+    Other kwargs (beyond ``type_``) are not supported — a one-time warning
+    is emitted if they are passed.
 
     Examples
     --------
@@ -267,8 +265,8 @@ class YError(ChannelBase):
 
     Notes
     -----
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
+    Other kwargs (beyond ``type_``) are not supported — a one-time warning
+    is emitted if they are passed.
 
     Examples
     --------
@@ -296,8 +294,8 @@ class XError2(ChannelBase):
 
     Notes
     -----
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
+    Other kwargs (beyond ``type_``) are not supported — a one-time warning
+    is emitted if they are passed.
 
     Examples
     --------
@@ -329,8 +327,8 @@ class YError2(ChannelBase):
 
     Notes
     -----
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
+    Other kwargs (beyond ``type_``) are not supported — a one-time warning
+    is emitted if they are passed.
 
     Examples
     --------
@@ -466,8 +464,8 @@ class Theta2(ChannelBase):
     Remapped to ``x2`` (when ``CoordPolar(theta="x")``) or ``y2``
     (when ``CoordPolar(theta="y")``) before the spec reaches Rust.
 
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
+    Other kwargs (beyond ``type_``) are not supported — a one-time warning
+    is emitted if they are passed.
 
     Examples
     --------
@@ -506,8 +504,8 @@ class Radius2(ChannelBase):
     Remapped to ``y2`` (when ``CoordPolar(theta="x")``) or ``x2``
     (when ``CoordPolar(theta="y")``) before the spec reaches Rust.
 
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
+    Other kwargs (beyond ``type_``) are not supported — a one-time warning
+    is emitted if they are passed.
 
     Examples
     --------

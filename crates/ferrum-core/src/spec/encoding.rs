@@ -391,6 +391,29 @@ impl EncodingSpec {
     }
 }
 
+/// Serialize an optional Rust value to a Python object via JSON round-trip.
+///
+/// `None` maps to `Ok(None)`; `Some(v)` serializes `v` to a JSON string and
+/// deserializes it back into a Python object via `json.loads`, matching the
+/// behavior previously repeated inline in each `EncodingSpec` getter.
+/// The spec interface (C8) names this function for the `Option<serde_json::Value>`
+/// case; the generic `T: Serialize` bound covers that case and the typed-struct
+/// getters (scale/axis/legend) with one implementation rather than two.
+fn encode_serde_value_for_py<T: serde::Serialize>(
+    py: Python,
+    v: &Option<T>,
+) -> PyResult<Option<Py<PyAny>>> {
+    match v {
+        None => Ok(None),
+        Some(val) => {
+            let json = serde_json::to_string(val)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let json_module = py.import("json")?;
+            Ok(Some(json_module.call_method1("loads", (json,))?.unbind()))
+        }
+    }
+}
+
 #[pymethods]
 impl EncodingSpec {
     #[new]
@@ -474,15 +497,7 @@ impl EncodingSpec {
     /// Scale override dict, or ``None``.
     #[getter]
     fn scale(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
-        match &self.scale {
-            None => Ok(None),
-            Some(s) => {
-                let json = serde_json::to_string(s)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-                let json_module = py.import("json")?;
-                Ok(Some(json_module.call_method1("loads", (json,))?.unbind()))
-            }
-        }
+        encode_serde_value_for_py(py, &self.scale)
     }
 
     /// Axis or legend title override, or ``None``.
@@ -496,15 +511,7 @@ impl EncodingSpec {
     /// per-channel; unknown keys fail loud at construction.
     #[getter]
     fn axis(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
-        match &self.axis {
-            None => Ok(None),
-            Some(s) => {
-                let json = serde_json::to_string(s)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-                let json_module = py.import("json")?;
-                Ok(Some(json_module.call_method1("loads", (json,))?.unbind()))
-            }
-        }
+        encode_serde_value_for_py(py, &self.axis)
     }
 
     /// Legend style overrides. Typed against the shared `LegendStyleSpec`: every
@@ -512,43 +519,19 @@ impl EncodingSpec {
     /// per-channel; unknown keys fail loud at construction.
     #[getter]
     fn legend(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
-        match &self.legend {
-            None => Ok(None),
-            Some(s) => {
-                let json = serde_json::to_string(s)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-                let json_module = py.import("json")?;
-                Ok(Some(json_module.call_method1("loads", (json,))?.unbind()))
-            }
-        }
+        encode_serde_value_for_py(py, &self.legend)
     }
 
     /// Conditional encoding rules (selection-driven); returns what was passed at construction.
     #[getter]
     fn condition(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
-        match &self.condition {
-            None => Ok(None),
-            Some(s) => {
-                let json = serde_json::to_string(s)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-                let json_module = py.import("json")?;
-                Ok(Some(json_module.call_method1("loads", (json,))?.unbind()))
-            }
-        }
+        encode_serde_value_for_py(py, &self.condition)
     }
 
     /// Sort order for ordinal/nominal scales ("ascending", "descending", or explicit array).
     #[getter]
     fn sort(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
-        match &self.sort {
-            None => Ok(None),
-            Some(s) => {
-                let json = serde_json::to_string(s)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-                let json_module = py.import("json")?;
-                Ok(Some(json_module.call_method1("loads", (json,))?.unbind()))
-            }
-        }
+        encode_serde_value_for_py(py, &self.sort)
     }
 
     /// Stack method for bar/area marks ("zero", "normalize", "center").
@@ -560,15 +543,7 @@ impl EncodingSpec {
     /// Imputation strategy. {"value": N} fills missing group×x combinations with N.
     #[getter]
     fn impute(&self, py: Python) -> PyResult<Option<Py<PyAny>>> {
-        match &self.impute {
-            None => Ok(None),
-            Some(s) => {
-                let json = serde_json::to_string(s)
-                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
-                let json_module = py.import("json")?;
-                Ok(Some(json_module.call_method1("loads", (json,))?.unbind()))
-            }
-        }
+        encode_serde_value_for_py(py, &self.impute)
     }
 
     /// Color scheme name for quantitative encodings (e.g. ``"viridis"``).

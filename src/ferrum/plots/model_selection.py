@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
-from ferrum.plots._helpers import _dedupe_aggregated, _finalize_chart
+from ferrum.plots._helpers import _charts_with_endpoint_labels, _dedupe_aggregated, _finalize_chart
 from ferrum.plots._helpers import _resolve_source, _require
 
 
@@ -52,7 +52,6 @@ def _learning_curve_chart_from_source(
     ``Learning curve`` active title.
     """
     import ferrum
-    from ferrum._direct_label import _direct_label_endpoint
 
     df = source.learning_curve(cv=cv, scoring=scoring, train_sizes=train_sizes)
     df = _dedupe_aggregated(df, "train_size", "split")
@@ -71,7 +70,7 @@ def _learning_curve_chart_from_source(
     chart = chart.properties(
         title=ferrum.Title("Learning Curve", subtitle=subtitle),
     )
-    chart = _direct_label_endpoint(
+    chart = _charts_with_endpoint_labels(
         chart,
         label_field="split",
         x_col="train_size",
@@ -114,7 +113,6 @@ def _validation_curve_chart_from_source(
     parameterized active title (``"Validation curve — <param>"``).
     """
     import ferrum
-    from ferrum._direct_label import _direct_label_endpoint
 
     df = source.validation_curve(param, values, cv=cv, scoring=scoring)
     df = _dedupe_aggregated(df, "param_value", "split")
@@ -145,7 +143,7 @@ def _validation_curve_chart_from_source(
     chart = chart.properties(
         title=ferrum.Title(f"Validation Curve — {param}", subtitle=subtitle),
     )
-    chart = _direct_label_endpoint(
+    chart = _charts_with_endpoint_labels(
         chart,
         label_field="split",
         x_col="param_value",

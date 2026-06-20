@@ -8,6 +8,7 @@
 
 use crate::render::draw::{col_as_f64, col_as_positional_category_str, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::ScaleKind;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -20,21 +21,19 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Common setup shared by all four tick modes.
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let stroke_color = ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill);
-    let default_opacity = ctx.mark_style.opacity;
     let default_stroke_width = ctx.mark_style.stroke_width.max(1.0);
 
-    // Per-row opacity and stroke_width encoding columns.
-    let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
-        .as_ref()
-        .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
+    // Per-row opacity via the shared OpacityResolver (C7); stroke_width stays
+    // local. Tick is a stroke-only mark (no fill / stroke_opacity columns), so
+    // only the resolver's `opacity` slot is read.
+    let opacity_res =
+        OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
     let row_stroke = |i: usize| -> ferrum_scene::StrokeStyle {
-        let opacity = opacity_values.as_ref()
-            .and_then(|v| v.get(i).copied().flatten())
-            .unwrap_or(default_opacity);
+        let (opacity, _, _) = opacity_res.at_row(i);
         let width = stroke_width_values.as_ref()
             .and_then(|v| v.get(i).copied().flatten())
             .unwrap_or(default_stroke_width);
@@ -730,5 +729,93 @@ mod tests {
         let values: Vec<&str> = tooltips.iter().map(|t| t.fields[0].value.as_str()).collect();
         assert_eq!(values, vec!["tip_a", "tip_b", "tip_c"],
             "no-skip: tooltips must be in original row order");
+    }
+
+    /// C7 regression guard: after migrating tick's per-row opacity to the shared
+    /// `OpacityResolver`, each tick line must still carry its own row's opacity
+    /// value (per-row sampling, not a single constant). Fails if a dedup ever
+    /// collapses the per-row sample to one value or drops the encoding column.
+    #[test]
+    fn tick_per_row_opacity_is_sampled_per_row() {
+        use crate::spec::encoding::DataType as SDT;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                opacity: Some(EncodingSpec { field: "op".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",  DataType::Float64, false),
+            Field::new("op", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0, 90.0])),
+            Arc::new(Float64Array::from(vec![0.2_f64, 0.5, 0.9])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.opacity) } else { None }
+        }).collect();
+        assert_eq!(opacities, vec![0.2, 0.5, 0.9],
+            "each tick must carry its own row's opacity (per-row OpacityResolver sample)");
+    }
+
+    /// C7 family-consistency guard: tick now clamps out-of-range opacity to
+    /// `[0, 1]` and falls non-finite values back to the default, matching every
+    /// other mark via the shared `OpacityResolver`. (Before C7 tick passed these
+    /// raw, which could emit SVG with an invalid `opacity` attribute.) No real
+    /// chart feeds out-of-range opacity, so goldens are unaffected.
+    #[test]
+    fn tick_opacity_is_clamped_and_finite_checked() {
+        use crate::spec::encoding::DataType as SDT;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                opacity: Some(EncodingSpec { field: "op".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x",  DataType::Float64, false),
+            Field::new("op", DataType::Float64, false),
+        ]));
+        // Row 0: > 1 → clamps to 1.0. Row 1: NaN → falls back to default opacity.
+        // Row 2: in-range → passes through.
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0_f64, 50.0, 90.0])),
+            Arc::new(Float64Array::from(vec![1.5_f64, f64::NAN, 0.3])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let default_opacity = mark_style.opacity;
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let opacities: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.opacity) } else { None }
+        }).collect();
+        assert_eq!(opacities, vec![1.0, default_opacity, 0.3],
+            "tick opacity must clamp >1 to 1.0, fall NaN to default, pass in-range through");
     }
 }

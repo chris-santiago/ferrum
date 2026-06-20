@@ -809,10 +809,12 @@ fn build_auxiliary_scales(
     let aux_shared = facet_aux_shared(spec);
     let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared)?;
     warnings.extend(color_warns);
-    let size = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+    let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+    warnings.extend(size_warns);
     let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
     warnings.extend(shape_warns);
-    let opacity = build_opacity_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+    let (opacity, opacity_warns) = build_opacity_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+    warnings.extend(opacity_warns);
     Ok((color, size, shape, opacity))
 }
 
