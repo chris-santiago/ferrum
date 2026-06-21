@@ -498,3 +498,79 @@ class TestOrientAliasViolin:
         r_orient = desugar_violin("cat", "val", inner=None, horizontal=True)
         assert _field_of(r_h.layers[0].encoding["y"]) == _field_of(r_orient.layers[0].encoding["y"])
         assert _field_of(r_h.layers[0].encoding["x"]) == _field_of(r_orient.layers[0].encoding["x"])
+
+
+# ---------------------------------------------------------------------------
+# F1 regression: orient= WINS over horizontal= alias when both are given
+# ---------------------------------------------------------------------------
+
+
+def _effective_orient_from_kwargs(chart) -> str:
+    """Extract the effective orientation from a chart's pending-mark kwargs.
+
+    Returns ``"vertical"`` or ``"horizontal"`` depending on what the mark
+    normalizer resolved.
+
+    - boxplot / boxen / violin store a bool ``horizontal`` in kwargs.
+    - swarm stores an orient string ``orient`` in kwargs.
+    """
+    kwargs = chart._pending_stat_mark.kwargs
+    if "orient" in kwargs:
+        # swarm: orient string is already canonical
+        return kwargs["orient"]
+    # boxplot / boxen / violin: bool horizontal
+    return "horizontal" if kwargs.get("horizontal", False) else "vertical"
+
+
+@pytest.mark.parametrize(
+    "mark_fn, encode_kwargs",
+    [
+        ("mark_boxplot", {"x": "cat", "y": "val"}),
+        ("mark_boxen", {"x": "cat", "y": "val"}),
+        ("mark_violin", {"x": "cat", "y": "val"}),
+        ("mark_swarm", {"x": "cat", "y": "val"}),
+    ],
+)
+def test_orient_wins_when_orient_vertical_and_horizontal_true(grouped_df, mark_fn, encode_kwargs):
+    """orient='vertical' must win over horizontal=True for all four marks.
+
+    This test FAILS on pre-fix swarm because mark_swarm used to give
+    horizontal= precedence when it was not None, resolving to 'horizontal'
+    instead of 'vertical'.
+    """
+    chart = getattr(fm.Chart(grouped_df), mark_fn)(orient="vertical", horizontal=True).encode(
+        **encode_kwargs
+    )
+    effective = _effective_orient_from_kwargs(chart)
+    assert effective == "vertical", (
+        f"{mark_fn}(orient='vertical', horizontal=True) must resolve to 'vertical' "
+        f"(orient wins); got {effective!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "mark_fn, encode_kwargs",
+    [
+        ("mark_boxplot", {"x": "val:Q", "y": "cat:N"}),
+        ("mark_boxen", {"x": "val:Q", "y": "cat:N"}),
+        ("mark_violin", {"x": "val:Q", "y": "cat:N"}),
+        ("mark_swarm", {"x": "val:Q", "y": "cat:N"}),
+    ],
+)
+def test_orient_wins_when_orient_horizontal_and_horizontal_false(
+    grouped_df, mark_fn, encode_kwargs
+):
+    """orient='horizontal' must win over horizontal=False for all four marks.
+
+    This test FAILS on pre-fix swarm because mark_swarm used to give
+    horizontal= precedence when it was not None, resolving to 'vertical'
+    instead of 'horizontal'.
+    """
+    chart = getattr(fm.Chart(grouped_df), mark_fn)(orient="horizontal", horizontal=False).encode(
+        **encode_kwargs
+    )
+    effective = _effective_orient_from_kwargs(chart)
+    assert effective == "horizontal", (
+        f"{mark_fn}(orient='horizontal', horizontal=False) must resolve to 'horizontal' "
+        f"(orient wins); got {effective!r}"
+    )

@@ -30,6 +30,27 @@ use arrow::record_batch::RecordBatch;
 
 use super::RenderError;
 
+/// Multiplier to convert a Duration tick in the given `unit` to nanoseconds.
+///
+/// Both `col_as_f64` and `min_max_f64` normalize Duration values to nanoseconds
+/// so that the two functions always agree numerically (T0-closeout / D-DTYPE-1).
+/// This is the single source of truth for that scale factor; a third divergence
+/// is unrepresentable because both callers delegate here.
+///
+/// Values on live Python paths are pre-cast to `Timestamp(ms)` by
+/// `_coerce.normalize_for_rust` before crossing the CDI boundary, so these arms
+/// are unreachable in production. The helper is retained for internal callers and
+/// will be deleted together with its call sites in T6.2.
+#[inline]
+fn duration_unit_scale(unit: &TimeUnit) -> f64 {
+    match unit {
+        TimeUnit::Nanosecond  => 1.0,
+        TimeUnit::Microsecond => 1_000.0,
+        TimeUnit::Millisecond => 1_000_000.0,
+        TimeUnit::Second      => 1_000_000_000.0,
+    }
+}
+
 /// Category label for a null value in an ordinal/nominal column (FA-9).
 ///
 /// A null row in a categorical column becomes its own distinct category under
@@ -117,18 +138,28 @@ pub(crate) fn col_as_f64(batch: &RecordBatch, field: &str) -> Result<Vec<Option<
         // `_coerce.normalize_for_rust` pre-casts both to Timestamp(ms) before
         // the CDI boundary crossing. They remain for correctness of internal
         // callers and are tracked for removal in T6.2.
-        DataType::Duration(TimeUnit::Nanosecond) => collect_as!(DurationNanosecondArray),
+        //
+        // Duration values are normalized to nanoseconds via `duration_unit_scale`
+        // so this function and `min_max_f64` always agree numerically (T0-closeout).
+        DataType::Duration(TimeUnit::Nanosecond) => {
+            let scale = duration_unit_scale(&TimeUnit::Nanosecond);
+            let a = col.as_any().downcast_ref::<DurationNanosecondArray>().expect("dtype matched");
+            Ok(a.iter().map(|v| v.map(|x| x as f64 * scale)).collect())
+        }
         DataType::Duration(TimeUnit::Microsecond) => {
+            let scale = duration_unit_scale(&TimeUnit::Microsecond);
             let a = col.as_any().downcast_ref::<DurationMicrosecondArray>().expect("dtype matched");
-            Ok(a.iter().map(|v| v.map(|x| x as f64 * 1_000.0)).collect())
+            Ok(a.iter().map(|v| v.map(|x| x as f64 * scale)).collect())
         }
         DataType::Duration(TimeUnit::Millisecond) => {
+            let scale = duration_unit_scale(&TimeUnit::Millisecond);
             let a = col.as_any().downcast_ref::<DurationMillisecondArray>().expect("dtype matched");
-            Ok(a.iter().map(|v| v.map(|x| x as f64 * 1_000_000.0)).collect())
+            Ok(a.iter().map(|v| v.map(|x| x as f64 * scale)).collect())
         }
         DataType::Duration(TimeUnit::Second) => {
+            let scale = duration_unit_scale(&TimeUnit::Second);
             let a = col.as_any().downcast_ref::<DurationSecondArray>().expect("dtype matched");
-            Ok(a.iter().map(|v| v.map(|x| x as f64 * 1_000_000_000.0)).collect())
+            Ok(a.iter().map(|v| v.map(|x| x as f64 * scale)).collect())
         }
         // Date32: days since epoch → epoch-milliseconds (matches JS Date / Altair convention).
         DataType::Date32 => {
@@ -337,10 +368,37 @@ pub(crate) fn min_max_f64(col: &dyn Array) -> Result<(f64, f64), String> {
         // `_coerce.normalize_for_rust` pre-casts them to Timestamp(ms) before
         // crossing the CDI boundary. Covered here so that `min_max_f64` agrees
         // with `col_as_f64` and `supported_numeric_dtype` (D-DTYPE-1 / T6.2).
-        DataType::Duration(TimeUnit::Nanosecond) => min_max_int!(DurationNanosecondArray, i64),
-        DataType::Duration(TimeUnit::Microsecond) => min_max_int!(DurationMicrosecondArray, i64),
-        DataType::Duration(TimeUnit::Millisecond) => min_max_int!(DurationMillisecondArray, i64),
-        DataType::Duration(TimeUnit::Second) => min_max_int!(DurationSecondArray, i64),
+        //
+        // Duration values are normalized to nanoseconds via `duration_unit_scale`
+        // so this function and `col_as_f64` always agree numerically (T0-closeout).
+        DataType::Duration(TimeUnit::Nanosecond) => {
+            let scale = duration_unit_scale(&TimeUnit::Nanosecond);
+            let a = col.as_any().downcast_ref::<DurationNanosecondArray>().expect("dtype matched");
+            let min = a.iter().flatten().fold(i64::MAX, i64::min) as f64 * scale;
+            let max = a.iter().flatten().fold(i64::MIN, i64::max) as f64 * scale;
+            Ok((min, max))
+        }
+        DataType::Duration(TimeUnit::Microsecond) => {
+            let scale = duration_unit_scale(&TimeUnit::Microsecond);
+            let a = col.as_any().downcast_ref::<DurationMicrosecondArray>().expect("dtype matched");
+            let min = a.iter().flatten().fold(i64::MAX, i64::min) as f64 * scale;
+            let max = a.iter().flatten().fold(i64::MIN, i64::max) as f64 * scale;
+            Ok((min, max))
+        }
+        DataType::Duration(TimeUnit::Millisecond) => {
+            let scale = duration_unit_scale(&TimeUnit::Millisecond);
+            let a = col.as_any().downcast_ref::<DurationMillisecondArray>().expect("dtype matched");
+            let min = a.iter().flatten().fold(i64::MAX, i64::min) as f64 * scale;
+            let max = a.iter().flatten().fold(i64::MIN, i64::max) as f64 * scale;
+            Ok((min, max))
+        }
+        DataType::Duration(TimeUnit::Second) => {
+            let scale = duration_unit_scale(&TimeUnit::Second);
+            let a = col.as_any().downcast_ref::<DurationSecondArray>().expect("dtype matched");
+            let min = a.iter().flatten().fold(i64::MAX, i64::min) as f64 * scale;
+            let max = a.iter().flatten().fold(i64::MIN, i64::max) as f64 * scale;
+            Ok((min, max))
+        }
         DataType::Date32 => {
             let a = col.as_any().downcast_ref::<Date32Array>().expect("Date32");
             let min = a.iter().flatten().fold(i32::MAX, i32::min) as f64 * 86_400_000.0;
@@ -943,11 +1001,18 @@ mod tests {
 
     /// RSUP-02 regression: `supported_numeric_dtype`, `is_numeric`, `col_as_f64`,
     /// and `min_max_f64` must all agree — each returning true/Ok — for every
-    /// dtype in the covered set.
+    /// dtype in the covered set, AND must agree NUMERICALLY (same f64 scale).
     ///
     /// On the old code this test would fail for `Date32`, `Date64`, and all four
     /// `Duration` variants because `is_numeric` returned `false` and `min_max_f64`
     /// returned `Err` for those dtypes, even though `col_as_f64` could read them.
+    ///
+    /// After T0-closeout the test additionally fails on the old code for
+    /// `Duration(Microsecond)`, `Duration(Millisecond)`, and `Duration(Second)`
+    /// because `min_max_f64` used raw i64 ticks while `col_as_f64` normalized to
+    /// nanoseconds — e.g. Duration(ms) value=1 gave min_max → 1.0 but col_as_f64
+    /// → 1_000_000.0 (off by 1e6). The numeric equality assertions below catch
+    /// this: min_max_f64 min/max must equal the min/max of col_as_f64's output.
     #[test]
     fn supported_numeric_dtype_is_numeric_col_as_f64_min_max_agree() {
         let dtypes = [
@@ -967,6 +1032,7 @@ mod tests {
             DataType::Timestamp(TimeUnit::Second, None),
             // The next four are the latent-bug cases (RSUP-02): old code returned
             // false / Err for these while col_as_f64 could read them.
+            // T0-closeout additionally requires numeric agreement (nanosecond scale).
             DataType::Duration(TimeUnit::Nanosecond),
             DataType::Duration(TimeUnit::Microsecond),
             DataType::Duration(TimeUnit::Millisecond),
@@ -989,19 +1055,35 @@ mod tests {
             );
 
             // 2. col_as_f64 must succeed.
-            let f64_result = col_as_f64(&batch, "v");
-            assert!(
-                f64_result.is_ok(),
-                "col_as_f64 returned Err for {dtype:?}: {:?}",
-                f64_result.err()
-            );
+            let f64_vals = col_as_f64(&batch, "v").unwrap_or_else(|e| {
+                panic!("col_as_f64 returned Err for {dtype:?}: {e:?}")
+            });
 
-            // 3. min_max_f64 must succeed and its Ok signals agreement with the predicate.
-            let mm_result = min_max_f64(batch.column(0).as_ref());
-            assert!(
-                mm_result.is_ok(),
-                "min_max_f64 returned Err for {dtype:?}: {:?}",
-                mm_result.err()
+            // 3. min_max_f64 must succeed.
+            let (mm_min, mm_max) = min_max_f64(batch.column(0).as_ref()).unwrap_or_else(|e| {
+                panic!("min_max_f64 returned Err for {dtype:?}: {e}")
+            });
+
+            // 4. NUMERIC AGREEMENT: min_max_f64 values must match the min/max of
+            //    col_as_f64's output. This is the key invariant — both must produce
+            //    the same f64 scale (e.g. nanoseconds for Duration). On the old code
+            //    this assertion fails for Duration(µs/ms/s) because min_max_f64 used
+            //    raw ticks while col_as_f64 normalized to nanoseconds.
+            let non_null_vals: Vec<f64> = f64_vals.into_iter().flatten().collect();
+            let expected_min = non_null_vals.iter().cloned()
+                .fold(f64::INFINITY, f64::min);
+            let expected_max = non_null_vals.iter().cloned()
+                .fold(f64::NEG_INFINITY, f64::max);
+
+            assert_eq!(
+                mm_min, expected_min,
+                "min_max_f64 min disagrees with col_as_f64 min for {dtype:?}: \
+                 min_max_f64={mm_min} vs col_as_f64_min={expected_min}"
+            );
+            assert_eq!(
+                mm_max, expected_max,
+                "min_max_f64 max disagrees with col_as_f64 max for {dtype:?}: \
+                 min_max_f64={mm_max} vs col_as_f64_max={expected_max}"
             );
         }
 

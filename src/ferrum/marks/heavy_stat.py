@@ -347,8 +347,8 @@ def desugar_violin(
     # For horizontal violin y=cat, x=violin_y (value grid points on x-axis).
     # violin_x (the mirrored KDE density offset) is handled by the position
     # offset column emitted by the Rust Violin transform (__pos_x_offset__ for
-    # vertical; __pos_y_offset__ for horizontal — the latter requires the
-    # pending Rust change in crates/ferrum-core/src/transform/violin.rs).
+    # vertical; __pos_y_offset__ for horizontal — both are implemented; the
+    # Violin transform emits __pos_y_offset__ from panel height).
     if horizontal:
         body_encoding: dict = {"y": cat_enc, "x": X("violin_y", title=val_field)}
     else:

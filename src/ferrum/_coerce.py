@@ -85,11 +85,17 @@ def _normalize_column(col: "pyarrow.Array", pa: object, pc: object) -> "tuple[py
 
 
 def normalize_for_rust(tbl: "pyarrow.Table") -> "pyarrow.Table":
-    """Apply all CDI-boundary dtype casts required by the Rust renderer.
+    """Apply CDI-boundary dtype casts required by the Rust renderer.
 
-    This is the **single source of truth** for which Arrow dtypes may cross
-    the Python→Rust boundary and in what canonical form.  Both the SVG render
-    path and the interactive render path must call this function after
+    This is the pre-Rust boundary normalizer that **owns** the
+    ``Duration``→``timestamp[ms]``, ``Dictionary``-decode, and
+    ``Null``→``float64`` rules, and **re-asserts** the date/timestamp
+    canonicalization that ``to_arrow_table`` also applies at ingest (so a
+    caller passing a raw pyarrow table directly is still safe).  Note that
+    ``to_arrow_table``'s polars and pyarrow branches already cast
+    ``date32``/``date64``→``timestamp[ms]`` and non-ms timestamps at ingest,
+    making those casts here idempotent for the common path.  Both the SVG
+    render path and the interactive render path must call this function after
     ``to_arrow_table`` and before handing data to any ``ferrum._core``
     binding.
 

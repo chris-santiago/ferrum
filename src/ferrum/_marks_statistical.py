@@ -915,7 +915,7 @@ class StatisticalMarksMixin:
         self,
         *,
         size=4,
-        orient="vertical",
+        orient=None,
         horizontal=None,
         spacing=1.0,
         side="both",
@@ -934,13 +934,14 @@ class StatisticalMarksMixin:
         ----------
         size : float, optional
             Point diameter in pixels.  Default is ``4``.
-        orient : {"vertical", "horizontal"}, default "vertical"
-            Canonical orientation control.  ``"vertical"`` spreads points
-            along x; ``"horizontal"`` spreads along y.
+        orient : {"vertical", "horizontal"} or None, optional
+            Canonical orientation control.  ``"vertical"`` (default) spreads
+            points along x; ``"horizontal"`` spreads along y.  When both
+            ``orient`` and ``horizontal`` are given, ``orient`` wins.
         horizontal : bool or None, optional
             Legacy alias for ``orient``.  ``True`` is equivalent to
-            ``orient="horizontal"``.  When both ``orient`` and ``horizontal``
-            are given, ``horizontal`` wins when ``horizontal is not None``.
+            ``orient="horizontal"``.  Ignored when ``orient`` is also given;
+            prefer ``orient`` in new code.
         spacing : float, optional
             Minimum spacing between point centres as a fraction of ``size``.
             Default is ``1.0``.
@@ -969,12 +970,12 @@ class StatisticalMarksMixin:
         """
         from ferrum.marks.heavy_stat import desugar_swarm
 
-        # Normalize: horizontal= is a legacy alias for orient=; when both are
-        # given, horizontal= wins (it is explicit).
-        if horizontal is not None:
-            effective_orient = "horizontal" if horizontal else "vertical"
-        else:
-            effective_orient = orient
+        # Normalize: orient= is canonical; horizontal= is a legacy alias.
+        # When orient is not None it wins unconditionally (consistent with
+        # boxplot/boxen/violin which call _normalize_orient).  When orient is
+        # None, fall back to horizontal (or default to "vertical").
+        effective_horizontal = _normalize_orient(orient, horizontal or False)
+        effective_orient = "horizontal" if effective_horizontal else "vertical"
 
         return self._set_composite_mark(
             "swarm",
