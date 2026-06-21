@@ -12,7 +12,7 @@ import logging
 import warnings
 from typing import TYPE_CHECKING, Any
 
-from ferrum._coerce import to_arrow_table
+from ferrum._coerce import normalize_for_rust, to_arrow_table
 from ferrum.encoding.base import ChannelBase
 
 if TYPE_CHECKING:
@@ -22,40 +22,15 @@ _logger = logging.getLogger(__name__)
 
 
 def _sanitize_for_rust(tbl: "pyarrow.Table") -> "pyarrow.Table":
-    """Decode or cast any Arrow column types that the Rust CDI boundary rejects.
+    """Compatibility shim — delegates to ``ferrum._coerce.normalize_for_rust``.
 
-    This is a render-boundary concern, not a coerce concern — ``to_arrow_table``
-    preserves the caller's data as-is so its contract is predictable.  The Rust
-    renderer currently rejects two special types:
-
-    - ``Dictionary`` (categorical / dictionary-encoded) — decode to the plain
-      value type via ``pyarrow.compute.dictionary_decode()``.
-    - ``Null`` (all-None column with unknown type) — cast to ``float64`` so Rust
-      can represent it as a numeric column of NaNs.
+    .. deprecated::
+        Import ``normalize_for_rust`` from ``ferrum._coerce`` directly.
+        This shim exists only so that existing tests that imported
+        ``_sanitize_for_rust`` from ``ferrum._render`` continue to work
+        without modification.
     """
-    import pyarrow as pa
-    import pyarrow.compute as pc
-
-    new_cols: list = []
-    needs_rebuild = False
-    for i in range(len(tbl.schema)):
-        col = tbl.column(i)
-        field_type = tbl.schema.field(i).type
-        if pa.types.is_dictionary(field_type):
-            col = pc.dictionary_decode(col)
-            # After decoding, the underlying type may be date32/date64 which
-            # Rust also rejects — cast to timestamp[ms] (same as _coerce.py).
-            decoded_type = col.type
-            if pa.types.is_date32(decoded_type) or pa.types.is_date64(decoded_type):
-                col = col.cast(pa.timestamp("ms"))
-            needs_rebuild = True
-        elif pa.types.is_null(field_type):
-            col = col.cast(pa.float64())
-            needs_rebuild = True
-        new_cols.append(col)
-    if not needs_rebuild:
-        return tbl
-    return pa.table(new_cols, names=[tbl.schema.field(i).name for i in range(len(tbl.schema))])
+    return normalize_for_rust(tbl)
 
 
 def _collect_label_maps(chart: Any) -> dict[str, dict[str, str]]:
@@ -592,7 +567,7 @@ class _RenderMixin:
         # reaches Rust so the scale domain uses the display labels.
         label_maps = _collect_label_maps(chart)
         raw_data = _apply_label_maps(chart._data, label_maps) if label_maps else chart._data
-        data = _sanitize_for_rust(to_arrow_table(raw_data))
+        data = normalize_for_rust(to_arrow_table(raw_data))
         from ferrum import config as _config
 
         viewport = (

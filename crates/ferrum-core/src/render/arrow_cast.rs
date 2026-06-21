@@ -39,20 +39,45 @@ use super::RenderError;
 /// lookup matches the domain entry.
 pub(crate) const NULL_CATEGORY: &str = "null";
 
-/// True for Arrow dtypes that should route as continuous/quantitative when
-/// inferring an encoding type from data alone.
+/// Authoritative predicate: true iff `dtype` is in the set that
+/// `col_as_f64` can read and `min_max_f64` can range over.
 ///
-/// Used by `scale_resolve::build_color_scale` to validate that a column
-/// marked quantitative or temporal is actually a numeric dtype, replacing
-/// the pre-F16 narrow `Float64|UInt64` check.
-pub(crate) fn is_numeric(dtype: &DataType) -> bool {
+/// This is the single source of truth for "can this dtype be treated as a
+/// continuous/quantitative value?".  `is_numeric`, `col_as_f64`, and
+/// `min_max_f64` all branch from this predicate so they can never claim
+/// different coverage (RSUP-02 / D-DTYPE-1).
+///
+/// Covered set: Float64/32, Int64/32/16/8, UInt64/32/16/8,
+/// Timestamp(any unit), Duration(any unit), Date32, Date64.
+///
+/// Note: on live Python paths Date32/Date64/Duration never arrive — they
+/// are pre-cast to Timestamp(ms) by `_coerce.normalize_for_rust` before
+/// crossing the CDI boundary. The predicate covers them so that internal
+/// callers and future code paths are consistent with `col_as_f64`.
+pub(crate) fn supported_numeric_dtype(dtype: &DataType) -> bool {
     matches!(
         dtype,
         DataType::Float64 | DataType::Float32
             | DataType::Int64 | DataType::Int32 | DataType::Int16 | DataType::Int8
             | DataType::UInt64 | DataType::UInt32 | DataType::UInt16 | DataType::UInt8
             | DataType::Timestamp(_, _)
+            | DataType::Duration(_)
+            | DataType::Date32
+            | DataType::Date64
     )
+}
+
+/// True for Arrow dtypes that should route as continuous/quantitative when
+/// inferring an encoding type from data alone.
+///
+/// Used by `scale_resolve::build_color_scale` to validate that a column
+/// marked quantitative or temporal is actually a numeric dtype, replacing
+/// the pre-F16 narrow `Float64|UInt64` check.
+///
+/// Delegates to [`supported_numeric_dtype`] so the coverage is always in
+/// sync with `col_as_f64` and `min_max_f64` (D-DTYPE-1).
+pub(crate) fn is_numeric(dtype: &DataType) -> bool {
+    supported_numeric_dtype(dtype)
 }
 
 /// Read any supported numeric Arrow column as `Vec<Option<f64>>`, preserving
@@ -88,8 +113,10 @@ pub(crate) fn col_as_f64(batch: &RecordBatch, field: &str) -> Result<Vec<Option<
         DataType::Timestamp(TimeUnit::Microsecond, _) => collect_as!(TimestampMicrosecondArray),
         DataType::Timestamp(TimeUnit::Millisecond, _) => collect_as!(TimestampMillisecondArray),
         DataType::Timestamp(TimeUnit::Second, _) => collect_as!(TimestampSecondArray),
-        // Duration types: normalize to nanoseconds so the scale layer can treat them
-        // uniformly with Timestamp columns (both become f64 ns-since-zero).
+        // Duration and Date arms below are unreachable on live Python paths:
+        // `_coerce.normalize_for_rust` pre-casts both to Timestamp(ms) before
+        // the CDI boundary crossing. They remain for correctness of internal
+        // callers and are tracked for removal in T6.2.
         DataType::Duration(TimeUnit::Nanosecond) => collect_as!(DurationNanosecondArray),
         DataType::Duration(TimeUnit::Microsecond) => {
             let a = col.as_any().downcast_ref::<DurationMicrosecondArray>().expect("dtype matched");
@@ -306,6 +333,26 @@ pub(crate) fn min_max_f64(col: &dyn Array) -> Result<(f64, f64), String> {
         DataType::Timestamp(TimeUnit::Microsecond, _) => min_max_int!(TimestampMicrosecondArray, i64),
         DataType::Timestamp(TimeUnit::Millisecond, _) => min_max_int!(TimestampMillisecondArray, i64),
         DataType::Timestamp(TimeUnit::Second, _) => min_max_int!(TimestampSecondArray, i64),
+        // Duration and Date arms: unreachable on live Python paths because
+        // `_coerce.normalize_for_rust` pre-casts them to Timestamp(ms) before
+        // crossing the CDI boundary. Covered here so that `min_max_f64` agrees
+        // with `col_as_f64` and `supported_numeric_dtype` (D-DTYPE-1 / T6.2).
+        DataType::Duration(TimeUnit::Nanosecond) => min_max_int!(DurationNanosecondArray, i64),
+        DataType::Duration(TimeUnit::Microsecond) => min_max_int!(DurationMicrosecondArray, i64),
+        DataType::Duration(TimeUnit::Millisecond) => min_max_int!(DurationMillisecondArray, i64),
+        DataType::Duration(TimeUnit::Second) => min_max_int!(DurationSecondArray, i64),
+        DataType::Date32 => {
+            let a = col.as_any().downcast_ref::<Date32Array>().expect("Date32");
+            let min = a.iter().flatten().fold(i32::MAX, i32::min) as f64 * 86_400_000.0;
+            let max = a.iter().flatten().fold(i32::MIN, i32::max) as f64 * 86_400_000.0;
+            Ok((min, max))
+        }
+        DataType::Date64 => {
+            let a = col.as_any().downcast_ref::<Date64Array>().expect("Date64");
+            let min = a.iter().flatten().fold(i64::MAX, i64::min) as f64;
+            let max = a.iter().flatten().fold(i64::MIN, i64::max) as f64;
+            Ok((min, max))
+        }
         other => Err(format!("unsupported column dtype: {other:?}")),
     }
 }
@@ -419,6 +466,7 @@ mod tests {
         DurationMillisecondArray, DurationMicrosecondArray,
         DurationNanosecondArray, DurationSecondArray,
         Float64Array, Int32Array, Int8Array, StringArray, UInt8Array, UInt32Array,
+        TimestampMillisecondArray,
     };
     use arrow::datatypes::{Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
@@ -831,5 +879,136 @@ mod tests {
         ).unwrap();
         let out = col_as_ordinal_category_str(&b, "x").unwrap();
         assert_eq!(out, vec![Some("5".into()), Some("10".into()), None]);
+    }
+
+    // ── RSUP-02 regression: supported_numeric_dtype / is_numeric / col_as_f64 /
+    //    min_max_f64 must agree on every dtype in the supported set ─────────────
+    //
+    // This test would FAIL on the old code because `is_numeric` and `min_max_f64`
+    // omitted Date32/Date64/Duration — returning false/Err for dtypes that
+    // `col_as_f64` could read successfully.  After D-DTYPE-1 all three branch
+    // from `supported_numeric_dtype` and must agree for every dtype below.
+
+    /// Helper: build a one-element RecordBatch with a single column of the given
+    /// dtype containing a plausible non-null value, ready for agreement checks.
+    fn one_elem_batch_for_dtype(dtype: &DataType) -> RecordBatch {
+        use std::sync::Arc as A;
+        let field = Field::new("v", dtype.clone(), true);
+        let schema = Arc::new(Schema::new(vec![field]));
+        let col: Arc<dyn Array> = match dtype {
+            DataType::Float64 => A::new(Float64Array::from(vec![Some(1.0f64)])),
+            DataType::Float32 => A::new(arrow::array::Float32Array::from(vec![Some(1.0f32)])),
+            DataType::Int64 => A::new(arrow::array::Int64Array::from(vec![Some(1i64)])),
+            DataType::Int32 => A::new(Int32Array::from(vec![Some(1i32)])),
+            DataType::Int16 => A::new(arrow::array::Int16Array::from(vec![Some(1i16)])),
+            DataType::Int8 => A::new(Int8Array::from(vec![Some(1i8)])),
+            DataType::UInt64 => A::new(arrow::array::UInt64Array::from(vec![Some(1u64)])),
+            DataType::UInt32 => A::new(UInt32Array::from(vec![Some(1u32)])),
+            DataType::UInt16 => A::new(arrow::array::UInt16Array::from(vec![Some(1u16)])),
+            DataType::UInt8 => A::new(UInt8Array::from(vec![Some(1u8)])),
+            DataType::Timestamp(TimeUnit::Millisecond, tz) => {
+                A::new(TimestampMillisecondArray::from(vec![Some(1i64)])
+                    .with_timezone_opt(tz.clone()))
+            }
+            DataType::Timestamp(TimeUnit::Microsecond, tz) => {
+                A::new(arrow::array::TimestampMicrosecondArray::from(vec![Some(1i64)])
+                    .with_timezone_opt(tz.clone()))
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond, tz) => {
+                A::new(TimestampNanosecondArray::from(vec![Some(1i64)])
+                    .with_timezone_opt(tz.clone()))
+            }
+            DataType::Timestamp(TimeUnit::Second, tz) => {
+                A::new(TimestampSecondArray::from(vec![Some(1i64)])
+                    .with_timezone_opt(tz.clone()))
+            }
+            DataType::Duration(TimeUnit::Nanosecond) => {
+                A::new(DurationNanosecondArray::from(vec![Some(1i64)]))
+            }
+            DataType::Duration(TimeUnit::Microsecond) => {
+                A::new(DurationMicrosecondArray::from(vec![Some(1i64)]))
+            }
+            DataType::Duration(TimeUnit::Millisecond) => {
+                A::new(DurationMillisecondArray::from(vec![Some(1i64)]))
+            }
+            DataType::Duration(TimeUnit::Second) => {
+                A::new(DurationSecondArray::from(vec![Some(1i64)]))
+            }
+            DataType::Date32 => A::new(Date32Array::from(vec![Some(1i32)])),
+            DataType::Date64 => A::new(Date64Array::from(vec![Some(1i64)])),
+            other => panic!("one_elem_batch_for_dtype: unhandled dtype {other:?}"),
+        };
+        RecordBatch::try_new(schema, vec![col]).unwrap()
+    }
+
+    /// RSUP-02 regression: `supported_numeric_dtype`, `is_numeric`, `col_as_f64`,
+    /// and `min_max_f64` must all agree — each returning true/Ok — for every
+    /// dtype in the covered set.
+    ///
+    /// On the old code this test would fail for `Date32`, `Date64`, and all four
+    /// `Duration` variants because `is_numeric` returned `false` and `min_max_f64`
+    /// returned `Err` for those dtypes, even though `col_as_f64` could read them.
+    #[test]
+    fn supported_numeric_dtype_is_numeric_col_as_f64_min_max_agree() {
+        let dtypes = [
+            DataType::Float64,
+            DataType::Float32,
+            DataType::Int64,
+            DataType::Int32,
+            DataType::Int16,
+            DataType::Int8,
+            DataType::UInt64,
+            DataType::UInt32,
+            DataType::UInt16,
+            DataType::UInt8,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            DataType::Timestamp(TimeUnit::Second, None),
+            // The next four are the latent-bug cases (RSUP-02): old code returned
+            // false / Err for these while col_as_f64 could read them.
+            DataType::Duration(TimeUnit::Nanosecond),
+            DataType::Duration(TimeUnit::Microsecond),
+            DataType::Duration(TimeUnit::Millisecond),
+            DataType::Duration(TimeUnit::Second),
+            DataType::Date32,
+            DataType::Date64,
+        ];
+
+        for dtype in &dtypes {
+            let batch = one_elem_batch_for_dtype(dtype);
+
+            // 1. supported_numeric_dtype and is_numeric must agree and both be true.
+            assert!(
+                supported_numeric_dtype(dtype),
+                "supported_numeric_dtype returned false for {dtype:?}"
+            );
+            assert!(
+                is_numeric(dtype),
+                "is_numeric returned false for {dtype:?} (disagreement with supported_numeric_dtype)"
+            );
+
+            // 2. col_as_f64 must succeed.
+            let f64_result = col_as_f64(&batch, "v");
+            assert!(
+                f64_result.is_ok(),
+                "col_as_f64 returned Err for {dtype:?}: {:?}",
+                f64_result.err()
+            );
+
+            // 3. min_max_f64 must succeed and its Ok signals agreement with the predicate.
+            let mm_result = min_max_f64(batch.column(0).as_ref());
+            assert!(
+                mm_result.is_ok(),
+                "min_max_f64 returned Err for {dtype:?}: {:?}",
+                mm_result.err()
+            );
+        }
+
+        // Sanity: non-numeric dtypes return false from both predicates.
+        assert!(!supported_numeric_dtype(&DataType::Utf8));
+        assert!(!supported_numeric_dtype(&DataType::Boolean));
+        assert!(!is_numeric(&DataType::Utf8));
+        assert!(!is_numeric(&DataType::Boolean));
     }
 }

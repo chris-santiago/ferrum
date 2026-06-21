@@ -311,9 +311,20 @@ def test_pandas_unnamed_series():
 
 
 # ── K6: Polars Duration cast ──────────────────────────────────────────────────
+# Duration columns are NOT pre-cast by to_arrow_table; polars.to_arrow()
+# produces Arrow duration[unit] which normalize_for_rust converts to timestamp[ms].
 
 
 def test_polars_duration_cast():
+    """Polars Duration passes through to_arrow_table as Arrow duration[ns].
+
+    The actual timestamp[ms] normalization happens in normalize_for_rust,
+    which is tested by test_duration_frontend_agreement and
+    test_dict_over_duration_normalizes_to_timestamp_ms in this file.
+    This test just verifies that to_arrow_table no longer casts Duration → Int64.
+    """
+    from ferrum._coerce import normalize_for_rust
+
     df = pl.DataFrame(
         {
             "dur": pl.Series([1_000_000, 2_000_000, 3_000_000], dtype=pl.Duration("ns")),
@@ -321,7 +332,12 @@ def test_polars_duration_cast():
         }
     )
     tbl = to_arrow_table(df)
-    assert pa.types.is_int64(tbl.schema.field("dur").type)
+    # to_arrow_table leaves Duration as Arrow duration[ns]; normalize_for_rust
+    # then converts it to timestamp[ms].
+    assert pa.types.is_duration(tbl.schema.field("dur").type)
+    normalized = normalize_for_rust(tbl)
+    assert pa.types.is_timestamp(normalized.schema.field("dur").type)
+    assert normalized.schema.field("dur").type.unit == "ms"
 
 
 def test_polars_duration_renders():
@@ -368,3 +384,179 @@ def test_pyarrow_non_date_table_passthrough():
     tbl = pa.table({"x": [1, 2, 3], "y": [4.0, 5.0, 6.0]})
     result = to_arrow_table(tbl)
     assert result is tbl
+
+
+# ── SEAM-01 regression: Duration frontend agreement ───────────────────────────
+
+
+def test_duration_frontend_agreement():
+    """Regression test for SEAM-01 (T0.2): polars and pyarrow Duration columns
+    must produce the same Arrow dtype and the same axis-scale values after
+    normalize_for_rust.
+
+    Old behavior (broken):
+    - polars Duration("ns") was cast to Int64 (raw nanosecond integer) by
+      to_arrow_table before crossing the boundary.
+    - pyarrow duration[us] was left as Arrow Duration and hit different Rust
+      arms (different unit math).
+    - Same logical "1 second" duration appeared at different x positions on
+      the axis depending on which frontend provided the data.
+
+    New behavior (fixed):
+    - Both frontends produce Arrow duration[unit] out of to_arrow_table.
+    - normalize_for_rust converts all duration[unit] → timestamp[ms] uniformly.
+    - A 1-second duration from polars and a 1-second duration from pyarrow
+      produce the same timestamp[ms] value: 1970-01-01T00:00:01.
+    """
+    from datetime import datetime
+
+    from ferrum._coerce import normalize_for_rust
+
+    # 1 second expressed in different units on each frontend.
+    ONE_SECOND_NS = 1_000_000_000  # nanoseconds
+    ONE_SECOND_US = 1_000_000  # microseconds
+
+    # Polars path: Duration("ns") -> to_arrow_table -> normalize_for_rust
+    df_polars = pl.DataFrame(
+        {"dur": pl.Series([ONE_SECOND_NS], dtype=pl.Duration("ns")), "y": [1.0]}
+    )
+    normalized_polars = normalize_for_rust(to_arrow_table(df_polars))
+
+    # PyArrow path: duration[us] -> to_arrow_table -> normalize_for_rust
+    tbl_pyarrow = pa.table({"dur": pa.array([ONE_SECOND_US], type=pa.duration("us")), "y": [1.0]})
+    normalized_pyarrow = normalize_for_rust(to_arrow_table(tbl_pyarrow))
+
+    # Both must produce timestamp[ms] — not int64 (old polars behavior) or
+    # duration (old pyarrow behavior).
+    polars_dtype = normalized_polars.schema.field("dur").type
+    pyarrow_dtype = normalized_pyarrow.schema.field("dur").type
+    assert pa.types.is_timestamp(polars_dtype), (
+        f"SEAM-01 regression: polars Duration should normalize to timestamp, got {polars_dtype}"
+    )
+    assert pa.types.is_timestamp(pyarrow_dtype), (
+        f"SEAM-01 regression: pyarrow duration should normalize to timestamp, got {pyarrow_dtype}"
+    )
+    assert polars_dtype == pyarrow_dtype, (
+        f"SEAM-01 regression: frontend dtypes diverge after normalize_for_rust: "
+        f"polars={polars_dtype}, pyarrow={pyarrow_dtype}"
+    )
+    assert polars_dtype.unit == "ms", f"Expected timestamp[ms], got {polars_dtype}"
+
+    # The axis-scale value (timestamp value) must be the same from both frontends.
+    val_polars = normalized_polars.column("dur").to_pylist()[0]
+    val_pyarrow = normalized_pyarrow.column("dur").to_pylist()[0]
+    assert val_polars == val_pyarrow, (
+        f"SEAM-01 regression: polars and pyarrow Duration values diverge: "
+        f"polars={val_polars!r}, pyarrow={val_pyarrow!r}"
+    )
+    # 1 second from epoch (1970-01-01T00:00:01)
+    assert val_polars == datetime(1970, 1, 1, 0, 0, 1), (
+        f"Expected 1970-01-01T00:00:01, got {val_polars!r}"
+    )
+
+
+# ── Fix round 1 regression: dictionary-encoded Duration and timestamp[us] ────
+#
+# The original normalize_for_rust had two drifted paths: the top-level loop
+# applied all normalizations (date, timestamp, duration, null), but the
+# is_dictionary branch only re-checked for date32/date64 after decode.
+# A dict-over-duration column was decoded to duration[ns] and left untouched,
+# crashing with "unsupported dtype: Duration(Nanosecond)" when the table
+# crossed the Rust boundary.  A dict-over-timestamp[us] stayed non-ms.
+#
+# Both bugs are fixed by extracting _normalize_column and calling it from both
+# the dict branch and the non-dict branch.
+
+
+def test_dict_over_duration_normalizes_to_timestamp_ms():
+    """dictionary-encoded Duration column must normalize to timestamp[ms].
+
+    Old behavior (broken): pc.dictionary_decode produced duration[ns], which the
+    old is_dictionary branch left untouched (it only re-checked date32/date64).
+    The column then crossed the Rust boundary as duration[ns] and raised:
+      ValueError: column 'dur' has unsupported dtype: Duration(Nanosecond)
+
+    New behavior: the decoded column passes through _normalize_column, which
+    converts duration[any unit] → timestamp[ms] identically to the non-dict path.
+    """
+    from datetime import datetime
+
+    from ferrum._coerce import normalize_for_rust
+
+    ONE_SECOND_NS = 1_000_000_000
+
+    # Build a dictionary-encoded duration[ns] column.
+    indices = pa.array([0, 1, 0], type=pa.int8())
+    values = pa.array([ONE_SECOND_NS, 2 * ONE_SECOND_NS], type=pa.duration("ns"))
+    dict_col = pa.DictionaryArray.from_arrays(indices, values)
+    tbl = pa.table({"dur": dict_col, "y": [1.0, 2.0, 3.0]})
+
+    # This must not raise (old code raised ValueError).
+    result = normalize_for_rust(tbl)
+
+    dur_type = result.schema.field("dur").type
+    assert pa.types.is_timestamp(dur_type), (
+        f"dict-over-duration should normalize to timestamp[ms], got {dur_type}"
+    )
+    assert dur_type.unit == "ms", f"Expected timestamp[ms], got {dur_type}"
+
+    # Check values: 1s → datetime(1970,1,1,0,0,1), 2s → datetime(1970,1,1,0,0,2).
+    vals = result.column("dur").to_pylist()
+    assert vals[0] == datetime(1970, 1, 1, 0, 0, 1), (
+        f"Expected 1970-01-01T00:00:01, got {vals[0]!r}"
+    )
+    assert vals[1] == datetime(1970, 1, 1, 0, 0, 2), (
+        f"Expected 1970-01-01T00:00:02, got {vals[1]!r}"
+    )
+    assert vals[2] == datetime(1970, 1, 1, 0, 0, 1), (
+        f"Expected 1970-01-01T00:00:01, got {vals[2]!r}"
+    )
+
+
+def test_dict_over_duration_chart_renders():
+    """End-to-end: dictionary-encoded Duration column must produce valid SVG."""
+    import ferrum as fm
+
+    ONE_SECOND_NS = 1_000_000_000
+    indices = pa.array([0, 1, 0], type=pa.int8())
+    values = pa.array([ONE_SECOND_NS, 2 * ONE_SECOND_NS], type=pa.duration("ns"))
+    dict_col = pa.DictionaryArray.from_arrays(indices, values)
+    tbl = pa.table({"dur": dict_col, "y": [1.0, 2.0, 3.0]})
+
+    svg = fm.Chart(tbl).mark_point().encode(x="dur", y="y").to_svg()
+    assert "<svg" in svg
+
+
+def test_dict_over_timestamp_us_normalizes_to_timestamp_ms():
+    """dictionary-encoded timestamp[us] column must normalize to timestamp[ms].
+
+    Old behavior (broken): the is_dictionary branch only re-checked date32/date64.
+    A dict-over-timestamp[us] was decoded to timestamp[us] and left at that unit,
+    causing wrong axis scaling (us vs ms).
+
+    New behavior: the decoded column passes through _normalize_column, which
+    casts timestamp[us] → timestamp[ms].
+    """
+    from datetime import datetime
+
+    from ferrum._coerce import normalize_for_rust
+
+    # One microsecond = 1us tick; 1,000,000 us = 1 second.
+    ONE_SECOND_US = 1_000_000
+
+    indices = pa.array([0, 1], type=pa.int8())
+    values = pa.array([0, ONE_SECOND_US], type=pa.timestamp("us"))
+    dict_col = pa.DictionaryArray.from_arrays(indices, values)
+    tbl = pa.table({"ts": dict_col, "y": [1.0, 2.0]})
+
+    result = normalize_for_rust(tbl)
+
+    ts_type = result.schema.field("ts").type
+    assert pa.types.is_timestamp(ts_type), (
+        f"dict-over-timestamp[us] should normalize to timestamp, got {ts_type}"
+    )
+    assert ts_type.unit == "ms", f"Expected timestamp[ms], got {ts_type}"
+
+    vals = result.column("ts").to_pylist()
+    assert vals[0] == datetime(1970, 1, 1, 0, 0, 0), f"Expected epoch, got {vals[0]!r}"
+    assert vals[1] == datetime(1970, 1, 1, 0, 0, 1), f"Expected 1s from epoch, got {vals[1]!r}"
