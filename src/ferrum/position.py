@@ -1,6 +1,8 @@
 """Position-adjustment value classes: Identity, Dodge, Jitter, Stack."""
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -55,6 +57,7 @@ _VALID_STACK_ANCHORS = {"top", "mid"}
 # ---- Value classes -----------------------------------------------------------
 
 
+@dataclass(frozen=True)
 class Identity:
     """Explicit no-op position adjustment.
 
@@ -71,25 +74,12 @@ class Identity:
     >>> fm.Chart(df).encode(x="grp", y="val").mark_bar(position=fm.Identity())
     """
 
-    __slots__ = ()
-
     def to_spec_dict(self) -> dict:
         """Return the spec dict ``{"type": "identity"}``."""
         return {"type": "identity"}
 
-    def __repr__(self) -> str:
-        """Return ``Identity()``."""
-        return "Identity()"
 
-    def __eq__(self, other) -> bool:
-        """Return True if *other* is also an ``Identity`` instance."""
-        return isinstance(other, Identity)
-
-    def __hash__(self) -> int:
-        """Return a stable hash for use in sets and dict keys."""
-        return hash("Identity")
-
-
+@dataclass(frozen=True)
 class Dodge:
     """Side-by-side placement of marks grouped by a channel.
 
@@ -119,13 +109,12 @@ class Dodge:
     ... )
     """
 
-    __slots__ = ("by", "padding")
+    by: Optional[str] = None
+    padding: float = 0.05
 
-    def __init__(self, by: Optional[str] = None, *, padding: float = 0.05) -> None:
-        if not (0.0 <= padding < 1.0):
-            raise ValueError(f"Dodge: padding must be in [0, 1); got {padding}")
-        object.__setattr__(self, "by", by)
-        object.__setattr__(self, "padding", padding)
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.padding < 1.0):
+            raise ValueError(f"Dodge: padding must be in [0, 1); got {self.padding}")
 
     def to_spec_dict(self) -> dict:
         """Return the serialized spec dict for this position adjustment."""
@@ -134,23 +123,8 @@ class Dodge:
             d["by"] = self.by
         return d
 
-    def __setattr__(self, name, value):
-        """Raise AttributeError — Dodge is immutable."""
-        raise AttributeError(f"Dodge is immutable; cannot set {name!r}")
 
-    def __repr__(self) -> str:
-        """Return a constructor-style string representation."""
-        return f"Dodge(by={self.by!r}, padding={self.padding})"
-
-    def __eq__(self, other) -> bool:
-        """Return True if *other* is a ``Dodge`` with identical fields."""
-        return isinstance(other, Dodge) and self.by == other.by and self.padding == other.padding
-
-    def __hash__(self) -> int:
-        """Return a stable hash for use in sets and dict keys."""
-        return hash(("Dodge", self.by, self.padding))
-
-
+@dataclass(frozen=True)
 class Jitter:
     """Random per-row noise applied to x, y, or both axes.
 
@@ -186,22 +160,15 @@ class Jitter:
     ... )
     """
 
-    __slots__ = ("axis", "width", "seed")
+    axis: str = "x"
+    width: float = 0.4
+    seed: Optional[int] = None
 
-    def __init__(
-        self,
-        axis: str = "x",
-        *,
-        width: float = 0.4,
-        seed: Optional[int] = None,
-    ) -> None:
-        if axis not in _VALID_JITTER_AXES:
-            raise ValueError(f"Jitter: axis must be 'x'|'y'|'both'; got '{axis}'")
-        if width <= 0.0:
-            raise ValueError(f"Jitter: width must be > 0; got {width}")
-        object.__setattr__(self, "axis", axis)
-        object.__setattr__(self, "width", width)
-        object.__setattr__(self, "seed", seed)
+    def __post_init__(self) -> None:
+        if self.axis not in _VALID_JITTER_AXES:
+            raise ValueError(f"Jitter: axis must be 'x'|'y'|'both'; got '{self.axis}'")
+        if self.width <= 0.0:
+            raise ValueError(f"Jitter: width must be > 0; got {self.width}")
 
     def to_spec_dict(self) -> dict:
         """Return the serialized spec dict for this position adjustment."""
@@ -210,28 +177,8 @@ class Jitter:
             d["seed"] = self.seed
         return d
 
-    def __setattr__(self, name, value):
-        """Raise AttributeError — Jitter is immutable."""
-        raise AttributeError(f"Jitter is immutable; cannot set {name!r}")
 
-    def __repr__(self) -> str:
-        """Return a constructor-style string representation."""
-        return f"Jitter(axis={self.axis!r}, width={self.width}, seed={self.seed})"
-
-    def __eq__(self, other) -> bool:
-        """Return True if *other* is a ``Jitter`` with identical fields."""
-        return (
-            isinstance(other, Jitter)
-            and self.axis == other.axis
-            and self.width == other.width
-            and self.seed == other.seed
-        )
-
-    def __hash__(self) -> int:
-        """Return a stable hash for use in sets and dict keys."""
-        return hash(("Jitter", self.axis, self.width, self.seed))
-
-
+@dataclass(frozen=True)
 class Stack:
     """Vertical accumulation of marks grouped by a channel.
 
@@ -276,22 +223,17 @@ class Stack:
     ... )
     """
 
-    __slots__ = ("by", "offset", "anchor")
+    by: Optional[str] = None
+    offset: str = "zero"
+    anchor: str = "top"
 
-    def __init__(
-        self,
-        by: Optional[str] = None,
-        *,
-        offset: str = "zero",
-        anchor: str = "top",
-    ) -> None:
-        if offset not in _VALID_STACK_OFFSETS:
-            raise ValueError(f"Stack: offset must be 'zero'|'normalize'|'center'; got '{offset}'")
-        if anchor not in _VALID_STACK_ANCHORS:
-            raise ValueError(f"Stack: anchor must be 'top'|'mid'; got '{anchor}'")
-        object.__setattr__(self, "by", by)
-        object.__setattr__(self, "offset", offset)
-        object.__setattr__(self, "anchor", anchor)
+    def __post_init__(self) -> None:
+        if self.offset not in _VALID_STACK_OFFSETS:
+            raise ValueError(
+                f"Stack: offset must be 'zero'|'normalize'|'center'; got '{self.offset}'"
+            )
+        if self.anchor not in _VALID_STACK_ANCHORS:
+            raise ValueError(f"Stack: anchor must be 'top'|'mid'; got '{self.anchor}'")
 
     def to_spec_dict(self) -> dict:
         """Return the serialized spec dict for this position adjustment."""
@@ -299,27 +241,6 @@ class Stack:
         if self.by is not None:
             d["by"] = self.by
         return d
-
-    def __setattr__(self, name, value):
-        """Raise AttributeError — Stack is immutable."""
-        raise AttributeError(f"Stack is immutable; cannot set {name!r}")
-
-    def __repr__(self) -> str:
-        """Return a constructor-style string representation."""
-        return f"Stack(by={self.by!r}, offset={self.offset!r}, anchor={self.anchor!r})"
-
-    def __eq__(self, other) -> bool:
-        """Return True if *other* is a ``Stack`` with identical fields."""
-        return (
-            isinstance(other, Stack)
-            and self.by == other.by
-            and self.offset == other.offset
-            and self.anchor == other.anchor
-        )
-
-    def __hash__(self) -> int:
-        """Return a stable hash for use in sets and dict keys."""
-        return hash(("Stack", self.by, self.offset, self.anchor))
 
 
 # ---- Eligibility validator ---------------------------------------------------

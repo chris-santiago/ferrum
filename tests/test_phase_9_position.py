@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 
 import polars as pl
@@ -325,3 +326,50 @@ class TestEligibilityMatrix:
         else:
             with pytest.raises(TypeError, match=position_class):
                 method(position=pos)
+
+
+# ---------------------------------------------------------------------------
+# CHART-03 — value-class contract (frozen, eq/hash-correct after dataclass
+#            conversion of Identity / Dodge / Jitter / Stack)
+# ---------------------------------------------------------------------------
+
+_CHART03_INSTANCES = [
+    pytest.param(Identity(), Identity(), Dodge(), id="Identity"),
+    pytest.param(Dodge(by="g", padding=0.1), Dodge(by="g", padding=0.1), Dodge(by="h"), id="Dodge"),
+    pytest.param(Jitter(axis="y", width=0.3, seed=7), Jitter(axis="y", width=0.3, seed=7), Jitter(axis="x"), id="Jitter"),
+    pytest.param(Stack(by="cat", offset="normalize", anchor="mid"), Stack(by="cat", offset="normalize", anchor="mid"), Stack(by="other"), id="Stack"),
+]
+
+
+@pytest.mark.parametrize("inst_a,inst_b,inst_other", _CHART03_INSTANCES)
+def test_position_value_class_contract(inst_a, inst_b, inst_other):
+    """Regression: CHART-03 — value classes must remain frozen, eq/hash-correct value
+    objects after the @dataclass(frozen=True) conversion.
+
+    Two instances with identical field values must compare equal, share the same
+    hash, and collapse to one entry in a set.  An instance with a different field
+    value must be unequal and occupy a distinct set entry.  Attribute assignment must
+    raise AttributeError (FrozenInstanceError is a subclass, so this is
+    implementation-agnostic).  copy.copy must preserve equality and hashability.
+    """
+    # Equal instances: equality and hash parity.
+    assert inst_a == inst_b
+    assert hash(inst_a) == hash(inst_b)
+
+    # Equal instances collapse to one entry in a set.
+    assert len({inst_a, inst_b}) == 1
+
+    # An instance with different field values is not equal.
+    assert inst_a != inst_other
+
+    # The different instance is a distinct set entry.
+    assert len({inst_a, inst_other}) == 2
+
+    # Attribute assignment raises (frozen contract).
+    with pytest.raises(AttributeError):
+        setattr(inst_a, "_hack", 1)
+
+    # copy.copy preserves equality and hashability.
+    copied = copy.copy(inst_a)
+    assert copied == inst_a
+    assert hash(copied) == hash(inst_a)
