@@ -92,6 +92,87 @@ pub(crate) fn polar_channel_resolver<'a>(
     }
 }
 
+/// Partition row indices into color/detail groups for group-mark builders
+/// (area, line, ribbon).
+///
+/// The partitioning algorithm is shared verbatim across all three builders;
+/// only the *color-values loading* differs (area uses
+/// `col_as_ordinal_category_str`, line uses `col_as_str`, ribbon uses
+/// `col_as_str`) and stays in each caller. This helper receives the already-
+/// loaded optional value slices and applies the common 4-way split:
+///
+/// - Color only (scale present): one group per distinct color key; each group
+///   retains its key for downstream color resolution.
+/// - Detail only: one group per distinct detail value; the key is stripped to
+///   `None` so callers fall through to their theme-default color.
+/// - Both color and detail: one group per (color, detail) pair; the color key
+///   is retained (detail subdivides each color group without its own legend).
+/// - Neither: a single group over all row indices `0..n_rows`.
+///
+/// # Arguments
+/// - `color_values`: optional per-row color strings (loaded by the caller).
+/// - `detail_values`: optional per-row detail strings (loaded by the caller).
+/// - `has_color_scale`: whether a resolved color scale is present; gates the
+///   color-only branch (matches `&ctx.scales.color` being `Some(_)`).
+/// - `n_rows`: total row count, used for the fallback all-rows group.
+///
+/// # Returns
+/// `Vec<(Option<String>, Vec<usize>)>` — one entry per group. The `Option<String>`
+/// is the color legend key for that group (`None` in the detail-only and
+/// fallback cases).
+pub(crate) fn build_color_detail_groups(
+    color_values: Option<&Vec<Option<String>>>,
+    detail_values: Option<&Vec<Option<String>>>,
+    has_color_scale: bool,
+    n_rows: usize,
+) -> Vec<(Option<String>, Vec<usize>)> {
+    match (color_values, detail_values, has_color_scale) {
+        // Color only: one group per color category; key retained for legend.
+        (Some(cv), None, true) => {
+            let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+            for (i, v) in cv.iter().enumerate() {
+                let key = v.clone();
+                match groups.iter().position(|(k, _)| k == &key) {
+                    Some(p) => groups[p].1.push(i),
+                    None => groups.push((key, vec![i])),
+                }
+            }
+            groups
+        }
+        // Detail only: one group per detail value; key stripped so fill falls
+        // to the mark-style default (no per-group color from the legend).
+        (None, Some(dv), _) => {
+            let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+            for (i, v) in dv.iter().enumerate() {
+                let key = v.clone();
+                match groups.iter().position(|(k, _)| k == &key) {
+                    Some(p) => groups[p].1.push(i),
+                    None => groups.push((key, vec![i])),
+                }
+            }
+            groups.into_iter().map(|(_, rows)| (None, rows)).collect()
+        }
+        // Both color and detail: one group per (color, detail) pair.
+        (Some(cv), Some(dv), _) => {
+            let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
+            for i in 0..n_rows {
+                let composite = (cv[i].clone(), dv[i].clone());
+                match groups.iter().position(|(_, rows)| {
+                    rows.first()
+                        .map(|&r| (cv[r].clone(), dv[r].clone()) == composite)
+                        .unwrap_or(false)
+                }) {
+                    Some(p) => groups[p].1.push(i),
+                    None => groups.push((cv[i].clone(), vec![i])),
+                }
+            }
+            groups
+        }
+        // No color, no detail (or color present but no scale): single group.
+        _ => vec![(None, (0..n_rows).collect())],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +374,75 @@ mod tests {
         let (cat, num) = run_loader(&spec, &batch, &scales);
         assert_eq!(cat, Some(vec![Some("a".into()), Some("b".into()), Some("c".into())]));
         assert!(num.is_none(), "scale-less branch must not load the numeric column");
+    }
+
+    // ── build_color_detail_groups (FA-13) ────────────────────────────────────
+
+    fn sv(s: &str) -> Option<String> { Some(s.to_string()) }
+
+    /// FA-13 guard: color-only with a scale present partitions by color key and
+    /// retains the key for downstream legend-based color resolution.
+    #[test]
+    fn groups_color_only_with_scale_partitions_by_color() {
+        let cv: Vec<Option<String>> = vec![sv("A"), sv("B"), sv("A"), sv("B")];
+        let groups = super::build_color_detail_groups(Some(&cv), None, true, 4);
+        assert_eq!(groups.len(), 2, "two color keys → two groups");
+        assert_eq!(groups[0].0, sv("A"));
+        assert_eq!(groups[0].1, vec![0, 2]);
+        assert_eq!(groups[1].0, sv("B"));
+        assert_eq!(groups[1].1, vec![1, 3]);
+    }
+
+    /// FA-13 guard: color present but no scale → falls through to single group
+    /// (the `_` fallback arm; mirrors what area/line do without a color legend).
+    #[test]
+    fn groups_color_only_without_scale_is_single_group() {
+        let cv: Vec<Option<String>> = vec![sv("A"), sv("B"), sv("A")];
+        let groups = super::build_color_detail_groups(Some(&cv), None, false, 3);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, None);
+        assert_eq!(groups[0].1, vec![0, 1, 2]);
+    }
+
+    /// FA-13 guard: detail-only partitions by detail value and strips the key
+    /// to None so callers use their theme-default color (no legend).
+    #[test]
+    fn groups_detail_only_strips_key_to_none() {
+        let dv: Vec<Option<String>> = vec![sv("s0"), sv("s1"), sv("s0"), sv("s1")];
+        let groups = super::build_color_detail_groups(None, Some(&dv), false, 4);
+        assert_eq!(groups.len(), 2, "two detail values → two groups");
+        // Keys are stripped to None in both groups.
+        assert!(groups.iter().all(|(k, _)| k.is_none()), "detail-only keys must all be None");
+        // Row assignment still correct.
+        let rows0: Vec<usize> = groups[0].1.clone();
+        let rows1: Vec<usize> = groups[1].1.clone();
+        assert_eq!(rows0, vec![0, 2]);
+        assert_eq!(rows1, vec![1, 3]);
+    }
+
+    /// FA-13 guard: color + detail partitions by the (color, detail) composite
+    /// pair and retains the color key (not the detail key).
+    #[test]
+    fn groups_color_and_detail_partitions_by_pair() {
+        // 4 rows: (A,x), (A,y), (B,x), (B,y)
+        let cv: Vec<Option<String>> = vec![sv("A"), sv("A"), sv("B"), sv("B")];
+        let dv: Vec<Option<String>> = vec![sv("x"), sv("y"), sv("x"), sv("y")];
+        let groups = super::build_color_detail_groups(Some(&cv), Some(&dv), true, 4);
+        assert_eq!(groups.len(), 4, "4 distinct (color, detail) pairs → 4 groups");
+        // Color key is retained; each group has exactly one row.
+        assert_eq!(groups[0], (sv("A"), vec![0]));
+        assert_eq!(groups[1], (sv("A"), vec![1]));
+        assert_eq!(groups[2], (sv("B"), vec![2]));
+        assert_eq!(groups[3], (sv("B"), vec![3]));
+    }
+
+    /// FA-13 guard: no color, no detail → single group over all rows (the ribbon
+    /// no-color case).
+    #[test]
+    fn groups_no_color_no_detail_is_single_group() {
+        let groups = super::build_color_detail_groups(None, None, false, 5);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, None);
+        assert_eq!(groups[0].1, vec![0, 1, 2, 3, 4]);
     }
 }

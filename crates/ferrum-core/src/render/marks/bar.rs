@@ -274,16 +274,7 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 }
 
 fn empty_result() -> crate::render::draw::MarkBuildResult {
-    use crate::render::draw::MarkBuildResult;
-    use ferrum_scene::MarkBatchKind;
-    MarkBuildResult {
-        kind: MarkBatchKind::Bar,
-        nodes: vec![],
-        data_indices: Some(vec![]),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
-    }
+    crate::render::draw::MarkBuildResult::empty(ferrum_scene::MarkBatchKind::Bar)
 }
 
 fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {

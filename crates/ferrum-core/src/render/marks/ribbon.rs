@@ -20,6 +20,7 @@
 
 use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::channels::build_color_detail_groups;
 use crate::render::scale_resolve::ScaleKind;
 
 fn resolve_x_pixels(ctx: &DrawCtx, xf: &str, n: usize) -> Option<(Vec<Option<f64>>, bool)> {
@@ -62,14 +63,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
     use ferrum_scene::{MarkBatchKind, PathCmd};
 
-    let empty = || MarkBuildResult {
-        kind: MarkBatchKind::Ribbon,
-        nodes: vec![],
-        data_indices: Some(vec![]),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
-    };
+    let empty = || MarkBuildResult::empty(MarkBatchKind::Ribbon);
 
     let spec = ctx.spec;
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
@@ -97,22 +91,15 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let n = n.min(x_pixels.len());
 
     let cf = color_field(ctx, spec);
+    // Ribbon only uses color (no detail channel); the helper's detail=None path
+    // resolves to the color-only or fallback arm as appropriate.
     let color_values = cf.and_then(|f| col_as_str(ctx.batch, f).ok());
-    let groups: Vec<(Option<String>, Vec<usize>)> = match (color_values.as_ref(), &ctx.scales.color) {
-        (Some(values), Some(_)) => {
-            let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
-            for (i, v) in values.iter().take(n).enumerate() {
-                let key = v.clone();
-                let pos = groups.iter().position(|(k, _)| k == &key);
-                match pos {
-                    Some(p) => groups[p].1.push(i),
-                    None => groups.push((key, vec![i])),
-                }
-            }
-            groups
-        }
-        _ => vec![(None, (0..n).collect())],
-    };
+    let groups = build_color_detail_groups(
+        color_values.as_ref(),
+        None,
+        ctx.scales.color.is_some(),
+        n,
+    );
 
     // Phase 9c — per-row pixel offsets (Stack/Dodge ordinal).
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);

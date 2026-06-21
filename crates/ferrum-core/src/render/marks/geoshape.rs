@@ -10,12 +10,13 @@
 //! - `LineString` / `MultiLineString` → `SceneNode::Polyline` (no fill).
 //! - `GeometryCollection` → recursively handled.
 
-use ferrum_scene::{FillStroke, MarkBatchKind, SceneNode};
+use ferrum_scene::{MarkBatchKind, SceneNode};
 use geojson::{Geometry, Value as GeoValue};
 
 use crate::render::arrow_cast::col_as_str;
 use crate::render::color::with_opacity;
-use crate::render::draw::{to_scene_color, to_scene_stroke, DrawCtx, MarkBuildResult, MetadataColumns};
+use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke, DrawCtx, MarkBuildResult, MetadataColumns};
+use crate::render::mark_nodes::MarkNodes;
 use crate::spec::coord::CoordKind as SpecCoord;
 
 const GEOMETRY_COL: &str = "__geometry__";
@@ -134,16 +135,13 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
 
     // ── Style setup ───────────────────────────────────────────────────
 
-    let fill_style = FillStroke {
-        fill: Some(to_scene_color(fill)),
-        stroke: stroke.map(to_scene_color),
-        stroke_width: ctx.mark_style.stroke_width,
-        opacity: ctx.mark_style.opacity,
-        stroke_dash: None,
-        stroke_opacity: 1.0,
-        fill_opacity: 1.0,
-        angle: 0.0,
-    };
+    let fill_style = to_scene_fill_stroke(
+        Some(fill),
+        stroke,
+        ctx.mark_style.stroke_width,
+        ctx.mark_style.opacity,
+        None,
+    );
 
     // Stroke color for lines: prefer explicit stroke, fall back to fill.
     let stroke_color = stroke.unwrap_or(fill);
@@ -158,8 +156,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
 
     // ── Pass 2: emit scene nodes ──────────────────────────────────────
 
-    let mut nodes: Vec<SceneNode> = Vec::new();
-    let mut data_indices: Vec<usize> = Vec::new();
+    let mut acc = MarkNodes::new();
 
     for row in rows {
         for poly_rings in row.polygons {
@@ -170,14 +167,12 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
                 .map(|r| r.iter().map(|&c| to_pixel(c)).collect())
                 .collect();
             if pixel_rings.is_empty() { continue; }
-            nodes.push(SceneNode::Polygon { rings: pixel_rings, style: fill_style.clone() });
-            data_indices.push(row.row_idx);
+            acc.push(SceneNode::Polygon { rings: pixel_rings, style: fill_style.clone() }, row.row_idx);
         }
 
         for pt in row.points {
             let [cx, cy] = to_pixel(pt);
-            nodes.push(SceneNode::Circle { cx, cy, r: POINT_RADIUS, style: fill_style.clone() });
-            data_indices.push(row.row_idx);
+            acc.push(SceneNode::Circle { cx, cy, r: POINT_RADIUS, style: fill_style.clone() }, row.row_idx);
         }
 
         for line in row.lines {
@@ -186,11 +181,11 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
                 let [x, y] = to_pixel(c);
                 (x, y)
             }).collect();
-            nodes.push(SceneNode::Polyline { points: pixel_pts, style: stroke_style.clone() });
-            data_indices.push(row.row_idx);
+            acc.push(SceneNode::Polyline { points: pixel_pts, style: stroke_style.clone() }, row.row_idx);
         }
     }
 
+    let (nodes, data_indices) = acc.finalize();
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 

@@ -435,6 +435,16 @@ pub fn to_scene_color(c: Color) -> ferrum_scene::Color {
     ferrum_scene::Color { r: c.red, g: c.green, b: c.blue, a: c.alpha }
 }
 
+/// Build a [`FillStroke`](ferrum_scene::FillStroke) with `fill_opacity`,
+/// `stroke_opacity`, and `angle` left at their neutral defaults (`1.0`, `1.0`,
+/// `0.0`).
+///
+/// This is the common case for marks that do not bind those channels (legend
+/// swatches, axis fills, strip backgrounds, area/line group styles). Marks that
+/// *do* resolve per-row `fill_opacity`/`stroke_opacity`/`angle` should call
+/// [`to_scene_fill_stroke_full`] instead of patching the returned struct
+/// afterward — that variant takes all eight fields so the caller receives a
+/// finished `FillStroke` in one call.
 pub fn to_scene_fill_stroke(
     fill: Option<Color>,
     stroke: Option<Color>,
@@ -442,15 +452,36 @@ pub fn to_scene_fill_stroke(
     opacity: f64,
     stroke_dash: Option<&[f64]>,
 ) -> ferrum_scene::FillStroke {
+    to_scene_fill_stroke_full(fill, stroke, stroke_width, opacity, stroke_dash, 1.0, 1.0, 0.0)
+}
+
+/// Build a complete [`FillStroke`](ferrum_scene::FillStroke), including the
+/// `fill_opacity` / `stroke_opacity` / `angle` channels.
+///
+/// [`to_scene_fill_stroke`] is the convenience wrapper that defaults the last
+/// three fields to their neutral values. Marks that resolve those channels
+/// per-row (point, rect, area, line) call this directly so they no longer build
+/// a partial `FillStroke` and patch the three fields by hand at the call site.
+#[allow(clippy::too_many_arguments)]
+pub fn to_scene_fill_stroke_full(
+    fill: Option<Color>,
+    stroke: Option<Color>,
+    stroke_width: f64,
+    opacity: f64,
+    stroke_dash: Option<&[f64]>,
+    fill_opacity: f64,
+    stroke_opacity: f64,
+    angle: f64,
+) -> ferrum_scene::FillStroke {
     ferrum_scene::FillStroke {
         fill: fill.map(to_scene_color),
         stroke: stroke.map(to_scene_color),
         stroke_width,
         opacity,
         stroke_dash: stroke_dash.map(|d| d.to_vec()),
-        stroke_opacity: 1.0,
-        fill_opacity: 1.0,
-        angle: 0.0,
+        stroke_opacity,
+        fill_opacity,
+        angle,
     }
 }
 
@@ -528,6 +559,34 @@ pub(crate) fn resolve_fill_color(
             None => fallback,
         },
         None => fallback,
+    }
+}
+
+/// Resolve the effective per-row stroke color for a *filled* mark
+/// (bar/rect/point), honoring the "visible stroke-width needs a stroke color"
+/// rule (RMARK-04).
+///
+/// SVG only emits `stroke-width` when a stroke color is present. So when a
+/// per-row `stroke_width` channel produces a positive width but the mark has no
+/// explicit stroke color, fall back to the fill color so the width is actually
+/// visible. The gate is intentionally narrow — it triggers only when a
+/// `stroke_width` *column* is bound (`stroke_width_col_present`) — so a constant
+/// `stroke_width` with no stroke color stays strokeless, exactly as before.
+///
+/// Byte-identical to the inline `if row_stroke_width > 0.0 && base_stroke
+/// .is_none() && stroke_width_values.is_some() { Some(fill) } else { base_stroke }`
+/// blocks that bar/rect/point each carried.
+#[inline]
+pub(crate) fn resolve_effective_stroke(
+    row_stroke_width: f64,
+    base_stroke: Option<Color>,
+    fill: Color,
+    stroke_width_col_present: bool,
+) -> Option<Color> {
+    if row_stroke_width > 0.0 && base_stroke.is_none() && stroke_width_col_present {
+        Some(fill)
+    } else {
+        base_stroke
     }
 }
 

@@ -15,14 +15,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{to_scene_text_style, MarkBuildResult, MetadataColumns};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
-    let empty = || MarkBuildResult {
-        kind: MarkBatchKind::Text,
-        nodes: vec![],
-        data_indices: Some(vec![]),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
-    };
+    let empty = || MarkBuildResult::empty(MarkBatchKind::Text);
 
     let spec = ctx.spec;
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {

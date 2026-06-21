@@ -3,10 +3,10 @@
 //! Phase 8a: honors per-row size/shape/opacity from ctx.scales when populated.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, resolve_fill_color, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
-use crate::render::scale_resolve::{ColorScale, ScaleKind, ShapeKind};
+use crate::render::marks::opacity::{resolve_scaled_opacity, OpacityFallback, OpacityResolver};
+use crate::render::scale_resolve::{ScaleKind, ShapeKind};
 
 /// Parse a shape name string to a `ShapeKind`.
 ///
@@ -61,7 +61,7 @@ pub(crate) fn emit_shape_nodes(
     style: ShapeStyle,
 ) -> Vec<ferrum_scene::SceneNode> {
     let ShapeStyle { fill, stroke, stroke_width, opacity, stroke_opacity, fill_opacity, stroke_dash_idx, angle } = style;
-    use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke};
+    use crate::render::draw::{to_scene_fill_stroke_full, to_scene_stroke};
     use ferrum_scene::{PathCmd, SceneNode};
 
     let dash_vec: Option<Vec<f64>> = stroke_dash_idx.and_then(resolve_stroke_dash);
@@ -69,18 +69,16 @@ pub(crate) fn emit_shape_nodes(
 
     match kind {
         ShapeKind::Circle => {
-            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
-            style.stroke_opacity = stroke_opacity;
-            style.fill_opacity = fill_opacity;
-            style.angle = angle;
+            let style = to_scene_fill_stroke_full(
+                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity, angle,
+            );
             vec![SceneNode::Circle { cx, cy, r, style }]
         }
         ShapeKind::Square => {
             let s = r * 1.6;
-            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
-            style.stroke_opacity = stroke_opacity;
-            style.fill_opacity = fill_opacity;
-            style.angle = angle;
+            let style = to_scene_fill_stroke_full(
+                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity, angle,
+            );
             vec![SceneNode::Rect {
                 x: cx - s / 2.0,
                 y: cy - s / 2.0,
@@ -118,10 +116,9 @@ pub(crate) fn emit_shape_nodes(
         }
         ShapeKind::Diamond => {
             let d = r * 1.4;
-            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
-            style.stroke_opacity = stroke_opacity;
-            style.fill_opacity = fill_opacity;
-            style.angle = angle;
+            let style = to_scene_fill_stroke_full(
+                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity, angle,
+            );
             vec![SceneNode::Path {
                 commands: vec![
                     PathCmd::MoveTo { x: cx, y: cy - d },
@@ -136,10 +133,9 @@ pub(crate) fn emit_shape_nodes(
         }
         ShapeKind::TriangleUp => {
             let h = r * 1.4;
-            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
-            style.stroke_opacity = stroke_opacity;
-            style.fill_opacity = fill_opacity;
-            style.angle = angle;
+            let style = to_scene_fill_stroke_full(
+                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity, angle,
+            );
             vec![SceneNode::Path {
                 commands: vec![
                     PathCmd::MoveTo { x: cx, y: cy - h },
@@ -153,10 +149,9 @@ pub(crate) fn emit_shape_nodes(
         }
         ShapeKind::TriangleDown => {
             let h = r * 1.4;
-            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
-            style.stroke_opacity = stroke_opacity;
-            style.fill_opacity = fill_opacity;
-            style.angle = angle;
+            let style = to_scene_fill_stroke_full(
+                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity, angle,
+            );
             vec![SceneNode::Path {
                 commands: vec![
                     PathCmd::MoveTo { x: cx, y: cy + h },
@@ -206,25 +201,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let spec = ctx.spec;
     let xf = match x_field(ctx, spec) {
         Some(f) => f,
-        None => return MarkBuildResult {
-            kind: MarkBatchKind::Point,
-            nodes: vec![],
-            data_indices: Some(vec![]),
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-        },
+        None => return MarkBuildResult::empty(MarkBatchKind::Point),
     };
     let yf = match y_field(ctx, spec) {
         Some(f) => f,
-        None => return MarkBuildResult {
-            kind: MarkBatchKind::Point,
-            nodes: vec![],
-            data_indices: Some(vec![]),
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-        },
+        None => return MarkBuildResult::empty(MarkBatchKind::Point),
     };
 
     let xs_f64 = col_as_f64(ctx.batch, xf).ok();
@@ -243,14 +224,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .or_else(|| ys_str.as_ref().map(|v| v.len()))
         .unwrap_or(0);
     if n == 0 || n != n_y {
-        return MarkBuildResult {
-            kind: MarkBatchKind::Point,
-            nodes: vec![],
-            data_indices: Some(vec![]),
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-        };
+        return MarkBuildResult::empty(MarkBatchKind::Point);
     }
 
     // Color encoding (shared loader, C9 — byte-identical to the prior inline
@@ -348,32 +322,17 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let cx = cx + x_offsets[i];
         let cy = cy + y_offsets[i];
 
-        // Resolve color.
-        let fill_base = match (&ctx.scales.color, &color_values_f64, &color_values_str) {
-            (Some(scale @ ColorScale::Continuous { .. }), Some(values), _) => {
-                match values[i] {
-                    Some(v) if v.is_finite() => scale.lookup_f64(v).unwrap_or(ctx.mark_style.fill),
-                    _ => ctx.mark_style.fill,
-                }
-            }
-            (Some(scale @ ColorScale::Categorical { .. }), _, Some(values)) => {
-                match values[i].as_deref() {
-                    Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-                    None => ctx.mark_style.fill,
-                }
-            }
-            _ => ctx.mark_style.fill,
-        };
+        // Resolve color via the shared per-row fill resolver (RMARK-03).
+        let fill_base = resolve_fill_color(
+            ctx.scales.color.as_ref(),
+            color_values_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
+            color_values_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
+            ctx.mark_style.fill,
+        );
 
-        // Resolve per-row opacity.
-        let row_opacity = if let (Some(values), Some(scale)) = (&opacity_values, &ctx.scales.opacity) {
-            match values[i].and_then(|v| scale.inner.to_pixel_f64(v)) {
-                Some(op) => op,
-                None => ctx.mark_style.opacity,
-            }
-        } else {
-            ctx.mark_style.opacity
-        };
+        // Resolve per-row opacity (through scale if present).
+        let row_opacity =
+            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.opacity);
 
         let fill = with_opacity(fill_base, row_opacity);
 

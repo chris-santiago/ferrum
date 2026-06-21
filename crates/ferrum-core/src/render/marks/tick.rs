@@ -15,6 +15,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{MarkBuildResult, to_scene_stroke, MetadataColumns};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
+    let empty = || MarkBuildResult::empty(MarkBatchKind::Tick);
+
     let spec = ctx.spec;
     let panel = ctx.panel.plot_area;
 
@@ -54,10 +56,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             if matches!(&ctx.scales.y, ScaleKind::Ordinal(_)) {
                 let ys = match col_as_positional_category_str(ctx.batch, yf) {
                     Ok(v) => v,
-                    Err(_) => return MarkBuildResult {
-                        kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-                        tooltips: None, hrefs: None, descriptions: None,
-                    },
+                    Err(_) => return empty(),
                 };
                 let n_cats = {
                     let mut set = std::collections::HashSet::<&str>::new();
@@ -92,10 +91,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let tick_len = ctx.theme.sizes.tick_size * 2.0;
             let ys = match col_as_f64(ctx.batch, yf) {
                 Ok(v) => v,
-                Err(_) => return MarkBuildResult {
-                    kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-                    tooltips: None, hrefs: None, descriptions: None,
-                },
+                Err(_) => return empty(),
             };
             let baseline_x = panel.x;
             let mut acc = MarkNodes::with_capacity(ys.len());
@@ -118,10 +114,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             };
         }
         // No x and no y: return empty.
-        return MarkBuildResult {
-            kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-            tooltips: None, hrefs: None, descriptions: None,
-        };
+        return empty();
     }
 
     let xf = xf_opt.expect("invariant: xf_opt is Some — None case returned above");
@@ -129,14 +122,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Ordinal x + quantitative y → horizontal tick at data y position.
     if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) {
         if let Some(yf) = y_field(ctx, spec) {
-            let xs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return MarkBuildResult {
-                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-                tooltips: None, hrefs: None, descriptions: None,
-            }};
-            let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return MarkBuildResult {
-                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-                tooltips: None, hrefs: None, descriptions: None,
-            }};
+            let xs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
+            let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
             let n_cats = {
                 let mut set = std::collections::HashSet::<&str>::new();
                 for v in xs.iter().flatten() { set.insert(v.as_str()); }
@@ -175,14 +162,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Ordinal y + quantitative x → vertical tick at data x position (strip plot).
     if matches!(&ctx.scales.y, ScaleKind::Ordinal(_)) {
         if let Some(yf) = y_field(ctx, spec) {
-            let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return MarkBuildResult {
-                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-                tooltips: None, hrefs: None, descriptions: None,
-            }};
-            let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return MarkBuildResult {
-                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-                tooltips: None, hrefs: None, descriptions: None,
-            }};
+            let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
+            let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
             let n_cats = {
                 let mut set = std::collections::HashSet::<&str>::new();
                 for v in ys.iter().flatten() { set.insert(v.as_str()); }
@@ -222,10 +203,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) && y_field(ctx, spec).is_none() {
         let xs = match col_as_positional_category_str(ctx.batch, xf) {
             Ok(v) => v,
-            Err(_) => return MarkBuildResult {
-                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-                tooltips: None, hrefs: None, descriptions: None,
-            },
+            Err(_) => return empty(),
         };
         let n_cats = {
             let mut set = std::collections::HashSet::<&str>::new();
@@ -258,10 +236,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     // Quantitative x → rug-style vertical tick at panel baseline.
     let tick_len = ctx.theme.sizes.tick_size * 2.0;
-    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return MarkBuildResult {
-        kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-        tooltips: None, hrefs: None, descriptions: None,
-    }};
+    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
     let baseline_y = panel.y + panel.h;
     let mut acc = MarkNodes::with_capacity(xs.len());
     for (i, xopt) in xs.iter().enumerate() {

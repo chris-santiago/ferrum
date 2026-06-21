@@ -6,6 +6,8 @@ use crate::render::draw::{
     color_field, resolve_fill_color, to_scene_fill_stroke, DrawCtx, MarkBuildResult,
     MetadataColumns,
 };
+use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::opacity::resolve_scaled_opacity;
 use crate::render::scale_resolve::ColorScale;
 use crate::spec::coord::{CoordKind as SpecCoord, PolarThetaChannel};
 use crate::spec::encoding::DataType as SpecDataType;
@@ -166,8 +168,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     // Collect tooltip column data up front so we can index by row later.
     let meta = MetadataColumns::from_ctx(ctx);
 
-    let mut nodes: Vec<SceneNode> = Vec::with_capacity(values.len());
-    let mut data_indices: Vec<usize> = Vec::with_capacity(values.len());
+    let mut acc = MarkNodes::with_capacity(values.len());
     let mut cum_angle = start_angle;
     let tau = std::f64::consts::TAU;
 
@@ -184,32 +185,19 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         if angle_end <= angle_start { continue; }
 
         // Resolve per-slice fill from color scale, fall back to mark_style.fill.
-        let fill_base = match (&ctx.scales.color, &color_f64, &color_str) {
-            (Some(scale @ ColorScale::Continuous { .. }), Some(vals), _) => {
-                vals.get(i).and_then(|v| *v)
-                    .and_then(|v| if v.is_finite() { scale.lookup_f64(v) } else { None })
-                    .unwrap_or(ctx.mark_style.fill)
-            }
-            (Some(scale @ ColorScale::Categorical { .. }), _, Some(vals)) => {
-                vals.get(i).and_then(|v| v.as_deref())
-                    .and_then(|v| scale.lookup(v))
-                    .unwrap_or(ctx.mark_style.fill)
-            }
-            _ => ctx.mark_style.fill,
-        };
+        let fill_base = resolve_fill_color(
+            ctx.scales.color.as_ref(),
+            color_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
+            color_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
+            ctx.mark_style.fill,
+        );
         // Resolve per-row opacity through scale if present; fall back to mark_style.opacity.
-        let row_opacity = if let (Some(values), Some(scale)) = (&opacity_values, &ctx.scales.opacity) {
-            match values.get(i).copied().flatten().and_then(|v| scale.inner.to_pixel_f64(v)) {
-                Some(op) => op,
-                None => ctx.mark_style.opacity,
-            }
-        } else {
-            ctx.mark_style.opacity
-        };
+        let row_opacity =
+            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.opacity);
         let fill_color = with_opacity(fill_base, row_opacity);
 
         let commands = wedge_path(cx, cy, inner_radius, outer_radius, angle_start, angle_end);
-        nodes.push(SceneNode::Path {
+        acc.push(SceneNode::Path {
             commands,
             style: to_scene_fill_stroke(
                 Some(fill_color),
@@ -219,8 +207,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
                 ctx.mark_style.stroke_dash.as_deref(),
             ),
             closed: true,
-        });
-        data_indices.push(i);
+        }, i);
     }
 
     // Build tooltip/href/description aligned to KEPT nodes only. Some rows are
@@ -228,6 +215,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     // subset of the original batch. `build_metadata_for_indices` gathers
     // exactly the kept rows in node order so node j receives its true source
     // row's metadata.
+    let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
@@ -302,8 +290,7 @@ fn build_nominal_theta(
 
     let meta = MetadataColumns::from_ctx(ctx);
 
-    let mut nodes: Vec<SceneNode> = Vec::with_capacity(angle_strs.len());
-    let mut data_indices: Vec<usize> = Vec::with_capacity(angle_strs.len());
+    let mut acc = MarkNodes::with_capacity(angle_strs.len());
 
     for (i, cat_opt) in angle_strs.iter().enumerate() {
         let cat = match cat_opt { Some(s) => s.as_str(), None => continue };
@@ -324,33 +311,20 @@ fn build_nominal_theta(
             _ => geom.outer_radius,
         };
 
-        let fill_base = match (&ctx.scales.color, &color_f64, &color_str) {
-            (Some(scale @ ColorScale::Continuous { .. }), Some(vals), _) => {
-                vals.get(i).and_then(|v| *v)
-                    .and_then(|v| if v.is_finite() { scale.lookup_f64(v) } else { None })
-                    .unwrap_or(ctx.mark_style.fill)
-            }
-            (Some(scale @ ColorScale::Categorical { .. }), _, Some(vals)) => {
-                vals.get(i).and_then(|v| v.as_deref())
-                    .and_then(|v| scale.lookup(v))
-                    .unwrap_or(ctx.mark_style.fill)
-            }
-            _ => resolve_fill_color(ctx.scales.color.as_ref(), None, None, ctx.mark_style.fill),
-        };
-        let row_opacity = if let (Some(values), Some(scale)) = (&opacity_values, &ctx.scales.opacity) {
-            match values.get(i).copied().flatten().and_then(|v| scale.inner.to_pixel_f64(v)) {
-                Some(op) => op,
-                None => ctx.mark_style.opacity,
-            }
-        } else {
-            ctx.mark_style.opacity
-        };
+        let fill_base = resolve_fill_color(
+            ctx.scales.color.as_ref(),
+            color_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
+            color_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
+            ctx.mark_style.fill,
+        );
+        let row_opacity =
+            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.opacity);
         let fill_color = with_opacity(fill_base, row_opacity);
 
         let commands = wedge_path(
             geom.cx, geom.cy, geom.inner_radius, outer_r, angle_start, angle_end,
         );
-        nodes.push(SceneNode::Path {
+        acc.push(SceneNode::Path {
             commands,
             style: to_scene_fill_stroke(
                 Some(fill_color),
@@ -360,8 +334,7 @@ fn build_nominal_theta(
                 ctx.mark_style.stroke_dash.as_deref(),
             ),
             closed: true,
-        });
-        data_indices.push(i);
+        }, i);
     }
 
     // Metadata must be aligned to the KEPT nodes, not all rows. Some rows are
@@ -369,6 +342,7 @@ fn build_nominal_theta(
     // set is a subset of the original batch. `build_metadata_for_indices`
     // gathers exactly the kept rows in node order so node j receives its true
     // source row's tooltip/href/description (not row j's).
+    let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {
@@ -429,8 +403,7 @@ fn build_annular(
 
     let meta = MetadataColumns::from_ctx(ctx);
 
-    let mut nodes: Vec<SceneNode> = Vec::with_capacity(theta.len());
-    let mut data_indices: Vec<usize> = Vec::with_capacity(theta.len());
+    let mut acc = MarkNodes::with_capacity(theta.len());
 
     for (i, t0_opt) in theta.iter().enumerate() {
         let Some(t0) = t0_opt.filter(|v| v.is_finite()) else { continue };
@@ -459,31 +432,18 @@ fn build_annular(
             _ => geom.outer_radius,
         };
 
-        let fill_base = match (&ctx.scales.color, &color_f64, &color_str) {
-            (Some(scale @ ColorScale::Continuous { .. }), Some(vals), _) => {
-                vals.get(i).and_then(|v| *v)
-                    .and_then(|v| if v.is_finite() { scale.lookup_f64(v) } else { None })
-                    .unwrap_or(ctx.mark_style.fill)
-            }
-            (Some(scale @ ColorScale::Categorical { .. }), _, Some(vals)) => {
-                vals.get(i).and_then(|v| v.as_deref())
-                    .and_then(|v| scale.lookup(v))
-                    .unwrap_or(ctx.mark_style.fill)
-            }
-            _ => ctx.mark_style.fill,
-        };
-        let row_opacity = if let (Some(values), Some(scale)) = (&opacity_values, &ctx.scales.opacity) {
-            match values.get(i).copied().flatten().and_then(|v| scale.inner.to_pixel_f64(v)) {
-                Some(op) => op,
-                None => ctx.mark_style.opacity,
-            }
-        } else {
-            ctx.mark_style.opacity
-        };
+        let fill_base = resolve_fill_color(
+            ctx.scales.color.as_ref(),
+            color_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
+            color_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
+            ctx.mark_style.fill,
+        );
+        let row_opacity =
+            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.opacity);
         let fill_color = with_opacity(fill_base, row_opacity);
 
         let commands = wedge_path(geom.cx, geom.cy, inner_r, outer_r, angle_start, angle_end);
-        nodes.push(SceneNode::Path {
+        acc.push(SceneNode::Path {
             commands,
             style: to_scene_fill_stroke(
                 Some(fill_color),
@@ -493,8 +453,7 @@ fn build_annular(
                 ctx.mark_style.stroke_dash.as_deref(),
             ),
             closed: true,
-        });
-        data_indices.push(i);
+        }, i);
     }
 
     // Metadata must be aligned to the KEPT nodes, not all rows. Some rows are
@@ -502,6 +461,7 @@ fn build_annular(
     // so the kept set is a subset of the original batch. `build_metadata_for_indices`
     // gathers exactly the kept rows in node order so node j receives its true
     // source row's tooltip/href/description (not row j's).
+    let (nodes, data_indices) = acc.finalize();
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
     MarkBuildResult {

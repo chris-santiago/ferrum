@@ -31,6 +31,7 @@ use arrow::array::{BinaryArray, Float64Array, UInt32Array};
 
 use crate::render::color::{ContinuousScheme, NamedContinuous};
 use crate::render::draw::{col_as_f64, col_as_str, DrawCtx, MetadataColumns};
+use crate::render::mark_nodes::MarkNodes;
 use crate::render::rasterize::encode_png;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -98,8 +99,7 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
     let default_w = ctx.mark_style.width.unwrap_or(32.0);
     let default_h = ctx.mark_style.height.unwrap_or(32.0);
 
-    let mut nodes: Vec<SceneNode> = Vec::with_capacity(n);
-    let mut data_indices: Vec<usize> = Vec::with_capacity(n);
+    let mut acc = MarkNodes::with_capacity(n);
 
     for i in 0..n {
         // Skip nulls in required fields.
@@ -143,16 +143,16 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
         let img_x = px - tile_w / 2.0;
         let img_y = py - tile_h / 2.0;
 
-        nodes.push(SceneNode::Image {
+        acc.push(SceneNode::Image {
             x: img_x,
             y: img_y,
             w: tile_w,
             h: tile_h,
             data: ImageData::Url { url: url_val.to_string() },
-        });
-        data_indices.push(i);
+        }, i);
     }
 
+    let (nodes, data_indices) = acc.finalize();
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 

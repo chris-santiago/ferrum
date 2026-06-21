@@ -12,6 +12,7 @@
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::channels::build_color_detail_groups;
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 
 /// Build `Vec<PathCmd>` for the top-edge line using the given interpolation
@@ -73,18 +74,11 @@ fn build_stacked_area_cmds(top: &[(f64, f64)], bottom: &[(f64, f64)], interpolat
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{
-        to_scene_fill_stroke, MarkBuildResult, MetadataColumns,
+        to_scene_fill_stroke, to_scene_fill_stroke_full, MarkBuildResult, MetadataColumns,
     };
     use ferrum_scene::MarkBatchKind;
 
-    let empty = || MarkBuildResult {
-        kind: MarkBatchKind::Area,
-        nodes: vec![],
-        data_indices: Some(vec![]),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
-    };
+    let empty = || MarkBuildResult::empty(MarkBatchKind::Area);
 
     let spec = ctx.spec;
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
@@ -110,55 +104,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
 
     let n_rows = xs.len();
-    let groups: Vec<(Option<String>, Vec<usize>)> = match (
+    let groups = build_color_detail_groups(
         color_values.as_ref(),
         detail_values.as_ref(),
-        &ctx.scales.color,
-    ) {
-        // Color only: one area per color category; color drives the legend.
-        (Some(cv), None, Some(_)) => {
-            let mut g: Vec<(Option<String>, Vec<usize>)> = Vec::new();
-            for (i, v) in cv.iter().enumerate() {
-                let key = v.clone();
-                match g.iter().position(|(k, _)| k == &key) {
-                    Some(p) => g[p].1.push(i),
-                    None => g.push((key, vec![i])),
-                }
-            }
-            g
-        }
-        // Detail only: one area per detail value, no color legend key.
-        (None, Some(dv), _) => {
-            let mut g: Vec<(Option<String>, Vec<usize>)> = Vec::new();
-            for (i, v) in dv.iter().enumerate() {
-                let key = v.clone();
-                match g.iter().position(|(k, _)| k == &key) {
-                    Some(p) => g[p].1.push(i),
-                    None => g.push((key, vec![i])),
-                }
-            }
-            // Strip the key so that the fill-color branch below falls to the
-            // mark-style fill (no per-group color from the legend).
-            g.into_iter().map(|(_, rows)| (None, rows)).collect()
-        }
-        // Both color and detail: one area per (color, detail) pair.
-        (Some(cv), Some(dv), _) => {
-            let mut g: Vec<(Option<String>, Vec<usize>)> = Vec::new();
-            for i in 0..n_rows {
-                let composite = (cv[i].clone(), dv[i].clone());
-                match g.iter().position(|(_, rows)| {
-                    rows.first().map(|&r| (cv[r].clone(), dv[r].clone()) == composite)
-                        .unwrap_or(false)
-                }) {
-                    Some(p) => g[p].1.push(i),
-                    None => g.push((cv[i].clone(), vec![i])),
-                }
-            }
-            g
-        }
-        // No color, no detail: single area.
-        _ => vec![(None, (0..n_rows).collect())],
-    };
+        ctx.scales.color.is_some(),
+        n_rows,
+    );
 
     // Phase 9c — per-row position-adjustment pixel offsets (Stack).
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
@@ -250,14 +201,16 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             (Some(v), Some(scale)) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
             _ => ctx.mark_style.fill,
         };
-        let mut style = to_scene_fill_stroke(
+        let style = to_scene_fill_stroke_full(
             Some(fill),
             ctx.mark_style.stroke,
             ctx.mark_style.stroke_width,
             1.0,
             None,
+            group_fill_opacity,
+            1.0,
+            0.0,
         );
-        style.fill_opacity = group_fill_opacity;
 
         // Collect this group's nodes (fill + optional borders) so they can all
         // be pushed against the same representative row.

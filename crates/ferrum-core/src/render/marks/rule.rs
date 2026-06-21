@@ -88,14 +88,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let meta = MetadataColumns::from_ctx(ctx);
 
-    let empty = || MarkBuildResult {
-        kind: MarkBatchKind::Rule,
-        nodes: vec![],
-        data_indices: Some(vec![]),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
-    };
+    let empty = || MarkBuildResult::empty(MarkBatchKind::Rule);
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let xf_opt = x_field(ctx, spec);

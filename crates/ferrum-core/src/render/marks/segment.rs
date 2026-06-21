@@ -11,14 +11,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{to_scene_stroke, MarkBuildResult, MetadataColumns};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
-    let empty = || MarkBuildResult {
-        kind: MarkBatchKind::Segment,
-        nodes: vec![],
-        data_indices: Some(vec![]),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
-    };
+    let empty = || MarkBuildResult::empty(MarkBatchKind::Segment);
 
     let spec = ctx.spec;
     let (Some(xf), Some(yf)) = (x_field(ctx, spec), y_field(ctx, spec)) else { return empty(); };

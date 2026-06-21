@@ -18,20 +18,14 @@ use arrow::array::{Array, Float64Array, Int64Array, UInt32Array};
 use crate::render::color::{with_opacity, ContinuousScheme, NamedContinuous};
 use crate::render::draw::{col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::opacity::resolve_scaled_opacity;
 use crate::render::scale_resolve::ColorScale;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{to_scene_fill_stroke, MarkBuildResult, MetadataColumns};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
-    let empty = || MarkBuildResult {
-        kind: MarkBatchKind::Polygon,
-        nodes: vec![],
-        data_indices: Some(vec![]),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
-    };
+    let empty = || MarkBuildResult::empty(MarkBatchKind::Polygon);
 
     let spec = ctx.spec;
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
@@ -211,15 +205,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ctx.mark_style.fill
         };
 
-        // Resolve per-group opacity through the scale if present.
-        let group_opacity = if let (Some(values), Some(scale)) = (&opacity_values, &ctx.scales.opacity) {
-            match values.get(first_row).copied().flatten().and_then(|v| scale.inner.to_pixel_f64(v)) {
-                Some(op) => op,
-                None => ctx.mark_style.opacity,
-            }
-        } else {
-            ctx.mark_style.opacity
-        };
+        // Resolve per-group opacity through the scale if present (sampled at the
+        // group's representative first row).
+        let group_opacity = resolve_scaled_opacity(
+            &opacity_values,
+            &ctx.scales.opacity,
+            first_row,
+            ctx.mark_style.opacity,
+        );
 
         let fill = with_opacity(fill, group_opacity);
 
