@@ -56,7 +56,7 @@ Each task lists the finding IDs it closes (see §6 for the inverse map) and its 
 - **Files:** src/ferrum/_coerce.py; src/ferrum/_render.py; crates/ferrum-core/src/render/arrow_cast.rs
 
 #### T0.3 [rs] **[regression]** group_partition() unifies bin/kde/kde_2d/smooth grouping (D-GROUPBY-1; fixes int/bool groupby)
-- **Closes (4):** XFORM-01, XFORM-03, XFORM-07, XFORM-09  (S2,S3,S4)
+- **Closes (3):** XFORM-01, XFORM-07, XFORM-09  (S2,S4)  [XFORM-03 reassigned to T3.8 during execution — it is purely the Option<String>→Vec<String> groupby field-shape API change, requiring PyO3/.pyi/Python edits outside T0.3's bug-fix scope]
 - **Files:** crates/ferrum-core/src/transform/group_key.rs; crates/ferrum-core/src/transform/kde.rs; crates/ferrum-core/src/transform/kde_2d.rs; crates/ferrum-core/src/transform/smooth.rs; crates/ferrum-core/src/transform/bin.rs
 
 #### T0.4 [both] **[regression]** Canonical `orient` across marks; implement mark_violin flip (D-ORIENT-1)
@@ -172,9 +172,9 @@ Each task lists the finding IDs it closes (see §6 for the inverse map) and its 
 - **Closes (4):** XNAME-04, XNAME-05, XNAME-06, XNAME-07  (S1,S2)
 - **Files:** src/ferrum/composition.py; src/ferrum/_render.py; crates/ferrum-core/src/render/figure_chrome.rs
 
-#### T3.8 [rs] groupby field one shape; Bin → typed BinSpecAxis enum like bin_2d (D-GROUPBY/XFORM-04)
-- **Closes (2):** XFORM-04, XFORM-06  (S2,S3)
-- **Files:** crates/ferrum-core/src/transform/bin.rs; crates/ferrum-core/src/transform/core.rs
+#### T3.8 [rs+py] groupby field one shape (XFORM-03 Option<String>→Vec<String>, canonical+alias); Bin → typed BinSpecAxis enum like bin_2d
+- **Closes (3):** XFORM-03, XFORM-04, XFORM-06  (S2,S3)  [XFORM-03 reassigned here from T0.3 — public-API field-shape change, staged with the non-breaking-alias discipline per D-GROUPBY-1]
+- **Files:** crates/ferrum-core/src/transform/bin.rs; crates/ferrum-core/src/transform/core.rs; crates/ferrum-core/src/transform/{kde,kde_2d,smooth}.rs; src/ferrum/_core.pyi; src/ferrum/transforms.py; src/ferrum/marks/ (desugar call sites)
 
 
 ### Tier 4 — Structural splits (pure moves behind goldens)
@@ -434,7 +434,7 @@ All 193 findings are assigned to exactly one task (verified: 0 missing, 0 duplic
 | XDEAD-08 | S1 | T6.2 |
 | XFORM-01 | S4 | T0.3 |
 | XFORM-02 | S3 | T1.2 |
-| XFORM-03 | S3 | T0.3 |
+| XFORM-03 | S3 | T3.8 |
 | XFORM-04 | S3 | T3.8 |
 | XFORM-05 | S2 | T1.2 |
 | XFORM-06 | S2 | T3.8 |
