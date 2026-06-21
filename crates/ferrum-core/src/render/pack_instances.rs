@@ -20,6 +20,8 @@
 
 use ferrum_scene::{Color, FillStroke, MarkBatchKind, SceneGraph, SceneNode};
 
+use super::draw::DASH_PALETTE;
+
 // ── Wire-format stride constants ────────────────────────────────────────────
 //
 // These are the single authoritative definition of the packed GPU-instance
@@ -297,22 +299,34 @@ fn push_color(buf: &mut Vec<u8>, color: Option<&Color>, alpha_factor: f64) {
     }
 }
 
-/// Map a stroke-dash pattern to the same palette index used by the WASM
-/// renderer: 0 = solid, 1 = dashed [6,3], 2 = dotted [2,3], 3 = dash-dot [6,3,2,3].
-fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
-    match dash {
-        None => 0.0,
-        Some(v) if v.is_empty() => 0.0,
-        Some(v) => {
-            let pattern: Vec<u64> = v.iter().map(|&x| x as u64).collect();
-            match pattern.as_slice() {
-                [6, 3] => 1.0,
-                [2, 3] => 2.0,
-                [6, 3, 2, 3] => 3.0,
-                _ => 0.0,
-            }
+/// Map a stroke-dash pattern to the palette index used by the WASM renderer.
+///
+/// Derives from [`super::draw::DASH_PALETTE`] (the single canonical source) so
+/// this direction (pattern→index) cannot drift from `resolve_stroke_dash`
+/// (index→pattern). The mapping is:
+///   - `None` or empty vec → `0` (solid)
+///   - `[6, 3]`       → `1`
+///   - `[2, 3]`       → `2`
+///   - `[6, 3, 2, 3]` → `3`
+///   - unknown pattern → `0` (solid fallback)
+///
+/// Exposed as `pub(crate)` so the `draw` module's round-trip tests can call it
+/// without a `#[cfg(test)]` re-export.
+pub(crate) fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
+    let Some(v) = dash else { return 0.0 };
+    if v.is_empty() {
+        return 0.0;
+    }
+    // Compare by truncating to u64 so fractional noise (e.g. 6.0 vs 6) is ignored,
+    // matching the original implementation's cast semantics exactly.
+    let pattern: Vec<u64> = v.iter().map(|&x| x as u64).collect();
+    for (i, palette_entry) in DASH_PALETTE.iter().enumerate() {
+        let entry_as_u64: Vec<u64> = palette_entry.iter().map(|&x| x as u64).collect();
+        if pattern == entry_as_u64 {
+            return (i + 1) as f32;
         }
     }
+    0.0
 }
 
 #[cfg(test)]

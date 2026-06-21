@@ -626,6 +626,28 @@ pub fn to_scene_text_style(
     }
 }
 
+/// Canonical stroke-dash palette: index → dasharray pattern.
+///
+/// Index 0 is solid (no entry here — `resolve_stroke_dash` returns `None` for 0).
+/// Indices 1–3 map to the pattern at `DASH_PALETTE[index - 1]`:
+///   - index 1 → `[6, 3]`   long dash
+///   - index 2 → `[2, 3]`   short dash / dot
+///   - index 3 → `[6, 3, 2, 3]`  long-short dash
+///
+/// **Both** `resolve_stroke_dash` (index→pattern, SVG/scene path) and
+/// `pack_instances::stroke_dash_index` (pattern→index, GPU packed path) derive
+/// from this single source so the two directions cannot silently drift.
+///
+/// The WASM shader (`crates/ferrum-wasm/src/shaders/`) encodes the same palette
+/// to interpret the `stroke_dash` f32 field packed by `stroke_dash_index`. Any
+/// change to this table **must** be reflected there too — that shader is not
+/// edited by the Rust cohesion refactor; its comment notes the dependency.
+pub(crate) const DASH_PALETTE: &[&[f64]] = &[
+    &[6.0, 3.0],           // index 1
+    &[2.0, 3.0],           // index 2
+    &[6.0, 3.0, 2.0, 3.0], // index 3
+];
+
 /// Map a stroke-dash palette index to its canonical SVG dasharray pattern.
 ///
 /// The index is rounded and clamped to `[0, 3]` before lookup:
@@ -633,13 +655,15 @@ pub fn to_scene_text_style(
 /// - `1` → long dash `[6, 3]`
 /// - `2` → short dash / dot `[2, 3]`
 /// - `3` → long-short dash `[6, 3, 2, 3]`
+///
+/// Derives from [`DASH_PALETTE`] so it cannot drift from the GPU-path inverse
+/// in `pack_instances::stroke_dash_index`.
 pub(crate) fn resolve_stroke_dash(idx: f64) -> Option<Vec<f64>> {
-    let idx = (idx.round() as i64).clamp(0, 3);
-    match idx {
-        1 => Some(vec![6.0, 3.0]),
-        2 => Some(vec![2.0, 3.0]),
-        3 => Some(vec![6.0, 3.0, 2.0, 3.0]),
-        _ => None,
+    let idx = (idx.round() as i64).clamp(0, 3) as usize;
+    if idx == 0 {
+        None
+    } else {
+        DASH_PALETTE.get(idx - 1).map(|pat| pat.to_vec())
     }
 }
 
@@ -674,6 +698,57 @@ pub fn dispatch_mark_build(mark: &Mark, ctx: &DrawCtx) -> MarkBuildResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- RSUP-01: DASH_PALETTE round-trip (index→pattern→index and pattern→index→pattern) ---
+
+    /// Verify that `resolve_stroke_dash` and `stroke_dash_index` are exact mutual inverses
+    /// for every entry in `DASH_PALETTE`.  A drift between the two functions silently renders
+    /// dashes correctly in SVG but wrong in the GPU/interactive path with no compile error.
+    ///
+    /// This test exercises both directions of the round-trip:
+    ///   1. index → pattern (`resolve_stroke_dash`) → index (`stroke_dash_index`) == original index
+    ///   2. pattern → index (`stroke_dash_index`) → pattern (`resolve_stroke_dash`) == original pattern
+    #[test]
+    fn dash_palette_round_trip_index_to_pattern_to_index() {
+        use crate::render::pack_instances::stroke_dash_index;
+
+        // Index 0 is solid.
+        assert_eq!(resolve_stroke_dash(0.0), None, "index 0 must be solid (None)");
+        let solid_idx = stroke_dash_index(&None);
+        assert!((solid_idx - 0.0).abs() < 1e-6, "None pattern → index 0");
+
+        // Indices 1..=N: round-trip in both directions.
+        for palette_idx in 1..=(DASH_PALETTE.len()) {
+            let pattern = resolve_stroke_dash(palette_idx as f64)
+                .expect("non-zero index must produce a pattern");
+
+            // Direction 1: index → pattern → index must recover the original index.
+            let recovered_idx = stroke_dash_index(&Some(pattern.clone()));
+            assert!(
+                (recovered_idx - palette_idx as f32).abs() < 1e-6,
+                "round-trip index {palette_idx}: pattern={pattern:?} → index={recovered_idx} (expected {palette_idx})"
+            );
+
+            // Direction 2: pattern → index → pattern must recover the original pattern.
+            let recovered_pattern = resolve_stroke_dash(recovered_idx as f64)
+                .expect("recovered index must produce a pattern");
+            assert_eq!(
+                pattern, recovered_pattern,
+                "round-trip pattern {pattern:?}: index={recovered_idx} → pattern={recovered_pattern:?}"
+            );
+        }
+    }
+
+    /// Solid and unknown patterns always map to index 0 (the solid sentinel).
+    #[test]
+    fn dash_palette_solid_and_unknown_map_to_zero() {
+        use crate::render::pack_instances::stroke_dash_index;
+
+        assert!((stroke_dash_index(&None) - 0.0).abs() < 1e-6, "None → 0");
+        assert!((stroke_dash_index(&Some(vec![])) - 0.0).abs() < 1e-6, "empty → 0");
+        assert!((stroke_dash_index(&Some(vec![5.0, 5.0])) - 0.0).abs() < 1e-6,
+            "unknown pattern → 0");
+    }
 
     // --- Phase 7 baseline tests (updated to 3-arg signature; None overrides = same result) ---
 
