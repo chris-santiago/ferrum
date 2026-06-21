@@ -95,8 +95,10 @@ pub(crate) fn emit_shape_nodes(
                 fill.unwrap_or(crate::render::color::from_rgb(0, 0, 0));
             let arm = r * 0.5;
             let sw = r * 0.4;
-            let s1 = to_scene_stroke(stroke_color, sw, 1.0, None, None, None);
-            let s2 = to_scene_stroke(stroke_color, sw, 1.0, None, None, None);
+            let mut s1 = to_scene_stroke(stroke_color, sw, opacity, None, None, None);
+            s1.stroke_opacity = stroke_opacity;
+            let mut s2 = to_scene_stroke(stroke_color, sw, opacity, None, None, None);
+            s2.stroke_opacity = stroke_opacity;
             vec![
                 SceneNode::Line {
                     x1: cx - arm,
@@ -170,7 +172,8 @@ pub(crate) fn emit_shape_nodes(
             let stroke_color = fill.unwrap_or(crate::render::color::from_rgb(0, 0, 0));
             let arm = r * 0.7;
             let sw = r * 0.35;
-            let s = to_scene_stroke(stroke_color, sw, 1.0, None, None, None);
+            let mut s = to_scene_stroke(stroke_color, sw, opacity, None, None, None);
+            s.stroke_opacity = stroke_opacity;
             vec![SceneNode::Line {
                 x1: cx,
                 y1: cy - arm,
@@ -183,7 +186,8 @@ pub(crate) fn emit_shape_nodes(
             let stroke_color = fill.unwrap_or(crate::render::color::from_rgb(0, 0, 0));
             let arm = r * 0.7;
             let sw = r * 0.35;
-            let s = to_scene_stroke(stroke_color, sw, 1.0, None, None, None);
+            let mut s = to_scene_stroke(stroke_color, sw, opacity, None, None, None);
+            s.stroke_opacity = stroke_opacity;
             vec![SceneNode::Line {
                 x1: cx - arm,
                 y1: cy,
@@ -938,6 +942,120 @@ mod tests {
                 assert!((y1 - y2).abs() < 1e-10, "HLine y1 and y2 must be equal (horizontal line): y1={y1}, y2={y2}");
             }
             other => panic!("Expected SceneNode::Line, got: {other:?}"),
+        }
+    }
+
+    /// RMARK-01 regression: line-based shapes (Cross, VLine, HLine) must honor
+    /// the opacity channel. Before the fix, to_scene_stroke was called with a
+    /// hardcoded 1.0, so mark_point(shape="cross", opacity=0.3) rendered fully
+    /// opaque while shape="circle" honored 0.3. This test verifies the fix by
+    /// calling emit_shape_nodes directly with a non-1.0 opacity and asserting
+    /// that the emitted StrokeStyle carries the expected opacity — NOT 1.0.
+    #[test]
+    fn line_shapes_honor_opacity_channel_rmark01() {
+        use ferrum_scene::SceneNode;
+
+        let opacity_val = 0.3_f64;
+        let stroke_opacity_val = 0.5_f64;
+
+        let style = ShapeStyle {
+            fill: Some(crate::render::color::from_rgb(100, 150, 200)),
+            stroke: None,
+            stroke_width: 1.0,
+            opacity: opacity_val,
+            stroke_opacity: stroke_opacity_val,
+            fill_opacity: 1.0,
+            stroke_dash_idx: None,
+            angle: 0.0,
+        };
+
+        // Cross emits 2 Line nodes — both must carry the row opacity.
+        let cross_nodes = emit_shape_nodes(ShapeKind::Cross, 50.0, 50.0, 5.0, ShapeStyle {
+            fill: style.fill,
+            stroke: style.stroke,
+            stroke_width: style.stroke_width,
+            opacity: opacity_val,
+            stroke_opacity: stroke_opacity_val,
+            fill_opacity: style.fill_opacity,
+            stroke_dash_idx: style.stroke_dash_idx,
+            angle: style.angle,
+        });
+        assert_eq!(cross_nodes.len(), 2, "Cross must emit 2 Line nodes");
+        for (i, node) in cross_nodes.iter().enumerate() {
+            match node {
+                SceneNode::Line { style: s, .. } => {
+                    assert!(
+                        (s.opacity - opacity_val).abs() < 1e-9,
+                        "Cross line[{i}] opacity: expected {opacity_val}, got {}. \
+                         RMARK-01 regression — line shapes must honor the opacity channel.",
+                        s.opacity
+                    );
+                    assert!(
+                        (s.stroke_opacity - stroke_opacity_val).abs() < 1e-9,
+                        "Cross line[{i}] stroke_opacity: expected {stroke_opacity_val}, got {}.",
+                        s.stroke_opacity
+                    );
+                }
+                other => panic!("Expected SceneNode::Line for Cross, got: {other:?}"),
+            }
+        }
+
+        // VLine emits 1 Line node.
+        let vline_nodes = emit_shape_nodes(ShapeKind::VLine, 50.0, 50.0, 5.0, ShapeStyle {
+            fill: style.fill,
+            stroke: style.stroke,
+            stroke_width: style.stroke_width,
+            opacity: opacity_val,
+            stroke_opacity: stroke_opacity_val,
+            fill_opacity: style.fill_opacity,
+            stroke_dash_idx: style.stroke_dash_idx,
+            angle: style.angle,
+        });
+        assert_eq!(vline_nodes.len(), 1, "VLine must emit 1 Line node");
+        match &vline_nodes[0] {
+            SceneNode::Line { style: s, .. } => {
+                assert!(
+                    (s.opacity - opacity_val).abs() < 1e-9,
+                    "VLine opacity: expected {opacity_val}, got {}. \
+                     RMARK-01 regression — line shapes must honor the opacity channel.",
+                    s.opacity
+                );
+                assert!(
+                    (s.stroke_opacity - stroke_opacity_val).abs() < 1e-9,
+                    "VLine stroke_opacity: expected {stroke_opacity_val}, got {}.",
+                    s.stroke_opacity
+                );
+            }
+            other => panic!("Expected SceneNode::Line for VLine, got: {other:?}"),
+        }
+
+        // HLine emits 1 Line node.
+        let hline_nodes = emit_shape_nodes(ShapeKind::HLine, 50.0, 50.0, 5.0, ShapeStyle {
+            fill: style.fill,
+            stroke: style.stroke,
+            stroke_width: style.stroke_width,
+            opacity: opacity_val,
+            stroke_opacity: stroke_opacity_val,
+            fill_opacity: style.fill_opacity,
+            stroke_dash_idx: style.stroke_dash_idx,
+            angle: style.angle,
+        });
+        assert_eq!(hline_nodes.len(), 1, "HLine must emit 1 Line node");
+        match &hline_nodes[0] {
+            SceneNode::Line { style: s, .. } => {
+                assert!(
+                    (s.opacity - opacity_val).abs() < 1e-9,
+                    "HLine opacity: expected {opacity_val}, got {}. \
+                     RMARK-01 regression — line shapes must honor the opacity channel.",
+                    s.opacity
+                );
+                assert!(
+                    (s.stroke_opacity - stroke_opacity_val).abs() < 1e-9,
+                    "HLine stroke_opacity: expected {stroke_opacity_val}, got {}.",
+                    s.stroke_opacity
+                );
+            }
+            other => panic!("Expected SceneNode::Line for HLine, got: {other:?}"),
         }
     }
 
