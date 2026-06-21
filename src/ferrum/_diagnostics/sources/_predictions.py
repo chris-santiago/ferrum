@@ -40,9 +40,7 @@ class PredictionsMixin:
         if "coef_" in self._capabilities and self._y is not None:
             from ferrum._core import hat_matrix_stats
 
-            x_arrow = pa.RecordBatch.from_pydict(
-                {c: self._X[c].to_arrow() for c in self._X.columns}
-            )
+            x_arrow = self._x_record_batch()
             yt_arrow = pa.array(y_true, type=pa.float64())
             yp_arrow = pa.array(y_pred, type=pa.float64())
             result = hat_matrix_stats(x_arrow, yt_arrow, yp_arrow)

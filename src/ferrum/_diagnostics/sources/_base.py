@@ -20,6 +20,7 @@ from typing import Any, Sequence
 
 import numpy as np
 import polars as pl
+import pyarrow as pa
 
 
 _PROTOCOL_ATTRS: tuple[str, ...] = (
@@ -170,6 +171,17 @@ class BaseSource:
             Attribute names that are present on the wrapped model.
         """
         return self._capabilities
+
+    def _x_record_batch(self) -> pa.RecordBatch:
+        """Coerce ``self._X`` to a ``pa.RecordBatch`` for Rust kernel calls.
+
+        All derived-data methods that pass the feature matrix to Rust kernels
+        should call this instead of inlining the ``from_pydict`` expression.
+        ``self._X`` is always a polars DataFrame (guaranteed by ``_coerce_X_y``),
+        so the conversion is a direct column-by-column Arrow export — no copy
+        beyond what polars already holds.
+        """
+        return pa.RecordBatch.from_pydict({c: self._X[c].to_arrow() for c in self._X.columns})
 
     def _require_capability(self, attr: str, method_name: str) -> None:
         if attr not in self._capabilities:

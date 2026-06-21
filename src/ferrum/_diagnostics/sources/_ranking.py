@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import polars as pl
-import pyarrow as pa
 
 
 class RankingMixin:
@@ -27,8 +26,9 @@ class RankingMixin:
         if key in self._cache:
             return self._cache[key]
 
-        x_arrow = pa.RecordBatch.from_pydict({c: self._X[c].to_arrow() for c in self._X.columns})
+        x_arrow = self._x_record_batch()
         if algorithm == "covariance":
+            import pyarrow as pa
             from ferrum._core import py_rank1d_with_y
 
             if self._y is None:
@@ -58,7 +58,7 @@ class RankingMixin:
         key = self._cache_key("rank2d", algorithm=algorithm)
         if key in self._cache:
             return self._cache[key]
-        x_arrow = pa.RecordBatch.from_pydict({c: self._X[c].to_arrow() for c in self._X.columns})
+        x_arrow = self._x_record_batch()
         result = py_rank2d(x_arrow, algorithm)
         df = pl.from_arrow(result)
         self._cache[key] = df

@@ -20,6 +20,33 @@ from ferrum._core import studentized_residual_no_x
 from . import _curve_frames
 
 
+def _gain_lift_score_matrix(y_pred: np.ndarray, classes: list) -> np.ndarray:
+    """Build a ``(n_samples, n_classes)`` score matrix for gain/lift assembly.
+
+    For a 2-D ``y_pred`` (multiclass probability matrix), the columns are
+    already per-class and returned as-is.
+
+    For any 1-D ``y_pred`` (binary or unusual 1-D multiclass), the score
+    column is tiled so each class column is identical — every class is ranked
+    by the same raw ``y_pred`` scores.  This reproduces the pre-T1.5 behavior
+    exactly: ``gain_frame``/``lift_frame`` call ``argsort(-score_matrix[:, i])``
+    per class, and with a tiled matrix every class sorts by ``y_pred``
+    descending, matching the old inline sort.
+
+    Note: the negative-class gain/lift thereby ranks by the positive-class
+    score ``p`` rather than ``1 - p``.  This is inconsistent with the roc/pr
+    precomputed 1-D binary path (which uses ``column_stack([1-p, p])`` to
+    rank the negative class by ``1 - p``).  That inconsistency is preserved
+    here for byte-identity with the pre-T1.5 output; it is a separate
+    deliberate fix to be made in a future pass.
+    """
+    if y_pred.ndim == 2:
+        return y_pred
+    # Tile the 1-D scores so every class column is identical.
+    n_classes = len(classes)
+    return np.tile(y_pred[:, np.newaxis], (1, n_classes))
+
+
 class _PrecomputedSource:
     """Lightweight adapter that wraps raw (y_true, y_pred) arrays.
 
@@ -136,118 +163,19 @@ class _PrecomputedSource:
         """Cumulative-gain curve.  Mirrors ``ModelSource.cumulative_gain`` schema."""
         y_true = self._y_true_np
         y_pred = self._y_pred_np
-        n = len(y_true)
         classes = list(np.unique(y_true))
-
-        per_class_parts: list[pl.DataFrame] = []
-        if y_pred.ndim == 1:
-            for cls in classes:
-                y_bin = (y_true == cls).astype(int)
-                scores = y_pred
-                order = np.argsort(-scores)
-                cum_pos = np.cumsum(y_bin[order])
-                total_pos = max(int(cum_pos[-1]), 1) if n else 1
-                pct_pop = np.arange(1, n + 1) / max(n, 1)
-                gain = cum_pos / total_pos
-                xs = np.concatenate([[0.0], pct_pop])
-                ys = np.concatenate([[0.0], gain])
-                per_class_parts.append(
-                    pl.DataFrame(
-                        {
-                            "percent_population": xs,
-                            "gain": ys,
-                            "class": [str(cls)] * len(xs),
-                        }
-                    )
-                )
-        else:
-            for i, cls in enumerate(classes):
-                y_bin = (y_true == cls).astype(int)
-                order = np.argsort(-y_pred[:, i])
-                cum_pos = np.cumsum(y_bin[order])
-                total_pos = max(int(cum_pos[-1]), 1) if n else 1
-                pct_pop = np.arange(1, n + 1) / max(n, 1)
-                gain = cum_pos / total_pos
-                xs = np.concatenate([[0.0], pct_pop])
-                ys = np.concatenate([[0.0], gain])
-                per_class_parts.append(
-                    pl.DataFrame(
-                        {
-                            "percent_population": xs,
-                            "gain": ys,
-                            "class": [str(cls)] * len(xs),
-                        }
-                    )
-                )
-
-        baseline = pl.DataFrame(
-            {
-                "percent_population": [0.0, 1.0],
-                "gain": [0.0, 1.0],
-                "class": ["baseline", "baseline"],
-            }
-        )
-        return pl.concat(per_class_parts + [baseline])
+        labels = [str(cls) for cls in classes]
+        score_matrix = _gain_lift_score_matrix(y_pred, classes)
+        return _curve_frames.gain_frame(y_true, score_matrix, classes, labels)
 
     def lift_curve(self) -> pl.DataFrame:
         """Lift curve.  Mirrors ``ModelSource.lift_curve`` schema."""
         y_true = self._y_true_np
         y_pred = self._y_pred_np
-        n = len(y_true)
         classes = list(np.unique(y_true))
-
-        per_class_parts: list[pl.DataFrame] = []
-        if y_pred.ndim == 1:
-            for cls in classes:
-                y_bin = (y_true == cls).astype(int)
-                base_rate = float(y_bin.mean()) if n else 0.0
-                if base_rate == 0.0:
-                    continue
-                order = np.argsort(-y_pred)
-                cum_pos = np.cumsum(y_bin[order])
-                denom = np.arange(1, n + 1)
-                cum_rate = cum_pos / denom
-                lift = cum_rate / base_rate
-                pct_pop = denom / n
-                per_class_parts.append(
-                    pl.DataFrame(
-                        {
-                            "percent_population": pct_pop.astype(float),
-                            "lift": lift.astype(float),
-                            "class": [str(cls)] * len(pct_pop),
-                        }
-                    )
-                )
-        else:
-            for i, cls in enumerate(classes):
-                y_bin = (y_true == cls).astype(int)
-                base_rate = float(y_bin.mean()) if n else 0.0
-                if base_rate == 0.0:
-                    continue
-                order = np.argsort(-y_pred[:, i])
-                cum_pos = np.cumsum(y_bin[order])
-                denom = np.arange(1, n + 1)
-                cum_rate = cum_pos / denom
-                lift = cum_rate / base_rate
-                pct_pop = denom / n
-                per_class_parts.append(
-                    pl.DataFrame(
-                        {
-                            "percent_population": pct_pop.astype(float),
-                            "lift": lift.astype(float),
-                            "class": [str(cls)] * len(pct_pop),
-                        }
-                    )
-                )
-
-        baseline = pl.DataFrame(
-            {
-                "percent_population": [0.0, 1.0],
-                "lift": [1.0, 1.0],
-                "class": ["baseline", "baseline"],
-            }
-        )
-        return pl.concat(per_class_parts + [baseline])
+        labels = [str(cls) for cls in classes]
+        score_matrix = _gain_lift_score_matrix(y_pred, classes)
+        return _curve_frames.lift_frame(y_true, score_matrix, classes, labels)
 
     def confusion_matrix(self, *, normalize: str | None = None) -> pl.DataFrame:
         """Confusion matrix in long form.  Mirrors ``ModelSource.confusion_matrix`` schema.

@@ -1,11 +1,11 @@
 """Shared kernel-calling frame assembly for classification diagnostics.
 
-This module is the single home for building the five diagnostic curve/matrix
-frames (ROC, PR, calibration, confusion, threshold sweep) from raw numpy
-arrays via the Rust kernels in ``ferrum._core``. Both diagnostic source
-adapters — ``_PrecomputedSource`` (array inputs) and ``ClassificationCurvesMixin``
-(model inputs) — delegate all frame assembly here, so the Python-side curve
-math has exactly one implementation per concept.
+This module is the single home for building the seven diagnostic curve/matrix
+frames (ROC, PR, calibration, confusion, threshold sweep, cumulative gain, lift)
+from raw numpy arrays via the Rust kernels in ``ferrum._core``. Both diagnostic
+source adapters — ``_PrecomputedSource`` (array inputs) and
+``ClassificationCurvesMixin`` (model inputs) — delegate all frame assembly here,
+so the Python-side curve math has exactly one implementation per concept.
 
 The callers own input concerns the kernels cannot: obtaining the score arrays
 (the model path runs ``predict_proba``/``decision_function`` through
@@ -21,6 +21,8 @@ Python-facing DataFrame schemas (the chart-builder contract, unchanged):
 - Calibration: ``mean_predicted, fraction_positive, count``
 - Confusion: ``actual, predicted, value, value_fmt``
 - Discrimination threshold: ``threshold, precision, recall, f1, queue_rate``
+- Cumulative gain: ``percent_population, gain, class``
+- Lift: ``percent_population, lift, class``
 """
 
 from __future__ import annotations
@@ -358,6 +360,137 @@ def confusion_frame(
             "value_fmt": value_fmt,
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Cumulative gain
+# ---------------------------------------------------------------------------
+
+
+def gain_frame(
+    y_true: np.ndarray,
+    y_score_matrix: np.ndarray,
+    class_values: list,
+    class_labels: list[str],
+) -> pl.DataFrame:
+    """Cumulative-gain curve per class with a 2-row baseline diagonal.
+
+    Parameters
+    ----------
+    y_true
+        Raw ground-truth labels (caller's dtype).
+    y_score_matrix
+        ``(n_samples, n_classes)`` per-class scores. Column ``i`` aligns with
+        ``class_values[i]`` / ``class_labels[i]``.
+    class_values
+        Per-class comparison values in ``y_true``'s dtype. Used to binarize
+        ``y_true`` (``y_true == value``).
+    class_labels
+        Per-class string labels for the ``class`` discriminator column.
+
+    Returns
+    -------
+    pl.DataFrame
+        Columns ``percent_population``, ``gain``, ``class``. Per-class curves
+        prepend a ``(0.0, 0.0)`` origin point. A 2-row ``class='baseline'``
+        diagonal (from 0 to 1) is appended at the end.
+    """
+    n = len(y_true)
+    frames: list[pl.DataFrame] = []
+    for i, (cls_val, cls_label) in enumerate(zip(class_values, class_labels)):
+        y_bin = (y_true == cls_val).astype(int)
+        order = np.argsort(-y_score_matrix[:, i])
+        cum_pos = np.cumsum(y_bin[order])
+        total_pos = max(int(cum_pos[-1]), 1) if n else 1
+        pct_pop = np.arange(1, n + 1) / max(n, 1)
+        gain = cum_pos / total_pos
+        xs = np.concatenate([[0.0], pct_pop])
+        ys = np.concatenate([[0.0], gain])
+        frames.append(
+            pl.DataFrame(
+                {
+                    "percent_population": xs,
+                    "gain": ys,
+                    "class": [cls_label] * len(xs),
+                }
+            )
+        )
+    frames.append(
+        pl.DataFrame(
+            {
+                "percent_population": [0.0, 1.0],
+                "gain": [0.0, 1.0],
+                "class": ["baseline", "baseline"],
+            }
+        )
+    )
+    return pl.concat(frames, how="vertical")
+
+
+# ---------------------------------------------------------------------------
+# Lift
+# ---------------------------------------------------------------------------
+
+
+def lift_frame(
+    y_true: np.ndarray,
+    y_score_matrix: np.ndarray,
+    class_values: list,
+    class_labels: list[str],
+) -> pl.DataFrame:
+    """Lift curve per class with a 2-row baseline line at lift=1.0.
+
+    Parameters
+    ----------
+    y_true
+        Raw ground-truth labels (caller's dtype).
+    y_score_matrix
+        ``(n_samples, n_classes)`` per-class scores. Column ``i`` aligns with
+        ``class_values[i]`` / ``class_labels[i]``.
+    class_values
+        Per-class comparison values in ``y_true``'s dtype.
+    class_labels
+        Per-class string labels for the ``class`` discriminator column.
+
+    Returns
+    -------
+    pl.DataFrame
+        Columns ``percent_population``, ``lift``, ``class``. Classes whose
+        base rate is zero are silently omitted. A 2-row ``class='baseline'``
+        line at ``lift=1.0`` is appended at the end.
+    """
+    n = len(y_true)
+    frames: list[pl.DataFrame] = []
+    for i, (cls_val, cls_label) in enumerate(zip(class_values, class_labels)):
+        y_bin = (y_true == cls_val).astype(int)
+        base_rate = float(y_bin.mean()) if n else 0.0
+        if base_rate == 0.0:
+            continue
+        order = np.argsort(-y_score_matrix[:, i])
+        cum_pos = np.cumsum(y_bin[order])
+        denom = np.arange(1, n + 1)
+        cum_rate = cum_pos / denom
+        lift = cum_rate / base_rate
+        pct_pop = denom / n
+        frames.append(
+            pl.DataFrame(
+                {
+                    "percent_population": pct_pop.astype(float),
+                    "lift": lift.astype(float),
+                    "class": [cls_label] * n,
+                }
+            )
+        )
+    frames.append(
+        pl.DataFrame(
+            {
+                "percent_population": [0.0, 1.0],
+                "lift": [1.0, 1.0],
+                "class": ["baseline", "baseline"],
+            }
+        )
+    )
+    return pl.concat(frames, how="vertical")
 
 
 # ---------------------------------------------------------------------------

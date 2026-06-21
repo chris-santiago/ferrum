@@ -10,6 +10,31 @@ import polars as pl
 from ..deps import require_sklearn
 
 
+def _ci_agg_rows(key_name: str, key_value, split_name: str, arr: np.ndarray) -> list[dict]:
+    """Build per-fold row dicts with CI/mean/std aggregates for one (key, split, fold) group.
+
+    Used by both ``learning_curve`` (key = train_size) and
+    ``validation_curve`` (key = param_value).  Returns one dict per element
+    in ``arr`` — callers extend their row accumulator with the result.
+    """
+    mean = float(arr.mean())
+    std = float(arr.std())
+    n = len(arr)
+    ci = 1.96 * std / np.sqrt(n) if n > 0 else 0.0
+    return [
+        {
+            key_name: key_value,
+            "split": split_name,
+            "score": float(s),
+            "mean_score": mean,
+            "std_score": std,
+            "lower": mean - ci,
+            "upper": mean + ci,
+        }
+        for s in arr
+    ]
+
+
 class ModelSelectionMixin:
     """Phase 10e — model selection / CV curves (learning, validation, cv scores, alpha selection)."""
 
@@ -58,22 +83,7 @@ class ModelSelectionMixin:
         rows: list[dict] = []
         for i, t in enumerate(ts):
             for split_name, arr in (("train", tr_scores[i]), ("test", te_scores[i])):
-                mean = float(arr.mean())
-                std = float(arr.std())
-                n = len(arr)
-                ci = 1.96 * std / np.sqrt(n) if n > 0 else 0.0
-                for s in arr:
-                    rows.append(
-                        {
-                            "train_size": int(t),
-                            "split": split_name,
-                            "score": float(s),
-                            "mean_score": mean,
-                            "std_score": std,
-                            "lower": mean - ci,
-                            "upper": mean + ci,
-                        }
-                    )
+                rows.extend(_ci_agg_rows("train_size", int(t), split_name, arr))
         df = pl.DataFrame(rows)
         self._cache[key] = df
         return df
@@ -119,22 +129,7 @@ class ModelSelectionMixin:
         rows: list[dict] = []
         for i, v in enumerate(vals):
             for split_name, arr in (("train", tr[i]), ("test", te[i])):
-                mean = float(arr.mean())
-                std = float(arr.std())
-                n = len(arr)
-                ci = 1.96 * std / np.sqrt(n) if n > 0 else 0.0
-                for s in arr:
-                    rows.append(
-                        {
-                            "param_value": float(v),
-                            "split": split_name,
-                            "score": float(s),
-                            "mean_score": mean,
-                            "std_score": std,
-                            "lower": mean - ci,
-                            "upper": mean + ci,
-                        }
-                    )
+                rows.extend(_ci_agg_rows("param_value", float(v), split_name, arr))
         df = pl.DataFrame(rows)
         self._cache[key] = df
         return df

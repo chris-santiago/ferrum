@@ -1425,31 +1425,31 @@ def test_roc_visualizer_double_fit():
 
 
 def test_rank_helpers_coerce_pandas_dataframe():
-    """_coerce_to_arrow_batch should handle pandas DataFrame."""
+    """polars_or_array_to_record_batch should handle pandas DataFrame."""
     import pandas as pd
-    from ferrum._diagnostics._rank_helpers import _coerce_to_arrow_batch
+    from ferrum._diagnostics._rank_helpers import polars_or_array_to_record_batch
 
     df_pd = pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
-    batch = _coerce_to_arrow_batch(df_pd)
+    batch = polars_or_array_to_record_batch(df_pd)
     assert batch.num_rows == 2
 
 
 def test_rank_helpers_coerce_2d_numpy():
-    """_coerce_to_arrow_batch should handle 2D numpy array."""
-    from ferrum._diagnostics._rank_helpers import _coerce_to_arrow_batch
+    """polars_or_array_to_record_batch should handle 2D numpy array."""
+    from ferrum._diagnostics._rank_helpers import polars_or_array_to_record_batch
 
     arr = np.array([[1.0, 2.0], [3.0, 4.0]])
-    batch = _coerce_to_arrow_batch(arr)
+    batch = polars_or_array_to_record_batch(arr)
     assert batch.num_rows == 2
     assert batch.num_columns == 2
 
 
 def test_rank_helpers_coerce_1d_numpy_raises():
-    """_coerce_to_arrow_batch should raise for 1D array."""
-    from ferrum._diagnostics._rank_helpers import _coerce_to_arrow_batch
+    """polars_or_array_to_record_batch should raise for 1D array."""
+    from ferrum._diagnostics._rank_helpers import polars_or_array_to_record_batch
 
     with pytest.raises(ValueError, match="2D"):
-        _coerce_to_arrow_batch(np.array([1.0, 2.0, 3.0]))
+        polars_or_array_to_record_batch(np.array([1.0, 2.0, 3.0]))
 
 
 # ---------------------------------------------------------------------------

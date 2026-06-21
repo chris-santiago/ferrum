@@ -387,3 +387,120 @@ def test_existing_positional_call_still_works(binary_data):
     model, X, y = binary_data
     chart = ferrum.roc_chart(model, X, y)
     assert "<svg" in _svg(chart)
+
+
+# ---------------------------------------------------------------------------
+# Numeric regression — precomputed 1-D binary gain/lift values (DIAG-01)
+# ---------------------------------------------------------------------------
+
+
+def test_precomputed_1d_binary_gain_values():
+    """Pin the gain curve VALUES for a small 1-D binary fixture.
+
+    The precomputed path uses a TILED score matrix (both class columns = y_pred)
+    so every class is ranked by descending y_pred — reproducing the pre-T1.5
+    behavior.  This test pins BOTH the positive AND negative class curves.
+
+    Fixture:
+      y_true  = [0, 0, 1, 1]
+      y_pred  = [0.1, 0.4, 0.35, 0.8]  (1-D positive-class scores)
+
+    Tiled matrix: col 0 = col 1 = y_pred.
+    Sort order (descending y_pred): indices [3, 1, 2, 0].
+
+    Class "1" (positive): y_bin=[0,0,1,1] sorted → [1,0,1,0]
+      cum_pos=[1,1,2,2], total=2, gain=[0.5, 0.5, 1.0, 1.0]
+      with origin: percent_pop=[0, 0.25, 0.5, 0.75, 1.0], gain=[0, 0.5, 0.5, 1.0, 1.0]
+
+    Class "0" (negative): y_bin=[1,1,0,0] sorted → [0,1,0,1]
+      cum_pos=[0,1,1,2], total=2, gain=[0.0, 0.5, 0.5, 1.0]
+      with origin: percent_pop=[0, 0.25, 0.5, 0.75, 1.0], gain=[0, 0.0, 0.5, 0.5, 1.0]
+
+    NOTE: both classes rank by y_pred (positive-class score), so the negative
+    class is ranked by p rather than 1-p.  This is intentionally preserved for
+    byte-identity with pre-T1.5; the inconsistency with roc/pr (which use 1-p
+    for the negative class) is a separate deliberate fix.
+    """
+    from ferrum._diagnostics.precomputed import _PrecomputedSource
+
+    y_true = np.array([0, 0, 1, 1])
+    y_pred = np.array([0.1, 0.4, 0.35, 0.8])
+
+    src = _PrecomputedSource(y_true, y_pred)
+    df = src.cumulative_gain()
+
+    # Positive class "1"
+    pos_rows = df.filter(df["class"] == "1").sort("percent_population")
+    np.testing.assert_allclose(
+        pos_rows["percent_population"].to_numpy(),
+        [0.0, 0.25, 0.5, 0.75, 1.0],
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        pos_rows["gain"].to_numpy(),
+        [0.0, 0.5, 0.5, 1.0, 1.0],
+        atol=1e-12,
+    )
+
+    # Negative class "0" — ranked by y_pred (same as positive class), NOT by 1-y_pred
+    neg_rows = df.filter(df["class"] == "0").sort("percent_population")
+    np.testing.assert_allclose(
+        neg_rows["percent_population"].to_numpy(),
+        [0.0, 0.25, 0.5, 0.75, 1.0],
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        neg_rows["gain"].to_numpy(),
+        [0.0, 0.0, 0.5, 0.5, 1.0],
+        atol=1e-12,
+    )
+
+
+def test_precomputed_1d_binary_lift_values():
+    """Pin the lift curve VALUES for a small 1-D binary fixture.
+
+    Same fixture as test_precomputed_1d_binary_gain_values.
+
+    Class "1": base_rate=0.5, sort order [3,1,2,0] → y_bin_sorted=[1,0,1,0]
+      cum_pos=[1,1,2,2], cum_rate=[1.0, 0.5, 2/3, 0.5]
+      lift = cum_rate / 0.5 = [2.0, 1.0, 4/3, 1.0]
+      percent_population = [0.25, 0.5, 0.75, 1.0]
+
+    Class "0": base_rate=0.5, same sort order → y_bin_sorted=[0,1,0,1]
+      cum_pos=[0,1,1,2], cum_rate=[0.0, 0.5, 1/3, 0.5]
+      lift = [0.0, 1.0, 2/3, 1.0]
+      percent_population = [0.25, 0.5, 0.75, 1.0]
+    """
+    from ferrum._diagnostics.precomputed import _PrecomputedSource
+
+    y_true = np.array([0, 0, 1, 1])
+    y_pred = np.array([0.1, 0.4, 0.35, 0.8])
+
+    src = _PrecomputedSource(y_true, y_pred)
+    df = src.lift_curve()
+
+    # Positive class "1"
+    pos_rows = df.filter(df["class"] == "1").sort("percent_population")
+    np.testing.assert_allclose(
+        pos_rows["percent_population"].to_numpy(),
+        [0.25, 0.5, 0.75, 1.0],
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        pos_rows["lift"].to_numpy(),
+        [2.0, 1.0, 4.0 / 3.0, 1.0],
+        atol=1e-12,
+    )
+
+    # Negative class "0" — ranked by y_pred, not 1-y_pred
+    neg_rows = df.filter(df["class"] == "0").sort("percent_population")
+    np.testing.assert_allclose(
+        neg_rows["percent_population"].to_numpy(),
+        [0.25, 0.5, 0.75, 1.0],
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        neg_rows["lift"].to_numpy(),
+        [0.0, 1.0, 2.0 / 3.0, 1.0],
+        atol=1e-12,
+    )

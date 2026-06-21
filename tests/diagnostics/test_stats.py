@@ -15,7 +15,7 @@ from ferrum._core import (
     kendall_tau_b,
     py_shapiro_w,
 )
-from ferrum._diagnostics._rank_helpers import _coerce_to_arrow_batch
+from ferrum._diagnostics._rank_helpers import polars_or_array_to_record_batch
 
 
 def _pearson_r_rust(X: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -25,7 +25,7 @@ def _pearson_r_rust(X: np.ndarray, y: np.ndarray) -> np.ndarray:
     # and read off the last row (y vs each X column).
     n, p = X.shape
     combined = np.column_stack([X, y])
-    batch = _coerce_to_arrow_batch(combined)
+    batch = polars_or_array_to_record_batch(combined)
     from ferrum._core import py_rank2d
     import polars as pl
 
@@ -42,7 +42,7 @@ def _pearson_r_rust(X: np.ndarray, y: np.ndarray) -> np.ndarray:
 def _spearman_rho_rust(X: np.ndarray, y: np.ndarray) -> np.ndarray:
     n, p = X.shape
     combined = np.column_stack([X, y])
-    batch = _coerce_to_arrow_batch(combined)
+    batch = polars_or_array_to_record_batch(combined)
     from ferrum._core import py_rank2d
     import polars as pl
 

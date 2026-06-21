@@ -11,6 +11,27 @@ from .. import _curve_frames
 from ..deps import require_sklearn
 
 
+def _resolve_proba(method_name: str, y, proba_df: pl.DataFrame):
+    """Resolve proba columns and y_true from a probabilities DataFrame.
+
+    Returns ``(y_true_np, score_matrix, labels, class_values)`` where:
+    - ``y_true_np`` is the ground-truth as a numpy array
+    - ``score_matrix`` is ``(n_samples, n_classes)`` float64
+    - ``labels`` is a list of class label strings (stripped ``"proba_"`` prefix)
+    - ``class_values`` is a list of class values coerced to ``y_true``'s dtype
+
+    Raises ``ValueError`` when ``y`` is ``None``.
+    """
+    if y is None:
+        raise ValueError(f"ModelSource.{method_name}() requires y to be provided.")
+    proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
+    y_true = np.asarray(y)
+    labels = [c[len("proba_") :] for c in proba_cols]
+    class_values = [_coerce_class_label(c, y_true.dtype) for c in labels]
+    score_matrix = proba_df[proba_cols].to_numpy()
+    return y_true, score_matrix, labels, class_values
+
+
 class ClassificationCurvesMixin:
     """Phase 10b — classification curves (ROC, PR, calibration, gain, lift, discrimination threshold, confusion matrix)."""
 
@@ -39,15 +60,8 @@ class ClassificationCurvesMixin:
             return self._cache[key]
         require_sklearn("roc_curve")
 
-        if self._y is None:
-            raise ValueError("ModelSource.roc_curve() requires y to be provided.")
         proba_df = self.probabilities()
-        proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
-        y_true = np.asarray(self._y)
-        labels = [c[len("proba_") :] for c in proba_cols]
-        class_values = [_coerce_class_label(c, y_true.dtype) for c in labels]
-        score_matrix = proba_df[proba_cols].to_numpy()
-
+        y_true, score_matrix, labels, class_values = _resolve_proba("roc_curve", self._y, proba_df)
         df = _curve_frames.roc_frame(
             y_true,
             score_matrix,
@@ -91,15 +105,8 @@ class ClassificationCurvesMixin:
             return self._cache[key]
         require_sklearn("pr_curve")
 
-        if self._y is None:
-            raise ValueError("ModelSource.pr_curve() requires y to be provided.")
         proba_df = self.probabilities()
-        proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
-        y_true = np.asarray(self._y)
-        labels = [c[len("proba_") :] for c in proba_cols]
-        class_values = [_coerce_class_label(c, y_true.dtype) for c in labels]
-        score_matrix = proba_df[proba_cols].to_numpy()
-
+        y_true, score_matrix, labels, class_values = _resolve_proba("pr_curve", self._y, proba_df)
         df = _curve_frames.pr_frame(
             y_true,
             score_matrix,
@@ -154,44 +161,11 @@ class ClassificationCurvesMixin:
         if key in self._cache:
             return self._cache[key]
 
-        if self._y is None:
-            raise ValueError("ModelSource.cumulative_gain() requires y to be provided.")
         proba_df = self.probabilities()
-        proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
-        y_true = np.asarray(self._y)
-        classes = [c[len("proba_") :] for c in proba_cols]
-        n = len(y_true)
-
-        frames: list[pl.DataFrame] = []
-        for i, cls in enumerate(classes):
-            y_bin = (y_true == _coerce_class_label(cls, y_true.dtype)).astype(int)
-            order = np.argsort(-np.asarray(proba_df[proba_cols[i]]))
-            cum_pos = np.cumsum(y_bin[order])
-            total_pos = max(int(cum_pos[-1]), 1) if n else 1
-            pct_pop = np.arange(1, n + 1) / max(n, 1)
-            gain = cum_pos / total_pos
-            xs = np.concatenate([[0.0], pct_pop])
-            ys = np.concatenate([[0.0], gain])
-            frames.append(
-                pl.DataFrame(
-                    {
-                        "percent_population": xs,
-                        "gain": ys,
-                        "class": [str(cls)] * len(xs),
-                    }
-                )
-            )
-
-        frames.append(
-            pl.DataFrame(
-                {
-                    "percent_population": [0.0, 1.0],
-                    "gain": [0.0, 1.0],
-                    "class": ["baseline", "baseline"],
-                }
-            )
+        y_true, score_matrix, labels, class_values = _resolve_proba(
+            "cumulative_gain", self._y, proba_df
         )
-        df = pl.concat(frames, how="vertical")
+        df = _curve_frames.gain_frame(y_true, score_matrix, class_values, labels)
         self._cache[key] = df
         return df
 
@@ -203,46 +177,9 @@ class ClassificationCurvesMixin:
         if key in self._cache:
             return self._cache[key]
 
-        if self._y is None:
-            raise ValueError("ModelSource.lift_curve() requires y to be provided.")
         proba_df = self.probabilities()
-        proba_cols = [c for c in proba_df.columns if c.startswith("proba_")]
-        y_true = np.asarray(self._y)
-        classes = [c[len("proba_") :] for c in proba_cols]
-        n = len(y_true)
-
-        frames: list[pl.DataFrame] = []
-        for i, cls in enumerate(classes):
-            y_bin = (y_true == _coerce_class_label(cls, y_true.dtype)).astype(int)
-            base_rate = float(y_bin.mean()) if n else 0.0
-            if base_rate == 0.0:
-                continue
-            order = np.argsort(-np.asarray(proba_df[proba_cols[i]]))
-            cum_pos = np.cumsum(y_bin[order])
-            denom = np.arange(1, n + 1)
-            cum_rate = cum_pos / denom
-            lift = cum_rate / base_rate
-            pct_pop = denom / n
-            frames.append(
-                pl.DataFrame(
-                    {
-                        "percent_population": pct_pop,
-                        "lift": lift,
-                        "class": [str(cls)] * n,
-                    }
-                )
-            )
-
-        frames.append(
-            pl.DataFrame(
-                {
-                    "percent_population": [0.0, 1.0],
-                    "lift": [1.0, 1.0],
-                    "class": ["baseline", "baseline"],
-                }
-            )
-        )
-        df = pl.concat(frames, how="vertical")
+        y_true, score_matrix, labels, class_values = _resolve_proba("lift_curve", self._y, proba_df)
+        df = _curve_frames.lift_frame(y_true, score_matrix, class_values, labels)
         self._cache[key] = df
         return df
 

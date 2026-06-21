@@ -11,10 +11,6 @@ import polars as pl
 from ferrum import _core
 
 
-def _x_to_arrow(x_df: pl.DataFrame) -> pa.RecordBatch:
-    return pa.RecordBatch.from_pydict({c: x_df[c].to_arrow() for c in x_df.columns})
-
-
 class ClusteringMixin:
     """Phase 10f — clustering / manifold diagnostics (silhouette, PCA variance, embeddings, intercluster distance)."""
 
@@ -44,7 +40,7 @@ class ClusteringMixin:
                 "ModelSource.silhouette() requires the wrapped model to "
                 "expose 'labels_' or 'predict'."
             )
-        x_arrow = _x_to_arrow(self._X)
+        x_arrow = self._x_record_batch()
         labels_arrow = pa.array(labels.astype(int).tolist(), type=pa.int64())
         sv_raw = _core.silhouette_samples(x_arrow, labels_arrow, "euclidean")
         sv = np.array(pa.array(sv_raw), dtype=np.float64)
@@ -96,7 +92,7 @@ class ClusteringMixin:
                 }
             )
         else:
-            x_arrow = _x_to_arrow(self._X)
+            x_arrow = self._x_record_batch()
             result = _core.pca_variance(x_arrow, n_components)
             df = pl.from_arrow(result)
         self._cache[key] = df
@@ -125,7 +121,7 @@ class ClusteringMixin:
             return self._cache[key]
         seed = self._random_state if self._random_state is not None else 0
         if method == "umap":
-            x_arrow = _x_to_arrow(self._X)
+            x_arrow = self._x_record_batch()
             result = _core.umap_embedding(
                 x_arrow,
                 n_components,
@@ -136,7 +132,7 @@ class ClusteringMixin:
             )
             df = pl.from_arrow(result)
         elif method == "tsne":
-            x_arrow = _x_to_arrow(self._X)
+            x_arrow = self._x_record_batch()
             result = _core.tsne_embedding(
                 x_arrow,
                 n_components,
@@ -147,7 +143,7 @@ class ClusteringMixin:
             )
             df = pl.from_arrow(result)
         elif method == "pca":
-            x_arrow = _x_to_arrow(self._X)
+            x_arrow = self._x_record_batch()
             scores_batch = _core.pca_scores(x_arrow, n_components)
             df = pl.from_arrow(scores_batch)
         else:
