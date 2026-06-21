@@ -11,8 +11,6 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::transform::numeric_util::coerce_to_float64;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct DataBinSpec {
     pub field: String,
@@ -145,23 +143,14 @@ pub(crate) fn global_extent(
     spec: &DataBinSpec,
     batch: &RecordBatch,
 ) -> Option<(f64, f64)> {
+    // An explicit extent always wins. Otherwise return the RAW global range
+    // (NICENESS CONTRACT, XFORM-08: DataBin nices inside `apply` from the pinned
+    // range, so every panel derives identical edges from the raw extent — unlike
+    // 1-D `Bin::global_extent`, which nices the pin itself).
     if let Some(e) = spec.extent {
         return Some(e);
     }
-    let schema = batch.schema();
-    let idx = schema.index_of(&spec.field).ok()?;
-    let arr = coerce_to_float64(batch.column(idx), "data_bin", &spec.field).ok()?;
-    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
-        if arr.is_null(i) { return (lo, hi); }
-        let v = arr.value(i);
-        if v.is_nan() { return (lo, hi); }
-        (lo.min(v), hi.max(v))
-    });
-    if lo.is_finite() && hi.is_finite() && lo < hi {
-        Some((lo, hi))
-    } else {
-        None
-    }
+    crate::transform::numeric_util::column_extent(batch, &spec.field)
 }
 
 fn build_output(spec: &DataBinSpec, batch: &RecordBatch, bin_values: Vec<f64>) -> PyResult<RecordBatch> {

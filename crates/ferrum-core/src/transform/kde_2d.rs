@@ -44,10 +44,12 @@ fn default_kde2d_n() -> usize {
 /// When `spec.extent` is already set (user-provided), it is returned unchanged so
 /// the faceted pin never clobbers an explicit extent.
 ///
-/// This is the pre-facet extent that `render::prepare` uses to pin the 2-D grid
-/// range before partitioning, so every facet panel shares the same KDE grid
-/// axes (see `fix_transform_extents_for_facet`). Reuses `coerce_to_float64` so
-/// integer-typed fields behave the same as they do inside `apply_one_group`.
+/// NICENESS CONTRACT (XFORM-08): returns the RAW per-axis `(min, max)` (no
+/// nicing), mirroring the 1-D `kde::global_extent` and unlike `Bin`. This is the
+/// pre-facet extent that `render::prepare` uses to pin the 2-D grid range before
+/// partitioning, so every facet panel shares the same KDE grid axes (see
+/// `fix_transform_extents_for_facet`). Each axis uses the shared `column_extent`
+/// helper, which coerces integer-typed fields just as `apply_one_group` does.
 pub(crate) fn global_extent(
     spec: &Kde2DSpec,
     batch: &RecordBatch,
@@ -56,39 +58,9 @@ pub(crate) fn global_extent(
     if let Some(e) = spec.extent {
         return Some(e);
     }
-    let (x_lo, x_hi) = raw_axis_extent(batch, &spec.x)?;
-    let (y_lo, y_hi) = raw_axis_extent(batch, &spec.y)?;
+    let (x_lo, x_hi) = crate::transform::numeric_util::column_extent(batch, &spec.x)?;
+    let (y_lo, y_hi) = crate::transform::numeric_util::column_extent(batch, &spec.y)?;
     Some((x_lo, x_hi, y_lo, y_hi))
-}
-
-/// Raw per-axis `(min, max)` over a single Float64-coercible column, dropping
-/// null/NaN. Returns `None` on a missing/non-numeric field, an empty cleaned
-/// column, or a degenerate range. Mirrors `kde::global_extent`'s single-axis
-/// fold so the 2-D and 1-D extents agree on the cast/clean/fold convention.
-fn raw_axis_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f64)> {
-    let schema = batch.schema();
-    let idx = schema.index_of(field).ok()?;
-    let arr = crate::transform::numeric_util::coerce_to_float64(
-        batch.column(idx),
-        "kde_2d_global_extent",
-        field,
-    )
-    .ok()?;
-    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
-        if arr.is_null(i) {
-            return (lo, hi);
-        }
-        let v = arr.value(i);
-        if v.is_nan() {
-            return (lo, hi);
-        }
-        (lo.min(v), hi.max(v))
-    });
-    if lo.is_finite() && hi.is_finite() && lo < hi {
-        Some((lo, hi))
-    } else {
-        None
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

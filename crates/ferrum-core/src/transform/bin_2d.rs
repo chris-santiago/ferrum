@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::scale::ticks::sturges_floor;
-use crate::transform::numeric_util::coerce_to_float64;
+use crate::transform::numeric_util::{coerce_to_float64, column_extent};
 
 // ---------------------------------------------------------------------------
 // Spec types
@@ -49,9 +49,9 @@ pub(crate) struct Bin2DSpec {
 /// Compute the global 2-D extent `(x_lo, x_hi, y_lo, y_hi)` of `spec.x`/`spec.y`
 /// over the full `batch`, used to pin every facet panel to one comparable grid.
 ///
-/// Returns the RAW per-axis `(min, max)` (no nicing). Unlike the 1-D `Bin`
-/// transform — whose `apply_one_group` nices the auto-derived extent so its
-/// helper nices to match — `Bin2D::apply` divides the **raw** `(min, max)` into
+/// NICENESS CONTRACT (XFORM-08): returns the RAW per-axis `(min, max)` (no
+/// nicing). Unlike the 1-D `Bin` transform — whose `global_extent` nices the
+/// auto-derived extent — `Bin2D::apply` divides the **raw** `(min, max)` into
 /// `bin_count` equal cells with no nicing step, so the extent that reproduces its
 /// bin edges is the raw range. Pinning the raw global range therefore makes every
 /// panel land identical bin edges. Returns `None` when either field is missing,
@@ -61,45 +61,21 @@ pub(crate) struct Bin2DSpec {
 /// returned unchanged so the faceted pin never clobbers an explicit extent.
 ///
 /// See `fix_transform_extents_for_facet`. Extent math lives here in the transform
-/// layer; `prepare.rs` only orchestrates.
+/// layer; `prepare.rs` only orchestrates. Each axis uses the shared
+/// `column_extent` helper (coerces integer columns to Float64).
 pub(crate) fn global_extent(
     spec: &Bin2DSpec,
     batch: &RecordBatch,
 ) -> Option<(f64, f64, f64, f64)> {
     let (x_lo, x_hi) = match spec.extent_x {
         Some(e) => e,
-        None => raw_axis_extent(batch, &spec.x)?,
+        None => column_extent(batch, &spec.x)?,
     };
     let (y_lo, y_hi) = match spec.extent_y {
         Some(e) => e,
-        None => raw_axis_extent(batch, &spec.y)?,
+        None => column_extent(batch, &spec.y)?,
     };
     Some((x_lo, x_hi, y_lo, y_hi))
-}
-
-/// Raw per-axis `(min, max)` over a single Float64-coercible column, dropping
-/// null/NaN. Returns `None` on a missing/non-numeric field, an empty cleaned
-/// column, or a degenerate range. Matches the per-axis min/max `apply` folds
-/// when `extent_x`/`extent_y` are unset.
-fn raw_axis_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f64)> {
-    let schema = batch.schema();
-    let idx = schema.index_of(field).ok()?;
-    let arr = coerce_to_float64(batch.column(idx), "stat_bin_2d", field).ok()?;
-    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
-        if arr.is_null(i) {
-            return (lo, hi);
-        }
-        let v = arr.value(i);
-        if v.is_nan() {
-            return (lo, hi);
-        }
-        (lo.min(v), hi.max(v))
-    });
-    if lo.is_finite() && hi.is_finite() && lo < hi {
-        Some((lo, hi))
-    } else {
-        None
-    }
 }
 
 // ---------------------------------------------------------------------------

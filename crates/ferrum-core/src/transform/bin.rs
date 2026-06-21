@@ -1,5 +1,4 @@
 use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, UInt64Array};
-use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -10,18 +9,11 @@ use crate::scale::ticks::sturges_floor;
 use crate::transform::group_key::{
     group_partition, groupby_field_nullable, materialize_groupby_col, KeyValue,
 };
-use crate::transform::numeric_util::resolve_shared_extent;
+use crate::transform::numeric_util::{
+    clean_float64_values, coerce_to_float64, column_extent, resolve_shared_extent,
+};
 
 // ── Shared private helpers ────────────────────────────────────────────────────
-
-/// Compute the raw `(lo, hi)` Float64 extent of `field` from `batch`.
-///
-/// Thin re-export of [`crate::transform::numeric_util::raw_float64_extent`] (the
-/// single source for the cast→clean→fold extent pattern), kept under this name
-/// because `global_extent` reads more clearly with the local alias.
-fn raw_float64_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f64)> {
-    crate::transform::numeric_util::raw_float64_extent(batch, field)
-}
 
 /// Apply nice rounding to a raw `(lo, hi)` extent for a target bin count.
 ///
@@ -86,24 +78,25 @@ pub(crate) fn global_extent(spec: &BinSpec, batch: &RecordBatch) -> Option<(f64,
     if let Some(e) = spec.extent {
         return Some(e);
     }
-    let (lo, hi) = raw_float64_extent(batch, &spec.field)?;
-    // Apply the same nicing as apply_one_group so the global extent aligns with
-    // per-group bin edges. Only when nice=true and no explicit extent is set.
+    let (lo, hi) = column_extent(batch, &spec.field)?;
+    // NICENESS CONTRACT (XFORM-08): `Bin` nices its faceted-pin extent so the
+    // pinned range reproduces the same bin edges every per-group/per-panel
+    // partition would compute. This is the one extent-deriving transform that
+    // nices — `Kde`/`Violin`/`DensityData`/`Bin2D`/`Hex`/`Raster`/`Kde2D` all
+    // return the raw `column_extent`. The divergence lives here, at the call
+    // site, not in the shared fold. Only nice when `nice=true` and no explicit
+    // extent was set.
     if spec.nice {
-        // Compute the Sturges fallback target from the clean count. When
-        // bin_count is already set, clean.len() is unused but the coercion is
-        // cheap; extracting it avoids a second raw_float64_extent call.
+        // Sturges fallback target from the clean count. When `bin_count` is set,
+        // `clean.len()` is unused but the coercion is cheap; extracting it avoids
+        // a second `column_extent` call.
         let target = match spec.bin_count {
             Some(c) => c.max(1),
             None => {
                 let schema = batch.schema();
                 let idx = schema.index_of(&spec.field).ok()?;
-                let col = batch.column(idx);
-                let arr = crate::transform::numeric_util::coerce_to_float64(
-                    col, "stat_bin", &spec.field,
-                )
-                .ok()?;
-                let n = crate::transform::numeric_util::clean_float64_values(&arr, None).len();
+                let arr = coerce_to_float64(batch.column(idx), "stat_bin", &spec.field).ok()?;
+                let n = clean_float64_values(&arr, None).len();
                 sturges_floor(n).max(1)
             }
         };
@@ -136,38 +129,13 @@ fn apply_one_group(
             schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
         ))
     })?;
-    let field = schema.field(idx);
     // Auto-cast integer types to Float64 so that Int32/Int64 columns work without
     // requiring the caller to pre-cast (e.g. JointChart marginal histograms).
-    let col_ref: ArrayRef;
-    let arr: &Float64Array = match field.data_type() {
-        DataType::Float64 => batch
-            .column(idx)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .expect("dtype guarantees Float64Array"),
-        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
-        | DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64
-        | DataType::Float32 => {
-            col_ref = cast(batch.column(idx), &DataType::Float64)
-                .map_err(|e| PyValueError::new_err(format!(
-                    "stat_bin: could not cast column '{}' to Float64: {e}", spec.field
-                )))?;
-            col_ref
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .expect("cast to Float64 succeeded")
-        }
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "stat_bin: column '{}' must be numeric; got {:?}",
-                spec.field, other
-            )));
-        }
-    };
+    // `coerce_to_float64` is the single source for this cast (XFORM-05).
+    let arr = coerce_to_float64(batch.column(idx), "stat_bin", &spec.field)?;
 
     // Drop nulls and NaN; optionally restrict to a subset of row indices (for groupby).
-    let clean = crate::transform::numeric_util::clean_float64_values(arr, only_indices);
+    let clean = clean_float64_values(&arr, only_indices);
 
     // Empty input → empty output (per spec §6: stat_bin is the exception that allows empty)
     if clean.is_empty() {
@@ -1020,38 +988,42 @@ mod tests {
         assert!(hi >= 2.0, "niced hi must not be below raw hi");
     }
 
-    /// `raw_float64_extent` returns the min/max of a clean Float64 batch.
+    // `Bin`'s extent now delegates to `numeric_util::column_extent`; these tests
+    // exercise that shared helper through the path `global_extent` takes.
+    use crate::transform::numeric_util::column_extent;
+
+    /// `column_extent` returns the min/max of a clean Float64 batch.
     #[test]
-    fn test_raw_float64_extent_basic() {
+    fn test_column_extent_basic() {
         let batch = batch_with(vec![3.0, 1.0, 5.0, 2.0]);
-        let ext = super::raw_float64_extent(&batch, "x");
+        let ext = column_extent(&batch, "x");
         assert_eq!(ext, Some((1.0, 5.0)));
     }
 
-    /// `raw_float64_extent` drops nulls and NaN values.
+    /// `column_extent` drops nulls and NaN values.
     #[test]
-    fn test_raw_float64_extent_drops_nulls_and_nan() {
+    fn test_column_extent_drops_nulls_and_nan() {
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
         let arr = Float64Array::from(vec![Some(2.0), None, Some(f64::NAN), Some(8.0)]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
-        let ext = super::raw_float64_extent(&batch, "x");
+        let ext = column_extent(&batch, "x");
         assert_eq!(ext, Some((2.0, 8.0)));
     }
 
-    /// `raw_float64_extent` returns None for a missing field.
+    /// `column_extent` returns None for a missing field.
     #[test]
-    fn test_raw_float64_extent_missing_field() {
+    fn test_column_extent_missing_field() {
         pyo3::Python::initialize();
         let batch = batch_with(vec![1.0, 2.0]);
-        let ext = super::raw_float64_extent(&batch, "ghost");
+        let ext = column_extent(&batch, "ghost");
         assert_eq!(ext, None);
     }
 
-    /// `raw_float64_extent` returns None when lo == hi (degenerate extent).
+    /// `column_extent` returns None when lo == hi (degenerate extent).
     #[test]
-    fn test_raw_float64_extent_degenerate_all_equal() {
+    fn test_column_extent_degenerate_all_equal() {
         let batch = batch_with(vec![5.0, 5.0, 5.0]);
-        let ext = super::raw_float64_extent(&batch, "x");
+        let ext = column_extent(&batch, "x");
         assert_eq!(ext, None, "degenerate extent (lo==hi) must return None");
     }
 }

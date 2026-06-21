@@ -14,7 +14,6 @@ mod tests;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use arrow::array::Array;
 use arrow::datatypes::DataType as ArrowDataType;
 use arrow::record_batch::RecordBatch;
 
@@ -670,9 +669,10 @@ fn infer_spec_type(
     }
 }
 
-fn column_min_max_f64(col: &dyn Array) -> Result<(f64, f64), String> {
-    super::arrow_cast::min_max_f64(col)
-}
+/// Canonical (min, max) for a numeric Arrow column (SPINE-09: one wrapper, was
+/// three identical per-submodule copies). Re-exported so `domain`, `positional`,
+/// and `auxiliary` all reach the same `arrow_cast::min_max_f64` via `super::`.
+pub(super) use super::arrow_cast::min_max_f64 as column_min_max_f64;
 
 /// Compute (min, max) for a numeric Arrow column, skipping NaN/null values.
 /// Returns (0.0, 1.0) when no finite values are present.

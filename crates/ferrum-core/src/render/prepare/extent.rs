@@ -25,10 +25,19 @@ use arrow::record_batch::RecordBatch;
 /// facet partitioning — so the multi-group (hue) case is covered without
 /// special-casing (spec §8). Each transform's owning module computes the extent
 /// (`kde::global_extent` / `bin::global_extent` / `violin::global_extent` /
-/// `kde_2d::global_extent` / `bin_2d::global_extent`); this seam only orchestrates
-/// (it does not re-derive extents in the render layer). 1-D `Bin` nices its extent
-/// to align bin edges; `Kde`/`Violin`/`Kde2D` return the raw range; `Bin2D` also
-/// returns raw because `Bin2D::apply` never nices.
+/// `kde_2d::global_extent` / `bin_2d::global_extent` / etc.); this seam only
+/// orchestrates (it does not re-derive extents in the render layer).
+///
+/// NICENESS CONTRACT (XFORM-08) — the one place the niced-vs-raw divergence is
+/// documented. Every `global_extent` shares the same `numeric_util::column_extent`
+/// fold, but **`Bin` alone nices** the result inside its own `global_extent`, so
+/// the pinned range reproduces the same bin edges every per-group partition would
+/// compute. Every other transform here returns the RAW range:
+/// `Kde`/`Violin`/`DensityData`/`DataBin` because they control a continuous grid
+/// or nice from the pinned range inside `apply`, and `Kde2D`/`Bin2D`/`Hex`/`Raster`
+/// because their `apply` divides the raw `(min, max)` directly. The divergence is
+/// owned by each transform's `global_extent` (each carries a `NICENESS CONTRACT`
+/// note), not by this orchestrator.
 ///
 /// A spec that already carries an explicit extent (user-provided) is left
 /// unchanged; `Bin2D`'s per-axis `extent_x`/`extent_y` are pinned independently so

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 
+use super::column_min_max_f64;
 use crate::render::{RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
 use crate::transform::core::FINAL_OUTPUT_KEY;
@@ -484,10 +485,6 @@ pub(in crate::render) fn numeric_domain_union(
         }
     }
     Ok((mn, mx))
-}
-
-fn column_min_max_f64(col: &dyn Array) -> Result<(f64, f64), String> {
-    crate::render::arrow_cast::min_max_f64(col)
 }
 
 /// Distinct positional (x:N / y:N) categories for an ordinal/band axis, unioning

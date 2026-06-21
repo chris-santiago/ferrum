@@ -101,34 +101,49 @@ pub(crate) fn clean_float64_values(
     }
 }
 
-/// Raw `(lo, hi)` extent of a Float64-coercible column, dropping null/NaN.
+/// Finite `(lo, hi)` extent of a `Float64Array`, skipping null and NaN entries.
 ///
-/// Coerces `field` to Float64 (so integer columns are handled the same as float
-/// ones), drops null and NaN entries via [`clean_float64_values`], then folds to
-/// the min/max. Returns `None` when the field is missing or non-numeric, when the
-/// cleaned column is empty, or when the extent is degenerate (`lo >= hi` or
-/// non-finite).
+/// Folds the non-null, non-NaN values to their min/max. Returns `None` when the
+/// array has no finite values, or when the resulting extent is degenerate
+/// (`lo >= hi` or non-finite). This is the canonical null/NaN-skipping fold plus
+/// `lo < hi` guard that every faceted-pin transform's per-axis extent needs.
 ///
-/// This is the single source for the cast→clean→fold extent computation that the
-/// grouped stat transforms (`bin`, `kde`) need before per-group partitioning.
-pub(crate) fn raw_float64_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f64)> {
-    let schema = batch.schema();
-    let idx = schema.index_of(field).ok()?;
-    let arr = coerce_to_float64(batch.column(idx), "raw_float64_extent", field).ok()?;
-    let clean = clean_float64_values(&arr, None);
-    if clean.is_empty() {
-        return None;
-    }
-    let (lo, hi) = clean
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
-            (a.min(v), b.max(v))
-        });
+/// [`column_extent`] is the batch-level wrapper (index_of + coerce_to_float64 +
+/// `finite_extent`); use it when starting from a column name.
+pub(crate) fn finite_extent(arr: &Float64Array) -> Option<(f64, f64)> {
+    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
+        if arr.is_null(i) {
+            return (lo, hi);
+        }
+        let v = arr.value(i);
+        if v.is_nan() {
+            return (lo, hi);
+        }
+        (lo.min(v), hi.max(v))
+    });
     if lo.is_finite() && hi.is_finite() && lo < hi {
         Some((lo, hi))
     } else {
         None
     }
+}
+
+/// Finite `(lo, hi)` extent of a numeric column, addressed by name.
+///
+/// Coerces `field` to Float64 (so integer columns are handled the same as float
+/// ones), then delegates to [`finite_extent`]. Returns `None` when the field is
+/// missing or non-numeric, when the column has no finite values, or when the
+/// extent is degenerate (`lo >= hi` or non-finite).
+///
+/// This is the single source for the cast→clean→fold extent computation that the
+/// faceted-pin stat transforms (`bin`, `kde`, `violin`, `density_data`,
+/// `data_bin`, and the per-axis 2-D pins in `bin_2d`/`hex`/`raster`/`kde_2d`)
+/// share before per-group partitioning.
+pub(crate) fn column_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f64)> {
+    let schema = batch.schema();
+    let idx = schema.index_of(field).ok()?;
+    let arr = coerce_to_float64(batch.column(idx), "column_extent", field).ok()?;
+    finite_extent(&arr)
 }
 
 /// Resolve the extent a grouped stat transform should apply across all groups.
@@ -138,7 +153,7 @@ pub(crate) fn raw_float64_extent(batch: &RecordBatch, field: &str) -> Option<(f6
 ///     explicit extent always wins, and is shared across groups), else
 ///   - `None` when `shared` is `false` (default / layer mode → each group uses
 ///     its own data-derived extent), else
-///   - the global [`raw_float64_extent`] over `field` when `shared` is `true`
+///   - the global [`column_extent`] over `field` when `shared` is `true`
 ///     and no explicit extent was set (so every group gets the same edges —
 ///     required for `multiple="stack"`/`"fill"` alignment).
 ///
@@ -157,7 +172,7 @@ pub(crate) fn resolve_shared_extent(
     if !shared {
         return None;
     }
-    raw_float64_extent(batch, field)
+    column_extent(batch, field)
 }
 
 /// Linearly-interpolated quantile over an already-sorted (ascending) sequence.
@@ -355,7 +370,7 @@ mod tests {
         assert!((q - 3.0).abs() < 1e-12);
     }
 
-    // ---------- raw_float64_extent / resolve_shared_extent ----------
+    // ---------- finite_extent / column_extent / resolve_shared_extent ----------
 
     use arrow::datatypes::{Field, Schema};
 
@@ -369,29 +384,53 @@ mod tests {
     }
 
     #[test]
-    fn raw_extent_basic_min_max() {
-        let b = one_col_batch("x", Arc::new(Float64Array::from(vec![3.0, 1.0, 5.0, 2.0])));
-        assert_eq!(raw_float64_extent(&b, "x"), Some((1.0, 5.0)));
+    fn finite_extent_basic_min_max() {
+        let arr = Float64Array::from(vec![3.0, 1.0, 5.0, 2.0]);
+        assert_eq!(finite_extent(&arr), Some((1.0, 5.0)));
     }
 
     #[test]
-    fn raw_extent_coerces_int_column() {
+    fn finite_extent_skips_null_and_nan() {
+        let arr = arr_from_options(vec![Some(3.0), None, Some(f64::NAN), Some(1.0), Some(5.0)]);
+        assert_eq!(finite_extent(&arr), Some((1.0, 5.0)));
+    }
+
+    #[test]
+    fn finite_extent_all_null_returns_none() {
+        let arr = arr_from_options(vec![None, None]);
+        assert_eq!(finite_extent(&arr), None);
+    }
+
+    #[test]
+    fn finite_extent_degenerate_returns_none() {
+        let arr = Float64Array::from(vec![5.0, 5.0, 5.0]);
+        assert_eq!(finite_extent(&arr), None);
+    }
+
+    #[test]
+    fn column_extent_basic_min_max() {
+        let b = one_col_batch("x", Arc::new(Float64Array::from(vec![3.0, 1.0, 5.0, 2.0])));
+        assert_eq!(column_extent(&b, "x"), Some((1.0, 5.0)));
+    }
+
+    #[test]
+    fn column_extent_coerces_int_column() {
         use arrow::array::Int64Array;
         let b = one_col_batch("x", Arc::new(Int64Array::from(vec![1_i64, 5, 3])));
-        assert_eq!(raw_float64_extent(&b, "x"), Some((1.0, 5.0)));
+        assert_eq!(column_extent(&b, "x"), Some((1.0, 5.0)));
     }
 
     #[test]
-    fn raw_extent_degenerate_returns_none() {
+    fn column_extent_degenerate_returns_none() {
         let b = one_col_batch("x", Arc::new(Float64Array::from(vec![5.0, 5.0, 5.0])));
-        assert_eq!(raw_float64_extent(&b, "x"), None);
+        assert_eq!(column_extent(&b, "x"), None);
     }
 
     #[test]
-    fn raw_extent_missing_field_returns_none() {
+    fn column_extent_missing_field_returns_none() {
         pyo3::Python::initialize();
         let b = one_col_batch("x", Arc::new(Float64Array::from(vec![1.0, 2.0])));
-        assert_eq!(raw_float64_extent(&b, "ghost"), None);
+        assert_eq!(column_extent(&b, "ghost"), None);
     }
 
     #[test]
