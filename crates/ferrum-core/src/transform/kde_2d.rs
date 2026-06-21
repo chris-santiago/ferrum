@@ -11,8 +11,7 @@
 //! Downstream consumers (Contour) read the grid back from this shape.
 
 use arrow::array::{
-    Array, ArrayRef, Float64Array, Float64Builder, ListBuilder, RecordBatch, StringArray,
-    UInt32Array,
+    Array, ArrayRef, Float64Array, Float64Builder, ListBuilder, RecordBatch, UInt32Array,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
@@ -20,6 +19,9 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::group_key::{
+    group_partition, groupby_field_nullable, materialize_groupby_col, KeyValue,
+};
 use crate::transform::kde::{self, BandwidthSpec};
 
 fn default_bandwidth() -> BandwidthSpec {
@@ -304,46 +306,8 @@ fn apply_grouped(
     batch: &RecordBatch,
     group_col: &str,
 ) -> PyResult<RecordBatch> {
-    use std::collections::BTreeMap;
-
-    let schema = batch.schema();
-    let gi = schema.index_of(group_col).map_err(|_| {
-        PyValueError::new_err(format!(
-            "stat_kde_2d: groupby column '{}' not found", group_col
-        ))
-    })?;
-    let gtype = schema.field(gi).data_type();
-    if gtype != &DataType::Utf8 {
-        return Err(PyValueError::new_err(format!(
-            "stat_kde_2d: groupby column '{}' must be Utf8; got {:?}",
-            group_col, gtype
-        )));
-    }
-    let garr = batch
-        .column(gi)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "stat_kde_2d: expected StringArray for groupby column '{}'",
-                group_col
-            ))
-        })?;
-
-    // Group row indices in first-appearance order.
-    let mut group_order: Vec<String> = Vec::new();
-    let mut group_idx_map: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for i in 0..garr.len() {
-        if garr.is_null(i) {
-            continue;
-        }
-        let gv = garr.value(i).to_string();
-        if seen.insert(gv.clone()) {
-            group_order.push(gv.clone());
-        }
-        group_idx_map.entry(gv).or_default().push(i);
-    }
+    // Shared partition path (first-appearance order, null-key skip, dtype-preserve).
+    let (group_order, group_idx_map, gtype) = group_partition(batch, group_col, "stat_kde_2d")?;
 
     // Per-group extents by default; spec.extent (when set) is a shared override.
     let shared_extent: Option<(f64, f64, f64, f64)> = spec.extent;
@@ -357,13 +321,13 @@ fn apply_grouped(
     let mut all_nx: Vec<u32> = Vec::with_capacity(group_order.len());
     let mut all_ny: Vec<u32> = Vec::with_capacity(group_order.len());
     let mut all_extent: ListBuilder<Float64Builder> = ListBuilder::new(Float64Builder::new());
-    let mut all_groups: Vec<String> = Vec::with_capacity(group_order.len());
+    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::with_capacity(group_order.len());
 
     for g in &group_order {
         let ixs = group_idx_map
             .get(g)
             .ok_or_else(|| PyValueError::new_err(format!(
-                "stat_kde_2d: missing group key '{g}' in index map"
+                "stat_kde_2d: missing group key {g:?} in index map"
             )))?;
         let surface = apply_one_group(spec, batch, Some(ixs), shared_extent)?;
 
@@ -383,7 +347,7 @@ fn apply_grouped(
         all_extent.append(true);
         all_nx.push(n as u32);
         all_ny.push(n as u32);
-        all_groups.push(g.clone());
+        group_keys_out.push(vec![g.clone()]);
     }
 
     let list_f64 = DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
@@ -394,8 +358,12 @@ fn apply_grouped(
         Field::new("nx", DataType::UInt32, false),
         Field::new("ny", DataType::UInt32, false),
         Field::new("extent", list_f64, false),
-        Field::new(group_col, DataType::Utf8, false),
+        // FA-7: preserve the original groupby dtype (nullable per FA-9; null keys
+        // are skipped upstream in group_partition).
+        Field::new(group_col, gtype.clone(), groupby_field_nullable()),
     ]));
+    let group_col_arr = materialize_groupby_col(&group_keys_out, 0, &gtype)
+        .map_err(PyValueError::new_err)?;
     let cols: Vec<ArrayRef> = vec![
         Arc::new(all_grid_x.finish()),
         Arc::new(all_grid_y.finish()),
@@ -403,9 +371,7 @@ fn apply_grouped(
         Arc::new(UInt32Array::from(all_nx)),
         Arc::new(UInt32Array::from(all_ny)),
         Arc::new(all_extent.finish()),
-        Arc::new(StringArray::from(
-            all_groups.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-        )),
+        group_col_arr,
     ];
     RecordBatch::try_new(out_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_kde_2d: {e}")))
@@ -960,6 +926,72 @@ mod tests {
         assert_eq!(nx_arr.value(1), n as u32);
         assert_eq!(ny_arr.value(0), n as u32);
         assert_eq!(ny_arr.value(1), n as u32);
+    }
+
+    #[test]
+    fn kde_2d_groupby_int64_group_column() {
+        // T0.3 regression: a non-Utf8 (Int64) group column must work, not raise
+        // "must be Utf8". Pre-fix this errored in kde_2d::apply_grouped.
+        use arrow::array::Int64Array;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Int64, false),
+        ]));
+        let xs = Float64Array::from(vec![0.0, 0.2, 0.1, 10.0, 10.2, 10.1]);
+        let ys = Float64Array::from(vec![0.0, 0.2, 0.1, 10.0, 10.2, 10.1]);
+        let gs = Int64Array::from(vec![7_i64, 7, 7, 9, 9, 9]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(xs), Arc::new(ys), Arc::new(gs)]).unwrap();
+        let n = 8usize;
+        let spec = Kde2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n,
+            extent: None,
+            groupby: Some("g".into()),
+            name: None,
+        };
+        let out = apply(&spec, &b).expect("Int64 groupby must succeed");
+        assert_eq!(out.num_rows(), 2, "one row per group");
+        assert_eq!(out.num_columns(), 7);
+        // Group column must round-trip as Int64, in first-appearance order.
+        assert_eq!(out.schema().field(6).data_type(), &DataType::Int64);
+        let garr = out.column(6).as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(garr.value(0), 7);
+        assert_eq!(garr.value(1), 9);
+    }
+
+    #[test]
+    fn kde_2d_groupby_boolean_group_column() {
+        // T0.3 regression: a Boolean group column must work (was "must be Utf8").
+        use arrow::array::BooleanArray;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Boolean, false),
+        ]));
+        let xs = Float64Array::from(vec![0.0, 0.2, 0.1, 10.0, 10.2, 10.1]);
+        let ys = Float64Array::from(vec![0.0, 0.2, 0.1, 10.0, 10.2, 10.1]);
+        let gs = BooleanArray::from(vec![true, true, true, false, false, false]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(xs), Arc::new(ys), Arc::new(gs)]).unwrap();
+        let spec = Kde2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bandwidth: BandwidthSpec::Scott,
+            n: 8,
+            extent: None,
+            groupby: Some("g".into()),
+            name: None,
+        };
+        let out = apply(&spec, &b).expect("Boolean groupby must succeed");
+        assert_eq!(out.num_rows(), 2);
+        assert_eq!(out.schema().field(6).data_type(), &DataType::Boolean);
+        let garr = out.column(6).as_any().downcast_ref::<BooleanArray>().unwrap();
+        assert!(garr.value(0), "true group appears first");
+        assert!(!garr.value(1), "false group appears second");
     }
 
     #[test]

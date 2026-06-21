@@ -1,9 +1,14 @@
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
+use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use crate::transform::group_key::{
+    group_partition, groupby_field_nullable, materialize_groupby_col, KeyValue,
+};
+use crate::transform::numeric_util::resolve_shared_extent;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -154,64 +159,21 @@ fn apply_one_group(
         .map_err(|e| PyValueError::new_err(format!("stat_kde: {e}")))
 }
 
-/// Partition input batch by `group_col` (Utf8), call apply_one_group per
-/// partition, then stack the results into a single batch with the group
-/// column preserved as the 3rd field.
+/// Partition input batch by `group_col`, call apply_one_group per partition,
+/// then stack the results into a single batch with the group column preserved
+/// (with its original dtype) as the 3rd field.
 fn apply_grouped(
     spec: &KdeSpec,
     batch: &RecordBatch,
     group_col: &str,
 ) -> PyResult<RecordBatch> {
-    use std::collections::BTreeMap;
-    let schema = batch.schema();
-    let gi = schema.index_of(group_col).map_err(|_|
-        PyValueError::new_err(format!(
-            "stat_kde: groupby column '{}' not found", group_col)))?;
-    let gtype = schema.field(gi).data_type();
-    if gtype != &DataType::Utf8 {
-        return Err(PyValueError::new_err(format!(
-            "stat_kde: groupby column '{}' must be Utf8; got {:?}", group_col, gtype)));
-    }
-    let garr = batch.column(gi).as_any().downcast_ref::<StringArray>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_kde: expected StringArray for groupby column '{}'", group_col)))?;
+    // Shared partition path (first-appearance order, null-key skip, dtype-preserve).
+    let (group_order, group_idx_map, gtype) = group_partition(batch, group_col, "stat_kde")?;
 
-    // Group row indices by first-appearance order of the group value.
-    let mut group_order: Vec<String> = Vec::new();
-    let mut group_idx_map: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for i in 0..garr.len() {
-        if garr.is_null(i) { continue; }
-        let gv = garr.value(i).to_string();
-        if seen.insert(gv.clone()) {
-            group_order.push(gv.clone());
-        }
-        group_idx_map.entry(gv).or_default().push(i);
-    }
-
-    // Compute global extent across all groups when shared_extent=true (stack/fill).
-    // When false (layer mode), each group uses its own extent.
-    let global_extent: Option<(f64, f64)> = if spec.extent.is_some() {
-        spec.extent // user-specified extent always shared
-    } else if !spec.shared_extent {
-        None // per-group extents (default, layer mode)
-    } else {
-        let field_idx = schema.index_of(&spec.field).ok();
-        field_idx.and_then(|fi| {
-            let arr = crate::transform::numeric_util::coerce_to_float64(
-                batch.column(fi),
-                "stat_kde",
-                &spec.field,
-            )
-            .ok()?;
-            let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
-                if arr.is_null(i) { return (lo, hi); }
-                let v = arr.value(i);
-                if !v.is_nan() { (lo.min(v), hi.max(v)) } else { (lo, hi) }
-            });
-            if lo.is_finite() && hi.is_finite() && lo < hi { Some((lo, hi)) } else { None }
-        })
-    };
+    // Shared vs per-group extent (stack/fill aligns to one global extent;
+    // layer mode keeps per-group extents). resolve_shared_extent returns the
+    // explicit extent unchanged, else the global extent when shared, else None.
+    let global_extent = resolve_shared_extent(spec.extent, spec.shared_extent, batch, &spec.field);
     let shared_spec = KdeSpec {
         extent: global_extent.or(spec.extent),
         ..spec.clone()
@@ -219,11 +181,11 @@ fn apply_grouped(
 
     let mut all_values: Vec<f64> = Vec::new();
     let mut all_density: Vec<f64> = Vec::new();
-    let mut all_groups: Vec<String> = Vec::new();
+    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::new();
     for g in &group_order {
         let ixs = group_idx_map.get(g)
             .ok_or_else(|| PyValueError::new_err(format!(
-                "stat_kde: missing group key '{g}' in index map")))?;
+                "stat_kde: missing group key {g:?} in index map")))?;
         let out = apply_one_group(&shared_spec, batch, Some(ixs))?;
         let n = out.num_rows();
         let values = out.column(0).as_any().downcast_ref::<Float64Array>()
@@ -233,19 +195,23 @@ fn apply_grouped(
         for i in 0..n {
             all_values.push(values.value(i));
             all_density.push(if density.is_null(i) { f64::NAN } else { density.value(i) });
-            all_groups.push(g.clone());
+            group_keys_out.push(vec![g.clone()]);
         }
     }
 
     let out_schema = Arc::new(Schema::new(vec![
         Field::new("value", DataType::Float64, false),
         Field::new("density", DataType::Float64, true),
-        Field::new(group_col, DataType::Utf8, false),
+        // FA-7: preserve the original groupby dtype (nullable per FA-9, though
+        // null keys are skipped upstream in group_partition).
+        Field::new(group_col, gtype.clone(), groupby_field_nullable()),
     ]));
+    let group_col_arr = materialize_groupby_col(&group_keys_out, 0, &gtype)
+        .map_err(PyValueError::new_err)?;
     let cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(all_values)),
         Arc::new(Float64Array::from(all_density)),
-        Arc::new(StringArray::from(all_groups.iter().map(|s| s.as_str()).collect::<Vec<_>>())),
+        group_col_arr,
     ];
     RecordBatch::try_new(out_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_kde: {e}")))
@@ -717,6 +683,90 @@ mod tests {
         assert!((values[7] - 2.0).abs() < 1e-9, "group A grid ends at max");
         assert!((values[8] - 10.0).abs() < 1e-9, "group B grid starts at min");
         assert!((values[15] - 12.0).abs() < 1e-9, "group B grid ends at max");
+    }
+
+    #[test]
+    fn test_kde_grouped_int64_group_column() {
+        // T0.3 regression: a non-Utf8 (Int64) group column must work, not raise
+        // "must be Utf8". Pre-fix this errored in kde::apply_grouped.
+        use arrow::array::Int64Array;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("g", DataType::Int64, false),
+        ]));
+        let xs = Float64Array::from(vec![
+            0.0, 0.5, 1.0, 1.5, 2.0, // group 1
+            10.0, 10.5, 11.0, 11.5, 12.0, // group 2
+        ]);
+        let gs = Int64Array::from(vec![1_i64, 1, 1, 1, 1, 2, 2, 2, 2, 2]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(xs), Arc::new(gs)]).unwrap();
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            shared_extent: false,
+            n: 8,
+            extent: None,
+            cumulative: false,
+            kernel: default_kernel(),
+            groupby: Some("g".into()),
+            name: None,
+        };
+        let out = apply(&spec, &batch).expect("Int64 groupby must succeed");
+        assert_eq!(out.num_rows(), 16, "2 groups × 8 grid points");
+        // Group column must round-trip as Int64, NOT String.
+        assert_eq!(out.schema().field(2).name(), "g");
+        assert_eq!(out.schema().field(2).data_type(), &DataType::Int64);
+        let groups = out.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+        for i in 0..8 {
+            assert_eq!(groups.value(i), 1, "first 8 rows are group 1");
+        }
+        for i in 8..16 {
+            assert_eq!(groups.value(i), 2, "last 8 rows are group 2");
+        }
+    }
+
+    #[test]
+    fn test_kde_grouped_boolean_group_column() {
+        // T0.3 regression: a Boolean group column must work (was "must be Utf8").
+        use arrow::array::BooleanArray;
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("g", DataType::Boolean, false),
+        ]));
+        let xs = Float64Array::from(vec![
+            0.0, 0.5, 1.0, 1.5, 2.0, // false group
+            10.0, 10.5, 11.0, 11.5, 12.0, // true group
+        ]);
+        let gs = BooleanArray::from(vec![
+            false, false, false, false, false, true, true, true, true, true,
+        ]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(xs), Arc::new(gs)]).unwrap();
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            shared_extent: false,
+            n: 8,
+            extent: None,
+            cumulative: false,
+            kernel: default_kernel(),
+            groupby: Some("g".into()),
+            name: None,
+        };
+        let out = apply(&spec, &batch).expect("Boolean groupby must succeed");
+        assert_eq!(out.num_rows(), 16);
+        assert_eq!(out.schema().field(2).data_type(), &DataType::Boolean);
+        let groups = out.column(2).as_any().downcast_ref::<BooleanArray>().unwrap();
+        // First-appearance order → false group first, then true.
+        for i in 0..8 {
+            assert!(!groups.value(i), "first 8 rows are the false group");
+        }
+        for i in 8..16 {
+            assert!(groups.value(i), "last 8 rows are the true group");
+        }
     }
 
     #[test]

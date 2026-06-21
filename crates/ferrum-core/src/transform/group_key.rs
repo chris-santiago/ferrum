@@ -15,9 +15,12 @@
 
 use arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
-    StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    RecordBatch, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow::datatypes::DataType;
+use pyo3::exceptions::PyValueError;
+use pyo3::PyResult;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Internal representation of a group key value. Order matters: `BTreeMap` relies on `Ord`.
@@ -53,6 +56,72 @@ pub(crate) fn is_groupby_supported_dtype(dt: &DataType) -> bool {
             | DataType::UInt64
             | DataType::Boolean
     )
+}
+
+/// Result of [`group_partition`]: the distinct group keys in first-appearance
+/// order, the per-key row-index map, and the group column's original dtype.
+pub(crate) type GroupPartition = (Vec<KeyValue>, BTreeMap<KeyValue, Vec<usize>>, DataType);
+
+/// Partition a batch's rows by a single groupby column.
+///
+/// This is the one partition path shared by every grouped stat transform
+/// (`bin`, `kde`, `kde_2d`, `smooth`). It validates the column dtype, then walks
+/// the rows once to build a [`GroupPartition`]:
+///   - `group_order`: the distinct group keys in **first-appearance** order,
+///   - `group_idx_map`: each key's row indices (a `BTreeMap` so per-group output
+///     materialization is deterministic), and
+///   - the group column's original [`DataType`], so callers can reconstruct the
+///     output column with [`materialize_groupby_col`] and the dtype preserved
+///     end-to-end.
+///
+/// **Null-key policy (centralized here — XFORM-09):** rows whose group key is
+/// [`KeyValue::Null`] are skipped, so a null group never becomes its own series.
+/// Every grouped transform shares this one policy; previously `kde`/`kde_2d`/
+/// `smooth` each had an undocumented inline `is_null` skip that could drift from
+/// `bin`'s. Keeping the skip in one place means the policy cannot diverge across
+/// the family.
+///
+/// `ctx` is the transform-name prefix (e.g. `"stat_kde"`) used only in the
+/// error messages, matching the convention in [`crate::transform::numeric_util`].
+pub(crate) fn group_partition(
+    batch: &RecordBatch,
+    group_col: &str,
+    ctx: &str,
+) -> PyResult<GroupPartition> {
+    let schema = batch.schema();
+    let gi = schema.index_of(group_col).map_err(|_| {
+        PyValueError::new_err(format!("{ctx}: groupby column '{group_col}' not found"))
+    })?;
+    let gtype = schema.field(gi).data_type().clone();
+    if !is_groupby_supported_dtype(&gtype) {
+        return Err(PyValueError::new_err(format!(
+            "{ctx}: groupby column '{group_col}' has unsupported dtype {gtype:?}; \
+             supported: Utf8/LargeUtf8, Float64/Float32, \
+             Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
+        )));
+    }
+    let garr = batch.column(gi);
+
+    let mut group_order: Vec<KeyValue> = Vec::new();
+    let mut group_idx_map: BTreeMap<KeyValue, Vec<usize>> = BTreeMap::new();
+    for i in 0..garr.len() {
+        let gv = groupby_key_at(garr.as_ref(), &gtype, i).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "{ctx}: internal error extracting groupby key at row {i}"
+            ))
+        })?;
+        // Null group keys collapse into their own KeyValue::Null, which the
+        // centralized policy skips (see the doc comment above).
+        if matches!(gv, KeyValue::Null) {
+            continue;
+        }
+        if !group_idx_map.contains_key(&gv) {
+            group_order.push(gv.clone());
+        }
+        group_idx_map.entry(gv).or_default().push(i);
+    }
+
+    Ok((group_order, group_idx_map, gtype))
 }
 
 /// Extract the groupby [`KeyValue`] for a single row from an Arrow column.
@@ -335,5 +404,76 @@ mod tests {
         assert!(is_groupby_supported_dtype(&DataType::Int32));
         assert!(is_groupby_supported_dtype(&DataType::Boolean));
         assert!(is_groupby_supported_dtype(&DataType::Utf8));
+    }
+
+    // ── group_partition (T0.3 unification) ──────────────────────────────────
+
+    use arrow::array::BooleanArray;
+    use arrow::datatypes::{Field, Schema};
+    use std::sync::Arc;
+
+    fn batch_with_group(col: ArrayRef) -> RecordBatch {
+        let nullable = col.null_count() > 0;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "g",
+            col.data_type().clone(),
+            nullable,
+        )]));
+        RecordBatch::try_new(schema, vec![col]).unwrap()
+    }
+
+    #[test]
+    fn group_partition_int64_first_appearance_order() {
+        // Values 20, 10, 20, 10 → first-appearance order is [20, 10].
+        let col: ArrayRef = Arc::new(Int64Array::from(vec![20_i64, 10, 20, 10]));
+        let batch = batch_with_group(col);
+        let (order, map, dt) = group_partition(&batch, "g", "test").unwrap();
+        assert_eq!(dt, DataType::Int64);
+        assert_eq!(order, vec![KeyValue::Int(20), KeyValue::Int(10)]);
+        assert_eq!(map.get(&KeyValue::Int(20)).unwrap(), &vec![0_usize, 2]);
+        assert_eq!(map.get(&KeyValue::Int(10)).unwrap(), &vec![1_usize, 3]);
+    }
+
+    #[test]
+    fn group_partition_boolean_groups() {
+        let col: ArrayRef = Arc::new(BooleanArray::from(vec![true, false, true]));
+        let batch = batch_with_group(col);
+        let (order, map, dt) = group_partition(&batch, "g", "test").unwrap();
+        assert_eq!(dt, DataType::Boolean);
+        assert_eq!(order, vec![KeyValue::Bool(1), KeyValue::Bool(0)]);
+        assert_eq!(map.get(&KeyValue::Bool(1)).unwrap(), &vec![0_usize, 2]);
+        assert_eq!(map.get(&KeyValue::Bool(0)).unwrap(), &vec![1_usize]);
+    }
+
+    #[test]
+    fn group_partition_skips_null_keys() {
+        // Centralized null-key policy: null rows are excluded from the partition.
+        let col: ArrayRef = Arc::new(Int64Array::from(vec![Some(1_i64), None, Some(1), None]));
+        let batch = batch_with_group(col);
+        let (order, map, _) = group_partition(&batch, "g", "test").unwrap();
+        assert_eq!(order, vec![KeyValue::Int(1)]);
+        assert_eq!(map.get(&KeyValue::Int(1)).unwrap(), &vec![0_usize, 2]);
+        assert!(!map.contains_key(&KeyValue::Null), "null key must be skipped");
+    }
+
+    #[test]
+    fn group_partition_unsupported_dtype_errors() {
+        pyo3::Python::initialize();
+        use arrow::array::Date32Array;
+        let col: ArrayRef = Arc::new(Date32Array::from(vec![0_i32, 1]));
+        let batch = batch_with_group(col);
+        let err = group_partition(&batch, "g", "stat_kde").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unsupported dtype"), "err: {msg}");
+        assert!(msg.contains("stat_kde"), "err must carry ctx: {msg}");
+    }
+
+    #[test]
+    fn group_partition_missing_column_errors() {
+        pyo3::Python::initialize();
+        let col: ArrayRef = Arc::new(Int64Array::from(vec![1_i64, 2]));
+        let batch = batch_with_group(col);
+        let err = group_partition(&batch, "ghost", "stat_smooth").unwrap_err();
+        assert!(err.to_string().contains("ghost"), "err: {err}");
     }
 }

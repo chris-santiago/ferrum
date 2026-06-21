@@ -8,40 +8,19 @@ use std::sync::Arc;
 
 use crate::scale::ticks::sturges_floor;
 use crate::transform::group_key::{
-    groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
-    KeyValue,
+    group_partition, groupby_field_nullable, materialize_groupby_col, KeyValue,
 };
+use crate::transform::numeric_util::resolve_shared_extent;
 
 // ── Shared private helpers ────────────────────────────────────────────────────
 
 /// Compute the raw `(lo, hi)` Float64 extent of `field` from `batch`.
 ///
-/// Casts numeric columns to Float64 via the Arrow cast kernel, then drops nulls
-/// and NaN values via `clean_float64_values`, and folds the result to find the
-/// minimum and maximum.  Returns `None` when the field is missing or
-/// non-numeric, when the batch is empty after cleaning, or when the resulting
-/// extent is degenerate (`lo >= hi` or non-finite).
-///
-/// This is the single source for the cast→clean→fold pattern that previously
-/// appeared separately in `global_extent` and the `apply_grouped` shared_extent
-/// block.
+/// Thin re-export of [`crate::transform::numeric_util::raw_float64_extent`] (the
+/// single source for the cast→clean→fold extent pattern), kept under this name
+/// because `global_extent` reads more clearly with the local alias.
 fn raw_float64_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f64)> {
-    let schema = batch.schema();
-    let idx = schema.index_of(field).ok()?;
-    let col = batch.column(idx);
-    let arr = crate::transform::numeric_util::coerce_to_float64(col, "stat_bin", field).ok()?;
-    let clean = crate::transform::numeric_util::clean_float64_values(&arr, None);
-    if clean.is_empty() {
-        return None;
-    }
-    let (lo, hi) = clean
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
-    if lo.is_finite() && hi.is_finite() && lo < hi {
-        Some((lo, hi))
-    } else {
-        None
-    }
+    crate::transform::numeric_util::raw_float64_extent(batch, field)
 }
 
 /// Apply nice rounding to a raw `(lo, hi)` extent for a target bin count.
@@ -291,58 +270,23 @@ fn apply_grouped(
     batch: &RecordBatch,
     group_col: &str,
 ) -> PyResult<RecordBatch> {
-    use std::collections::BTreeMap;
-    let schema = batch.schema();
-    let gi = schema.index_of(group_col).map_err(|_|
-        PyValueError::new_err(format!(
-            "stat_bin: groupby column '{}' not found", group_col)))?;
-    let gtype = schema.field(gi).data_type().clone();
-    if !is_groupby_supported_dtype(&gtype) {
-        return Err(PyValueError::new_err(format!(
-            "stat_bin: groupby column '{}' has unsupported dtype {:?}; \
-             supported: Utf8/LargeUtf8, Float64/Float32, \
-             Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean",
-            group_col, gtype)));
-    }
-    let garr = batch.column(gi);
+    // Partition rows by the group column via the shared helper (first-appearance
+    // group order, per-group index map, null-key skip, dtype-preservation —
+    // identical across bin/kde/kde_2d/smooth).
+    let (group_order, group_idx_map, gtype) = group_partition(batch, group_col, "stat_bin")?;
 
-    // Group row indices by first-appearance order of the group value (FA-7:
-    // int/uint/bool/float/string all supported). A null group key collapses
-    // into its own group (KeyValue::Null), distinct from any real value.
-    let mut group_order: Vec<KeyValue> = Vec::new();
-    let mut group_idx_map: BTreeMap<KeyValue, Vec<usize>> = BTreeMap::new();
-    for i in 0..garr.len() {
-        let gv = groupby_key_at(garr.as_ref(), &gtype, i).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "stat_bin: internal error extracting groupby key at row {i}"
-            ))
-        })?;
-        // Skip null group keys: the pre-existing behaviour excluded null rows
-        // from the grouped output, and a KDE/bin over a null bucket is not
-        // meaningful as its own series.
-        if matches!(gv, KeyValue::Null) {
-            continue;
-        }
-        if !group_idx_map.contains_key(&gv) {
-            group_order.push(gv.clone());
-        }
-        group_idx_map.entry(gv).or_default().push(i);
-    }
-
-    // When shared_extent=true, compute the global raw extent from all rows of
-    // the field so all groups receive the same bin edges. Only override when
-    // the caller has not explicitly set spec.extent.
-    let effective_spec: std::borrow::Cow<BinSpec> = if spec.shared_extent && spec.extent.is_none() {
-        if let Some((global_lo, global_hi)) = raw_float64_extent(batch, &spec.field) {
-            let mut patched = spec.clone();
-            patched.extent = Some((global_lo, global_hi));
-            std::borrow::Cow::Owned(patched)
-        } else {
-            std::borrow::Cow::Borrowed(spec)
-        }
-    } else {
-        std::borrow::Cow::Borrowed(spec)
-    };
+    // When shared_extent=true, inject the global raw extent so every group gets
+    // the same bin edges (required for stack/fill). resolve_shared_extent returns
+    // the explicit extent unchanged when set, else None unless shared is on.
+    let effective_spec: std::borrow::Cow<BinSpec> =
+        match resolve_shared_extent(spec.extent, spec.shared_extent, batch, &spec.field) {
+            Some(e) if spec.extent.is_none() => {
+                let mut patched = spec.clone();
+                patched.extent = Some(e);
+                std::borrow::Cow::Owned(patched)
+            }
+            _ => std::borrow::Cow::Borrowed(spec),
+        };
     let spec_ref: &BinSpec = &effective_spec;
 
     // Per-group output, then stack.

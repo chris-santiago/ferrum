@@ -5,6 +5,9 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::group_key::{
+    group_partition, groupby_field_nullable, materialize_groupby_col, KeyValue,
+};
 use crate::transform::residuals;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -171,49 +174,25 @@ fn apply_one_group(spec: &SmoothSpec, batch: &RecordBatch, only_indices: Option<
     }
 }
 
-/// Partition input batch by `group_col` (Utf8), call apply_one_group per
-/// partition, then stack the results into a single batch with the group
-/// column preserved as an additional field.
+/// Partition input batch by `group_col`, call apply_one_group per partition,
+/// then stack the results into a single batch with the group column preserved
+/// (with its original dtype, XFORM-03) as an additional field.
 fn apply_grouped(
     spec: &SmoothSpec,
     batch: &RecordBatch,
     group_col: &str,
 ) -> PyResult<RecordBatch> {
     use arrow::array::StringArray;
-    use std::collections::BTreeMap;
 
-    let schema = batch.schema();
-    let gi = schema.index_of(group_col).map_err(|_|
-        PyValueError::new_err(format!(
-            "stat_smooth: groupby column '{}' not found", group_col)))?;
-    let gtype = schema.field(gi).data_type();
-    if gtype != &DataType::Utf8 {
-        return Err(PyValueError::new_err(format!(
-            "stat_smooth: groupby column '{}' must be Utf8; got {:?}", group_col, gtype)));
-    }
-    let garr = batch.column(gi).as_any().downcast_ref::<StringArray>()
-        .ok_or_else(|| PyValueError::new_err(format!(
-            "stat_smooth: expected StringArray for groupby column '{}'", group_col)))?;
-
-    // Group row indices by first-appearance order of the group value.
-    let mut group_order: Vec<String> = Vec::new();
-    let mut group_idx_map: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for i in 0..garr.len() {
-        if garr.is_null(i) { continue; }
-        let gv = garr.value(i).to_string();
-        if seen.insert(gv.clone()) {
-            group_order.push(gv.clone());
-        }
-        group_idx_map.entry(gv).or_default().push(i);
-    }
+    // Shared partition path (first-appearance order, null-key skip, dtype-preserve).
+    let (group_order, group_idx_map, gtype) = group_partition(batch, group_col, "stat_smooth")?;
 
     // Collect per-group outputs and stack them.
-    let mut per_group_batches: Vec<(String, RecordBatch)> = Vec::new();
+    let mut per_group_batches: Vec<(KeyValue, RecordBatch)> = Vec::new();
     for g in &group_order {
         let ixs = group_idx_map.get(g)
             .ok_or_else(|| PyValueError::new_err(format!(
-                "stat_smooth: missing group key '{g}' in index map")))?;
+                "stat_smooth: missing group key {g:?} in index map")))?;
         let out = apply_one_group(spec, batch, Some(ixs))?;
         per_group_batches.push((g.clone(), out));
     }
@@ -265,17 +244,19 @@ fn apply_grouped(
         }
     }
 
-    // Append the group column.
-    out_fields.push(Field::new(group_col, DataType::Utf8, false));
-    let mut group_vals: Vec<String> = Vec::with_capacity(total_rows);
+    // Append the group column, preserving its ORIGINAL dtype (XFORM-03): one
+    // KeyValue per output row, materialized via the shared group_key helper so
+    // an Int64/Boolean group round-trips as Int64/Boolean rather than String.
+    out_fields.push(Field::new(group_col, gtype.clone(), groupby_field_nullable()));
+    let mut group_keys_out: Vec<Vec<KeyValue>> = Vec::with_capacity(total_rows);
     for (g, b) in &per_group_batches {
         for _ in 0..b.num_rows() {
-            group_vals.push(g.clone());
+            group_keys_out.push(vec![g.clone()]);
         }
     }
-    out_cols.push(Arc::new(StringArray::from(
-        group_vals.iter().map(|s| s.as_str()).collect::<Vec<_>>()
-    )));
+    let group_col_arr = materialize_groupby_col(&group_keys_out, 0, &gtype)
+        .map_err(PyValueError::new_err)?;
+    out_cols.push(group_col_arr);
 
     let out_schema = Arc::new(Schema::new(out_fields));
     RecordBatch::try_new(out_schema, out_cols)
@@ -1939,6 +1920,205 @@ mod tests {
             // (removing one data point changes the regression coefficients slightly).
             // What must NOT happen: NaN-corrupted output.  Here we just assert finite.
         }
+    }
+
+    // ── T0.3: grouped smooth accepts non-Utf8 group dtypes + preserves dtype ──
+
+    fn col_i64<'a>(b: &'a RecordBatch, name: &str) -> &'a arrow::array::Int64Array {
+        b.column(b.schema().index_of(name).unwrap())
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+    }
+
+    /// An Int64 group column must work (was "must be Utf8") AND round-trip as
+    /// Int64 in the output, not a forced StringArray (XFORM-03).
+    #[test]
+    fn test_smooth_grouped_int64_group_roundtrips_as_int64() {
+        use arrow::array::Int64Array;
+        pyo3::Python::initialize();
+        // Two groups, each a perfect line so LM recovers it exactly.
+        let xs: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let mut all_x: Vec<f64> = Vec::new();
+        let mut all_y: Vec<f64> = Vec::new();
+        let mut all_g: Vec<i64> = Vec::new();
+        for &x in &xs {
+            all_x.push(x);
+            all_y.push(3.0 + 2.0 * x); // group 100
+            all_g.push(100);
+        }
+        for &x in &xs {
+            all_x.push(x);
+            all_y.push(1.0 - 1.0 * x); // group 200
+            all_g.push(200);
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(all_x)),
+                Arc::new(Float64Array::from(all_y)),
+                Arc::new(Int64Array::from(all_g)),
+            ],
+        )
+        .unwrap();
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: None,
+            bandwidth: 0.0, degree: 1, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: Some("g".into()),
+            name: None,
+        };
+        let out = apply(&spec, &batch).expect("Int64 groupby must succeed");
+        // 2 groups × 5 grid points = 10 rows.
+        assert_eq!(out.num_rows(), 10);
+        // Group column must be the LAST field, dtype Int64 (NOT Utf8).
+        let last = out.schema().fields().len() - 1;
+        assert_eq!(out.schema().field(last).name(), "g");
+        assert_eq!(
+            out.schema().field(last).data_type(),
+            &DataType::Int64,
+            "group column must round-trip as Int64, not String"
+        );
+        let groups = col_i64(&out, "g");
+        for i in 0..5 {
+            assert_eq!(groups.value(i), 100, "first 5 rows are group 100");
+        }
+        for i in 5..10 {
+            assert_eq!(groups.value(i), 200, "last 5 rows are group 200");
+        }
+        // Each group's fit recovers its own line.
+        let yf = col(&out, "y");
+        let xg = col(&out, "x");
+        for i in 0..5 {
+            assert!((yf[i] - (3.0 + 2.0 * xg[i])).abs() < 1e-9, "group 100 fit");
+        }
+        for i in 5..10 {
+            assert!((yf[i] - (1.0 - 1.0 * xg[i])).abs() < 1e-9, "group 200 fit");
+        }
+    }
+
+    /// A Boolean group column must work (was "must be Utf8") and round-trip as
+    /// Boolean in the output.
+    #[test]
+    fn test_smooth_grouped_boolean_group_column() {
+        use arrow::array::BooleanArray;
+        pyo3::Python::initialize();
+        let xs: Vec<f64> = (0..8).map(|i| i as f64).collect();
+        let mut all_x: Vec<f64> = Vec::new();
+        let mut all_y: Vec<f64> = Vec::new();
+        let mut all_g: Vec<bool> = Vec::new();
+        for &x in &xs {
+            all_x.push(x);
+            all_y.push(2.0 * x);
+            all_g.push(true);
+        }
+        for &x in &xs {
+            all_x.push(x);
+            all_y.push(-3.0 * x + 1.0);
+            all_g.push(false);
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Boolean, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(all_x)),
+                Arc::new(Float64Array::from(all_y)),
+                Arc::new(BooleanArray::from(all_g)),
+            ],
+        )
+        .unwrap();
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: None,
+            bandwidth: 0.0, degree: 1, n: 4, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: Some("g".into()),
+            name: None,
+        };
+        let out = apply(&spec, &batch).expect("Boolean groupby must succeed");
+        assert_eq!(out.num_rows(), 8, "2 groups × 4 grid points");
+        let last = out.schema().fields().len() - 1;
+        assert_eq!(out.schema().field(last).data_type(), &DataType::Boolean);
+        let groups = out
+            .column(last)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        for i in 0..4 {
+            assert!(groups.value(i), "first group (true) appears first");
+        }
+        for i in 4..8 {
+            assert!(!groups.value(i), "second group (false) appears second");
+        }
+    }
+
+    /// Sentinel: a Utf8 group column still round-trips as Utf8 (byte-stable path).
+    #[test]
+    fn test_smooth_grouped_utf8_group_unchanged() {
+        use arrow::array::StringArray;
+        pyo3::Python::initialize();
+        let xs: Vec<f64> = (0..6).map(|i| i as f64).collect();
+        let mut all_x: Vec<f64> = Vec::new();
+        let mut all_y: Vec<f64> = Vec::new();
+        let mut all_g: Vec<&str> = Vec::new();
+        for &x in &xs {
+            all_x.push(x);
+            all_y.push(x + 1.0);
+            all_g.push("A");
+        }
+        for &x in &xs {
+            all_x.push(x);
+            all_y.push(2.0 * x);
+            all_g.push("B");
+        }
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, true),
+            Field::new("y", DataType::Float64, true),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(all_x)),
+                Arc::new(Float64Array::from(all_y)),
+                Arc::new(StringArray::from(all_g)),
+            ],
+        )
+        .unwrap();
+        let spec = SmoothSpec {
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: None,
+            bandwidth: 0.0, degree: 1, n: 4, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false, inject_metrics: false, x_range: None,
+            groupby: Some("g".into()),
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let last = out.schema().fields().len() - 1;
+        assert_eq!(out.schema().field(last).data_type(), &DataType::Utf8);
+        let groups = out
+            .column(last)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(groups.value(0), "A");
+        assert_eq!(groups.value(out.num_rows() - 1), "B");
     }
 
     /// Unknown method aliases must return an error.
