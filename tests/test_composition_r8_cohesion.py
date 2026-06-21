@@ -29,12 +29,18 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+import json
+
 from ferrum.composition import (
+    _EMPTY_SCENE_JSON,
     _OUTER_NODE_LIST_KEYS,
     _PANEL_AREA_KEYS,
     _PANEL_NODE_LIST_KEYS,
     _FigureChrome,
+    _empty_scene,
     _inject_figure_chrome,
+    _merge_child_scenes,
+    _merge_child_scenes_grid,
     _merge_one_child,
     _merge_scene_panels,
 )
@@ -445,3 +451,40 @@ def test_figure_chrome_kwargs_carries_title(base_chart):
     assert payload["title"] == "MyTitle"
     assert payload["subtitle"] == "Sub"
     assert payload["caption"] == "Cap"
+
+
+# ---------------------------------------------------------------------------
+# COMP-03: _merge_child_scenes* empty-input returns canonical schema
+# ---------------------------------------------------------------------------
+
+_FULL_SCENE_KEYS = {"panels", "width", "height", "selections", "interaction", "title", "legend", "decorations", "background"}
+
+
+def test_merge_child_scenes_empty_input_returns_full_schema():
+    """Regression: COMP-03 — empty-input early-return uses _EMPTY_SCENE_JSON (full schema).
+
+    Before the fix, the four _merge_child_scenes* helpers returned a partial
+    literal '{"panels":[],"width":0,"height":0}' on empty input, which carried
+    only 3 keys.  After COMP-03 they return _EMPTY_SCENE_JSON, whose parsed
+    shape matches _empty_scene() and carries the full key set including
+    selections, interaction, legend, decorations, and background.
+
+    This test would KeyError / fail on the old 3-key literal and passes now.
+    """
+    scene_json, packed = _merge_child_scenes([], spacing=10.0)
+    parsed = json.loads(scene_json)
+    assert parsed.keys() >= _FULL_SCENE_KEYS
+    assert packed == b""
+
+
+def test_merge_child_scenes_grid_empty_input_returns_full_schema():
+    """Regression: COMP-03 — grid variant also uses _EMPTY_SCENE_JSON on empty input."""
+    scene_json, packed = _merge_child_scenes_grid([], spacing=10.0, columns=2)
+    parsed = json.loads(scene_json)
+    assert parsed.keys() >= _FULL_SCENE_KEYS
+    assert packed == b""
+
+
+def test_empty_scene_json_matches_empty_scene_call():
+    """_EMPTY_SCENE_JSON is the canonical serialization of _empty_scene()."""
+    assert json.loads(_EMPTY_SCENE_JSON) == _empty_scene()

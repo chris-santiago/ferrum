@@ -63,6 +63,30 @@ def _copy_configure_layers(src: "_ChartLike", dst: "_ChartLike") -> None:
         dst._configure_layers = list(config)
 
 
+def _shallow_copy_composite(src) -> object:
+    """Shallow copy for ``_ChartLike`` subclasses that mix ``__slots__`` and ``__dict__``.
+
+    Shared by ``_CompositeBase.__copy__`` and ``LayerChart.__copy__`` so the
+    ``__dict__`` + MRO-slot copy logic lives in one place.  Returns a new
+    instance with all ``__dict__`` keys and all ``__slots__`` attributes from
+    the full MRO copied to the new object.  The caller is responsible for
+    making any mutable slot attributes (e.g. ``charts``, ``_charts``) into
+    fresh copies after this returns.
+    """
+    new = object.__new__(type(src))
+    if hasattr(src, "__dict__"):
+        new.__dict__.update(src.__dict__)
+    for cls in type(src).__mro__:
+        for slot in getattr(cls, "__slots__", ()):
+            if slot == "__dict__":
+                continue
+            try:
+                setattr(new, slot, getattr(src, slot))
+            except AttributeError:
+                pass
+    return new
+
+
 def _validate_resolve(resolve: Optional[Dict[str, str]], label: str) -> None:
     """Raise ``ValueError`` when *resolve* is not a valid channel-mode dict.
 
@@ -629,20 +653,7 @@ class _CompositeBase(_ChartLike):
 
     def __copy__(self):
         """Shallow copy that duplicates mutable list attributes."""
-        new = object.__new__(type(self))
-        # Copy __dict__ for dynamic attributes (e.g. _configure_layers,
-        # figure-chrome fields, and slot-free attrs on asymmetric layouts).
-        if hasattr(self, "__dict__"):
-            new.__dict__.update(self.__dict__)
-        # Copy slot attributes from the full MRO.
-        for cls in type(self).__mro__:
-            for slot in getattr(cls, "__slots__", ()):
-                if slot == "__dict__":
-                    continue
-                try:
-                    setattr(new, slot, getattr(self, slot))
-                except AttributeError:
-                    pass
+        new = _shallow_copy_composite(self)
         # Ensure the mutable charts list is a fresh copy.  Asymmetric
         # layouts expose ``charts`` as a read-only property (derived from
         # their panels), so only refresh it when it is a writable attribute.
@@ -1154,18 +1165,7 @@ class RepeatChart(_CompositeBase):
             raise ValueError("RepeatChart: at least one of row=, column=, or layer= must be set")
         if columns is not None and columns <= 0:
             raise ValueError(f"RepeatChart: columns must be > 0; got {columns}")
-        if resolve is not None:
-            if not isinstance(resolve, dict):
-                raise ValueError(
-                    "RepeatChart: resolve must be a dict mapping channel names "
-                    "to 'shared' or 'independent'; got "
-                    f"{type(resolve).__name__}"
-                )
-            for ch, mode in resolve.items():
-                if mode not in ("shared", "independent"):
-                    raise ValueError(
-                        f"RepeatChart: resolve[{ch!r}]={mode!r}; expected 'shared' or 'independent'"
-                    )
+        _validate_resolve(resolve, "RepeatChart")
         self.template = template
         self.row = list(row) if row is not None else None
         self.column = list(column) if column is not None else None
@@ -1809,31 +1809,17 @@ class LayerChart(_ChartLike):
     ) -> None:
         if len(charts) < 1:
             raise ValueError("LayerChart requires at least one chart")
-        if resolve is not None:
-            if not isinstance(resolve, dict):
-                raise ValueError(
-                    "LayerChart: resolve must be a dict mapping channel names "
-                    f"to 'shared' or 'independent'; got {type(resolve).__name__}"
-                )
-            for ch, mode in resolve.items():
-                if mode not in ("shared", "independent"):
-                    raise ValueError(
-                        f"LayerChart: resolve[{ch!r}]={mode!r}; expected 'shared' or 'independent'"
-                    )
+        _validate_resolve(resolve, "LayerChart")
         self._charts = list(charts)
         self._resolve = resolve
         self._title = title
 
     def __copy__(self):
         """Shallow copy that duplicates the mutable _charts list."""
-        new = object.__new__(type(self))
+        new = _shallow_copy_composite(self)
+        # _shallow_copy_composite copies _charts as the same list reference;
+        # make it a fresh copy so mutations to the original don't affect the copy.
         new._charts = list(self._charts)
-        new._resolve = self._resolve
-        new._title = self._title
-        # Copy __dict__ (holds dynamic attrs like _configure_layers from the
-        # parent _ChartLike which doesn't define __slots__).
-        if hasattr(self, "__dict__"):
-            new.__dict__.update(self.__dict__)
         return new
 
     @property
@@ -2129,6 +2115,21 @@ def _assemble_placed_children(
     return _json.dumps(merged), merged_packed
 
 
+def _render_charts(charts: list) -> list[tuple[dict, bytes]]:
+    """Render each chart and return a list of ``(scene_dict, packed)`` pairs.
+
+    Shared by the four ``_merge_child_scenes*`` helpers so the
+    ``_render_scene`` + ``_json.loads`` prelude is not copy-pasted.
+    The caller is responsible for its own empty-input guard (COMP-03).
+    """
+    from ferrum._interactive import _render_scene
+
+    return [
+        (_json.loads(scene_json), packed)
+        for scene_json, packed in (_render_scene(c) for c in charts)
+    ]
+
+
 def _merge_child_scenes(
     charts: list,
     spacing: float,
@@ -2155,17 +2156,10 @@ def _merge_child_scenes(
     tuple[str, bytes]
         ``(merged_scene_json, merged_packed_data)``
     """
-    from ferrum._interactive import _render_scene
+    rendered = _render_charts(charts)
 
-    child_scenes = []
-    child_packed = []
-    for chart in charts:
-        scene_json, packed = _render_scene(chart)
-        child_scenes.append(_json.loads(scene_json))
-        child_packed.append(packed)
-
-    if not child_scenes:
-        return '{"panels":[],"width":0,"height":0}', b""
+    if not rendered:
+        return _EMPTY_SCENE_JSON, b""
 
     x_offset = 0.0
     y_offset = 0.0
@@ -2174,7 +2168,7 @@ def _merge_child_scenes(
     height = 0
     placed: list[_PlacedChild] = []
 
-    for scene, packed in zip(child_scenes, child_packed):
+    for scene, packed in rendered:
         dx = x_offset if layout == "horizontal" else 0.0
         dy = y_offset if layout == "vertical" else 0.0
         placed.append(_PlacedChild(scene, packed, dx, dy, panel_id_offset))
@@ -2223,18 +2217,13 @@ def _merge_child_scenes_grid(
     tuple[str, bytes]
         ``(merged_scene_json, merged_packed_data)``
     """
-    from ferrum._interactive import _render_scene
-
     if not charts:
-        return '{"panels":[],"width":0,"height":0}', b""
+        return _EMPTY_SCENE_JSON, b""
 
     columns = max(1, columns)
 
     # Render all children up front.
-    rendered: list[tuple[dict, bytes]] = []
-    for chart in charts:
-        scene_json, packed = _render_scene(chart)
-        rendered.append((_json.loads(scene_json), packed))
+    rendered: list[tuple[dict, bytes]] = _render_charts(charts)
 
     # Partition into rows.
     rows: list[list[tuple[dict, bytes]]] = []
@@ -2297,16 +2286,16 @@ def _merge_child_scenes_sparse_grid(
     tuple[str, bytes]
         ``(merged_scene_json, merged_packed_data)``
     """
-    from ferrum._interactive import _render_scene
-
     if not cells:
-        return '{"panels":[],"width":0,"height":0}', b""
+        return _EMPTY_SCENE_JSON, b""
 
-    # Render all children up front.
-    rendered: list[tuple[int, int, dict, bytes]] = []
-    for row_idx, col_idx, chart in cells:
-        scene_json, packed = _render_scene(chart)
-        rendered.append((row_idx, col_idx, _json.loads(scene_json), packed))
+    # Render all children up front, preserving their (row, col) coordinates.
+    row_cols = [(r, c) for r, c, _ in cells]
+    charts = [chart for _, _, chart in cells]
+    scenes_packed = _render_charts(charts)
+    rendered: list[tuple[int, int, dict, bytes]] = [
+        (r, c, scene, packed) for (r, c), (scene, packed) in zip(row_cols, scenes_packed)
+    ]
 
     # Uniform cell dimensions (max across all children).
     cell_w = max(s.get("width", 0) for _, _, s, _ in rendered)
@@ -2362,16 +2351,16 @@ def _merge_child_scenes_nonuniform_grid(
     tuple[str, bytes]
         ``(merged_scene_json, merged_packed_data)``
     """
-    from ferrum._interactive import _render_scene
-
     if not cells:
-        return '{"panels":[],"width":0,"height":0}', b""
+        return _EMPTY_SCENE_JSON, b""
 
-    # Render all children up front.
-    rendered: list[tuple[int, int, dict, bytes]] = []
-    for row_idx, col_idx, chart in cells:
-        scene_json, packed = _render_scene(chart)
-        rendered.append((row_idx, col_idx, _json.loads(scene_json), packed))
+    # Render all children up front, preserving their (row, col) coordinates.
+    row_cols = [(r, c) for r, c, _ in cells]
+    charts = [chart for _, _, chart in cells]
+    scenes_packed = _render_charts(charts)
+    rendered: list[tuple[int, int, dict, bytes]] = [
+        (r, c, scene, packed) for (r, c), (scene, packed) in zip(row_cols, scenes_packed)
+    ]
 
     # Compute per-row heights and per-column widths.
     row_heights: dict[int, float] = {}
@@ -2633,6 +2622,12 @@ def _empty_scene() -> dict:
             "param_bindings": [],
         },
     }
+
+
+# Canonical empty-merge return value: (scene_json, packed_bytes).
+# Used by all four _merge_child_scenes* helpers on their empty-input early-return
+# so the empty case shares the full scene schema with _empty_scene().
+_EMPTY_SCENE_JSON: str = _json.dumps(_empty_scene())
 
 
 def _merge_scene_panels(
