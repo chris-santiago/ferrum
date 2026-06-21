@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 
 def save_chart(
-    chart: "Chart",
+    chart: object,
     path: Union[str, Path],
     *,
     format: str | None = None,
@@ -21,12 +21,20 @@ def save_chart(
     scale: float = 2.0,
     toolbar: bool = True,
 ) -> None:
-    """Save a chart to disk.
+    """Save a chart-like object to disk, dispatching on extension or ``format``.
+
+    This is the single save-format router for the whole library: ``Chart``,
+    every composition wrapper (``HConcatChart`` / ``VConcatChart`` /
+    ``JointChart`` / ``LayerChart`` / ...), and ``InteractiveChart`` all route
+    their ``.save()`` through here so there is one format table and one HTML /
+    title resolution path.
 
     Parameters
     ----------
-    chart : Chart
-        The chart to save.  Callers typically pass a chart with render
+    chart : chart-like
+        Any object exposing the chart-like rendering surface — ``to_svg()``,
+        ``to_png(scale=...)`` and the ``(scene_json, packed_data)`` producer
+        used for HTML / JSON.  Callers typically pass a chart with render
         overrides already applied (e.g. via ``Chart.save(raster=False)``).
     path : str or Path
         Destination file path.  The extension determines the format unless
@@ -66,17 +74,13 @@ def save_chart(
     elif fmt == "png":
         path.write_bytes(chart.to_png(scale=scale))
     elif fmt == "html":
-        scene_json, packed_data = _render_scene_json(chart)
-        from ferrum._html import assemble_html, _copy_wasm_sidecar
+        from ferrum._html import _copy_wasm_sidecar
 
-        title = _extract_title_text(chart._title)
-        html = assemble_html(
-            scene_json,
-            packed_data=packed_data,
-            title=title,
+        html = html_string(
+            chart,
             embed_wasm=embed_wasm,
-            csp_nonce=csp_nonce,
             toolbar=toolbar,
+            csp_nonce=csp_nonce,
         )
         path.write_text(html)
         if not embed_wasm:
@@ -90,6 +94,55 @@ def save_chart(
         raise ValueError(f"save({str(path)!r}) requires a format= or a path with extension.")
     else:
         raise ValueError(f"unknown extension {fmt!r}; supported: svg, png, html, json, pdf.")
+
+
+def html_string(
+    chart_like: object,
+    *,
+    embed_wasm: bool = True,
+    toolbar: bool = True,
+    csp_nonce: str | None = None,
+) -> str:
+    """Assemble a self-contained interactive HTML document for any chart-like.
+
+    This is the single HTML-assembly path for the whole library.  It produces
+    ``(scene_json, packed_data)`` through the uniform scene producer
+    (:func:`_render_scene_json`, which dispatches to a plain ``Chart``'s Rust
+    renderer or a composition's ``_render_interactive``), resolves the
+    browser-tab ``<title>`` via :func:`figure_title_text`, and calls
+    :func:`ferrum._html.assemble_html`.
+
+    ``Chart.to_html``, ``_CompositeBase.to_html``, :func:`save_chart`'s HTML
+    branch, and ``InteractiveChart.save`` all route through here, so the HTML
+    output and tab title are identical regardless of which entry point a caller
+    reaches.  It never constructs a live widget, so it works in environments
+    without ``anywidget`` installed.
+
+    Parameters
+    ----------
+    chart_like : chart-like
+        Any ``Chart`` or composition wrapper.
+    embed_wasm : bool, default True
+        When True, base64-inline the WASM binary for single-file distribution.
+        When False, the document references an adjacent ``ferrum_wasm_bg.wasm``
+        sidecar that the caller must place beside it.
+    toolbar : bool, default True
+        When False, the interactive toolbar is hidden in the rendered HTML.
+    csp_nonce : str, optional
+        When provided, both the ``<style>`` and ``<script type="module">`` tags
+        receive a ``nonce="..."`` attribute for strict Content-Security-Policy.
+    """
+    from ferrum._html import assemble_html
+
+    scene_json, packed_data = _render_scene_json(chart_like)
+    return assemble_html(
+        scene_json,
+        packed_data=packed_data,
+        title=figure_title_text(chart_like),
+        embed_wasm=embed_wasm,
+        csp_nonce=csp_nonce,
+        toolbar=toolbar,
+    )
 
 
 def show_chart(chart: "Chart") -> None:
@@ -124,7 +177,7 @@ def show_chart(chart: "Chart") -> None:
             pass
     # Browser fallback: write temp HTML, open in browser
     with tempfile.NamedTemporaryFile(mode="w", suffix=".html", delete=False) as f:
-        f.write(_wrap_svg_in_html(chart.to_svg(), title=_extract_title_text(chart._title)))
+        f.write(_wrap_svg_in_html(chart.to_svg(), title=figure_title_text(chart)))
         url = f"file://{f.name}"
     webbrowser.open(url)
 
@@ -144,11 +197,21 @@ def _extract_title_text(raw_title: object) -> str:
 def figure_title_text(chart_like: object) -> str:
     """Resolve the document ``<title>`` text for any chart-like object.
 
-    Composites expose a canonical ``_figure_title_text()`` accessor that
-    resolves their figure-level title; a plain ``Chart`` carries ``_title``
-    (a ``Title`` dataclass).  This helper dispatches to the accessor when it
-    exists and otherwise reads ``_title``, so every HTML export path sets the
-    browser-tab title consistently.
+    This is the **sole** title-resolution entry point for every HTML / browser
+    export path.  Title resolution is three-tiered:
+
+    - :func:`figure_title_text` (this function) — the dispatcher every caller
+      uses.  It prefers a chart-like's per-object ``_figure_title_text()``
+      accessor when present, and otherwise reads ``_title`` directly.
+    - ``_figure_title_text()`` — the per-object hook.  ``_ChartLike`` resolves
+      a single chart's ``_title``; ``_CompositeBase`` overrides it to resolve
+      the composite's ``_figure_title``.
+    - :func:`_extract_title_text` — the leaf that turns a ``Title`` dataclass
+      (or plain string / ``None``) into the displayed text.
+
+    Routing every caller through this dispatcher (rather than the leaf) is what
+    keeps the browser-tab title identical across ``Chart.to_html``,
+    ``_CompositeBase.to_html``, :func:`save_chart`, and ``InteractiveChart.save``.
     """
     accessor = getattr(chart_like, "_figure_title_text", None)
     if callable(accessor):
@@ -350,13 +413,18 @@ def _png_channels(png_bytes: bytes) -> int:
     return {0: 1, 2: 3, 3: 3, 4: 2, 6: 4}.get(colour_type, 3)
 
 
-def _render_scene_json(chart: "Chart") -> tuple[str, bytes]:
-    """Render a chart to SceneGraph JSON + packed binary data for the WASM renderer.
+def _render_scene_json(chart: object) -> tuple[str, bytes]:
+    """Render any chart-like to SceneGraph JSON + packed binary data.
+
+    This is the uniform ``(scene_json, packed_data)`` producer used by every
+    HTML / JSON export path.  It delegates to :func:`ferrum._interactive._render_scene`,
+    which dispatches to a composition's ``_render_interactive()`` when present
+    and otherwise drives the Rust ``render_interactive`` for a plain ``Chart``.
 
     Returns
     -------
     tuple[str, bytes]
-        (scene_json, packed_data) from ``render_interactive``.
+        ``(scene_json, packed_data)``.
     """
     from ferrum._interactive import _render_scene
 

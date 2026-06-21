@@ -239,7 +239,13 @@ class _ChartLike(ConfigureMixin):
 
         return _extract_title_text(getattr(self, "_title", None))
 
-    def to_html(self, *, embed_wasm: bool = True, toolbar: bool = True) -> str:
+    def to_html(
+        self,
+        *,
+        embed_wasm: bool = True,
+        toolbar: bool = True,
+        csp_nonce: str | None = None,
+    ) -> str:
         """Return the composition as a self-contained interactive HTML document.
 
         This **returns** the HTML markup; it does not display the composition
@@ -250,6 +256,11 @@ class _ChartLike(ConfigureMixin):
         than a static export; for a lightweight static image use
         :meth:`to_svg` / :meth:`to_png`.
 
+        Routes through the shared :func:`ferrum.display.html_string` helper, so
+        the HTML assembly and tab-title resolution are identical to a plain
+        ``Chart``.  It does **not** construct a live ``InteractiveChart``
+        widget, so headless HTML export works without ``anywidget`` installed.
+
         Parameters
         ----------
         embed_wasm : bool, default True
@@ -259,22 +270,23 @@ class _ChartLike(ConfigureMixin):
         toolbar : bool, default True
             When False, the interactive toolbar (zoom / pan controls, export
             button) is hidden in the rendered HTML.
+        csp_nonce : str, optional
+            When provided, both the ``<style>`` and ``<script type="module">``
+            tags receive a ``nonce="..."`` attribute so they pass strict
+            Content-Security-Policy headers.
 
         Returns
         -------
         str
             A complete, self-contained interactive HTML document.
         """
-        from ferrum._html import assemble_html
+        from ferrum.display import html_string
 
-        ic = self.interactive(toolbar=toolbar)
-        title = self._figure_title_text()
-        return assemble_html(
-            ic._scene_json,
-            packed_data=ic._packed_data,
-            title=title,
+        return html_string(
+            self,
             embed_wasm=embed_wasm,
             toolbar=toolbar,
+            csp_nonce=csp_nonce,
         )
 
     def show_svg(self) -> str:
@@ -327,49 +339,56 @@ class _ChartLike(ConfigureMixin):
         format=None,
         scale: float = 2.0,
         toolbar: bool = True,
-        **kwargs,
+        embed_wasm: bool = True,
+        csp_nonce: str | None = None,
     ) -> None:
         """Save the composition to a file.
+
+        Routes through :func:`ferrum.display.save_chart` — the single
+        save-format router shared with ``Chart.save`` — so the supported
+        format table (``svg`` / ``png`` / ``html`` / ``json`` / ``pdf``) and
+        the HTML / title resolution are identical across chart and composite.
 
         Parameters
         ----------
         path : str
             Destination file path.  The extension determines the format when
             *format* is omitted.
-        format : str, optional
-            ``"svg"``, ``"png"``, ``"pdf"``, or ``"html"``.  Other formats
-            raise ``ValueError``.
+        format : {"svg", "png", "html", "json", "pdf"}, optional
+            Explicit format override.  Other formats raise ``ValueError``.
         scale : float, default 2.0
             Pixel-density multiplier for PNG and PDF output.  Has no effect
-            on SVG or HTML exports.
+            on SVG, HTML, or JSON exports.
         toolbar : bool, default True
             Whether to include the interactive toolbar (zoom/pan controls,
             export button) when saving as HTML.  Has no effect on SVG, PNG,
-            or PDF exports.
+            JSON, or PDF exports.
+        embed_wasm : bool, default True
+            For ``"html"`` format only.  When True, the WASM binary is
+            base64-inlined for single-file distribution.  When False, an
+            adjacent ``ferrum_wasm_bg.wasm`` sidecar is written alongside.
+        csp_nonce : str, optional
+            For ``"html"`` format only.  When provided, both the ``<style>``
+            and ``<script type="module">`` tags receive a ``nonce="..."``
+            attribute so they pass strict Content-Security-Policy headers.
 
         Raises
         ------
         ValueError
-            If *format* is not a recognised export format.
+            If *format* (or the path extension) is not a recognised export
+            format.
         """
-        from ferrum.display import save_chart_svg
+        from ferrum.display import save_chart
 
-        dest = Path(path)
-        fmt = format or dest.suffix.lstrip(".")
-        if fmt == "svg":
-            dest.write_text(self.to_svg(), encoding="utf-8")
-        elif fmt == "png":
-            dest.write_bytes(self.to_png(scale=scale))
-        elif fmt == "pdf":
-            save_chart_svg(self.to_svg(), str(dest), scale=scale)
-        elif fmt == "html":
-            ic = self.interactive(toolbar=toolbar)
-            ic.save(str(dest), **kwargs)
-        else:
-            raise ValueError(
-                f"format={fmt!r} is not supported for {type(self).__name__}; "
-                "use 'svg', 'png', 'pdf', or 'html'."
-            )
+        save_chart(
+            self,
+            path,
+            format=format,
+            scale=scale,
+            toolbar=toolbar,
+            embed_wasm=embed_wasm,
+            csp_nonce=csp_nonce,
+        )
 
     def share_scale(self, **channels):
         """Share scales across this composition's member charts.

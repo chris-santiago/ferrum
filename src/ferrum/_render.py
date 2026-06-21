@@ -708,6 +708,7 @@ class _RenderMixin:
         embed_wasm: bool = True,
         toolbar: bool = True,
         raster: bool | None = None,
+        csp_nonce: str | None = None,
     ) -> str:
         """Return the chart as a self-contained interactive HTML document.
 
@@ -732,6 +733,10 @@ class _RenderMixin:
             Override the auto-raster policy for this render only.
             ``False`` forces per-element rendering.  ``True`` forces raster.
             ``None`` uses the chart's ``RenderConfig`` policy.
+        csp_nonce : str, optional
+            When provided, both the ``<style>`` and ``<script type="module">``
+            tags receive a ``nonce="..."`` attribute so they pass strict
+            Content-Security-Policy headers.
 
         Returns
         -------
@@ -747,18 +752,13 @@ class _RenderMixin:
         >>> html.lstrip().startswith("<!")
         True
         """
-        from ferrum._html import assemble_html
-        from ferrum.display import _extract_title_text, _render_scene_json
+        from ferrum.display import html_string
 
-        chart = self._with_raster_override(raster)
-        scene_json, packed_data = _render_scene_json(chart)
-        title = _extract_title_text(chart._title)
-        return assemble_html(
-            scene_json,
-            packed_data=packed_data,
-            title=title,
+        return html_string(
+            self._with_raster_override(raster),
             embed_wasm=embed_wasm,
             toolbar=toolbar,
+            csp_nonce=csp_nonce,
         )
 
     def show_svg(self, *, raster: bool | None = None) -> str:
@@ -820,6 +820,7 @@ class _RenderMixin:
         raster: bool | None = None,
         scale: float = 2.0,
         toolbar: bool = True,
+        csp_nonce: str | None = None,
     ) -> None:
         """Save the chart to a file on disk.
 
@@ -844,6 +845,10 @@ class _RenderMixin:
         toolbar : bool, default True
             For ``"html"`` format only.  When False, the interactive toolbar
             is hidden in the rendered HTML.
+        csp_nonce : str, optional
+            For ``"html"`` format only.  When provided, both the ``<style>``
+            and ``<script type="module">`` tags receive a ``nonce="..."``
+            attribute so they pass strict Content-Security-Policy headers.
 
         Examples
         --------
@@ -861,6 +866,7 @@ class _RenderMixin:
             embed_wasm=embed_wasm,
             scale=scale,
             toolbar=toolbar,
+            csp_nonce=csp_nonce,
         )
 
     def show(self, *, raster: bool | None = None) -> None:
