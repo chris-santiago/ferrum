@@ -215,6 +215,7 @@ def desugar_violin(
     y_sort: Any = None,
     color_field: str | None = None,
     shared_extent: bool = False,
+    horizontal: bool = False,
 ) -> "MarkDesugarResult":
     """Violin-plot composite mark desugar.
 
@@ -273,6 +274,17 @@ def desugar_violin(
         axis directly comparable across groups.  When ``False`` (default),
         each group's KDE is evaluated on its own per-group data range.
         Mirrors ``mark_density(multiple="stack"/"fill")`` behavior.
+    horizontal : bool, default False
+        When ``True``, swap axes so the categorical grouping is on ``y`` and
+        the value distribution is on ``x``.  Mirrors the ``horizontal``
+        parameter on ``desugar_boxplot``.  The body encoding is swapped
+        (``y=cat``, ``x=violin_y``) and the inner box/quartile/point layers
+        are similarly swapped.
+
+        Horizontal rendering is fully supported: the ``Violin`` transform
+        emits ``__pos_y_offset__`` (scaled by panel height) instead of
+        ``__pos_x_offset__`` when ``horizontal=True``, so the KDE width
+        expands along the category band on the ``y`` axis.
 
     Returns
     -------
@@ -302,33 +314,55 @@ def desugar_violin(
 
     from ferrum.encoding import X, Y
 
-    # Violin always uses x_field as the categorical grouping axis.
-    # Wrap it in X(..., sort=x_sort) when sort is present so the rendered axis
-    # honors the user's sort request across all inner layers.
-    x_enc_val = X(x_field, sort=x_sort) if x_sort is not None else x_field
+    # Resolve cat/val axes.  When horizontal=True the categorical grouping moves
+    # to y and the numeric values move to x, mirroring the boxplot pattern.
+    if horizontal:
+        cat_field = y_field  # categorical grouping on y
+        val_field = x_field  # numeric values on x
+        cat_sort = y_sort
+    else:
+        cat_field = x_field  # categorical grouping on x (default)
+        val_field = y_field  # numeric values on y
+        cat_sort = x_sort
+
+    # Wrap the categorical encoding in X/Y with sort when a sort is present.
+    if horizontal:
+        cat_enc = Y(cat_field, sort=cat_sort) if cat_sort is not None else cat_field
+    else:
+        cat_enc = X(cat_field, sort=cat_sort) if cat_sort is not None else cat_field
 
     # When a hue (color) field is present, the KDE — and every inner summary —
-    # must split per (x, hue) group rather than pooling across hues.  The Violin
-    # and BoxStats transforms propagate all groupby columns to their output, so
-    # `color_field` is available as an output column on the violin batch and can
-    # drive a per-hue fill on the body polygon.  `detail="group_id"` keeps each
-    # (x, hue) group drawing as a distinct closed polygon (group_id is per
-    # groupby-group), so the per-hue violins overlay within each x band.
+    # must split per (cat, hue) group rather than pooling across hues.  The
+    # Violin and BoxStats transforms propagate all groupby columns to their
+    # output, so `color_field` is available as an output column on the violin
+    # batch and can drive a per-hue fill on the body polygon.
+    # `detail="group_id"` keeps each (cat, hue) group drawing as a distinct
+    # closed polygon, so the per-hue violins overlay within each category band.
     # Add the hue field to the groupby only when it is a distinct column; when
-    # color encodes the same field as x the KDE is already split per x-category
-    # and the body just colors by the surviving x column.
-    groupby, split_hue = resolve_color_groupby(x_field, color_field, [x_field])
+    # color encodes the same field as cat the KDE is already split per category
+    # and the body just colors by the surviving cat column.
+    groupby, split_hue = resolve_color_groupby(cat_field, color_field, [cat_field])
 
-    body_encoding: dict = {"x": x_enc_val, "y": Y("violin_y", title=y_field)}
+    # Body encoding: for vertical violin x=cat, y=violin_y (value grid points).
+    # For horizontal violin y=cat, x=violin_y (value grid points on x-axis).
+    # violin_x (the mirrored KDE density offset) is handled by the position
+    # offset column emitted by the Rust Violin transform (__pos_x_offset__ for
+    # vertical; __pos_y_offset__ for horizontal — the latter requires the
+    # pending Rust change in crates/ferrum-core/src/transform/violin.rs).
+    if horizontal:
+        body_encoding: dict = {"y": cat_enc, "x": X("violin_y", title=val_field)}
+    else:
+        body_encoding = {"x": cat_enc, "y": Y("violin_y", title=val_field)}
     if color_field is not None:
         body_encoding["color"] = color_field
 
     transforms = [
         Violin(
-            field=y_field,
+            field=val_field,
             groupby=groupby,
             bandwidth=bandwidth,
             shared_extent=shared_extent,
+            horizontal=horizontal,
             name="violin",
         )
     ]
@@ -342,7 +376,11 @@ def desugar_violin(
     if inner is None:
         return MarkDesugarResult(transforms=transforms, layers=[violin_layer])
     if inner == "point":
-        point_encoding: dict = {"x": x_enc_val, "y": y_field}
+        # Raw points on the original data (not the violin batch).
+        if horizontal:
+            point_encoding: dict = {"y": cat_enc, "x": val_field}
+        else:
+            point_encoding = {"x": cat_enc, "y": val_field}
         if color_field is not None:
             point_encoding["color"] = color_field
         # raw points read from the original (unsplit) data, so coloring by the
@@ -355,11 +393,14 @@ def desugar_violin(
             ],
         )
     if inner == "quartile":
-        transforms.append(BoxStats(field=y_field, groupby=groupby, name="quart"))
+        transforms.append(BoxStats(field=val_field, groupby=groupby, name="quart"))
         layers = [violin_layer]
         for col in ("q1", "median", "q3"):
             mk = {} if col == "median" else {"stroke_dash": [2, 2]}
-            quart_encoding: dict = {"x": x_enc_val, "y": col}
+            if horizontal:
+                quart_encoding: dict = {"y": cat_enc, "x": col}
+            else:
+                quart_encoding = {"x": cat_enc, "y": col}
             if color_field is not None:
                 quart_encoding["color"] = color_field
             layers.append(
@@ -372,7 +413,8 @@ def desugar_violin(
                 )
             )
         return MarkDesugarResult(transforms=transforms, layers=layers)
-    # inner == "box"
+    # inner == "box": delegate to desugar_boxplot with the swapped axes so the
+    # inner box also respects the horizontal orientation.
     from ferrum.marks.composite import desugar_boxplot
 
     box_result = desugar_boxplot(
@@ -381,6 +423,7 @@ def desugar_violin(
         extent=1.5,
         outliers=False,
         size=0.1,
+        horizontal=horizontal,
         x_sort=x_sort,
         y_sort=y_sort,
         color_field=color_field if split_hue else None,

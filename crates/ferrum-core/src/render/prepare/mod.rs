@@ -1686,6 +1686,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         let out = fix_transform_extents_for_facet(&[TransformSpec::Violin(spec.clone())], &batch);
         let TransformSpec::Violin(pinned) = &out[0] else {
@@ -1836,6 +1837,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
 
         // Bin nices: raw (0.3, 9.7) with bin_count=10 → step=1.0 → (0.0, 10.0).

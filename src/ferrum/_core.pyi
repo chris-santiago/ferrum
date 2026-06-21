@@ -583,6 +583,7 @@ class Violin:
         n: int = 256,
         width: float = 0.4,
         shared_extent: bool = False,
+        horizontal: bool = False,
         name: Optional[str] = None,
     ) -> None: ...
 

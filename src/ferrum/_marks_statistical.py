@@ -20,6 +20,45 @@ from ferrum.marks.statistical import (
 _PRIMITIVE_MARKS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
 
 
+def _normalize_orient(orient: str | None, horizontal: bool) -> bool:
+    """Return the effective ``horizontal`` flag from the canonical ``orient`` kwarg.
+
+    ``orient`` is the canonical spelling across the mark family.  ``horizontal``
+    is a legacy bool alias accepted by boxplot/boxen/violin.  When ``orient`` is
+    not ``None``, it wins; otherwise the explicit ``horizontal`` value is used.
+
+    Valid values for ``orient``: ``"vertical"`` (default) or ``"horizontal"``.
+    Any other string raises ``ValueError`` immediately so the error surfaces at
+    the call site rather than silently being absorbed as a style kwarg.
+    """
+    if orient is not None:
+        if orient not in ("vertical", "horizontal"):
+            raise ValueError(f"orient must be 'vertical' or 'horizontal'; got {orient!r}")
+        return orient == "horizontal"
+    return bool(horizontal)
+
+
+def _normalize_orient_to_orientation(kwargs: dict) -> dict:
+    """Normalize ``orient=`` to ``orientation=`` for density/histogram desugars.
+
+    ``desugar_density`` and ``desugar_histogram`` use ``orientation`` as their
+    internal parameter name (historical spelling).  This helper pops ``orient``
+    from a copy of *kwargs* and injects ``orientation`` so the desugar receives
+    its expected param name.  ``orient`` wins over ``orientation`` when both are
+    present.
+
+    Returns a new dict; the caller's original dict is not mutated.
+    """
+    if "orient" not in kwargs:
+        return kwargs
+    orient_val = kwargs["orient"]
+    if orient_val not in ("vertical", "horizontal"):
+        raise ValueError(f"orient must be 'vertical' or 'horizontal'; got {orient_val!r}")
+    new_kwargs = {k: v for k, v in kwargs.items() if k != "orient"}
+    new_kwargs["orientation"] = orient_val
+    return new_kwargs
+
+
 class StatisticalMarksMixin:
     """Mixin providing statistical mark methods for Chart."""
 
@@ -51,6 +90,12 @@ class StatisticalMarksMixin:
         multiple : str, optional
             How to handle multiple densities when a ``color`` encoding is
             present: ``"layer"`` (default), ``"stack"``, ``"fill"``.
+        orient : {"vertical", "horizontal"}, optional
+            Canonical orientation alias for ``orientation``.  ``"horizontal"``
+            swaps the value and density axes.  Takes precedence over
+            ``orientation`` when both are given.
+        orientation : {"vertical", "horizontal"}, optional
+            Legacy spelling.  ``orient`` is preferred.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -71,6 +116,9 @@ class StatisticalMarksMixin:
         >>> fm.Chart(df).mark_density().encode(x="val")
         Chart(mark='area', encoding=['x'])
         """
+        # Normalize orient= → orientation= so the desugar's existing param name
+        # is used.  orient= wins over orientation= when both are present.
+        kwargs = _normalize_orient_to_orientation(kwargs)
         return self._set_composite_mark(
             "density",
             _resolve_density,
@@ -102,6 +150,12 @@ class StatisticalMarksMixin:
         multiple : str, optional
             How to handle grouped histograms when a ``color`` encoding is
             present: ``"layer"`` (default), ``"stack"``, ``"dodge"``.
+        orient : {"vertical", "horizontal"}, optional
+            Canonical orientation alias for ``orientation``.  ``"horizontal"``
+            swaps the bin-edge and count axes.  Takes precedence over
+            ``orientation`` when both are given.
+        orientation : {"vertical", "horizontal"}, optional
+            Legacy spelling.  ``orient`` is preferred.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -122,6 +176,9 @@ class StatisticalMarksMixin:
         >>> fm.Chart(df).mark_histogram(bin_count=5).encode(x="val")
         Chart(mark='bar', encoding=['x', 'x2', 'y'])
         """
+        # Normalize orient= → orientation= so the desugar's existing param name
+        # is used.  orient= wins over orientation= when both are present.
+        kwargs = _normalize_orient_to_orientation(kwargs)
         return self._set_composite_mark(
             "histogram",
             _resolve_histogram,
@@ -203,6 +260,7 @@ class StatisticalMarksMixin:
         outliers=True,
         color_field=None,
         horizontal=False,
+        orient=None,
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -211,7 +269,7 @@ class StatisticalMarksMixin:
         Desugars to a multi-layer chart: box (IQR rect), upper and lower
         whisker rules, median rule, and (optionally) outlier points.  Requires
         a categorical ``x`` encoding and a continuous ``y`` (or the reverse
-        when ``horizontal=True``).
+        when ``horizontal=True`` or ``orient="horizontal"``).
 
         Parameters
         ----------
@@ -231,6 +289,11 @@ class StatisticalMarksMixin:
             Column name to drive per-group fill colour on the box layer.
         horizontal : bool, optional
             Swap x and y axes so boxes run horizontally.  Default is ``False``.
+            Legacy alias; prefer ``orient="horizontal"``.
+        orient : {"vertical", "horizontal"} or None, optional
+            Canonical orientation control.  ``"horizontal"`` is equivalent to
+            ``horizontal=True``.  When both are given, ``orient`` wins if it is
+            not ``None``.
         position : Position, optional
             Position adjustment -- e.g. ``fm.Dodge()`` for side-by-side boxes.
         **mark_kwargs
@@ -253,6 +316,9 @@ class StatisticalMarksMixin:
 
         # width is an alias for size; size takes precedence when both are given.
         effective_size = size if size is not None else width
+        # Normalize orient/horizontal: orient= is canonical; horizontal= is a legacy
+        # alias. When orient is given explicitly, it overrides horizontal.
+        effective_horizontal = _normalize_orient(orient, horizontal)
 
         return self._set_composite_mark(
             "boxplot",
@@ -262,7 +328,7 @@ class StatisticalMarksMixin:
                 "size": effective_size,
                 "outliers": outliers,
                 "color_field": color_field,
-                "horizontal": horizontal,
+                "horizontal": effective_horizontal,
                 **mark_kwargs,
             },
             placeholder="point",
@@ -277,6 +343,7 @@ class StatisticalMarksMixin:
         outlier_threshold: float = 1.5,
         palette=None,
         horizontal: bool = False,
+        orient=None,
         color_field=None,
         position=None,
         **mark_kwargs,
@@ -286,7 +353,7 @@ class StatisticalMarksMixin:
         Produces nested rectangular bands for each letter-value depth, a median
         rule, and an outlier-point layer via the ``LetterValue`` transform.
         Requires a categorical ``x`` encoding and a continuous ``y`` (or the
-        reverse when ``horizontal=True``).
+        reverse when ``horizontal=True`` or ``orient="horizontal"``).
 
         Parameters
         ----------
@@ -303,6 +370,11 @@ class StatisticalMarksMixin:
             the active theme's categorical palette.
         horizontal : bool, optional
             Swap axes so bands run horizontally.  Default is ``False``.
+            Legacy alias; prefer ``orient="horizontal"``.
+        orient : {"vertical", "horizontal"} or None, optional
+            Canonical orientation control.  ``"horizontal"`` is equivalent to
+            ``horizontal=True``.  When both are given, ``orient`` wins if it is
+            not ``None``.
         color_field : str or None, optional
             Column name to drive per-group colour.
         position : Position, optional
@@ -326,6 +398,8 @@ class StatisticalMarksMixin:
         """
         from ferrum.marks.composite import desugar_boxen
 
+        effective_horizontal = _normalize_orient(orient, horizontal)
+
         return self._set_composite_mark(
             "boxen",
             desugar_boxen,
@@ -334,7 +408,7 @@ class StatisticalMarksMixin:
                 "k_proportion": k_proportion,
                 "outlier_threshold": outlier_threshold,
                 "palette": palette,
-                "horizontal": horizontal,
+                "horizontal": effective_horizontal,
                 "color_field": color_field,
                 **mark_kwargs,
             },
@@ -554,14 +628,22 @@ class StatisticalMarksMixin:
         )
 
     def mark_violin(
-        self, *, bandwidth="scott", inner="box", shared_extent=False, position=None, **mark_kwargs
+        self,
+        *,
+        bandwidth="scott",
+        inner="box",
+        shared_extent=False,
+        orient=None,
+        horizontal=False,
+        position=None,
+        **mark_kwargs,
     ) -> "Chart":
         """Render violin plots via the ``Violin`` transform.
 
         Estimates a mirrored KDE per group and overlays an optional inner
         summary (box, quartile lines, or individual points).  Requires a
         categorical ``x`` and continuous ``y`` encoding (or swapped when
-        ``horizontal`` is set).
+        ``orient="horizontal"`` or ``horizontal=True``).
 
         Parameters
         ----------
@@ -578,6 +660,14 @@ class StatisticalMarksMixin:
             (cross-group global min/max), making the value axis directly
             comparable across groups.  When ``False`` (default), each group
             evaluates its KDE on its own per-group data range.
+        orient : {"vertical", "horizontal"}, default "vertical"
+            Canonical orientation control.  ``"horizontal"`` swaps the axes so
+            the categorical grouping is on ``y`` and the value distribution is
+            on ``x``.  Equivalent to ``horizontal=True``.  When both are given,
+            ``orient`` wins.
+        horizontal : bool, default False
+            Legacy alias for ``orient="horizontal"``.  Kept for backward
+            compatibility.
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -599,10 +689,18 @@ class StatisticalMarksMixin:
         """
         from ferrum.marks.heavy_stat import desugar_violin
 
+        effective_horizontal = _normalize_orient(orient, horizontal)
+
         return self._set_composite_mark(
             "violin",
             desugar_violin,
-            {"bandwidth": bandwidth, "inner": inner, "shared_extent": shared_extent, **mark_kwargs},
+            {
+                "bandwidth": bandwidth,
+                "inner": inner,
+                "shared_extent": shared_extent,
+                "horizontal": effective_horizontal,
+                **mark_kwargs,
+            },
             placeholder="polygon",
             position=position,
         )
@@ -818,6 +916,7 @@ class StatisticalMarksMixin:
         *,
         size=4,
         orient="vertical",
+        horizontal=None,
         spacing=1.0,
         side="both",
         dodge=None,
@@ -836,8 +935,12 @@ class StatisticalMarksMixin:
         size : float, optional
             Point diameter in pixels.  Default is ``4``.
         orient : {"vertical", "horizontal"}, default "vertical"
-            Orientation of the swarm axis.  ``"vertical"`` spreads points
+            Canonical orientation control.  ``"vertical"`` spreads points
             along x; ``"horizontal"`` spreads along y.
+        horizontal : bool or None, optional
+            Legacy alias for ``orient``.  ``True`` is equivalent to
+            ``orient="horizontal"``.  When both ``orient`` and ``horizontal``
+            are given, ``horizontal`` wins when ``horizontal is not None``.
         spacing : float, optional
             Minimum spacing between point centres as a fraction of ``size``.
             Default is ``1.0``.
@@ -866,12 +969,19 @@ class StatisticalMarksMixin:
         """
         from ferrum.marks.heavy_stat import desugar_swarm
 
+        # Normalize: horizontal= is a legacy alias for orient=; when both are
+        # given, horizontal= wins (it is explicit).
+        if horizontal is not None:
+            effective_orient = "horizontal" if horizontal else "vertical"
+        else:
+            effective_orient = orient
+
         return self._set_composite_mark(
             "swarm",
             desugar_swarm,
             {
                 "size": size,
-                "orient": orient,
+                "orient": effective_orient,
                 "spacing": spacing,
                 "side": side,
                 "dodge": dodge,
