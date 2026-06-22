@@ -410,3 +410,18 @@ The autonomous review→remediate loop ran to convergence: a round-12 unscoped s
 | KG-9 | S1 | [#27](https://github.com/chris-santiago/ferrum/issues/27) | **pyo3 stub fidelity nits** — `EncodingSpec.condition` is a ctor kwarg with no readable getter (write-only); 5 stub defaults are concrete where the live signature shows `=...` (all verified to match the true runtime default, so the stub is *more* informative, not wrong). No caller impact. |
 
 KG-1..KG-5 above remain open/inactive. The faceted shared-scale fix gates strictly on `ResolveMode::Shared` (the documented default) for positional channels and on `spec.facet.is_some()` for the non-positional channels (which have no per-channel independent option); `Independent`, explicit `Scale(domain=)`, and non-faceted output are byte-identical throughout.
+
+---
+
+## 2026-06-22 — cohesion-campaign discovered follow-ups (C1–C4)
+
+Surfaced while executing the cohesion campaign (`fix/cohesion-campaign`, plan `2026-06-21-cohesion-campaign-plan.md`). These are NOT among the 193 campaign findings; they are out-of-scope discoveries logged here at the user's direction ("log all C"). The campaign's own behavior-change carries B1–B3 were *fixed* (not deferred); these C-items are genuine follow-ups.
+
+| ID | Sev | Item |
+|---|---|---|
+| C1 | S3 | **`cargo clippy -p ferrum-core -D warnings` is RED at a ~180-error pre-existing baseline.** Dominated by a pyo3 0.28.3 `#[pyclass]` deprecation firing on every scale/spec `#[pyclass]` struct, plus warnings across `transform/`, `layout/`, `render/`. The toolchain advanced (rustc 1.95.0 + pyo3 0.28.3; date rolled 2026-06-21→06-22 mid-campaign). NOT introduced by the campaign — every Rust commit was verified to add **zero new** warnings on its touched files, but the crate-wide `-D warnings` gate cannot pass until a dedicated pyo3-deprecation-migration + clippy-cleanup pass runs. Highest-value C-item. |
+| C2 | S2 | **Broad pre-existing pyright type-debt** surfaced on files the campaign edited (it re-reports all diagnostics in a touched file). Clusters: `_RepeatPlaceholder` leaking into `str`-typed returns/args in `chart.py`/`encoding/base.py`; the `_SourceState` mixin protocol gap in `_diagnostics/*` (`_cache`/`_y`/`_model`/`_X` "unknown attribute" — the FA-9-class Protocol the audit recommended); string forward-refs unresolved (`Title`/`HConcatChart`/`VConcatChart`); polars `Series`/`DataFrame` overload mismatches in `plots/*`. Runtime-fine (suite green). Candidate for a dedicated typing pass (add `_SourceState(Protocol)`, real forward-ref imports under `TYPE_CHECKING`). Outside the 193 findings. |
+| C3 | S2 | **Scale-level `scheme=` not eagerly validated** (T2.2/D-COLOR-1 left it deliberately). `DivergingScale(scheme="redblue")` and `ColorConfig(scheme="category10")` use names **not in** `list_palettes()` yet currently resolve late without error. Either those are valid Vega aliases the Rust registry should expose (so `list_palettes()` is incomplete) or they are dead names. Resolve before extending declaration-time validation from the channel path to the Scale/Config path (needs a Rust pass). |
+| C4 | S1 | **`cmap`-vocabulary holdouts** `heatmap(cmap=)` (`plots/matrix.py`) and `RenderConfig.raster_cmap` (`render_config.py`) — named in XSIB-07's finding text but outside its fix scope (T2.2 unified mark_raster/contour/hex + clustermap). Add `scheme=` as canonical with `cmap=` alias when the heatmap/render-config family is next touched. |
+
+C1 is the most worth doing (it restores a real CI-able gate). C2 is the largest. C3/C4 are localized.
