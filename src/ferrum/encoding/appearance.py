@@ -1,33 +1,21 @@
-"""Appearance encoding channels (Color, Fill, Stroke, Opacity, Size, Shape, Angle)."""
+"""Appearance encoding channels (Color, Fill, Stroke, Opacity, Size, Shape, Angle).
+
+Each channel references one named role from :mod:`ferrum.encoding._honored`;
+``_honored_kwargs`` is the single, machine-readable source of truth for which
+kwargs the channel honors (see the ``ChannelBase`` docstring for the contract).
+"""
 
 from __future__ import annotations
 
+from ferrum.encoding._honored import (
+    APPEARANCE_BASE,
+    APPEARANCE_COLOR,
+    APPEARANCE_CONDITION,
+    APPEARANCE_FULL,
+    APPEARANCE_SCHEME,
+    APPEARANCE_SORT,
+)
 from ferrum.encoding.base import ChannelBase
-
-
-# Single source of truth for the appearance-channel honored-kwargs contract.
-#
-# Every appearance channel honors at minimum {"type", "legend"}.  The named
-# constants below build upward compositionally so that each channel's
-# _honored_kwargs is assembled from explicit, named pieces rather than
-# copy-pasted literals.  Final frozensets are IDENTICAL to the previous
-# ad-hoc declarations — this is a declaration de-duplication, not a membership
-# change.
-#
-#   _APPEARANCE_BASE       {"type", "legend"}
-#   _APPEARANCE_FULL       adds scale + title
-#   _APPEARANCE_CONDITION  adds condition  (= old _RENDERED_HONORED)
-#   _APPEARANCE_SORT       adds sort
-#   _APPEARANCE_SCHEME     adds scheme
-#
-_APPEARANCE_BASE = frozenset({"type", "legend"})
-_APPEARANCE_FULL = _APPEARANCE_BASE | {"scale", "title"}
-_APPEARANCE_CONDITION = _APPEARANCE_FULL | {"condition"}  # == old _RENDERED_HONORED
-_APPEARANCE_SORT = _APPEARANCE_CONDITION | {"sort"}
-_APPEARANCE_SCHEME = _APPEARANCE_CONDITION | {"scheme"}
-
-# Preserved alias so any external code that imports _RENDERED_HONORED still works.
-_RENDERED_HONORED = _APPEARANCE_CONDITION
 
 
 # Phase 8a renders these (added to scale_resolve in Task 8):
@@ -42,9 +30,7 @@ class Color(ChannelBase):
         Data type: quantitative, nominal, ordinal, temporal. Inferred from
         the column dtype when omitted.
     scheme : str, optional
-        Named color scheme for categorical data (e.g. ``"tableau10"``,
-        ``"set1"``).  Only honored for the ``Color`` channel; other channels
-        treat this kwarg as a no-op.
+        Named categorical color scheme (e.g. ``"tableau10"``, ``"set1"``).
     scale : Scale, optional
         Explicit scale override (e.g. ``ColorScale.Continuous("viridis")``).
     title : str, optional
@@ -65,18 +51,10 @@ class Color(ChannelBase):
     >>> fm.Chart(df).encode(x="hp", y="mpg", color=fm.Color("origin", scheme="set1"))
     """
 
-    # `scheme` is honored ONLY for Color in Phase 8a (Task 10 wires it through
-    # palette.rs::categorical_palette into the renderer's color-scale construction).
-    # All other channels treat `scheme` as deferred → warn-once.
     _channel_name = "color"
 
-    # ``legend`` honored in Schwabish SB3 (2026-05-11): passing
-    # ``legend=None`` (or ``False``) suppresses the categorical color legend
-    # at the renderer level. Used by direct-label diagnostic charts to
-    # avoid a redundant legend alongside endpoint-anchored series labels.
-    _honored_kwargs = _APPEARANCE_SORT | {
-        "scheme"
-    }  # {"type","legend","scale","title","condition","sort","scheme"}
+    # {"type","legend","scale","title","condition","sort","scheme"}
+    _honored_kwargs = APPEARANCE_COLOR
 
 
 class Size(ChannelBase):
@@ -117,7 +95,7 @@ class Size(ChannelBase):
 
     _channel_name = "size"
 
-    _honored_kwargs = _APPEARANCE_CONDITION  # {"type","legend","scale","title","condition"}
+    _honored_kwargs = APPEARANCE_CONDITION  # {"type","legend","scale","title","condition"}
 
 
 class Shape(ChannelBase):
@@ -159,7 +137,7 @@ class Shape(ChannelBase):
 
     _channel_name = "shape"
 
-    _honored_kwargs = _APPEARANCE_SORT  # {"type","legend","scale","title","condition","sort"}
+    _honored_kwargs = APPEARANCE_SORT  # {"type","legend","scale","title","condition","sort"}
 
 
 class Opacity(ChannelBase):
@@ -179,11 +157,6 @@ class Opacity(ChannelBase):
     title : str, optional
         Legend title override.
 
-    Notes
-    -----
-    ``legend`` and ``condition`` kwargs are accepted but are reserved for
-    future use (no-op today) — they trigger a one-time deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -192,7 +165,7 @@ class Opacity(ChannelBase):
 
     _channel_name = "opacity"
 
-    _honored_kwargs = _APPEARANCE_CONDITION  # {"type","legend","scale","title","condition"}
+    _honored_kwargs = APPEARANCE_CONDITION  # {"type","legend","scale","title","condition"}
 
 
 # Deferred to Phase 9:
@@ -210,12 +183,6 @@ class Fill(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    ``scale``, ``title``, ``legend``, and ``condition`` kwargs are accepted
-    but are reserved for future use (no-op today) — they trigger a one-time
-    deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -224,7 +191,7 @@ class Fill(ChannelBase):
 
     _channel_name = "fill"
 
-    _honored_kwargs = _APPEARANCE_SCHEME  # {"type","legend","scale","title","condition","scheme"}
+    _honored_kwargs = APPEARANCE_SCHEME  # {"type","legend","scale","title","condition","scheme"}
 
 
 class Stroke(ChannelBase):
@@ -239,12 +206,6 @@ class Stroke(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    ``scale``, ``title``, ``legend``, and ``condition`` kwargs are accepted
-    but are reserved for future use (no-op today) — they trigger a one-time
-    deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -253,7 +214,7 @@ class Stroke(ChannelBase):
 
     _channel_name = "stroke"
 
-    _honored_kwargs = _APPEARANCE_SCHEME  # {"type","legend","scale","title","condition","scheme"}
+    _honored_kwargs = APPEARANCE_SCHEME  # {"type","legend","scale","title","condition","scheme"}
 
 
 class FillOpacity(ChannelBase):
@@ -269,12 +230,6 @@ class FillOpacity(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    ``scale``, ``title``, ``legend``, and ``condition`` kwargs are accepted
-    but are reserved for future use (no-op today) — they trigger a one-time
-    deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -283,7 +238,7 @@ class FillOpacity(ChannelBase):
 
     _channel_name = "fill_opacity"
 
-    _honored_kwargs = _APPEARANCE_FULL  # {"type","legend","scale","title"}
+    _honored_kwargs = APPEARANCE_FULL  # {"type","legend","scale","title"}
 
 
 class StrokeOpacity(ChannelBase):
@@ -299,12 +254,6 @@ class StrokeOpacity(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    ``scale``, ``title``, ``legend``, and ``condition`` kwargs are accepted
-    but are reserved for future use (no-op today) — they trigger a one-time
-    deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -313,7 +262,7 @@ class StrokeOpacity(ChannelBase):
 
     _channel_name = "stroke_opacity"
 
-    _honored_kwargs = _APPEARANCE_BASE  # {"type","legend"}
+    _honored_kwargs = APPEARANCE_BASE  # {"type","legend"}
 
 
 class StrokeWidth(ChannelBase):
@@ -328,12 +277,6 @@ class StrokeWidth(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    ``scale``, ``title``, ``legend``, and ``condition`` kwargs are accepted
-    but are reserved for future use (no-op today) — they trigger a one-time
-    deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -342,7 +285,7 @@ class StrokeWidth(ChannelBase):
 
     _channel_name = "stroke_width"
 
-    _honored_kwargs = _APPEARANCE_BASE  # {"type","legend"}
+    _honored_kwargs = APPEARANCE_BASE  # {"type","legend"}
 
 
 class StrokeDash(ChannelBase):
@@ -358,12 +301,6 @@ class StrokeDash(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    ``scale``, ``title``, ``legend``, and ``condition`` kwargs are accepted
-    but are reserved for future use (no-op today) — they trigger a one-time
-    deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -372,7 +309,7 @@ class StrokeDash(ChannelBase):
 
     _channel_name = "stroke_dash"
 
-    _honored_kwargs = _APPEARANCE_BASE  # {"type","legend"}
+    _honored_kwargs = APPEARANCE_BASE  # {"type","legend"}
 
 
 class Angle(ChannelBase):
@@ -388,12 +325,6 @@ class Angle(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    ``scale``, ``title``, ``legend``, and ``condition`` kwargs are accepted
-    but are reserved for future use (no-op today) — they trigger a one-time
-    deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -402,4 +333,4 @@ class Angle(ChannelBase):
 
     _channel_name = "angle"
 
-    _honored_kwargs = _APPEARANCE_BASE  # {"type","legend"}
+    _honored_kwargs = APPEARANCE_BASE  # {"type","legend"}

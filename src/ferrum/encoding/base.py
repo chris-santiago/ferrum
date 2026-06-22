@@ -17,6 +17,21 @@ from ferrum.position import STACK_OFFSETS, _validate_stack_offset
 # ``STACK_OFFSETS``; the encoding path layers these spellings on top.
 _STACK_FALSY = frozenset({"false", "null", "none"})
 
+# Accepted ``type=`` spellings → their canonical single-letter code.  The long
+# (Vega-Lite) spellings are accepted for convenience but normalized to the short
+# code immediately after validation so two channels that differ only in
+# type-spelling are equal, hash-equal, and serialize identically (ENC-08).
+_TYPE_NORMALIZE = {
+    "Q": "Q",
+    "N": "N",
+    "O": "O",
+    "T": "T",
+    "quantitative": "Q",
+    "nominal": "N",
+    "ordinal": "O",
+    "temporal": "T",
+}
+
 
 @dataclass(frozen=True)
 class _PendingAggregate:
@@ -78,12 +93,129 @@ class _PendingBin:
     bin_obj: Any = dataclass_field(default=None, hash=False, compare=False)
 
 
+# ---------------------------------------------------------------------------
+# Spec-dict serialization (ENC-04: driven off the channel's own honored set)
+# ---------------------------------------------------------------------------
+#
+# Each honored kwarg that maps to an EncodingSpec field has a handler here:
+# ``handler(value, out)`` mutates the output dict.  ``to_encoding_spec_dict``
+# iterates the channel's ``_honored_kwargs`` and dispatches through this table,
+# so a kwarg is serialized iff the channel honors it.  ``bin`` and ``aggregate``
+# are honored (for the warn guard) but intentionally absent here — they are
+# consumed via ``to_implicit_transforms``, not the spec dict.
+
+
+def _emit_type(value: Any, out: dict) -> None:
+    # PyO3 EncodingSpec emits the data-type under "type_" (Python convention to
+    # avoid shadowing the builtin); the wire form is "type".
+    out["type_"] = value
+
+
+def _emit_scale(value: Any, out: dict) -> None:
+    # Convert Python Scale objects → JSON-serializable dict so Rust's json_round
+    # helper (json.dumps) can serialize them.
+    out["scale"] = _scale_to_dict(value)
+
+
+def _emit_title(value: Any, out: dict) -> None:
+    # title=None (explicitly passed) → suppress the axis/legend title by
+    # forwarding an empty string to Rust, which renders a blank title instead of
+    # falling back to the field name.  title omitted (key absent) keeps the
+    # field-name default.  title="Foo" passes through as-is.
+    out["title"] = "" if value is None else value
+
+
+def _emit_axis(value: Any, out: dict) -> None:
+    # Accept Axis instances, False (suppression), or raw dicts.
+    normalized = _normalize_axis(value)
+    if normalized is not None:
+        out["axis"] = normalized
+
+
+def _emit_legend(value: Any, out: dict) -> None:
+    # Accept Legend instances, None/False (suppression), or raw dicts.
+    normalized = _normalize_legend(value)
+    if normalized is not None:
+        out["legend"] = normalized
+
+
+def _emit_format_type(value: Any, out: dict) -> None:
+    # Both the camelCase "formatType" (Vega-Lite compat) and snake_case
+    # "format_type" honored keys serialize to the snake_case EncodingSpec field.
+    if value is not None:
+        out["format_type"] = value
+
+
+def _emit_condition(value: Any, out: dict) -> None:
+    # Serialize ConditionalSpec or raw dict as opaque JSON for Rust.
+    if hasattr(value, "to_spec_dict"):
+        out["condition"] = value.to_spec_dict()
+    elif isinstance(value, dict):
+        out["condition"] = value
+
+
+def _emit_passthrough(key: str):
+    """Return a handler that copies a non-None kwarg verbatim under *key*."""
+
+    def handler(value: Any, out: dict) -> None:
+        if value is not None:
+            out[key] = value
+
+    return handler
+
+
+# Canonical emission order, preserved from the previous hard-coded serializer so
+# the resulting dict layout is byte-stable.  ``to_encoding_spec_dict`` walks this
+# list and skips keys the channel does not honor.
+_SPEC_DICT_ORDER = (
+    "type",
+    "scale",
+    "title",
+    "axis",
+    "legend",
+    "sort",
+    "stack",
+    "impute",
+    "scheme",
+    "format",
+    "format_type",
+    "formatType",
+    "condition",
+)
+
+_SPEC_DICT_HANDLERS = {
+    "type": _emit_type,
+    "scale": _emit_scale,
+    "title": _emit_title,
+    "axis": _emit_axis,
+    "legend": _emit_legend,
+    "sort": _emit_passthrough("sort"),
+    "stack": _emit_passthrough("stack"),
+    "impute": _emit_passthrough("impute"),
+    "scheme": _emit_passthrough("scheme"),
+    "format": _emit_passthrough("format"),
+    "format_type": _emit_format_type,
+    "formatType": _emit_format_type,
+    "condition": _emit_condition,
+}
+
+
 class ChannelBase:
     """Base class for all encoding-channel value objects.
 
-    Subclasses set _channel_name and _honored_kwargs.
-    Constructor accepts a `field` positional arg + arbitrary keyword arguments;
-    unknown kwargs trigger warn_once.
+    Subclasses set ``_channel_name`` and ``_honored_kwargs``. The constructor
+    accepts a ``field`` positional arg plus arbitrary keyword arguments.
+
+    Honored-kwarg contract
+    ----------------------
+    ``_honored_kwargs`` is the single, machine-readable source of truth for the
+    kwargs a channel honors. A kwarg in this set is accepted silently and (if it
+    has a serializer) forwarded to the EncodingSpec by
+    :meth:`to_encoding_spec_dict`; a kwarg NOT in the set triggers a one-time
+    ``warn_once`` and is dropped. Per-channel membership is assembled from the
+    named role constants in :mod:`ferrum.encoding._honored`; do not narrate
+    render status (``"honored"`` / ``"reserved"`` / ``"no-op today"``) in
+    per-channel docstrings, as that prose drifts from this set.
     """
 
     _channel_name: ClassVar[str] = "_unknown_"
@@ -138,20 +270,16 @@ class ChannelBase:
     def _validate(self) -> None:
         """Enforce kwarg-value constraints; subclasses may override."""
         type_ = self._kwargs.get("type")
-        if type_ is not None and type_ not in (
-            "Q",
-            "N",
-            "O",
-            "T",
-            "quantitative",
-            "nominal",
-            "ordinal",
-            "temporal",
-        ):
-            raise ValueError(
-                f"{self.__class__.__name__}(type={type_!r}): "
-                f"expected one of Q, N, O, T, quantitative, nominal, ordinal, temporal"
-            )
+        if type_ is not None:
+            if type_ not in _TYPE_NORMALIZE:
+                raise ValueError(
+                    f"{self.__class__.__name__}(type={type_!r}): "
+                    f"expected one of Q, N, O, T, quantitative, nominal, ordinal, temporal"
+                )
+            # Normalize the long spellings to their single-letter codes so a
+            # channel built with ``type_="quantitative"`` compares, hashes, and
+            # serializes identically to one built with ``type_="Q"`` (ENC-08).
+            self._kwargs["type"] = _TYPE_NORMALIZE[type_]
         if self._stack_kwarg:
             stack = self._kwargs.get("stack")
             if stack is not None:
@@ -206,50 +334,26 @@ class ChannelBase:
         return value
 
     def to_encoding_spec_dict(self) -> dict:
-        """Return kwargs for the Rust EncodingSpec constructor / serde JSON."""
+        """Return kwargs for the Rust EncodingSpec constructor / serde JSON.
+
+        Iterates this channel's own ``_honored_kwargs`` (the single source of
+        truth) rather than a separate hard-coded key list, so a kwarg is
+        serialized iff the channel honors it.  Each honored key routes through
+        :data:`_SPEC_DICT_HANDLERS` to its serializer; keys with no handler
+        (``bin``/``aggregate``) are honored for the warn guard but consumed via
+        :meth:`to_implicit_transforms`, so they contribute nothing here.
+
+        Keys are emitted in :data:`_SPEC_DICT_ORDER` so the dict layout is
+        stable regardless of ``frozenset`` iteration order.
+        """
         out: dict = {"field": self.field}
-        if (t := self._kwargs.get("type")) is not None:
-            out["type_"] = t
-        # scale: convert Python Scale objects → JSON-serializable dict so that
-        # Rust's json_round helper (which calls json.dumps) can serialize them.
-        if (v := self._kwargs.get("scale")) is not None:
-            out["scale"] = _scale_to_dict(v)
-        for k in ("title", "axis", "legend", "sort", "stack", "impute", "scheme", "format"):
-            if k == "title" and "title" in self._kwargs:
-                # title=None (explicitly passed) → suppress axis title by forwarding
-                # an empty string to Rust, which renders a blank title instead of
-                # falling back to the field name.  title omitted (key absent) keeps
-                # the existing field-name default.  title="Foo" passes through as-is.
-                raw_title = self._kwargs["title"]
-                out["title"] = "" if raw_title is None else raw_title
+        for key in _SPEC_DICT_ORDER:
+            if key not in self._honored_kwargs or key not in self._kwargs:
                 continue
-            if k == "axis" and "axis" in self._kwargs:
-                # Accept Axis instances, False (suppression), or raw dicts.
-                normalized = _normalize_axis(self._kwargs["axis"])
-                if normalized is not None:
-                    out["axis"] = normalized
+            handler = _SPEC_DICT_HANDLERS.get(key)
+            if handler is None:
                 continue
-            if k == "legend" and "legend" in self._kwargs:
-                # Accept Legend instances, None/False (suppression), or raw dicts.
-                normalized = _normalize_legend(self._kwargs["legend"])
-                if normalized is not None:
-                    out["legend"] = normalized
-                continue
-            if (v := self._kwargs.get(k)) is not None:
-                out[k] = v
-        # PyO3 EncodingSpec.__new__ expects snake_case param name `format_type`.
-        # Accept both "formatType" (camelCase, Vega-Lite compat) and "format_type"
-        # (snake_case, Python idiomatic) as aliases.
-        if (v := self._kwargs.get("formatType")) is not None:
-            out["format_type"] = v
-        elif (v := self._kwargs.get("format_type")) is not None:
-            out["format_type"] = v
-        # condition: serialize ConditionalSpec or raw dict as opaque JSON for Rust.
-        if (cond := self._kwargs.get("condition")) is not None:
-            if hasattr(cond, "to_spec_dict"):
-                out["condition"] = cond.to_spec_dict()
-            elif isinstance(cond, dict):
-                out["condition"] = cond
+            handler(self._kwargs[key], out)
         return out
 
     def to_implicit_transforms(self) -> list:
