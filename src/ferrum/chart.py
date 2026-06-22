@@ -1443,6 +1443,15 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
     def mark_text(self, **kwargs) -> "Chart":
         """Render data values as text labels.
 
+        Places a free-positioned text glyph at each (x, y) data coordinate.
+        No collision avoidance is applied and no leader line is drawn; the
+        glyph sits exactly at the encoded position plus any ``dx``/``dy``
+        pixel offset.  Use this mark when you control placement explicitly
+        (e.g. inline bar labels, callout annotations at known coordinates).
+
+        See also :meth:`mark_label` for a point-anchored annotation with
+        automatic collision avoidance and optional leader-line support.
+
         Requires a ``text`` encoding channel pointing at the column to display.
 
         Parameters
@@ -1653,7 +1662,19 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         return self._set_mark("geoshape", **kwargs)
 
     def mark_label(self, **kwargs) -> "Chart":
-        """Render positioned text labels near data points with collision avoidance.
+        """Render point-anchored text annotations near data points.
+
+        Each label is anchored to its (x, y) data point and positioned by a
+        greedy collision-avoidance algorithm (not placed at an arbitrary
+        coordinate like :meth:`mark_text`).  An optional leader line
+        (``leader_line=True``) draws a thin connecting line from the data
+        point to the placed label, useful when the label lands far from its
+        source point.  Use this mark when you want the renderer to find
+        non-overlapping placements automatically.
+
+        See also :meth:`mark_text` for a free-positioned text glyph that
+        places the label at the exact encoded coordinate without collision
+        avoidance or a leader line.
 
         Each row in the dataset becomes one text label.  By default the
         renderer uses a greedy collision-avoidance algorithm: for each label
