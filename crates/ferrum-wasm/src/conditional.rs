@@ -530,11 +530,11 @@ fn apply_value_to_circle(inst: &mut CircleInstance, channel: &ChannelName, value
 /// Test whether a mark's tooltip satisfies all (field, value) constraints,
 /// using a caller-supplied comparison predicate.
 ///
-/// This is the shared loop helper for the conditional-highlight path.  The
-/// click-selection path (`collect_matching_indices` in `selection_state.rs`)
-/// no longer goes through this helper — it works directly with raw tooltip
-/// strings via byte-equal comparison, preserving the pre-T1.10 behavior where
-/// "42.0" != "42" and the two marks do not co-select.
+/// This is the shared loop helper for BOTH the conditional-highlight path and
+/// the click-selection membership scan (`collect_matching_indices` in
+/// `selection_state.rs`).  Both call sites use the typed comparison via
+/// [`tooltip_matches`], so a clicked "42.0" co-selects a candidate "42"
+/// consistently across highlighting and selection.
 ///
 /// `lookup` is a closure that, given a field name, returns the tooltip string
 /// for that field (or `None` if absent).
@@ -554,7 +554,8 @@ pub(crate) fn tooltip_matches_with_cmp(
 /// (`field_value_matches_tooltip`).
 ///
 /// Used by the conditional-highlight path (`packed_instance_selected`,
-/// `apply_conditional_to_batch`).  Typed comparison means "42" matches
+/// `apply_conditional_to_batch`) and the click-selection membership scan
+/// (`collect_matching_indices`).  Typed comparison means "42" matches
 /// `FieldValue::Number { value: 42.0 }` because both parse to the same f64.
 pub(crate) fn tooltip_matches(
     field_values: &[(String, FieldValue)],
