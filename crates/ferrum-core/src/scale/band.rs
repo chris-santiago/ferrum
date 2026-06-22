@@ -64,7 +64,6 @@ impl BandScaleData {
 pub struct BandScale {
     data: BandScaleData,
     range: Option<[f64; 2]>,
-    domain_set: bool,
 }
 
 impl BandScale {
@@ -118,7 +117,6 @@ impl BandScale {
                 align,
             },
             range: r,
-            domain_set: true,
         })
     }
 
@@ -246,7 +244,6 @@ mod tests {
                 align: 0.5,
             },
             range: Some([0.0, 300.0]),
-            domain_set: true,
         };
         assert!(scale.minor_ticks_internal().is_empty());
     }

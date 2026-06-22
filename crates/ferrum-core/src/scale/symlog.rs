@@ -1,7 +1,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::validate_continuous_pair;
+use super::core::resolve_continuous;
 use super::ticks::{minor_ticks_default, nice_step, nice_ticks, Tick};
 
 fn symlog_fwd(x: f64, c: f64) -> f64 {
@@ -109,8 +109,12 @@ impl SymlogScaleData {
 ///     )
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct SymlogScale(SymlogScaleData, Option<f64>, bool, bool);
-//                     ^^^data          ^^^padding  ^^^range_user_set  ^^^domain_user_set
+pub struct SymlogScale {
+    data: SymlogScaleData,
+    padding: Option<f64>,
+    range_user_set: bool,
+    domain_user_set: bool,
+}
 
 impl SymlogScale {
     /// Rust-side constructor (no Python validation overhead).
@@ -122,12 +126,12 @@ impl SymlogScale {
             clamp,
         };
         if nice { d = d.nice(); }
-        SymlogScale(d, None, true, true)
+        SymlogScale { data: d, padding: None, range_user_set: true, domain_user_set: true }
     }
 
-    pub(crate) fn scale_internal(&self, x: f64) -> f64 { self.0.scale(x) }
+    pub(crate) fn scale_internal(&self, x: f64) -> f64 { self.data.scale(x) }
 
-    pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> { self.0.ticks(count) }
+    pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> { self.data.ticks(count) }
 
     /// Return minor ticks subdivided in **symlog-transformed** space.
     ///
@@ -142,26 +146,26 @@ impl SymlogScale {
     // Wired to the render layer in Task 2 of the grid subsystem.
     #[allow(dead_code)]
     pub(crate) fn minor_ticks_internal(&self) -> Vec<Tick> {
-        let majors = self.0.ticks(10);
-        let c = self.0.constant;
+        let majors = self.data.ticks(10);
+        let c = self.data.constant;
         let fwd = move |v: f64| symlog_fwd(v, c);
         let inv = move |t: f64| symlog_inv(t, c);
         let transformed: Vec<f64> = majors.iter().map(|&v| fwd(v)).collect();
         minor_ticks_default(&transformed, inv)
     }
 
-    pub(crate) fn range_pair(&self) -> [f64; 2] { self.0.range }
+    pub(crate) fn range_pair(&self) -> [f64; 2] { self.data.range }
 
-    pub(crate) fn domain_pair(&self) -> [f64; 2] { self.0.domain }
+    pub(crate) fn domain_pair(&self) -> [f64; 2] { self.data.domain }
 
     pub(crate) fn repr_string(&self) -> String {
-        let SymlogScaleData { domain, range, constant, clamp } = &self.0;
-        let domain_s = if self.3 {
+        let SymlogScaleData { domain, range, constant, clamp } = &self.data;
+        let domain_s = if self.domain_user_set {
             format!("[{}, {}]", domain[0], domain[1])
         } else {
             "None".to_string()
         };
-        let range_s = if self.2 {
+        let range_s = if self.range_user_set {
             format!("[{}, {}]", range[0], range[1])
         } else {
             "None".to_string()
@@ -185,69 +189,75 @@ impl SymlogScale {
         nice: bool,
         padding: Option<f64>,
     ) -> PyResult<Self> {
-        let range_user_set = range.is_some();
-        let domain_user_set = domain.is_some();
-        let r = range.unwrap_or_else(|| vec![0.0, 1.0]);
         if !constant.is_finite() || constant <= 0.0 {
             return Err(PyValueError::new_err(format!(
                 "constant must be finite and > 0; got {constant}"
             )));
         }
-        // Use sentinel [-1.0, 1.0] when no domain supplied; render-time inference
+        // Sentinel [-1.0, 1.0] when no domain supplied; render-time inference
         // replaces it before any scale computation occurs.
-        let dom = domain.unwrap_or_else(|| vec![-1.0, 1.0]);
-        if domain_user_set {
-            validate_continuous_pair(&dom, &r)?;
-        }
+        let resolved = resolve_continuous(domain, range, [-1.0, 1.0])?;
         let mut d = SymlogScaleData {
-            domain: [dom[0], dom[1]],
-            range:  [r[0],  r[1]],
+            domain: resolved.domain,
+            range: resolved.range,
             constant,
             clamp,
         };
-        if nice && domain_user_set {
+        if nice && resolved.domain_user_set {
             d = d.nice();
         }
-        Ok(SymlogScale(d, padding, range_user_set, domain_user_set))
+        Ok(SymlogScale {
+            data: d,
+            padding,
+            range_user_set: resolved.range_user_set,
+            domain_user_set: resolved.domain_user_set,
+        })
     }
 
     /// Map a single input value ``x`` to its output range coordinate.
-    fn scale(&self, x: f64) -> f64 { self.0.scale(x) }
+    fn scale(&self, x: f64) -> f64 { self.data.scale(x) }
     /// Invert a range coordinate ``y`` back to the domain.
-    fn invert(&self, y: f64) -> f64 { self.0.invert(y) }
+    fn invert(&self, y: f64) -> f64 { self.data.invert(y) }
 
     /// Return approximately ``count`` tick values within the domain.
     #[pyo3(signature = (count = 10))]
-    fn ticks(&self, count: usize) -> Vec<f64> { self.0.ticks(count) }
+    fn ticks(&self, count: usize) -> Vec<f64> { self.data.ticks(count) }
 
     /// Return a copy of this scale with domain endpoints rounded to "nice" values.
-    fn nice(&self) -> Self { SymlogScale(self.0.clone().nice(), self.1, self.2, self.3) }
+    fn nice(&self) -> Self {
+        SymlogScale {
+            data: self.data.clone().nice(),
+            padding: self.padding,
+            range_user_set: self.range_user_set,
+            domain_user_set: self.domain_user_set,
+        }
+    }
 
     /// Fractional inward pixel padding (themes-T4). ``None`` lets the renderer
     /// apply the 5% default when ``domain`` is unset.
     #[getter]
-    fn padding(&self) -> Option<f64> { self.1 }
+    fn padding(&self) -> Option<f64> { self.padding }
 
     /// Input domain as ``[min, max]``, or ``None`` when data-derived.
     #[getter]
     fn domain(&self) -> Option<Vec<f64>> {
-        if self.3 { Some(self.0.domain.to_vec()) } else { None }
+        if self.domain_user_set { Some(self.data.domain.to_vec()) } else { None }
     }
 
     /// Output range as ``[lo, hi]`` pixel coordinates, or ``None`` when
     /// the renderer should auto-fill from the plot-area dimensions.
     #[getter]
     fn range(&self) -> Option<Vec<f64>> {
-        if self.2 { Some(self.0.range.to_vec()) } else { None }
+        if self.range_user_set { Some(self.data.range.to_vec()) } else { None }
     }
 
     /// Half-width of the linear region around zero (default 1.0).
     #[getter]
-    fn constant(&self) -> f64 { self.0.constant }
+    fn constant(&self) -> f64 { self.data.constant }
 
     /// Whether out-of-domain inputs are clamped to the range endpoints.
     #[getter]
-    fn clamp(&self) -> bool { self.0.clamp }
+    fn clamp(&self) -> bool { self.data.clamp }
 
     fn __repr__(&self) -> String { self.repr_string() }
 }
@@ -276,6 +286,25 @@ mod tests {
             let back = s.invert(y);
             assert!((back - x).abs() < 1e-6, "round-trip failed at x={x}: got {back}");
         }
+    }
+
+    /// Named-field conversion (T2.5): user-set domain/range/constant round-trip,
+    /// and an unset domain reports `None` while keeping the [-1, 1] sentinel.
+    #[test]
+    fn symlog_named_fields_round_trip() {
+        let with_domain = SymlogScale::new(
+            Some(vec![-1000.0, 1000.0]), Some(vec![0.0, 400.0]), 1.0, false, false, Some(0.2),
+        ).unwrap();
+        assert_eq!(with_domain.domain(), Some(vec![-1000.0, 1000.0]));
+        assert_eq!(with_domain.range(), Some(vec![0.0, 400.0]));
+        assert_eq!(with_domain.constant(), 1.0);
+        assert_eq!(with_domain.padding(), Some(0.2));
+
+        let no_domain = SymlogScale::new(None, None, 5.0, false, false, None).unwrap();
+        assert_eq!(no_domain.domain(), None);
+        assert_eq!(no_domain.range(), None);
+        assert_eq!(no_domain.domain_pair(), [-1.0, 1.0]);
+        assert_eq!(no_domain.constant(), 5.0);
     }
 
     #[test]
