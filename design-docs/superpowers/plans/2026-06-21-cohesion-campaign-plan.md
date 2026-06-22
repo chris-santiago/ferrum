@@ -118,16 +118,21 @@ Each task lists the finding IDs it closes (see §6 for the inverse map) and its 
 ### Tier 2 — Collapse dual sources of truth
 
 #### T2.1 [both] Theme key contract derived from one manifest; resolve font_size/grid/_FALLBACKS drift (D-THEME-1)
-- **Closes (5):** THEME-01, THEME-02, THEME-05, THEME-07, XDEAD-03  (S2,S3)
-- **Files:** src/ferrum/themes/__init__.py; src/ferrum/themes/_defaults.py; crates/ferrum-core/src/spec/theme.rs
+- **Closes (4):** THEME-01, THEME-02, THEME-05, THEME-07  (S2,S3)  [XDEAD-03 CARVED OUT → T2.1b: it is annotation dead-flags (render/annotation.rs + annotation/primitives.py), NOT a theme file, and an [API] wire-vs-drop fork the "non-breaking aliases" answer doesn't cover — needs feasibility assessment / user decision]
+- **Files:** src/ferrum/themes/__init__.py; src/ferrum/themes/_defaults.py; crates/ferrum-core/src/render/binding.rs  [corrected: ThemeOverridesSpec lives in render/binding.rs:195, not spec/theme.rs]
+
+#### T2.1b [both] **[CARVED FROM T2.1 — pending decision]** Annotation z/curve dead FFI flags (XDEAD-03, [API])
+- **Closes (1):** XDEAD-03  (S3)
+- **Files:** crates/ferrum-core/src/render/annotation.rs; src/ferrum/annotation/primitives.py
+- **Decision needed:** wire per-annotation z-ordering (below_marks → pre-mark scene slot, align Rust enum to Python above/below_marks vocab) + curve bezier, OR drop z/curve from the Python API + Rust structs. No-defer principle favors wiring z (infra exists in scene_build draws_above_marks); curve=bezier is a real geometry feature. Assess feasibility, then wire or surface.
 
 #### T2.2 [both] Rust palette registry is sole source; color.py consumes it; scheme= validated at declaration (D-COLOR-1)
 - **Closes (4):** ENC-06, XNAME-02, XSIB-07, ENC-11  (S2,S3)
-- **Files:** src/ferrum/color.py; src/ferrum/encoding/appearance.py; src/ferrum/encoding/_scale.py; crates/ferrum-core/src/render/color/palette.rs; crates/ferrum-core/src/lib.rs
+- **Files:** src/ferrum/color.py; src/ferrum/schemes.py; src/ferrum/encoding/{appearance,_scale,base}.py; src/ferrum/marks/{heavy_stat,statistical}.py; src/ferrum/_marks_statistical.py; crates/ferrum-core/src/render/palette.rs + render/color/{mod,categorical,continuous}.rs; crates/ferrum-core/src/lib.rs  [corrected: palette registry is render/palette.rs + render/color/, not render/color/palette.rs; XNAME-02 merges schemes.py; XSIB-07 cmap→scheme spans marks/*; scheme= validation in encoding/base.py]
 
 #### T2.3 [py] Honored-kwargs is the single truth; serializer iterates it; one honored vocab module (D-HONORED-1)
 - **Closes (7):** ENC-01, ENC-04, ENC-08, ENC-09, ENC-10, XSIB-03, XSIB-05  (S2,S3)
-- **Files:** src/ferrum/encoding/base.py; src/ferrum/encoding/positional.py; src/ferrum/encoding/appearance.py; src/ferrum/encoding/text.py
+- **Files:** src/ferrum/encoding/{base,positional,appearance,text,facet,__init__}.py; NEW src/ferrum/encoding/_honored.py; NEW src/ferrum/encoding/_aliases.py  [corrected during execution: ENC-10 lives in __init__.py; XSIB-05 spans facet.py; the honored-vocab + alias-table get their own modules]
 
 #### T2.4 [both] One STACK_OFFSETS + validator; one stack capability registry (D-STACK-1)
 - **Closes (3):** ENC-02, ENC-07, CHART-08  (S2,S3)
@@ -135,7 +140,7 @@ Each task lists the finding IDs it closes (see §6 for the inverse map) and its 
 
 #### T2.5 [rs] Continuous scales → named-field structs; one domain/range/utc representation (D-SCALE-1)
 - **Closes (6):** SPEC-01, SPEC-02, SPEC-03, SPEC-06, SPEC-07, SEAM-08  (S2,S3,S4)
-- **Files:** crates/ferrum-core/src/scale/time.rs; crates/ferrum-core/src/scale/linear.rs; crates/ferrum-core/src/scale/mod.rs
+- **Files:** crates/ferrum-core/src/scale/{linear,log,time,pow,symlog,band,core,mod}.rs  [corrected during execution: the 6 continuous scales + BandScale live in per-type files, not just time/linear/mod]
 
 #### T2.6 [rs] One AxisStyleOverrides::fill_from merge; resolve_panel_scales seam (SPINE-01/02)
 - **Closes (3):** SPINE-01, SPINE-02, SPINE-03  (S3,S4)
