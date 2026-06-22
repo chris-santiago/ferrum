@@ -486,10 +486,6 @@ class _NamedTransform:
         self.transform = transform
         self.name = name
 
-    def _inner_eq(self, other: object) -> bool:
-        inner = other.transform if isinstance(other, _NamedTransform) else other
-        return bool(self.transform == inner)
-
 
 from ferrum.composition import (
     _expand_layers,
@@ -517,6 +513,52 @@ def _rename_encoding_fields(encoding: dict, renames: dict[str, str]) -> dict:
                 val = renames[bare] + (":" + suffix if suffix else "")
         out[ch] = val
     return out
+
+
+def _append_unique_by_name(seq: list, item: object) -> None:
+    """Append *item* to *seq* if no element with the same ``.name`` is present.
+
+    Preserves insertion order (first-seen wins).  Mutates *seq* in place.
+    *item* must have a ``.name`` attribute; *seq* may contain ``None`` entries
+    which are skipped during the existence check.
+    """
+    existing = {el.name for el in seq if el is not None and hasattr(el, "name")}
+    if item.name not in existing:
+        seq.append(item)
+
+
+def _check_param_collision(
+    name: str,
+    *,
+    is_selection: bool,
+    context: str = "layer merge",
+) -> None:
+    """Raise ``ValueError`` when a reactive-parameter name collides across kinds.
+
+    A name registered as both a ``Selection`` and a ``VariableParameter``
+    is always a user error: two reactive-object kinds cannot share a name
+    without producing a silently wrong spec.
+
+    Parameters
+    ----------
+    name:
+        The colliding reactive-parameter name.
+    is_selection:
+        ``True`` when *name* is the Selection side (the other object is a
+        VariableParameter); ``False`` when *name* is the VariableParameter
+        side (the other object is a Selection).
+    context:
+        Short description of where the collision was detected, used in the
+        error message for easier diagnosis.
+    """
+    if is_selection:
+        detail = f"{name!r} is a Selection on one side and a VariableParameter on the other"
+    else:
+        detail = f"{name!r} is a VariableParameter on one side and a Selection on the other"
+    raise ValueError(
+        f"Reactive-parameter name collision ({context}): {detail}. "
+        f"A name must resolve to a single reactive-object kind. Rename one of them."
+    )
 
 
 def _apply_remap(encoding: dict, remap: dict, orig_encoding: dict | None = None) -> None:
@@ -1736,9 +1778,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 new._conditionals.append(replace(value, channel=name))
                 sel = value.selection
                 if sel is not None:
-                    existing = {s.name for s in new._selections if hasattr(s, "name")}
-                    if sel.name not in existing:
-                        new._selections.append(sel)
+                    _append_unique_by_name(new._selections, sel)
                 continue
 
             if isinstance(value, ChannelBase):
@@ -2115,7 +2155,6 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         if rhs._selections:
             from ferrum.parameter import VariableParameter
 
-            existing_names = {s.name for s in new._selections if s is not None}
             existing_variable_names = {
                 p.name for p in new._params if p is not None and isinstance(p, VariableParameter)
             }
@@ -2123,14 +2162,8 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 if s is None:
                     continue
                 if s.name in existing_variable_names:
-                    raise ValueError(
-                        f"Reactive-parameter name collision during layer merge: {s.name!r} "
-                        f"is a VariableParameter in the LHS chart and a Selection in the "
-                        f"RHS chart. A name must resolve to a single reactive-object kind. "
-                        f"Rename one of them."
-                    )
-                if s.name not in existing_names:
-                    new._selections.append(s)
+                    _check_param_collision(s.name, is_selection=True, context="layer merge")
+                _append_unique_by_name(new._selections, s)
         if rhs._conditionals:
             new._conditionals.extend(rhs._conditionals)
         if rhs._params:
@@ -2142,12 +2175,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                 if p is None:
                     continue
                 if isinstance(p, VariableParameter) and p.name in existing_selection_names:
-                    raise ValueError(
-                        f"Reactive-parameter name collision during layer merge: {p.name!r} "
-                        f"is a Selection in the LHS chart and a VariableParameter in the "
-                        f"RHS chart. A name must resolve to a single reactive-object kind. "
-                        f"Rename one of them."
-                    )
+                    _check_param_collision(p.name, is_selection=False, context="layer merge")
                 if p.name not in existing_param_names:
                     new._params.append(p)
         # Merge RHS configure/annotation/structural/override slots.
@@ -2941,7 +2969,6 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         Chart(mark='point', encoding=['x', 'y'])
         """
         from ferrum.encoding.positional import X, Y
-        from ferrum.title import Title as _TitleCls
 
         remaining = dict(kwargs)
         c = self._clone()
@@ -2949,17 +2976,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         if "title" in remaining:
             c = c.properties(title=remaining.pop("title"))
         if "subtitle" in remaining:
-            subtitle_text = remaining.pop("subtitle")
-            # Merge subtitle into the existing Title object (preserving other
-            # Title fields such as anchor, font, etc.) or create a new one.
-            existing_title = c._title
-            if isinstance(existing_title, _TitleCls):
-                import dataclasses
-
-                c._title = dataclasses.replace(existing_title, subtitle=subtitle_text)
-            else:
-                # No title set yet — create a Title with an empty main text.
-                c._title = _TitleCls(text="", subtitle=subtitle_text)
+            c = c.properties(subtitle=remaining.pop("subtitle"))
 
         for axis_name, cls in (("x", X), ("y", Y)):
             if axis_name not in remaining:
@@ -3481,30 +3498,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         # --- Conditional / selection injection ---
         if resolved._selections:
             kw["selections"] = json.dumps([s.to_spec_dict() for s in resolved._selections])
-            # Auto-inject selection fields into tooltip so cross-panel linked
-            # selection can match marks by field values (not just data indices).
-            sel_fields = set()
-            for s in resolved._selections:
-                if hasattr(s, "params") and s.params.get("fields"):
-                    sel_fields.update(s.params["fields"])
-            if sel_fields:
-                existing = set()
-                if "tooltip_fields" in kw:
-                    for entry in json.loads(kw["tooltip_fields"]):
-                        existing.add(entry.get("field", ""))
-                elif "tooltip" in kw:
-                    existing.add(getattr(kw["tooltip"], "field", ""))
-                missing = sel_fields - existing
-                if missing:
-                    tf_list = []
-                    if "tooltip_fields" in kw:
-                        tf_list = json.loads(kw["tooltip_fields"])
-                    elif "tooltip" in kw:
-                        tf_list = [{"field": getattr(kw["tooltip"], "field", "")}]
-                        del kw["tooltip"]
-                    for f in sorted(missing):
-                        tf_list.append({"field": f})
-                    kw["tooltip_fields"] = json.dumps(tf_list)
+            self._inject_selection_tooltips(kw, resolved._selections)
         if resolved._conditionals:
             kw["conditionals"] = json.dumps([c.to_spec_dict() for c in resolved._conditionals])
 
@@ -3546,24 +3540,16 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         variable_names = {
             p.name for p in resolved._params if p is not None and isinstance(p, VariableParameter)
         }
-        collisions = selection_names & variable_names
-        if collisions:
-            names = ", ".join(repr(n) for n in sorted(collisions))
-            raise ValueError(
-                f"Reactive-parameter name collision: {names} is registered as both "
-                f"a Selection and a VariableParameter. A name must resolve to a "
-                f"single reactive-object kind. Rename one of them."
-            )
+        for name in sorted(selection_names & variable_names):
+            _check_param_collision(name, is_selection=True, context="param collection")
         # Also check domain-referenced VariableParameters against selections.
         for ch in enc.values():
             scale = ch.option("scale") if isinstance(ch, ChannelBase) else None
             if isinstance(scale, dict):
                 domain = scale.get("domain")
                 if isinstance(domain, VariableParameter) and domain.name in selection_names:
-                    raise ValueError(
-                        f"Reactive-parameter name collision: {domain.name!r} is used as a "
-                        f"scale domain VariableParameter but is also registered as a "
-                        f"Selection. Rename one of them."
+                    _check_param_collision(
+                        domain.name, is_selection=False, context="scale domain"
                     )
 
         ordered: list = []
@@ -3623,6 +3609,52 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                     f"Parameter values must be finite numbers. "
                     f"Use a finite bound instead of Inf or NaN."
                 )
+
+    @staticmethod
+    def _inject_selection_tooltips(kw: dict, selections: list) -> None:
+        """Merge selection-tracked fields into the spec-assembly tooltip keys.
+
+        Called during ``to_spec()`` to ensure that every field named in an
+        active selection's ``fields`` list is also present in the chart's
+        tooltip, so cross-panel linked-selection can match marks by field
+        value rather than only by data index.
+
+        Operates on the ``kw`` dict being assembled before ``ChartSpec`` is
+        constructed (``tooltip`` values are still Python channel objects;
+        ``tooltip_fields`` is a JSON string when present).  Mutates *kw* in
+        place; returns nothing.
+
+        Parameters
+        ----------
+        kw : dict
+            The spec-assembly keyword dict (in-progress ``ChartSpec`` kwargs).
+        selections : list
+            The resolved selections list (``resolved._selections``).
+        """
+        sel_fields: set[str] = set()
+        for s in selections:
+            if hasattr(s, "params") and s.params.get("fields"):
+                sel_fields.update(s.params["fields"])
+        if not sel_fields:
+            return
+        existing: set[str] = set()
+        if "tooltip_fields" in kw:
+            for entry in json.loads(kw["tooltip_fields"]):
+                existing.add(entry.get("field", ""))
+        elif "tooltip" in kw:
+            existing.add(getattr(kw["tooltip"], "field", ""))
+        missing = sel_fields - existing
+        if not missing:
+            return
+        tf_list: list[dict] = []
+        if "tooltip_fields" in kw:
+            tf_list = json.loads(kw["tooltip_fields"])
+        elif "tooltip" in kw:
+            tf_list = [{"field": getattr(kw["tooltip"], "field", "")}]
+            del kw["tooltip"]
+        for f in sorted(missing):
+            tf_list.append({"field": f})
+        kw["tooltip_fields"] = json.dumps(tf_list)
 
     def _inject_auto_tooltips(self, kw: dict) -> dict:
         """Inject auto-generated tooltip fields into a serialised spec dict.
@@ -3790,11 +3822,8 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
                     f"got {type(sel).__name__!r}. Did you mean add_params()?"
                 )
         new = self._clone()
-        existing_names = {s.name for s in new._selections if s is not None and hasattr(s, "name")}
         for sel in selections:
-            if sel.name not in existing_names:
-                new._selections.append(sel)
-                existing_names.add(sel.name)
+            _append_unique_by_name(new._selections, sel)
         return new
 
     def add_params(self, *params) -> "Chart":
@@ -3844,13 +3873,9 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         # the WASM runtime (toggle_legend, crossfilter) can find the SelectionSpec.
         # Dedup by name to avoid double-registration when the same Selection is
         # later also passed to add_selection().
-        existing_selection_names = {
-            s.name for s in new._selections if s is not None and hasattr(s, "name")
-        }
         for p in params:
-            if isinstance(p, Selection) and p.name not in existing_selection_names:
-                new._selections.append(p)
-                existing_selection_names.add(p.name)
+            if isinstance(p, Selection):
+                _append_unique_by_name(new._selections, p)
         return new
 
     def interactive(self, *, toolbar: bool = True) -> "Chart":
@@ -3919,14 +3944,14 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         new._conditionals.append(spec)
         if hasattr(spec, "selection_name"):
             # Ensure the selection is also registered so scene_build can wire it.
-            existing = {s.name for s in new._selections if hasattr(s, "name")}
-            if spec.selection_name not in existing:
-                # Auto-register the carried selection when the spec knows it,
-                # so the explicit path benefits like encode(<channel>=cond) does.
-                carried = getattr(spec, "selection", None)
-                if carried is not None and carried.name == spec.selection_name:
-                    new._selections.append(carried)
-                else:
+            # Auto-register the carried selection when the spec knows it,
+            # so the explicit path benefits like encode(<channel>=cond) does.
+            carried = getattr(spec, "selection", None)
+            if carried is not None and carried.name == spec.selection_name:
+                _append_unique_by_name(new._selections, carried)
+            else:
+                existing = {s.name for s in new._selections if hasattr(s, "name")}
+                if spec.selection_name not in existing:
                     raise ValueError(
                         f"Chart.conditional(): no selection named {spec.selection_name!r} "
                         f"is attached to this chart. Call .add_selection(sel) first, or use "

@@ -330,6 +330,41 @@ class TestParamCollection:
         names = [p["name"] for p in _params_of(c.to_spec())]
         assert names.count("brush") == 1
 
+    def test_layer_merge_deduplicates_same_named_selection(self):
+        """Regression: CHART-05 — when two charts each carry a Selection with the
+        same name and they are layered via ``+``, the resulting chart's
+        ``_selections`` must contain exactly one entry for that name.
+
+        Without ``_append_unique_by_name`` in the layer-merge path the same
+        selection object would appear twice, producing a duplicate ``params``
+        entry in the emitted spec.
+        """
+        df = _df()
+        brush = fm.selection_interval(name="shared_brush")
+        a = fm.Chart(df).mark_point().encode(x="t", y="a").add_selection(brush)
+        b = fm.Chart(df).mark_line().encode(x="t", y="a").add_selection(brush)
+        layered = a + b
+        names = [s.name for s in layered._selections if s is not None]
+        assert names.count("shared_brush") == 1, (
+            "layer merge must deduplicate selections with the same name"
+        )
+
+    def test_layer_merge_raises_on_selection_variable_name_collision(self):
+        """Regression: CHART-04 — layering a chart that carries a Selection with
+        a chart that carries a VariableParameter of the same name must raise
+        ``ValueError`` containing 'collision'.
+
+        Without ``_check_param_collision`` in the layer-merge path the kinds
+        would silently shadow each other, producing a malformed spec.
+        """
+        df = _df()
+        sel = fm.selection_interval(name="clash")
+        var = fm.param("clash", value=42)
+        a = fm.Chart(df).mark_point().encode(x="t", y="a").add_selection(sel)
+        b = fm.Chart(df).mark_line().encode(x="t", y="a").add_params(var)
+        with pytest.raises(ValueError, match="collision"):
+            a + b
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # transform_filter(param) crossfilter — static contract = all rows kept
