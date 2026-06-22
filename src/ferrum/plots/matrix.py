@@ -218,6 +218,50 @@ def pairplot(
         all_vars = list(dict.fromkeys(rows + cols))  # deduplicate, preserve order
         data = data.drop_nulls(subset=all_vars)
 
+    return _pairplot_build(
+        data,
+        rows=rows,
+        cols=cols,
+        hue=hue,
+        kind=kind,
+        diag_kind=diag_kind,
+        markers=markers,
+        height=height,
+        aspect=aspect,
+        corner=corner,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+        encode_kwargs=encode_kwargs,
+    )
+
+
+def _pairplot_build(
+    data: Any,
+    *,
+    rows: list,
+    cols: list,
+    hue: Any,
+    kind: str,
+    diag_kind: str,
+    markers: Any,
+    height: float | None,
+    aspect: float | None,
+    corner: bool,
+    mark: dict | None,
+    encode: dict | None,
+    properties: dict | None,
+    layers: list | None,
+    theme: Any,
+    encode_kwargs: dict[str, Any],
+) -> RepeatChart:
+    """Construct the pairplot ``RepeatChart`` from validated inputs.
+
+    ``data`` is already coerced (when ``dropna``) and ``rows``/``cols`` are the
+    resolved field lists; ``kind``/``diag_kind`` have passed validation.
+    """
     # Build the off-diagonal template.
     mark_kwargs: dict = {}
     if markers is not None and kind == "scatter":
@@ -409,7 +453,6 @@ def heatmap(
 
     >>> fm.heatmap(wide_df, annot=False, vmin=0, vmax=1, cmap="greens")
     """
-    from ferrum import Unpivot
     from ferrum._coerce import to_arrow_table
 
     tbl = to_arrow_table(data)
@@ -429,6 +472,63 @@ def heatmap(
     # If no id column found, synthesize a `_row_id` column so downstream
     # transforms have a row identity to unpivot against.
     data, tbl, id_col = _ensure_id_column(data, tbl, id_col)
+
+    return _heatmap_build(
+        data,
+        tbl=tbl,
+        id_col=id_col,
+        value_cols=value_cols,
+        annot=annot,
+        fmt=fmt,
+        cmap=cmap,
+        linewidths=linewidths,
+        linecolor=linecolor,
+        vmin=vmin,
+        vmax=vmax,
+        center=center,
+        robust=robust,
+        square=square,
+        mask=mask,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+        encode_kwargs=encode_kwargs,
+    )
+
+
+def _heatmap_build(
+    data: Any,
+    *,
+    tbl: Any,
+    id_col: str,
+    value_cols: list[str],
+    annot: bool,
+    fmt: str,
+    cmap: str | None,
+    linewidths: float,
+    linecolor: str,
+    vmin: float | None,
+    vmax: float | None,
+    center: float | None,
+    robust: bool,
+    square: bool,
+    mask: Any,
+    mark: dict | None,
+    encode: dict | None,
+    properties: dict | None,
+    layers: list | None,
+    theme: Any,
+    encode_kwargs: dict[str, Any],
+) -> Chart:
+    """Construct the heatmap chart from resolved column metadata.
+
+    The public ``heatmap`` resolves ``tbl``/``id_col``/``value_cols`` (including
+    synthetic-id materialisation) and validates that numeric columns exist; this
+    builder owns robust-domain computation, masking, unpivot, and layering.
+    """
+    from ferrum import Unpivot
 
     # robust=True: compute vmin/vmax from 2nd/98th percentiles in Python.
     if robust:
@@ -707,12 +807,6 @@ def clustermap(
 
     >>> fm.clustermap(corr_df, cmap="viridis")
     """
-    from ferrum import (
-        ClusterMapChart,
-        Linkage,
-        Reorder,
-        Unpivot,
-    )
     from ferrum._coerce import to_arrow_table
 
     tbl = to_arrow_table(data)
@@ -740,6 +834,60 @@ def clustermap(
     # forms (``"rows"`` / ``"columns"``) remain accepted for back-compat.
     z_score = _normalize_standardize_arg(z_score, param="z_score")
     standard_scale = _normalize_standardize_arg(standard_scale, param="standard_scale")
+
+    return _clustermap_build(
+        data,
+        id_col=id_col,
+        value_cols=value_cols,
+        method=method,
+        metric=metric,
+        scheme=scheme,
+        cmap=cmap,
+        z_score=z_score,
+        standard_scale=standard_scale,
+        figsize=figsize,
+        dendrogram_ratio=dendrogram_ratio,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+        encode_kwargs=encode_kwargs,
+    )
+
+
+def _clustermap_build(
+    data: Any,
+    *,
+    id_col: str,
+    value_cols: list[str],
+    method: str,
+    metric: str,
+    scheme: str | None,
+    cmap: str | None,
+    z_score: str | None,
+    standard_scale: str | None,
+    figsize: Any,
+    dendrogram_ratio: float,
+    mark: dict | None,
+    encode: dict | None,
+    properties: dict | None,
+    layers: list | None,
+    theme: Any,
+    encode_kwargs: dict[str, Any],
+) -> "ClusterMapChart":
+    """Construct the ``ClusterMapChart`` from resolved column metadata.
+
+    The public ``clustermap`` resolves the id/value columns and normalises the
+    ``z_score``/``standard_scale`` axis arguments; this builder owns the linkage
+    transforms, center heatmap, and dendrogram panels.
+    """
+    from ferrum import (
+        ClusterMapChart,
+        Linkage,
+        Reorder,
+        Unpivot,
+    )
 
     # Linkage transforms (rows + columns) with explicit names so we can route
     # their `segments` named outputs to the dendrogram layers.
@@ -979,6 +1127,56 @@ def jointplot(
             f"got {marginal_kind!r}"
         )
 
+    return _jointplot_build(
+        data,
+        x=x,
+        y=y,
+        hue=hue,
+        kind=kind,
+        marginal_kind=marginal_kind,
+        ratio=ratio,
+        space=space,
+        xlim=xlim,
+        ylim=ylim,
+        joint_kws=joint_kws,
+        marginal_kws=marginal_kws,
+        height=height,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+        encode_kwargs=encode_kwargs,
+    )
+
+
+def _jointplot_build(
+    data: Any,
+    *,
+    x: str,
+    y: str,
+    hue: Any,
+    kind: str,
+    marginal_kind: str,
+    ratio: int,
+    space: float,
+    xlim: Any,
+    ylim: Any,
+    joint_kws: Any,
+    marginal_kws: Any,
+    height: float | None,
+    mark: dict | None,
+    encode: dict | None,
+    properties: dict | None,
+    layers: list | None,
+    theme: Any,
+    encode_kwargs: dict[str, Any],
+) -> JointChart:
+    """Construct the ``JointChart`` from validated inputs.
+
+    The public ``jointplot`` validates ``kind``/``marginal_kind``; this builder
+    owns the center-panel and marginal construction plus assembly.
+    """
     # Build the center chart per `kind`.
     from ferrum.encoding import X as _X, Y as _Y
 

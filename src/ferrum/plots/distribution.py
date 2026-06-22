@@ -254,6 +254,68 @@ def displot(
     _validate_choice("displot", "kind", kind, _DISPLOT_VALID_KINDS)
     _validate_choice("displot", "multiple", multiple, _DISPLOT_VALID_MULTIPLE)
 
+    return _displot_build(
+        data,
+        x=x,
+        y=y,
+        hue=hue,
+        col=col,
+        row=row,
+        kind=kind,
+        fill=fill,
+        cumulative=cumulative,
+        log_scale=log_scale,
+        stat=stat,
+        bins=bins,
+        bandwidth=bandwidth,
+        bw_adjust=bw_adjust,
+        multiple=multiple,
+        kde=kde,
+        rug=rug,
+        height=height,
+        aspect=aspect,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+        encode_kwargs=encode_kwargs,
+    )
+
+
+def _displot_build(
+    data: Any,
+    *,
+    x: Any,
+    y: Any,
+    hue: Any,
+    col: Any,
+    row: Any,
+    kind: str,
+    fill: bool,
+    cumulative: bool,
+    log_scale: bool,
+    stat: str,
+    bins: Any,
+    bandwidth: Any,
+    bw_adjust: float,
+    multiple: str,
+    kde: bool,
+    rug: bool,
+    height: float | None,
+    aspect: float | None,
+    mark: dict | None,
+    encode: dict | None,
+    properties: dict | None,
+    layers: list | None,
+    theme: Any,
+    encode_kwargs: dict[str, Any],
+) -> Chart:
+    """Construct the displot chart from validated inputs.
+
+    The public ``displot`` validates ``kind``/``multiple``; this builder owns the
+    mark/transform dispatch, optional kde/rug overlays, faceting, and sizing.
+    """
     # Position adjustment from `multiple`.
     position = _multiple_to_position(multiple, hue)
 
@@ -618,6 +680,61 @@ def catplot(
             "the Summary transform is not wired into catplot"
         )
 
+    return _catplot_build(
+        data,
+        x=x,
+        y=y,
+        hue=hue,
+        col=col,
+        row=row,
+        kind=kind,
+        order=order,
+        hue_order=hue_order,
+        orient=orient,
+        dodge=dodge,
+        jitter=jitter,
+        seed=seed,
+        height=height,
+        aspect=aspect,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+        encode_kwargs=encode_kwargs,
+    )
+
+
+def _catplot_build(
+    data: Any,
+    *,
+    x: Any,
+    y: Any,
+    hue: Any,
+    col: Any,
+    row: Any,
+    kind: str,
+    order: Any,
+    hue_order: Any,
+    orient: Any,
+    dodge: bool,
+    jitter: bool,
+    seed: int | None,
+    height: float | None,
+    aspect: float | None,
+    mark: dict | None,
+    encode: dict | None,
+    properties: dict | None,
+    layers: list | None,
+    theme: Any,
+    encode_kwargs: dict[str, Any],
+) -> Chart:
+    """Construct the catplot chart from validated inputs.
+
+    The public ``catplot`` validates ``kind`` and rejects unsupported
+    ``native_scale``/``ci``/``n_boot`` combinations; this builder owns the
+    axis-orientation handling, mark dispatch, coord-flip, faceting, and sizing.
+    """
     # Determine the categorical and value axes. By default x is categorical,
     # y is value; orient="h" flips to y categorical / x value (and we add
     # CoordFlip to the chart).
@@ -835,6 +952,52 @@ def relplot(
     """
     _validate_choice("relplot", "kind", kind, _RELPLOT_VALID_KINDS)
 
+    return _relplot_build(
+        data,
+        x=x,
+        y=y,
+        hue=hue,
+        size=size,
+        style=style,
+        col=col,
+        row=row,
+        kind=kind,
+        height=height,
+        aspect=aspect,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+        encode_kwargs=encode_kwargs,
+    )
+
+
+def _relplot_build(
+    data: Any,
+    *,
+    x: Any,
+    y: Any,
+    hue: Any,
+    size: Any,
+    style: Any,
+    col: Any,
+    row: Any,
+    kind: str,
+    height: float | None,
+    aspect: float | None,
+    mark: dict | None,
+    encode: dict | None,
+    properties: dict | None,
+    layers: list | None,
+    theme: Any,
+    encode_kwargs: dict[str, Any],
+) -> Chart:
+    """Construct the relplot chart from validated inputs.
+
+    The public ``relplot`` validates ``kind``; this builder owns the encoding
+    assembly, mark dispatch, faceting, and sizing.
+    """
     chart = Chart(data)
 
     enc: dict = {}
