@@ -499,20 +499,8 @@ pub fn to_scene_stroke(
         opacity,
         dash: dash.map(|d| d.to_vec()),
         stroke_opacity: opacity,
-        // Unknown strings return None so SVG uses its default (butt/miter),
-        // consistent with parse_stroke_cap / parse_stroke_join.
-        stroke_cap: cap.and_then(|s| match s {
-            "round" => Some(ferrum_scene::StrokeCap::Round),
-            "square" => Some(ferrum_scene::StrokeCap::Square),
-            "butt" => Some(ferrum_scene::StrokeCap::Butt),
-            _ => None,
-        }),
-        stroke_join: join.and_then(|s| match s {
-            "round" => Some(ferrum_scene::StrokeJoin::Round),
-            "bevel" => Some(ferrum_scene::StrokeJoin::Bevel),
-            "miter" => Some(ferrum_scene::StrokeJoin::Miter),
-            _ => None,
-        }),
+        stroke_cap: cap.and_then(parse_stroke_cap),
+        stroke_join: join.and_then(parse_stroke_join),
     }
 }
 
@@ -1097,5 +1085,35 @@ mod tests {
             !formatted.contains("0000"),
             "default tooltip format must trim trailing zeros; got: '{formatted}'"
         );
+    }
+
+    // --- RSUP-07: parse_stroke_cap / parse_stroke_join string→enum contracts ---
+
+    #[test]
+    fn parse_stroke_cap_maps_known_strings() {
+        assert_eq!(parse_stroke_cap("round"),  Some(ferrum_scene::StrokeCap::Round));
+        assert_eq!(parse_stroke_cap("square"), Some(ferrum_scene::StrokeCap::Square));
+        assert_eq!(parse_stroke_cap("butt"),   Some(ferrum_scene::StrokeCap::Butt));
+    }
+
+    #[test]
+    fn parse_stroke_cap_returns_none_for_unknown() {
+        assert_eq!(parse_stroke_cap("flat"),   None);
+        assert_eq!(parse_stroke_cap(""),        None);
+        assert_eq!(parse_stroke_cap("Round"),  None, "matching must be case-sensitive");
+    }
+
+    #[test]
+    fn parse_stroke_join_maps_known_strings() {
+        assert_eq!(parse_stroke_join("round"), Some(ferrum_scene::StrokeJoin::Round));
+        assert_eq!(parse_stroke_join("bevel"), Some(ferrum_scene::StrokeJoin::Bevel));
+        assert_eq!(parse_stroke_join("miter"), Some(ferrum_scene::StrokeJoin::Miter));
+    }
+
+    #[test]
+    fn parse_stroke_join_returns_none_for_unknown() {
+        assert_eq!(parse_stroke_join("arcs"),  None);
+        assert_eq!(parse_stroke_join(""),       None);
+        assert_eq!(parse_stroke_join("Miter"), None, "matching must be case-sensitive");
     }
 }

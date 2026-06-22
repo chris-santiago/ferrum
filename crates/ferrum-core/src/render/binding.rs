@@ -70,14 +70,7 @@ pub fn render_svg(
     config: Option<&Bound<'_, PyDict>>,
     chart_config: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<String> {
-    let batch = collect_single_batch(data)?;
-    let t = theme_from_dict(theme)?;
-    let c = config_from_dict(config)?;
-    let cc = chart_config_from_dict(chart_config)?;
-    let vp = Viewport {
-        width: viewport.0,
-        height: viewport.1,
-    };
+    let (batch, t, c, cc, vp) = decode_render_inputs(data, viewport, theme, config, chart_config)?;
     let result = render_svg_internal(spec, &batch, &t, vp, &c, &cc).map_err(render_err_to_py)?;
     emit_warnings(py, &result.warnings)?;
     Ok(result.bytes)
@@ -140,14 +133,7 @@ pub fn render_png<'py>(
     config: Option<&Bound<'_, PyDict>>,
     chart_config: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let batch = collect_single_batch(data)?;
-    let t = theme_from_dict(theme)?;
-    let c = config_from_dict(config)?;
-    let cc = chart_config_from_dict(chart_config)?;
-    let vp = Viewport {
-        width: viewport.0,
-        height: viewport.1,
-    };
+    let (batch, t, c, cc, vp) = decode_render_inputs(data, viewport, theme, config, chart_config)?;
     let result = render_png_internal(spec, &batch, &t, vp, &c, &cc).map_err(render_err_to_py)?;
     emit_warnings(py, &result.warnings)?;
     Ok(PyBytes::new(py, &result.bytes))
@@ -164,14 +150,7 @@ pub fn render_interactive(
     config: Option<&Bound<'_, PyDict>>,
     chart_config: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<(String, Py<PyBytes>)> {
-    let batch = collect_single_batch(data)?;
-    let t = theme_from_dict(theme)?;
-    let c = config_from_dict(config)?;
-    let cc = chart_config_from_dict(chart_config)?;
-    let vp = Viewport {
-        width: viewport.0,
-        height: viewport.1,
-    };
+    let (batch, t, c, cc, vp) = decode_render_inputs(data, viewport, theme, config, chart_config)?;
     let (json, packed_bytes) = super::render_scene_json(spec, &batch, &t, vp, &c, &cc)
         .map_err(render_err_to_py)?;
     let py_bytes = PyBytes::new(py, &packed_bytes);
@@ -670,6 +649,37 @@ fn render_err_to_py(e: RenderError) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
 
+/// Shared decode preamble for the three PyO3 render entry points
+/// (`render_svg`, `render_png`, `render_interactive`).
+///
+/// Collects the Arrow record batch stream into a single batch, decodes the
+/// theme/config/chart-config dicts, and builds the [`Viewport`] from the
+/// `(width, height)` tuple. Any change to the render input contract (a new
+/// kwarg, a new batch-collection policy) needs to be made here only.
+fn decode_render_inputs(
+    data: PyRecordBatchReader,
+    viewport: (f64, f64),
+    theme: Option<&Bound<'_, PyDict>>,
+    config: Option<&Bound<'_, PyDict>>,
+    chart_config: Option<&Bound<'_, PyDict>>,
+) -> PyResult<(
+    arrow::record_batch::RecordBatch,
+    crate::layout::ThemeInputs,
+    super::config::RenderConfig,
+    super::chart_config::ChartConfig,
+    Viewport,
+)> {
+    let batch = collect_single_batch(data)?;
+    let t = theme_from_dict(theme)?;
+    let c = config_from_dict(config)?;
+    let cc = chart_config_from_dict(chart_config)?;
+    let vp = Viewport {
+        width: viewport.0,
+        height: viewport.1,
+    };
+    Ok((batch, t, c, cc, vp))
+}
+
 // ---------------------------------------------------------------------------
 // SVG compositor bindings (Task 11)
 // ---------------------------------------------------------------------------
@@ -689,6 +699,33 @@ fn parse_chrome_anchor(anchor: Option<&str>) -> PyResult<ChromeAnchor> {
             "anchor must be one of 'start'|'middle'|'end', got '{other}'"
         ))),
     }
+}
+
+/// Apply figure chrome to an already-composed SVG string.
+///
+/// This is the shared tail of all three `compose_svg_*_py` bindings:
+/// build the [`FigureChrome`] from the chrome kwargs and call
+/// [`wrap_with_chrome`](crate::render::figure_chrome::wrap_with_chrome).
+///
+/// `composed` is the raw composed SVG (no chrome yet) produced by the
+/// compositor. `title`/`subtitle`/`caption`/`left_inset`/`right_inset`/
+/// `anchor` are the same chrome kwargs accepted by every compose binding.
+///
+/// Errors from [`wrap_with_chrome`] are mapped to `PyValueError` here so
+/// callers don't need to repeat the `map_err` boilerplate.
+#[allow(clippy::too_many_arguments)]
+fn compose_and_wrap(
+    composed: String,
+    title: Option<&str>,
+    subtitle: Option<&str>,
+    caption: Option<&str>,
+    left_inset: Option<f64>,
+    right_inset: Option<f64>,
+    anchor: Option<&str>,
+) -> PyResult<String> {
+    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
+    crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 /// Build a [`FigureChrome`] from the chrome-related keyword params, applying the
@@ -780,21 +817,11 @@ pub fn compose_svg_horizontal_py(
     right_inset: Option<f64>,
     anchor: Option<&str>,
 ) -> PyResult<String> {
-    let align_val = match align {
-        "top" => crate::render::compositor::VerticalAlign::Top,
-        "center" => crate::render::compositor::VerticalAlign::Center,
-        "bottom" => crate::render::compositor::VerticalAlign::Bottom,
-        other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "align must be one of 'top'|'center'|'bottom', got '{other}'"
-            )))
-        }
-    };
+    let align_val = crate::render::compositor::VerticalAlign::try_from(align)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
     let composed = crate::render::compositor::compose_svg_horizontal(&svgs, spacing, align_val)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
-    crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    compose_and_wrap(composed, title, subtitle, caption, left_inset, right_inset, anchor)
 }
 
 /// Compose SVG panels stacked top-to-bottom into a single vertical strip.
@@ -866,21 +893,11 @@ pub fn compose_svg_vertical_py(
     right_inset: Option<f64>,
     anchor: Option<&str>,
 ) -> PyResult<String> {
-    let align_val = match align {
-        "left" => crate::render::compositor::HorizontalAlign::Left,
-        "center" => crate::render::compositor::HorizontalAlign::Center,
-        "right" => crate::render::compositor::HorizontalAlign::Right,
-        other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "align must be one of 'left'|'center'|'right', got '{other}'"
-            )))
-        }
-    };
+    let align_val = crate::render::compositor::HorizontalAlign::try_from(align)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
     let composed = crate::render::compositor::compose_svg_vertical(&svgs, spacing, align_val)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
-    crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    compose_and_wrap(composed, title, subtitle, caption, left_inset, right_inset, anchor)
 }
 
 /// Compose SVG panels into a rectangular grid.
@@ -986,9 +1003,7 @@ pub fn compose_svg_grid_py(
         spacing,
     )
     .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
-    crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    compose_and_wrap(composed, title, subtitle, caption, left_inset, right_inset, anchor)
 }
 
 /// Lay out a figure-level chrome title/subtitle/caption band as scene nodes.

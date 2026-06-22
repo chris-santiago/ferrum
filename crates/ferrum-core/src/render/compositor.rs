@@ -66,11 +66,49 @@ pub enum VerticalAlign {
     Bottom,
 }
 
+impl TryFrom<&str> for VerticalAlign {
+    type Error = String;
+
+    /// Parse a vertical-alignment string.
+    ///
+    /// Accepted: `"top"`, `"center"`, `"bottom"`.
+    /// Returns `Err` for any other value.
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s {
+            "top" => Ok(VerticalAlign::Top),
+            "center" => Ok(VerticalAlign::Center),
+            "bottom" => Ok(VerticalAlign::Bottom),
+            other => Err(format!(
+                "align must be one of 'top'|'center'|'bottom', got '{other}'"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HorizontalAlign {
     Left,
     Center,
     Right,
+}
+
+impl TryFrom<&str> for HorizontalAlign {
+    type Error = String;
+
+    /// Parse a horizontal-alignment string.
+    ///
+    /// Accepted: `"left"`, `"center"`, `"right"`.
+    /// Returns `Err` for any other value.
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s {
+            "left" => Ok(HorizontalAlign::Left),
+            "center" => Ok(HorizontalAlign::Center),
+            "right" => Ok(HorizontalAlign::Right),
+            other => Err(format!(
+                "align must be one of 'left'|'center'|'right', got '{other}'"
+            )),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -480,5 +518,41 @@ mod tests {
             2,
             "expected 2 distinct legend-clip defs: {out}",
         );
+    }
+
+    // --- RSUP-09: VerticalAlign / HorizontalAlign string→enum contracts ---
+
+    #[test]
+    fn vertical_align_try_from_maps_known_strings() {
+        assert_eq!(VerticalAlign::try_from("top"),    Ok(VerticalAlign::Top));
+        assert_eq!(VerticalAlign::try_from("center"), Ok(VerticalAlign::Center));
+        assert_eq!(VerticalAlign::try_from("bottom"), Ok(VerticalAlign::Bottom));
+    }
+
+    #[test]
+    fn vertical_align_try_from_rejects_unknown_string() {
+        let err = VerticalAlign::try_from("middle").unwrap_err();
+        assert!(
+            err.contains("align must be one of 'top'|'center'|'bottom'"),
+            "unexpected error message: {err}",
+        );
+        assert!(err.contains("middle"), "error should echo the bad input: {err}");
+    }
+
+    #[test]
+    fn horizontal_align_try_from_maps_known_strings() {
+        assert_eq!(HorizontalAlign::try_from("left"),   Ok(HorizontalAlign::Left));
+        assert_eq!(HorizontalAlign::try_from("center"), Ok(HorizontalAlign::Center));
+        assert_eq!(HorizontalAlign::try_from("right"),  Ok(HorizontalAlign::Right));
+    }
+
+    #[test]
+    fn horizontal_align_try_from_rejects_unknown_string() {
+        let err = HorizontalAlign::try_from("start").unwrap_err();
+        assert!(
+            err.contains("align must be one of 'left'|'center'|'right'"),
+            "unexpected error message: {err}",
+        );
+        assert!(err.contains("start"), "error should echo the bad input: {err}");
     }
 }
