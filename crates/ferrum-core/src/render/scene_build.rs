@@ -1530,15 +1530,14 @@ fn build_independent_x_projection(
     if matches!(scale, scale_resolve::ScaleKind::Ordinal(_)) {
         return None;
     }
-    // Rebuild a provisional [0,1]-range scale so tick fractions are portable
-    // across different panel pixel ranges (the same approach prepare.rs uses).
-    let fractions = build_provisional_fractions(scale, tick_count);
+    // Tick fractions are computed over the scale's own domain, panel-range-
+    // agnostic; `layout_x_axis` maps them onto the actual panel pixel range.
+    let fractions = scale.tick_fractions(tick_count);
     if fractions.is_empty() {
         return None;
     }
-    let padding_frac = build_provisional_padding(scale);
     Some(crate::layout::TickProjection {
-        padding_frac,
+        padding_frac: scale.padding_fraction(),
         major: fractions,
         minor: Vec::new(), // minor ticks are not rebuilt for independent axes
     })
@@ -1556,37 +1555,17 @@ fn build_independent_y_projection(
     if matches!(scale, scale_resolve::ScaleKind::Ordinal(_)) {
         return None;
     }
-    let mut fractions = build_provisional_fractions(scale, tick_count);
+    let mut fractions = scale.tick_fractions(tick_count);
     if fractions.is_empty() {
         return None;
     }
     // Reverse so the carrier is index-aligned with the reversed y tick labels.
     fractions.reverse();
-    let padding_frac = build_provisional_padding(scale);
     Some(crate::layout::TickProjection {
-        padding_frac,
+        padding_frac: scale.padding_fraction(),
         major: fractions,
         minor: Vec::new(),
     })
-}
-
-/// Compute tick fractions `t ∈ [0, 1]` for `scale` over its own data domain,
-/// normalizing pixel positions by the scale's pixel span. This mirrors the
-/// approach in `ScaleKind::tick_fractions`.
-///
-/// Callers that need reversed fractions (e.g. y-axis) reverse the result
-/// themselves after calling this function.
-fn build_provisional_fractions(
-    scale: &scale_resolve::ScaleKind,
-    tick_count: usize,
-) -> Vec<f64> {
-    scale.tick_fractions(tick_count)
-}
-
-/// Recover the scale padding fraction from the provisional scale's pixel range.
-/// Mirrors `ScaleKind::padding_fraction` used in `prepare.rs`.
-fn build_provisional_padding(scale: &scale_resolve::ScaleKind) -> f64 {
-    scale.padding_fraction()
 }
 
 /// Validate that the encoding channels supplied to a mark are a supported

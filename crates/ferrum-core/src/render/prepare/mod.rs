@@ -1357,6 +1357,26 @@ mod tick_format_tests {
     }
 }
 
+/// Resolve a named column from `batch` as a `StringArray`, returning a typed
+/// error when the column is absent or has a non-Utf8 type. Shared by all four
+/// facet distinct-value scan helpers below so the column-lookup + downcast
+/// pattern lives in exactly one place.
+fn facet_str_arr<'a>(
+    batch: &'a RecordBatch,
+    field: &str,
+) -> Result<&'a arrow::array::StringArray, RenderError> {
+    let col = batch
+        .column_by_name(field)
+        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+    col.as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .ok_or_else(|| {
+            RenderError::ScaleResolutionFailed(format!(
+                "facet field '{field}' must be Utf8 (Phase 7 limitation)"
+            ))
+        })
+}
+
 /// Partition a RecordBatch by a Utf8 field, returning `(value, filtered_batch)`
 /// pairs in first-appearance order. Used by facet-before-transform to split the
 /// input into per-panel subsets before running transforms.
@@ -1364,19 +1384,9 @@ fn partition_batch_by_field(
     batch: &RecordBatch,
     field: &str,
 ) -> Result<Vec<(String, RecordBatch)>, RenderError> {
-    use arrow::array::{Array, BooleanArray, StringArray};
+    use arrow::array::BooleanArray;
     use arrow::compute::filter_record_batch;
-    let col = batch
-        .column_by_name(field)
-        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
-    let arr = col
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            RenderError::ScaleResolutionFailed(format!(
-                "facet field '{field}' must be Utf8 (Phase 7 limitation)"
-            ))
-        })?;
+    let arr = facet_str_arr(batch, field)?;
     // Collect distinct values in first-appearance order.
     let mut order: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1422,18 +1432,7 @@ fn inject_facet_column(batch: &RecordBatch, field: &str, value: &str) -> RecordB
 }
 
 fn group_rows_by_field(batch: &RecordBatch, field: &str) -> Result<Vec<FacetGroup>, RenderError> {
-    use arrow::array::StringArray;
-    let col = batch
-        .column_by_name(field)
-        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
-    let arr = col
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            RenderError::ScaleResolutionFailed(format!(
-                "facet field '{field}' must be Utf8 (Phase 7 limitation)"
-            ))
-        })?;
+    let arr = facet_str_arr(batch, field)?;
     let mut order: Vec<String> = Vec::new();
     let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     for v in arr.iter().flatten() {
@@ -1465,20 +1464,8 @@ fn group_rows_by_two_fields(
     col_field: &str,
     row_field: &str,
 ) -> Result<Vec<FacetGroup>, RenderError> {
-    use arrow::array::StringArray;
-
-    let get_str_arr = |field: &str| -> Result<&StringArray, RenderError> {
-        let col = batch.column_by_name(field)
-            .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
-        col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-            RenderError::ScaleResolutionFailed(format!(
-                "facet field '{field}' must be Utf8 (Phase 7 limitation)"
-            ))
-        })
-    };
-
-    let col_arr = get_str_arr(col_field)?;
-    let row_arr = get_str_arr(row_field)?;
+    let col_arr = facet_str_arr(batch, col_field)?;
+    let row_arr = facet_str_arr(batch, row_field)?;
 
     // Collect distinct row values and col values (first-appearance order).
     let mut row_order: Vec<String> = Vec::new();
@@ -1526,21 +1513,11 @@ fn partition_batch_by_two_fields(
     col_field: &str,
     row_field: &str,
 ) -> Result<Vec<(GridPartitionKey, RecordBatch)>, RenderError> {
-    use arrow::array::{Array, BooleanArray, StringArray};
+    use arrow::array::{Array, BooleanArray};
     use arrow::compute::filter_record_batch;
 
-    let get_str_arr = |field: &str| -> Result<&StringArray, RenderError> {
-        let col = batch.column_by_name(field)
-            .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
-        col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-            RenderError::ScaleResolutionFailed(format!(
-                "facet field '{field}' must be Utf8 (Phase 7 limitation)"
-            ))
-        })
-    };
-
-    let col_arr = get_str_arr(col_field)?;
-    let row_arr = get_str_arr(row_field)?;
+    let col_arr = facet_str_arr(batch, col_field)?;
+    let row_arr = facet_str_arr(batch, row_field)?;
 
     // Collect distinct (row_val, col_val) pairs in row-major first-appearance order.
     let mut row_order: Vec<String> = Vec::new();
@@ -3489,7 +3466,7 @@ mod tests {
 #[cfg(test)]
 mod grid_partition_tests {
     use super::*;
-    use arrow::array::StringArray;
+    use arrow::array::{Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
@@ -3593,6 +3570,67 @@ mod grid_partition_tests {
                 "Wrap-mode groups must have row_key = None; got {:?}",
                 g.row_key
             );
+        }
+    }
+
+    // ── T1.9 (SPINE-06): facet_str_arr contract ──────────────────────────────
+
+    /// A minimal batch with one Utf8 column `"cat"` and one Float64 column `"v"`.
+    /// Used by all three `facet_str_arr` tests below.
+    fn facet_str_arr_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "a"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// Happy path: `facet_str_arr` on a present Utf8 column returns the
+    /// underlying `StringArray` with the correct values.
+    #[test]
+    fn facet_str_arr_returns_correct_utf8_array() {
+        let batch = facet_str_arr_batch();
+        let arr = facet_str_arr(&batch, "cat").expect("cat is a Utf8 column");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr.value(0), "a");
+        assert_eq!(arr.value(1), "b");
+        assert_eq!(arr.value(2), "a");
+    }
+
+    /// Missing column: `facet_str_arr` must return `RenderError::UnknownColumn`
+    /// (not panic) when the field is absent from the batch.
+    #[test]
+    fn facet_str_arr_missing_column_errors_unknown_column() {
+        let batch = facet_str_arr_batch();
+        let err = facet_str_arr(&batch, "nonexistent").unwrap_err();
+        assert!(
+            matches!(err, RenderError::UnknownColumn { .. }),
+            "expected UnknownColumn, got: {err:?}"
+        );
+    }
+
+    /// Non-Utf8 column: `facet_str_arr` on a Float64 column must return a
+    /// `RenderError::ScaleResolutionFailed` containing "Phase 7 limitation"
+    /// (the SPINE-06 error contract pinned for the three call sites).
+    #[test]
+    fn facet_str_arr_non_utf8_column_errors_phase7_limitation() {
+        let batch = facet_str_arr_batch();
+        let err = facet_str_arr(&batch, "v").unwrap_err();
+        match &err {
+            RenderError::ScaleResolutionFailed(msg) => {
+                assert!(
+                    msg.contains("Phase 7 limitation"),
+                    "error message must contain 'Phase 7 limitation', got: {msg:?}"
+                );
+            }
+            other => panic!("expected ScaleResolutionFailed, got: {other:?}"),
         }
     }
 }

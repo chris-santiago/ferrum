@@ -4041,3 +4041,44 @@ fn t3_shape_non_faceted_byte_identical() {
         glyph_y,
     );
 }
+
+// ── T1.9 (SPINE-11): dummy_unit_scale range-ordering contract ───────────────
+
+/// `dummy_unit_scale` with `ascending=true` must produce a LinearScale whose
+/// pixel range is `[lo, hi]` (the x convention, where increasing data maps to
+/// increasing pixel). The three Geoshape/Tick/Rule call sites that pass
+/// `ascending=true` depend on this ordering.
+#[test]
+fn dummy_unit_scale_ascending_produces_lo_hi_range() {
+    let scale = dummy_unit_scale((10.0, 90.0), true);
+    assert!(
+        matches!(scale, ScaleKind::Linear(_)),
+        "dummy_unit_scale must return a LinearScale variant"
+    );
+    let (r0, r1) = scale.pixel_range();
+    assert_eq!(
+        (r0, r1),
+        (10.0, 90.0),
+        "ascending=true must produce pixel_range (lo, hi) = (10.0, 90.0), got ({r0}, {r1})"
+    );
+}
+
+/// `dummy_unit_scale` with `ascending=false` must produce a LinearScale whose
+/// pixel range is `[hi, lo]` (the y convention, where the top pixel is smaller
+/// and the bottom pixel is larger). The three Geoshape/Tick/Rule call sites
+/// that pass `ascending=false` depend on this reversed ordering so that high
+/// data values map toward the top of the viewport.
+#[test]
+fn dummy_unit_scale_descending_produces_hi_lo_range() {
+    let scale = dummy_unit_scale((10.0, 90.0), false);
+    assert!(
+        matches!(scale, ScaleKind::Linear(_)),
+        "dummy_unit_scale must return a LinearScale variant"
+    );
+    let (r0, r1) = scale.pixel_range();
+    assert_eq!(
+        (r0, r1),
+        (90.0, 10.0),
+        "ascending=false must produce pixel_range (hi, lo) = (90.0, 10.0), got ({r0}, {r1})"
+    );
+}

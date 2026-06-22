@@ -818,6 +818,24 @@ fn build_auxiliary_scales(
     Ok((color, size, shape, opacity))
 }
 
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Build a dummy unit `LinearScale` that maps `[0, 1]` domain onto the given
+/// pixel range. Used when a particular axis is not encoded (Geoshape ignores
+/// both axes; single-axis Tick/Rule ignores the absent axis). The mark builder
+/// for those marks never reads the dummy scale; it exists so `ResolvedScales`
+/// is always fully populated.
+///
+/// `ascending` controls the pixel-range ordering: `true` → `[lo, hi]` (x
+/// convention), `false` → `[hi, lo]` (y convention, where the top pixel is
+/// smaller and the bottom is larger).
+#[inline]
+fn dummy_unit_scale(pixel_range: (f64, f64), ascending: bool) -> ScaleKind {
+    let (lo, hi) = pixel_range;
+    let range = if ascending { vec![lo, hi] } else { vec![hi, lo] };
+    ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], range, false, false))
+}
+
 // ── Main entry points ───────────────────────────────────────────────────────
 
 /// Build scales from spec + post-transform batch + pixel ranges.
@@ -869,15 +887,13 @@ pub fn resolve_scales_with_outputs(
     // Geoshape marks read geometry from __geometry__ column and don't use x/y scales.
     // Return dummy unit scales so the renderer can proceed; the mark builder ignores them.
     if matches!(spec.mark, crate::spec::mark::Mark::Geoshape) {
-        let dummy_x = ScaleKind::Linear(LinearScale::new_internal(
-            vec![0.0, 1.0], vec![x_pixel_range.0, x_pixel_range.1], false, false,
-        ));
-        let dummy_y = ScaleKind::Linear(LinearScale::new_internal(
-            vec![0.0, 1.0], vec![y_pixel_range.1, y_pixel_range.0], false, false,
-        ));
         return Ok((
-            ResolvedScales { x: dummy_x, y: dummy_y, color: None, size: None, shape: None, opacity: None,
-                x2: None, y2: None },
+            ResolvedScales {
+                x: dummy_unit_scale(x_pixel_range, true),
+                y: dummy_unit_scale(y_pixel_range, false),
+                color: None, size: None, shape: None, opacity: None,
+                x2: None, y2: None,
+            },
             warnings,
         ));
     }
@@ -895,11 +911,11 @@ pub fn resolve_scales_with_outputs(
             let x2_enc = spec.encoding.x2.as_ref();
             let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
             let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, &mut warnings)?;
-            let dummy_y = ScaleKind::Linear(LinearScale::new_internal(
-                vec![0.0, 1.0], vec![y_pixel_range.1, y_pixel_range.0], false, false,
-            ));
             let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
-            return Ok((ResolvedScales { x, y: dummy_y, color, size, shape, opacity, x2: None, y2: None }, warnings));
+            return Ok((ResolvedScales {
+                x, y: dummy_unit_scale(y_pixel_range, false),
+                color, size, shape, opacity, x2: None, y2: None,
+            }, warnings));
         }
         if !has_x && has_y {
             let y_enc = spec.encoding.y.as_ref().unwrap();
@@ -907,11 +923,11 @@ pub fn resolve_scales_with_outputs(
             let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
             let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
             let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, &mut warnings)?;
-            let dummy_x = ScaleKind::Linear(LinearScale::new_internal(
-                vec![0.0, 1.0], vec![x_pixel_range.0, x_pixel_range.1], false, false,
-            ));
             let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
-            return Ok((ResolvedScales { x: dummy_x, y, color, size, shape, opacity, x2: None, y2: None }, warnings));
+            return Ok((ResolvedScales {
+                x: dummy_unit_scale(x_pixel_range, true), y,
+                color, size, shape, opacity, x2: None, y2: None,
+            }, warnings));
         }
     }
 
