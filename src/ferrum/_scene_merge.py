@@ -563,8 +563,14 @@ def _inject_figure_chrome(
     Repeat), where the interactive body height equals the SVG body height.  For
     JointChart and ClusterMapChart the interactive body is native panel size
     rather than the ratio-scaled viewBox the SVG path uses, so the caption y
-    will differ from the SVG (pre-existing W5 limitation — interactive
-    nonuniform-grid layout is flat horizontal, not a 2×2 grid).
+    will differ from the SVG (pre-existing W5 / COMP-08 limitation, tracked as a
+    feature-gap).  Note: the interactive path DOES place panels in the correct
+    2×2 grid (via ``_merge_child_scenes_nonuniform_grid``); the only divergence
+    from SVG is that cells keep their native size instead of being non-uniformly
+    stretch-scaled to ratio-proportional cells.  Matching SVG proportions needs a
+    per-panel layout-scale slot through the scene schema into WASM (the analog of
+    SVG's nested ``<svg viewBox preserveAspectRatio="none">``), which is the
+    deferred design work.
 
     Parameters
     ----------
