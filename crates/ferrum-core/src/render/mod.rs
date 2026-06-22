@@ -205,6 +205,157 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod axis_style_fill_from_tests {
+    //! Characterization tests for `axis_style_fill_from` (T2.6 / SPINE-01): the
+    //! one merge that replaced the two parallel `AxisStyleSpec → AxisStyleOverrides`
+    //! mappers. These pin the exact field ownership both old mappers had so the
+    //! collapse stays behavior-preserving.
+    use super::*;
+    use crate::layout::{AxisStyleOverrides, LabelOverlap};
+    use chart_config::AxisStyleSpec;
+
+    /// An `AxisStyleSpec` with every merge-relevant field populated, plus a couple
+    /// of fields that exercise color parsing and token validation.
+    fn fully_populated_spec() -> AxisStyleSpec {
+        AxisStyleSpec {
+            label_angle: Some(45.0),
+            label_font_size: Some(11.0),
+            label_color: Some("#112233".into()),
+            label_format: Some(".2f".into()),
+            label_format_type: None,
+            label_overlap: Some("parity".into()),
+            label_flush: Some(true),
+            labels: Some(false), // show toggle — NOT an overrides field; must be ignored
+            ticks: Some(false),  // show toggle — ignored
+            tick_count: Some(7), // not an overrides field — ignored
+            tick_size: Some(4.0),
+            tick_extra: Some(true),
+            tick_min_step: Some(0.5),
+            values: Some(vec![0.0, 1.0, 2.0]),
+            grid: Some(false), // show toggle — ignored
+            grid_color: Some("#445566".into()),
+            grid_dash: Some(vec![6.0, 3.0]),
+            grid_width: Some(1.5),
+            grid_opacity: Some(0.4),
+            domain: Some(false), // show toggle — ignored
+            domain_color: Some("#778899".into()),
+            domain_width: Some(2.0),
+            title: Some("ignored-here".into()), // title text — not an overrides field
+            title_font_size: Some(13.0),
+            title_color: Some("#aabbcc".into()),
+            title_padding: Some(8.0),
+            title_orient: Some("right".into()),
+            label_padding: Some(3.0),
+            orient: Some("bottom".into()),
+            translate: Some(5.0),
+            min_extent: Some(10.0),
+            max_extent: Some(40.0),
+            offset: Some(2.0),
+            zindex: Some(1),
+        }
+    }
+
+    /// Per-channel fresh-build (`fill_only_if_none = false`) writes every
+    /// overrides field from the spec — EXCEPT `label_format`, which the
+    /// per-channel/prepare path deliberately leaves `None` (it is threaded
+    /// separately afterward). show_* toggles and non-overrides fields (title text,
+    /// tick_count, tick_size) are never written (they are not bundle fields).
+    #[test]
+    fn fresh_build_writes_all_fields_except_label_format() {
+        let spec = fully_populated_spec();
+        let mut o = AxisStyleOverrides::default();
+        axis_style_fill_from(&mut o, &spec, "x", false).unwrap();
+
+        assert_eq!(o.label_angle, Some(45.0));
+        assert_eq!(o.label_font_size, Some(11.0));
+        assert_eq!(o.label_color, color::from_hex_str("#112233").ok());
+        // label_format MUST stay None on the per-channel/fresh-build path.
+        assert_eq!(o.label_format, None);
+        assert_eq!(o.label_overlap, Some(LabelOverlap::Parity));
+        assert_eq!(o.label_flush, Some(true));
+        assert_eq!(o.tick_extra, Some(true));
+        assert_eq!(o.tick_min_step, Some(0.5));
+        assert_eq!(o.tick_values, Some(vec![0.0, 1.0, 2.0]));
+        assert_eq!(o.grid_color, color::from_hex_str("#445566").ok());
+        assert_eq!(o.grid_dash, Some(vec![6.0, 3.0]));
+        assert_eq!(o.grid_width, Some(1.5));
+        assert_eq!(o.grid_opacity, Some(0.4));
+        assert_eq!(o.domain_color, color::from_hex_str("#778899").ok());
+        assert_eq!(o.domain_width, Some(2.0));
+        assert_eq!(o.title_font_size, Some(13.0));
+        assert_eq!(o.title_color, color::from_hex_str("#aabbcc").ok());
+        assert_eq!(o.title_padding, Some(8.0));
+        assert_eq!(o.title_orient, Some(crate::layout::AxisOrient::Right));
+        assert_eq!(o.label_padding, Some(3.0));
+        assert_eq!(o.orient, Some(crate::layout::AxisOrient::Bottom));
+        assert_eq!(o.translate, Some(5.0));
+        assert_eq!(o.min_extent, Some(10.0));
+        assert_eq!(o.max_extent, Some(40.0));
+        assert_eq!(o.offset, Some(2.0));
+        assert_eq!(o.zindex, Some(1));
+    }
+
+    /// Chart-level fill (`fill_only_if_none = true`) fills only `None` slots
+    /// (higher-precedence values survive) AND owns `label_format` (the one field
+    /// the per-channel path leaves `None`).
+    #[test]
+    fn chart_level_fills_only_none_and_owns_label_format() {
+        let spec = fully_populated_spec();
+        let mut o = AxisStyleOverrides {
+            // A higher-precedence per-channel value already claimed these slots.
+            label_angle: Some(90.0),
+            grid_width: Some(99.0),
+            ..AxisStyleOverrides::default()
+        };
+        axis_style_fill_from(&mut o, &spec, "x", true).unwrap();
+
+        // Pre-set slots survive (fill-only-if-None).
+        assert_eq!(o.label_angle, Some(90.0));
+        assert_eq!(o.grid_width, Some(99.0));
+        // Empty slots filled from the spec.
+        assert_eq!(o.label_font_size, Some(11.0));
+        assert_eq!(o.tick_min_step, Some(0.5));
+        assert_eq!(o.orient, Some(crate::layout::AxisOrient::Bottom));
+        // label_format IS written on the chart-level path.
+        assert_eq!(o.label_format, Some(".2f".into()));
+    }
+
+    /// Chart-level fill does NOT clobber a `label_format` that a per-channel value
+    /// already set (the threaded override wins).
+    #[test]
+    fn chart_level_label_format_defers_to_existing() {
+        let spec = fully_populated_spec(); // label_format = ".2f"
+        let mut o = AxisStyleOverrides {
+            label_format: Some("~s".into()), // per-channel already won
+            ..AxisStyleOverrides::default()
+        };
+        axis_style_fill_from(&mut o, &spec, "x", true).unwrap();
+        assert_eq!(o.label_format, Some("~s".into()));
+    }
+
+    /// A cross-dimension `orient` (left/right on an x axis) fails loud on both
+    /// paths, exactly as both old mappers did via `parse_axis_orient`.
+    #[test]
+    fn cross_dimension_orient_errors() {
+        let spec = AxisStyleSpec { orient: Some("left".into()), ..Default::default() };
+        let mut o = AxisStyleOverrides::default();
+        assert!(axis_style_fill_from(&mut o, &spec, "x", false).is_err());
+        let mut o = AxisStyleOverrides::default();
+        assert!(axis_style_fill_from(&mut o, &spec, "x", true).is_err());
+    }
+
+    /// An unparseable color hex leaves the slot `None` (theme fallback) rather
+    /// than failing — preserved from both old mappers.
+    #[test]
+    fn bad_color_hex_falls_back_to_none() {
+        let spec = AxisStyleSpec { label_color: Some("not-a-color".into()), ..Default::default() };
+        let mut o = AxisStyleOverrides::default();
+        axis_style_fill_from(&mut o, &spec, "x", false).unwrap();
+        assert_eq!(o.label_color, None);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Task 20 — render_svg full pipeline orchestration (spec §6).
 // ---------------------------------------------------------------------------
@@ -552,6 +703,111 @@ fn axis_channel(orient: crate::layout::AxisOrient) -> &'static str {
     if matches!(orient, Top | Bottom) { "x" } else { "y" }
 }
 
+/// One canonical [`AxisStyleSpec`](chart_config::AxisStyleSpec) →
+/// [`AxisStyleOverrides`](crate::layout::AxisStyleOverrides) merge, replacing the
+/// two parallel ~28-field mappers that previously turned the SAME source struct
+/// into the bundle in two shapes (the per-channel fresh-builder in
+/// `prepare::encoding_axis_style_overrides` and the chart-level fill-only-if-`None`
+/// `apply_axis_style_to_axis_input`). Both call sites now route through here so a
+/// new `AxisStyleSpec` field is wired once, not in two drifting bodies.
+///
+/// `fill_only_if_none` selects the merge discipline:
+/// - `false` (per-channel path): write every field unconditionally — the caller
+///   starts from `Default`, so this is the fresh-build the encoding path needs.
+/// - `true` (chart-level path): write each field only when the slot is still
+///   `None`, so a higher-precedence source (a per-channel spec, or an earlier
+///   config layer) always wins.
+///
+/// Field-ownership exceptions preserved bit-for-bit from the old two-mapper world:
+/// - **`label_format`** is written ONLY on the chart-level (`fill_only_if_none`)
+///   path. The per-channel/prepare path deliberately leaves it `None` here and
+///   seeds it separately from the temporal/numeric format threading
+///   (`apply_axis_format_or_thread`) after this merge runs.
+/// - **`show_*`** toggles (`grid`/`domain`/`labels`/`ticks`) live on `AxisInput`,
+///   not on this bundle, and are owned solely by the prepare path. This merge
+///   cannot touch them (they are not `AxisStyleOverrides` fields); the chart-level
+///   caller documents that single-owner contract at its call site.
+///
+/// An invalid `orient` (cross-dimension) or `title_orient` token fails loud via
+/// [`RenderError::InvalidAxisOrient`]; an unparseable color hex string leaves the
+/// slot `None` (theme fallback) on both paths.
+pub(crate) fn axis_style_fill_from(
+    o: &mut crate::layout::AxisStyleOverrides,
+    style: &chart_config::AxisStyleSpec,
+    channel: &'static str,
+    fill_only_if_none: bool,
+) -> Result<(), RenderError> {
+    // One merge predicate for every field: on the fresh-build (per-channel) path
+    // (`fill_only_if_none == false`) the value is written unconditionally; on the
+    // chart-level path it is written only when the slot is still `None` so a
+    // higher-precedence source wins. Collapsing it here means each field below
+    // appears exactly once regardless of which discipline applies. A generic `fn`
+    // (not a closure) because the slot type varies across fields.
+    fn set<T>(slot: &mut Option<T>, value: Option<T>, fill_only_if_none: bool) {
+        if !fill_only_if_none || slot.is_none() {
+            *slot = value;
+        }
+    }
+    let parse_color = |c: &Option<String>| {
+        c.as_deref().and_then(|s| color::from_hex_str(s).ok())
+    };
+    // ── Positioning / draw-order orphans (B5 unit 2) ─────────────────────────
+    // `orient` is the override INPUT (validated against the dimension); the
+    // concrete `AxisInput.orient` is re-synced from it by `resolve_orient` after
+    // all override layers merge. Validation can fail, so it is resolved eagerly
+    // (before `set`) and only assigned under the same fill predicate.
+    if !fill_only_if_none || o.orient.is_none() {
+        o.orient = style
+            .orient
+            .as_deref()
+            .map(|s| prepare::parse_axis_orient(s, channel))
+            .transpose()?;
+    }
+    if !fill_only_if_none || o.title_orient.is_none() {
+        o.title_orient = style
+            .title_orient
+            .as_deref()
+            .map(|s| prepare::parse_title_orient(s, channel))
+            .transpose()?;
+    }
+    set(&mut o.translate, style.translate, fill_only_if_none);
+    set(&mut o.min_extent, style.min_extent, fill_only_if_none);
+    set(&mut o.max_extent, style.max_extent, fill_only_if_none);
+    set(&mut o.grid_opacity, style.grid_opacity, fill_only_if_none);
+    set(&mut o.zindex, style.zindex, fill_only_if_none);
+    set(&mut o.tick_extra, style.tick_extra, fill_only_if_none);
+    set(&mut o.tick_min_step, style.tick_min_step, fill_only_if_none);
+    // ── Residual positioning/overlap orphans (B5 unit 6b) ────────────────────
+    set(&mut o.offset, style.offset, fill_only_if_none);
+    set(&mut o.label_flush, style.label_flush, fill_only_if_none);
+    set(
+        &mut o.label_overlap,
+        style.label_overlap.as_deref().and_then(prepare::parse_label_overlap),
+        fill_only_if_none,
+    );
+    set(&mut o.label_angle, style.label_angle, fill_only_if_none);
+    // `label_format` is owned by the chart-level path only. The per-channel path
+    // threads it separately after this merge, so it must stay `None` here.
+    if fill_only_if_none && o.label_format.is_none() {
+        o.label_format = style.label_format.clone();
+    }
+    set(&mut o.tick_values, style.values.clone(), fill_only_if_none);
+    // Title overrides.
+    set(&mut o.title_font_size, style.title_font_size, fill_only_if_none);
+    set(&mut o.title_color, parse_color(&style.title_color), fill_only_if_none);
+    set(&mut o.title_padding, style.title_padding, fill_only_if_none);
+    set(&mut o.label_padding, style.label_padding, fill_only_if_none);
+    // ── Per-axis styling overrides (B5): consulted by build_axis/build_grid ──
+    set(&mut o.label_color, parse_color(&style.label_color), fill_only_if_none);
+    set(&mut o.label_font_size, style.label_font_size, fill_only_if_none);
+    set(&mut o.grid_color, parse_color(&style.grid_color), fill_only_if_none);
+    set(&mut o.grid_dash, style.grid_dash.clone(), fill_only_if_none);
+    set(&mut o.grid_width, style.grid_width, fill_only_if_none);
+    set(&mut o.domain_color, parse_color(&style.domain_color), fill_only_if_none);
+    set(&mut o.domain_width, style.domain_width, fill_only_if_none);
+    Ok(())
+}
+
 /// Apply an [`AxisStyleSpec`](chart_config::AxisStyleSpec) to one `AxisInput`,
 /// filling only fields the input has not already set (so a higher-precedence
 /// source — a per-channel spec, or an earlier config layer — always wins).
@@ -560,143 +816,27 @@ fn axis_channel(orient: crate::layout::AxisOrient) -> &'static str {
 /// `EncodingSpec.axis` path (B5 fix). Honored styling keys (grid color/dash/width,
 /// label color/font-size, domain color/width) flow into per-axis override fields
 /// on `AxisInput` that `build_axis`/`build_grid` consult with a theme fallback, so
-/// they render per-axis instead of mutating the shared theme.
+/// they render per-axis instead of mutating the shared theme. The actual field
+/// merge is the canonical [`axis_style_fill_from`] (chart-level discipline:
+/// `fill_only_if_none = true`).
 ///
-/// The positioning/draw-order orphan fields (`orient`, `translate`,
-/// `min_extent`/`max_extent`, `grid_opacity`, `title_orient`, `zindex`) are also
-/// threaded here at chart level (B5 unit 2) with the same fill-only-if-`None`
-/// precedence, so `configure_axis(orient=...)` works alongside `fm.Axis(...)`.
-/// An invalid `orient` (cross-dimension) or `title_orient` token fails loud via
-/// `RenderError::InvalidAxisOrient`. `tick_extra`/`tick_min_step` are NOT applied
-/// here — they need the scale and are handled in `prepare_and_layout`.
+/// Show toggles (`grid`/`domain`/`labels`/`ticks`) are deliberately NOT written
+/// from the chart-level path. The per-channel prepare path
+/// (`prepare_render_inputs`) is the sole owner of `AxisInput.show_*`, so a
+/// per-channel `Axis(grid=False)` wins over a conflicting chart-level
+/// `configure_axis(grid=True)`. The chart-level toggle still takes effect through
+/// its global theme/gate path: `configure_axis` maps `grid`→`theme.grid.grid` and
+/// `domain`→`theme.axis.axis_line` in `apply_axis_config_to_theme`, and
+/// `build_grid`/`build_axis` AND that global gate with the per-axis `show_*` gate.
+/// Writing `show_*` here would clobber the per-channel value and invert the
+/// precedence — which is why `axis_style_fill_from` (operating on
+/// `AxisStyleOverrides`, which has no `show_*` fields) structurally cannot.
 pub(crate) fn apply_axis_style_to_axis_input(
     axis: &mut crate::layout::AxisInput,
     style: &chart_config::AxisStyleSpec,
 ) -> Result<(), RenderError> {
     let channel = axis_channel(axis.orient);
-    let o = &mut axis.overrides;
-    // ── Positioning / draw-order orphans (B5 unit 2) ─────────────────────────
-    // `orient` is the override INPUT (validated against the dimension); it fills
-    // like every sibling — only when still `None`, so a per-channel
-    // `fm.Axis(orient=...)` always wins. The concrete `AxisInput.orient` is
-    // re-synced from this by `resolve_orient` after all override layers merge.
-    if o.orient.is_none() {
-        if let Some(ref s) = style.orient {
-            o.orient = Some(prepare::parse_axis_orient(s, channel)?);
-        }
-    }
-    if o.title_orient.is_none() {
-        if let Some(ref s) = style.title_orient {
-            o.title_orient = Some(prepare::parse_title_orient(s, channel)?);
-        }
-    }
-    if o.translate.is_none() {
-        o.translate = style.translate;
-    }
-    if o.min_extent.is_none() {
-        o.min_extent = style.min_extent;
-    }
-    if o.max_extent.is_none() {
-        o.max_extent = style.max_extent;
-    }
-    if o.grid_opacity.is_none() {
-        o.grid_opacity = style.grid_opacity;
-    }
-    if o.zindex.is_none() {
-        o.zindex = style.zindex;
-    }
-    if o.tick_extra.is_none() {
-        o.tick_extra = style.tick_extra;
-    }
-    if o.tick_min_step.is_none() {
-        o.tick_min_step = style.tick_min_step;
-    }
-    // ── Residual positioning/overlap orphans (B5 unit 6b) ────────────────────
-    if o.offset.is_none() {
-        o.offset = style.offset;
-    }
-    if o.label_flush.is_none() {
-        o.label_flush = style.label_flush;
-    }
-    if o.label_overlap.is_none() {
-        o.label_overlap = style
-            .label_overlap
-            .as_deref()
-            .and_then(prepare::parse_label_overlap);
-    }
-    // label_angle.
-    if o.label_angle.is_none() {
-        o.label_angle = style.label_angle;
-    }
-    // d3-format string for tick labels (per-channel `label_format`).
-    if o.label_format.is_none() {
-        o.label_format = style.label_format.clone();
-    }
-    // Explicit tick positions (`fm.Axis(values=...)`).
-    if o.tick_values.is_none() {
-        o.tick_values = style.values.clone();
-    }
-    // Show toggles (`grid`/`domain`/`labels`/`ticks`) are deliberately NOT written
-    // here. The per-channel prepare path (`prepare_render_inputs`) is the sole owner
-    // of `AxisInput.show_*`, so a per-channel `Axis(grid=False)` wins over a
-    // conflicting chart-level `configure_axis(grid=True)`. The chart-level toggle
-    // still takes effect through its global theme/gate path: `configure_axis` maps
-    // `grid`→`theme.grid.grid` and `domain`→`theme.axis.axis_line` in
-    // `apply_axis_config_to_theme`, and `build_grid`/`build_axis` AND that global
-    // gate with the per-axis `show_*` gate. Writing `show_*` here too would clobber
-    // the per-channel value and invert the precedence.
-    // Title overrides.
-    if o.title_font_size.is_none() {
-        o.title_font_size = style.title_font_size;
-    }
-    if o.title_color.is_none() {
-        if let Some(ref c) = style.title_color {
-            if let Ok(parsed) = color::from_hex_str(c) {
-                o.title_color = Some(parsed);
-            }
-        }
-    }
-    if o.title_padding.is_none() {
-        o.title_padding = style.title_padding;
-    }
-    if o.label_padding.is_none() {
-        o.label_padding = style.label_padding;
-    }
-    // ── Per-axis styling overrides (B5): consulted by build_axis/build_grid ──
-    if o.label_color.is_none() {
-        if let Some(ref c) = style.label_color {
-            if let Ok(parsed) = color::from_hex_str(c) {
-                o.label_color = Some(parsed);
-            }
-        }
-    }
-    if o.label_font_size.is_none() {
-        o.label_font_size = style.label_font_size;
-    }
-    if o.grid_color.is_none() {
-        if let Some(ref c) = style.grid_color {
-            if let Ok(parsed) = color::from_hex_str(c) {
-                o.grid_color = Some(parsed);
-            }
-        }
-    }
-    if o.grid_dash.is_none() {
-        o.grid_dash = style.grid_dash.clone();
-    }
-    if o.grid_width.is_none() {
-        o.grid_width = style.grid_width;
-    }
-    if o.domain_color.is_none() {
-        if let Some(ref c) = style.domain_color {
-            if let Ok(parsed) = color::from_hex_str(c) {
-                o.domain_color = Some(parsed);
-            }
-        }
-    }
-    if o.domain_width.is_none() {
-        o.domain_width = style.domain_width;
-    }
-    Ok(())
+    axis_style_fill_from(&mut axis.overrides, style, channel, true)
 }
 
 /// Re-format tick label strings using a d3-format string override.

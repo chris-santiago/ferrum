@@ -103,35 +103,20 @@ pub fn build_scene(
             })
             .collect::<Result<Vec<_>, RenderError>>()?;
 
-        // Encoding merge
-        let mut merged_encoding = spec.encoding.clone();
-        merged_encoding.overlay_from(&prep.layers[0].encoding);
-        let mut rendering_spec_for_panel = ChartSpec {
-            encoding: merged_encoding,
-            ..spec.clone()
-        };
-        // Reactive-rescale substitution (D6): turn `domainParam` references into
-        // concrete domains before scale resolution. No-op when `params` is empty.
-        resolve_param_domains(&mut rendering_spec_for_panel);
-
-        // Scale resolution
-        let (mut scales, scale_warnings) = scale_resolve::resolve_scales_with_outputs(
-            &rendering_spec_for_panel,
+        // Per-panel scale build (encoding merge + param-domain substitution +
+        // scale resolution + color-config re-apply) through the single
+        // `resolve_panel_scales` seam, so the prepare provisional pass and this
+        // per-panel pass cannot drift on what scales get built or on remembering
+        // to re-apply the color config.
+        let (rendering_spec_for_panel, scales) = resolve_panel_scales(
+            spec,
+            prep,
+            panel,
             &panel_batch,
-            &prep.transform_outputs,
-            (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
-            (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
             theme,
+            chart_config,
+            warnings,
         )?;
-        warnings.extend(scale_warnings);
-
-        // Apply chart_config color overrides (level 3) to the per-panel color scale.
-        // This must run after scale resolution because resolve_scales_with_outputs
-        // independently re-resolves the color scale for each panel, discarding any
-        // provisional_scales override that was applied in render_svg/render_scene_json.
-        if let Some(ref cfg) = chart_config.color {
-            super::apply_color_config_to_color_scale(&mut scales.color, cfg);
-        }
 
         tick_levels.push(build_tick_levels(&scales, panel_idx));
 
@@ -186,18 +171,26 @@ pub fn build_scene(
             // produce a similar label density to what the layout engine chose globally.
             let x_tick_count = prep.axes.x.tick_labels.len().max(1);
             let mut x_input = prep.axes.x.clone();
-            let new_x_labels = scales.x.tick_labels(x_tick_count);
-            x_input.tick_projection = build_independent_x_projection(&scales.x, x_tick_count);
-            // Re-apply the encoding-level label format to the fresh per-panel raw labels.
-            // The shared path (prepare.rs + mod.rs) already formatted the global tick_labels —
-            // those formatted strings were discarded when tick_labels was replaced with
-            // per-panel scale output above.  Calling apply_tick_format here mirrors what
-            // the shared path does, keeping both paths identical.
-            x_input.tick_labels = super::prepare::apply_tick_format(
-                new_x_labels,
-                x_fmt_spec.as_deref(),
-                x_fmt_type.as_deref(),
+            // Re-derive the per-panel labels + projection through the SAME
+            // `build_axis_tick_inputs` helper the global axis path uses, so the
+            // tick_labels → non-ordinal-y reverse → format → projection sequence
+            // lives in one place. `Immediate` mode applies the encoding-level label
+            // format to the fresh per-panel raw labels right away (the per-panel
+            // layout is built directly below, bypassing `apply_label_format_to_axis`).
+            // Independent panels keep `minor: Vec::new()` (no per-panel minor-tick
+            // rebuild), passed as the empty minor vec.
+            let (new_x_labels, x_projection, _threaded) = super::prepare::build_axis_tick_inputs(
+                &scales.x,
+                x_tick_count,
+                super::prepare::TickFormatMode::Immediate {
+                    format: x_fmt_spec.as_deref(),
+                    format_type: x_fmt_type.as_deref(),
+                },
+                false,
+                Vec::new(),
             );
+            x_input.tick_labels = new_x_labels;
+            x_input.tick_projection = x_projection;
             let x_label_fs = x_input
                 .overrides
                 .label_font_size
@@ -221,21 +214,23 @@ pub fn build_scene(
         let independent_y_layout: Option<AxisLayout> = if y_independent {
             let y_tick_count = prep.axes.y.tick_labels.len().max(1);
             let mut y_input = prep.axes.y.clone();
-            let mut new_y_labels = scales.y.tick_labels(y_tick_count);
-            // Non-ordinal y labels must be reversed so high values appear at
-            // the top of the axis (matching the inverted y pixel range).
-            if !matches!(scales.y, scale_resolve::ScaleKind::Ordinal(_)) {
-                new_y_labels.reverse();
-            }
-            // Re-apply the encoding-level label format to the fresh per-panel raw labels.
-            // Mirrors the shared path.  The labels are passed in their final order
-            // (already reversed above) so the format is applied once in the right order.
-            y_input.tick_labels = super::prepare::apply_tick_format(
-                new_y_labels,
-                y_fmt_spec.as_deref(),
-                y_fmt_type.as_deref(),
+            // Same `build_axis_tick_inputs` helper as the global/x path. `is_y =
+            // true` carries the non-ordinal-y label/fraction reversal (high values
+            // at the top of the inverted y pixel range) and the projection's
+            // reversed fractions, in lockstep — so the carrier stays index-aligned
+            // with the reversed labels. `Immediate` format mode; empty minor vec.
+            let (new_y_labels, y_projection, _threaded) = super::prepare::build_axis_tick_inputs(
+                &scales.y,
+                y_tick_count,
+                super::prepare::TickFormatMode::Immediate {
+                    format: y_fmt_spec.as_deref(),
+                    format_type: y_fmt_type.as_deref(),
+                },
+                true,
+                Vec::new(),
             );
-            y_input.tick_projection = build_independent_y_projection(&scales.y, y_tick_count);
+            y_input.tick_labels = new_y_labels;
+            y_input.tick_projection = y_projection;
             let y_label_fs = y_input
                 .overrides
                 .label_font_size
@@ -650,6 +645,70 @@ pub fn build_scene(
 ///
 /// No-op when `spec.params` is empty (the byte-stability gate): the early return
 /// keeps param-free specs on the exact pre-D6 code path.
+/// The single per-panel scale-build seam: merge the layer-0 encoding onto the
+/// chart encoding, substitute reactive `domainParam` references into concrete
+/// domains, resolve the panel's scales over its pixel range, and re-apply the
+/// chart-level color config to the resolved color scale.
+///
+/// This deliberately re-does work the prepare provisional pass already did once:
+/// `prep.provisional_scales` exists **for tick-label generation only** (its pixel
+/// ranges are not panel-specific), so the final per-panel scales — whose pixel
+/// ranges differ per panel — must be resolved fresh here. The provisional-vs-final
+/// duality is real and kept; what this seam removes is the silent coupling where
+/// the encoding-merge, param-domain substitution, and color-config re-apply were
+/// each hand-repeated next to the re-resolution (and the color-config re-apply was
+/// a latent drift point — it had to be remembered both here and on the provisional
+/// scales in `prepare_and_layout`).
+///
+/// Returns the merged-encoding `ChartSpec` (still needed by the caller for
+/// independent-axis label formatting and structural-node building) and the
+/// resolved scales. Scale warnings are appended to `warnings`. `panel_batch` is
+/// the caller's already-facet-filtered batch for this panel (the same one used to
+/// resolve layer batches), passed in to avoid re-running the facet filter.
+fn resolve_panel_scales(
+    spec: &ChartSpec,
+    prep: &PreparedInputs,
+    panel: &crate::layout::PanelLayout,
+    panel_batch: &RecordBatch,
+    theme: &ThemeInputs,
+    chart_config: &super::chart_config::ChartConfig,
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<(ChartSpec, scale_resolve::ResolvedScales), RenderError> {
+    // Encoding merge: layer-0 encoding overlays the chart-level encoding.
+    let mut merged_encoding = spec.encoding.clone();
+    merged_encoding.overlay_from(&prep.layers[0].encoding);
+    let mut rendering_spec_for_panel = ChartSpec {
+        encoding: merged_encoding,
+        ..spec.clone()
+    };
+
+    // Reactive-rescale substitution (D6): turn `domainParam` references into
+    // concrete domains before scale resolution. No-op when `params` is empty.
+    resolve_param_domains(&mut rendering_spec_for_panel);
+
+    // Scale resolution over this panel's pixel range.
+    let (mut scales, scale_warnings) = scale_resolve::resolve_scales_with_outputs(
+        &rendering_spec_for_panel,
+        panel_batch,
+        &prep.transform_outputs,
+        (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
+        (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
+        theme,
+    )?;
+    warnings.extend(scale_warnings);
+
+    // Apply chart_config color overrides (level 3) to the per-panel color scale.
+    // Must run after scale resolution because `resolve_scales_with_outputs`
+    // independently re-resolves the color scale for each panel, discarding the
+    // provisional override applied to `prep.provisional_scales` in
+    // `prepare_and_layout`.
+    if let Some(ref cfg) = chart_config.color {
+        super::apply_color_config_to_color_scale(&mut scales.color, cfg);
+    }
+
+    Ok((rendering_spec_for_panel, scales))
+}
+
 fn resolve_param_domains(spec: &mut ChartSpec) {
     if spec.params.is_empty() {
         return;
@@ -1507,66 +1566,11 @@ fn remap_coord(
     break_axis::broken_scale_map(data_val, br)
 }
 
-// ── Independent-axis projection helpers ──────────────────────────────────────
-//
-// These helpers rebuild `AxisInput.tick_projection` from a per-panel
-// `ScaleKind` so that tick positions are correct relative to the per-panel
-// scale domain (not the global one). The provisional `[0,1]`-range scale
-// used in `prepare.rs` is reproduced here by building a matching scale over
-// the `[0,1]` range and computing fractions from it — this mirrors the exact
-// logic in `prepare.rs::prepare_render_inputs`.
-
-/// Build a `TickProjection` for an x-axis from a per-panel resolved scale.
-///
-/// The scale's tick fractions are computed relative to the `[0, 1]` range so
-/// they are panel-range-agnostic; `layout_x_axis` maps them onto the actual
-/// panel pixel range. Returns `None` for ordinal (categorical) scales, keeping
-/// uniform-slot placement (same as the shared path).
-fn build_independent_x_projection(
-    scale: &scale_resolve::ScaleKind,
-    tick_count: usize,
-) -> Option<crate::layout::TickProjection> {
-    // Ordinal axes do not use scale-projected placement.
-    if matches!(scale, scale_resolve::ScaleKind::Ordinal(_)) {
-        return None;
-    }
-    // Tick fractions are computed over the scale's own domain, panel-range-
-    // agnostic; `layout_x_axis` maps them onto the actual panel pixel range.
-    let fractions = scale.tick_fractions(tick_count);
-    if fractions.is_empty() {
-        return None;
-    }
-    Some(crate::layout::TickProjection {
-        padding_frac: scale.padding_fraction(),
-        major: fractions,
-        minor: Vec::new(), // minor ticks are not rebuilt for independent axes
-    })
-}
-
-/// Build a `TickProjection` for a y-axis from a per-panel resolved scale.
-///
-/// Y fractions must be produced in REVERSED order (high domain values first)
-/// so they align with the reversed tick labels (`prepare.rs` reverses y labels
-/// for non-ordinal axes). Returns `None` for ordinal scales.
-fn build_independent_y_projection(
-    scale: &scale_resolve::ScaleKind,
-    tick_count: usize,
-) -> Option<crate::layout::TickProjection> {
-    if matches!(scale, scale_resolve::ScaleKind::Ordinal(_)) {
-        return None;
-    }
-    let mut fractions = scale.tick_fractions(tick_count);
-    if fractions.is_empty() {
-        return None;
-    }
-    // Reverse so the carrier is index-aligned with the reversed y tick labels.
-    fractions.reverse();
-    Some(crate::layout::TickProjection {
-        padding_frac: scale.padding_fraction(),
-        major: fractions,
-        minor: Vec::new(),
-    })
-}
+// The per-panel independent-axis `TickProjection` rebuild (formerly the
+// `build_independent_{x,y}_projection` helpers here) is now derived through the
+// shared `prepare::build_axis_tick_inputs`, which the global/shared axis path
+// also drives — so the tick-derivation sequence (labels → non-ordinal-y reverse
+// → format → fraction projection) lives in exactly one place.
 
 /// Validate that the encoding channels supplied to a mark are a supported
 /// combination for that mark type.  Called before `dispatch_mark_build` so that

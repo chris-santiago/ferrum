@@ -537,31 +537,6 @@ pub fn prepare_render_inputs(
     let x_tick_count = encoding_axis_tick_count(rendering_encoding.x.as_ref()).unwrap_or(10);
     let y_tick_count = encoding_axis_tick_count(rendering_encoding.y.as_ref()).unwrap_or(10);
 
-    let x_tick_labels = provisional_scales.x.tick_labels(x_tick_count);
-    // Continuous-axis scale projection (2026-05-30): per-tick domain fractions
-    // and the scale's padding fraction, so layout can place continuous ticks at
-    // the SAME pixels that data marks land on. `tick_fractions` projects exactly
-    // the same tick values as `tick_labels` (both via `ticks_internal(count)`), so
-    // the carrier stays index-aligned with the labels. Ordinal/discretizing
-    // scales return an empty vec → carrier is `None` → uniform-slot placement.
-    let x_tick_fractions = provisional_scales.x.tick_fractions(x_tick_count);
-    let x_scale_padding_frac = provisional_scales.x.padding_fraction();
-    // Y-axis tick labels arrive in domain order (low → high). `layout_y_axis`
-    // places the first label at the TOP of the panel, which is the correct
-    // top-down convention for ordinal y (heatmaps, confusion matrices) but
-    // INVERTS quantitative/temporal labels relative to the data placement
-    // (scale_resolve.rs inverts the pixel range for non-ordinal y so high
-    // data → top pixel). Reverse the tick labels here for non-ordinal y so
-    // the axis labels and data points share the same orientation. The projected
-    // fractions must be reversed in lockstep so `label[i]` aligns with
-    // `fraction[i]`.
-    let mut y_tick_labels = provisional_scales.y.tick_labels(y_tick_count);
-    let mut y_tick_fractions = provisional_scales.y.tick_fractions(y_tick_count);
-    let y_scale_padding_frac = provisional_scales.y.padding_fraction();
-    if !matches!(provisional_scales.y, crate::render::scale_resolve::ScaleKind::Ordinal(_)) {
-        y_tick_labels.reverse();
-        y_tick_fractions.reverse();
-    }
     // D7 + D12 (B5-typed): extract per-axis style fields from the typed
     // `encoding.axis` style spec. The show toggles default to `true` (and title
     // falls through to the field name) so SVG output is byte-identical when the
@@ -599,30 +574,6 @@ pub fn prepare_render_inputs(
     // `render/mod.rs` only when no per-encoding override exists.
     let (x_tick_format, x_tick_format_type) = resolve_axis_label_format(rendering_encoding.x.as_ref());
     let (y_tick_format, y_tick_format_type) = resolve_axis_label_format(rendering_encoding.y.as_ref());
-    // Apply the format. For temporal axes with an explicit strftime pattern, the
-    // raw epoch-ms tick values are formatted directly here (the pre-computed
-    // strings have already lost the timestamp), and no override is carried
-    // forward. For numeric axes the spec is threaded to `label_format_override`
-    // (D3 root-cause fix for `prepare.rs:538`) so `apply_label_format_to_axis`
-    // applies it centrally — re-parsing the numeric label strings is lossless.
-    let (x_tick_labels, x_label_format_override) = apply_axis_format_or_thread(
-        x_tick_labels,
-        x_tick_format,
-        x_tick_format_type.as_deref(),
-        &provisional_scales.x,
-        x_tick_count,
-        false,
-    );
-    let (y_tick_labels, y_label_format_override) = apply_axis_format_or_thread(
-        y_tick_labels,
-        y_tick_format,
-        y_tick_format_type.as_deref(),
-        &provisional_scales.y,
-        y_tick_count,
-        // Non-ordinal y labels were reversed above; the raw temporal values must
-        // be reversed in lockstep so index `i` still aligns.
-        !matches!(provisional_scales.y, crate::render::scale_resolve::ScaleKind::Ordinal(_)),
-    );
 
     // Grid item 18: minor tick fractions from the provisional scales, projected
     // through the same `[0,1]`-range scale that places majors. Carried into the
@@ -643,28 +594,35 @@ pub fn prepare_render_inputs(
         Vec::new()
     };
 
+    // Derive labels + scale-projected tick fractions + threaded label format for
+    // both axes through the single `build_axis_tick_inputs` helper that the
+    // independent-axis facet path (`scene_build`) also drives, so the two paths
+    // cannot drift on the tick_labels → non-ordinal-y reverse → format → fraction
+    // projection sequence. Global axes use `Thread` mode (numeric format is
+    // threaded onto the override for central application + chart-level deferral;
+    // temporal is formatted directly). `is_y` carries the non-ordinal-y reversal;
+    // the theme-gated minor fractions are passed in (not reversed).
+    let (x_tick_labels, x_tick_projection, x_label_format_override) = build_axis_tick_inputs(
+        &provisional_scales.x,
+        x_tick_count,
+        TickFormatMode::Thread { format: x_tick_format, format_type: x_tick_format_type.as_deref() },
+        false,
+        x_minor_fractions,
+    );
+    let (y_tick_labels, y_tick_projection, y_label_format_override) = build_axis_tick_inputs(
+        &provisional_scales.y,
+        y_tick_count,
+        TickFormatMode::Thread { format: y_tick_format, format_type: y_tick_format_type.as_deref() },
+        true,
+        y_minor_fractions,
+    );
+
     // B5: per-channel axis STYLING + positioning overrides (grid color/dash/
     // width, label color/font-size, domain color/width, title styling,
     // tick_values, padding, and the unit-2 orphans orient/translate/extents/
     // grid_opacity/title_orient/zindex/tick_min_step/tick_extra).
     let mut x_axis_style = encoding_axis_style_overrides(x_enc_axis.map(Box::as_ref), "x")?;
     let mut y_axis_style = encoding_axis_style_overrides(y_enc_axis.map(Box::as_ref), "y")?;
-
-    // Continuous-axis scale projection: an empty major-fraction vec means the
-    // axis is categorical/discretizing (ordinal) → carrier is `None`, so layout
-    // keeps the uniform-slot formula byte-identically. A non-empty vec means a
-    // continuous scale → carrier drives scale-projected placement, and groups the
-    // padding fraction + projected major/minor fractions that share the inset.
-    let x_tick_projection = (!x_tick_fractions.is_empty()).then(|| TickProjection {
-        padding_frac: x_scale_padding_frac,
-        major: x_tick_fractions,
-        minor: x_minor_fractions,
-    });
-    let y_tick_projection = (!y_tick_fractions.is_empty()).then(|| TickProjection {
-        padding_frac: y_scale_padding_frac,
-        major: y_tick_fractions,
-        minor: y_minor_fractions,
-    });
 
     // Per-channel `orient` selects the axis side; absent → the dimension default
     // (Bottom for x, Left for y). Validated above against the channel dimension.
@@ -983,61 +941,27 @@ pub(crate) fn parse_title_orient(
 }
 
 /// Parse a per-channel typed [`AxisStyleSpec`] into the bundled
-/// [`AxisStyleOverrides`] ready to drop into an `AxisInput` (B5). Color strings
-/// are pre-parsed to `Srgba<u8>`; an unparseable hex string yields `None` (theme
-/// fallback) rather than failing, matching the chart-level apply behavior.
+/// [`AxisStyleOverrides`] ready to drop into an `AxisInput` (B5). A fresh-build
+/// over a `Default` bundle via the canonical [`crate::render::axis_style_fill_from`]
+/// merge (`fill_only_if_none = false`), the same merge the chart-level
+/// `configure_axis` path uses (`fill_only_if_none = true`) — so the two cannot
+/// drift on the field set, color parsing, or orient/title_orient validation.
 ///
-/// `label_format` is left `None` here: prepare resolves it through the temporal/
-/// numeric format threading (`apply_axis_format_or_thread`) and seeds it onto the
-/// bundle at construction. `orient` is the validated override input; the concrete
-/// axis side is resolved into `AxisInput.orient` once all override layers merge.
+/// `label_format` is left `None` here (the fresh-build path never writes it):
+/// prepare resolves it through the temporal/numeric format threading
+/// (`apply_axis_format_or_thread`) and seeds it onto the bundle afterward. An
+/// unparseable color hex string yields `None` (theme fallback) rather than
+/// failing. `orient` is the validated override input; the concrete axis side is
+/// resolved into `AxisInput.orient` once all override layers merge.
 fn encoding_axis_style_overrides(
     axis: Option<&crate::render::chart_config::AxisStyleSpec>,
     channel: &'static str,
 ) -> Result<crate::layout::AxisStyleOverrides, RenderError> {
-    let Some(a) = axis else { return Ok(crate::layout::AxisStyleOverrides::default()) };
-    let parse = |c: &Option<String>| {
-        c.as_deref()
-            .and_then(|s| crate::render::color::from_hex_str(s).ok())
-    };
-    let orient = a
-        .orient
-        .as_deref()
-        .map(|s| parse_axis_orient(s, channel))
-        .transpose()?;
-    let title_orient = a
-        .title_orient
-        .as_deref()
-        .map(|s| parse_title_orient(s, channel))
-        .transpose()?;
-    Ok(crate::layout::AxisStyleOverrides {
-        tick_values: a.values.clone(),
-        label_angle: a.label_angle,
-        label_format: None,
-        title_font_size: a.title_font_size,
-        title_color: parse(&a.title_color),
-        title_padding: a.title_padding,
-        label_padding: a.label_padding,
-        label_color: parse(&a.label_color),
-        label_font_size: a.label_font_size,
-        grid_color: parse(&a.grid_color),
-        grid_dash: a.grid_dash.clone(),
-        grid_width: a.grid_width,
-        domain_color: parse(&a.domain_color),
-        domain_width: a.domain_width,
-        orient,
-        translate: a.translate,
-        min_extent: a.min_extent,
-        max_extent: a.max_extent,
-        grid_opacity: a.grid_opacity,
-        title_orient,
-        zindex: a.zindex,
-        tick_extra: a.tick_extra,
-        tick_min_step: a.tick_min_step,
-        offset: a.offset,
-        label_flush: a.label_flush,
-        label_overlap: a.label_overlap.as_deref().and_then(parse_label_overlap),
-    })
+    let mut overrides = crate::layout::AxisStyleOverrides::default();
+    if let Some(a) = axis {
+        crate::render::axis_style_fill_from(&mut overrides, a, channel, false)?;
+    }
+    Ok(overrides)
 }
 
 /// Apply the per-axis `tick_min_step` / `tick_extra` adjustments (B5 unit 2) to a
@@ -1208,6 +1132,91 @@ fn apply_axis_format_or_thread(
     }
     // Numeric / non-temporal: thread the spec to the override, apply later.
     (labels, Some(fmt))
+}
+
+/// How [`build_axis_tick_inputs`] applies the resolved tick-label format. The two
+/// modes are the two byte-distinct format disciplines the render spine already
+/// has — surfaced as one enum so the shared and independent axis paths run the
+/// same tick-derivation function while keeping their (intentionally different)
+/// format handling.
+pub(crate) enum TickFormatMode<'a> {
+    /// Shared/global axes: format temporal axes directly, but THREAD a numeric
+    /// format forward (returned as the second tuple element) so chart-level
+    /// `configure_axis` can still defer to the per-channel override via its
+    /// `is_none()` gate, with `apply_label_format_to_axis` applying it centrally
+    /// later. Mirrors [`apply_axis_format_or_thread`].
+    Thread { format: Option<String>, format_type: Option<&'a str> },
+    /// Independent per-panel axes: apply the format IMMEDIATELY via
+    /// [`apply_tick_format`] and thread nothing (the per-panel layout is built
+    /// directly in `scene_build`, bypassing `apply_label_format_to_axis`).
+    Immediate { format: Option<&'a str>, format_type: Option<&'a str> },
+}
+
+/// Derive one axis's tick labels and [`TickProjection`] from a resolved scale —
+/// the single source of truth for the sequence the shared (global) and
+/// independent (per-panel facet) axis paths both run: `tick_labels(count)`, the
+/// non-ordinal-y label/fraction reversal, format application, and the
+/// fraction-projection build.
+///
+/// Returns `(labels, projection, threaded_label_format)`. The threaded format is
+/// `Some` only under [`TickFormatMode::Thread`] for a numeric axis (the caller
+/// seeds it onto `AxisInput.overrides.label_format`); it is always `None` under
+/// [`TickFormatMode::Immediate`].
+///
+/// `minor` is supplied by the caller (already projected, NOT reversed) so this fn
+/// stays theme-agnostic: the shared path passes the `theme.grid.minor`-gated
+/// `minor_tick_fractions()`; the independent path passes `Vec::new()` (per-panel
+/// independent axes do not rebuild minor ticks — preserved from the pre-extraction
+/// behavior). An ordinal scale yields no projection (`None`), matching uniform-
+/// slot placement.
+pub(crate) fn build_axis_tick_inputs(
+    scale: &crate::render::scale_resolve::ScaleKind,
+    tick_count: usize,
+    mode: TickFormatMode<'_>,
+    is_y: bool,
+    minor: Vec<f64>,
+) -> (Vec<String>, Option<TickProjection>, Option<String>) {
+    use crate::render::scale_resolve::ScaleKind;
+    // Non-ordinal y axes display high domain values at the top, so labels and the
+    // projected fractions are reversed in lockstep (the pixel range is already
+    // inverted in scale_resolve). Ordinal y keeps domain order (top-down for
+    // heatmaps/confusion matrices).
+    let reverse = is_y && !matches!(scale, ScaleKind::Ordinal(_));
+
+    let mut labels = scale.tick_labels(tick_count);
+    let mut fractions = scale.tick_fractions(tick_count);
+    let padding_frac = scale.padding_fraction();
+    if reverse {
+        labels.reverse();
+        fractions.reverse();
+    }
+
+    let (labels, threaded) = match mode {
+        TickFormatMode::Thread { format, format_type } => apply_axis_format_or_thread(
+            labels,
+            format,
+            format_type,
+            scale,
+            tick_count,
+            // The temporal raw values must be reversed in lockstep with the
+            // already-reversed labels so index `i` still aligns.
+            reverse,
+        ),
+        TickFormatMode::Immediate { format, format_type } => {
+            (apply_tick_format(labels, format, format_type), None)
+        }
+    };
+
+    // A non-empty major-fraction vec means a continuous scale → scale-projected
+    // placement; an empty vec means ordinal/discretizing → no carrier (uniform
+    // slots), byte-identical to the pre-extraction `None`.
+    let projection = (!fractions.is_empty()).then(|| TickProjection {
+        padding_frac,
+        major: fractions,
+        minor,
+    });
+
+    (labels, projection, threaded)
 }
 
 /// D12: apply an encoding-level `format` string to pre-computed tick label strings.
@@ -3458,6 +3467,160 @@ mod tests {
             vec!["AS", "EU", "AF"],
             "base-color chart legend entries must not be affected by a conditional"
         );
+    }
+
+    // ── SPINE-03: build_axis_tick_inputs characterization ────────────────────
+    //
+    // These pin that the single `build_axis_tick_inputs` helper reproduces the
+    // OLD open-coded independent-axis sequence (formerly in scene_build.rs:
+    // tick_labels → non-ordinal-y reverse → apply_tick_format → projection with
+    // minor: Vec::new()) byte-for-byte. The oracle below is that exact old
+    // sequence, inlined here so any drift trips the test.
+
+    use crate::render::scale_resolve::ScaleKind;
+    use crate::scale::linear::LinearScale;
+    use crate::scale::ordinal::OrdinalScale;
+
+    fn linear_scale(lo: f64, hi: f64) -> ScaleKind {
+        ScaleKind::Linear(LinearScale::new_internal(
+            vec![lo, hi],
+            vec![0.0, 1.0],
+            false,
+            false,
+        ))
+    }
+
+    /// The old independent-X open-coded sequence (no reverse), used as an oracle.
+    fn old_independent_x(
+        scale: &ScaleKind,
+        count: usize,
+        fmt: Option<&str>,
+        fmt_type: Option<&str>,
+    ) -> (Vec<String>, Option<TickProjection>) {
+        let labels = apply_tick_format(scale.tick_labels(count), fmt, fmt_type);
+        let proj = if matches!(scale, ScaleKind::Ordinal(_)) {
+            None
+        } else {
+            let fractions = scale.tick_fractions(count);
+            (!fractions.is_empty()).then(|| TickProjection {
+                padding_frac: scale.padding_fraction(),
+                major: fractions,
+                minor: Vec::new(),
+            })
+        };
+        (labels, proj)
+    }
+
+    /// The old independent-Y open-coded sequence (non-ordinal reverse), as oracle.
+    fn old_independent_y(
+        scale: &ScaleKind,
+        count: usize,
+        fmt: Option<&str>,
+        fmt_type: Option<&str>,
+    ) -> (Vec<String>, Option<TickProjection>) {
+        let mut raw = scale.tick_labels(count);
+        if !matches!(scale, ScaleKind::Ordinal(_)) {
+            raw.reverse();
+        }
+        let labels = apply_tick_format(raw, fmt, fmt_type);
+        let proj = if matches!(scale, ScaleKind::Ordinal(_)) {
+            None
+        } else {
+            let mut fractions = scale.tick_fractions(count);
+            (!fractions.is_empty()).then(|| {
+                fractions.reverse();
+                TickProjection {
+                    padding_frac: scale.padding_fraction(),
+                    major: fractions,
+                    minor: Vec::new(),
+                }
+            })
+        };
+        (labels, proj)
+    }
+
+    /// X (no reverse), no format: build_axis_tick_inputs(Immediate) == oracle.
+    #[test]
+    fn build_axis_tick_inputs_x_matches_old_independent_no_format() {
+        let scale = linear_scale(0.0, 100.0);
+        let (labels, proj, threaded) = build_axis_tick_inputs(
+            &scale,
+            10,
+            TickFormatMode::Immediate { format: None, format_type: None },
+            false,
+            Vec::new(),
+        );
+        let (o_labels, o_proj) = old_independent_x(&scale, 10, None, None);
+        assert_eq!(labels, o_labels);
+        assert_eq!(proj, o_proj);
+        assert_eq!(threaded, None, "Immediate mode threads nothing");
+    }
+
+    /// X with a d3 numeric format applied immediately.
+    #[test]
+    fn build_axis_tick_inputs_x_matches_old_independent_with_format() {
+        let scale = linear_scale(0.0, 1.0);
+        let (labels, proj, _t) = build_axis_tick_inputs(
+            &scale,
+            5,
+            TickFormatMode::Immediate { format: Some(".0%"), format_type: None },
+            false,
+            Vec::new(),
+        );
+        let (o_labels, o_proj) = old_independent_x(&scale, 5, Some(".0%"), None);
+        assert_eq!(labels, o_labels);
+        assert_eq!(proj, o_proj);
+    }
+
+    /// Y (non-ordinal reverse) matches the old reversed-label / reversed-fraction
+    /// sequence in lockstep.
+    #[test]
+    fn build_axis_tick_inputs_y_matches_old_independent_reversed() {
+        let scale = linear_scale(-50.0, 50.0);
+        let (labels, proj, _t) = build_axis_tick_inputs(
+            &scale,
+            8,
+            TickFormatMode::Immediate { format: None, format_type: None },
+            true,
+            Vec::new(),
+        );
+        let (o_labels, o_proj) = old_independent_y(&scale, 8, None, None);
+        assert_eq!(labels, o_labels);
+        assert_eq!(proj, o_proj);
+        // Sanity: the y projection's fractions are descending (reversed).
+        let major = &proj.unwrap().major;
+        assert!(
+            major.windows(2).all(|w| w[0] >= w[1]),
+            "reversed y fractions must be non-increasing"
+        );
+    }
+
+    /// Ordinal scale: no projection on either path, no y-reverse of labels.
+    #[test]
+    fn build_axis_tick_inputs_ordinal_has_no_projection() {
+        let scale = ScaleKind::Ordinal(OrdinalScale::new_internal(
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![0.0, 30.0],
+            0.1,
+        ));
+        let (x_labels, x_proj, _t) = build_axis_tick_inputs(
+            &scale,
+            10,
+            TickFormatMode::Immediate { format: None, format_type: None },
+            false,
+            Vec::new(),
+        );
+        assert!(x_proj.is_none(), "ordinal scale yields no tick projection");
+        let (y_labels, y_proj, _t) = build_axis_tick_inputs(
+            &scale,
+            10,
+            TickFormatMode::Immediate { format: None, format_type: None },
+            true,
+            Vec::new(),
+        );
+        assert!(y_proj.is_none());
+        // Ordinal labels are NOT reversed for y (top-down convention preserved).
+        assert_eq!(x_labels, y_labels);
     }
 }
 
