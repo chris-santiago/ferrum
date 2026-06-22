@@ -574,7 +574,7 @@ class _CompositeBase(_ChartLike):
     and surfaced for the HTML document title via :meth:`_figure_title_text`.
 
     The symmetric containers also use this class's ``__init__`` to hold an
-    ordered ``charts`` list and a pixel ``spacing`` between cells, plus
+    ordered ``charts`` list and a pixel ``spacing`` between panels, plus
     ``__or__`` / ``__and__`` to chain further compositions.  The asymmetric
     layouts keep their own slot-based ``__init__`` and ``charts`` property;
     they call :meth:`_init_figure_chrome` to wire the chrome fields.
@@ -874,12 +874,12 @@ class VConcatChart(_CompositeBase):
 class JointChart(_CompositeBase):
     """Joint distribution view: center chart plus optional top and right marginals.
 
-    Lays out a 2 × 2 grid: center chart occupies the bottom-left cell,
+    Lays out a 2 × 2 grid: center chart occupies the bottom-left panel,
     *top* marginal goes top-left, *right* marginal goes bottom-right, and the
     top-right corner is empty.  The x-axis is shared between the center and
     top charts; the y-axis is shared between the center and right charts.
 
-    The cell size ratio between the center and each marginal is controlled by
+    The panel size ratio between the center and each marginal is controlled by
     ``ratio``.  A ratio of 5 gives the center 5/(5+1) of each dimension and
     each marginal 1/(5+1).
 
@@ -899,7 +899,7 @@ class JointChart(_CompositeBase):
     ratio : int, default 5
         Size ratio of the center panel to each marginal panel.  Must be > 0.
     spacing : float, default 10.0
-        Pixel gap between adjacent cells.
+        Pixel gap between adjacent panels.
 
     Raises
     ------
@@ -1006,20 +1006,20 @@ class JointChart(_CompositeBase):
         if not has_top and not has_right:
             return _render_single_with_figure_chrome(center, self._figure_chrome_kwargs())
 
-        # Build grid cells matching the SVG path layout.
-        cells: list[tuple[int, int, object]] = []
+        # Build grid panels matching the SVG path layout.
+        panels: list[tuple[int, int, object]] = []
         if has_top and has_right:
             # Full 2x2 grid: top at (0,0), center at (1,0), right at (1,1).
-            cells = [(0, 0, top), (1, 0, center), (1, 1, right)]
+            panels = [(0, 0, top), (1, 0, center), (1, 1, right)]
         elif has_top:
             # Vertical stack: top at (0,0), center at (1,0).
-            cells = [(0, 0, top), (1, 0, center)]
+            panels = [(0, 0, top), (1, 0, center)]
         else:
             # Horizontal stack: center at (0,0), right at (0,1).
-            cells = [(0, 0, center), (0, 1, right)]
+            panels = [(0, 0, center), (0, 1, right)]
 
         return _merge_child_scenes_nonuniform_grid(
-            cells,
+            panels,
             self.spacing,
             figure_chrome=self._figure_chrome_kwargs(),
         )
@@ -1035,10 +1035,10 @@ class JointChart(_CompositeBase):
         from ferrum._core import compose_svg_grid
 
         # F20: the Rust grid compositor now honors row_ratios/col_ratios via
-        # viewBox-scaled per-cell wrappers, so marginals can be passed at
+        # viewBox-scaled per-panel wrappers, so marginals can be passed at
         # their native size and the compositor handles proportional sizing.
         # The marginals still suppress their own axis decoration — the
-        # data axis is redundant against the centre cell and the marginal-
+        # data axis is redundant against the centre panel and the marginal-
         # only axis (count/density on a thin strip) is illegible at marginal
         # size.
         center = self._inject_parent_config(self.center)
@@ -1048,12 +1048,12 @@ class JointChart(_CompositeBase):
         right_chart = right.axis(show=False) if right is not None else None
         top_svg = top_chart.to_svg() if top_chart is not None else None
         right_svg = right_chart.to_svg() if right_chart is not None else None
-        cells = [top_svg, None, center.to_svg(), right_svg]
+        panels = [top_svg, None, center.to_svg(), right_svg]
         marginal_share = 1.0 / (self.ratio + 1)
         center_share = self.ratio / (self.ratio + 1)
         chrome = chrome_kwargs(merge_configure_layers(getattr(self, "_configure_layers", None)))
         return compose_svg_grid(
-            cells,
+            panels,
             rows=2,
             cols=2,
             row_ratios=[marginal_share, center_share],
@@ -1078,11 +1078,11 @@ class RepeatChart(_CompositeBase):
 
     Use ``Repeat.column``, ``Repeat.row``, or ``Repeat.layer`` typed sentinels
     in the template's ``.encode(...)`` call to mark which encoding channel
-    receives the per-cell field substitution.  ``RepeatChart.expand()``
+    receives the per-panel field substitution.  ``RepeatChart.expand()``
     materializes the grid into fully-resolved ``(row_field, col_field, Chart)``
     tuples.
 
-    ``diagonal=`` provides an alternate template for cells where
+    ``diagonal=`` provides an alternate template for panels where
     ``row_field == col_field`` (symmetric n × n repeat).  ``corner=True``
     filters the expanded grid to the lower triangle including the diagonal.
 
@@ -1093,7 +1093,7 @@ class RepeatChart(_CompositeBase):
     ----------
     template : Chart
         Template chart whose ``Repeat.*`` placeholders are substituted per
-        cell.
+        panel.
     row : list of str, optional
         Field names assigned to the row axis.
     column : list of str, optional
@@ -1104,20 +1104,20 @@ class RepeatChart(_CompositeBase):
         Alternate template used when ``row_field == col_field``.  Requires
         both *row* and *column* to be set.
     corner : bool, default False
-        When ``True``, only the lower-triangle cells (``ri >= ci``) are
+        When ``True``, only the lower-triangle panels (``ri >= ci``) are
         rendered, giving a half-matrix layout.
     spacing : float, default 10.0
-        Pixel gap between adjacent cells.
+        Pixel gap between adjacent panels.
     columns : int, optional
         Maximum number of columns for a wrapped 1-D repeat layout (no-op
         for 2-D row/column repeat).
     resolve : dict, optional
         Per-channel scale-sharing overrides — e.g.
         ``resolve={"x": "shared", "y": "independent"}``.  ``"shared"``
-        computes the union domain across all cells (and across every
-        layer of layered cells) and injects an explicit scale on every
+        computes the union domain across all panels (and across every
+        layer of layered panels) and injects an explicit scale on every
         participating chart so the axis ticks match.  ``"independent"``
-        (the default for unlisted channels) keeps per-cell domains.
+        (the default for unlisted channels) keeps per-panel domains.
 
     Raises
     ------
@@ -1199,23 +1199,23 @@ class RepeatChart(_CompositeBase):
         }
 
     def expand(self) -> list:
-        """Materialize the template into fully-resolved chart cells.
+        """Materialize the template into fully-resolved chart panels.
 
-        Cell iteration shape:
+        Panel iteration shape:
 
         - 2-D grid (both *row* and *column* set): ``len(row) × len(column)``
-          cells, optionally filtered by *corner*; *diagonal* substitutes
-          the template on ``row_field == col_field`` cells.
+          panels, optionally filtered by *corner*; *diagonal* substitutes
+          the template on ``row_field == col_field`` panels.
         - 1-D wrap (only one of *row* or *column* set): the populated
           field list, paired with ``None`` on the missing axis.  Geometry
           is applied by :meth:`to_svg` driven by ``columns``.
         - Layer-only (``layer=`` set, *row* and *column* both ``None``):
-          a single cell containing all layers.
+          a single panel containing all layers.
 
-        When ``layer=`` is set, each cell becomes a layered ``Chart``
+        When ``layer=`` is set, each panel becomes a layered ``Chart``
         with one layer per element in ``self.layer`` (substituted into
-        every ``Repeat.layer`` placeholder).  Diagonal cells skip
-        layering — the diagonal template already defines that cell.
+        every ``Repeat.layer`` placeholder).  Diagonal panels skip
+        layering — the diagonal template already defines that panel.
 
         Returns
         -------
@@ -1231,30 +1231,30 @@ class RepeatChart(_CompositeBase):
             repeat), or if the template references a ``Repeat.*``
             placeholder for an axis that was not populated.
         """
-        cells = [
-            (row_field, col_field, self._make_cell(row_field, col_field))
-            for row_field, col_field in self._cell_coordinates()
+        panels = [
+            (row_field, col_field, self._make_panel(row_field, col_field))
+            for row_field, col_field in self._panel_coordinates()
         ]
-        return self._apply_resolve(cells)
+        return self._apply_resolve(panels)
 
-    def _apply_resolve(self, cells: list) -> list:
-        """Inject shared scales onto every cell per ``self.resolve``.
+    def _apply_resolve(self, panels: list) -> list:
+        """Inject shared scales onto every panel per ``self.resolve``.
 
-        For each channel marked ``"shared"``, walks every cell (and every
-        layer of layered cells), computes the union domain, and re-emits
-        each cell with an explicit ``scale=`` dict on that channel.
-        ``"independent"`` channels are no-ops.  When no cell binds a
+        For each channel marked ``"shared"``, walks every panel (and every
+        layer of layered panels), computes the union domain, and re-emits
+        each panel with an explicit ``scale=`` dict on that channel.
+        ``"independent"`` channels are no-ops.  When no panel binds a
         shared channel the channel is silently skipped — sharing a
         channel that nothing uses is harmless.
         """
         if not self.resolve:
-            return cells
+            return panels
         from ferrum._scale_share import compute_union_domain, inject_scale
 
         shared = [ch for ch, mode in self.resolve.items() if mode == "shared"]
         if not shared:
-            return cells
-        result = list(cells)
+            return panels
+        result = list(panels)
         for channel in shared:
             charts = [chart for _, _, chart in result]
             scale_dict = compute_union_domain(charts, channel)
@@ -1266,8 +1266,8 @@ class RepeatChart(_CompositeBase):
             ]
         return result
 
-    def _cell_coordinates(self) -> list:
-        """Compute ``(row_field, col_field)`` pairs for every cell.
+    def _panel_coordinates(self) -> list:
+        """Compute ``(row_field, col_field)`` pairs for every panel.
 
         Either entry is ``None`` when the corresponding axis is unset
         (1-D wrap) or both are ``None`` (layer-only).
@@ -1276,7 +1276,7 @@ class RepeatChart(_CompositeBase):
             if self.diagonal is not None and self.row != self.column:
                 raise ValueError(
                     "RepeatChart: diagonal= requires row == column "
-                    "(diagonal cells only exist on a symmetric grid); "
+                    "(diagonal panels only exist on a symmetric grid); "
                     f"got row={self.row!r}, column={self.column!r}"
                 )
             coords = []
@@ -1293,8 +1293,8 @@ class RepeatChart(_CompositeBase):
         # layer-only: __init__ already ruled out the all-None axes case.
         return [(None, None)]
 
-    def _make_cell(self, row_field: Optional[str], col_field: Optional[str]):
-        """Build the chart for one cell, layering across ``self.layer`` if set."""
+    def _make_panel(self, row_field: Optional[str], col_field: Optional[str]):
+        """Build the chart for one panel, layering across ``self.layer`` if set."""
         use_diagonal = (
             self.diagonal is not None
             and self.row is not None
@@ -1302,7 +1302,7 @@ class RepeatChart(_CompositeBase):
             and row_field == col_field
         )
         if use_diagonal:
-            # Diagonal cells are intentional overrides; skip layering.
+            # Diagonal panels are intentional overrides; skip layering.
             return self._resolve_template(self.diagonal, row_field, col_field)
         if self.layer is not None:
             layers = [
@@ -1388,12 +1388,12 @@ class RepeatChart(_CompositeBase):
         return new
 
     def share_scale(self, **channels):
-        """Share scales across this repeat's cells by merging into ``resolve=``.
+        """Share scales across this repeat's panels by merging into ``resolve=``.
 
         Equivalent to constructing the chart with ``resolve={...}`` set
         — both paths run through :meth:`_apply_resolve` at ``expand()``
-        time, so the union-domain computation sees every cell (including
-        each layer of layered cells) exactly once.  Passing the same
+        time, so the union-domain computation sees every panel (including
+        each layer of layered panels) exactly once.  Passing the same
         channel twice with different modes takes the call's value.
 
         Parameters
@@ -1425,23 +1425,23 @@ class RepeatChart(_CompositeBase):
         return result
 
     def _render_interactive(self) -> tuple[str, bytes]:
-        """Render to (scene_json, packed_data) by expanding cells and merging scenes."""
-        cells = [(r, c, self._inject_parent_config(chart)) for r, c, chart in self.expand()]
+        """Render to (scene_json, packed_data) by expanding panels and merging scenes."""
+        panels = [(r, c, self._inject_parent_config(chart)) for r, c, chart in self.expand()]
 
         if self.corner and self.row is not None and self.column is not None:
-            # Corner mode: cells must be placed at their true (row, col) grid
+            # Corner mode: panels must be placed at their true (row, col) grid
             # coordinates with gaps for the upper triangle.  Map field names
             # back to integer indices for the sparse grid merge.
             row_index = {v: i for i, v in enumerate(self.row)}
             col_index = {v: i for i, v in enumerate(self.column)}
-            indexed = [(row_index[r], col_index[c], chart) for r, c, chart in cells]
+            indexed = [(row_index[r], col_index[c], chart) for r, c, chart in panels]
             return _merge_child_scenes_sparse_grid(
                 indexed,
                 self.spacing,
                 figure_chrome=self._figure_chrome_kwargs(),
             )
 
-        expanded_charts = [chart for _, _, chart in cells]
+        expanded_charts = [chart for _, _, chart in panels]
         if self.row is not None and self.column is not None:
             n_cols = len(self.column)
         else:
@@ -1459,7 +1459,7 @@ class RepeatChart(_CompositeBase):
         Returns
         -------
         str
-            SVG markup containing all materialized cell charts in a grid.
+            SVG markup containing all materialized panel charts in a grid.
 
         Notes
         -----
@@ -1472,20 +1472,20 @@ class RepeatChart(_CompositeBase):
         """
         from ferrum._core import compose_svg_grid
 
-        cells = [(r, c, self._inject_parent_config(chart)) for r, c, chart in self.expand()]
+        panels = [(r, c, self._inject_parent_config(chart)) for r, c, chart in self.expand()]
         if self.row is not None and self.column is not None:
             n_rows = len(self.row)
             n_cols = len(self.column)
             grid: list = [None] * (n_rows * n_cols)
-            for row_field, col_field, chart in cells:
+            for row_field, col_field, chart in panels:
                 ri = self.row.index(row_field)
                 ci = self.column.index(col_field)
                 grid[ri * n_cols + ci] = chart.to_svg()
         else:
-            n_cells = len(cells)
-            n_cols, n_rows = self._wrap_dimensions(n_cells)
+            n_panels = len(panels)
+            n_cols, n_rows = self._wrap_dimensions(n_panels)
             grid = [None] * (n_rows * n_cols)
-            for idx, (_, _, chart) in enumerate(cells):
+            for idx, (_, _, chart) in enumerate(panels):
                 grid[idx] = chart.to_svg()
         chrome = chrome_kwargs(merge_configure_layers(getattr(self, "_configure_layers", None)))
         return compose_svg_grid(
@@ -1501,20 +1501,20 @@ class RepeatChart(_CompositeBase):
             **chrome,
         )
 
-    def _wrap_dimensions(self, n_cells: int) -> tuple:
+    def _wrap_dimensions(self, n_panels: int) -> tuple:
         """Compute ``(n_cols, n_rows)`` for a 1-D wrapped layout.
 
         ``columns=`` is honored when set; otherwise column-only repeats
         produce a single row and row-only repeats produce a single column.
         """
         if self.columns is not None:
-            n_cols = min(self.columns, n_cells)
+            n_cols = min(self.columns, n_panels)
         elif self.column is not None:
-            n_cols = n_cells  # horizontal default: one row
+            n_cols = n_panels  # horizontal default: one row
         else:
             n_cols = 1  # vertical default: one column
         n_cols = max(1, n_cols)
-        n_rows = (n_cells + n_cols - 1) // n_cols
+        n_rows = (n_panels + n_cols - 1) // n_cols
         return n_cols, n_rows
 
     def __repr__(self) -> str:
@@ -1528,12 +1528,12 @@ class RepeatChart(_CompositeBase):
 class ClusterMapChart(_CompositeBase):
     """Clustered heatmap with optional row and column dendrograms.
 
-    Lays out a 2 × 2 grid: the heatmap occupies the bottom-right cell,
+    Lays out a 2 × 2 grid: the heatmap occupies the bottom-right panel,
     the column dendrogram goes top-right, the row dendrogram (rotated 90°)
     goes bottom-left, and the top-left corner is empty.  Dendrogram value
     axes are hidden; categorical axes align with the heatmap row/column labels.
 
-    Cell size is split by ``dendrogram_ratio``: dendrograms receive that
+    Panel size is split by ``dendrogram_ratio``: dendrograms receive that
     fraction of the total width/height, the heatmap receives the remainder.
 
     Most users obtain a ``ClusterMapChart`` from `ferrum.clustermap` rather
@@ -1552,7 +1552,7 @@ class ClusterMapChart(_CompositeBase):
         Fraction of the total width/height allocated to each dendrogram panel.
         Must be in the open interval (0, 1).
     spacing : float, default 10.0
-        Pixel gap between adjacent cells.
+        Pixel gap between adjacent panels.
 
     Raises
     ------
@@ -1669,24 +1669,24 @@ class ClusterMapChart(_CompositeBase):
         if not has_row and not has_col:
             return _render_single_with_figure_chrome(heatmap, self._figure_chrome_kwargs())
 
-        # Build grid cells matching the SVG path layout.
-        cells: list[tuple[int, int, object]] = []
+        # Build grid panels matching the SVG path layout.
+        panels: list[tuple[int, int, object]] = []
         if has_row and has_col:
             # Full 2x2: col_dendro at (0,1), row_dendro at (1,0), heatmap at (1,1).
-            cells = [
+            panels = [
                 (0, 1, col_dendro),
                 (1, 0, row_dendro),
                 (1, 1, heatmap),
             ]
         elif has_row:
             # Horizontal: row_dendro at (0,0), heatmap at (0,1).
-            cells = [(0, 0, row_dendro), (0, 1, heatmap)]
+            panels = [(0, 0, row_dendro), (0, 1, heatmap)]
         else:
             # Vertical: col_dendro at (0,0), heatmap at (1,0).
-            cells = [(0, 0, col_dendro), (1, 0, heatmap)]
+            panels = [(0, 0, col_dendro), (1, 0, heatmap)]
 
         return _merge_child_scenes_nonuniform_grid(
-            cells,
+            panels,
             self.spacing,
             figure_chrome=self._figure_chrome_kwargs(),
         )
@@ -1730,10 +1730,10 @@ class ClusterMapChart(_CompositeBase):
         )
         col_svg = col_dendro.to_svg() if col_dendro is not None else None
         row_svg = row_dendro.to_svg() if row_dendro is not None else None
-        cells = [None, col_svg, row_svg, heatmap.to_svg()]
+        panels = [None, col_svg, row_svg, heatmap.to_svg()]
         chrome = chrome_kwargs(merge_configure_layers(getattr(self, "_configure_layers", None)))
         return compose_svg_grid(
-            cells,
+            panels,
             rows=2,
             cols=2,
             row_ratios=[d, h],
@@ -1945,7 +1945,7 @@ class ConcatChart(_CompositeBase):
         Maximum number of columns before wrapping.  Defaults to
         ``len(charts)`` (single row, no wrapping).
     spacing : float, default 10.0
-        Pixel gap between adjacent cells.
+        Pixel gap between adjacent panels.
     resolve : dict, optional
         Per-channel scale-sharing overrides — e.g.
         ``resolve={"x": "shared", "y": "shared"}``.
@@ -2008,10 +2008,10 @@ class ConcatChart(_CompositeBase):
         """
         from ferrum._core import compose_svg_grid
 
-        n_cells = len(self.charts)
-        n_cols = self._columns if self._columns is not None else n_cells
-        n_cols = min(n_cols, n_cells)
-        n_rows = (n_cells + n_cols - 1) // n_cols
+        n_panels = len(self.charts)
+        n_cols = self._columns if self._columns is not None else n_panels
+        n_cols = min(n_cols, n_panels)
+        n_rows = (n_panels + n_cols - 1) // n_cols
 
         # Apply resolve (shared scales) and composition-level config before rendering
         render_charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
@@ -2089,7 +2089,7 @@ def _assemble_placed_children(
     Builds a fresh :func:`_empty_scene`, sets *width*/*height*, runs
     :func:`_merge_one_child` for each placement in order, injects figure chrome
     (only when *figure_chrome* is not ``None``, after the merge loop), then
-    merges packed bytes with ``y_offset = header_h``.  Returns
+    merges packed bytes with ``y_offset = chrome_top_h``.  Returns
     ``(scene_json, packed)``.
 
     Only ever called on the non-empty path; each variant keeps its own
@@ -2102,15 +2102,17 @@ def _assemble_placed_children(
     for pc in placed:
         _merge_one_child(merged, pc.scene, pc.dx, pc.dy, pc.panel_id_offset)
 
-    header_h = 0.0
+    # chrome_top_h = title+subtitle band height; chrome_bottom_h = caption band height;
+    # together they are the figure chrome.
+    chrome_top_h = 0.0
     if figure_chrome is not None:
-        header_h = _inject_figure_chrome(merged, **figure_chrome)
+        chrome_top_h = _inject_figure_chrome(merged, **figure_chrome)
 
     merged_packed = _merge_packed_data(
         [pc.packed for pc in placed],
         [pc.panel_id_offset for pc in placed],
         [(pc.dx, pc.dy) for pc in placed],
-        y_offset=header_h,
+        y_offset=chrome_top_h,
     )
     return _json.dumps(merged), merged_packed
 
@@ -2260,24 +2262,24 @@ def _merge_child_scenes_grid(
 
 
 def _merge_child_scenes_sparse_grid(
-    cells: list[tuple[int, int, object]],
+    panels: list[tuple[int, int, object]],
     spacing: float,
     *,
     figure_chrome: Optional["_FigureChrome"] = None,
 ) -> tuple[str, bytes]:
     """Render child charts in a sparse grid layout (for corner-mode repeat).
 
-    Each cell carries explicit ``(row, col)`` grid coordinates.  Cells are
-    positioned at ``(col * cell_w + col * spacing, row * cell_h + row * spacing)``
-    using uniform cell dimensions (the max width/height across all children).
-    Grid positions without a cell (upper triangle in corner mode) are left empty.
+    Each panel carries explicit ``(row, col)`` grid coordinates.  Panels are
+    positioned at ``(col * panel_w + col * spacing, row * panel_h + row * spacing)``
+    using uniform panel dimensions (the max width/height across all children).
+    Grid positions without a panel (upper triangle in corner mode) are left empty.
 
     Parameters
     ----------
-    cells : list of (row, col, chart)
+    panels : list of (row, col, chart)
         Each element is a ``(row_index, col_index, chart)`` triple.
     spacing : float
-        Pixel gap between adjacent cells.
+        Pixel gap between adjacent panels.
     figure_chrome : dict, optional
         Figure-level chrome band to inject (see :func:`_inject_figure_chrome`).
 
@@ -2286,20 +2288,20 @@ def _merge_child_scenes_sparse_grid(
     tuple[str, bytes]
         ``(merged_scene_json, merged_packed_data)``
     """
-    if not cells:
+    if not panels:
         return _EMPTY_SCENE_JSON, b""
 
     # Render all children up front, preserving their (row, col) coordinates.
-    row_cols = [(r, c) for r, c, _ in cells]
-    charts = [chart for _, _, chart in cells]
+    row_cols = [(r, c) for r, c, _ in panels]
+    charts = [chart for _, _, chart in panels]
     scenes_packed = _render_charts(charts)
     rendered: list[tuple[int, int, dict, bytes]] = [
         (r, c, scene, packed) for (r, c), (scene, packed) in zip(row_cols, scenes_packed)
     ]
 
-    # Uniform cell dimensions (max across all children).
-    cell_w = max(s.get("width", 0) for _, _, s, _ in rendered)
-    cell_h = max(s.get("height", 0) for _, _, s, _ in rendered)
+    # Uniform panel dimensions (max across all children).
+    panel_w = max(s.get("width", 0) for _, _, s, _ in rendered)
+    panel_h = max(s.get("height", 0) for _, _, s, _ in rendered)
 
     # Grid extents.
     max_row = max(r for r, _, _, _ in rendered)
@@ -2307,31 +2309,31 @@ def _merge_child_scenes_sparse_grid(
     n_rows = max_row + 1
     n_cols = max_col + 1
 
-    # Place each cell at its (row, col) position.
+    # Place each panel at its (row, col) position.
     panel_id_offset = 0
     placed: list[_PlacedChild] = []
 
     for row_idx, col_idx, scene, packed in rendered:
-        dx = col_idx * (cell_w + spacing)
-        dy = row_idx * (cell_h + spacing)
+        dx = col_idx * (panel_w + spacing)
+        dy = row_idx * (panel_h + spacing)
         placed.append(_PlacedChild(scene, packed, dx, dy, panel_id_offset))
         panel_id_offset += len(scene.get("panels", []))
 
-    width = n_cols * cell_w + (n_cols - 1) * spacing
-    height = n_rows * cell_h + (n_rows - 1) * spacing
+    width = n_cols * panel_w + (n_cols - 1) * spacing
+    height = n_rows * panel_h + (n_rows - 1) * spacing
 
     return _assemble_placed_children(placed, width, height, figure_chrome)
 
 
 def _merge_child_scenes_nonuniform_grid(
-    cells: list[tuple[int, int, object]],
+    panels: list[tuple[int, int, object]],
     spacing: float,
     *,
     figure_chrome: Optional["_FigureChrome"] = None,
 ) -> tuple[str, bytes]:
     """Render child charts in a sparse grid with per-row/per-column sizing.
 
-    Unlike ``_merge_child_scenes_sparse_grid`` which uses uniform cell
+    Unlike ``_merge_child_scenes_sparse_grid`` which uses uniform panel
     dimensions, this variant computes the maximum width per column and
     maximum height per row, so that differently-sized children (e.g.
     marginal plots next to a center plot) occupy only as much space as
@@ -2339,10 +2341,10 @@ def _merge_child_scenes_nonuniform_grid(
 
     Parameters
     ----------
-    cells : list of (row, col, chart)
+    panels : list of (row, col, chart)
         Each element is a ``(row_index, col_index, chart)`` triple.
     spacing : float
-        Pixel gap between adjacent cells.
+        Pixel gap between adjacent panels.
     figure_chrome : dict, optional
         Figure-level chrome band to inject (see :func:`_inject_figure_chrome`).
 
@@ -2351,12 +2353,12 @@ def _merge_child_scenes_nonuniform_grid(
     tuple[str, bytes]
         ``(merged_scene_json, merged_packed_data)``
     """
-    if not cells:
+    if not panels:
         return _EMPTY_SCENE_JSON, b""
 
     # Render all children up front, preserving their (row, col) coordinates.
-    row_cols = [(r, c) for r, c, _ in cells]
-    charts = [chart for _, _, chart in cells]
+    row_cols = [(r, c) for r, c, _ in panels]
+    charts = [chart for _, _, chart in panels]
     scenes_packed = _render_charts(charts)
     rendered: list[tuple[int, int, dict, bytes]] = [
         (r, c, scene, packed) for (r, c), (scene, packed) in zip(row_cols, scenes_packed)
@@ -2388,7 +2390,7 @@ def _merge_child_scenes_nonuniform_grid(
         x += col_widths[c] + (spacing if i < len(sorted_cols) - 1 else 0)
     total_width = x
 
-    # Place each cell at its computed position.
+    # Place each panel at its computed position.
     panel_id_offset = 0
     placed: list[_PlacedChild] = []
 
@@ -2490,8 +2492,8 @@ def _inject_figure_chrome(
 
     The ``width`` / ``height`` passed to ``figure_title_nodes`` are the merged
     panels' pre-chrome bounding box (``merged["width"]`` / ``merged["height"]``
-    as set by the caller before this runs).  The title/subtitle header band is
-    positioned identically to SVG for all composites.  The caption (footer)
+    as set by the caller before this runs).  The title/subtitle chrome-top band is
+    positioned identically to SVG for all composites.  The caption (chrome-bottom)
     absolute y matches SVG for the concat family (HConcat / VConcat / Concat /
     Repeat), where the interactive body height equals the SVG body height.  For
     JointChart and ClusterMapChart the interactive body is native panel size
@@ -2513,12 +2515,12 @@ def _inject_figure_chrome(
     Returns
     -------
     float
-        The header band height (``header_h``) applied to shift every panel's
-        scene nodes down.  Returned so the caller can apply the **same**
-        downward shift to the panels' packed GPU-instance bytes (which live in
-        a separate binary sidecar, not in *merged*), keeping packed marks
-        aligned with the shifted plot_area / axes.  ``0.0`` when no chrome text
-        is present or the band has no header (caption-only), in which case no
+        The chrome-top band height (``chrome_top_h``, title+subtitle) applied to
+        shift every panel's scene nodes down.  Returned so the caller can apply
+        the **same** downward shift to the panels' packed GPU-instance bytes
+        (which live in a separate binary sidecar, not in *merged*), keeping packed
+        marks aligned with the shifted plot_area / axes.  ``0.0`` when no chrome
+        text is present or the band has no top (caption-only), in which case no
         offset is applied anywhere.
     """
     if title is None and subtitle is None and caption is None:
@@ -2528,7 +2530,9 @@ def _inject_figure_chrome(
 
     panel_w = merged.get("width", 0) or 0.0
     panel_h = merged.get("height", 0) or 0.0
-    nodes_json, header_h, footer_h = figure_title_nodes(
+    # chrome_top_h = title+subtitle band height; chrome_bottom_h = caption band height;
+    # together they are the figure chrome.
+    nodes_json, chrome_top_h, chrome_bottom_h = figure_title_nodes(
         width=float(panel_w),
         height=float(panel_h),
         title=title,
@@ -2537,25 +2541,25 @@ def _inject_figure_chrome(
         **chrome,
     )
 
-    # Offset every child scene node DOWN by the header band height so the
+    # Offset every child scene node DOWN by the chrome-top band height so the
     # panels sit below the title/subtitle.  The chrome nodes themselves are
-    # already in outer-canvas space (caption y already includes header_h +
+    # already in outer-canvas space (caption y already includes chrome_top_h +
     # panel_h) and must NOT be offset.
-    if header_h:
+    if chrome_top_h:
         for panel in merged.get("panels", []):
             for area_key in _PANEL_AREA_KEYS:
                 area = panel.get(area_key)
                 if area is not None:
-                    area["y"] = area.get("y", 0) + header_h
+                    area["y"] = area.get("y", 0) + chrome_top_h
             for batch in panel.get("marks", []):
                 for node in batch.get("nodes", []):
-                    _offset_node(node, 0.0, header_h)
+                    _offset_node(node, 0.0, chrome_top_h)
             for key in _PANEL_NODE_LIST_KEYS:
                 for node in panel.get(key, []):
-                    _offset_node(node, 0.0, header_h)
+                    _offset_node(node, 0.0, chrome_top_h)
         for key in _OUTER_NODE_LIST_KEYS:
             for node in merged.get(key, []):
-                _offset_node(node, 0.0, header_h)
+                _offset_node(node, 0.0, chrome_top_h)
 
     # Inject the chrome nodes (already absolute) into the merged title list.
     # Note: for JointChart/ClusterMapChart the caption y is relative to the
@@ -2563,12 +2567,13 @@ def _inject_figure_chrome(
     # (W5 limitation — interactive nonuniform-grid layout).
     merged.setdefault("title", []).extend(_json.loads(nodes_json))
 
-    # Grow the merged canvas to fit the header + footer bands (width unchanged).
-    merged["height"] = panel_h + header_h + footer_h
+    # Grow the merged canvas to fit the chrome-top + chrome-bottom bands
+    # (width unchanged).
+    merged["height"] = panel_h + chrome_top_h + chrome_bottom_h
 
-    # Report the header shift so the caller can apply the identical downward
+    # Report the chrome-top shift so the caller can apply the identical downward
     # offset to the packed GPU-instance bytes (see _merge_packed_data).
-    return float(header_h)
+    return float(chrome_top_h)
 
 
 def _render_single_with_figure_chrome(chart, figure_chrome: "_FigureChrome") -> tuple[str, bytes]:
@@ -2591,13 +2596,13 @@ def _render_single_with_figure_chrome(chart, figure_chrome: "_FigureChrome") -> 
         return scene_json, packed
 
     scene = _json.loads(scene_json)
-    header_h = _inject_figure_chrome(scene, **figure_chrome)
-    # Shift the packed GPU instances down by the same header band so they stay
+    chrome_top_h = _inject_figure_chrome(scene, **figure_chrome)
+    # Shift the packed GPU instances down by the chrome-top band so they stay
     # aligned with the scene nodes _inject_figure_chrome just shifted.  No
     # panel-id remap here (single child) and no lateral placement offset,
     # so child_xy is [(0.0, 0.0)].
-    if header_h:
-        packed = _merge_packed_data([packed], [0], [(0.0, 0.0)], y_offset=header_h)
+    if chrome_top_h:
+        packed = _merge_packed_data([packed], [0], [(0.0, 0.0)], y_offset=chrome_top_h)
     return _json.dumps(scene), packed
 
 
@@ -2807,7 +2812,7 @@ def _merge_packed_data(
         ``(0.0, 0.0)`` with *y_offset* == 0.0 stays byte-identical.
     y_offset : float, default 0.0
         Global pixels to add to every packed instance's Y coordinate.  This
-        is the ``header_h`` returned by :func:`_inject_figure_chrome` for a
+        is the ``chrome_top_h`` returned by :func:`_inject_figure_chrome` for a
         titled composite; ``0.0`` for a non-titled composite.
     """
     result = bytearray()

@@ -931,13 +931,13 @@ def test_joint_chart_very_large_ratio():
 def test_repeat_chart_layer_only():
     """RepeatChart with only layer= (no row or column) should expand correctly.
 
-    Targets RepeatChart._cell_coordinates line 778: layer-only path returns [(None, None)].
+    Targets RepeatChart._panel_coordinates line 778: layer-only path returns [(None, None)].
     """
     df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]})
     template = Chart(df).encode(x=fr.Repeat.layer, y="a").mark_point()
     rc = RepeatChart(template, layer=["a", "b"])
     cells = rc.expand()
-    assert len(cells) == 1  # single cell with layered chart
+    assert len(cells) == 1  # single panel with layered chart
     _, _, chart = cells[0]
     # The layered chart should have layers
     assert chart._layers is not None
@@ -975,7 +975,7 @@ def test_repeat_chart_with_columns_wrapping():
 def test_repeat_chart_diagonal_cells_use_diagonal_template():
     """RepeatChart with diagonal should use diagonal template on matching cells.
 
-    Targets RepeatChart._make_cell lines 786-790: use_diagonal check.
+    Targets RepeatChart._make_panel lines 786-790: use_diagonal check.
     """
     df = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
     template = Chart(df).encode(x=fr.Repeat.column, y=fr.Repeat.row).mark_point()

@@ -66,11 +66,11 @@ class Repeat:
     Attributes
     ----------
     column : _RepeatPlaceholder
-        Sentinel that resolves to the column-axis field for each cell.
+        Sentinel that resolves to the column-axis field for each panel.
     row : _RepeatPlaceholder
-        Sentinel that resolves to the row-axis field for each cell.
+        Sentinel that resolves to the row-axis field for each panel.
     layer : _RepeatPlaceholder
-        Sentinel that resolves to the layer-axis field for each cell.
+        Sentinel that resolves to the layer-axis field for each panel.
 
     Examples
     --------
