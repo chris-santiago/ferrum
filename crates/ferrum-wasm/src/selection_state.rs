@@ -99,13 +99,6 @@ impl InteractionState {
                     match &hit {
                         Some(h) => {
                             if let Some(data_idx) = h.data_idx {
-                                // When the spec declares field constraints, expand the
-                                // selection to ALL marks sharing the same field values.
-                                let indices = if let Some(field_names) = fields {
-                                    collect_matching_indices(panels, h, field_names, data_idx)
-                                } else {
-                                    vec![data_idx]
-                                };
                                 // Extract field values from the clicked mark's tooltip
                                 // so cross-panel conditional resolution can match by
                                 // field content rather than by data index.
@@ -113,6 +106,21 @@ impl InteractionState {
                                     extract_field_values(panels, h, field_names)
                                 } else {
                                     Vec::new()
+                                };
+                                // When the spec declares field constraints, expand the
+                                // selection to ALL marks sharing the same field values.
+                                // Use raw strings for the membership scan so the click
+                                // path is byte-identical to the pre-T1.10 behavior:
+                                // "42.0" (clicked) must NOT co-select "42" (candidate).
+                                let indices = if let Some(field_names) = fields {
+                                    if !field_names.is_empty() {
+                                        let raw = extract_raw_field_values(panels, h, field_names);
+                                        collect_matching_indices(panels, data_idx, &raw)
+                                    } else {
+                                        vec![data_idx]
+                                    }
+                                } else {
+                                    vec![data_idx]
                                 };
                                 let is_toggle = shift_held
                                     && matches!(
@@ -255,6 +263,10 @@ fn tooltip_for_hit<'a>(
 
 /// Extract field values from the clicked mark's tooltip, converting each
 /// tooltip string to a typed `FieldValue` (number if parseable, else string).
+///
+/// The returned typed values are stored in `SelectionState::Point { field_values }`
+/// for the conditional-highlight and serialization paths.  They are NOT used
+/// for the click-membership scan — see `extract_raw_field_values` for that.
 fn extract_field_values(
     panels: &[ferrum_scene::Panel],
     hit: &crate::hit_test::HitResult,
@@ -285,37 +297,65 @@ fn extract_field_values(
         .collect()
 }
 
-/// Scan all marks in a panel for rows whose tooltip field values match those
-/// of the clicked mark.  Returns the set of data indices to select.
+/// Extract raw (unparsed) tooltip string values for the clicked mark.
 ///
-/// Falls back to `vec![clicked_data_idx]` when tooltip data is unavailable
-/// or the field is not present in any tooltip.
-fn collect_matching_indices(
+/// Returns `(field_name, raw_tooltip_string)` pairs.  These are used
+/// exclusively by `collect_matching_indices` for the click-membership scan,
+/// where comparison is raw string == raw string — byte-identical to the
+/// pre-T1.10 behavior where the click path never parsed tooltip strings.
+///
+/// Keeping raw strings here means "42.0" (clicked) != "42" (candidate),
+/// which is the intended pre-T1.10 behavior.  The typed `extract_field_values`
+/// path (for `SelectionState::Point { field_values }`) is separate and
+/// intentionally not involved in the membership scan.
+fn extract_raw_field_values(
     panels: &[ferrum_scene::Panel],
     hit: &crate::hit_test::HitResult,
     field_names: &[String],
-    clicked_data_idx: usize,
-) -> Vec<usize> {
-    // Get the field values for the clicked mark from its tooltip.
-    let clicked_values: Vec<(&str, &str)> = tooltip_for_hit(panels, hit)
-        .map(|tip| {
-            field_names.iter()
-                .filter_map(|fname| {
-                    tip.fields.iter()
-                        .find(|f| &f.name == fname)
-                        .map(|f| (fname.as_str(), f.value.as_str()))
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+) -> Vec<(String, String)> {
+    let Some(tooltip) = tooltip_for_hit(panels, hit) else {
+        return Vec::new();
+    };
 
-    if clicked_values.is_empty() {
+    field_names
+        .iter()
+        .filter_map(|fname| {
+            tooltip
+                .fields
+                .iter()
+                .find(|f| f.name == *fname)
+                .map(|f| (fname.clone(), f.value.clone()))
+        })
+        .collect()
+}
+
+/// Scan all marks across all panels for rows whose tooltip field values match
+/// the supplied raw clicked strings.  Returns the set of data indices to select.
+///
+/// Falls back to `vec![clicked_data_idx]` when no matching marks are found.
+///
+/// Comparison is raw string == raw string — byte-identical to the pre-T1.10
+/// behavior where `collect_matching_indices` compared tooltip strings directly
+/// without any parsing.  This means "42.0" (clicked) vs "42" (candidate) do
+/// NOT co-select.
+///
+/// The conditional-highlight path uses `tooltip_matches` (typed with epsilon)
+/// via `packed_instance_selected` / `apply_conditional_to_batch`; the two
+/// paths intentionally differ here.  See the T1.10 report's user-decision
+/// carry (typing-unification) for the full analysis of whether they should be
+/// unified.
+fn collect_matching_indices(
+    panels: &[ferrum_scene::Panel],
+    clicked_data_idx: usize,
+    raw_field_values: &[(String, String)],
+) -> Vec<usize> {
+    if raw_field_values.is_empty() {
         return vec![clicked_data_idx];
     }
 
     // Scan all mark batches across ALL panels; collect data indices whose
-    // tooltip fields match every (field_name, field_value) pair from the
-    // clicked mark. This enables cross-panel linked selection.
+    // tooltip fields match every (field_name, raw_string) pair via byte-
+    // identical string equality.
     //
     // A HashSet tracks already-seen indices so membership checks stay O(1),
     // avoiding an O(n²) scan when many marks match across large batches.
@@ -330,11 +370,15 @@ fn collect_matching_indices(
             };
             let data_indices = batch.data_indices.as_deref();
             for (node_idx, tooltip) in tooltips.iter().enumerate() {
-                let all_match = clicked_values.iter().all(|(fname, fval)| {
+                // Raw string equality: every (name, clicked_value) pair must
+                // match the candidate's tooltip field exactly as stored strings.
+                // This is the pre-T1.10 behavior — no parsing on either side.
+                let all_match = raw_field_values.iter().all(|(fname, clicked_raw)| {
                     tooltip
                         .fields
                         .iter()
-                        .any(|f| f.name == *fname && f.value == *fval)
+                        .find(|f| f.name == *fname)
+                        .is_some_and(|f| f.value == *clicked_raw)
                 });
                 if all_match {
                     let data_idx = data_indices
@@ -1479,6 +1523,121 @@ mod tests {
                 );
             }
             other => panic!("expected Point selection with field_values, got {other:?}"),
+        }
+    }
+
+    // ── WASM-04 fix round 2: click path is raw-string==raw-string ─────────────
+
+    /// Clicking "42.0" must NOT co-select a mark whose tooltip shows "42".
+    ///
+    /// Pre-T1.10 compared raw string == raw string in `collect_matching_indices`,
+    /// so "42.0" != "42" and the two marks did not co-select.
+    ///
+    /// The parse-to-f64 path (the bug this test guards against) would call
+    /// `extract_field_values` on the clicked mark, obtaining
+    /// `FieldValue::Number { value: 42.0 }`, then compare that against the
+    /// candidate mark's tooltip string "42" by parsing "42" → 42.0_f64, finding
+    /// 42.0 == 42.0 and co-selecting.  This test fails on that path.
+    #[test]
+    fn click_selection_42_dot_0_does_not_coselect_42() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect,
+            TooltipContent, TooltipField,
+        };
+
+        let style = FillStroke {
+            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        };
+
+        // Mark 0: score = "42.0"  (the clicked mark, at (50, 50))
+        // Mark 1: score = "42"    (candidate — different string representation)
+        // Mark 2: score = "42.0"  (candidate — identical string, must co-select)
+        let panels = vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![
+                    ferrum_scene::SceneNode::Circle { cx: 50.0, cy: 50.0, r: 10.0, style: style.clone() },
+                    ferrum_scene::SceneNode::Circle { cx: 150.0, cy: 50.0, r: 10.0, style: style.clone() },
+                    ferrum_scene::SceneNode::Circle { cx: 250.0, cy: 50.0, r: 10.0, style: style.clone() },
+                ],
+                data_indices: Some(vec![0, 1, 2]),
+                tooltips: Some(vec![
+                    TooltipContent {
+                        fields: vec![TooltipField { name: "score".to_string(), value: "42.0".to_string() }],
+                    },
+                    TooltipContent {
+                        fields: vec![TooltipField { name: "score".to_string(), value: "42".to_string() }],
+                    },
+                    TooltipContent {
+                        fields: vec![TooltipField { name: "score".to_string(), value: "42.0".to_string() }],
+                    },
+                ]),
+                hrefs: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }];
+
+        let specs = vec![SelectionSpec::Point {
+            name: "sel".to_string(),
+            fields: Some(vec!["score".to_string()]),
+            encodings: None,
+            nearest: false,
+            toggle: ferrum_scene::EventExpr::Click,
+            on: ferrum_scene::EventExpr::Click,
+            clear: ferrum_scene::EventExpr::Mouseout,
+            resolve: ferrum_scene::SelectionResolve::Global,
+        }];
+        let mut state = InteractionState::new(&specs);
+        let zoom = crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
+
+        // Click mark 0 (score="42.0") at (50, 50).
+        state.handle_click(&panels, &specs, 50.0, 50.0, &zoom, false);
+
+        match state.selections.get("sel") {
+            Some(SelectionState::Point { indices, .. }) => {
+                // Mark 0 (score="42.0") must be selected.
+                assert!(
+                    indices.contains(&0),
+                    "clicked mark (score='42.0', index 0) must be selected, got {indices:?}"
+                );
+                // Mark 2 (score="42.0") must co-select — identical raw string.
+                assert!(
+                    indices.contains(&2),
+                    "mark 2 (score='42.0') must co-select (identical raw string), got {indices:?}"
+                );
+                // Mark 1 (score="42") must NOT co-select — different raw string.
+                assert!(
+                    !indices.contains(&1),
+                    "mark 1 (score='42') must NOT co-select when '42.0' is clicked \
+                     (raw-string behavior), got {indices:?}"
+                );
+            }
+            other => panic!("expected Point selection after click, got {other:?}"),
         }
     }
 }

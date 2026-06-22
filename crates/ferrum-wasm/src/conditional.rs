@@ -310,9 +310,8 @@ fn packed_instance_selected(
             let Some(bytes) = meta.tooltip_bytes.as_deref() else {
                 return false;
             };
-            field_values.iter().all(|(fname, fval)| {
+            tooltip_matches(field_values, |fname| {
                 crate::scene_load::tooltip_field_value(bytes, i, fname)
-                    .is_some_and(|tv| field_value_matches_tooltip(&tv, fval))
             })
         }
         SelectionState::Point { indices, .. } => meta
@@ -426,10 +425,11 @@ pub(crate) fn apply_conditional_to_batch(
                     .as_ref()
                     .and_then(|tips| tips.get(node_idx))
                     .map(|tip| {
-                        field_values.iter().all(|(fname, fval)| {
+                        tooltip_matches(field_values, |fname| {
                             tip.fields
                                 .iter()
-                                .any(|f| f.name == *fname && field_value_matches_tooltip(&f.value, fval))
+                                .find(|f| f.name == fname)
+                                .map(|f| f.value.clone())
                         })
                     })
                     .unwrap_or(false)
@@ -457,42 +457,121 @@ pub(crate) fn apply_conditional_to_batch(
     }
 }
 
-fn apply_value_to_circle(inst: &mut CircleInstance, channel: &ChannelName, value: &EncodingValue) {
+/// Apply the 7 conditional encoding arms that are identical for circles and
+/// rects.  Returns `true` when the value was handled; returns `false` when the
+/// `Size` arm fires (the caller applies per-geometry size logic) or when no arm
+/// matches.
+///
+/// Using explicit mutable references instead of a trait keeps the call sites
+/// simple and avoids introducing a new trait for two implementors.
+#[allow(clippy::too_many_arguments)]
+fn apply_common_channels(
+    channel: &ChannelName,
+    value: &EncodingValue,
+    fill_color: &mut [f32; 4],
+    opacity: &mut f32,
+    stroke_width: &mut f32,
+    stroke_dash: &mut f32,
+    stroke_opacity: &mut f32,
+    angle: &mut f32,
+) -> bool {
     match (channel, value) {
         (ChannelName::Color, EncodingValue::Color { value: c }) => {
-            inst.fill_color = color_to_linear(c, 1.0);
+            *fill_color = color_to_linear(c, 1.0);
+            true
         }
         (ChannelName::Opacity, EncodingValue::Opacity { value: o }) => {
-            inst.opacity = *o as f32;
-        }
-        (ChannelName::Size, EncodingValue::Size { value: s }) => {
-            inst.radius = (*s as f32 / std::f32::consts::PI).sqrt();
+            *opacity = *o as f32;
+            true
         }
         (_, EncodingValue::StrokeWidth { value: w }) => {
-            inst.stroke_width = *w as f32;
+            *stroke_width = *w as f32;
+            true
         }
         (_, EncodingValue::StrokeDash { value: pattern }) => {
-            inst.stroke_dash = stroke_dash_index(&Some(pattern.clone()));
+            *stroke_dash = stroke_dash_index(&Some(pattern.clone()));
+            true
         }
         (ChannelName::StrokeOpacity, EncodingValue::StrokeOpacity { value: o }) => {
-            inst.stroke_opacity = *o as f32;
+            *stroke_opacity = *o as f32;
+            true
         }
         (ChannelName::FillOpacity, EncodingValue::FillOpacity { value: o }) => {
-            inst.fill_color[3] = *o as f32;
+            fill_color[3] = *o as f32;
+            true
         }
         (ChannelName::Angle, EncodingValue::Angle { value: a }) => {
-            inst.angle = *a as f32;
+            *angle = *a as f32;
+            true
         }
-        _ => {}
+        // Size arm and unknown combinations are left to the caller.
+        _ => false,
     }
 }
 
-/// Compare a tooltip string value against a typed `FieldValue`.
+fn apply_value_to_circle(inst: &mut CircleInstance, channel: &ChannelName, value: &EncodingValue) {
+    if !apply_common_channels(
+        channel,
+        value,
+        &mut inst.fill_color,
+        &mut inst.opacity,
+        &mut inst.stroke_width,
+        &mut inst.stroke_dash,
+        &mut inst.stroke_opacity,
+        &mut inst.angle,
+    ) {
+        // Only the Size arm differs per geometry.
+        if let EncodingValue::Size { value: s } = value {
+            inst.radius = (*s as f32 / std::f32::consts::PI).sqrt();
+        }
+    }
+}
+
+/// Test whether a mark's tooltip satisfies all (field, value) constraints,
+/// using a caller-supplied comparison predicate.
+///
+/// This is the shared loop helper for the conditional-highlight path.  The
+/// click-selection path (`collect_matching_indices` in `selection_state.rs`)
+/// no longer goes through this helper — it works directly with raw tooltip
+/// strings via byte-equal comparison, preserving the pre-T1.10 behavior where
+/// "42.0" != "42" and the two marks do not co-select.
+///
+/// `lookup` is a closure that, given a field name, returns the tooltip string
+/// for that field (or `None` if absent).
+pub(crate) fn tooltip_matches_with_cmp(
+    field_values: &[(String, FieldValue)],
+    lookup: impl Fn(&str) -> Option<String>,
+    cmp: impl Fn(&str, &FieldValue) -> bool,
+) -> bool {
+    field_values.iter().all(|(fname, fval)| {
+        lookup(fname.as_str())
+            .as_deref()
+            .is_some_and(|tv| cmp(tv, fval))
+    })
+}
+
+/// Convenience wrapper: test membership using typed comparison
+/// (`field_value_matches_tooltip`).
+///
+/// Used by the conditional-highlight path (`packed_instance_selected`,
+/// `apply_conditional_to_batch`).  Typed comparison means "42" matches
+/// `FieldValue::Number { value: 42.0 }` because both parse to the same f64.
+pub(crate) fn tooltip_matches(
+    field_values: &[(String, FieldValue)],
+    lookup: impl Fn(&str) -> Option<String>,
+) -> bool {
+    tooltip_matches_with_cmp(field_values, lookup, field_value_matches_tooltip)
+}
+
+/// Compare a tooltip string value against a typed `FieldValue` using typed,
+/// epsilon-tolerant comparison.
 ///
 /// Tooltip fields are always stored as strings in the scene graph. This
 /// function bridges the gap by parsing the string according to the
 /// `FieldValue` variant so cross-panel matching works even when one panel
 /// stores `"42"` and the selection carries `FieldValue::Number { value: 42.0 }`.
+///
+/// Used by the conditional-highlight path via [`tooltip_matches`].
 fn field_value_matches_tooltip(tooltip_value: &str, field_value: &FieldValue) -> bool {
     match field_value {
         FieldValue::String { value } => tooltip_value == value,
@@ -509,38 +588,26 @@ fn field_value_matches_tooltip(tooltip_value: &str, field_value: &FieldValue) ->
 }
 
 fn apply_value_to_rect(inst: &mut RectInstance, channel: &ChannelName, value: &EncodingValue) {
-    match (channel, value) {
-        (ChannelName::Color, EncodingValue::Color { value: c }) => {
-            inst.fill_color = color_to_linear(c, 1.0);
-        }
-        (ChannelName::Opacity, EncodingValue::Opacity { value: o }) => {
-            inst.opacity = *o as f32;
-        }
-        (ChannelName::Size, EncodingValue::Size { value: s }) => {
-            // Without orientation context (h-bar vs v-bar) we apply the size to
-            // both width and height so the conditional always has a visible effect.
-            // The rendering layer controls which dimension is the data extent; the
-            // other is the band width set by the scale.  Applying to both is the
-            // conservative fallback that matches the circle counterpart's intent
-            // (scale the mark proportionally to the encoded value).
+    if !apply_common_channels(
+        channel,
+        value,
+        &mut inst.fill_color,
+        &mut inst.opacity,
+        &mut inst.stroke_width,
+        &mut inst.stroke_dash,
+        &mut inst.stroke_opacity,
+        &mut inst.angle,
+    ) {
+        // Only the Size arm differs per geometry.
+        // Without orientation context (h-bar vs v-bar) we apply the size to
+        // both width and height so the conditional always has a visible effect.
+        // The rendering layer controls which dimension is the data extent; the
+        // other is the band width set by the scale.  Applying to both is the
+        // conservative fallback that matches the circle counterpart's intent
+        // (scale the mark proportionally to the encoded value).
+        if let EncodingValue::Size { value: s } = value {
             inst.size = [*s as f32, *s as f32];
         }
-        (_, EncodingValue::StrokeWidth { value: w }) => {
-            inst.stroke_width = *w as f32;
-        }
-        (_, EncodingValue::StrokeDash { value: pattern }) => {
-            inst.stroke_dash = stroke_dash_index(&Some(pattern.clone()));
-        }
-        (ChannelName::StrokeOpacity, EncodingValue::StrokeOpacity { value: o }) => {
-            inst.stroke_opacity = *o as f32;
-        }
-        (ChannelName::FillOpacity, EncodingValue::FillOpacity { value: o }) => {
-            inst.fill_color[3] = *o as f32;
-        }
-        (ChannelName::Angle, EncodingValue::Angle { value: a }) => {
-            inst.angle = *a as f32;
-        }
-        _ => {}
     }
 }
 
@@ -2729,5 +2796,79 @@ mod tests {
             "packed mark 2 (cat=a) must be selected, got {}",
             result.circle_instances[2].opacity
         );
+    }
+
+    // ── WASM-04: tooltip_matches ─────────────────────────────────────────────
+
+    /// All field_values must match for `tooltip_matches` to return true.
+    #[test]
+    fn tooltip_matches_all_fields_match_returns_true() {
+        let field_values = vec![
+            ("cat".to_string(), FieldValue::String { value: "a".to_string() }),
+            ("val".to_string(), FieldValue::Number { value: 42.0 }),
+        ];
+        let result = tooltip_matches(&field_values, |fname| match fname {
+            "cat" => Some("a".to_string()),
+            "val" => Some("42".to_string()),
+            _ => None,
+        });
+        assert!(result, "all fields matching must return true");
+    }
+
+    /// If any field does not match, `tooltip_matches` returns false.
+    #[test]
+    fn tooltip_matches_one_mismatch_returns_false() {
+        let field_values = vec![
+            ("cat".to_string(), FieldValue::String { value: "a".to_string() }),
+            ("val".to_string(), FieldValue::Number { value: 42.0 }),
+        ];
+        let result = tooltip_matches(&field_values, |fname| match fname {
+            "cat" => Some("a".to_string()),
+            "val" => Some("99".to_string()), // mismatch
+            _ => None,
+        });
+        assert!(!result, "one mismatching field must return false");
+    }
+
+    /// If the lookup returns `None` for a field, it counts as a mismatch.
+    #[test]
+    fn tooltip_matches_missing_field_returns_false() {
+        let field_values = vec![
+            ("cat".to_string(), FieldValue::String { value: "a".to_string() }),
+        ];
+        let result = tooltip_matches(&field_values, |_fname| None);
+        assert!(!result, "missing field (lookup returns None) must return false");
+    }
+
+    /// Empty `field_values` slice — vacuously true (all zero constraints pass).
+    #[test]
+    fn tooltip_matches_empty_field_values_returns_true() {
+        let field_values: Vec<(String, FieldValue)> = vec![];
+        let result = tooltip_matches(&field_values, |_| None);
+        assert!(result, "empty field_values must return true (vacuous truth)");
+    }
+
+    /// Typed comparison: numeric tooltip string "42" matches `FieldValue::Number{42.0}`.
+    #[test]
+    fn tooltip_matches_numeric_field_value_typed_comparison() {
+        let field_values = vec![
+            ("x".to_string(), FieldValue::Number { value: 42.0 }),
+        ];
+        // The string "42" must match Number{42.0} via field_value_matches_tooltip.
+        let result = tooltip_matches(&field_values, |_| Some("42".to_string()));
+        assert!(result, "string '42' must match Number(42.0) via typed comparison");
+    }
+
+    /// Bool field value: "true" matches `FieldValue::Bool{true}`.
+    #[test]
+    fn tooltip_matches_bool_field_value() {
+        let field_values = vec![
+            ("flag".to_string(), FieldValue::Bool { value: true }),
+        ];
+        let result = tooltip_matches(&field_values, |_| Some("true".to_string()));
+        assert!(result, "'true' string must match Bool(true)");
+
+        let result_false = tooltip_matches(&field_values, |_| Some("false".to_string()));
+        assert!(!result_false, "'false' string must not match Bool(true)");
     }
 }

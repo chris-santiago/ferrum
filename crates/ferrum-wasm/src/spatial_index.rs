@@ -209,13 +209,37 @@ impl SpatialIndex {
     }
 }
 
+// ── MarkEntry constructors ───────────────────────────────────────────────────
+
+/// Build a [`MarkEntry`] for a circle node.
+///
+/// Used by both `collect_batch_entries` (scene-graph path) and
+/// `collect_packed_entries` (packed instance path) so the AABB convention and
+/// center computation are defined in one place.
+fn circle_entry(cx: f64, cy: f64, r: f64, batch_idx: usize, node_idx: usize, data_idx: Option<usize>) -> MarkEntry {
+    let aabb = AABB::from_corners([cx - r, cy - r], [cx + r, cy + r]);
+    MarkEntry { point: [cx, cy], batch_idx, node_idx, data_idx, radius: r, aabb }
+}
+
+/// Build a [`MarkEntry`] for a rect node.
+///
+/// Used by both `collect_batch_entries` (scene-graph path) and
+/// `collect_packed_entries` (packed instance path) so the AABB convention and
+/// center computation are defined in one place.
+fn rect_entry(x: f64, y: f64, w: f64, h: f64, batch_idx: usize, node_idx: usize, data_idx: Option<usize>) -> MarkEntry {
+    let cx = x + w / 2.0;
+    let cy = y + h / 2.0;
+    let aabb = AABB::from_corners([x, y], [x + w, y + h]);
+    MarkEntry { point: [cx, cy], batch_idx, node_idx, data_idx, radius: 0.0, aabb }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Build the list of [`MarkEntry`]s for one panel.
 fn entries_for_panel(panel: &Panel) -> Vec<MarkEntry> {
     let mut entries = Vec::new();
     for (batch_idx, batch) in panel.marks.iter().enumerate() {
-        if !is_indexed_kind(batch) {
+        if !is_indexed_kind(batch.kind) {
             continue;
         }
         collect_batch_entries(batch, batch_idx, &mut entries);
@@ -223,12 +247,15 @@ fn entries_for_panel(panel: &Panel) -> Vec<MarkEntry> {
     entries
 }
 
-/// Return `true` for batch kinds whose nodes are indexed by the spatial index.
-fn is_indexed_kind(batch: &MarkBatch) -> bool {
-    matches!(
-        batch.kind,
-        MarkBatchKind::Point | MarkBatchKind::Bar | MarkBatchKind::Rect
-    )
+/// Return `true` for `MarkBatchKind` values that are indexed by the spatial index.
+///
+/// The spatial index covers circles (from `Point` batches) and rects (from
+/// `Bar` and `Rect` batches).  This is the single policy definition: both
+/// `SpatialIndex::entries_for_panel` and `hit_test::hit_test_with_index` route
+/// through this function so the indexed-kind set cannot drift between the two
+/// modules.
+pub fn is_indexed_kind(kind: MarkBatchKind) -> bool {
+    matches!(kind, MarkBatchKind::Point | MarkBatchKind::Bar | MarkBatchKind::Rect)
 }
 
 /// Append [`MarkEntry`] values for each indexable node in `batch`.
@@ -241,35 +268,10 @@ fn collect_batch_entries(batch: &MarkBatch, batch_idx: usize, out: &mut Vec<Mark
 
         match node {
             SceneNode::Circle { cx, cy, r, .. } => {
-                let r = *r;
-                let cx = *cx;
-                let cy = *cy;
-                let aabb = AABB::from_corners([cx - r, cy - r], [cx + r, cy + r]);
-                out.push(MarkEntry {
-                    point: [cx, cy],
-                    batch_idx,
-                    node_idx,
-                    data_idx,
-                    radius: r,
-                    aabb,
-                });
+                out.push(circle_entry(*cx, *cy, *r, batch_idx, node_idx, data_idx));
             }
             SceneNode::Rect { x, y, w, h, .. } => {
-                let x = *x;
-                let y = *y;
-                let w = *w;
-                let h = *h;
-                let cx = x + w / 2.0;
-                let cy = y + h / 2.0;
-                let aabb = AABB::from_corners([x, y], [x + w, y + h]);
-                out.push(MarkEntry {
-                    point: [cx, cy],
-                    batch_idx,
-                    node_idx,
-                    data_idx,
-                    radius: 0.0,
-                    aabb,
-                });
+                out.push(rect_entry(*x, *y, *w, *h, batch_idx, node_idx, data_idx));
             }
             _ => {}
         }
@@ -298,22 +300,18 @@ fn collect_packed_entries(
                 for i in 0..meta.instance_count {
                     let idx = meta.instance_start + i;
                     let Some(ci) = data.circle_instances.get(idx) else { continue };
-                    let cx = ci.center[0] as f64;
-                    let cy = ci.center[1] as f64;
-                    let r = ci.radius as f64;
-                    let aabb = AABB::from_corners([cx - r, cy - r], [cx + r, cy + r]);
                     let data_idx = meta.data_indices
                         .as_ref()
                         .and_then(|dis| dis.get(i))
                         .map(|&di| di as usize);
-                    out.push(MarkEntry {
-                        point: [cx, cy],
+                    out.push(circle_entry(
+                        ci.center[0] as f64,
+                        ci.center[1] as f64,
+                        ci.radius as f64,
                         batch_idx,
-                        node_idx: i,
+                        i,
                         data_idx,
-                        radius: r,
-                        aabb,
-                    });
+                    ));
                 }
             }
             1 => {
@@ -321,25 +319,19 @@ fn collect_packed_entries(
                 for i in 0..meta.instance_count {
                     let idx = meta.instance_start + i;
                     let Some(ri) = data.rect_instances.get(idx) else { continue };
-                    let x = ri.position[0] as f64;
-                    let y = ri.position[1] as f64;
-                    let w = ri.size[0] as f64;
-                    let h = ri.size[1] as f64;
-                    let cx = x + w / 2.0;
-                    let cy = y + h / 2.0;
-                    let aabb = AABB::from_corners([x, y], [x + w, y + h]);
                     let data_idx = meta.data_indices
                         .as_ref()
                         .and_then(|dis| dis.get(i))
                         .map(|&di| di as usize);
-                    out.push(MarkEntry {
-                        point: [cx, cy],
+                    out.push(rect_entry(
+                        ri.position[0] as f64,
+                        ri.position[1] as f64,
+                        ri.size[0] as f64,
+                        ri.size[1] as f64,
                         batch_idx,
-                        node_idx: i,
+                        i,
                         data_idx,
-                        radius: 0.0,
-                        aabb,
-                    });
+                    ));
                 }
             }
             _ => {}
@@ -1261,5 +1253,107 @@ mod tests {
         // Packed circle at (400, 400).
         let (e_pk, _) = idx.nearest(0, 400.0, 400.0).expect("must find packed circle");
         assert_eq!(e_pk.data_idx, Some(2));
+    }
+
+    // ── WASM-06: is_indexed_kind policy ──────────────────────────────────────
+
+    /// Point, Bar, and Rect are indexed; all other kinds are not.
+    ///
+    /// This test pins the policy that `is_indexed_kind` defines so that
+    /// `spatial_index` and `hit_test` cannot drift from each other.
+    #[test]
+    fn is_indexed_kind_returns_true_for_indexed_kinds() {
+        assert!(is_indexed_kind(MarkBatchKind::Point), "Point must be indexed");
+        assert!(is_indexed_kind(MarkBatchKind::Bar),   "Bar must be indexed");
+        assert!(is_indexed_kind(MarkBatchKind::Rect),  "Rect must be indexed");
+    }
+
+    #[test]
+    fn is_indexed_kind_returns_false_for_non_indexed_kinds() {
+        assert!(!is_indexed_kind(MarkBatchKind::Line),    "Line must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Area),    "Area must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Arc),     "Arc must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Tick),    "Tick must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Text),    "Text must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Label),   "Label must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Ribbon),  "Ribbon must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Segment), "Segment must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Image),   "Image must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Polygon), "Polygon must not be indexed");
+    }
+
+    // ── WASM-09: circle_entry / rect_entry constructors ──────────────────────
+
+    /// `circle_entry` must set center, radius, AABB, and pass through indices.
+    #[test]
+    fn circle_entry_sets_correct_fields() {
+        let e = circle_entry(10.0, 20.0, 5.0, 1, 2, Some(99));
+        assert_eq!(e.point, [10.0, 20.0], "center must be (cx, cy)");
+        assert!((e.radius - 5.0).abs() < 1e-10, "radius must match");
+        assert_eq!(e.batch_idx, 1);
+        assert_eq!(e.node_idx, 2);
+        assert_eq!(e.data_idx, Some(99));
+        // AABB must enclose (cx±r, cy±r).
+        let lower = e.aabb.lower();
+        let upper = e.aabb.upper();
+        assert!((lower[0] - 5.0).abs() < 1e-10,  "AABB lower x must be cx-r");
+        assert!((lower[1] - 15.0).abs() < 1e-10, "AABB lower y must be cy-r");
+        assert!((upper[0] - 15.0).abs() < 1e-10, "AABB upper x must be cx+r");
+        assert!((upper[1] - 25.0).abs() < 1e-10, "AABB upper y must be cy+r");
+    }
+
+    /// `circle_entry` with `data_idx: None` passes None through.
+    #[test]
+    fn circle_entry_none_data_idx() {
+        let e = circle_entry(0.0, 0.0, 1.0, 0, 0, None);
+        assert_eq!(e.data_idx, None);
+    }
+
+    /// `rect_entry` must set center to (x + w/2, y + h/2), radius to 0.0,
+    /// and AABB to the rect corners.
+    #[test]
+    fn rect_entry_sets_correct_fields() {
+        // Rect at (10, 20), 40 wide, 30 tall.
+        // Center = (10 + 20, 20 + 15) = (30, 35).
+        let e = rect_entry(10.0, 20.0, 40.0, 30.0, 3, 4, Some(7));
+        assert!((e.point[0] - 30.0).abs() < 1e-10, "center x = x + w/2 = 30");
+        assert!((e.point[1] - 35.0).abs() < 1e-10, "center y = y + h/2 = 35");
+        assert!((e.radius).abs() < 1e-10, "rect entry must have radius 0");
+        assert_eq!(e.batch_idx, 3);
+        assert_eq!(e.node_idx, 4);
+        assert_eq!(e.data_idx, Some(7));
+        let lower = e.aabb.lower();
+        let upper = e.aabb.upper();
+        assert!((lower[0] - 10.0).abs() < 1e-10, "AABB lower x = x");
+        assert!((lower[1] - 20.0).abs() < 1e-10, "AABB lower y = y");
+        assert!((upper[0] - 50.0).abs() < 1e-10, "AABB upper x = x + w");
+        assert!((upper[1] - 50.0).abs() < 1e-10, "AABB upper y = y + h");
+    }
+
+    /// `rect_entry` with `data_idx: None` passes None through.
+    #[test]
+    fn rect_entry_none_data_idx() {
+        let e = rect_entry(0.0, 0.0, 10.0, 10.0, 0, 0, None);
+        assert_eq!(e.data_idx, None);
+    }
+
+    /// The PointDistance implementation for a circle entry treats the query
+    /// point as inside (distance 0) when it lies within the circle's radius.
+    #[test]
+    fn circle_entry_distance_inside_is_zero() {
+        let e = circle_entry(50.0, 50.0, 10.0, 0, 0, None);
+        // Query at center — distance must be 0.
+        assert!((e.distance_2(&[50.0, 50.0])).abs() < 1e-10);
+        // Query at surface edge — distance must be 0 (inside or on boundary).
+        assert!((e.distance_2(&[60.0, 50.0])).abs() < 1e-10);
+    }
+
+    /// The PointDistance implementation for a rect entry treats a query inside
+    /// the AABB as distance 0.
+    #[test]
+    fn rect_entry_distance_inside_is_zero() {
+        let e = rect_entry(10.0, 10.0, 20.0, 20.0, 0, 0, None);
+        // Center (20, 20) is inside the rect.
+        assert!((e.distance_2(&[20.0, 20.0])).abs() < 1e-10);
     }
 }
