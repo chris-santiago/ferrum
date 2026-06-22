@@ -29,8 +29,14 @@ if TYPE_CHECKING:
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
-from ferrum.plots._helpers import _coerce_to_polars, _finalize_chart, _validate_choice
-from ferrum.plots._helpers import _resolve_source
+from ferrum.plots._helpers import (
+    _UNSET,
+    _coerce_to_polars,
+    _finalize_chart,
+    _resolve_first_param,
+    _resolve_source,
+    _validate_choice,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -39,10 +45,11 @@ from ferrum.plots._helpers import _resolve_source
 
 
 def rank_chart(
-    source: Any,
+    data_or_source: Any = _UNSET,
     X: Any = None,
     y: Any = None,
     *,
+    source: Any = _UNSET,  # deprecated keyword alias for ``data_or_source``
     rank: str = "2d",
     algorithm: str | None = None,
     top_k: int | None = None,
@@ -66,14 +73,16 @@ def rank_chart(
 
     Parameters
     ----------
-    source : estimator, ModelSource, DataFrame, or array-like
+    data_or_source : estimator, ModelSource, DataFrame, or array-like
         Input data. When a fitted estimator or ``ModelSource`` is
         supplied, the feature matrix is taken from the bound data.
         When a DataFrame or 2D array is supplied, ``X`` is used as
-        the feature matrix if provided.
+        the feature matrix if provided. (Family-canonical first-param
+        name; the legacy keyword ``source=`` is accepted as a deprecated
+        alias.)
     X : array-like, optional
-        Feature matrix. Used when ``source`` is a raw estimator
-        (not a ``ModelSource``) or when ``source`` is a raw
+        Feature matrix. Used when ``data_or_source`` is a raw estimator
+        (not a ``ModelSource``) or when ``data_or_source`` is a raw
         DataFrame and ``X`` overrides it.
     y : array-like, optional
         Target vector. Required only for
@@ -137,6 +146,15 @@ def rank_chart(
         dispatcher remains as a shim that forwards to the appropriate
         sibling and will be removed in a future major release.
     """
+    data_or_source = _resolve_first_param(
+        data_or_source,
+        source,
+        canonical_name="data_or_source",
+        alias_name="source",
+        func_name="rank_chart",
+    )
+    if data_or_source is _UNSET:
+        raise TypeError("rank_chart() missing required argument: 'data_or_source'")
     _validate_choice("rank_chart", "rank", rank, {"1d", "2d"})
 
     import warnings
@@ -148,7 +166,7 @@ def rank_chart(
     )
     if rank == "1d":
         return rank1d_chart(
-            source,
+            data_or_source,
             X,
             y,
             algorithm=algorithm,
@@ -163,7 +181,7 @@ def rank_chart(
             theme=theme,
         )
     return rank2d_chart(
-        source,
+        data_or_source,
         X,
         y,
         algorithm=algorithm,
@@ -183,10 +201,11 @@ def rank_chart(
 
 
 def rank1d_chart(
-    source: Any,
+    data_or_source: Any = _UNSET,
     X: Any = None,
     y: Any = None,
     *,
+    source: Any = _UNSET,  # deprecated keyword alias for ``data_or_source``
     algorithm: str | None = None,
     top_k: int | None = None,
     orient: str = "horizontal",
@@ -207,12 +226,14 @@ def rank1d_chart(
 
     Parameters
     ----------
-    source : estimator, ModelSource, DataFrame, or array-like
+    data_or_source : estimator, ModelSource, DataFrame, or array-like
         Input data. When a fitted estimator or ``ModelSource`` is supplied,
-        the feature matrix is taken from the bound data.
+        the feature matrix is taken from the bound data. (Family-canonical
+        first-param name; the legacy keyword ``source=`` is accepted as a
+        deprecated alias.)
     X, y : optional
         Feature matrix / target -- forwarded to ``_resolve_source`` when
-        ``source`` is a raw estimator.
+        ``data_or_source`` is a raw estimator.
     algorithm : str or None, default None
         Ranking algorithm. ``None`` selects ``"shapiro"``.
     top_k : int or None, optional
@@ -250,12 +271,22 @@ def rank1d_chart(
     """
     import ferrum
 
+    data_or_source = _resolve_first_param(
+        data_or_source,
+        source,
+        canonical_name="data_or_source",
+        alias_name="source",
+        func_name="rank1d_chart",
+    )
+    if data_or_source is _UNSET:
+        raise TypeError("rank1d_chart() missing required argument: 'data_or_source'")
+
     algo = algorithm or "shapiro"
-    if isinstance(source, ferrum.ModelSource):
-        df = source.rank1d(algorithm=algo)
+    if isinstance(data_or_source, ferrum.ModelSource):
+        df = data_or_source.rank1d(algorithm=algo)
     elif algo == "covariance":
         ms = _resolve_source(
-            source,
+            data_or_source,
             X,
             y,
             random_state=random_state,
@@ -264,7 +295,7 @@ def rank1d_chart(
     else:
         from ferrum._diagnostics._rank_helpers import rank1d_compute
 
-        input_data = source if X is None else X
+        input_data = data_or_source if X is None else X
         df = rank1d_compute(input_data, algorithm=algo)
     return _rank1d_chart_from_dataframe(
         df,
@@ -286,10 +317,11 @@ def rank1d_chart(
 
 
 def rank2d_chart(
-    source: Any,
+    data_or_source: Any = _UNSET,
     X: Any = None,
     y: Any = None,
     *,
+    source: Any = _UNSET,  # deprecated keyword alias for ``data_or_source``
     algorithm: str | None = None,
     annot: bool = True,
     random_state: int | None = None,
@@ -307,8 +339,9 @@ def rank2d_chart(
 
     Parameters
     ----------
-    source : estimator, ModelSource, DataFrame, or array-like
-        Input data.
+    data_or_source : estimator, ModelSource, DataFrame, or array-like
+        Input data. (Family-canonical first-param name; the legacy keyword
+        ``source=`` is accepted as a deprecated alias.)
     X, y : optional
         Feature matrix / target.
     algorithm : str or None, default None
@@ -343,13 +376,23 @@ def rank2d_chart(
     """
     import ferrum
 
+    data_or_source = _resolve_first_param(
+        data_or_source,
+        source,
+        canonical_name="data_or_source",
+        alias_name="source",
+        func_name="rank2d_chart",
+    )
+    if data_or_source is _UNSET:
+        raise TypeError("rank2d_chart() missing required argument: 'data_or_source'")
+
     algo = algorithm or "pearson"
-    if isinstance(source, ferrum.ModelSource):
-        df = source.rank2d(algorithm=algo)
+    if isinstance(data_or_source, ferrum.ModelSource):
+        df = data_or_source.rank2d(algorithm=algo)
     else:
         from ferrum._diagnostics._rank_helpers import rank2d_compute
 
-        input_data = source if X is None else X
+        input_data = data_or_source if X is None else X
         df = rank2d_compute(input_data, algorithm=algo)
     return _rank2d_chart_from_dataframe(
         df,

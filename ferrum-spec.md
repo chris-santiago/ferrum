@@ -1303,9 +1303,14 @@ ferrum.validation_curve_chart(model, X, y, param, values, *,
                                 cv=5, scoring=None, log_scale="auto",
                                 ci_style="band", theme=None)
 
-ferrum.cluster_diagnostics(X, *, ks, method="kmeans", scoring="both",
+ferrum.cluster_diagnostics(model, *, ks, method="kmeans", scoring="both",
                              # scoring: "elbow" | "silhouette" | "both"
                              n_init=10, random_state=None, theme=None)
+# **2026-06-22 (T3.4, D-FIRSTPARAM-1):** the first positional parameter was
+# renamed `X` -> `model` so the whole model-diagnostic family shares one
+# canonical first-param name. Positional callers are unaffected; the legacy
+# keyword `X=` is accepted as a deprecated alias (supplying both `model=` and
+# `X=` raises `TypeError`).
 
 ferrum.decision_boundary_chart(model, X, y, *,
                                  features=(0, 1),    # column indices or names

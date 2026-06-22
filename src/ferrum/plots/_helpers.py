@@ -318,6 +318,43 @@ def _require(func_name: str, arg_name: str, value: Any, *, hint: str) -> Any:
     return value
 
 
+# Sentinel distinguishing "argument omitted" from an explicit ``None`` so that a
+# deprecated keyword alias can be ``None`` and still count as supplied.
+_UNSET: Any = object()
+
+
+def _resolve_first_param(
+    canonical_value: Any,
+    alias_value: Any,
+    *,
+    canonical_name: str,
+    alias_name: str,
+    func_name: str,
+) -> Any:
+    """Resolve a renamed first positional parameter against its deprecated alias.
+
+    The single keyword-alias mechanism shared by every figure function whose
+    first positional parameter was renamed to its family-canonical name
+    (D-FIRSTPARAM-1). The canonical parameter keeps the positional slot, so
+    positional callers are unaffected; the old name is accepted as a deprecated
+    keyword whose default is :data:`_UNSET` (so an explicit ``alias=None`` is
+    still detected as "supplied").
+
+    Returns the value the function should use. Raises ``TypeError`` when both
+    the canonical and alias names are supplied, mirroring Python's own
+    "got multiple values for argument" error shape.
+    """
+    if alias_value is _UNSET:
+        return canonical_value
+    if canonical_value is not _UNSET:
+        raise TypeError(
+            f"{func_name}() got both {canonical_name}= and {alias_name}=; "
+            f"{alias_name}= is a deprecated alias for {canonical_name}=, "
+            "supply only one."
+        )
+    return alias_value
+
+
 def _finalize_chart(chart, *, mark=None, encode=None, properties=None, layers=None, theme=None):
     """Apply overrides and optional theme to a chart, then return it.
 

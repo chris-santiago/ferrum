@@ -27,7 +27,13 @@ if TYPE_CHECKING:
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
-from ferrum.plots._helpers import _finalize_chart, _resolve_source, _validate_choice
+from ferrum.plots._helpers import (
+    _UNSET,
+    _finalize_chart,
+    _resolve_first_param,
+    _resolve_source,
+    _validate_choice,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +215,7 @@ def _intercluster_distance_chart_from_source(
 
 
 def _cluster_diagnostics_chart(
-    X: Any,  # noqa: N803 — matches public API parameter name
+    model: Any,
     *,
     ks: Any,
     method: str,
@@ -226,7 +232,9 @@ def _cluster_diagnostics_chart(
 
     Unlike the other builders, this one sweeps the clusterer over the
     requested ``ks`` rather than wrapping a single fitted ``ModelSource``.
-    See ``ferrum.cluster_diagnostics`` for the user-facing parameter docs.
+    ``model`` here is the feature matrix to cluster (the family-canonical
+    first-param name; see D-FIRSTPARAM-1). See ``ferrum.cluster_diagnostics``
+    for the user-facing parameter docs.
     """
     import ferrum
     import numpy as np
@@ -237,7 +245,7 @@ def _cluster_diagnostics_chart(
     from ferrum._layer import _Layer
 
     # numpy required: manual inertia computation uses 2D positional indexing and mask ops.
-    X_np = np.asarray(X, dtype=np.float64)
+    X_np = np.asarray(model, dtype=np.float64)
     X_np = np.ascontiguousarray(X_np)
     x_arrow = pa.RecordBatch.from_pydict(
         {f"f{j}": X_np[:, j].tolist() for j in range(X_np.shape[1])}
@@ -488,8 +496,9 @@ def pca_scree_chart(
 
 
 def cluster_diagnostics(
-    X: Any,  # noqa: N803 — matches ferrum-spec.md parameter name
+    model: Any = _UNSET,
     *,
+    X: Any = _UNSET,  # noqa: N803 — deprecated keyword alias for ``model``
     ks: Any,
     method: str = "kmeans",
     scoring: str = "both",
@@ -511,10 +520,11 @@ def cluster_diagnostics(
 
     Parameters
     ----------
-    X : array-like
+    model : array-like
         Feature matrix. All samples are used for fitting and scoring.
         Polars DataFrames, pandas DataFrames, and 2D numpy arrays are
-        accepted.
+        accepted. (Family-canonical first-param name; the legacy keyword
+        ``X=`` is accepted as a deprecated alias.)
     ks : iterable of int
         Values of k (number of clusters) to evaluate.
     method : {"kmeans", "hierarchical"}, default "kmeans"
@@ -580,11 +590,20 @@ def cluster_diagnostics(
     """
     from ferrum._diagnostics.deps import require_sklearn
 
+    model = _resolve_first_param(
+        model,
+        X,
+        canonical_name="model",
+        alias_name="X",
+        func_name="cluster_diagnostics",
+    )
+    if model is _UNSET:
+        raise TypeError("cluster_diagnostics() missing required argument: 'model'")
     require_sklearn("cluster_diagnostics")
     _validate_choice("cluster_diagnostics", "method", method, {"kmeans", "hierarchical"})
     _validate_choice("cluster_diagnostics", "scoring", scoring, {"elbow", "silhouette", "both"})
     return _cluster_diagnostics_chart(
-        X,
+        model,
         ks=ks,
         method=method,
         scoring=scoring,
