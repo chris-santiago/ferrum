@@ -22,8 +22,8 @@ from ferrum._layer_transforms import (
     _transforms_to_json_list_named,
 )
 from ferrum._configure_mixin import ConfigureMixin
-from ferrum._marks_diagnostic import DiagnosticMarksMixin
-from ferrum._marks_statistical import StatisticalMarksMixin
+from ferrum.marks._chart_methods_diagnostic import DiagnosticMarksMixin
+from ferrum.marks._chart_methods_statistical import StatisticalMarksMixin
 from ferrum._render import _RenderMixin
 from ferrum._shorthand import parse_shorthand
 from ferrum._spec_build import SpecBuildMixin
