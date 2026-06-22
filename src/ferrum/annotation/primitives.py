@@ -16,12 +16,14 @@ All coordinate arguments accept:
 
 from __future__ import annotations
 
-import datetime as _dt
-import math
 from dataclasses import dataclass
 from typing import Any
 
-from ferrum.annotation.coords import CoordValue
+# ``_coord`` is the single source of truth for coordinate serialization; it
+# lives in ``coords.py`` alongside the wrapper types and coercion functions.
+# Re-imported (not re-defined) here so the ``to_dict()`` methods below and any
+# caller importing ``ferrum.annotation.primitives._coord`` keep working.
+from ferrum.annotation.coords import CoordValue, _coord  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -260,54 +262,6 @@ class AnnotationImage:
             "height": self.height,
             "anchor": self.anchor,
         }
-
-
-# ---------------------------------------------------------------------------
-# Internal helper
-# ---------------------------------------------------------------------------
-
-
-def _sanitize_coord(v: Any) -> Any:
-    """Replace NaN/Inf with 0.0 so JSON serialization doesn't crash."""
-    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-        return 0.0
-    return v
-
-
-def _coord(v: CoordValue) -> Any:
-    """Normalize a CoordValue to a renderer-serializable form.
-
-    Temporal values (``date``, ``datetime``, ISO strings) are converted to
-    epoch-milliseconds (UTC) so they align with the Rust renderer's temporal
-    scale — the same units that ``_coerce.py`` produces for temporal data
-    columns.  Numeric values and coordinate wrappers pass through unchanged.
-    ``OrdinalCategoryCoord`` is serialized as ``{"category": value}``; this
-    dict is resolved to a ``{"norm": ...}`` entry by ``_resolve_chart_config``
-    before the annotation list is sent to the Rust renderer.
-    """
-    from ferrum.annotation.coords import (
-        PixelCoord,
-        NormCoord,
-        OrdinalCategoryCoord,
-        temporal_coord_to_epoch_ms,
-    )
-
-    if isinstance(v, PixelCoord):
-        return {"px": _sanitize_coord(v.value)}
-    if isinstance(v, NormCoord):
-        return {"norm": _sanitize_coord(v.value)}
-    if isinstance(v, OrdinalCategoryCoord):
-        return {"category": v.value}
-    # datetime must be checked before date (datetime is a subclass of date).
-    if isinstance(v, (_dt.datetime, _dt.date)):
-        return temporal_coord_to_epoch_ms(v)
-    if isinstance(v, str):
-        # Plain strings reaching _coord() should already have been coerced to
-        # OrdinalCategoryCoord or epoch-ms by _coerce_coord().  Strings that
-        # arrive here are treated as ISO-8601 (legacy path / direct primitive
-        # construction); non-ISO strings raise so the caller is aware.
-        return temporal_coord_to_epoch_ms(v)
-    return _sanitize_coord(v)  # plain numeric — data-space
 
 
 # ---------------------------------------------------------------------------

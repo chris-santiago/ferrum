@@ -872,10 +872,21 @@ Annotations are lightweight overlays that don't participate in scale domain calc
 | `annotate_hline(y, *, label=None, label_position="right", stroke=None, stroke_dash=None)` | Horizontal reference line | |
 | `annotate_vline(x, *, label=None, stroke=None, stroke_dash=None)` | Vertical reference line | |
 | `annotate_rect(x1, x2, y1, y2, *, fill=None, opacity=0.1, label=None)` | Shaded rectangle region | |
-| `annotate_text(x, y, text, *, dx=0, dy=0, align="center", baseline="middle", font_size=None, color=None, angle=None)` | Free text annotation | |
+| `annotate_text(x, y, text, *, dx=0, dy=0, anchor=None, align=None, baseline="middle", font_size=None, color=None, angle=None)` | Free text annotation | |
 | `annotate_arrow(x1, y1, x2, y2, *, label=None, label_side="start", stroke=None)` | Arrow with optional label | |
 | `AUCLabel(*, position="end", format=".3f", prefix="AUC = ")` | Auto-placed AUC annotation on ROC curves | |
 | `OutlierLabel(*, threshold=3.0, field=None, label_field=None, max_labels=10)` | Label high-leverage or high-residual points | |
+
+> **2026-06-22 (COMP-06):** `annotate_text` now takes the canonical `anchor=`
+> keyword in the SVG vocabulary (`"start"`/`"middle"`/`"end"`), matching
+> [`annotation.text`][]. The former `align=` keyword (`"left"`/`"center"`/
+> `"right"`) is retained as a non-breaking **deprecated alias**, mapped via
+> `{left: start, center: middle, right: end}`. When neither is supplied the
+> resolved anchor is `"middle"` (the same render as the historical
+> `align="center"` default). Supplying **both** `anchor=` and `align=` raises
+> `ValueError`. This reconciles the annotation-pair vocabulary drift: the
+> `annotate_text` (mark-Chart) and `annotation.text` (dataclass) surfaces now
+> share one anchor vocabulary.
 
 ---
 

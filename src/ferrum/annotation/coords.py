@@ -21,8 +21,9 @@ Use the :func:`px` and :func:`norm` factory functions as readable shorthands.
 from __future__ import annotations
 
 import datetime as _dt
+import math
 from dataclasses import dataclass
-from typing import TypeAlias, Union
+from typing import Any, TypeAlias, Union
 
 
 @dataclass(frozen=True)
@@ -221,3 +222,115 @@ def norm(value: float) -> NormCoord:
     NormCoord(value=0.5)
     """
     return NormCoord(value)
+
+
+# ---------------------------------------------------------------------------
+# Coordinate coercion and serialization
+#
+# These functions are the single source of truth for turning a raw annotation
+# coordinate (numeric, temporal, ISO string, ordinal label, or wrapper) into
+# either a stored ``CoordValue`` (for primitive dataclass fields) or a
+# renderer-serializable form (for ``to_dict()``).  They were previously split
+# across ``annotations.py`` (``_coerce_coord``/``_coerce_coord_to_numeric``)
+# and ``annotation/primitives.py`` (``_coord``/``_sanitize_coord``), which
+# duplicated the raw-input classification.  The classification now lives once
+# in :func:`_classify_raw_coord`; both the coerce path and the serialize path
+# consume it.
+# ---------------------------------------------------------------------------
+
+
+def _classify_raw_coord(v: CoordValue) -> CoordValue:
+    """Resolve a raw annotation coordinate to a canonical stored form.
+
+    This is the shared classification both ``_coerce_coord`` (which stores the
+    result in a primitive) and ``_coord`` (which serializes it) build on:
+
+    - ``PixelCoord`` / ``NormCoord`` / ``OrdinalCategoryCoord`` pass through
+      unchanged — the caller already expressed precise intent.
+    - ``datetime.date`` / ``datetime.datetime`` → epoch-milliseconds float.
+    - String that IS an ISO-8601 date/datetime → epoch-milliseconds float.
+    - String that is NOT ISO-8601 → ``OrdinalCategoryCoord`` (resolved against
+      the chart's ordinal domain at render time).
+    - Numeric (float, int) → float (data-space value).
+
+    The returned value is always a type that :func:`_coord` knows how to
+    serialize.
+    """
+    if isinstance(v, (PixelCoord, NormCoord, OrdinalCategoryCoord)):
+        return v
+    # datetime must be checked before date (datetime is a subclass of date).
+    if isinstance(v, (_dt.datetime, _dt.date)):
+        return temporal_coord_to_epoch_ms(v)
+    if isinstance(v, str):
+        if _is_iso8601_string(v):
+            return temporal_coord_to_epoch_ms(v)
+        return OrdinalCategoryCoord(v)
+    return float(v)
+
+
+def _coerce_coord(v: CoordValue) -> CoordValue:
+    """Normalize an annotation positional coordinate for storage in a primitive.
+
+    Rules (see :func:`_classify_raw_coord`):
+    - ``PixelCoord`` / ``NormCoord`` / ``OrdinalCategoryCoord`` pass through.
+    - ``datetime.date`` / ``datetime.datetime`` → epoch-milliseconds float.
+    - ISO-8601 string → epoch-milliseconds float.
+    - Non-ISO-8601 string → ``OrdinalCategoryCoord``.
+    - Numeric → float.
+
+    The returned value is always a type that :func:`_coord` knows how to
+    serialize.
+    """
+    return _classify_raw_coord(v)
+
+
+def _coerce_coord_to_numeric(v: CoordValue) -> float:
+    """Convert a coordinate to a plain float for use in a polars DataFrame column.
+
+    ``PixelCoord`` and ``NormCoord`` do not have a meaningful data-space value,
+    so they are mapped to 0.0 as a placeholder (the primitive carries the real
+    coord; the DataFrame column for the mark_rule is only used as a shape hint
+    and is not used for rendering when the primitive is present).
+
+    ``OrdinalCategoryCoord`` is mapped to 0.0 similarly — its true pixel
+    position is resolved at render time from the ordinal domain.
+    """
+    if isinstance(v, (PixelCoord, NormCoord, OrdinalCategoryCoord)):
+        return 0.0
+    return float(v)  # already a float after _coerce_coord
+
+
+def _sanitize_coord(v: Any) -> Any:
+    """Replace NaN/Inf with 0.0 so JSON serialization doesn't crash."""
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return 0.0
+    return v
+
+
+def _coord(v: CoordValue) -> Any:
+    """Normalize a CoordValue to a renderer-serializable form.
+
+    Temporal values (``date``, ``datetime``, ISO strings) are converted to
+    epoch-milliseconds (UTC) so they align with the Rust renderer's temporal
+    scale — the same units that ``_coerce.py`` produces for temporal data
+    columns.  Numeric values and coordinate wrappers pass through unchanged.
+    ``OrdinalCategoryCoord`` is serialized as ``{"category": value}``; this
+    dict is resolved to a ``{"norm": ...}`` entry by ``_resolve_chart_config``
+    before the annotation list is sent to the Rust renderer.
+    """
+    if isinstance(v, PixelCoord):
+        return {"px": _sanitize_coord(v.value)}
+    if isinstance(v, NormCoord):
+        return {"norm": _sanitize_coord(v.value)}
+    if isinstance(v, OrdinalCategoryCoord):
+        return {"category": v.value}
+    # datetime must be checked before date (datetime is a subclass of date).
+    if isinstance(v, (_dt.datetime, _dt.date)):
+        return temporal_coord_to_epoch_ms(v)
+    if isinstance(v, str):
+        # Plain strings reaching _coord() should already have been coerced to
+        # OrdinalCategoryCoord or epoch-ms by _coerce_coord().  Strings that
+        # arrive here are treated as ISO-8601 (legacy path / direct primitive
+        # construction); non-ISO strings raise so the caller is aware.
+        return temporal_coord_to_epoch_ms(v)
+    return _sanitize_coord(v)  # plain numeric — data-space

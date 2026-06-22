@@ -7,18 +7,15 @@ for backward compatibility.
 
 from __future__ import annotations
 
-import datetime as _dt
+from dataclasses import dataclass
 from typing import Optional
 
 import polars as pl
 
 from ferrum.annotation.coords import (
     CoordValue,
-    OrdinalCategoryCoord,
-    PixelCoord,
-    NormCoord,
-    _is_iso8601_string,
-    temporal_coord_to_epoch_ms,
+    _coerce_coord,
+    _coerce_coord_to_numeric,
 )
 from ferrum.chart import Chart
 from ferrum._metric_labels import AUCLabel, APLabel, BrierLabel, OutlierLabel  # noqa: F401
@@ -29,48 +26,35 @@ from ferrum._metric_labels import AUCLabel, APLabel, BrierLabel, OutlierLabel  #
 _AnnotationCoord = CoordValue
 
 
-def _coerce_coord(v: CoordValue) -> CoordValue:
-    """Normalize an annotation positional coordinate for storage in a primitive.
+@dataclass(frozen=True)
+class _LineStyle:
+    """A single capture of line style feeding both the mark and the primitive.
 
-    Rules:
-    - ``PixelCoord`` / ``NormCoord`` / ``OrdinalCategoryCoord`` pass through
-      unchanged — the caller already expressed precise intent.
-    - ``datetime.date`` / ``datetime.datetime`` → epoch-milliseconds float.
-    - String that IS an ISO-8601 date/datetime → epoch-milliseconds float.
-    - String that is NOT ISO-8601 → ``OrdinalCategoryCoord`` (resolved against
-      the chart's ordinal domain at render time).
-    - Numeric (float, int) → float (data-space value).
-
-    The returned value is always a type that ``_coord()`` in
-    ``annotation/primitives.py`` knows how to serialize.
+    ``mark_kwargs`` carries only the style the user explicitly supplied (so the
+    mark falls back to its own defaults when omitted, exactly as before).
+    ``stroke`` / ``dash`` carry the same style with the primitive's documented
+    defaults applied.  Deriving both from one capture keeps the mark-Chart and
+    the annotation primitive from drifting.
     """
-    if isinstance(v, (PixelCoord, NormCoord, OrdinalCategoryCoord)):
-        return v
-    if isinstance(v, _dt.datetime):
-        return temporal_coord_to_epoch_ms(v)
-    if isinstance(v, _dt.date):
-        return temporal_coord_to_epoch_ms(v)
-    if isinstance(v, str):
-        if _is_iso8601_string(v):
-            return temporal_coord_to_epoch_ms(v)
-        return OrdinalCategoryCoord(v)
-    return float(v)
+
+    mark_kwargs: dict
+    stroke: str
+    dash: Optional[list]
 
 
-def _coerce_coord_to_numeric(v: CoordValue) -> float:
-    """Convert a coordinate to a plain float for use in a polars DataFrame column.
+def _capture_line_style(*, stroke: Optional[str], stroke_dash) -> _LineStyle:
+    """Capture the user-supplied reference-line style once.
 
-    ``PixelCoord`` and ``NormCoord`` do not have a meaningful data-space value,
-    so they are mapped to 0.0 as a placeholder (the primitive carries the real
-    coord; the DataFrame column for the mark_rule is only used as a shape hint
-    and is not used for rendering when the primitive is present).
-
-    ``OrdinalCategoryCoord`` is mapped to 0.0 similarly — its true pixel
-    position is resolved at render time from the ordinal domain.
+    The mark receives ``stroke``/``stroke_dash`` only when supplied; the
+    primitive receives the defaulted ``stroke`` (``"#333"``) and the raw
+    ``stroke_dash`` as its ``dash``.
     """
-    if isinstance(v, (PixelCoord, NormCoord, OrdinalCategoryCoord)):
-        return 0.0
-    return float(v)  # already a float after _coerce_coord
+    mark_kwargs: dict = {}
+    if stroke is not None:
+        mark_kwargs["stroke"] = stroke
+    if stroke_dash is not None:
+        mark_kwargs["stroke_dash"] = stroke_dash
+    return _LineStyle(mark_kwargs=mark_kwargs, stroke=stroke or "#333", dash=stroke_dash)
 
 
 def _attach_annotation_primitive(chart: Chart, primitive: object) -> Chart:
@@ -123,21 +107,20 @@ def annotate_hline(
     y_coord = _coerce_coord(y)
     y_num = _coerce_coord_to_numeric(y_coord)
     df = pl.DataFrame({"_y": [y_num]})
-    kwargs: dict = {}
-    if stroke is not None:
-        kwargs["stroke"] = stroke
-    if stroke_dash is not None:
-        kwargs["stroke_dash"] = stroke_dash
-    chart = Chart(df).mark_rule(**kwargs).encode(y="_y")
+    # Single style capture: collect only the explicitly-supplied style once,
+    # then derive the mark kwargs (only-if-supplied) and the primitive fields
+    # (defaulted) from it so the two representations cannot drift.
+    style = _capture_line_style(stroke=stroke, stroke_dash=stroke_dash)
+    chart = Chart(df).mark_rule(**style.mark_kwargs).encode(y="_y")
     # Attach annotation primitive: horizontal line spanning the full x-axis
     prim = AnnotationLine(
         x1=norm(0),
         y1=y_coord,
         x2=norm(1),
         y2=y_coord,
-        stroke=stroke or "#333",
+        stroke=style.stroke,
         stroke_width=1,
-        dash=stroke_dash,
+        dash=style.dash,
     )
     return _attach_annotation_primitive(chart, prim)
 
@@ -185,21 +168,17 @@ def annotate_vline(
     x_coord = _coerce_coord(x)
     x_num = _coerce_coord_to_numeric(x_coord)
     df = pl.DataFrame({"_x": [x_num]})
-    kwargs: dict = {}
-    if stroke is not None:
-        kwargs["stroke"] = stroke
-    if stroke_dash is not None:
-        kwargs["stroke_dash"] = stroke_dash
-    chart = Chart(df).mark_rule(**kwargs).encode(x="_x")
+    style = _capture_line_style(stroke=stroke, stroke_dash=stroke_dash)
+    chart = Chart(df).mark_rule(**style.mark_kwargs).encode(x="_x")
     # Attach annotation primitive: vertical line spanning the full y-axis
     prim = AnnotationLine(
         x1=x_coord,
         y1=norm(0),
         x2=x_coord,
         y2=norm(1),
-        stroke=stroke or "#333",
+        stroke=style.stroke,
         stroke_width=1,
-        dash=stroke_dash,
+        dash=style.dash,
     )
     return _attach_annotation_primitive(chart, prim)
 
@@ -256,10 +235,11 @@ def annotate_rect(
     x1_num, x2_num = _coerce_coord_to_numeric(x1_coord), _coerce_coord_to_numeric(x2_coord)
     y1_num, y2_num = _coerce_coord_to_numeric(y1_coord), _coerce_coord_to_numeric(y2_coord)
     df = pl.DataFrame({"_x1": [x1_num], "_x2": [x2_num], "_y1": [y1_num], "_y2": [y2_num]})
-    kwargs: dict = {"opacity": opacity}
+    # Single style capture: mark gets fill only-if-supplied; primitive defaults.
+    mark_kwargs: dict = {"opacity": opacity}
     if fill is not None:
-        kwargs["fill"] = fill
-    chart = Chart(df).mark_rect(**kwargs).encode(x="_x1", y="_y1", x2="_x2", y2="_y2")
+        mark_kwargs["fill"] = fill
+    chart = Chart(df).mark_rect(**mark_kwargs).encode(x="_x1", y="_y1", x2="_x2", y2="_y2")
     # Attach annotation primitive
     prim = AnnotationRect(
         x1=x1_coord,
@@ -274,6 +254,38 @@ def annotate_rect(
     return _attach_annotation_primitive(chart, prim)
 
 
+# Horizontal-alignment vocabularies.  The mark_text mark speaks the
+# ``left/center/right`` ``align`` vocabulary; the annotation primitive (and
+# ``annotation.text``) speak the SVG ``start/middle/end`` ``anchor`` vocabulary.
+# ``annotate_text`` accepts either keyword and resolves to both.
+_ALIGN_TO_ANCHOR = {"left": "start", "center": "middle", "right": "end"}
+_ANCHOR_TO_ALIGN = {"start": "left", "middle": "center", "end": "right"}
+
+
+def _resolve_text_alignment(*, anchor: Optional[str], align: Optional[str]) -> tuple[str, str]:
+    """Resolve the ``anchor``/``align`` pair to ``(mark_align, primitive_anchor)``.
+
+    ``anchor`` is the canonical SVG vocabulary (``start``/``middle``/``end``,
+    matching ``annotation.text``); ``align`` is the back-compat alias
+    (``left``/``center``/``right``).  Exactly one vocabulary drives the result:
+
+    - Neither supplied → ``("center", "middle")`` (the historical default).
+    - ``align`` only → mark gets ``align``; primitive gets ``_ALIGN_TO_ANCHOR``.
+    - ``anchor`` only → mark gets ``_ANCHOR_TO_ALIGN``; primitive gets ``anchor``.
+    - Both supplied → ``ValueError`` (the canonical and the alias conflict).
+    """
+    if anchor is not None and align is not None:
+        raise ValueError(
+            "annotate_text() received both 'anchor' and 'align'; pass only one "
+            "('anchor' is the canonical SVG vocabulary, 'align' is the alias)."
+        )
+    if anchor is not None:
+        return _ANCHOR_TO_ALIGN.get(anchor, anchor), anchor
+    if align is not None:
+        return align, _ALIGN_TO_ANCHOR.get(align, align)
+    return "center", "middle"
+
+
 def annotate_text(
     x: _AnnotationCoord,
     y: _AnnotationCoord,
@@ -281,7 +293,8 @@ def annotate_text(
     *,
     dx: float = 0,
     dy: float = 0,
-    align: str = "center",
+    anchor: Optional[str] = None,
+    align: Optional[str] = None,
     baseline: str = "middle",
     font_size: Optional[float] = None,
     color: Optional[str] = None,
@@ -307,9 +320,16 @@ def annotate_text(
         Horizontal pixel offset from ``(x, y)``.
     dy : float, default 0
         Vertical pixel offset from ``(x, y)``.
-    align : str, default "center"
-        Horizontal text alignment (SVG ``text-anchor``): ``"left"``,
-        ``"center"``, or ``"right"``.
+    anchor : str, optional
+        Horizontal text anchor in the SVG vocabulary (matching
+        :func:`ferrum.annotation.text`): ``"start"``, ``"middle"``, or
+        ``"end"``.  This is the canonical keyword.  When neither ``anchor`` nor
+        ``align`` is supplied the anchor defaults to ``"middle"`` (centered).
+    align : str, optional
+        Deprecated alias for ``anchor`` in the ``"left"``/``"center"``/
+        ``"right"`` vocabulary.  Mapped to ``anchor`` via
+        ``{left: start, center: middle, right: end}``.  Supplying both
+        ``anchor`` and ``align`` raises ``ValueError``.
     baseline : str, default "middle"
         Vertical text baseline: ``"top"``, ``"middle"``, or ``"bottom"``.
     font_size : float, optional
@@ -333,10 +353,12 @@ def annotate_text(
     """
     from ferrum.annotation.primitives import AnnotationText
 
+    mark_align, prim_anchor = _resolve_text_alignment(anchor=anchor, align=align)
+
     x_coord, y_coord = _coerce_coord(x), _coerce_coord(y)
     x_num, y_num = _coerce_coord_to_numeric(x_coord), _coerce_coord_to_numeric(y_coord)
     df = pl.DataFrame({"_x": [x_num], "_y": [y_num], "_text": [text]})
-    kwargs: dict = {"dx": dx, "dy": dy, "align": align, "baseline": baseline}
+    kwargs: dict = {"dx": dx, "dy": dy, "align": mark_align, "baseline": baseline}
     if font_size is not None:
         kwargs["font_size"] = font_size
     if color is not None:
@@ -344,15 +366,13 @@ def annotate_text(
     if angle is not None:
         kwargs["angle"] = angle
     chart = Chart(df).mark_text(**kwargs).encode(x="_x", y="_y", text="_text")
-    # Map align to annotation anchor
-    anchor_map = {"left": "start", "center": "middle", "right": "end"}
     prim = AnnotationText(
         x=x_coord,
         y=y_coord,
         text=text,
         font_size=font_size or 12,
         color=color or "#333",
-        anchor=anchor_map.get(align, align),
+        anchor=prim_anchor,
         baseline=baseline,
         angle=angle or 0,
         dx=dx,
