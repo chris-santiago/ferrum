@@ -5,53 +5,6 @@ from __future__ import annotations
 from ferrum.encoding.base import ChannelBase
 
 
-_VALID_STACK = frozenset(("zero", "normalize", "center", "false", "null", "none"))
-
-
-def _normalize_stack(value: object, channel: str) -> str:
-    """Normalize a ``stack=`` kwarg value to a string for Rust's ``Option<String>``.
-
-    Rust's ``EncodingSpec.stack`` is ``Option<String>``; passing a Python bool
-    crashes PyO3 with ``TypeError: argument 'stack': 'bool' object is not an
-    instance of 'str'``.  This helper converts booleans and validates strings.
-
-    Parameters
-    ----------
-    value:
-        The raw ``stack=`` argument supplied by the caller.
-    channel:
-        Channel name used in ``ValueError`` messages.
-
-    Returns
-    -------
-    str
-        ``"zero"`` for ``True``; ``"false"`` for ``False``; the original string
-        when it is a recognised stack strategy.
-
-    Raises
-    ------
-    ValueError
-        When *value* is a string that is not a recognised stack strategy.
-    """
-    if value is True:
-        return "zero"
-    if value is False:
-        return "false"
-    if not isinstance(value, str):
-        raise TypeError(
-            f"{channel}(stack={value!r}): stack= must be a bool or one of "
-            "'zero', 'normalize', 'center', 'false', 'null', 'none'; "
-            f"got {type(value).__name__!r}"
-        )
-    if value.lower() not in _VALID_STACK:
-        raise ValueError(
-            f"{channel}(stack={value!r}): must be one of "
-            "'zero', 'normalize', 'center', or a falsy value ('false', 'null', 'none'); "
-            f"got {value!r}"
-        )
-    return value
-
-
 _RENDERED_HONORED = frozenset(
     [
         "type",
@@ -113,12 +66,7 @@ class X(ChannelBase):
 
     _channel_name = "x"
     _honored_kwargs = _RENDERED_HONORED
-
-    def _validate(self) -> None:
-        super()._validate()
-        stack = self._kwargs.get("stack")
-        if stack is not None:
-            self._kwargs["stack"] = _normalize_stack(stack, "X")
+    _stack_kwarg = True
 
 
 class Y(ChannelBase):
@@ -157,12 +105,7 @@ class Y(ChannelBase):
 
     _channel_name = "y"
     _honored_kwargs = _RENDERED_HONORED
-
-    def _validate(self) -> None:
-        super()._validate()
-        stack = self._kwargs.get("stack")
-        if stack is not None:
-            self._kwargs["stack"] = _normalize_stack(stack, "Y")
+    _stack_kwarg = True
 
 
 class X2(ChannelBase):
@@ -379,12 +322,7 @@ class Theta(ChannelBase):
     _channel_name = "theta"
 
     _honored_kwargs = frozenset(["type", "stack"])
-
-    def _validate(self) -> None:
-        super()._validate()
-        stack = self._kwargs.get("stack")
-        if stack is not None:
-            self._kwargs["stack"] = _normalize_stack(stack, "Theta")
+    _stack_kwarg = True
 
 
 class Radius(ChannelBase):
@@ -435,12 +373,7 @@ class Radius(ChannelBase):
     _channel_name = "radius"
 
     _honored_kwargs = frozenset(["type", "stack"])
-
-    def _validate(self) -> None:
-        super()._validate()
-        stack = self._kwargs.get("stack")
-        if stack is not None:
-            self._kwargs["stack"] = _normalize_stack(stack, "Radius")
+    _stack_kwarg = True
 
 
 class Theta2(ChannelBase):

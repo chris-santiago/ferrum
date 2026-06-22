@@ -9,6 +9,13 @@ from ferrum._warn import warn_once
 from ferrum.axis import _normalize_axis
 from ferrum.legend import _normalize_legend
 from ferrum.encoding._scale import _scale_to_dict
+from ferrum.position import STACK_OFFSETS, _validate_stack_offset
+
+# Falsy stack spellings accepted by the encoding ``stack=`` path only.  These
+# map to "no stacking" (Rust's ``Option<String>`` parser returns ``None``).
+# ``transform_stack`` and ``position.Stack`` accept ONLY the real offsets in
+# ``STACK_OFFSETS``; the encoding path layers these spellings on top.
+_STACK_FALSY = frozenset({"false", "null", "none"})
 
 
 @dataclass(frozen=True)
@@ -81,6 +88,10 @@ class ChannelBase:
 
     _channel_name: ClassVar[str] = "_unknown_"
     _honored_kwargs: ClassVar[frozenset[str]] = frozenset(["type", "condition"])
+    # Stacking channels (X, Y, Theta, Radius) set this True so the base
+    # ``_validate`` normalizes their ``stack=`` kwarg.  Non-stacking channels
+    # leave it False and the normalization is skipped.
+    _stack_kwarg: ClassVar[bool] = False
 
     def __init__(self, field: Any = None, **kwargs: Any) -> None:
         # Phase 9: accept _RepeatPlaceholder as a sentinel value alongside str.
@@ -141,6 +152,58 @@ class ChannelBase:
                 f"{self.__class__.__name__}(type={type_!r}): "
                 f"expected one of Q, N, O, T, quantitative, nominal, ordinal, temporal"
             )
+        if self._stack_kwarg:
+            stack = self._kwargs.get("stack")
+            if stack is not None:
+                self._kwargs["stack"] = self._normalize_stack(stack)
+
+    def _normalize_stack(self, value: Any) -> str:
+        """Normalize a ``stack=`` kwarg value to a string for Rust's ``Option<String>``.
+
+        Rust's ``EncodingSpec.stack`` is ``Option<String>``; passing a Python
+        bool crashes PyO3 with ``TypeError: argument 'stack': 'bool' object is
+        not an instance of 'str'``.  This helper converts booleans, accepts the
+        falsy spellings (``"false"``/``"null"``/``"none"`` → no stacking), and
+        validates real offsets against the single canonical ``STACK_OFFSETS``
+        set via :func:`~ferrum.position._validate_stack_offset`.
+
+        Parameters
+        ----------
+        value :
+            The raw ``stack=`` argument supplied by the caller.
+
+        Returns
+        -------
+        str
+            ``"zero"`` for ``True``; ``"false"`` for ``False``; the original
+            string when it is a recognized stack strategy or falsy spelling.
+
+        Raises
+        ------
+        TypeError
+            When *value* is neither a bool nor a string.
+        ValueError
+            When *value* is a string that is not a recognized stack strategy.
+        """
+        channel = self.__class__.__name__
+        if value is True:
+            return "zero"
+        if value is False:
+            return "false"
+        if not isinstance(value, str):
+            raise TypeError(
+                f"{channel}(stack={value!r}): stack= must be a bool or one of "
+                f"{sorted(STACK_OFFSETS)} or a falsy value {sorted(_STACK_FALSY)}; "
+                f"got {type(value).__name__!r}"
+            )
+        lowered = value.lower()
+        if lowered in _STACK_FALSY:
+            return value
+        if lowered not in STACK_OFFSETS:
+            # Surface the user's original spelling, but route through the single
+            # canonical validator so all three entry points fail identically.
+            _validate_stack_offset(value, where=channel)
+        return value
 
     def to_encoding_spec_dict(self) -> dict:
         """Return kwargs for the Rust EncodingSpec constructor / serde JSON."""

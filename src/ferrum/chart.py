@@ -25,16 +25,10 @@ from ferrum._spec_view import _SpecView
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
 from ferrum.marks.base import MarkBase
 from ferrum.marks.statistical import _build_prior_layer
+from ferrum.position import _STACKABLE_MARKS
 
 
 _PRIMITIVE_MARKS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
-
-# Marks whose Rust renderers consume the ``__stack_y_base__`` column produced
-# by ``apply_stack`` (see ``crates/ferrum-core/src/render/marks/bar.rs`` and
-# ``area.rs``).  Every other mark type silently drops stacked data, so when
-# ``stack=`` is set on a non-stackable mark we warn and strip it before
-# forwarding to the Rust layer.
-_STACKABLE_MARKS = frozenset(["bar", "area"])
 
 
 def _strip_unstackable(d: dict, mark: str | None) -> None:

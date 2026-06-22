@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Sequence
 
+from ferrum.position import _validate_stack_offset
+
 if TYPE_CHECKING:
     from ferrum.parameter import Parameter
 
@@ -666,9 +668,6 @@ def transform_top_k(
     return {"type": "top_k", "n": n, "field": field, "op": op, "sort": sort}
 
 
-_VALID_STACK_OFFSETS: frozenset[str] = frozenset(["zero", "normalize", "center"])
-
-
 def transform_stack(
     field: str,
     *,
@@ -711,11 +710,7 @@ def transform_stack(
     >>> t["as_"]
     ['y0', 'y1']
     """
-    if offset not in _VALID_STACK_OFFSETS:
-        raise ValueError(
-            f"transform_stack: offset={offset!r} is not valid. "
-            f"Valid values: {sorted(_VALID_STACK_OFFSETS)}"
-        )
+    _validate_stack_offset(offset, where="transform_stack")
     spec: dict = {
         "type": "data_stack",
         "field": field,

@@ -6,6 +6,35 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# ---- Mark stack capability (two distinct questions; see CHART-08) -------------
+#
+# These two frozensets both answer "can this mark stack?", but they answer
+# *different* questions and are intentionally NOT the same set:
+#
+#   _STACKABLE_MARKS  — which marks' Rust renderers *consume* the
+#       ``__stack_y_base__`` column emitted by ``apply_stack``.  Drives
+#       ``chart.py::_strip_unstackable``: a ``stack=`` declared on any other
+#       mark is silently dropped by the renderer, so we warn + strip it.  Only
+#       bar/area draw base→top from ``__stack_y_base__``.
+#
+#   _STACK_ELIGIBLE   — which marks accept a ``position=fm.Stack()`` adjustment.
+#       Drives ``validate_position_eligibility``.  Broader than the consumers
+#       above because annotation-style marks (text/point/rule/tick) ride on a
+#       Stack to *label* segments (Schwabish SB-followup, ``anchor="mid"``),
+#       and the composite histogram/density desugar to bar/area underneath.
+#
+# A maintainer changing which marks stack must consider BOTH sets and decide
+# which question the change answers.  They overlap on bar/area but are not one
+# concept split across files.
+
+# Marks whose Rust renderers consume the ``__stack_y_base__`` column produced
+# by ``apply_stack`` (see ``crates/ferrum-core/src/render/marks/bar.rs`` and
+# ``area.rs``).  Every other mark type silently drops stacked data, so when
+# ``stack=`` is set on a non-stackable mark the chart layer warns and strips it
+# before forwarding to Rust (``chart.py::_strip_unstackable``).
+_STACKABLE_MARKS = frozenset(["bar", "area"])
+
+
 # ---- Eligibility matrix ------------------------------------------------------
 
 _DODGE_ELIGIBLE = frozenset(
@@ -26,6 +55,8 @@ _DODGE_ELIGIBLE = frozenset(
     ]
 )
 _JITTER_ELIGIBLE = frozenset(["point", "swarm", "tick"])
+# Marks that accept a ``position=fm.Stack()`` adjustment (see CHART-08 note
+# above for how this differs from ``_STACKABLE_MARKS``).
 _STACK_ELIGIBLE = frozenset(
     [
         # Rect-style marks: y maps to segment TOP (renderer draws base→top).
@@ -50,8 +81,41 @@ _STACK_ELIGIBLE = frozenset(
 # ---- Valid-value sets --------------------------------------------------------
 
 _VALID_JITTER_AXES = {"x", "y", "both"}
-_VALID_STACK_OFFSETS = {"zero", "normalize", "center"}
 _VALID_STACK_ANCHORS = {"top", "mid"}
+
+# Canonical set of real stack-offset strategies.  Single source of truth for
+# every stack-offset validator (Stack, transform_stack, and the encoding
+# ``stack=`` path, which layers bool/falsy-string normalization on top).
+STACK_OFFSETS = frozenset({"zero", "normalize", "center"})
+
+
+def _validate_stack_offset(value: str, *, where: str) -> None:
+    """Raise ``ValueError`` if *value* is not a real stack offset.
+
+    Single canonical validator for the three stack-offset entry points
+    (``Stack``, ``transform_stack``, and the encoding ``stack=`` path). The
+    error text is identical across all three callers apart from the *where*
+    prefix that names the failing site.
+
+    Parameters
+    ----------
+    value : str
+        The candidate offset (already known to be one of the real-offset
+        spellings or an unrecognized string — bool/falsy normalization happens
+        before this call on the encoding path).
+    where : str
+        Caller label used as the message prefix (e.g. ``"Stack"``,
+        ``"transform_stack"``, or a channel name like ``"Y"``).
+
+    Raises
+    ------
+    ValueError
+        When *value* is not one of :data:`STACK_OFFSETS`.
+    """
+    if value not in STACK_OFFSETS:
+        raise ValueError(
+            f"{where}: stack offset {value!r} is not valid; expected one of {sorted(STACK_OFFSETS)}"
+        )
 
 
 # ---- Value classes -----------------------------------------------------------
@@ -228,10 +292,7 @@ class Stack:
     anchor: str = "top"
 
     def __post_init__(self) -> None:
-        if self.offset not in _VALID_STACK_OFFSETS:
-            raise ValueError(
-                f"Stack: offset must be 'zero'|'normalize'|'center'; got '{self.offset}'"
-            )
+        _validate_stack_offset(self.offset, where="Stack")
         if self.anchor not in _VALID_STACK_ANCHORS:
             raise ValueError(f"Stack: anchor must be 'top'|'mid'; got '{self.anchor}'")
 
