@@ -274,12 +274,9 @@ fn parse_anchor(s: &str) -> TextAnchor {
 }
 
 fn parse_baseline(s: &str) -> TextBaseline {
-    match s {
-        "top" | "hanging" | "text-before-edge" => TextBaseline::Top,
-        "bottom" | "ideographic" => TextBaseline::Bottom,
-        "alphabetic" => TextBaseline::Alphabetic,
-        _ => TextBaseline::Middle,
-    }
+    // Route through the canonical parser; unrecognized strings default to Middle
+    // (the annotation-layer convention for baseline-less text placement).
+    super::draw::parse_text_baseline(s).unwrap_or(TextBaseline::Middle)
 }
 
 // ── Build annotations ───────────────────────────────────────────────────────

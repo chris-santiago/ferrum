@@ -578,6 +578,34 @@ pub(crate) fn resolve_effective_stroke(
     }
 }
 
+/// Canonical parser: text-baseline string → `TextBaseline` enum.
+///
+/// Accepts the full union vocabulary of SVG/CSS `dominant-baseline` values and
+/// the shorthand aliases used at Python-layer call sites. Returns `None` for
+/// unrecognized strings so each call site can apply its own fallback.
+///
+/// Recognized spellings and their canonical enum values:
+/// - `"top"` / `"hanging"` / `"text-before-edge"` → `Top`
+/// - `"middle"` / `"central"` → `Middle`
+/// - `"bottom"` / `"text-after-edge"` / `"ideographic"` → `Bottom`
+/// - `"alphabetic"` → `Alphabetic`
+///
+/// `svg_walk.rs` renders the enum variants as:
+/// - `Top` → `dominant-baseline="hanging"` (valid SVG)
+/// - `Middle` → `dominant-baseline="central"` (valid SVG)
+/// - `Bottom` → `dominant-baseline="text-after-edge"` (valid SVG)
+/// - `Alphabetic` → attribute omitted (SVG default)
+/// - `Custom(_)` → attribute emitted verbatim
+pub(crate) fn parse_text_baseline(s: &str) -> Option<ferrum_scene::TextBaseline> {
+    match s {
+        "top" | "hanging" | "text-before-edge" => Some(ferrum_scene::TextBaseline::Top),
+        "middle" | "central" => Some(ferrum_scene::TextBaseline::Middle),
+        "bottom" | "text-after-edge" | "ideographic" => Some(ferrum_scene::TextBaseline::Bottom),
+        "alphabetic" => Some(ferrum_scene::TextBaseline::Alphabetic),
+        _ => None,
+    }
+}
+
 pub fn to_scene_text_style(
     color: Color,
     font_size: f64,
@@ -601,10 +629,8 @@ pub fn to_scene_text_style(
             crate::layout::TextAnchor::End => ferrum_scene::TextAnchor::End,
         },
         baseline: match dominant_baseline {
-            Some("hanging") | Some("text-before-edge") => ferrum_scene::TextBaseline::Top,
-            Some("central") | Some("middle") => ferrum_scene::TextBaseline::Middle,
-            Some("ideographic") | Some("text-after-edge") => ferrum_scene::TextBaseline::Bottom,
-            Some(other) => ferrum_scene::TextBaseline::Custom(other.to_string()),
+            Some(s) => parse_text_baseline(s)
+                .unwrap_or_else(|| ferrum_scene::TextBaseline::Custom(s.to_string())),
             None => ferrum_scene::TextBaseline::Alphabetic,
         },
         angle,
@@ -1085,6 +1111,104 @@ mod tests {
             !formatted.contains("0000"),
             "default tooltip format must trim trailing zeros; got: '{formatted}'"
         );
+    }
+
+    // --- RSUP-04: parse_text_baseline + to_scene_text_style corrected SVG output ---
+
+    /// RSUP-04 regression: baseline="bottom" must resolve to TextBaseline::Bottom,
+    /// which svg_walk renders as dominant-baseline="text-after-edge" (valid SVG).
+    /// The old verbatim-passthrough code would have produced Custom("bottom"),
+    /// rendering as the invalid attribute dominant-baseline="bottom".
+    #[test]
+    fn parse_text_baseline_bottom_resolves_to_bottom_not_custom() {
+        let result = parse_text_baseline("bottom");
+        assert_eq!(result, Some(ferrum_scene::TextBaseline::Bottom),
+            "\"bottom\" must resolve to TextBaseline::Bottom (SVG: text-after-edge), not Custom(\"bottom\")");
+    }
+
+    /// RSUP-04 regression: baseline="top" must resolve to TextBaseline::Top,
+    /// which svg_walk renders as dominant-baseline="hanging" (valid SVG).
+    /// The old verbatim-passthrough code would have produced Custom("top"),
+    /// rendering as the invalid attribute dominant-baseline="top".
+    #[test]
+    fn parse_text_baseline_top_resolves_to_top_not_custom() {
+        let result = parse_text_baseline("top");
+        assert_eq!(result, Some(ferrum_scene::TextBaseline::Top),
+            "\"top\" must resolve to TextBaseline::Top (SVG: hanging), not Custom(\"top\")");
+    }
+
+    /// RSUP-04 regression: baseline="alphabetic" must resolve to TextBaseline::Alphabetic,
+    /// which svg_walk renders as omitting the attribute (SVG default, correct behavior).
+    /// The old verbatim-passthrough code would have produced Custom("alphabetic"),
+    /// rendering as the redundant but technically valid attribute dominant-baseline="alphabetic".
+    #[test]
+    fn parse_text_baseline_alphabetic_resolves_correctly() {
+        let result = parse_text_baseline("alphabetic");
+        assert_eq!(result, Some(ferrum_scene::TextBaseline::Alphabetic),
+            "\"alphabetic\" must resolve to TextBaseline::Alphabetic (attribute omitted in SVG)");
+    }
+
+    /// Full union vocabulary: every known alias must resolve to the correct variant.
+    #[test]
+    fn parse_text_baseline_full_vocabulary() {
+        use ferrum_scene::TextBaseline::*;
+        // Top aliases
+        assert_eq!(parse_text_baseline("top"),              Some(Top));
+        assert_eq!(parse_text_baseline("hanging"),          Some(Top));
+        assert_eq!(parse_text_baseline("text-before-edge"), Some(Top));
+        // Middle aliases
+        assert_eq!(parse_text_baseline("middle"),           Some(Middle));
+        assert_eq!(parse_text_baseline("central"),          Some(Middle));
+        // Bottom aliases
+        assert_eq!(parse_text_baseline("bottom"),           Some(Bottom));
+        assert_eq!(parse_text_baseline("text-after-edge"),  Some(Bottom));
+        assert_eq!(parse_text_baseline("ideographic"),      Some(Bottom));
+        // Alphabetic
+        assert_eq!(parse_text_baseline("alphabetic"),       Some(Alphabetic));
+        // Unrecognized → None
+        assert_eq!(parse_text_baseline("auto"),             None);
+        assert_eq!(parse_text_baseline(""),                 None);
+        assert_eq!(parse_text_baseline("Top"),              None, "case-sensitive");
+    }
+
+    /// to_scene_text_style with baseline="bottom" must produce TextBaseline::Bottom
+    /// in the returned TextStyle. This pins the corrected behavior end-to-end
+    /// (MarkStyle → to_scene_text_style → TextBaseline → svg_walk → DOM attribute).
+    #[test]
+    fn to_scene_text_style_bottom_emits_text_after_edge_baseline() {
+        use crate::layout::TextAnchor;
+        use crate::render::color::from_rgb;
+        let style = to_scene_text_style(
+            from_rgb(0, 0, 0),
+            12.0,
+            TextAnchor::Middle,
+            0.0,
+            "Inter",
+            None,
+            Some("bottom"),
+            1.0,
+        );
+        assert_eq!(style.baseline, ferrum_scene::TextBaseline::Bottom,
+            "baseline=\"bottom\" must produce TextBaseline::Bottom (svg_walk: dominant-baseline=\"text-after-edge\")");
+    }
+
+    /// to_scene_text_style with baseline="top" must produce TextBaseline::Top.
+    #[test]
+    fn to_scene_text_style_top_emits_hanging_baseline() {
+        use crate::layout::TextAnchor;
+        use crate::render::color::from_rgb;
+        let style = to_scene_text_style(
+            from_rgb(0, 0, 0),
+            12.0,
+            TextAnchor::Middle,
+            0.0,
+            "Inter",
+            None,
+            Some("top"),
+            1.0,
+        );
+        assert_eq!(style.baseline, ferrum_scene::TextBaseline::Top,
+            "baseline=\"top\" must produce TextBaseline::Top (svg_walk: dominant-baseline=\"hanging\")");
     }
 
     // --- RSUP-07: parse_stroke_cap / parse_stroke_join string→enum contracts ---
