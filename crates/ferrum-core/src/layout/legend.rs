@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::geometry::Rect;
+use super::geometry::{Axis1D, Rect};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -874,12 +874,16 @@ pub fn layout_colorbar(
         }
     });
 
-    // Distribute tick y-positions linearly from bar_bottom (= min value)
-    // to bar_top (= max value). Cartesian convention: high data → top.
+    // Distribute tick y-positions linearly from bar_bottom (= min value, t=0) to
+    // bar_top (= max value, t=1). Cartesian convention: high data → top, so the
+    // interval is inverted (`lo = bar_bottom > hi = bar_top`) and `lerp(t)` walks
+    // bar_bottom → bar_top. Byte-identical to the prior `bar_bottom - t*(bar_bottom
+    // - bar_top)` (negation/subtraction are exact in IEEE754); see LAYOUT-850.
+    let bar_axis = Axis1D { lo: bar_bottom, hi: bar_top };
     let n_ticks = tick_labels.len().max(1);
     let ticks: Vec<ColorbarTick> = tick_labels.iter().enumerate().map(|(i, label)| {
         let t = if n_ticks <= 1 { 0.0 } else { i as f64 / (n_ticks - 1) as f64 };
-        let y = bar_bottom - t * (bar_bottom - bar_top);
+        let y = bar_axis.lerp(t);
         ColorbarTick { label: label.clone(), y }
     }).collect();
 

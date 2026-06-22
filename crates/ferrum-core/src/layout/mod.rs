@@ -718,16 +718,16 @@ pub fn compute_layout(
     };
 
     // L-3: use per-axis title_font_size/title_padding overrides for gutter
-    // reservation, matching the y-axis pattern in compute_y_title_width.
-    // Previously used theme.title_font_size unconditionally, which caused the
-    // gutter to be undersized when axes.x.title_font_size was larger than theme.
-    let x_title_gutter = if axes.x.title.is_some() {
-        let effective_title_font_size = axes.x.overrides.title_font_size.unwrap_or(theme.typography.title_font_size);
-        let effective_title_padding = axes.x.overrides.title_padding.unwrap_or(theme.padding.axis_title_padding);
-        metrics.line_height(effective_title_font_size) + effective_title_padding
-    } else {
-        0.0
-    };
+    // reservation, via the `compute_x_title_width` sibling of `compute_y_title_width`
+    // (cohesion finding LAYOUT-855 — was inlined here "mirroring the y-axis pattern"
+    // to fix an undersizing bug, leaving the axis family asymmetric). Both axes now
+    // reserve the gutter through a named helper, so the formula has a single home.
+    let x_title_gutter = axis::compute_x_title_width(
+        &axes.x,
+        theme.typography.title_font_size,
+        theme.padding.axis_title_padding,
+        metrics,
+    );
 
     // Reserved band totals per axis (label band + title gutter). The orphan
     // `min_band`/`max_band` overrides (B5) clamp each total to `[min, max]`

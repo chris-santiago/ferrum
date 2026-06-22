@@ -31,6 +31,44 @@ pub(crate) fn inset_pixel_range(pr: (f64, f64), padding_frac: f64) -> (f64, f64)
     (pr.0 + sign * pad, pr.1 - sign * pad)
 }
 
+/// A 1-D pixel interval `[lo, hi]` (orientation-bearing: `lo`/`hi` are the *start*
+/// and *end* pixels in placement order, so an inverted range — e.g. the y-axis
+/// `(bottom, top)` or the colorbar's `bar_bottom → bar_top` — is expressed by
+/// passing the start as `lo` and the end as `hi`, not by normalizing). It is the
+/// single placement core for the layout's "map a fraction / distribute N items
+/// over a 1-D extent" arithmetic, replacing the hand-rolled `lo + t*span` lerps
+/// that were copied across the two tick projectors, the uniform-slot fallbacks,
+/// and the colorbar tick distribution (cohesion finding LAYOUT-850).
+///
+/// `lerp` is the only arithmetic primitive (`lo + t*(hi - lo)`); `uniform_center`
+/// takes a *precomputed* slot size rather than recomputing `(hi - lo)/n` so it is
+/// byte-identical to the original `origin + (i + 0.5)*slot` call sites (a
+/// recomputed span is not bit-for-bit equal to a separately-computed slot).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Axis1D {
+    pub lo: f64,
+    pub hi: f64,
+}
+
+impl Axis1D {
+    /// Linear interpolation: `lo + t*(hi - lo)`. With `t` in `[0, 1]`, `lerp(0) == lo`
+    /// and `lerp(1) == hi`; for an inverted interval (`lo > hi`) increasing `t`
+    /// moves from `lo` toward `hi`. This is exactly the per-call lerp the tick
+    /// projectors and colorbar previously hand-rolled.
+    pub(crate) fn lerp(&self, t: f64) -> f64 {
+        self.lo + t * (self.hi - self.lo)
+    }
+
+    /// Center pixel of uniform slot `i` (0-based) given a *precomputed* `slot`
+    /// size: `lo + (i + 0.5)*slot`. The caller supplies `slot` (typically
+    /// `extent / n`, guarded for `n == 0`) so the result is byte-identical to the
+    /// original inline uniform-slot fallbacks; this method intentionally does not
+    /// recompute `(hi - lo)/n` (which would not be bit-for-bit equal).
+    pub(crate) fn uniform_center(&self, i: usize, slot: f64) -> f64 {
+        self.lo + (i as f64 + 0.5) * slot
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: f64,
@@ -206,5 +244,48 @@ mod tests {
         let json = serde_json::to_string(&r0).unwrap();
         let r1: Rect = serde_json::from_str(&json).unwrap();
         assert_eq!(r0, r1);
+    }
+
+    #[test]
+    fn axis1d_lerp_endpoints_and_midpoint() {
+        let a = Axis1D { lo: 10.0, hi: 110.0 };
+        assert_eq!(a.lerp(0.0), 10.0);
+        assert_eq!(a.lerp(1.0), 110.0);
+        assert_eq!(a.lerp(0.5), 60.0);
+        // Byte-identical to the hand-rolled `lo + t*(hi - lo)` form.
+        let (lo, hi) = (a.lo, a.hi);
+        for &t in &[0.0, 0.25, 0.5, 0.75, 1.0, 0.123] {
+            assert_eq!(a.lerp(t).to_bits(), (lo + t * (hi - lo)).to_bits());
+        }
+    }
+
+    #[test]
+    fn axis1d_lerp_inverted_interval_moves_lo_to_hi() {
+        // The y-axis range `(bottom, top)` and the colorbar `bar_bottom → bar_top`
+        // are inverted (lo > hi): increasing `t` moves from lo toward hi.
+        let a = Axis1D { lo: 400.0, hi: 0.0 };
+        assert_eq!(a.lerp(0.0), 400.0);
+        assert_eq!(a.lerp(1.0), 0.0);
+        assert_eq!(a.lerp(0.25), 300.0);
+        // Colorbar exact-formula equivalence: `bar_bottom - t*(bar_bottom - bar_top)`.
+        let (bar_bottom, bar_top) = (400.0_f64, 0.0_f64);
+        let a = Axis1D { lo: bar_bottom, hi: bar_top };
+        for &t in &[0.0, 0.5, 1.0, 0.3] {
+            let direct = bar_bottom - t * (bar_bottom - bar_top);
+            assert_eq!(a.lerp(t).to_bits(), direct.to_bits());
+        }
+    }
+
+    #[test]
+    fn axis1d_uniform_center_matches_inline_slot_formula() {
+        // `uniform_center` reproduces `origin + (i + 0.5)*slot` bit-for-bit using
+        // the *precomputed* slot (the inline uniform-slot fallback's arithmetic).
+        let (origin, h, n) = (37.5_f64, 562.3_f64, 8usize);
+        let slot = h / n as f64;
+        let a = Axis1D { lo: origin, hi: origin + h };
+        for i in 0..n {
+            let inline = origin + (i as f64 + 0.5) * slot;
+            assert_eq!(a.uniform_center(i, slot).to_bits(), inline.to_bits());
+        }
     }
 }

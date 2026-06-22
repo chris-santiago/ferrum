@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::geometry::Rect;
+use super::geometry::{Axis1D, Rect};
 use palette::Srgba;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -23,7 +23,8 @@ pub enum AxisOrient {
 ///
 /// `None` on [`AxisInput`] (the default) runs the unmodified cascade, so default
 /// output is byte-identical. Only an explicit value changes behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum LabelOverlap {
     /// `true`: show ALL labels, skipping the overlap cull/elide stages. Labels
     /// may visibly overlap — the user's explicit choice.
@@ -357,6 +358,68 @@ fn rgba_array(c: Srgba<u8>) -> [u8; 4] {
     [c.red, c.green, c.blue, c.alpha]
 }
 
+/// How [`project_fractions`] handles a non-finite projected pixel. The two tick
+/// projectors guard against non-finite output differently, and the difference is
+/// *intentional* — this enum makes it a single named policy instead of two
+/// hand-copied finiteness loops (cohesion finding LAYOUT-845; the layout-side
+/// instance of archaeology R1, "major path is all-or-nothing on non-finite, minor
+/// path drops per-element... should be a named policy, not a copied loop").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NonFinitePolicy {
+    /// All-or-nothing: if *any* projected pixel is non-finite, discard the whole
+    /// projection (`None`). Used by the major-tick projector so a single bad major
+    /// drops the projection and the caller falls back to uniform slots — keeping
+    /// the labeled majors uniformly spaced rather than partially mis-placed.
+    DropAll,
+    /// Per-element: silently drop only the non-finite pixels and keep the rest.
+    /// Used by the minor-tick projector — minors carry no label, so dropping one
+    /// does not misalign anything.
+    DropEach,
+}
+
+/// Project per-tick domain fractions onto `base_range` through the *same* padding
+/// inset that places data marks (`crate::layout::geometry::inset_pixel_range`),
+/// then apply `policy` to any non-finite pixel. The inset range becomes an
+/// [`Axis1D`] and each fraction maps via [`Axis1D::lerp`] (`lo + t*(hi - lo)`),
+/// so a tick at value `v` lands on the same pixel a data mark at `v` would.
+///
+/// A non-finite fraction (or base range) would yield a NaN/±inf pixel that the
+/// SVG renderer rejects (`svg.rs` non-finite guard); `ScaleKind::project_values_to_fractions`
+/// already drops the carrier for degenerate/zero-span domains, but guard here too.
+///
+/// Returns `None` when there are no fractions (categorical axes / empty carrier),
+/// or — under [`NonFinitePolicy::DropAll`] — when any pixel is non-finite, so the
+/// caller falls back to the uniform-slot formula.
+fn project_fractions(
+    fractions: &[f64],
+    base_range: (f64, f64),
+    padding_frac: f64,
+    policy: NonFinitePolicy,
+) -> Option<Vec<f64>> {
+    if fractions.is_empty() {
+        return None;
+    }
+    let (lo, hi) = crate::layout::geometry::inset_pixel_range(base_range, padding_frac);
+    let axis = Axis1D { lo, hi };
+    match policy {
+        NonFinitePolicy::DropAll => {
+            let positions: Vec<f64> = fractions.iter().map(|&t| axis.lerp(t)).collect();
+            if positions.iter().all(|p| p.is_finite()) {
+                Some(positions)
+            } else {
+                None
+            }
+        }
+        NonFinitePolicy::DropEach => Some(
+            fractions
+                .iter()
+                .map(|&t| axis.lerp(t))
+                .filter(|p| p.is_finite())
+                .collect(),
+        ),
+    }
+}
+
 /// Continuous-axis scale projection: map each per-tick domain fraction onto the
 /// panel's mark pixel range, applying the *same* padding inset that places data
 /// marks (`crate::layout::geometry::inset_pixel_range`). The base range is the
@@ -365,27 +428,20 @@ fn rgba_array(c: Srgba<u8>) -> [u8; 4] {
 /// pixel). Returns one pixel per fraction, in the supplied order. Returns
 /// `None` when the carrier is absent (categorical axes), letting callers fall
 /// back to the uniform-slot formula.
+///
+/// Majors use [`NonFinitePolicy::DropAll`]: a single non-finite major drops the
+/// whole projection so labeled ticks stay uniformly spaced (uniform-slot fallback)
+/// rather than partially mis-placed.
 fn project_tick_positions(input: &AxisInput, base_range: (f64, f64)) -> Option<Vec<f64>> {
     let proj = input.tick_projection.as_ref()?;
     // An empty major vec carries no per-label projection (e.g. a minor-only
     // fixture); fall back to uniform-slot placement for the major ticks.
-    if proj.major.is_empty() {
-        return None;
-    }
-    let (lo, hi) = crate::layout::geometry::inset_pixel_range(base_range, proj.padding_frac);
-    let span = hi - lo;
-    let fractions = &proj.major;
-    let positions: Vec<f64> = fractions.iter().map(|&t| lo + t * span).collect();
-    // Defensive: a non-finite fraction (or base range) would yield a NaN/±inf
-    // pixel that the SVG renderer rejects (`svg.rs` non-finite guard). The
-    // source (`ScaleKind::project_values_to_fractions`) already drops the
-    // carrier for degenerate/zero-span domains, but guard here too so a stray
-    // non-finite can never reach the scene graph — fall back to uniform slots.
-    if positions.iter().all(|p| p.is_finite()) {
-        Some(positions)
-    } else {
-        None
-    }
+    project_fractions(
+        &proj.major,
+        base_range,
+        proj.padding_frac,
+        NonFinitePolicy::DropAll,
+    )
 }
 
 /// Smallest absolute gap between consecutive positions, or `None` when there are
@@ -420,16 +476,20 @@ fn build_minor_ticks(input: &AxisInput, base_range: (f64, f64)) -> Vec<TickLayou
     let Some(proj) = input.tick_projection.as_ref() else {
         return Vec::new();
     };
-    let (lo, hi) =
-        crate::layout::geometry::inset_pixel_range(base_range, proj.padding_frac);
-    let span = hi - lo;
-    proj.minor
-        .iter()
-        .map(|&frac| lo + frac * span)
-        // Defensive: drop any non-finite pixel so a NaN/±inf can never reach the
-        // scene graph (the SVG renderer rejects non-finite floats). Minors carry
-        // no label, so dropping one does not misalign anything.
-        .filter(|p| p.is_finite())
+    // Minors share the major projector's inset + lerp via `project_fractions`, but
+    // use `NonFinitePolicy::DropEach`: a non-finite minor is dropped per-element
+    // (minors carry no label, so dropping one does not misalign anything) instead
+    // of discarding the whole projection. `None` (empty `minor`) yields no ticks.
+    let Some(positions) = project_fractions(
+        &proj.minor,
+        base_range,
+        proj.padding_frac,
+        NonFinitePolicy::DropEach,
+    ) else {
+        return Vec::new();
+    };
+    positions
+        .into_iter()
         .map(|position| TickLayout {
             position,
             label: String::new(),
@@ -668,6 +728,27 @@ pub fn compute_y_title_width(
     }
 }
 
+/// Returns the x-axis title-gutter height contribution: title text line height
+/// (the title is unrotated on the x axis, so its band along the y-axis is its line
+/// height) plus axis_title_padding. Returns 0 if there is no title. The body is
+/// byte-identical to [`compute_y_title_width`] (cohesion finding LAYOUT-855:
+/// `compute_layout` previously inlined this formula "mirroring the y-axis pattern"
+/// while y was a named helper, leaving the axis family asymmetric).
+pub fn compute_x_title_width(
+    input: &AxisInput,
+    title_font_size: f64,
+    axis_title_padding: f64,
+    metrics: &dyn TextMetrics,
+) -> f64 {
+    if input.title.is_some() {
+        let effective_title_font_size = input.overrides.title_font_size.unwrap_or(title_font_size);
+        let effective_title_padding = input.overrides.title_padding.unwrap_or(axis_title_padding);
+        metrics.line_height(effective_title_font_size) + effective_title_padding
+    } else {
+        0.0
+    }
+}
+
 /// Build the AxisLayout for the y-axis (Left orient) of a single panel.
 /// Tick positions are uniformly spaced across `panel_area.h`; no collision
 /// policy applies to y-axis (spec §14.4).
@@ -682,6 +763,9 @@ pub fn layout_y_axis(
 ) -> AxisLayout {
     let n = input.tick_labels.len();
     let slot_h = if n > 0 { panel_area.h / n as f64 } else { 0.0 };
+    // Uniform-slot fallback range (top → bottom, in pixel order): slot `i`'s center
+    // is `panel_area.y + (i + 0.5)*slot_h` via `Axis1D::uniform_center`.
+    let slot_axis = Axis1D { lo: panel_area.y, hi: panel_area.y + panel_area.h };
     // Continuous axes: place each tick at its scale-projected pixel (mark range
     // is the inverted y range `(bottom, top)`, inset exactly like data marks).
     // Categorical axes (no projected fractions): keep the uniform-slot formula.
@@ -696,7 +780,7 @@ pub fn layout_y_axis(
         .map(|(i, label)| TickLayout {
             position: match &projected {
                 Some(px) => px[i],
-                None => panel_area.y + (i as f64 + 0.5) * slot_h,
+                None => slot_axis.uniform_center(i, slot_h),
             },
             label: label.clone(),
             label_angle: 0.0,
@@ -1178,6 +1262,9 @@ pub fn layout_x_axis(
 ) -> (AxisLayout, Option<XAxisWarning>) {
     let n = input.tick_labels.len();
     let slot_w = if n > 0 { panel_area.w / n as f64 } else { 0.0 };
+    // Uniform-slot fallback range (left → right, in pixel order): slot `i`'s center
+    // is `panel_area.x + (i + 0.5)*slot_w` via `Axis1D::uniform_center`.
+    let slot_axis = Axis1D { lo: panel_area.x, hi: panel_area.x + panel_area.w };
 
     // Continuous axes: place each tick at its scale-projected pixel; categorical
     // axes (no projected fractions) keep the uniform-slot center. The closure
@@ -1186,7 +1273,7 @@ pub fn layout_x_axis(
     let tick_position = |i: usize| -> f64 {
         match &projected {
             Some(px) => px[i],
-            None => panel_area.x + (i as f64 + 0.5) * slot_w,
+            None => slot_axis.uniform_center(i, slot_w),
         }
     };
     // The collision cascade judges label fit against the available horizontal
@@ -1820,6 +1907,53 @@ mod tests {
             });
         }
         input
+    }
+
+    // --- project_fractions NonFinitePolicy tests (LAYOUT-845) ---
+
+    #[test]
+    fn project_fractions_dropall_finite_maps_via_lerp() {
+        // Finite fractions over `(0, 100)` with no padding lerp to `lo + t*(hi-lo)`.
+        let got = project_fractions(&[0.0, 0.5, 1.0], (0.0, 100.0), 0.0, NonFinitePolicy::DropAll);
+        assert_eq!(got, Some(vec![0.0, 50.0, 100.0]));
+    }
+
+    #[test]
+    fn project_fractions_dropall_discards_whole_projection_on_nonfinite() {
+        // One non-finite fraction → the entire (major) projection is dropped so the
+        // caller falls back to uniform slots. All-or-nothing.
+        let got = project_fractions(
+            &[0.0, f64::NAN, 1.0],
+            (0.0, 100.0),
+            0.0,
+            NonFinitePolicy::DropAll,
+        );
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn project_fractions_dropeach_filters_only_nonfinite() {
+        // The same non-finite input under DropEach keeps the finite pixels and
+        // drops only the bad one — the minor-tick policy.
+        let got = project_fractions(
+            &[0.0, f64::INFINITY, 1.0],
+            (0.0, 100.0),
+            0.0,
+            NonFinitePolicy::DropEach,
+        );
+        assert_eq!(got, Some(vec![0.0, 100.0]));
+    }
+
+    #[test]
+    fn project_fractions_empty_is_none_for_both_policies() {
+        assert_eq!(
+            project_fractions(&[], (0.0, 100.0), 0.0, NonFinitePolicy::DropAll),
+            None
+        );
+        assert_eq!(
+            project_fractions(&[], (0.0, 100.0), 0.0, NonFinitePolicy::DropEach),
+            None
+        );
     }
 
     #[test]
