@@ -241,13 +241,14 @@ def test_parallel_coordinates_from_numpy_array():
     svg = chart.to_svg()
     assert "<svg" in svg
     assert svg.count("<polyline") == 50
-    # PLOT-04 regression: a bare 2D numpy array (features=None) must keep the
-    # legacy f0/f1/... column naming, which becomes the rendered axis labels.
-    # The dedup briefly routed numpy through to_arrow_table (col_0/col_1/...);
-    # this pins the preserved f{j} naming so it cannot drift again.
+    # B3 (cohesion campaign): a bare 2D numpy array (features=None) is auto-named
+    # col_0/col_1/... — the single ferrum-wide convention shared with
+    # Chart(numpy_array) / ferrum._coerce.to_arrow_table — and those names become
+    # the rendered axis labels. This pins the unified naming so it cannot drift
+    # back to the retired legacy f{j} convention.
     for j in range(4):
-        assert f">f{j}<" in svg, f"expected axis label f{j} in parallel-coordinates SVG"
-    assert ">col_0<" not in svg
+        assert f">col_{j}<" in svg, f"expected axis label col_{j} in parallel-coordinates SVG"
+    assert ">f0<" not in svg
 
 
 # --- Visualizers ----------------------------------------------------

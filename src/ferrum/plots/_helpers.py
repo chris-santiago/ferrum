@@ -265,12 +265,11 @@ def _to_polars(data: Any) -> pl.DataFrame:
 def _coerce_to_polars(data: Any) -> pl.DataFrame:
     """Coerce a polars / pandas / 2D-numeric input into a polars DataFrame.
 
-    Preserves the legacy ``f{j}`` column naming for a bare 2D numeric array or
-    list-of-lists: those names become the parallel-coordinates axis labels when
-    ``features=None``, so they must stay ``f0, f1, ...`` byte-identically (the
-    ferrum-wide :func:`ferrum._coerce.to_arrow_table` convention is ``col_{i}``;
-    that divergence is preserved here deliberately — see the T1.7 carry).  Every
-    other input type (pyarrow, narwhals frames, dict, ...) delegates to
+    A bare 2D numeric array or list-of-lists is auto-named ``col_0, col_1, ...``
+    to match the ferrum-wide :func:`ferrum._coerce.to_arrow_table` convention
+    (same prefix, same 0-based indexing) used by ``Chart(numpy_array)``: those
+    names become the parallel-coordinates axis labels when ``features=None``.
+    Every other input type (pyarrow, narwhals frames, dict, ...) delegates to
     :func:`_to_polars` for the widened CDI-backed coercion.
     """
     import numpy as np
@@ -284,7 +283,7 @@ def _coerce_to_polars(data: Any) -> pl.DataFrame:
     except (ValueError, TypeError):
         return _to_polars(data)
     if arr.ndim == 2:
-        return pl.DataFrame({f"f{j}": arr[:, j].tolist() for j in range(arr.shape[1])})
+        return pl.DataFrame({f"col_{j}": arr[:, j].tolist() for j in range(arr.shape[1])})
     return _to_polars(data)
 
 
