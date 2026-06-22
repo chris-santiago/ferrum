@@ -184,27 +184,16 @@ class SHAPVisualizer(FerrumVisualizer):
     def _materialize(self) -> None:
         sv = self._source.shap_values(background=self.background)
         # For waterfall, the chart only shows a single sample, so the
-        # headline metric should reflect that sample — not the global
-        # aggregation across the entire dataset.
-        if self.kind == "waterfall":
-            if self.sample_idx is None:
-                # Defer the ValueError to _build_chart so the error
-                # message stays consistent.
-                self._metrics["top_abs_shap"] = 0.0
-                return
-            one = sv.filter(pl.col("sample_id") == self.sample_idx)
-            if one.height:
-                self._metrics["top_abs_shap"] = float(one["shap_value"].abs().max())
-            else:
-                self._metrics["top_abs_shap"] = 0.0
-            return
-        expr = pl.col("shap_value").abs()
-        agg_expr = expr.mean() if self.order == "abs_mean" else expr.max()
-        agg = sv.group_by("feature").agg(agg_expr.alias("v"))
-        if agg.height:
-            self._metrics["top_abs_shap"] = float(agg["v"].max())
-        else:
+        # headline metric reflects that sample — not the global aggregation.
+        # When sample_idx is None the metric is 0.0 (the ValueError is
+        # deferred to _build_chart so the message stays consistent); since
+        # _top_abs_shap(sample_idx=None) would aggregate the whole dataset,
+        # short-circuit to 0.0 here before delegating.
+        if self.kind == "waterfall" and self.sample_idx is None:
             self._metrics["top_abs_shap"] = 0.0
+            return
+        sample_idx = self.sample_idx if self.kind == "waterfall" else None
+        self._metrics["top_abs_shap"] = _top_abs_shap(sv, self.order, sample_idx=sample_idx)
 
     def _build_chart(self) -> Any:
         if self.kind == "beeswarm":
@@ -239,17 +228,56 @@ class SHAPVisualizer(FerrumVisualizer):
         )
 
 
+def _top_abs_shap(
+    frame: "pl.DataFrame",
+    order: str,
+    *,
+    sample_idx: int | None = None,
+) -> float:
+    """Headline SHAP metric for a long-form ``shap_values`` frame.
+
+    The single home for the abs-mean / max aggregation that the deprecated
+    ``SHAPVisualizer`` and the three dedicated SHAP visualizers all need.
+
+    - ``sample_idx is None`` (beeswarm / bar): aggregate ``|shap_value|`` per
+      feature by mean (``order="abs_mean"``) or max (``order="max"``), then
+      return the largest per-feature value across all features.
+    - ``sample_idx`` given (waterfall): return the max ``|shap_value|`` over
+      the single explained sample's rows.
+
+    Returns ``0.0`` when the relevant rows are empty (no features, or the
+    requested ``sample_idx`` is absent), matching the prior per-visualizer
+    behavior exactly.
+    """
+    if sample_idx is not None:
+        one = frame.filter(pl.col("sample_id") == sample_idx)
+        return float(one["shap_value"].abs().max()) if one.height else 0.0
+    expr = pl.col("shap_value").abs()
+    agg_expr = expr.mean() if order == "abs_mean" else expr.max()
+    agg = frame.group_by("feature").agg(agg_expr.alias("v"))
+    return float(agg["v"].max()) if agg.height else 0.0
+
+
 class _SHAPBaseMixin:
     """Shared ``_materialize`` for the three SHAP sibling visualizers.
 
     Computes ``shap_values`` once on the underlying ``ModelSource`` and
     records ``top_abs_shap`` in ``self._metrics``.  Subclasses select
     which subset of the SHAP frame drives the metric (whole-dataset
-    aggregation for beeswarm / bar, single-sample max for waterfall).
+    aggregation for beeswarm / bar, single-sample max for waterfall) by
+    passing ``sample_idx`` to :func:`_top_abs_shap`.
     """
 
     def _shap_dataframe(self) -> "pl.DataFrame":
         return self._source.shap_values(background=self.background)
+
+    def _record_top_abs_shap(self, *, sample_idx: int | None = None) -> None:
+        """Compute and store ``top_abs_shap`` from a freshly-read SHAP frame."""
+        self._metrics["top_abs_shap"] = _top_abs_shap(
+            self._shap_dataframe(),
+            self.order,
+            sample_idx=sample_idx,
+        )
 
 
 class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
@@ -297,11 +325,7 @@ class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         self.per_class = per_class
 
     def _materialize(self) -> None:
-        sv = self._shap_dataframe()
-        expr = pl.col("shap_value").abs()
-        agg_expr = expr.mean() if self.order == "abs_mean" else expr.max()
-        agg = sv.group_by("feature").agg(agg_expr.alias("v"))
-        self._metrics["top_abs_shap"] = float(agg["v"].max()) if agg.height else 0.0
+        self._record_top_abs_shap()
 
     def _build_chart(self) -> Any:
         return _shap_beeswarm_chart_from_source(
@@ -324,8 +348,8 @@ class SHAPBarVisualizer(_SHAPBaseMixin, FerrumVisualizer):
     --------
     >>> import ferrum as fm
     >>> from sklearn.ensemble import GradientBoostingClassifier
-    >>> viz = fm.SHAPBarVisualizer(GradientBoostingClassifier().fit(X_train, y_train))
-    >>> chart = viz.chart(X_test, y_test)
+    >>> model = GradientBoostingClassifier().fit(X_train, y_train)
+    >>> viz = fm.SHAPBarVisualizer(model).fit(X_test, y_test).show()
     """
 
     def __init__(
@@ -346,11 +370,7 @@ class SHAPBarVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         self.per_class = per_class
 
     def _materialize(self) -> None:
-        sv = self._shap_dataframe()
-        expr = pl.col("shap_value").abs()
-        agg_expr = expr.mean() if self.order == "abs_mean" else expr.max()
-        agg = sv.group_by("feature").agg(agg_expr.alias("v"))
-        self._metrics["top_abs_shap"] = float(agg["v"].max()) if agg.height else 0.0
+        self._record_top_abs_shap()
 
     def _build_chart(self) -> Any:
         return _shap_bar_chart_from_source(
@@ -419,9 +439,7 @@ class SHAPWaterfallVisualizer(_SHAPBaseMixin, FerrumVisualizer):
         self.per_class = per_class
 
     def _materialize(self) -> None:
-        sv = self._shap_dataframe()
-        one = sv.filter(pl.col("sample_id") == self.sample_idx)
-        self._metrics["top_abs_shap"] = float(one["shap_value"].abs().max()) if one.height else 0.0
+        self._record_top_abs_shap(sample_idx=self.sample_idx)
 
     def _build_chart(self) -> Any:
         return _shap_waterfall_chart_from_source(

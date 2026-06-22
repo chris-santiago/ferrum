@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import polars as pl
 
 from .._internal.deps import require_sklearn
+
+if TYPE_CHECKING:
+    from ._protocols import _SourceState as _MixinBase
+else:
+    _MixinBase = object
 
 
 def _ci_agg_rows(key_name: str, key_value, split_name: str, arr: np.ndarray) -> list[dict]:
@@ -35,7 +40,7 @@ def _ci_agg_rows(key_name: str, key_value, split_name: str, arr: np.ndarray) -> 
     ]
 
 
-class ModelSelectionMixin:
+class ModelSelectionMixin(_MixinBase):
     """Phase 10e — model selection / CV curves (learning, validation, cv scores, alpha selection)."""
 
     # --- 10e: model selection / CV curves --------------------------------
@@ -96,7 +101,7 @@ class ModelSelectionMixin:
         cv: int = 5,
         scoring: Any = None,
     ) -> pl.DataFrame:
-        """Validation curve: score per (param_value, fold, split).
+        """Return validation-curve scores per (param_value, fold, split).
 
         Same shape as ``learning_curve`` but parameterized by an
         estimator hyperparameter sweep. ``param`` is the kwarg name on

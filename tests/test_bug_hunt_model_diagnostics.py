@@ -1622,11 +1622,27 @@ def test_base_visualizer_unfit_repr():
 
 
 def test_base_visualizer_score_returns_zero():
-    """FerrumVisualizer.score() should return 0.0."""
+    """A no-model FerrumVisualizer falls through to the 0.0 score fallback."""
     from ferrum.diagnostics.visualizers._base import FerrumVisualizer
 
     viz = FerrumVisualizer()
     assert viz.score(None, None) == 0.0
+    assert viz.has_score is False
+
+
+def test_base_visualizer_score_delegates_to_model():
+    """A FerrumVisualizer wrapping a model with .score delegates to it, and
+    the derived has_score property tracks that automatically (T4.6 part A).
+    """
+    from ferrum.diagnostics.visualizers._base import FerrumVisualizer
+
+    class _Scorer:
+        def score(self, X, y):
+            return 0.75
+
+    viz = FerrumVisualizer(_Scorer())
+    assert viz.score(None, None) == 0.75
+    assert viz.has_score is True
 
 
 # ---------------------------------------------------------------------------

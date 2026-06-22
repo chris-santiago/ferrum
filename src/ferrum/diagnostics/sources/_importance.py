@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import polars as pl
 
 from .._internal.deps import require_shap, require_sklearn
 
+if TYPE_CHECKING:
+    from ._protocols import _SourceState as _MixinBase
+else:
+    _MixinBase = object
 
-class FeatureImportanceMixin:
+
+class FeatureImportanceMixin(_MixinBase):
     """Phase 10d — feature importance (permutation / native, SHAP, partial dependence)."""
 
     # --- 10d: feature importance ----------------------------------------

@@ -154,3 +154,57 @@ def test_compare_capabilities_not_attribute_error():
     cms = ferrum.ModelSource.compare({"a": m}, X, y)
     # Must not raise
     _ = cms._capabilities
+
+
+# ---------------------------------------------------------------------------
+# T4.6 part E: the proxied-attribute set is derived from BaseSource's property
+# descriptors, not a hand-maintained literal tuple.
+# ---------------------------------------------------------------------------
+
+
+def test_compare_proxied_attrs_derived_from_base_properties():
+    """The proxy set equals BaseSource's public properties + private aliases
+    (minus ``model``), so a new property proxies automatically."""
+    from ferrum.diagnostics.sources._base import BaseSource
+    from ferrum.diagnostics.sources._compared import _COMPARED_PROXIED_ATTRS
+
+    public = {
+        name
+        for name, attr in vars(BaseSource).items()
+        if isinstance(attr, property) and name != "model"
+    }
+    expected = public | {f"_{name}" for name in public}
+    assert set(_COMPARED_PROXIED_ATTRS) == expected
+    # The current BaseSource surface — X / y / feature_names / capabilities.
+    assert "feature_names" in _COMPARED_PROXIED_ATTRS
+    assert "_feature_names" in _COMPARED_PROXIED_ATTRS
+    assert "model" not in _COMPARED_PROXIED_ATTRS
+    assert "_model" not in _COMPARED_PROXIED_ATTRS
+
+
+def test_compare_proxies_all_public_properties():
+    """Every public BaseSource property resolves through the wrapper."""
+    X, y, m = _binary_setup()
+    cms = ferrum.ModelSource.compare({"a": m, "b": m}, X, y)
+    first = next(iter(cms._sources.values()))
+    assert list(cms.feature_names) == list(first.feature_names)
+    assert cms.capabilities == first.capabilities
+    assert cms.X.height == first.X.height
+    assert cms.y.len() == first.y.len()
+
+
+def test_compare_picks_up_new_base_property(monkeypatch):
+    """A property added to BaseSource is proxied without editing _compared."""
+    from ferrum.diagnostics.sources import _compared
+    from ferrum.diagnostics.sources._base import BaseSource
+
+    # Add a temporary property to BaseSource and re-derive the set.
+    monkeypatch.setattr(
+        BaseSource,
+        "n_features",
+        property(lambda self: len(self._feature_names)),
+        raising=False,
+    )
+    derived = _compared._collect_compared_proxied_attrs()
+    assert "n_features" in derived
+    assert "_n_features" in derived

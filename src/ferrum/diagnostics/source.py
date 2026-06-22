@@ -16,7 +16,7 @@ churn — the per-domain reorganization is purely internal.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .sources._base import BaseSource
 from .sources._classification import ClassificationCurvesMixin
@@ -157,6 +157,24 @@ class ModelSource(
             )
         sources = {name: cls(model, X, y, **kwargs) for name, model in models.items()}
         return ComparedModelSource(sources)
+
+
+if TYPE_CHECKING:
+    # Type-only conformance: ``ModelSource`` is one of the concrete adapters
+    # the chart builders consume, so it must satisfy the ``DiagnosticSource``
+    # method/return contract. pyright flags any future signature/return drift
+    # here (and the matching assertion for ``_PrecomputedSource`` lives in
+    # ``_internal/precomputed.py``).
+    #
+    # ``ComparedModelSource`` is deliberately *not* asserted statically: it
+    # dispatches the same methods dynamically via ``__getattr__``, so it
+    # conforms only at runtime (``isinstance(cms, DiagnosticSource)`` is True
+    # — ``DiagnosticSource`` is ``runtime_checkable``). A static assertion
+    # would be a false positive, since pyright cannot see the proxied methods.
+    from .sources._protocols import DiagnosticSource
+
+    def _assert_model_source_diagnostic(src: "ModelSource") -> DiagnosticSource:
+        return src
 
 
 __all__ = ["ModelSource", "ComparedModelSource"]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pyarrow as pa
@@ -10,8 +10,13 @@ import polars as pl
 
 from ferrum import _core
 
+if TYPE_CHECKING:
+    from ._protocols import _SourceState as _MixinBase
+else:
+    _MixinBase = object
 
-class ClusteringMixin:
+
+class ClusteringMixin(_MixinBase):
     """Phase 10f — clustering / manifold diagnostics (silhouette, PCA variance, embeddings, intercluster distance)."""
 
     # --- 10f: clustering / manifold --------------------------------------
@@ -168,9 +173,11 @@ class ClusteringMixin:
     ) -> pl.DataFrame:
         """2D embedding of cluster centers + cluster size.
 
-        Returns one row per cluster with ``cluster`` (Int64), ``x`` / ``y``
-        (Float64, the 2D embedded coordinate), and ``size`` (Int64, sample
-        count). Requires the wrapped model to expose ``cluster_centers_``.
+        Returns one row per cluster with ``cluster`` (Utf8 — a stringified
+        ``0..k-1`` index, matching ``SCHEMA_INTERCLUSTER_DISTANCE`` and the
+        emitted column), ``x`` / ``y`` (Float64, the 2D embedded coordinate),
+        and ``size`` (Int64, sample count). Requires the wrapped model to
+        expose ``cluster_centers_``.
         """
         key = self._cache_key(
             "intercluster_distance",

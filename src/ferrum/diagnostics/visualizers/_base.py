@@ -54,7 +54,18 @@ class FerrumVisualizer:
     >>> viz._metrics              # headline metric(s)
     """
 
-    has_score: bool = False
+    @property
+    def has_score(self) -> bool:
+        """Whether :meth:`score` returns a real test-set metric.
+
+        Derived from behavior rather than hand-maintained: ``True`` exactly
+        when the wrapped model exposes a ``.score`` method (so the inherited
+        :meth:`score` delegates to it), ``False`` for genuinely no-model
+        visualizers (rank / parallel-coordinates / class-balance / elbow)
+        whose :meth:`score` returns the ``0.0`` fallback. Mirrors the guard
+        in :meth:`score`, so the two can never drift.
+        """
+        return callable(getattr(self.model, "score", None))
 
     def __init__(
         self,
@@ -122,13 +133,18 @@ class FerrumVisualizer:
         return None
 
     def score(self, X: Any, y: Any) -> float:
-        """Returns 0.0 for visualizers that do not compute a test-set score.
+        """Delegate to ``self.model.score(X, y)`` when the model supports it.
 
-        Subclasses that wrap a fitted estimator override this to return an
-        appropriate metric (e.g. ``roc_auc_score`` for ``ROCVisualizer``,
-        ``r2_score`` for ``ResidualsVisualizer``). The base implementation
-        returns ``0.0`` so that no-model / exploratory visualizers satisfy
-        the sklearn visualizer protocol without raising.
+        For model-backed visualizers (the common case) this returns the
+        wrapped estimator's own ``.score`` metric — ``r2_score`` for a
+        regressor, accuracy for a classifier, etc. Genuinely no-model
+        visualizers (rank / parallel-coordinates / class-balance / elbow,
+        all constructed with ``model=None``) fall through to the ``0.0``
+        fallback so they satisfy the sklearn visualizer protocol without
+        raising.
+
+        Subclasses whose score is *not* the estimator's own ``.score``
+        (e.g. ``ROCVisualizer`` returns ``roc_auc_score``) override this.
 
         Parameters
         ----------
@@ -140,9 +156,11 @@ class FerrumVisualizer:
         Returns
         -------
         float
-            ``0.0`` for the base class; a meaningful scalar for subclasses
-            that override this method.
+            ``self.model.score(X, y)`` when the wrapped model exposes a
+            ``.score`` method; ``0.0`` otherwise.
         """
+        if callable(getattr(self.model, "score", None)):
+            return float(self.model.score(X, y))
         return 0.0
 
     def show(self) -> Any:

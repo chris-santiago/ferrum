@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import polars as pl
@@ -10,8 +10,13 @@ import pyarrow as pa
 
 from .._internal.deps import require_sklearn
 
+if TYPE_CHECKING:
+    from ._protocols import _SourceState as _MixinBase
+else:
+    _MixinBase = object
 
-class PredictionsMixin:
+
+class PredictionsMixin(_MixinBase):
     """Phase 10a — predictions and probabilities."""
 
     # --- 10a: predictions, probabilities ---------------------------------

@@ -17,6 +17,7 @@ from typing import Any
 
 import polars as pl
 
+from ._base import BaseSource
 from ._classification import ClassificationCurvesMixin
 from ._clustering import ClusteringMixin
 from ._importance import FeatureImportanceMixin
@@ -33,6 +34,10 @@ _DOMAIN_MIXINS = (
     ClusteringMixin,
     RankingMixin,
 )
+
+# ``model`` has no single answer for a multi-model wrapper, so it (and its
+# private alias) is never proxied — access raises a clear AttributeError.
+_NON_PROXIED_PROPERTIES: frozenset[str] = frozenset({"model"})
 
 
 def _collect_compared_methods() -> frozenset[str]:
@@ -51,7 +56,26 @@ def _collect_compared_methods() -> frozenset[str]:
     return frozenset(methods)
 
 
+def _collect_compared_proxied_attrs() -> frozenset[str]:
+    """Derive the read-only attribute set proxied from the first source.
+
+    Enumerates ``BaseSource``'s ``property`` descriptors (``X``, ``y``,
+    ``feature_names``, ``capabilities``, …) plus their ``_``-prefixed
+    back-compat aliases, instead of a hand-maintained literal tuple. Adding
+    a new public property to ``BaseSource`` makes it proxy through
+    ``ComparedModelSource`` automatically. ``model`` / ``_model`` are
+    excluded (see ``_NON_PROXIED_PROPERTIES``) — there is no single model.
+    """
+    public = {
+        name
+        for name, attr in vars(BaseSource).items()
+        if isinstance(attr, property) and name not in _NON_PROXIED_PROPERTIES
+    }
+    return frozenset(public | {f"_{name}" for name in public})
+
+
 _COMPARED_METHODS: frozenset[str] = _collect_compared_methods()
+_COMPARED_PROXIED_ATTRS: frozenset[str] = _collect_compared_proxied_attrs()
 
 
 class ComparedModelSource:
@@ -62,11 +86,15 @@ class ComparedModelSource:
     ``model: Utf8`` column stamped on each frame, so downstream chart
     builders can route ``color="model"`` to render one curve per model.
 
-    ``_X``, ``_y``, ``_feature_names``, and ``_class_names`` resolve to
-    the first source's values (every wrapped source shares ``X`` / ``y``
-    by construction in ``ModelSource.compare``, so any one will do);
-    accessing ``_model`` raises since there is no single estimator.
-    ``model_names`` reports the configured ordering.
+    The read-only ``BaseSource`` properties (``X`` / ``y`` /
+    ``feature_names`` / ``capabilities``) and their ``_``-prefixed aliases
+    resolve to the first source's values — every wrapped source shares
+    ``X`` / ``y`` by construction in ``ModelSource.compare``, so any one
+    will do. The proxied set is derived from ``BaseSource``'s property
+    descriptors (see ``_collect_compared_proxied_attrs``), so a new public
+    property proxies automatically. Accessing ``model`` / ``_model`` raises
+    since there is no single estimator. ``model_names`` reports the
+    configured ordering.
 
     Parameters
     ----------
@@ -124,17 +152,7 @@ class ComparedModelSource:
         if name in _COMPARED_METHODS:
             method = name
             return lambda *args, **kwargs: self._dispatch(method, *args, **kwargs)
-        if name in (
-            "_X",
-            "_y",
-            "_feature_names",
-            "_class_names",
-            "_capabilities",
-            "X",
-            "y",
-            "feature_names",
-            "capabilities",
-        ):
+        if name in _COMPARED_PROXIED_ATTRS:
             return getattr(next(iter(self._sources.values())), name)
         if name in ("_model", "model"):
             raise AttributeError(

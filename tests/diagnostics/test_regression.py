@@ -302,30 +302,40 @@ def test_mark_prediction_error_ci_out_of_range_raises():
 
 
 # ---------------------------------------------------------------------------
-# Issue-3 regression: has_score sentinel on FerrumVisualizer
+# Issue-3 regression: has_score is a derived property on FerrumVisualizer.
+# It reports whether score() returns a real metric, i.e. whether the wrapped
+# model exposes .score — never a hand-maintained class flag (T4.6 part A).
 # ---------------------------------------------------------------------------
 
 
-def test_has_score_false_on_base():
-    """FerrumVisualizer base class must have has_score = False."""
+def test_has_score_false_on_no_model_base():
+    """A model-less FerrumVisualizer has no real score → has_score is False."""
     from ferrum.diagnostics.visualizers._base import FerrumVisualizer
 
-    assert FerrumVisualizer.has_score is False
+    assert FerrumVisualizer(model=None).has_score is False
 
 
-def test_has_score_true_on_residuals_visualizer():
-    """ResidualsVisualizer.score() is real; sentinel must be True."""
-    assert ferrum.ResidualsVisualizer.has_score is True
+def test_has_score_true_on_model_backed_visualizer():
+    """A model with .score → has_score derives True (no hand-set flag)."""
+
+    class _Scorer:
+        def score(self, X, y):
+            return 1.0
+
+    assert ferrum.ResidualsVisualizer(_Scorer()).has_score is True
+    assert ferrum.PredictionErrorVisualizer(_Scorer()).has_score is True
+    # CooksDistanceVisualizer never carried a flag yet wraps a model with
+    # .score, so the derived property correctly reports True.
+    assert ferrum.CooksDistanceVisualizer(_Scorer()).has_score is True
 
 
-def test_has_score_true_on_prediction_error_visualizer():
-    """PredictionErrorVisualizer.score() is real; sentinel must be True."""
-    assert ferrum.PredictionErrorVisualizer.has_score is True
+def test_has_score_false_on_model_without_score():
+    """A model lacking .score → has_score is False even when model is set."""
 
+    class _NoScore:
+        pass
 
-def test_has_score_false_on_unsupervised_visualizer():
-    """CooksDistanceVisualizer has no score(); sentinel must be False."""
-    assert ferrum.CooksDistanceVisualizer.has_score is False
+    assert ferrum.ResidualsVisualizer(_NoScore()).has_score is False
 
 
 # ---------------------------------------------------------------------------

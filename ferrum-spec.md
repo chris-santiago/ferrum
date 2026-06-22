@@ -1455,10 +1455,22 @@ Visualizers implement `fit` / `score` / `show` for drop-in compatibility with sk
 ```
 class FerrumVisualizer:
     def fit(self, X, y=None) -> self
-    def score(self, X, y) -> float        # computes metric; populates chart state
+    def score(self, X, y) -> float        # delegates to model.score; 0.0 if no model
     def show(self) -> Chart
     def __repr__(self) -> str             # summary string with key metrics
+    @property
+    def has_score(self) -> bool           # True iff score() returns a real metric
 ```
+
+> **Note (2026-06-22, cohesion campaign T4.6):** The base `score(X, y)`
+> delegates to `float(self.model.score(X, y))` whenever the wrapped model
+> exposes a `.score` method, and returns `0.0` only for genuinely no-model
+> visualizers (`model=None`: rank / parallel-coordinates / class-balance /
+> elbow). Subclasses whose score is not the estimator's own (e.g.
+> `ROCVisualizer` → `roc_auc_score`) override it. `has_score` is a derived
+> read-only property (not a hand-set class flag): it reports `True` exactly
+> when `score()` returns a real metric, mirroring the model-has-`.score`
+> guard, so the two can never drift.
 
 **Concrete visualizers:**
 

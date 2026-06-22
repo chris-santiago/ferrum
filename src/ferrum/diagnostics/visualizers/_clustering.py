@@ -14,8 +14,6 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-import polars as pl
-
 from ._base import FerrumVisualizer
 
 
@@ -122,8 +120,6 @@ class ElbowVisualizer(FerrumVisualizer):
     >>> viz._metrics["best_k"]
     """
 
-    _VALID_METRICS = ("distortion", "silhouette", "calinski_harabasz")
-
     def __init__(
         self,
         model_class: Any,
@@ -133,11 +129,13 @@ class ElbowVisualizer(FerrumVisualizer):
         random_state: int | None = None,
         theme: Any = None,
     ):
+        from ferrum.plots.clustering import _ELBOW_METRICS
+
         super().__init__(model=None, random_state=random_state, theme=theme)
-        if metric not in self._VALID_METRICS:
+        if metric not in _ELBOW_METRICS:
             raise ValueError(
                 f"ElbowVisualizer(metric={metric!r}) is not valid; expected "
-                f"one of {self._VALID_METRICS}."
+                f"one of {_ELBOW_METRICS}."
             )
         self.model_class = model_class
         self.ks = list(ks)
@@ -145,63 +143,21 @@ class ElbowVisualizer(FerrumVisualizer):
 
     def fit(self, X: Any, y: Any = None) -> "ElbowVisualizer":
         del y
-        from .._internal.deps import require_sklearn
+        from ferrum.plots.clustering import _elbow_chart_from_source, _elbow_scores
 
-        require_sklearn("ElbowVisualizer")
-        import numpy as np
-        import pyarrow as pa
-        import ferrum
-        from ferrum import _core
-
-        X_fit = X
-        X_np = np.asarray(X_fit, dtype=np.float64)
-        X_np = np.ascontiguousarray(X_np)
-        x_arrow = pa.RecordBatch.from_pydict(
-            {f"f{j}": X_np[:, j].tolist() for j in range(X_np.shape[1])}
+        scores = _elbow_scores(
+            self.model_class,
+            X,
+            ks=self.ks,
+            metric=self.metric,
+            random_state=self.random_state,
         )
-        seed = 0 if self.random_state is None else int(self.random_state)
-        rows: list[dict] = []
-        for k in self.ks:
-            k_int = int(k)
-            if self.metric in ("silhouette", "calinski_harabasz") and k_int < 2:
-                continue
-            m = self.model_class(
-                n_clusters=k_int,
-                random_state=seed,
-                n_init=10,
-            ).fit(X_fit)
-            if self.metric == "distortion":
-                score = float(m.inertia_)
-            elif self.metric == "silhouette":
-                labels = getattr(m, "labels_", None)
-                if labels is None:
-                    labels = m.predict(X_fit)
-                labels_arrow = pa.array(np.asarray(labels).astype(int).tolist(), type=pa.int64())
-                score = float(_core.silhouette_score(x_arrow, labels_arrow, "euclidean"))
-            else:  # "calinski_harabasz"
-                labels = getattr(m, "labels_", None)
-                if labels is None:
-                    labels = m.predict(X_fit)
-                labels_arrow = pa.array(np.asarray(labels).astype(int).tolist(), type=pa.int64())
-                score = float(_core.calinski_harabasz_score(x_arrow, labels_arrow))
-            rows.append({"k": k_int, "score": score})
-        if not rows:
-            raise ValueError(
-                f"ElbowVisualizer.fit produced no scores for metric="
-                f"{self.metric!r} over ks={self.ks!r}. For "
-                "silhouette/calinski_harabasz, ks must contain values >= 2."
-            )
-        df = pl.DataFrame(rows)
         # distortion is minimized; silhouette and CH are maximized.
-        if self.metric == "distortion":
-            idx = df["score"].arg_min()
-        else:
-            idx = df["score"].arg_max()
-        self._metrics["best_k"] = float(df["k"][idx])
-        chart = ferrum.Chart(df).mark_line().encode(x="k", y="score")
-        if self.theme is not None:
-            chart = chart.theme(self.theme)
-        self._chart = chart
+        idx = (
+            scores["score"].arg_min() if self.metric == "distortion" else scores["score"].arg_max()
+        )
+        self._metrics["best_k"] = float(scores["k"][idx])
+        self._chart = _elbow_chart_from_source(scores, theme=self.theme)
         self._fitted = True
         return self
 
@@ -265,21 +221,13 @@ class ManifoldVisualizer(FerrumVisualizer):
         self._metrics["n_samples"] = float(emb.height)
 
     def _build_chart(self) -> Any:
-        import ferrum
+        from ferrum.plots.clustering import _manifold_chart_from_source
 
-        emb = self._source.embeddings(method=self.method)
-        chart = (
-            ferrum.Chart(emb)
-            .mark_point()
-            .encode(
-                x="dim_0",
-                y="dim_1",
-                color="label",
-            )
+        return _manifold_chart_from_source(
+            self._source,
+            method=self.method,
+            theme=self.theme,
         )
-        if self.theme is not None:
-            chart = chart.theme(self.theme)
-        return chart
 
 
 class InterclusterDistanceVisualizer(FerrumVisualizer):

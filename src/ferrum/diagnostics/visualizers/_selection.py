@@ -109,9 +109,6 @@ class LearningCurveVisualizer(FerrumVisualizer):
             theme=self.theme,
         )
 
-    def score(self, X: Any, y: Any) -> float:
-        return float(self.model.score(X, y))
-
 
 class ValidationCurveVisualizer(FerrumVisualizer):
     """Visualize train/test scores as a single hyperparameter is swept.
@@ -219,9 +216,6 @@ class ValidationCurveVisualizer(FerrumVisualizer):
             theme=self.theme,
         )
 
-    def score(self, X: Any, y: Any) -> float:
-        return float(self.model.score(X, y))
-
 
 class CVScoresVisualizer(FerrumVisualizer):
     """Visualize the distribution of per-fold cross-validation scores.
@@ -299,9 +293,6 @@ class CVScoresVisualizer(FerrumVisualizer):
             split=self.split,
             theme=self.theme,
         )
-
-    def score(self, X: Any, y: Any) -> float:
-        return float(self.model.score(X, y))
 
 
 class AlphaSelectionVisualizer(FerrumVisualizer):
@@ -402,6 +393,3 @@ class AlphaSelectionVisualizer(FerrumVisualizer):
             highlight_best=self.highlight_best,
             theme=self.theme,
         )
-
-    def score(self, X: Any, y: Any) -> float:
-        return float(self.model.score(X, y))

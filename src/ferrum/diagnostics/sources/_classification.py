@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import polars as pl
 
 from .._internal import _curve_frames
 from .._internal.deps import require_sklearn
+
+if TYPE_CHECKING:
+    from ._protocols import _SourceState as _MixinBase
+else:
+    _MixinBase = object
 
 
 def _resolve_proba(method_name: str, y, proba_df: pl.DataFrame):
@@ -32,7 +37,7 @@ def _resolve_proba(method_name: str, y, proba_df: pl.DataFrame):
     return y_true, score_matrix, labels, class_values
 
 
-class ClassificationCurvesMixin:
+class ClassificationCurvesMixin(_MixinBase):
     """Phase 10b — classification curves (ROC, PR, calibration, gain, lift, discrimination threshold, confusion matrix)."""
 
     # --- 10b: classification curves --------------------------------------

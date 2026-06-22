@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import polars as pl
 
+if TYPE_CHECKING:
+    from ._protocols import _SourceState as _MixinBase
+else:
+    _MixinBase = object
 
-class RankingMixin:
+
+class RankingMixin(_MixinBase):
     """Phase 10g — feature ranking (rank1d, rank2d)."""
 
     # ---- Phase 10g: feature ranking ----

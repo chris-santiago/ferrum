@@ -73,8 +73,6 @@ class ROCVisualizer(FerrumVisualizer):
         self.macro = macro
         self.per_class = per_class
 
-    has_score: bool = True
-
     def _materialize(self) -> None:
         avg = "macro" if self.macro else ("micro" if self.micro else None)
         roc = self._source.roc_curve(average=avg)

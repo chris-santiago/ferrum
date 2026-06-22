@@ -9,7 +9,7 @@ modification.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import polars as pl
@@ -243,3 +243,14 @@ class _PrecomputedSource:
         y_true_bin = (y_true == positive_class).astype(int)
         thresholds_np = np.linspace(0.0, 1.0, n_thresholds)
         return _curve_frames.threshold_sweep_frame(y_true_bin, y_pred, thresholds_np)
+
+
+if TYPE_CHECKING:
+    # Type-only conformance: ``_PrecomputedSource`` hand-matches the subset of
+    # the ``DiagnosticSource`` contract its nine in-scope chart builders need.
+    # Annotating it here lets pyright flag any future signature/return drift
+    # from ``ModelSource`` at the seam where chart builders consume them.
+    from ..sources._protocols import DiagnosticSource
+
+    def _assert_precomputed_diagnostic(src: "_PrecomputedSource") -> DiagnosticSource:
+        return src

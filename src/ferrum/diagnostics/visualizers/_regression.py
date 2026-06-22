@@ -53,8 +53,6 @@ class ResidualsVisualizer(FerrumVisualizer):
         super().__init__(model, random_state=random_state, theme=theme)
         self.kind = kind
 
-    has_score: bool = True
-
     def _materialize(self) -> None:
         df = self._source.predictions()
         resid = df["residual"]
@@ -67,9 +65,6 @@ class ResidualsVisualizer(FerrumVisualizer):
             kind=self.kind,
             theme=self.theme,
         )
-
-    def score(self, X: Any, y: Any) -> float:
-        return float(self.model.score(X, y))
 
 
 class PredictionErrorVisualizer(FerrumVisualizer):
@@ -117,8 +112,6 @@ class PredictionErrorVisualizer(FerrumVisualizer):
         self.ci = ci
         self.reference_band = reference_band
 
-    has_score: bool = True
-
     def _materialize(self) -> None:
         df = self._source.predictions()
         resid = df["residual"]
@@ -132,9 +125,6 @@ class PredictionErrorVisualizer(FerrumVisualizer):
             reference_band=self.reference_band,
             theme=self.theme,
         )
-
-    def score(self, X: Any, y: Any) -> float:
-        return float(self.model.score(X, y))
 
 
 class CooksDistanceVisualizer(FerrumVisualizer):
