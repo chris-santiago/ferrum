@@ -121,10 +121,10 @@ Each task lists the finding IDs it closes (see §6 for the inverse map) and its 
 - **Closes (4):** THEME-01, THEME-02, THEME-05, THEME-07  (S2,S3)  [XDEAD-03 CARVED OUT → T2.1b: it is annotation dead-flags (render/annotation.rs + annotation/primitives.py), NOT a theme file, and an [API] wire-vs-drop fork the "non-breaking aliases" answer doesn't cover — needs feasibility assessment / user decision]
 - **Files:** src/ferrum/themes/__init__.py; src/ferrum/themes/_defaults.py; crates/ferrum-core/src/render/binding.rs  [corrected: ThemeOverridesSpec lives in render/binding.rs:195, not spec/theme.rs]
 
-#### T2.1b [both] **[CARVED FROM T2.1 — pending decision]** Annotation z/curve dead FFI flags (XDEAD-03, [API])
+#### T2.1b [both] **[RESOLVED — D-XDEAD-03: wire z, drop curve]** Annotation z/curve dead FFI flags (XDEAD-03, [API])
 - **Closes (1):** XDEAD-03  (S3)
-- **Files:** crates/ferrum-core/src/render/annotation.rs; src/ferrum/annotation/primitives.py
-- **Decision needed:** wire per-annotation z-ordering (below_marks → pre-mark scene slot, align Rust enum to Python above/below_marks vocab) + curve bezier, OR drop z/curve from the Python API + Rust structs. No-defer principle favors wiring z (infra exists in scene_build draws_above_marks); curve=bezier is a real geometry feature. Assess feasibility, then wire or surface.
+- **Files:** crates/ferrum-core/src/render/annotation.rs; crates/ferrum-core/src/render/scene_build.rs; src/ferrum/annotation/primitives.py; tests (annotation.rs in-file mod tests + tests/test_annotation_layer.py)
+- **Decision (D-XDEAD-03, user-decided):** WIRE `z` (Text-only), DROP `curve` (Arrow-only). `build_annotations` returns `{below_marks, above_marks}` partitioned by each Text spec's `z`; scene_build routes `below_marks`→panel `grid` slot (pre-marks below bucket), `above_marks`→`annotations` slot (post-marks above bucket) — mirror of the existing above-marks grid/axis zindex routing. Align Rust `default_z`→`"above_marks"`. No new `Panel` field (z is Text-only; SVG grid emitter falls through to `emit_node`, WASM `collect_static` handles Text; existing goldens byte-identical since no annotation used `below_marks`). Drop `curve` from `AnnotationArrow` (field/to_dict/factory/docstring) + Rust `Arrow.curve`/`default_curve()`.
 
 #### T2.2 [both] Rust palette registry is sole source; color.py consumes it; scheme= validated at declaration (D-COLOR-1)
 - **Closes (4):** ENC-06, XNAME-02, XSIB-07, ENC-11  (S2,S3)

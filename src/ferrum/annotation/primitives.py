@@ -74,7 +74,6 @@ class AnnotationArrow:
     stroke: str
     stroke_width: float
     head_size: float
-    curve: str
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""
@@ -87,7 +86,6 @@ class AnnotationArrow:
             "stroke": self.stroke,
             "stroke_width": self.stroke_width,
             "head_size": self.head_size,
-            "curve": self.curve,
         }
 
 
@@ -384,7 +382,6 @@ def arrow(
     stroke: str = "#333",
     stroke_width: float = 1.5,
     head_size: float = 8,
-    curve: str = "straight",
 ) -> AnnotationArrow:
     """Create an arrow annotation.
 
@@ -400,8 +397,6 @@ def arrow(
         Stroke width in pixels.
     head_size : float, default 8
         Arrowhead size in pixels.
-    curve : str, default "straight"
-        Path style: ``"straight"``, ``"arc"``, or ``"elbow"``.
 
     Returns
     -------
@@ -415,7 +410,6 @@ def arrow(
         stroke=stroke,
         stroke_width=stroke_width,
         head_size=head_size,
-        curve=curve,
     )
 
 

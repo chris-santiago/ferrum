@@ -480,6 +480,10 @@ pub fn build_scene(
         };
 
         // Annotations: render user-specified annotations on the first panel only.
+        // `build_annotations` partitions nodes by the Text spec's `z` field:
+        //   - `below_marks` → appended to the panel `grid` slot (pre-marks bucket)
+        //   - `above_marks` → seeded into the `annotations` slot (post-marks bucket)
+        // This mirrors how above-marks grid/axes (zindex >= 1) route into `annotations`.
         let annotation_nodes = if panel_idx == 0 && !chart_config.annotations.is_empty() {
             let ann_ctx = super::annotation::ScaleContext {
                 plot_area: panel.plot_area,
@@ -488,7 +492,10 @@ pub fn build_scene(
             };
             super::annotation::build_annotations(&chart_config.annotations, &ann_ctx)
         } else {
-            Vec::new()
+            super::annotation::AnnotationNodes {
+                below_marks: Vec::new(),
+                above_marks: Vec::new(),
+            }
         };
 
         // Structural features: secondary Y axis, axis breaks, insets.
@@ -544,11 +551,19 @@ pub fn build_scene(
         // zindex (B5): an above-marks grid is moved out of the (before-marks)
         // `grid` slot into the `annotations` slot (emitted after marks). The
         // below-marks default keeps the grid in `grid` for byte-identical output.
-        let (grid_below, grid_above_nodes) = if grid_above {
+        let (mut grid_below, grid_above_nodes) = if grid_above {
             (Vec::new(), grid_nodes)
         } else {
             (grid_nodes, Vec::new())
         };
+
+        // z-routing for text annotations (XDEAD-03): Text annotations with
+        // z="below_marks" are appended to the grid slot (the pre-marks "below"
+        // bucket), painted on top of gridlines but below data marks.  All other
+        // annotation nodes go into the post-marks `annotations` slot below.
+        // Even when grid_above is true (grid_below is empty), below-marks
+        // annotation nodes must still land in the grid slot.
+        grid_below.extend(annotation_nodes.below_marks);
 
         let final_axes: Vec<SceneNode> = {
             let mut v = axes_nodes;
@@ -560,10 +575,12 @@ pub fn build_scene(
             v.extend(structural_marks);
             v
         };
-        // Annotation list (emitted after marks): user annotations, then any
-        // above-marks grid + axes (zindex >= 1), then structural annotations.
+        // Annotation list (emitted after marks): user annotations (`above_marks`
+        // bucket), then any above-marks grid + axes (zindex >= 1), then structural
+        // annotations.  `below_marks` annotation nodes were routed into `grid_below`
+        // above; they do not appear here.
         let final_annotations: Vec<SceneNode> = {
-            let mut v = annotation_nodes;
+            let mut v = annotation_nodes.above_marks;
             v.extend(grid_above_nodes);
             v.extend(axes_above_nodes);
             v.extend(structural_annotations);

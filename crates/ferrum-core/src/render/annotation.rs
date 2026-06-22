@@ -55,9 +55,11 @@ pub enum AnnotationSpec {
         dx: f64,
         #[serde(default)]
         dy: f64,
-        /// Z-order: "front" or "back". Reserved for future layering support.
+        /// Routes the text annotation into the below-marks (`grid`) or above-marks
+        /// (`annotations`) panel bucket. `"below_marks"` emits the node before the
+        /// data marks (into the same slot as gridlines); any other value (including
+        /// the default `"above_marks"`) emits after the data marks.
         #[serde(default = "default_z")]
-        #[allow(dead_code)]
         z: String,
     },
     #[serde(rename = "arrow")]
@@ -72,10 +74,6 @@ pub enum AnnotationSpec {
         stroke_width: f64,
         #[serde(default = "default_head_size")]
         head_size: f64,
-        /// Curve type: "straight" or "curved". Reserved for future bezier support.
-        #[serde(default = "default_curve")]
-        #[allow(dead_code)]
-        curve: String,
     },
     #[serde(rename = "rect")]
     Rect {
@@ -174,10 +172,9 @@ fn default_font_size() -> f64 { 12.0 }
 fn default_color_str() -> String { "#333333".to_string() }
 fn default_anchor() -> String { "middle".to_string() }
 fn default_baseline() -> String { "middle".to_string() }
-fn default_z() -> String { "front".to_string() }
+fn default_z() -> String { "above_marks".to_string() }
 fn default_stroke_width() -> f64 { 1.5 }
 fn default_head_size() -> f64 { 8.0 }
-fn default_curve() -> String { "straight".to_string() }
 fn default_fill_str() -> String { "#cccccc".to_string() }
 fn default_rect_opacity() -> f64 { 0.3 }
 fn default_span_opacity() -> f64 { 0.2 }
@@ -281,13 +278,36 @@ fn parse_baseline(s: &str) -> TextBaseline {
 
 // ── Build annotations ───────────────────────────────────────────────────────
 
-/// Convert a slice of annotation specs into positioned SceneNodes.
-pub fn build_annotations(specs: &[AnnotationSpec], ctx: &ScaleContext) -> Vec<SceneNode> {
-    let mut nodes = Vec::with_capacity(specs.len());
+/// Partitioned result from `build_annotations`.
+///
+/// `below_marks` contains nodes that should be inserted into the panel's
+/// pre-marks `grid` slot (painted before data marks).  `above_marks` contains
+/// nodes that belong in the post-marks `annotations` slot (painted after marks).
+pub struct AnnotationNodes {
+    pub below_marks: Vec<SceneNode>,
+    pub above_marks: Vec<SceneNode>,
+}
+
+/// Convert a slice of annotation specs into positioned SceneNodes, partitioned
+/// by z-order bucket.
+///
+/// Only `AnnotationSpec::Text` with `z == "below_marks"` routes to
+/// `below_marks`; every other spec (including Text with any other z value)
+/// routes to `above_marks`, preserving the historical single-bucket behavior
+/// for all existing charts.
+pub fn build_annotations(specs: &[AnnotationSpec], ctx: &ScaleContext) -> AnnotationNodes {
+    let mut result = AnnotationNodes {
+        below_marks: Vec::new(),
+        above_marks: Vec::with_capacity(specs.len()),
+    };
     for spec in specs {
-        build_one(spec, ctx, &mut nodes);
+        let target = match spec {
+            AnnotationSpec::Text { z, .. } if z == "below_marks" => &mut result.below_marks,
+            _ => &mut result.above_marks,
+        };
+        build_one(spec, ctx, target);
     }
-    nodes
+    result
 }
 
 /// Dispatch a single annotation spec to its builder, appending nodes to `out`.
@@ -775,11 +795,13 @@ mod tests {
             angle: 0.0,
             dx: 0.0,
             dy: 0.0,
-            z: "front".to_string(),
+            z: "above_marks".to_string(),
         }];
-        let nodes = build_annotations(&specs, &ctx);
-        assert_eq!(nodes.len(), 1);
-        match &nodes[0] {
+        let ann = build_annotations(&specs, &ctx);
+        // Default z="above_marks" lands in above_marks, not below_marks.
+        assert!(ann.below_marks.is_empty());
+        assert_eq!(ann.above_marks.len(), 1);
+        match &ann.above_marks[0] {
             SceneNode::Text { x, y, content, style } => {
                 assert!((x - 300.0).abs() < f64::EPSILON);
                 assert!((y - 170.0).abs() < f64::EPSILON);
@@ -804,9 +826,11 @@ mod tests {
             stroke_width: 2.0,
             dash: Some(vec![4.0, 2.0]),
         }];
-        let nodes = build_annotations(&specs, &ctx);
-        assert_eq!(nodes.len(), 1);
-        match &nodes[0] {
+        let ann = build_annotations(&specs, &ctx);
+        // Non-Text specs always land in above_marks.
+        assert!(ann.below_marks.is_empty());
+        assert_eq!(ann.above_marks.len(), 1);
+        match &ann.above_marks[0] {
             SceneNode::Line { x1, y1, x2, y2, style } => {
                 assert!((x1 - 50.0).abs() < f64::EPSILON);
                 assert!((x2 - 550.0).abs() < f64::EPSILON);
@@ -823,6 +847,7 @@ mod tests {
     fn build_arrow_annotation() {
         let (x_scale, y_scale, plot_area) = test_ctx();
         let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+        // `curve` is no longer a field on AnnotationSpec::Arrow (dropped as dead code).
         let specs = vec![AnnotationSpec::Arrow {
             x: CoordValue::Norm { norm: 0.0 },
             y: CoordValue::Norm { norm: 0.0 },
@@ -831,13 +856,14 @@ mod tests {
             stroke: "#333333".to_string(),
             stroke_width: 1.5,
             head_size: 8.0,
-            curve: "straight".to_string(),
         }];
-        let nodes = build_annotations(&specs, &ctx);
+        let ann = build_annotations(&specs, &ctx);
+        // Arrow (non-Text) always lands in above_marks.
+        assert!(ann.below_marks.is_empty());
         // Arrow produces a line + arrowhead path.
-        assert_eq!(nodes.len(), 2);
-        assert!(matches!(&nodes[0], SceneNode::Line { .. }));
-        assert!(matches!(&nodes[1], SceneNode::Path { .. }));
+        assert_eq!(ann.above_marks.len(), 2);
+        assert!(matches!(&ann.above_marks[0], SceneNode::Line { .. }));
+        assert!(matches!(&ann.above_marks[1], SceneNode::Path { .. }));
     }
 
     #[test]
@@ -853,11 +879,13 @@ mod tests {
             label_position: "center".to_string(),
             label: Some("span".to_string()),
         }];
-        let nodes = build_annotations(&specs, &ctx);
+        let ann = build_annotations(&specs, &ctx);
+        // Non-Text specs always land in above_marks.
+        assert!(ann.below_marks.is_empty());
         // Span produces a rect + label text.
-        assert_eq!(nodes.len(), 2);
-        assert!(matches!(&nodes[0], SceneNode::Rect { .. }));
-        assert!(matches!(&nodes[1], SceneNode::Text { .. }));
+        assert_eq!(ann.above_marks.len(), 2);
+        assert!(matches!(&ann.above_marks[0], SceneNode::Rect { .. }));
+        assert!(matches!(&ann.above_marks[1], SceneNode::Text { .. }));
     }
 
     #[test]
@@ -881,11 +909,115 @@ mod tests {
     }
 
     #[test]
-    fn empty_specs_returns_empty_vec() {
+    fn empty_specs_returns_empty_vecs() {
         let (x_scale, y_scale, plot_area) = test_ctx();
         let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
-        let nodes = build_annotations(&[], &ctx);
-        assert!(nodes.is_empty());
+        let ann = build_annotations(&[], &ctx);
+        assert!(ann.below_marks.is_empty());
+        assert!(ann.above_marks.is_empty());
+    }
+
+    // ── Regression tests for z-routing (T2.1b / XDEAD-03) ───────────────────
+    //
+    // These tests must fail on the pre-wiring code where build_annotations
+    // returned a flat Vec<SceneNode> with no z-based partition.
+
+    /// A Text spec with z="below_marks" routes to `below_marks`; a Text spec
+    /// with z="above_marks" (or default) routes to `above_marks`.
+    #[test]
+    fn text_z_routing_below_and_above() {
+        let (x_scale, y_scale, plot_area) = test_ctx();
+        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+
+        let mk_text = |z: &str| AnnotationSpec::Text {
+            x: CoordValue::Norm { norm: 0.5 },
+            y: CoordValue::Norm { norm: 0.5 },
+            text: z.to_string(),
+            font_size: 12.0,
+            color: "#000000".to_string(),
+            anchor: "middle".to_string(),
+            baseline: "middle".to_string(),
+            angle: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+            z: z.to_string(),
+        };
+
+        let specs = vec![mk_text("below_marks"), mk_text("above_marks")];
+        let ann = build_annotations(&specs, &ctx);
+
+        // Exactly one node in each bucket.
+        assert_eq!(ann.below_marks.len(), 1, "below_marks bucket must have the below_marks text");
+        assert_eq!(ann.above_marks.len(), 1, "above_marks bucket must have the above_marks text");
+
+        // Confirm the content so we know which went where.
+        match &ann.below_marks[0] {
+            SceneNode::Text { content, .. } => assert_eq!(content, "below_marks"),
+            _ => panic!("expected Text in below_marks"),
+        }
+        match &ann.above_marks[0] {
+            SceneNode::Text { content, .. } => assert_eq!(content, "above_marks"),
+            _ => panic!("expected Text in above_marks"),
+        }
+    }
+
+    /// An unknown/unrecognized z value falls through to the above-marks bucket
+    /// (not below_marks).  Only the exact string "below_marks" selects the
+    /// below bucket; everything else is above (fail-safe default).
+    #[test]
+    fn text_unknown_z_falls_to_above_marks() {
+        let (x_scale, y_scale, plot_area) = test_ctx();
+        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+
+        let specs = vec![AnnotationSpec::Text {
+            x: CoordValue::Norm { norm: 0.5 },
+            y: CoordValue::Norm { norm: 0.5 },
+            text: "unknown".to_string(),
+            font_size: 12.0,
+            color: "#000000".to_string(),
+            anchor: "middle".to_string(),
+            baseline: "middle".to_string(),
+            angle: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+            z: "front".to_string(), // old default — must still go above
+        }];
+        let ann = build_annotations(&specs, &ctx);
+        assert!(ann.below_marks.is_empty(), "unrecognized z must not go to below_marks");
+        assert_eq!(ann.above_marks.len(), 1);
+    }
+
+    /// Non-Text specs (Arrow, Line, Rect, Span, Bracket, Callout, Image) have
+    /// no z field and always land in above_marks.
+    #[test]
+    fn non_text_specs_always_above_marks() {
+        let (x_scale, y_scale, plot_area) = test_ctx();
+        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale };
+
+        let specs = vec![
+            AnnotationSpec::Line {
+                x1: CoordValue::Norm { norm: 0.0 },
+                y1: CoordValue::Norm { norm: 0.5 },
+                x2: CoordValue::Norm { norm: 1.0 },
+                y2: CoordValue::Norm { norm: 0.5 },
+                stroke: "#000000".to_string(),
+                stroke_width: 1.0,
+                dash: None,
+            },
+            AnnotationSpec::Arrow {
+                x: CoordValue::Norm { norm: 0.0 },
+                y: CoordValue::Norm { norm: 0.0 },
+                x2: CoordValue::Norm { norm: 1.0 },
+                y2: CoordValue::Norm { norm: 1.0 },
+                stroke: "#000000".to_string(),
+                stroke_width: 1.5,
+                head_size: 0.0, // no arrowhead → 1 node only
+            },
+        ];
+        let ann = build_annotations(&specs, &ctx);
+        assert!(ann.below_marks.is_empty(), "non-Text annotations must never go to below_marks");
+        // Line = 1 node; Arrow with head_size=0 = 1 node (no path triangle).
+        assert_eq!(ann.above_marks.len(), 2);
     }
 
     /// Image annotation Raw nodes must carry `anchor == Data` — they are
@@ -904,9 +1036,10 @@ mod tests {
             height: 30.0,
             anchor: "middle".to_string(),
         }];
-        let nodes = build_annotations(&specs, &ctx);
-        assert_eq!(nodes.len(), 1, "expected exactly one node for image annotation");
-        match &nodes[0] {
+        let ann = build_annotations(&specs, &ctx);
+        assert!(ann.below_marks.is_empty(), "image annotation should not go to below_marks");
+        assert_eq!(ann.above_marks.len(), 1, "expected exactly one node for image annotation");
+        match &ann.above_marks[0] {
             SceneNode::Raw { anchor, .. } => {
                 assert_eq!(*anchor, RawAnchor::Data, "image annotation Raw node must have Data anchor");
             }
