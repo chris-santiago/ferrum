@@ -975,7 +975,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n: 16,
             extent: None,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let kde_out = kde_2d::apply(&kde2d_spec, &in_batch).unwrap();

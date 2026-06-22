@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::group_key::{
-    group_partition, groupby_field_nullable, materialize_groupby_col, KeyValue,
+    deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
+    materialize_groupby_col, parse_groupby_pyany, KeyValue,
 };
 use crate::transform::numeric_util::resolve_shared_extent;
 
@@ -41,8 +42,15 @@ pub(crate) struct KdeSpec {
     /// "tophat" / "uniform", "cosine".
     #[serde(default = "default_kernel")]
     pub kernel: String,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub groupby: Option<String>,
+    /// When non-empty, partition input by these columns and emit per-(value, group)
+    /// rows. Output schema gains one column per groupby field after the 2nd field.
+    /// Wire accepts: `null` → `[]`, `"col"` → `["col"]`, `["a","b"]` → `["a","b"]`.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        default,
+        deserialize_with = "deserialize_groupby_vec"
+    )]
+    pub groupby: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
@@ -66,8 +74,8 @@ pub(crate) fn global_extent(spec: &KdeSpec, batch: &RecordBatch) -> Option<(f64,
 }
 
 pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    if let Some(g) = &spec.groupby {
-        return apply_grouped(spec, batch, g);
+    if !spec.groupby.is_empty() {
+        return apply_grouped(spec, batch, &spec.groupby);
     }
     apply_one_group(spec, batch, None)
 }
@@ -140,16 +148,17 @@ fn apply_one_group(
         .map_err(|e| PyValueError::new_err(format!("stat_kde: {e}")))
 }
 
-/// Partition input batch by `group_col`, call apply_one_group per partition,
-/// then stack the results into a single batch with the group column preserved
-/// (with its original dtype) as the 3rd field.
+/// Partition input batch by the groupby columns, call apply_one_group per
+/// partition, then stack the results into a single batch with the group
+/// columns appended after the 2nd field.
 fn apply_grouped(
     spec: &KdeSpec,
     batch: &RecordBatch,
-    group_col: &str,
+    group_cols: &[String],
 ) -> PyResult<RecordBatch> {
-    // Shared partition path (first-appearance order, null-key skip, dtype-preserve).
-    let (group_order, group_idx_map, gtype) = group_partition(batch, group_col, "stat_kde")?;
+    // Multi-column partition path (first-appearance order, null-key skip, dtype-preserve).
+    let (group_order, group_idx_map, gtypes) =
+        group_partition_multi(batch, group_cols, "stat_kde")?;
 
     // Shared vs per-group extent (stack/fill aligns to one global extent;
     // layer mode keeps per-group extents). resolve_shared_extent returns the
@@ -176,24 +185,29 @@ fn apply_grouped(
         for i in 0..n {
             all_values.push(values.value(i));
             all_density.push(if density.is_null(i) { f64::NAN } else { density.value(i) });
-            group_keys_out.push(vec![g.clone()]);
+            group_keys_out.push(g.clone());
         }
     }
 
-    let out_schema = Arc::new(Schema::new(vec![
+    let mut fields = vec![
         Field::new("value", DataType::Float64, false),
         Field::new("density", DataType::Float64, true),
-        // FA-7: preserve the original groupby dtype (nullable per FA-9, though
-        // null keys are skipped upstream in group_partition).
-        Field::new(group_col, gtype.clone(), groupby_field_nullable()),
-    ]));
-    let group_col_arr = materialize_groupby_col(&group_keys_out, 0, &gtype)
-        .map_err(PyValueError::new_err)?;
-    let cols: Vec<ArrayRef> = vec![
+    ];
+    // FA-7: preserve the original groupby dtypes (nullable per FA-9; null keys
+    // are skipped upstream in group_partition_multi).
+    for (name, dtype) in group_cols.iter().zip(gtypes.iter()) {
+        fields.push(Field::new(name, dtype.clone(), groupby_field_nullable()));
+    }
+    let out_schema = Arc::new(Schema::new(fields));
+    let mut cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(all_values)),
         Arc::new(Float64Array::from(all_density)),
-        group_col_arr,
     ];
+    for (gi, dtype) in gtypes.iter().enumerate() {
+        let group_col_arr = materialize_groupby_col(&group_keys_out, gi, dtype)
+            .map_err(PyValueError::new_err)?;
+        cols.push(group_col_arr);
+    }
     RecordBatch::try_new(out_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_kde: {e}")))
 }
@@ -365,9 +379,9 @@ use crate::transform::core::TransformSpec;
 /// cumulative : bool, default False
 ///     When True, output is the cumulative distribution function (CDF)
 ///     rather than the PDF.
-/// groupby : str, optional
-///     Single group-key column (Utf8); KDE computed independently per
-///     group. Output schema gains the group column as the 3rd field.
+/// groupby : list[str] or str or None, optional
+///     One or more group-key columns; KDE computed independently per group.
+///     Output schema gains one column per groupby field after the 2nd field.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 ///
@@ -400,7 +414,7 @@ impl PyKde {
         cumulative: bool,
         shared_extent: bool,
         kernel: &str,
-        groupby: Option<String>,
+        groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
     ) -> PyResult<Self> {
         if !bw_adjust.is_finite() || bw_adjust <= 0.0 {
@@ -452,6 +466,7 @@ impl PyKde {
                 "Kde: unknown kernel '{other}'; expected 'gaussian' | 'epanechnikov' | 'epan' | 'tophat' | 'uniform' | 'cosine'"
             ))),
         };
+        let groupby = parse_groupby_pyany(groupby)?;
         Ok(PyKde(TransformSpec::Kde(KdeSpec {
             field: field.to_string(),
             bandwidth: bw,
@@ -549,7 +564,7 @@ mod tests {
                 extent: Some((case.extent[0], case.extent[1])),
                 cumulative: case.cumulative,
                 kernel: default_kernel(),
-                groupby: None,
+                groupby: vec![],
                 name: None,
             };
             let batch = batch_with("x", case.input.clone());
@@ -590,7 +605,7 @@ mod tests {
             extent: Some((0.0, 6.0)),
             cumulative: false,
             kernel: default_kernel(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -610,7 +625,7 @@ mod tests {
             extent: Some((0.0, 2.0)),
             cumulative: false,
             kernel: default_kernel(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -643,7 +658,7 @@ mod tests {
             extent: None,
             cumulative: false,
             kernel: default_kernel(),
-            groupby: Some("g".into()),
+            groupby: vec!["g".into()],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -691,7 +706,7 @@ mod tests {
             extent: None,
             cumulative: false,
             kernel: default_kernel(),
-            groupby: Some("g".into()),
+            groupby: vec!["g".into()],
             name: None,
         };
         let out = apply(&spec, &batch).expect("Int64 groupby must succeed");
@@ -734,7 +749,7 @@ mod tests {
             extent: None,
             cumulative: false,
             kernel: default_kernel(),
-            groupby: Some("g".into()),
+            groupby: vec!["g".into()],
             name: None,
         };
         let out = apply(&spec, &batch).expect("Boolean groupby must succeed");
@@ -764,7 +779,7 @@ mod tests {
             extent: Some((0.0, 6.0)),
             cumulative: false,
             kernel: default_kernel(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -786,7 +801,7 @@ mod tests {
             extent: None,
             cumulative: false,
             kernel: default_kernel(),
-            groupby: Some("ghost".into()),
+            groupby: vec!["ghost".into()],
             name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -814,7 +829,7 @@ mod tests {
             extent: None,
             cumulative: false,
             kernel: default_kernel(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let int_out = apply(&spec, &int_batch).expect("Int64 KDE should succeed");
@@ -850,7 +865,7 @@ mod tests {
             extent: None,
             cumulative: false,
             kernel: default_kernel(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).expect("Int32 KDE should succeed");
@@ -877,7 +892,7 @@ mod tests {
             extent: None,
             cumulative: false,
             kernel: default_kernel(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -896,7 +911,7 @@ mod tests {
             cumulative: true,
             shared_extent: false,
             kernel: "gaussian".to_string(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -918,7 +933,7 @@ mod tests {
             extent: Some((5.0, 9.0)),
             cumulative: false,
             kernel: default_kernel(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -944,7 +959,7 @@ mod tests {
             extent: Some((2.0, 6.0)),
             cumulative: false,
             kernel: default_kernel(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -967,7 +982,7 @@ mod tests {
             extent: Some((-3.0, 3.0)),
             cumulative: false,
             kernel: kernel.to_string(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         }
     }
@@ -1020,7 +1035,7 @@ mod tests {
             extent: Some((-2.0, 2.0)),
             cumulative: false,
             kernel: "epanechnikov".to_string(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -1159,7 +1174,7 @@ mod tests {
             cumulative: false,
             shared_extent: false,
             kernel: "epanechnikov".to_string(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -1195,7 +1210,7 @@ mod tests {
             cumulative: false,
             shared_extent: false,
             kernel: default_kernel(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -1220,7 +1235,7 @@ mod tests {
             cumulative: false,
             shared_extent: false,
             kernel: default_kernel(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -1240,7 +1255,7 @@ mod tests {
             cumulative: false,
             shared_extent: false,
             kernel: default_kernel(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -1262,10 +1277,128 @@ mod tests {
             cumulative: false,
             shared_extent: false,
             kernel: default_kernel(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
         assert_eq!(ext, None, "global_extent on all-null field must return None");
+    }
+
+    // ── T3.8a regression tests ────────────────────────────────────────────────
+
+    /// D-GROUPBY-1 regression (T3.8a): a 2-column groupby on `Kde` must produce
+    /// `n` density grid points per distinct `(g1, g2)` combination, with both
+    /// group columns appended after the standard 2 kde output columns.
+    #[test]
+    fn kde_two_column_groupby_produces_per_combination_rows() {
+        use arrow::array::StringArray;
+        pyo3::Python::initialize();
+        // 8 rows: two g1 × two g2 × 2 x-values each.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("g1", DataType::Utf8, false),
+            Field::new("g2", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![
+                    1.0, 9.0, 1.0, 9.0, 1.0, 9.0, 1.0, 9.0,
+                ])) as arrow::array::ArrayRef,
+                Arc::new(StringArray::from(vec!["A", "A", "A", "A", "B", "B", "B", "B"]))
+                    as arrow::array::ArrayRef,
+                Arc::new(StringArray::from(vec!["x", "x", "y", "y", "x", "x", "y", "y"]))
+                    as arrow::array::ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let n = 8_usize;
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n,
+            extent: None,
+            cumulative: false,
+            shared_extent: false,
+            kernel: default_kernel(),
+            groupby: vec!["g1".into(), "g2".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+
+        // Schema: value, density, g1, g2.
+        let s = out.schema();
+        assert!(s.index_of("value").is_ok(), "missing value");
+        assert!(s.index_of("density").is_ok(), "missing density");
+        assert!(s.index_of("g1").is_ok(), "missing g1");
+        assert!(s.index_of("g2").is_ok(), "missing g2");
+
+        // 4 distinct (g1,g2) groups × n grid points each.
+        assert_eq!(
+            out.num_rows(),
+            4 * n,
+            "expected 4 groups × {n} grid points = {} rows, got {}",
+            4 * n,
+            out.num_rows()
+        );
+
+        // Collect distinct (g1,g2) combos in the output.
+        let g1_col = out.column(s.index_of("g1").unwrap())
+            .as_any().downcast_ref::<StringArray>().unwrap();
+        let g2_col = out.column(s.index_of("g2").unwrap())
+            .as_any().downcast_ref::<StringArray>().unwrap();
+        let combos: std::collections::BTreeSet<(String, String)> = (0..out.num_rows())
+            .map(|i| (g1_col.value(i).to_string(), g2_col.value(i).to_string()))
+            .collect();
+        assert_eq!(combos.len(), 4, "must have 4 distinct (g1,g2) pairs");
+        assert!(combos.contains(&("A".into(), "x".into())));
+        assert!(combos.contains(&("A".into(), "y".into())));
+        assert!(combos.contains(&("B".into(), "x".into())));
+        assert!(combos.contains(&("B".into(), "y".into())));
+    }
+
+    /// D-GROUPBY-1 regression (T3.8a): the KdeSpec serde round-trip preserves
+    /// the canonical array wire form; deserializing the old bare-string form
+    /// yields a one-element vec identical to `vec!["col"]`.
+    #[test]
+    fn kde_groupby_serde_round_trip_and_back_compat() {
+        // Minimal valid KdeSpec JSON (bandwidth and n are required fields).
+        // "bandwidth":{"kind":"scott"} is the Scott variant serialized by serde.
+        let base_json =
+            r#"{"field":"x","bandwidth":{"kind":"scott"},"n":64,"groupby":"col"}"#;
+
+        let spec = KdeSpec {
+            field: "x".into(),
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 64,
+            extent: None,
+            cumulative: false,
+            shared_extent: false,
+            kernel: default_kernel(),
+            groupby: vec!["col".into()],
+            name: None,
+        };
+
+        // Serialize: groupby=["col"] must use array form.
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""groupby":["col"]"#), "must serialize as array, got: {json}");
+
+        // Legacy bare-string deserializes to vec!["col"].
+        let from_legacy: KdeSpec = serde_json::from_str(base_json).unwrap();
+        assert_eq!(from_legacy.groupby, vec!["col"], "bare-string must parse to [\"col\"]");
+
+        // Legacy null deserializes to [].
+        let null_json =
+            r#"{"field":"x","bandwidth":{"kind":"scott"},"n":64,"groupby":null}"#;
+        let from_null: KdeSpec = serde_json::from_str(null_json).unwrap();
+        assert!(from_null.groupby.is_empty(), "null groupby must parse to []");
+
+        // Empty groupby is omitted from serialization.
+        let empty = KdeSpec { groupby: vec![], ..spec.clone() };
+        let empty_json = serde_json::to_string(&empty).unwrap();
+        assert!(!empty_json.contains("groupby"), "empty groupby must be omitted: {empty_json}");
     }
 }

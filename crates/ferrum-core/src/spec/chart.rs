@@ -718,7 +718,7 @@ mod tests {
                 nice: true,
                 cumulative: false,
                 shared_extent: false,
-                groupby: None,
+                groupby: vec![],
                 name: None,
             })],
             facet: None,

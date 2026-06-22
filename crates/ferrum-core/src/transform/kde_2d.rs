@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::group_key::{
-    group_partition, groupby_field_nullable, materialize_groupby_col, KeyValue,
+    deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
+    materialize_groupby_col, parse_groupby_pyany, KeyValue,
 };
 use crate::transform::kde::{self, BandwidthSpec};
 
@@ -73,8 +74,15 @@ pub(crate) struct Kde2DSpec {
     pub n: usize,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub extent: Option<(f64, f64, f64, f64)>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub groupby: Option<String>,
+    /// When non-empty, partition input by these columns and emit one row per
+    /// group. Output schema gains one column per groupby field after the 6th field.
+    /// Wire accepts: `null` → `[]`, `"col"` → `["col"]`, `["a","b"]` → `["a","b"]`.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        default,
+        deserialize_with = "deserialize_groupby_vec"
+    )]
+    pub groupby: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
@@ -83,8 +91,8 @@ pub(crate) fn apply(spec: &Kde2DSpec, batch: &RecordBatch) -> PyResult<RecordBat
     if spec.n == 0 {
         return Err(PyValueError::new_err("stat_kde_2d: n must be > 0"));
     }
-    if let Some(g) = &spec.groupby {
-        return apply_grouped(spec, batch, g);
+    if !spec.groupby.is_empty() {
+        return apply_grouped(spec, batch, &spec.groupby);
     }
     apply_one_group(spec, batch, None, None)
 }
@@ -265,21 +273,21 @@ fn build_surface_batch(
         .map_err(|e| PyValueError::new_err(format!("stat_kde_2d: {e}")))
 }
 
-/// Partition input batch by `group_col` (Utf8), compute one 2-D KDE surface
+/// Partition input batch by the groupby columns, compute one 2-D KDE surface
 /// per group, then stack the results. Each group yields one output row; the
-/// group-key column is appended as the 7th field so downstream marks can
+/// group-key columns are appended after the 6th field so downstream marks can
 /// color by group.
 ///
-/// Per-group extents are used by default (matching `kde.rs` `shared_extent=false`
-/// semantics). The caller-specified `spec.extent`, when present, is applied as
-/// a shared override across all groups.
+/// Per-group extents are used by default. The caller-specified `spec.extent`,
+/// when present, is applied as a shared override across all groups.
 fn apply_grouped(
     spec: &Kde2DSpec,
     batch: &RecordBatch,
-    group_col: &str,
+    group_cols: &[String],
 ) -> PyResult<RecordBatch> {
-    // Shared partition path (first-appearance order, null-key skip, dtype-preserve).
-    let (group_order, group_idx_map, gtype) = group_partition(batch, group_col, "stat_kde_2d")?;
+    // Multi-column partition path (first-appearance order, null-key skip, dtype-preserve).
+    let (group_order, group_idx_map, gtypes) =
+        group_partition_multi(batch, group_cols, "stat_kde_2d")?;
 
     // Per-group extents by default; spec.extent (when set) is a shared override.
     let shared_extent: Option<(f64, f64, f64, f64)> = spec.extent;
@@ -319,32 +327,37 @@ fn apply_grouped(
         all_extent.append(true);
         all_nx.push(n as u32);
         all_ny.push(n as u32);
-        group_keys_out.push(vec![g.clone()]);
+        group_keys_out.push(g.clone());
     }
 
     let list_f64 = DataType::List(Arc::new(Field::new("item", DataType::Float64, true)));
-    let out_schema = Arc::new(Schema::new(vec![
+    let mut fields = vec![
         Field::new("grid_x", list_f64.clone(), false),
         Field::new("grid_y", list_f64.clone(), false),
         Field::new("density", list_f64.clone(), false),
         Field::new("nx", DataType::UInt32, false),
         Field::new("ny", DataType::UInt32, false),
         Field::new("extent", list_f64, false),
-        // FA-7: preserve the original groupby dtype (nullable per FA-9; null keys
-        // are skipped upstream in group_partition).
-        Field::new(group_col, gtype.clone(), groupby_field_nullable()),
-    ]));
-    let group_col_arr = materialize_groupby_col(&group_keys_out, 0, &gtype)
-        .map_err(PyValueError::new_err)?;
-    let cols: Vec<ArrayRef> = vec![
+    ];
+    // FA-7: preserve the original groupby dtypes (nullable per FA-9; null keys
+    // are skipped upstream in group_partition_multi).
+    for (name, dtype) in group_cols.iter().zip(gtypes.iter()) {
+        fields.push(Field::new(name, dtype.clone(), groupby_field_nullable()));
+    }
+    let out_schema = Arc::new(Schema::new(fields));
+    let mut cols: Vec<ArrayRef> = vec![
         Arc::new(all_grid_x.finish()),
         Arc::new(all_grid_y.finish()),
         Arc::new(all_density.finish()),
         Arc::new(UInt32Array::from(all_nx)),
         Arc::new(UInt32Array::from(all_ny)),
         Arc::new(all_extent.finish()),
-        group_col_arr,
     ];
+    for (gi, dtype) in gtypes.iter().enumerate() {
+        let group_col_arr = materialize_groupby_col(&group_keys_out, gi, dtype)
+            .map_err(PyValueError::new_err)?;
+        cols.push(group_col_arr);
+    }
     RecordBatch::try_new(out_schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_kde_2d: {e}")))
 }
@@ -406,10 +419,10 @@ use crate::transform::core::TransformSpec;
 /// extent : (float, float, float, float), optional
 ///     ``(xmin, xmax, ymin, ymax)`` clipping box; all values must be finite
 ///     and satisfy ``xmin < xmax``, ``ymin < ymax``.
-/// groupby : str, optional
-///     Single group-key column (Utf8). When set, one 2-D KDE surface is
-///     computed per distinct group value. Output schema gains the group
-///     column as the last field.
+/// groupby : list[str] or str or None, optional
+///     One or more group-key columns. When set, one 2-D KDE surface is
+///     computed per distinct group combination. Output schema gains one
+///     column per groupby field after the 6th field.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 ///
@@ -431,7 +444,7 @@ impl PyKde2D {
         bandwidth: Option<&Bound<'_, PyAny>>,
         n: usize,
         extent: Option<(f64, f64, f64, f64)>,
-        groupby: Option<String>,
+        groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
     ) -> PyResult<Self> {
         if x.is_empty() {
@@ -482,6 +495,7 @@ impl PyKde2D {
                 ));
             }
         }
+        let groupby = parse_groupby_pyany(groupby)?;
         Ok(PyKde2D(TransformSpec::Kde2D(Kde2DSpec {
             x: x.to_string(),
             y: y.to_string(),
@@ -565,7 +579,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n,
             extent: Some((-3.0, 4.0, -3.0, 4.0)),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let b = batch_xy(xs, ys);
@@ -600,7 +614,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n,
             extent: Some((-10.0, 10.0, -10.0, 10.0)),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let b = batch_xy(xs, ys);
@@ -644,7 +658,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n,
             extent: None,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).expect("Int64 KDE2D should succeed");
@@ -676,7 +690,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n: 8,
             extent: None,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -691,7 +705,7 @@ mod tests {
             bandwidth: BandwidthSpec::Fixed { value: 0.7 },
             n: 64,
             extent: Some((-1.0, 1.0, -2.0, 2.0)),
-            groupby: None,
+            groupby: vec![],
             name: Some("k2d".into()),
         };
         let json = serde_json::to_string(&with_extent).unwrap();
@@ -704,28 +718,28 @@ mod tests {
             bandwidth: BandwidthSpec::Silverman,
             n: 32,
             extent: None,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let json2 = serde_json::to_string(&no_extent).unwrap();
         let parsed2: Kde2DSpec = serde_json::from_str(&json2).unwrap();
         assert_eq!(parsed2, no_extent);
-        // Sanity: extent and groupby omitted in serialized form when None.
+        // Sanity: extent and groupby omitted in serialized form when empty.
         assert!(!json2.contains("extent"), "extent=None must be omitted: {json2}");
-        assert!(!json2.contains("groupby"), "groupby=None must be omitted: {json2}");
+        assert!(!json2.contains("groupby"), "groupby=[] must be omitted: {json2}");
 
-        // groupby round-trips through JSON.
+        // groupby round-trips through JSON (array form).
         let with_groupby = Kde2DSpec {
             x: "px".into(),
             y: "py".into(),
             bandwidth: BandwidthSpec::Scott,
             n: 16,
             extent: None,
-            groupby: Some("species".into()),
+            groupby: vec!["species".into()],
             name: None,
         };
         let json3 = serde_json::to_string(&with_groupby).unwrap();
-        assert!(json3.contains("groupby"), "groupby=Some must appear in JSON: {json3}");
+        assert!(json3.contains("groupby"), "groupby non-empty must appear in JSON: {json3}");
         let parsed3: Kde2DSpec = serde_json::from_str(&json3).unwrap();
         assert_eq!(parsed3, with_groupby);
     }
@@ -778,7 +792,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n: 8,
             extent: None,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let b = batch_xy(xs, ys);
@@ -820,7 +834,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n,
             extent: None,
-            groupby: Some("g".into()),
+            groupby: vec!["g".into()],
             name: None,
         };
         let b = batch_xy_g(xs, ys, gs);
@@ -922,7 +936,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n,
             extent: None,
-            groupby: Some("g".into()),
+            groupby: vec!["g".into()],
             name: None,
         };
         let out = apply(&spec, &b).expect("Int64 groupby must succeed");
@@ -955,7 +969,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n: 8,
             extent: None,
-            groupby: Some("g".into()),
+            groupby: vec!["g".into()],
             name: None,
         };
         let out = apply(&spec, &b).expect("Boolean groupby must succeed");
@@ -976,7 +990,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n: 4,
             extent: None,
-            groupby: Some("ghost".into()),
+            groupby: vec!["ghost".into()],
             name: None,
         };
         let err = apply(&spec, &b).unwrap_err();
@@ -1002,7 +1016,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n: 16,
             extent: None,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let b = batch_xy(xs, ys);
@@ -1025,7 +1039,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n: 16,
             extent: Some((-100.0, 100.0, -50.0, 50.0)),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let b = batch_xy(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 2.0]);
@@ -1046,7 +1060,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n: 16,
             extent: None,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let b = batch_xy(vec![0.0, 1.0], vec![0.0, 1.0]);
@@ -1068,7 +1082,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n,
             extent: Some(shared),
-            groupby: Some("g".into()),
+            groupby: vec!["g".into()],
             name: None,
         };
         let b = batch_xy_g(xs, ys, gs);

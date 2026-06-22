@@ -1629,7 +1629,7 @@ mod tests {
             nice: true,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = fix_transform_extents_for_facet(&[TransformSpec::Bin(spec.clone())], &batch);
@@ -1705,7 +1705,7 @@ mod tests {
             cumulative: false,
             shared_extent: false,
             kernel: "gaussian".into(),
-            groupby: Some("g".into()),
+            groupby: vec!["g".into()],
             name: None,
         };
         let out = fix_transform_extents_for_facet(&[TransformSpec::Kde(spec.clone())], &batch);
@@ -1738,7 +1738,7 @@ mod tests {
             nice: true,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let kde = KdeSpec {
@@ -1750,7 +1750,7 @@ mod tests {
             cumulative: false,
             shared_extent: false,
             kernel: "gaussian".into(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = fix_transform_extents_for_facet(
@@ -1798,7 +1798,7 @@ mod tests {
             nice: true,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let kde_spec = KdeSpec {
@@ -1810,7 +1810,7 @@ mod tests {
             cumulative: false,
             shared_extent: false,
             kernel: "gaussian".into(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let violin_spec = ViolinSpec {
@@ -1893,7 +1893,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n: 16,
             extent: None,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = fix_transform_extents_for_facet(&[TransformSpec::Kde2D(spec.clone())], &batch);
@@ -1965,7 +1965,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n: 16,
             extent: Some(user_kde),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         // Bin2D with BOTH axes user-set must be left fully untouched.
@@ -2718,7 +2718,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name,
         })];
         if !named {

@@ -436,7 +436,7 @@ class Bin:
         nice: bool = True,
         cumulative: bool = False,
         shared_extent: bool = False,
-        groupby: Optional[str] = None,
+        groupby: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -476,7 +476,7 @@ class Kde:
         cumulative: bool = False,
         shared_extent: bool = False,
         kernel: str = "gaussian",
-        groupby: Optional[str] = None,
+        groupby: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -489,7 +489,7 @@ class Kde2D:
         bandwidth: object = None,  # str ("scott"|"silverman") or float; None → scott
         n: int = 128,
         extent: Optional[Tuple[float, float, float, float]] = None,
-        groupby: Optional[str] = None,
+        groupby: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -520,7 +520,7 @@ class Smooth:
         output: str = "fitted",
         inject_zero_ref: bool = False,
         inject_metrics: bool = False,
-        groupby: Optional[str] = None,
+        groupby: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
         x_range: Optional[Tuple[float, float]] = None,
     ) -> None: ...

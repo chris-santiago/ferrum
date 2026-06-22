@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use crate::scale::ticks::sturges_floor;
 use crate::transform::group_key::{
-    group_partition, groupby_field_nullable, materialize_groupby_col, KeyValue,
+    deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
+    materialize_groupby_col, parse_groupby_pyany, KeyValue,
 };
 use crate::transform::numeric_util::{
     clean_float64_values, coerce_to_float64, column_extent, resolve_shared_extent,
@@ -52,10 +53,15 @@ pub(crate) struct BinSpec {
     /// aligned bars that can be stacked correctly.
     #[serde(default)]
     pub shared_extent: bool,
-    /// When set, partition input by this Utf8 column and emit per-(bin, group)
-    /// rows. Output schema gains the groupby column as the 5th field.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub groupby: Option<String>,
+    /// When non-empty, partition input by these columns and emit per-(bin, group)
+    /// rows. Output schema gains one column per groupby field after the 4th field.
+    /// Wire accepts: `null` → `[]`, `"col"` → `["col"]`, `["a","b"]` → `["a","b"]`.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        default,
+        deserialize_with = "deserialize_groupby_vec"
+    )]
+    pub groupby: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
@@ -107,11 +113,9 @@ pub(crate) fn global_extent(spec: &BinSpec, batch: &RecordBatch) -> Option<(f64,
 }
 
 pub(crate) fn apply(spec: &BinSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    // Phase 9 finalize: groupby support. Partition input by the groupby column,
-    // run bin_one_group per partition, then stack the per-group outputs into a
-    // single batch with the group column preserved as the 5th field.
-    if let Some(g) = &spec.groupby {
-        return apply_grouped(spec, batch, g);
+    // D-GROUPBY-1: groupby is now Vec<String>. Non-empty → grouped path.
+    if !spec.groupby.is_empty() {
+        return apply_grouped(spec, batch, &spec.groupby);
     }
     apply_one_group(spec, batch, None)
 }
@@ -225,9 +229,9 @@ fn apply_one_group(
     build_bin_batch(bin_starts, bin_ends, final_counts, final_densities)
 }
 
-/// Partition input batch by `group_col` (Utf8), call apply_one_group per
+/// Partition input batch by the groupby columns, call apply_one_group per
 /// partition, then stack the results into a single batch with the group
-/// column preserved as the 5th field.
+/// columns appended after the 4th field.
 ///
 /// When `spec.shared_extent` is `true` and `spec.extent` is `None`, a global
 /// extent is computed across all rows of the field before per-group binning so
@@ -236,12 +240,12 @@ fn apply_one_group(
 fn apply_grouped(
     spec: &BinSpec,
     batch: &RecordBatch,
-    group_col: &str,
+    group_cols: &[String],
 ) -> PyResult<RecordBatch> {
-    // Partition rows by the group column via the shared helper (first-appearance
-    // group order, per-group index map, null-key skip, dtype-preservation —
-    // identical across bin/kde/kde_2d/smooth).
-    let (group_order, group_idx_map, gtype) = group_partition(batch, group_col, "stat_bin")?;
+    // Multi-column partition via the shared helper (first-appearance order,
+    // null-key skip, dtype-preservation — same policy as single-column path).
+    let (group_order, group_idx_map, gtypes) =
+        group_partition_multi(batch, group_cols, "stat_bin")?;
 
     // When shared_extent=true, inject the global raw extent so every group gets
     // the same bin edges (required for stack/fill). resolve_shared_extent returns
@@ -282,12 +286,12 @@ fn apply_grouped(
             all_ends.push(ends.value(i));
             all_counts.push(counts.value(i));
             all_densities.push(densities.value(i));
-            group_keys_out.push(vec![g.clone()]);
+            group_keys_out.push(g.clone());
         }
     }
 
     build_bin_batch_grouped(
-        all_starts, all_ends, all_counts, all_densities, group_keys_out, group_col, &gtype,
+        all_starts, all_ends, all_counts, all_densities, group_keys_out, group_cols, &gtypes,
     )
 }
 
@@ -319,27 +323,32 @@ fn build_bin_batch_grouped(
     counts: Vec<u64>,
     densities: Vec<f64>,
     group_keys: Vec<Vec<KeyValue>>,
-    group_col_name: &str,
-    group_dtype: &DataType,
+    group_col_names: &[String],
+    group_dtypes: &[DataType],
 ) -> PyResult<RecordBatch> {
-    let schema = Arc::new(Schema::new(vec![
+    let mut fields = vec![
         Field::new("bin_start", DataType::Float64, false),
         Field::new("bin_end",   DataType::Float64, false),
         Field::new("count",     DataType::UInt64,  false),
         Field::new("density",   DataType::Float64, false),
-        // FA-7: preserve the original groupby dtype (nullable for FA-9 null keys,
-        // though null keys are skipped upstream for stat_bin).
-        Field::new(group_col_name, group_dtype.clone(), groupby_field_nullable()),
-    ]));
-    let group_col = materialize_groupby_col(&group_keys, 0, group_dtype)
-        .map_err(PyValueError::new_err)?;
-    let cols: Vec<ArrayRef> = vec![
+    ];
+    // FA-7: preserve original groupby dtypes (nullable for FA-9 null keys,
+    // though null keys are skipped upstream for stat_bin).
+    for (name, dtype) in group_col_names.iter().zip(group_dtypes.iter()) {
+        fields.push(Field::new(name, dtype.clone(), groupby_field_nullable()));
+    }
+    let mut cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(starts)),
         Arc::new(Float64Array::from(ends)),
         Arc::new(UInt64Array::from(counts)),
         Arc::new(Float64Array::from(densities)),
-        group_col,
     ];
+    for (gi, dtype) in group_dtypes.iter().enumerate() {
+        let group_col = materialize_groupby_col(&group_keys, gi, dtype)
+            .map_err(PyValueError::new_err)?;
+        cols.push(group_col);
+    }
+    let schema = Arc::new(Schema::new(fields));
     RecordBatch::try_new(schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))
 }
@@ -382,8 +391,10 @@ use crate::transform::core::TransformSpec;
 ///     Round bin edges to visually clean numbers.
 /// cumulative : bool, default False
 ///     When True, append a ``cumulative`` count column.
-/// groupby : str, optional
-///     Single group-key column; bins computed independently per group.
+/// groupby : list[str] or str or None, optional
+///     One or more group-key columns; bins computed independently per group.
+///     Pass a single string or a one-element list for single-column groupby
+///     (byte-identical to the old ``Option<String>`` behavior).
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 ///
@@ -414,7 +425,7 @@ impl PyBin {
         nice: bool,
         cumulative: bool,
         shared_extent: bool,
-        groupby: Option<String>,
+        groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
     ) -> PyResult<Self> {
         if field.is_empty() {
@@ -439,6 +450,7 @@ impl PyBin {
                 ));
             }
         }
+        let groupby = parse_groupby_pyany(groupby)?;
         Ok(PyBin(TransformSpec::Bin(BinSpec {
             field: field.to_string(),
             bin_count,
@@ -508,7 +520,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -538,7 +550,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -564,7 +576,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -582,7 +594,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -610,7 +622,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -631,7 +643,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -657,7 +669,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -684,7 +696,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let result = apply(&spec, &batch);
@@ -706,7 +718,7 @@ mod tests {
             nice: true,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -737,7 +749,7 @@ mod tests {
             nice: false,
             cumulative: true,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -766,7 +778,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -787,7 +799,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -807,7 +819,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -834,7 +846,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -859,7 +871,7 @@ mod tests {
             nice: true,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -902,7 +914,7 @@ mod tests {
             nice: true,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -923,7 +935,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -948,7 +960,7 @@ mod tests {
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -1025,5 +1037,181 @@ mod tests {
         let batch = batch_with(vec![5.0, 5.0, 5.0]);
         let ext = column_extent(&batch, "x");
         assert_eq!(ext, None, "degenerate extent (lo==hi) must return None");
+    }
+
+    // ── T3.8a regression tests ────────────────────────────────────────────────
+
+    /// Helper: build a batch with an `x` float column plus two string group columns.
+    fn batch_with_two_groups(
+        xs: Vec<f64>,
+        g1s: Vec<&str>,
+        g2s: Vec<&str>,
+    ) -> RecordBatch {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("g1", DataType::Utf8, false),
+            Field::new("g2", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs)) as arrow::array::ArrayRef,
+                Arc::new(StringArray::from(g1s)) as arrow::array::ArrayRef,
+                Arc::new(StringArray::from(g2s)) as arrow::array::ArrayRef,
+            ],
+        )
+        .unwrap()
+    }
+
+    fn col_str<'a>(b: &'a RecordBatch, name: &str) -> &'a arrow::array::StringArray {
+        b.column(b.schema().index_of(name).unwrap())
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap()
+    }
+
+    /// D-GROUPBY-1 regression (T3.8a): a 2-column groupby on `Bin` must produce one
+    /// set of bins per distinct `(g1, g2)` combination, with the two group columns
+    /// appended after the standard 4 bin output columns.
+    #[test]
+    fn bin_two_column_groupby_produces_per_combination_rows() {
+        // 8 rows: two g1 values × two g2 values × 2 x values each.
+        let batch = batch_with_two_groups(
+            vec![1.0, 9.0, 1.0, 9.0, 1.0, 9.0, 1.0, 9.0],
+            vec!["A", "A", "A", "A", "B", "B", "B", "B"],
+            vec!["x", "x", "y", "y", "x", "x", "y", "y"],
+        );
+        let spec = BinSpec {
+            field: "x".into(),
+            bin_count: Some(2),
+            bin_width: None,
+            extent: Some((0.0, 10.0)),
+            nice: false,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec!["g1".into(), "g2".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+
+        // Output must have columns: bin_start, bin_end, count, density, g1, g2.
+        let schema = out.schema();
+        assert!(schema.index_of("bin_start").is_ok(), "missing bin_start");
+        assert!(schema.index_of("bin_end").is_ok(), "missing bin_end");
+        assert!(schema.index_of("count").is_ok(), "missing count");
+        assert!(schema.index_of("density").is_ok(), "missing density");
+        assert!(schema.index_of("g1").is_ok(), "missing g1 column");
+        assert!(schema.index_of("g2").is_ok(), "missing g2 column");
+
+        // 4 distinct groups × 2 bins each = 8 output rows.
+        assert_eq!(out.num_rows(), 8, "expected 4 groups × 2 bins = 8 rows, got {}", out.num_rows());
+
+        // Each group contributes 2 bins with count=2 (2 x-values per group).
+        let counts = col_u64(&out, "count");
+        for i in 0..8 {
+            assert_eq!(counts.value(i), 1, "each bin should have count=1, row {i} has {}", counts.value(i));
+        }
+
+        // Verify both group columns are present and contain the right values.
+        let g1 = col_str(&out, "g1");
+        let g2 = col_str(&out, "g2");
+        // Collect all (g1, g2) pairs seen in the output.
+        let mut combos: std::collections::BTreeSet<(String, String)> =
+            (0..out.num_rows())
+            .map(|i| (g1.value(i).to_string(), g2.value(i).to_string()))
+            .collect();
+        assert_eq!(combos.len(), 4, "must have 4 distinct (g1,g2) groups in output");
+        assert!(combos.contains(&("A".into(), "x".into())));
+        assert!(combos.contains(&("A".into(), "y".into())));
+        assert!(combos.contains(&("B".into(), "x".into())));
+        assert!(combos.contains(&("B".into(), "y".into())));
+    }
+
+    /// D-GROUPBY-1 regression (T3.8a): a single-column groupby via `vec!["g"]`
+    /// must produce the same output schema and row values as the old `Some("g")`
+    /// path did before the migration.
+    #[test]
+    fn bin_single_column_groupby_matches_pre_migration_shape() {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 9.0, 1.0, 9.0])) as arrow::array::ArrayRef,
+                Arc::new(StringArray::from(vec!["A", "A", "B", "B"])) as arrow::array::ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let spec = BinSpec {
+            field: "x".into(),
+            bin_count: Some(2),
+            bin_width: None,
+            extent: Some((0.0, 10.0)),
+            nice: false,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec!["g".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+
+        // Schema: bin_start, bin_end, count, density, g
+        let s = out.schema();
+        assert!(s.index_of("bin_start").is_ok());
+        assert!(s.index_of("bin_end").is_ok());
+        assert!(s.index_of("count").is_ok());
+        assert!(s.index_of("density").is_ok());
+        assert!(s.index_of("g").is_ok());
+        assert_eq!(s.fields().len(), 5, "single-groupby output has exactly 5 columns");
+
+        // 2 groups × 2 bins = 4 rows.
+        assert_eq!(out.num_rows(), 4);
+
+        // Each bin should have count=1.
+        let counts = col_u64(&out, "count");
+        for i in 0..4 {
+            assert_eq!(counts.value(i), 1);
+        }
+    }
+
+    /// D-GROUPBY-1 regression (T3.8a): the BinSpec serde round-trip preserves
+    /// the canonical array wire form; deserializing the old bare-string form
+    /// yields a one-element vec identical to the direct vec!["col"] construction.
+    #[test]
+    fn bin_groupby_serde_round_trip_and_back_compat() {
+        // Serialize a BinSpec with groupby=["col"] — must emit array form.
+        let spec = BinSpec {
+            field: "x".into(),
+            bin_count: None,
+            bin_width: None,
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec!["col".into()],
+            name: None,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""groupby":["col"]"#), "must serialize as array, got: {json}");
+
+        // Deserialize a legacy JSON that has a bare string for groupby.
+        let legacy = r#"{"field":"x","groupby":"col"}"#;
+        let from_legacy: BinSpec = serde_json::from_str(legacy).unwrap();
+        assert_eq!(from_legacy.groupby, vec!["col"], "bare-string legacy must parse to [\"col\"]");
+
+        // Deserialize null → [].
+        let null_json = r#"{"field":"x","groupby":null}"#;
+        let from_null: BinSpec = serde_json::from_str(null_json).unwrap();
+        assert!(from_null.groupby.is_empty(), "null groupby must parse to []");
+
+        // Empty groupby must be omitted from serialization (skip_serializing_if).
+        let empty_spec = BinSpec { groupby: vec![], ..spec.clone() };
+        let empty_json = serde_json::to_string(&empty_spec).unwrap();
+        assert!(!empty_json.contains("groupby"), "empty groupby must be omitted: {empty_json}");
     }
 }

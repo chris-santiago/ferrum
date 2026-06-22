@@ -90,7 +90,7 @@ class TestDesugaredContourGroupby:
         result = desugar_contour("x", "y", groupby=None, fill=True)
         transforms = result.transforms
         kde_repr = repr(transforms[0])
-        assert "groupby=None" in kde_repr, f"Kde2D repr must show groupby=None; got: {kde_repr}"
+        assert "groupby=[]" in kde_repr, f"Kde2D repr must show empty groupby; got: {kde_repr}"
 
     def test_groupby_fill_layer_colors_by_group(self):
         """When groupby is set, the polygon layer colors by the group field."""

@@ -19,8 +19,8 @@ use arrow::array::{
 };
 use arrow::datatypes::DataType;
 use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
 use pyo3::PyResult;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Internal representation of a group key value. Order matters: `BTreeMap` relies on `Ord`.
@@ -56,72 +56,6 @@ pub(crate) fn is_groupby_supported_dtype(dt: &DataType) -> bool {
             | DataType::UInt64
             | DataType::Boolean
     )
-}
-
-/// Result of [`group_partition`]: the distinct group keys in first-appearance
-/// order, the per-key row-index map, and the group column's original dtype.
-pub(crate) type GroupPartition = (Vec<KeyValue>, BTreeMap<KeyValue, Vec<usize>>, DataType);
-
-/// Partition a batch's rows by a single groupby column.
-///
-/// This is the one partition path shared by every grouped stat transform
-/// (`bin`, `kde`, `kde_2d`, `smooth`). It validates the column dtype, then walks
-/// the rows once to build a [`GroupPartition`]:
-///   - `group_order`: the distinct group keys in **first-appearance** order,
-///   - `group_idx_map`: each key's row indices (a `BTreeMap` so per-group output
-///     materialization is deterministic), and
-///   - the group column's original [`DataType`], so callers can reconstruct the
-///     output column with [`materialize_groupby_col`] and the dtype preserved
-///     end-to-end.
-///
-/// **Null-key policy (centralized here — XFORM-09):** rows whose group key is
-/// [`KeyValue::Null`] are skipped, so a null group never becomes its own series.
-/// Every grouped transform shares this one policy; previously `kde`/`kde_2d`/
-/// `smooth` each had an undocumented inline `is_null` skip that could drift from
-/// `bin`'s. Keeping the skip in one place means the policy cannot diverge across
-/// the family.
-///
-/// `ctx` is the transform-name prefix (e.g. `"stat_kde"`) used only in the
-/// error messages, matching the convention in [`crate::transform::numeric_util`].
-pub(crate) fn group_partition(
-    batch: &RecordBatch,
-    group_col: &str,
-    ctx: &str,
-) -> PyResult<GroupPartition> {
-    let schema = batch.schema();
-    let gi = schema.index_of(group_col).map_err(|_| {
-        PyValueError::new_err(format!("{ctx}: groupby column '{group_col}' not found"))
-    })?;
-    let gtype = schema.field(gi).data_type().clone();
-    if !is_groupby_supported_dtype(&gtype) {
-        return Err(PyValueError::new_err(format!(
-            "{ctx}: groupby column '{group_col}' has unsupported dtype {gtype:?}; \
-             supported: Utf8/LargeUtf8, Float64/Float32, \
-             Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
-        )));
-    }
-    let garr = batch.column(gi);
-
-    let mut group_order: Vec<KeyValue> = Vec::new();
-    let mut group_idx_map: BTreeMap<KeyValue, Vec<usize>> = BTreeMap::new();
-    for i in 0..garr.len() {
-        let gv = groupby_key_at(garr.as_ref(), &gtype, i).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "{ctx}: internal error extracting groupby key at row {i}"
-            ))
-        })?;
-        // Null group keys collapse into their own KeyValue::Null, which the
-        // centralized policy skips (see the doc comment above).
-        if matches!(gv, KeyValue::Null) {
-            continue;
-        }
-        if !group_idx_map.contains_key(&gv) {
-            group_order.push(gv.clone());
-        }
-        group_idx_map.entry(gv).or_default().push(i);
-    }
-
-    Ok((group_order, group_idx_map, gtype))
 }
 
 /// Extract the groupby [`KeyValue`] for a single row from an Arrow column.
@@ -341,6 +275,175 @@ pub(crate) fn empty_groupby_col(dt: &DataType) -> Result<ArrayRef, String> {
     materialize_groupby_col(&[], 0, dt)
 }
 
+/// Result of [`group_partition_multi`]: distinct group key tuples in first-appearance
+/// order, the per-tuple row-index map, and each group column's original dtype.
+pub(crate) type GroupPartitionMulti = (
+    Vec<Vec<KeyValue>>,
+    std::collections::BTreeMap<Vec<KeyValue>, Vec<usize>>,
+    Vec<DataType>,
+);
+
+/// Partition a batch's rows by multiple groupby columns.
+///
+/// The single grouping entry point for all per-group transforms (bin, kde,
+/// kde_2d, smooth, ...): first-appearance group order, null-key skip,
+/// dtype-preservation. When `group_cols` is empty, returns an empty partition
+/// (all rows unsorted). A single-element `group_cols` yields the conventional
+/// single-column grouping.
+///
+/// **Null-key policy:** a row is skipped if ANY of its group-column values is null.
+/// This mirrors the single-column behaviour (a null in the groupby column is not
+/// assigned to any group). The null skip applies when *any* dimension of the
+/// composite key contains [`KeyValue::Null`].
+pub(crate) fn group_partition_multi(
+    batch: &RecordBatch,
+    group_cols: &[String],
+    ctx: &str,
+) -> PyResult<GroupPartitionMulti> {
+    let schema = batch.schema();
+    let mut group_dtypes: Vec<DataType> = Vec::with_capacity(group_cols.len());
+    let mut group_arrays: Vec<usize> = Vec::with_capacity(group_cols.len());
+
+    for col_name in group_cols {
+        let gi = schema.index_of(col_name).map_err(|_| {
+            PyValueError::new_err(format!("{ctx}: groupby column '{col_name}' not found"))
+        })?;
+        let gtype = schema.field(gi).data_type().clone();
+        if !is_groupby_supported_dtype(&gtype) {
+            return Err(PyValueError::new_err(format!(
+                "{ctx}: groupby column '{col_name}' has unsupported dtype {gtype:?}; \
+                 supported: Utf8/LargeUtf8, Float64/Float32, \
+                 Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
+            )));
+        }
+        group_dtypes.push(gtype);
+        group_arrays.push(gi);
+    }
+
+    let n_rows = batch.num_rows();
+    let mut group_order: Vec<Vec<KeyValue>> = Vec::new();
+    let mut group_idx_map: std::collections::BTreeMap<Vec<KeyValue>, Vec<usize>> =
+        std::collections::BTreeMap::new();
+
+    for row in 0..n_rows {
+        let mut key: Vec<KeyValue> = Vec::with_capacity(group_cols.len());
+        let mut has_null = false;
+        for (dim, &col_idx) in group_arrays.iter().enumerate() {
+            let arr = batch.column(col_idx);
+            let kv = groupby_key_at(arr.as_ref(), &group_dtypes[dim], row).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "{ctx}: internal error extracting groupby key at row {row}"
+                ))
+            })?;
+            if matches!(kv, KeyValue::Null) {
+                has_null = true;
+                break;
+            }
+            key.push(kv);
+        }
+        if has_null {
+            continue;
+        }
+        if !group_idx_map.contains_key(&key) {
+            group_order.push(key.clone());
+        }
+        group_idx_map.entry(key).or_default().push(row);
+    }
+
+    Ok((group_order, group_idx_map, group_dtypes))
+}
+
+/// Serde deserializer that accepts `null`, a bare JSON string, or a JSON array
+/// of strings, normalising all three to `Vec<String>`:
+///   - `null`      → `[]`  (ungrouped)
+///   - `"col"`     → `["col"]`  (single-column — legacy wire format)
+///   - `["a","b"]` → `["a","b"]`  (multi-column — canonical wire format)
+///
+/// This is the wire back-compat shim required by D-GROUPBY-1: old serialized specs
+/// that carried a bare string `"groupby":"col"` remain readable after the migration
+/// to `Vec<String>`. Serialize always emits the array form (via the struct's
+/// `#[serde(skip_serializing_if = "Vec::is_empty")]` attribute).
+pub(crate) fn deserialize_groupby_vec<'de, D>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+
+    struct GroupbyVisitor;
+
+    impl<'de> Visitor<'de> for GroupbyVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "null, a string, or an array of strings")
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Vec<String>, E> {
+            Ok(Vec::new())
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Vec<String>, E> {
+            Ok(Vec::new())
+        }
+
+        fn visit_some<D2: serde::Deserializer<'de>>(
+            self,
+            d: D2,
+        ) -> Result<Vec<String>, D2::Error> {
+            d.deserialize_any(GroupbyVisitor)
+        }
+
+        fn visit_str<E: de::Error>(self, s: &str) -> Result<Vec<String>, E> {
+            Ok(vec![s.to_owned()])
+        }
+
+        fn visit_string<E: de::Error>(self, s: String) -> Result<Vec<String>, E> {
+            Ok(vec![s])
+        }
+
+        fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
+            let mut out = Vec::new();
+            while let Some(elem) = seq.next_element::<String>()? {
+                out.push(elem);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_any(GroupbyVisitor)
+}
+
+/// Parse the `groupby` PyO3 constructor argument into `Vec<String>`.
+///
+/// Accepts:
+///   - `None` → `[]`
+///   - A Python `str` → `["col"]`
+///   - A Python `list[str]` → the list contents
+///
+/// This is the Python-boundary equivalent of [`deserialize_groupby_vec`] — both
+/// normalise the same three input forms to the canonical `Vec<String>` shape so the
+/// PyO3 constructors and the JSON wire layer agree on what "ungrouped" means.
+pub(crate) fn parse_groupby_pyany(
+    obj: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<String>> {
+    match obj {
+        None => Ok(Vec::new()),
+        Some(o) => {
+            if let Ok(s) = o.extract::<String>() {
+                Ok(vec![s])
+            } else if let Ok(v) = o.extract::<Vec<String>>() {
+                Ok(v)
+            } else {
+                Err(PyValueError::new_err(
+                    "groupby must be None, a str, or a list[str]",
+                ))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,7 +509,13 @@ mod tests {
         assert!(is_groupby_supported_dtype(&DataType::Utf8));
     }
 
-    // ── group_partition (T0.3 unification) ──────────────────────────────────
+    // ── group_partition_multi single-column coverage (T0.3 / T3.8a) ──────────
+    //
+    // These tests previously called the now-deleted `group_partition` helper.
+    // They are rewritten to call `group_partition_multi` with a 1-element slice,
+    // which is the canonical entry point after T3.8a. The single-key case
+    // exercises identical code paths inside `group_partition_multi`; only the
+    // return shape differs (Vec<Vec<KeyValue>> keys, Vec<DataType> dtypes).
 
     use arrow::array::BooleanArray;
     use arrow::datatypes::{Field, Schema};
@@ -425,35 +534,50 @@ mod tests {
     #[test]
     fn group_partition_int64_first_appearance_order() {
         // Values 20, 10, 20, 10 → first-appearance order is [20, 10].
+        pyo3::Python::initialize();
         let col: ArrayRef = Arc::new(Int64Array::from(vec![20_i64, 10, 20, 10]));
         let batch = batch_with_group(col);
-        let (order, map, dt) = group_partition(&batch, "g", "test").unwrap();
-        assert_eq!(dt, DataType::Int64);
-        assert_eq!(order, vec![KeyValue::Int(20), KeyValue::Int(10)]);
-        assert_eq!(map.get(&KeyValue::Int(20)).unwrap(), &vec![0_usize, 2]);
-        assert_eq!(map.get(&KeyValue::Int(10)).unwrap(), &vec![1_usize, 3]);
+        let (order, map, dtypes) =
+            group_partition_multi(&batch, &["g".to_string()], "test").unwrap();
+        assert_eq!(dtypes[0], DataType::Int64);
+        assert_eq!(
+            order,
+            vec![vec![KeyValue::Int(20)], vec![KeyValue::Int(10)]]
+        );
+        assert_eq!(map.get(&vec![KeyValue::Int(20)]).unwrap(), &vec![0_usize, 2]);
+        assert_eq!(map.get(&vec![KeyValue::Int(10)]).unwrap(), &vec![1_usize, 3]);
     }
 
     #[test]
     fn group_partition_boolean_groups() {
+        pyo3::Python::initialize();
         let col: ArrayRef = Arc::new(BooleanArray::from(vec![true, false, true]));
         let batch = batch_with_group(col);
-        let (order, map, dt) = group_partition(&batch, "g", "test").unwrap();
-        assert_eq!(dt, DataType::Boolean);
-        assert_eq!(order, vec![KeyValue::Bool(1), KeyValue::Bool(0)]);
-        assert_eq!(map.get(&KeyValue::Bool(1)).unwrap(), &vec![0_usize, 2]);
-        assert_eq!(map.get(&KeyValue::Bool(0)).unwrap(), &vec![1_usize]);
+        let (order, map, dtypes) =
+            group_partition_multi(&batch, &["g".to_string()], "test").unwrap();
+        assert_eq!(dtypes[0], DataType::Boolean);
+        assert_eq!(
+            order,
+            vec![vec![KeyValue::Bool(1)], vec![KeyValue::Bool(0)]]
+        );
+        assert_eq!(map.get(&vec![KeyValue::Bool(1)]).unwrap(), &vec![0_usize, 2]);
+        assert_eq!(map.get(&vec![KeyValue::Bool(0)]).unwrap(), &vec![1_usize]);
     }
 
     #[test]
     fn group_partition_skips_null_keys() {
         // Centralized null-key policy: null rows are excluded from the partition.
+        pyo3::Python::initialize();
         let col: ArrayRef = Arc::new(Int64Array::from(vec![Some(1_i64), None, Some(1), None]));
         let batch = batch_with_group(col);
-        let (order, map, _) = group_partition(&batch, "g", "test").unwrap();
-        assert_eq!(order, vec![KeyValue::Int(1)]);
-        assert_eq!(map.get(&KeyValue::Int(1)).unwrap(), &vec![0_usize, 2]);
-        assert!(!map.contains_key(&KeyValue::Null), "null key must be skipped");
+        let (order, map, _) =
+            group_partition_multi(&batch, &["g".to_string()], "test").unwrap();
+        assert_eq!(order, vec![vec![KeyValue::Int(1)]]);
+        assert_eq!(map.get(&vec![KeyValue::Int(1)]).unwrap(), &vec![0_usize, 2]);
+        assert!(
+            !map.contains_key(&vec![KeyValue::Null]),
+            "null key must be skipped"
+        );
     }
 
     #[test]
@@ -462,7 +586,7 @@ mod tests {
         use arrow::array::Date32Array;
         let col: ArrayRef = Arc::new(Date32Array::from(vec![0_i32, 1]));
         let batch = batch_with_group(col);
-        let err = group_partition(&batch, "g", "stat_kde").unwrap_err();
+        let err = group_partition_multi(&batch, &["g".to_string()], "stat_kde").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unsupported dtype"), "err: {msg}");
         assert!(msg.contains("stat_kde"), "err must carry ctx: {msg}");
@@ -473,7 +597,116 @@ mod tests {
         pyo3::Python::initialize();
         let col: ArrayRef = Arc::new(Int64Array::from(vec![1_i64, 2]));
         let batch = batch_with_group(col);
-        let err = group_partition(&batch, "ghost", "stat_smooth").unwrap_err();
+        let err =
+            group_partition_multi(&batch, &["ghost".to_string()], "stat_smooth").unwrap_err();
         assert!(err.to_string().contains("ghost"), "err: {err}");
+    }
+
+    // ── T3.8a regression: deserialize_groupby_vec wire formats ──────────────
+
+    /// `deserialize_groupby_vec` accepts the three legacy wire forms:
+    ///   - JSON `null` → `[]`
+    ///   - JSON bare string `"col"` → `["col"]`
+    ///   - JSON array `["a","b"]` → `["a","b"]`
+    #[test]
+    fn deserialize_groupby_vec_accepts_null_string_and_array() {
+        use serde_json;
+
+        // Wrap in a helper struct so we can drive the serde machinery.
+        #[derive(serde::Deserialize)]
+        struct W {
+            #[serde(deserialize_with = "deserialize_groupby_vec")]
+            groupby: Vec<String>,
+        }
+
+        let null_form: W = serde_json::from_str(r#"{"groupby": null}"#).unwrap();
+        assert!(null_form.groupby.is_empty(), "null must deserialize to []");
+
+        let str_form: W = serde_json::from_str(r#"{"groupby": "col"}"#).unwrap();
+        assert_eq!(str_form.groupby, vec!["col"], "bare string must deserialize to [\"col\"]");
+
+        let arr_form: W = serde_json::from_str(r#"{"groupby": ["a","b"]}"#).unwrap();
+        assert_eq!(arr_form.groupby, vec!["a", "b"], "array must deserialize as-is");
+    }
+
+    /// When `groupby` is absent from the JSON, `default` yields `[]`.
+    #[test]
+    fn deserialize_groupby_vec_missing_field_yields_empty() {
+        #[derive(serde::Deserialize)]
+        struct W {
+            #[serde(default, deserialize_with = "deserialize_groupby_vec")]
+            groupby: Vec<String>,
+        }
+
+        let absent: W = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(absent.groupby.is_empty(), "missing field must default to []");
+    }
+
+    // ── T3.8a regression: group_partition_multi ──────────────────────────────
+
+    /// `group_partition_multi` on two string columns produces composite keys
+    /// (one `Vec<KeyValue>` per group) and preserves first-appearance order.
+    #[test]
+    fn group_partition_multi_two_string_columns() {
+        pyo3::Python::initialize();
+        use arrow::array::StringArray;
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("g1", arrow::datatypes::DataType::Utf8, false),
+            arrow::datatypes::Field::new("g2", arrow::datatypes::DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A", "A", "B", "B"])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["x", "y", "x", "y"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let (order, map, dtypes) =
+            group_partition_multi(&batch, &["g1".to_string(), "g2".to_string()], "test").unwrap();
+
+        assert_eq!(dtypes.len(), 2);
+        assert_eq!(dtypes[0], arrow::datatypes::DataType::Utf8);
+        assert_eq!(dtypes[1], arrow::datatypes::DataType::Utf8);
+
+        // Four distinct groups in first-appearance order.
+        assert_eq!(order.len(), 4);
+        assert_eq!(order[0], vec![KeyValue::Str("A".into()), KeyValue::Str("x".into())]);
+        assert_eq!(order[1], vec![KeyValue::Str("A".into()), KeyValue::Str("y".into())]);
+        assert_eq!(order[2], vec![KeyValue::Str("B".into()), KeyValue::Str("x".into())]);
+        assert_eq!(order[3], vec![KeyValue::Str("B".into()), KeyValue::Str("y".into())]);
+
+        assert_eq!(map[&order[0]], vec![0]);
+        assert_eq!(map[&order[1]], vec![1]);
+        assert_eq!(map[&order[2]], vec![2]);
+        assert_eq!(map[&order[3]], vec![3]);
+    }
+
+    /// Rows where any dimension is null are skipped by `group_partition_multi`.
+    #[test]
+    fn group_partition_multi_skips_null_rows() {
+        pyo3::Python::initialize();
+        use arrow::array::StringArray;
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("g1", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("g2", arrow::datatypes::DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("A"), None, Some("B")])) as ArrayRef,
+                Arc::new(StringArray::from(vec![Some("x"), Some("x"), Some("y")])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let (order, map, _) =
+            group_partition_multi(&batch, &["g1".to_string(), "g2".to_string()], "test").unwrap();
+
+        // Row 1 has g1=null → excluded; only rows 0 and 2 appear.
+        assert_eq!(order.len(), 2);
+        assert_eq!(map[&order[0]], vec![0]);
+        assert_eq!(map[&order[1]], vec![2]);
     }
 }
