@@ -308,7 +308,7 @@ def test_mark_prediction_error_ci_out_of_range_raises():
 
 def test_has_score_false_on_base():
     """FerrumVisualizer base class must have has_score = False."""
-    from ferrum._diagnostics.visualizers.base import FerrumVisualizer
+    from ferrum.diagnostics.visualizers._base import FerrumVisualizer
 
     assert FerrumVisualizer.has_score is False
 

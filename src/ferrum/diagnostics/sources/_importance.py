@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from ..deps import require_shap, require_sklearn
+from .._internal.deps import require_shap, require_sklearn
 
 
 class FeatureImportanceMixin:

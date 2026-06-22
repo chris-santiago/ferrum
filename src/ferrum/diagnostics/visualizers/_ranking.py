@@ -14,13 +14,13 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from .base import FerrumVisualizer
+from ._base import FerrumVisualizer
 from ferrum.plots.ranking import (
     _parallel_coords_chart_from_dataframe,
     _rank1d_chart_from_dataframe,
     _rank2d_chart_from_dataframe,
 )
-from .._rank_helpers import rank1d_compute, rank1d_compute_with_y, rank2d_compute
+from .._internal._rank_helpers import rank1d_compute, rank1d_compute_with_y, rank2d_compute
 
 
 class Rank1DVisualizer(FerrumVisualizer):

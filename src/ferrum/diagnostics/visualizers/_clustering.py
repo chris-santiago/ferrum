@@ -16,7 +16,7 @@ from typing import Any, Sequence
 
 import polars as pl
 
-from .base import FerrumVisualizer
+from ._base import FerrumVisualizer
 
 
 class SilhouetteVisualizer(FerrumVisualizer):
@@ -145,7 +145,7 @@ class ElbowVisualizer(FerrumVisualizer):
 
     def fit(self, X: Any, y: Any = None) -> "ElbowVisualizer":
         del y
-        from ..deps import require_sklearn
+        from .._internal.deps import require_sklearn
 
         require_sklearn("ElbowVisualizer")
         import numpy as np

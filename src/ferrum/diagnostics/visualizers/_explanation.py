@@ -12,7 +12,7 @@ from ferrum.plots.explanation import (
     _shap_beeswarm_chart_from_source,
     _shap_waterfall_chart_from_source,
 )
-from .base import FerrumVisualizer
+from ._base import FerrumVisualizer
 
 
 class FeatureImportancesVisualizer(FerrumVisualizer):

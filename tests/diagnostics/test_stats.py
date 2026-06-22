@@ -15,7 +15,7 @@ from ferrum._core import (
     kendall_tau_b,
     py_shapiro_w,
 )
-from ferrum._diagnostics._rank_helpers import polars_or_array_to_record_batch
+from ferrum.diagnostics._internal._rank_helpers import polars_or_array_to_record_batch
 
 
 def _pearson_r_rust(X: np.ndarray, y: np.ndarray) -> np.ndarray:

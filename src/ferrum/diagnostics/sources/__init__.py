@@ -8,7 +8,7 @@ become independent mixin modules whose seam already exists as
 constructor, capability detection, and cache infrastructure; each
 mixin contributes domain methods that use those bits via ``self``.
 
-External callers still import from ``ferrum._diagnostics.source``
+External callers still import from ``ferrum.diagnostics.source``
 (re-export shim) — this package is the implementation home.
 """
 

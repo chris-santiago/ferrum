@@ -611,7 +611,7 @@ def cluster_diagnostics(
     comparison via ``compare=`` is meaningless. Passing a non-``None``
     ``compare`` raises ``ValueError`` (D-COMPARE-1).
     """
-    from ferrum._diagnostics.deps import require_sklearn
+    from ferrum.diagnostics._internal.deps import require_sklearn
 
     _reject_compare(
         compare,
@@ -991,7 +991,7 @@ def elbow_chart(
         reason="this sweeps one clusterer class over k on an unsupervised "
         "feature matrix; cross-model comparison is meaningless",
     )
-    from ferrum._diagnostics.visualizers.clustering import ElbowVisualizer
+    from ferrum.diagnostics.visualizers._clustering import ElbowVisualizer
 
     viz = ElbowVisualizer(
         model,

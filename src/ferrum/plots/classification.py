@@ -757,7 +757,7 @@ def _classification_report_chart(
     ``value_fmt``.  Renders via the same rect-plus-text pattern as
     ``mark_confusion``.
     """
-    from ferrum._diagnostics.deps import require_sklearn
+    from ferrum.diagnostics._internal.deps import require_sklearn
 
     require_sklearn("ClassificationReportVisualizer")
     from sklearn.metrics import classification_report

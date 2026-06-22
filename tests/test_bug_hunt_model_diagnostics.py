@@ -7,10 +7,10 @@ import polars as pl
 import pytest
 
 import ferrum
-from ferrum._diagnostics.precomputed import _PrecomputedSource
-from ferrum._diagnostics.sources._base import BaseSource, _coerce_X_y
-from ferrum._diagnostics.sources._classification import _coerce_class_label
-from ferrum._diagnostics.sources._compared import ComparedModelSource
+from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
+from ferrum.diagnostics.sources._base import BaseSource, _coerce_X_y
+from ferrum.diagnostics.sources._classification import _coerce_class_label
+from ferrum.diagnostics.sources._compared import ComparedModelSource
 
 
 # ---------------------------------------------------------------------------
@@ -1427,7 +1427,7 @@ def test_roc_visualizer_double_fit():
 def test_rank_helpers_coerce_pandas_dataframe():
     """polars_or_array_to_record_batch should handle pandas DataFrame."""
     import pandas as pd
-    from ferrum._diagnostics._rank_helpers import polars_or_array_to_record_batch
+    from ferrum.diagnostics._internal._rank_helpers import polars_or_array_to_record_batch
 
     df_pd = pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
     batch = polars_or_array_to_record_batch(df_pd)
@@ -1436,7 +1436,7 @@ def test_rank_helpers_coerce_pandas_dataframe():
 
 def test_rank_helpers_coerce_2d_numpy():
     """polars_or_array_to_record_batch should handle 2D numpy array."""
-    from ferrum._diagnostics._rank_helpers import polars_or_array_to_record_batch
+    from ferrum.diagnostics._internal._rank_helpers import polars_or_array_to_record_batch
 
     arr = np.array([[1.0, 2.0], [3.0, 4.0]])
     batch = polars_or_array_to_record_batch(arr)
@@ -1446,7 +1446,7 @@ def test_rank_helpers_coerce_2d_numpy():
 
 def test_rank_helpers_coerce_1d_numpy_raises():
     """polars_or_array_to_record_batch should raise for 1D array."""
-    from ferrum._diagnostics._rank_helpers import polars_or_array_to_record_batch
+    from ferrum.diagnostics._internal._rank_helpers import polars_or_array_to_record_batch
 
     with pytest.raises(ValueError, match="2D"):
         polars_or_array_to_record_batch(np.array([1.0, 2.0, 3.0]))
@@ -1615,7 +1615,7 @@ def test_silhouette_with_predict_fallback():
 
 def test_base_visualizer_unfit_repr():
     """FerrumVisualizer base class repr before fit."""
-    from ferrum._diagnostics.visualizers.base import FerrumVisualizer
+    from ferrum.diagnostics.visualizers._base import FerrumVisualizer
 
     viz = FerrumVisualizer()
     assert repr(viz) == "FerrumVisualizer(unfit)"
@@ -1623,7 +1623,7 @@ def test_base_visualizer_unfit_repr():
 
 def test_base_visualizer_score_returns_zero():
     """FerrumVisualizer.score() should return 0.0."""
-    from ferrum._diagnostics.visualizers.base import FerrumVisualizer
+    from ferrum.diagnostics.visualizers._base import FerrumVisualizer
 
     viz = FerrumVisualizer()
     assert viz.score(None, None) == 0.0

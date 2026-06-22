@@ -293,7 +293,7 @@ def rank1d_chart(
         )
         df = ms.rank1d(algorithm=algo)
     else:
-        from ferrum._diagnostics._rank_helpers import rank1d_compute
+        from ferrum.diagnostics._internal._rank_helpers import rank1d_compute
 
         input_data = data_or_source if X is None else X
         df = rank1d_compute(input_data, algorithm=algo)
@@ -390,7 +390,7 @@ def rank2d_chart(
     if isinstance(data_or_source, ferrum.ModelSource):
         df = data_or_source.rank2d(algorithm=algo)
     else:
-        from ferrum._diagnostics._rank_helpers import rank2d_compute
+        from ferrum.diagnostics._internal._rank_helpers import rank2d_compute
 
         input_data = data_or_source if X is None else X
         df = rank2d_compute(input_data, algorithm=algo)

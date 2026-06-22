@@ -402,7 +402,7 @@ def _resolve_source(
     The precomputed path is incompatible with ``compare=``.
     """
     import ferrum
-    from ferrum._diagnostics.source import ComparedModelSource
+    from ferrum.diagnostics.source import ComparedModelSource
 
     has_precomputed = y_true is not None or y_pred is not None
     has_model = model is not None
@@ -423,7 +423,7 @@ def _resolve_source(
             raise ValueError(
                 f"Precomputed path requires both y_true= and y_pred=; {missing}= is missing."
             )
-        from ferrum._diagnostics.precomputed import _PrecomputedSource
+        from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
         return _PrecomputedSource(y_true, y_pred)
 

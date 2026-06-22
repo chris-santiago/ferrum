@@ -14,7 +14,7 @@ from ferrum.plots.model_selection import (
     _learning_curve_chart_from_source,
     _validation_curve_chart_from_source,
 )
-from .base import FerrumVisualizer
+from ._base import FerrumVisualizer
 
 
 class LearningCurveVisualizer(FerrumVisualizer):

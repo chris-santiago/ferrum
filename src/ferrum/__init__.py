@@ -134,8 +134,8 @@ from ferrum.transforms import (
 )
 
 # Phase 10 — model diagnostics
-from ferrum._diagnostics import ComparedModelSource, ModelSource
-from ferrum._diagnostics.visualizers import (
+from ferrum.diagnostics import ComparedModelSource, ModelSource
+from ferrum.diagnostics.visualizers import (
     CalibrationVisualizer,
     ClassBalanceVisualizer,
     ClassificationReportVisualizer,

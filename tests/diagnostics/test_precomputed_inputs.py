@@ -420,7 +420,7 @@ def test_precomputed_1d_binary_gain_values():
       cum_pos=[1,1,2,2], total=2, gain=[0.5, 0.5, 1.0, 1.0]
       with origin: percent_pop=[0, 0.25, 0.5, 0.75, 1.0], gain=[0, 0.5, 0.5, 1.0, 1.0]
     """
-    from ferrum._diagnostics.precomputed import _PrecomputedSource
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
     y_true = np.array([0, 0, 1, 1])
     y_pred = np.array([0.1, 0.4, 0.35, 0.8])
@@ -471,7 +471,7 @@ def test_precomputed_1d_binary_lift_values():
       lift = [2.0, 1.0, 4/3, 1.0]
       percent_population = [0.25, 0.5, 0.75, 1.0]
     """
-    from ferrum._diagnostics.precomputed import _PrecomputedSource
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
     y_true = np.array([0, 0, 1, 1])
     y_pred = np.array([0.1, 0.4, 0.35, 0.8])
@@ -521,7 +521,7 @@ def test_precomputed_1d_binary_negative_class_ranks_by_one_minus_p():
       OLD (tile, rank by p = [0.1, 0.6, 0.9]) → desc order [2, 1, 0] → y_bin [0, 1, 1]
         cum_pos=[0, 1, 2], gain=[0.0, 0.5, 1.0] → with origin [0.0, 0.0, 0.5, 1.0]
     """
-    from ferrum._diagnostics.precomputed import _PrecomputedSource
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
     y_true = np.array([0, 0, 1])
     y_pred = np.array([0.1, 0.6, 0.9])

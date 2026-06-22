@@ -4,7 +4,9 @@ All notable changes to Ferrum are documented here.
 
 ## Unreleased
 
-*No unreleased changes.*
+### Changed
+
+- **Breaking (defining-module path only):** the model-diagnostics implementation package was renamed from the private `ferrum._diagnostics` to the public `ferrum.diagnostics`. The public import surface is **unchanged** — `from ferrum import ROCVisualizer`, `import ferrum; ferrum.ModelSource`, and every other `ferrum.<Name>` spelling work exactly as before. What changes is the *defining* module path: each diagnostic class's `__module__` (and any direct submodule import such as `from ferrum._diagnostics.source import ModelSource`) now reads `ferrum.diagnostics.*` instead of `ferrum._diagnostics.*`. Code that imported a diagnostic class from the canonical `ferrum` namespace is unaffected; only code reaching into the private `ferrum._diagnostics.*` path needs to update to `ferrum.diagnostics.*`. Heavy sklearn-boundary internals moved under `ferrum.diagnostics._internal`, the `visualizers/` submodules were underscore-prefixed to match `sources/`, and the visualizer surface is otherwise identical.
 
 ## 0.17.1
 

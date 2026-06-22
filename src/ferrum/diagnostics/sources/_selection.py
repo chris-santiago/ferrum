@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from ..deps import require_sklearn
+from .._internal.deps import require_sklearn
 
 
 def _ci_agg_rows(key_name: str, key_value, split_name: str, arr: np.ndarray) -> list[dict]:

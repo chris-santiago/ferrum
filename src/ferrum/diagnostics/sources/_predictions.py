@@ -8,7 +8,7 @@ import numpy as np
 import polars as pl
 import pyarrow as pa
 
-from ..deps import require_sklearn
+from .._internal.deps import require_sklearn
 
 
 class PredictionsMixin:

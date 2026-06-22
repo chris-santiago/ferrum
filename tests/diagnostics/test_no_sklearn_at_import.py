@@ -54,7 +54,7 @@ def test_require_sklearn_raises_clear_message_when_missing(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    from ferrum._diagnostics.deps import require_sklearn
+    from ferrum.diagnostics._internal.deps import require_sklearn
     import pytest
 
     with pytest.raises(ImportError, match=r"ferrum\[models\]|pip install scikit-learn"):

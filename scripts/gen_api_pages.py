@@ -63,9 +63,9 @@ HIDDEN_PAGES = {"specs", "rendering"}
 
 # ── Module-prefix -> page rules (longest prefix wins) ────────────────────────
 MODULE_RULES: list[tuple[str, str]] = [
-    ("ferrum._diagnostics.visualizers", "visualizers"),
-    ("ferrum._diagnostics.source", "model_sources"),
-    ("ferrum._diagnostics.sources", "model_sources"),
+    ("ferrum.diagnostics.visualizers", "visualizers"),
+    ("ferrum.diagnostics.source", "model_sources"),
+    ("ferrum.diagnostics.sources", "model_sources"),
     ("ferrum.encoding", "encoding"),
     ("ferrum.plots", "plots"),
     ("ferrum.transforms", "transforms"),

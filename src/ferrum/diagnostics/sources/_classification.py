@@ -7,8 +7,8 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from .. import _curve_frames
-from ..deps import require_sklearn
+from .._internal import _curve_frames
+from .._internal.deps import require_sklearn
 
 
 def _resolve_proba(method_name: str, y, proba_df: pl.DataFrame):

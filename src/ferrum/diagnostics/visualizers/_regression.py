@@ -10,7 +10,7 @@ from ferrum.plots.regression import (
     _prediction_error_chart_from_source,
     _residuals_chart_from_source,
 )
-from .base import FerrumVisualizer
+from ._base import FerrumVisualizer
 
 
 class ResidualsVisualizer(FerrumVisualizer):

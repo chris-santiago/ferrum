@@ -1,7 +1,7 @@
 """ModelSource adapter — wraps a fitted estimator + data, exposes derived data.
 
 This module is a thin re-export of the implementation that lives in
-:mod:`ferrum._diagnostics.sources`.  ``ModelSource`` composes one
+:mod:`ferrum.diagnostics.sources`.  ``ModelSource`` composes one
 mixin per phase-10 domain (predictions, classification curves,
 feature importance, model selection, clustering, ranking) over the
 shared :class:`sources._base.BaseSource` infrastructure;
@@ -10,7 +10,7 @@ shared :class:`sources._base.BaseSource` infrastructure;
 
 Keeping ``ModelSource`` and ``ComparedModelSource`` importable from
 this module path preserves every existing
-``from ferrum._diagnostics.source import ...`` site without
+``from ferrum.diagnostics.source import ...`` site without
 churn — the per-domain reorganization is purely internal.
 """
 
@@ -47,7 +47,7 @@ class ModelSource(
     actually compute a diagnostic that requires them.
 
     Each derived-data method returns a long-form polars DataFrame
-    whose schema is documented in ``ferrum._diagnostics.schemas`` —
+    whose schema is documented in ``ferrum.diagnostics._internal.schemas`` —
     chart builders and Visualizers consume the same frames.
 
     Parameters
