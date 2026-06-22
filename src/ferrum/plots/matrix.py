@@ -22,8 +22,12 @@ from typing import Any
 
 from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
 from ferrum._overrides import _apply_overrides
-from ferrum.plots._helpers import _finalize_chart
-from ferrum.plots.regression import _merge_layers
+from ferrum.plots._helpers import (
+    _finalize_chart,
+    _merge_layers,
+    _to_polars,
+    _validate_choice,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -58,10 +62,7 @@ def _ensure_id_column(data: Any, tbl: Any, id_col: str | None) -> tuple[Any, Any
     import polars as pl
     from ferrum._coerce import to_arrow_table
 
-    try:
-        pdf = data if isinstance(data, pl.DataFrame) else pl.from_arrow(tbl)
-    except Exception:
-        pdf = pl.from_arrow(tbl)
+    pdf = _to_polars(data)
     pdf = pdf.with_row_index("_row_id").with_columns(pl.col("_row_id").cast(pl.Utf8))
     return pdf, to_arrow_table(pdf), "_row_id"
 
@@ -183,13 +184,8 @@ def pairplot(
     ...     kind="kde", hue="species",
     ... )
     """
-    if kind not in _VALID_PAIR_KINDS:
-        raise ValueError(f"pairplot: kind must be one of {sorted(_VALID_PAIR_KINDS)}; got {kind!r}")
-    if diag_kind not in _VALID_DIAG_KINDS:
-        raise ValueError(
-            f"pairplot: diag_kind must be one of {sorted(k for k in _VALID_DIAG_KINDS if k)}|None; "
-            f"got {diag_kind!r}"
-        )
+    _validate_choice("pairplot", "kind", kind, _VALID_PAIR_KINDS)
+    _validate_choice("pairplot", "diag_kind", diag_kind, _VALID_DIAG_KINDS)
 
     # Resolve vars / x_vars / y_vars to (row, column) field lists.
     if vars is not None:
@@ -218,9 +214,7 @@ def pairplot(
 
     # dropna: drop rows with any null in the selected variable columns.
     if dropna:
-        import polars as pl
-
-        data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
+        data = _to_polars(data)
         all_vars = list(dict.fromkeys(rows + cols))  # deduplicate, preserve order
         data = data.drop_nulls(subset=all_vars)
 
@@ -457,7 +451,7 @@ def heatmap(
     if mask is not None:
         import polars as pl
 
-        pdf = data if isinstance(data, pl.DataFrame) else pl.from_arrow(tbl)
+        pdf = _to_polars(data)
         # Build a long-form DataFrame: (id_col, "column", "value").
         n_rows = pdf.height
         n_cols = len(value_cols)

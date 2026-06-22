@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
-from ferrum.plots._helpers import _coerce_to_polars, _finalize_chart
+from ferrum.plots._helpers import _coerce_to_polars, _finalize_chart, _validate_choice
 from ferrum.plots._helpers import _resolve_source
 
 
@@ -137,6 +137,8 @@ def rank_chart(
         dispatcher remains as a shim that forwards to the appropriate
         sibling and will be removed in a future major release.
     """
+    _validate_choice("rank_chart", "rank", rank, {"1d", "2d"})
+
     import warnings
 
     warnings.warn(
@@ -160,21 +162,19 @@ def rank_chart(
             layers=layers,
             theme=theme,
         )
-    if rank == "2d":
-        return rank2d_chart(
-            source,
-            X,
-            y,
-            algorithm=algorithm,
-            annot=annot,
-            random_state=random_state,
-            mark=mark,
-            encode=encode,
-            properties=properties,
-            layers=layers,
-            theme=theme,
-        )
-    raise ValueError(f"rank_chart(rank={rank!r}) — expected '1d' or '2d'.")
+    return rank2d_chart(
+        source,
+        X,
+        y,
+        algorithm=algorithm,
+        annot=annot,
+        random_state=random_state,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
+    )
 
 
 # ---------------------------------------------------------------------------

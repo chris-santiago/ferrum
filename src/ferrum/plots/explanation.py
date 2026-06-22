@@ -33,6 +33,7 @@ from ferrum.plots._helpers import (
     _require,
     _resolve_source,
     _should_facet_by_class,
+    _validate_choice,
 )
 
 
@@ -154,8 +155,7 @@ def _shap_order_features(
     max_display: int,
 ) -> list[str]:
     """Return the top-`max_display` feature names ordered by `order`."""
-    if order not in _SHAP_ORDER_VALUES:
-        raise ValueError(f"Unknown order {order!r}. Accepted values: {sorted(_SHAP_ORDER_VALUES)}")
+    _validate_choice("shap_order_features", "order", order, _SHAP_ORDER_VALUES)
     expr = pl.col("shap_value").abs()
     agg = expr.mean() if order == "abs_mean" else expr.max()
     ranked = (
@@ -264,8 +264,7 @@ def _shap_bar_chart_from_source(
     (default) renders a single panel using the first class_label group
     (the only group on regression and binary classifiers).
     """
-    if order not in _SHAP_ORDER_VALUES:
-        raise ValueError(f"Unknown order {order!r}. Accepted values: {sorted(_SHAP_ORDER_VALUES)}")
+    _validate_choice("shap_bar_chart", "order", order, _SHAP_ORDER_VALUES)
     import ferrum
 
     expr = pl.col("shap_value").abs()
@@ -975,6 +974,8 @@ def shap_chart(
     >>> from sklearn.ensemble import GradientBoostingClassifier
     >>> fm.shap_chart(GradientBoostingClassifier().fit(X_train, y_train), X_test, y_test)
     """
+    _validate_choice("shap_chart", "kind", kind, {"beeswarm", "bar", "waterfall"})
+
     import warnings
 
     warnings.warn(
@@ -1024,7 +1025,6 @@ def shap_chart(
             layers=layers,
             theme=theme,
         )
-    raise ValueError(f"shap_chart(kind={kind!r}) — expected 'beeswarm', 'bar', or 'waterfall'.")
 
 
 def pdp_chart(

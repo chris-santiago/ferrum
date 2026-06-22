@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
-from ferrum.plots._helpers import _finalize_chart, _resolve_source
+from ferrum.plots._helpers import _finalize_chart, _resolve_source, _validate_choice
 
 
 # ---------------------------------------------------------------------------
@@ -581,17 +581,8 @@ def cluster_diagnostics(
     from ferrum._diagnostics.deps import require_sklearn
 
     require_sklearn("cluster_diagnostics")
-    if method not in ("kmeans", "hierarchical"):
-        raise ValueError(
-            f"cluster_diagnostics(method={method!r}) — expected one of "
-            "'kmeans', 'hierarchical'. DBSCAN and other density-based "
-            "methods don't fit the sweep-k framework and are not supported."
-        )
-    if scoring not in ("elbow", "silhouette", "both"):
-        raise ValueError(
-            f"cluster_diagnostics(scoring={scoring!r}) — expected one of "
-            "'elbow', 'silhouette', 'both'."
-        )
+    _validate_choice("cluster_diagnostics", "method", method, {"kmeans", "hierarchical"})
+    _validate_choice("cluster_diagnostics", "scoring", scoring, {"elbow", "silhouette", "both"})
     return _cluster_diagnostics_chart(
         X,
         ks=ks,

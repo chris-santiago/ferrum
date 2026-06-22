@@ -161,7 +161,7 @@ def test_rank_chart_2d_no_annot():
 
 def test_rank_chart_invalid_rank():
     df = load_dataset("regression").select(_REGRESSION_FEATURES)
-    with pytest.raises(ValueError, match="'1d' or '2d'"):
+    with pytest.raises(ValueError, match="must be one of"):
         ferrum.rank_chart(df, rank="3d")
 
 
@@ -241,6 +241,13 @@ def test_parallel_coordinates_from_numpy_array():
     svg = chart.to_svg()
     assert "<svg" in svg
     assert svg.count("<polyline") == 50
+    # PLOT-04 regression: a bare 2D numpy array (features=None) must keep the
+    # legacy f0/f1/... column naming, which becomes the rendered axis labels.
+    # The dedup briefly routed numpy through to_arrow_table (col_0/col_1/...);
+    # this pins the preserved f{j} naming so it cannot drift again.
+    for j in range(4):
+        assert f">f{j}<" in svg, f"expected axis label f{j} in parallel-coordinates SVG"
+    assert ">col_0<" not in svg
 
 
 # --- Visualizers ----------------------------------------------------

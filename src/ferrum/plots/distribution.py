@@ -25,7 +25,7 @@ from ferrum import (
     Stack,
 )
 from ferrum._overrides import _apply_overrides
-from ferrum.plots._helpers import _finalize_chart
+from ferrum.plots._helpers import _finalize_chart, _to_polars, _validate_choice
 
 
 # ---------------------------------------------------------------------------
@@ -58,15 +58,7 @@ def _count_facet_levels(data: Any, field: str) -> int:
     degrades gracefully to the default size rather than raising.
     """
     try:
-        import polars as pl
-        from ferrum._coerce import to_arrow_table
-
-        if isinstance(data, pl.DataFrame):
-            df = data
-        elif isinstance(data, pl.LazyFrame):
-            df = data.collect()
-        else:
-            df = pl.from_arrow(to_arrow_table(data))
+        df = _to_polars(data)
         if field not in df.columns:
             return 1
         return df[field].n_unique()
@@ -259,14 +251,8 @@ def displot(
 
     >>> fm.displot(df, x="tip", hue="sex", multiple="stack", rug=True)
     """
-    if kind not in _DISPLOT_VALID_KINDS:
-        raise ValueError(
-            f"displot: kind must be one of {sorted(_DISPLOT_VALID_KINDS)}; got {kind!r}"
-        )
-    if multiple not in _DISPLOT_VALID_MULTIPLE:
-        raise ValueError(
-            f"displot: multiple must be one of {sorted(_DISPLOT_VALID_MULTIPLE)}; got {multiple!r}"
-        )
+    _validate_choice("displot", "kind", kind, _DISPLOT_VALID_KINDS)
+    _validate_choice("displot", "multiple", multiple, _DISPLOT_VALID_MULTIPLE)
 
     # Position adjustment from `multiple`.
     position = _multiple_to_position(multiple, hue)
@@ -612,10 +598,7 @@ def catplot(
 
     >>> fm.catplot(df, x="total_bill", y="day", kind="violin", orient="h")
     """
-    if kind not in _CATPLOT_VALID_KINDS:
-        raise ValueError(
-            f"catplot: kind must be one of {sorted(_CATPLOT_VALID_KINDS)}; got {kind!r}"
-        )
+    _validate_choice("catplot", "kind", kind, _CATPLOT_VALID_KINDS)
 
     if native_scale:
         raise ValueError(
@@ -850,10 +833,7 @@ def relplot(
     >>> fm.relplot(df, x="timepoint", y="signal", hue="region",
     ...            style="region", kind="line")
     """
-    if kind not in _RELPLOT_VALID_KINDS:
-        raise ValueError(
-            f"relplot: kind must be one of {sorted(_RELPLOT_VALID_KINDS)}; got {kind!r}"
-        )
+    _validate_choice("relplot", "kind", kind, _RELPLOT_VALID_KINDS)
 
     chart = Chart(data)
 

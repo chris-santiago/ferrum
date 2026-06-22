@@ -12,12 +12,6 @@ Internal-only builders
 ----------------------
 _residuals_chart_from_source, _residuals_panel,
 _prediction_error_chart_from_source.
-
-Shared utility
---------------
-_merge_layers — composes a scatter Chart and a fit Chart into a
-multi-layer Chart.  Also used by ``heatmap()`` and ``jointplot()``
-in other modules; importable from here.
 """
 
 from __future__ import annotations
@@ -41,79 +35,17 @@ from ferrum.plots._helpers import (
     _grid_panels,
     _inject_cook_outliers,
     _inject_metrics_corner,
+    _merge_layers,
     _overlay_metrics_corner,
     _r2_score,
     _resolve_source,
     _sort_by,
+    _to_polars,
+    _validate_choice,
 )
 
 
-_VALID_METHODS = {"lm", "logistic", "glm", "loess", "robust"}
-
-
-# ---------------------------------------------------------------------------
-# Shared utility: _merge_layers
-# ---------------------------------------------------------------------------
-
-
-def _merge_layers(
-    scatter_chart: Chart,
-    fit_chart: Chart,
-    *,
-    scatter_name: str | None = None,
-    fit_name: str | None = None,
-) -> Chart:
-    """Compose a scatter Chart and a fit Chart into a multi-layer Chart.
-
-    Returns a new Chart with ``_layers`` = scatter-layer + fit-layers,
-    with transforms accumulated from both inputs.
-    """
-    from dataclasses import replace as _replace
-
-    s_resolved = scatter_chart._resolve_pending()
-    f_resolved = fit_chart._resolve_pending()
-
-    new = s_resolved._clone()
-    new._pending_stat_mark = None
-
-    shared_transforms: list = []
-    seen_ids = set()
-    for t in list(s_resolved._transforms) + list(f_resolved._transforms):
-        key = id(t)
-        if key in seen_ids:
-            continue
-        seen_ids.add(key)
-        shared_transforms.append(t)
-
-    from ferrum._layer import _Layer
-
-    scatter_layer = _Layer(
-        name=scatter_name,
-        mark=s_resolved._mark,
-        encoding=dict(s_resolved._encoding),
-        mark_kwargs=dict(s_resolved._mark_kwargs) if s_resolved._mark_kwargs else None,
-        position=s_resolved._position,
-    )
-
-    if f_resolved._layers is not None:
-        fit_layers = list(f_resolved._layers)
-        if fit_name and fit_layers and fit_layers[0].name is None:
-            fit_layers[0] = _replace(fit_layers[0], name=fit_name)
-    else:
-        fit_layers = [
-            _Layer(
-                name=fit_name,
-                mark=f_resolved._mark,
-                encoding=dict(f_resolved._encoding),
-                mark_kwargs=dict(f_resolved._mark_kwargs) if f_resolved._mark_kwargs else None,
-                position=f_resolved._position,
-            )
-        ]
-
-    new._mark = None
-    new._layers = [scatter_layer] + fit_layers
-    new._transforms = shared_transforms
-    return new
+_VALID_METHODS = frozenset({"lm", "logistic", "glm", "loess", "robust"})
 
 
 # ---------------------------------------------------------------------------
@@ -490,8 +422,7 @@ def lmplot(
 
     >>> fm.lmplot(df, x="size", y="tip", order=2, ci=None)
     """
-    if method not in _VALID_METHODS:
-        raise ValueError(f"lmplot: method must be one of {sorted(_VALID_METHODS)}; got {method!r}")
+    _validate_choice("lmplot", "method", method, _VALID_METHODS)
 
     # Rust Smooth/Robust transforms require Float64 columns. Auto-cast
     # integer columns to Float64, matching catplot's pattern (chart.py).
@@ -505,7 +436,7 @@ def lmplot(
         pl.UInt32,
         pl.UInt64,
     )
-    data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
+    data = _to_polars(data)
     casts = []
     for fld in (x, y):
         col_name = fld.field if hasattr(fld, "field") else str(fld)
@@ -791,8 +722,8 @@ def residplot(
 
     >>> fm.residplot(df, x="size", y="tip", robust=True)
     """
+    data = _to_polars(data)
     if dropna:
-        data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
         data = data.drop_nulls(subset=[x, y])
 
     # Rust Smooth/Robust transforms require Float64 columns.  Auto-cast
@@ -807,7 +738,6 @@ def residplot(
         pl.UInt32,
         pl.UInt64,
     )
-    data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
     casts = []
     for fld in (x, y):
         if fld in data.columns and data[fld].dtype in _INT_DTYPES:
@@ -826,7 +756,6 @@ def residplot(
     # column cannot be preserved through that path — a Rust-side ``groupby``
     # addition to the Robust transform would be needed.
     if label is not None:
-        data = pl.DataFrame(data) if not isinstance(data, pl.DataFrame) else data
         data = data.with_columns(pl.lit(str(label)).alias("_label"))
 
     if robust:

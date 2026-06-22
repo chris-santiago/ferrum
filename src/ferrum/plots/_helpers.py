@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import polars as pl
 
+from ferrum._coerce import to_arrow_table
 from ferrum._overrides import _apply_overrides
 
 if TYPE_CHECKING:
@@ -247,18 +248,66 @@ def _should_facet_by_class(df: pl.DataFrame, *, per_class: bool) -> bool:
     return per_class and df["class_label"].n_unique() > 1
 
 
+def _to_polars(data: Any) -> pl.DataFrame:
+    """Coerce any supported input to a ``polars.DataFrame``.
+
+    Backed by :func:`ferrum._coerce.to_arrow_table`, so all input types
+    accepted by ``Chart(data=...)`` are accepted here: polars, pyarrow,
+    narwhals-compatible (pandas/modin/cuDF/dask/ibis), dict, list, numpy 2D.
+
+    Returns the input unchanged when it is already a ``polars.DataFrame``.
+    """
+    if isinstance(data, pl.DataFrame):
+        return data
+    return pl.from_arrow(to_arrow_table(data))
+
+
 def _coerce_to_polars(data: Any) -> pl.DataFrame:
-    """Coerce a polars / pandas / 2D-numpy input into a polars DataFrame."""
+    """Coerce a polars / pandas / 2D-numeric input into a polars DataFrame.
+
+    Preserves the legacy ``f{j}`` column naming for a bare 2D numeric array or
+    list-of-lists: those names become the parallel-coordinates axis labels when
+    ``features=None``, so they must stay ``f0, f1, ...`` byte-identically (the
+    ferrum-wide :func:`ferrum._coerce.to_arrow_table` convention is ``col_{i}``;
+    that divergence is preserved here deliberately — see the T1.7 carry).  Every
+    other input type (pyarrow, narwhals frames, dict, ...) delegates to
+    :func:`_to_polars` for the widened CDI-backed coercion.
+    """
     import numpy as np
 
     if isinstance(data, pl.DataFrame):
         return data
     if hasattr(data, "to_numpy") and hasattr(data, "columns"):
         return pl.from_pandas(data)
-    arr = np.asarray(data, dtype=np.float64)
-    if arr.ndim != 2:
-        raise ValueError(f"data must be a 2D array; got shape {arr.shape}")
-    return pl.DataFrame({f"f{j}": arr[:, j].tolist() for j in range(arr.shape[1])})
+    try:
+        arr = np.asarray(data, dtype=np.float64)
+    except (ValueError, TypeError):
+        return _to_polars(data)
+    if arr.ndim == 2:
+        return pl.DataFrame({f"f{j}": arr[:, j].tolist() for j in range(arr.shape[1])})
+    return _to_polars(data)
+
+
+def _validate_choice(
+    func_name: str,
+    param: str,
+    value: Any,
+    choices: "frozenset[Any] | set[Any] | tuple[Any, ...] | list[Any]",
+) -> None:
+    """Raise ``ValueError`` when ``value`` is not in ``choices``.
+
+    Produces a canonical error message across all figure functions::
+
+        {func_name}: {param} must be one of {sorted(choices)}; got {value!r}
+
+    This replaces three inconsistent idioms that existed across the plots
+    package (``"must be one of …; got"``, ``"Unknown … . Accepted values:"``,
+    and tail-raises with ``"— expected a or b"``).
+    """
+    if value not in choices:
+        raise ValueError(
+            f"{func_name}: {param} must be one of {sorted(str(c) for c in choices)}; got {value!r}"
+        )
 
 
 def _require(func_name: str, arg_name: str, value: Any, *, hint: str) -> Any:
@@ -357,3 +406,72 @@ def _resolve_source(
     if isinstance(model, ferrum.ModelSource):
         return model
     return ferrum.ModelSource(model, X, y, random_state=random_state)
+
+
+# ---------------------------------------------------------------------------
+# _merge_layers — general-purpose layer composer (moved from regression.py)
+# ---------------------------------------------------------------------------
+
+
+def _merge_layers(
+    scatter_chart: "Chart",
+    fit_chart: "Chart",
+    *,
+    scatter_name: str | None = None,
+    fit_name: str | None = None,
+) -> "Chart":
+    """Compose a scatter Chart and a fit Chart into a multi-layer Chart.
+
+    Returns a new Chart with ``_layers`` = scatter-layer + fit-layers,
+    with transforms accumulated from both inputs.
+
+    Originally defined in ``plots/regression.py``; relocated here because
+    it is domain-agnostic and is imported by both ``regression.py`` and
+    ``matrix.py``.
+    """
+    from dataclasses import replace as _replace
+
+    from ferrum._layer import _Layer
+
+    s_resolved = scatter_chart._resolve_pending()
+    f_resolved = fit_chart._resolve_pending()
+
+    new = s_resolved._clone()
+    new._pending_stat_mark = None
+
+    shared_transforms: list = []
+    seen_ids: set = set()
+    for t in list(s_resolved._transforms) + list(f_resolved._transforms):
+        key = id(t)
+        if key in seen_ids:
+            continue
+        seen_ids.add(key)
+        shared_transforms.append(t)
+
+    scatter_layer = _Layer(
+        name=scatter_name,
+        mark=s_resolved._mark,
+        encoding=dict(s_resolved._encoding),
+        mark_kwargs=dict(s_resolved._mark_kwargs) if s_resolved._mark_kwargs else None,
+        position=s_resolved._position,
+    )
+
+    if f_resolved._layers is not None:
+        fit_layers = list(f_resolved._layers)
+        if fit_name and fit_layers and fit_layers[0].name is None:
+            fit_layers[0] = _replace(fit_layers[0], name=fit_name)
+    else:
+        fit_layers = [
+            _Layer(
+                name=fit_name,
+                mark=f_resolved._mark,
+                encoding=dict(f_resolved._encoding),
+                mark_kwargs=dict(f_resolved._mark_kwargs) if f_resolved._mark_kwargs else None,
+                position=f_resolved._position,
+            )
+        ]
+
+    new._mark = None
+    new._layers = [scatter_layer] + fit_layers
+    new._transforms = shared_transforms
+    return new
