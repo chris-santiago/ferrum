@@ -30,6 +30,7 @@ from ferrum._overrides import _apply_overrides
 from ferrum.plots._helpers import (
     _UNSET,
     _finalize_chart,
+    _reject_compare,
     _resolve_first_param,
     _resolve_source,
     _validate_choice,
@@ -371,6 +372,7 @@ def pca_scree_chart(
     cumulative_line: bool = True,
     threshold: float | None = 0.95,
     subtitle: str | None = None,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -437,7 +439,20 @@ def pca_scree_chart(
     Raw DataFrame (no sklearn required):
 
     >>> fm.pca_scree_chart(X_train, n_components=10)
+
+    Notes
+    -----
+    ``compare=`` is not supported. PCA scree is an unsupervised single-fit
+    diagnostic with no ``y`` target, so cross-model comparison is meaningless.
+    Passing a non-``None`` ``compare`` raises ``ValueError`` (D-COMPARE-1:
+    loud, documented exclusion).
     """
+    _reject_compare(
+        compare,
+        chart="pca_scree_chart",
+        reason="PCA scree is an unsupervised single-fit diagnostic with no y "
+        "target; cross-model comparison is meaningless",
+    )
     import numpy as np
     import pyarrow as pa
 
@@ -503,6 +518,7 @@ def cluster_diagnostics(
     method: str = "kmeans",
     scoring: str = "both",
     n_init: int = 10,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -587,9 +603,22 @@ def cluster_diagnostics(
     >>> fm.cluster_diagnostics(X_train, ks=range(2, 11))
     >>> fm.cluster_diagnostics(X_train, ks=range(2, 11),
     ...                         method="hierarchical", scoring="silhouette")
+
+    Notes
+    -----
+    ``compare=`` is not supported. This sweeps one clusterer class over a range
+    of ``k`` on a single feature matrix (no ``y`` target); cross-model
+    comparison via ``compare=`` is meaningless. Passing a non-``None``
+    ``compare`` raises ``ValueError`` (D-COMPARE-1).
     """
     from ferrum._diagnostics.deps import require_sklearn
 
+    _reject_compare(
+        compare,
+        chart="cluster_diagnostics",
+        reason="this sweeps one clusterer class over k on an unsupervised "
+        "feature matrix; cross-model comparison is meaningless",
+    )
     model = _resolve_first_param(
         model,
         X,
@@ -623,6 +652,7 @@ def intercluster_distance_chart(
     *,
     k: int | None = None,
     method: str = "mds",
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -689,7 +719,19 @@ def intercluster_distance_chart(
     >>> import ferrum as fm
     >>> from sklearn.cluster import KMeans
     >>> fm.intercluster_distance_chart(KMeans(n_clusters=5).fit(X_train), X_train)
+
+    Notes
+    -----
+    ``compare=`` is not supported. This embeds one clusterer's centers in 2D
+    (no ``y`` target); cross-model comparison via ``compare=`` is meaningless.
+    Passing a non-``None`` ``compare`` raises ``ValueError`` (D-COMPARE-1).
     """
+    _reject_compare(
+        compare,
+        chart="intercluster_distance_chart",
+        reason="this embeds one clusterer's centers in 2D with no y target; "
+        "cross-model comparison is meaningless",
+    )
     source = _resolve_source(model, X, None, random_state=random_state)
     if k is None:
         if hasattr(source.model, "n_clusters"):
@@ -719,6 +761,7 @@ def silhouette_chart(
     X: Any = None,
     *,
     subtitle: str | None = None,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -770,7 +813,20 @@ def silhouette_chart(
     >>> import ferrum as fm
     >>> from sklearn.cluster import KMeans
     >>> fm.silhouette_chart(KMeans(n_clusters=3, random_state=0).fit(X), X)
+
+    Notes
+    -----
+    ``compare=`` is not supported. The silhouette plot is an unsupervised
+    single-clusterer diagnostic (no ``y`` target); cross-model comparison via
+    ``compare=`` is meaningless. Passing a non-``None`` ``compare`` raises
+    ``ValueError`` (D-COMPARE-1).
     """
+    _reject_compare(
+        compare,
+        chart="silhouette_chart",
+        reason="the silhouette plot is an unsupervised single-clusterer "
+        "diagnostic; cross-model comparison is meaningless",
+    )
     source = _resolve_source(model, X, None, random_state=random_state)
     return _silhouette_chart_from_source(
         source,
@@ -788,6 +844,7 @@ def manifold_chart(
     X: Any = None,
     *,
     method: str = "umap",
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -838,9 +895,22 @@ def manifold_chart(
     >>> import ferrum as fm
     >>> from sklearn.cluster import KMeans
     >>> fm.manifold_chart(KMeans(n_clusters=4, random_state=0).fit(X), X, method="tsne")
+
+    Notes
+    -----
+    ``compare=`` is not supported. The manifold scatter embeds one model's data
+    in 2D (no ``y`` target); cross-model comparison via ``compare=`` is
+    meaningless. Passing a non-``None`` ``compare`` raises ``ValueError``
+    (D-COMPARE-1).
     """
     import ferrum
 
+    _reject_compare(
+        compare,
+        chart="manifold_chart",
+        reason="the manifold scatter embeds one model's data in 2D with no y "
+        "target; cross-model comparison is meaningless",
+    )
     source = _resolve_source(model, X, None, random_state=random_state)
     emb = source.embeddings(method=method)
     chart = ferrum.Chart(emb).mark_point().encode(x="dim_0", y="dim_1", color="label:N")
@@ -855,6 +925,7 @@ def elbow_chart(
     *,
     ks: Any,
     metric: str = "distortion",
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -906,7 +977,20 @@ def elbow_chart(
     >>> import ferrum as fm
     >>> from sklearn.cluster import KMeans
     >>> fm.elbow_chart(KMeans, X_train, ks=range(2, 9))
+
+    Notes
+    -----
+    ``compare=`` is not supported. This sweeps one clusterer class over a range
+    of ``k`` on an unsupervised feature matrix (no ``y`` target); cross-model
+    comparison via ``compare=`` is meaningless. Passing a non-``None``
+    ``compare`` raises ``ValueError`` (D-COMPARE-1).
     """
+    _reject_compare(
+        compare,
+        chart="elbow_chart",
+        reason="this sweeps one clusterer class over k on an unsupervised "
+        "feature matrix; cross-model comparison is meaningless",
+    )
     from ferrum._diagnostics.visualizers.clustering import ElbowVisualizer
 
     viz = ElbowVisualizer(

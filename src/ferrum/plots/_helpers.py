@@ -160,11 +160,25 @@ def _grid_panels(charts: list, theme: Any = None):
     return c
 
 
-def _color_field_for(df: pl.DataFrame, default: str) -> str:
+def _color_field_for(df: pl.DataFrame, default: str | None) -> str | None:
     """Return ``'model'`` if a ``model`` column is present (compare-source
-    path), otherwise the supplied default.
+    path), otherwise the supplied default (which may be ``None`` for marks
+    whose single-model colour field is unset).
     """
     return "model" if "model" in df.columns else default
+
+
+def _reject_compare(compare: dict | None, *, chart: str, reason: str) -> None:
+    """Raise a clear ``ValueError`` when ``compare=`` is passed to a chart whose
+    builder cannot render a multi-model :class:`ComparedModelSource`.
+
+    Mirrors the loud rejection ``_resolve_source`` already applies on the
+    precomputed path (D-COMPARE-1): the parameter exists for signature
+    uniformity across the model-diagnostic family, but a non-``None`` value is
+    surfaced as an explicit error rather than silently dropped.
+    """
+    if compare is not None:
+        raise ValueError(f"compare= is not supported for {chart}: {reason}")
 
 
 def _dedupe_aggregated(df: pl.DataFrame, *group_keys: str) -> pl.DataFrame:

@@ -31,6 +31,7 @@ from ferrum import (
 from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
 from ferrum.plots._helpers import (
+    _color_field_for,
     _finalize_chart,
     _grid_panels,
     _inject_cook_outliers,
@@ -38,6 +39,7 @@ from ferrum.plots._helpers import (
     _merge_layers,
     _overlay_metrics_corner,
     _r2_score,
+    _reject_compare,
     _resolve_source,
     _sort_by,
     _to_polars,
@@ -82,15 +84,24 @@ def _residuals_chart_from_source(
     import ferrum
 
     df = source.predictions()
-    if annotate_metrics:
+    # The corner R²/RMSE/MAE metrics conflate models (a single R²/RMSE over all
+    # rows, anchored at one ``y_pred.arg_max()`` row), so skip the injection when
+    # comparing. This mirrors how classification gates its active title to the
+    # single-model case.
+    is_single_model = "model" not in df.columns
+    if annotate_metrics and is_single_model:
         df = _inject_metrics_corner(df, kind=kind)
 
     if panels in (None, "single"):
         if cook_threshold is not None:
             df = _inject_cook_outliers(df, kind=kind, threshold=cook_threshold)
+        # When a ``model`` column is present (compare-source path), drive
+        # per-model colour on the residual scatter; absent it, ``None`` is
+        # byte-identical to the single-model default.
         chart = ferrum.Chart(df).mark_residuals(
             kind=kind,
             cook_threshold=cook_threshold,
+            color_field=_color_field_for(df, None),
         )
         chart = chart.properties(
             title=ferrum.Title("Residuals", subtitle=subtitle),
@@ -250,6 +261,17 @@ def _prediction_error_chart_from_source(
     import numpy as np
 
     df = source.predictions().sort("y_true")
+    # The residual confidence band (``ci`` / ``reference_band``) is a
+    # single-model aggregate computed over all rows; overlaying it on a
+    # multi-model comparison would conflate the models. Reject loudly rather
+    # than silently dropping the band (D-COMPARE-1).
+    if "model" in df.columns and (ci is not None or reference_band):
+        raise ValueError(
+            "compare= is not supported with ci=/reference_band= for "
+            "prediction_error_chart: the band is a single-model aggregate. "
+            "Drop ci=/reference_band= to compare models, or compose one chart "
+            "per model instead."
+        )
     if ci is not None or reference_band:
         residuals = df["y_pred"] - df["y_true"]
         if ci is not None:
@@ -266,10 +288,14 @@ def _prediction_error_chart_from_source(
             (pl.col("y_true") + q_lo).alias("_pe_band_lo"),
             (pl.col("y_true") + q_hi).alias("_pe_band_hi"),
         )
+    # When a ``model`` column is present (compare-source path), drive per-model
+    # colour on the scatter; absent it, ``None`` is byte-identical to the
+    # single-model default.
     chart = ferrum.Chart(df).mark_prediction_error(
         reference_line=reference_line,
         ci=ci,
         reference_band=reference_band,
+        color_field=_color_field_for(df, None),
     )
     chart = chart.encode(
         x=X("y_pred", title="Predicted value"),
@@ -971,6 +997,7 @@ def residuals_chart(
     panels: Any = "auto",
     annotate_metrics: bool = True,
     subtitle: str | None = None,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -1024,6 +1051,17 @@ def residuals_chart(
         scatter alone.
     subtitle : str or None, default None
         Optional subtitle rendered beneath the active chart title.
+    compare : dict of str -> estimator or None, default None
+        Mapping of label -> fitted estimator to overlay alongside ``model``.
+        Supported only with ``panels="single"`` (or ``None``): the
+        residuals-vs-fitted scatter then carries a ``model`` colour group with
+        one series per model. The canonical 4-panel layout (QQ, scale-location,
+        residuals-vs-leverage) plus the per-model hat-matrix leverage and
+        Cook's-distance computations are intrinsically single-model, so passing
+        ``compare=`` with a multi-panel ``panels`` value raises ``ValueError``
+        (D-COMPARE-1: loud, documented exclusion). To compare models across the
+        full diagnostic grid, build one ``residuals_chart`` per model and
+        compose them with ``|`` / ``&``.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``; does not affect deterministic
         residuals computation.
@@ -1059,7 +1097,21 @@ def residuals_chart(
 
     >>> fm.residuals_chart(y_true=y_test, y_pred=reg.predict(X_test))
     """
-    source = _resolve_source(model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state)
+    # ``compare=`` is supported only on the single-panel residuals-vs-fitted
+    # view, where a ``model`` colour group overlays both models coherently.
+    # The multi-panel grid (QQ, scale-location, residuals-vs-leverage) plus the
+    # per-model hat-matrix leverage / Cook's-distance computations are
+    # intrinsically single-model, so a multi-panel comparison is rejected loudly
+    # (D-COMPARE-1) rather than silently rendering a single-model grid.
+    if compare is not None and panels not in (None, "single"):
+        raise ValueError(
+            "compare= is only supported with panels='single' for residuals_chart: "
+            "the 4-panel QQ/scale-location/leverage grid is single-model. "
+            "Compose one chart per model instead."
+        )
+    source = _resolve_source(
+        model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare
+    )
     if panels in (None, "single"):
         panel_list: Any = None
     elif panels == "auto":
@@ -1096,6 +1148,7 @@ def prediction_error_chart(
     reference_line: bool = True,
     ci: float | None = None,
     reference_band: bool = False,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -1136,6 +1189,15 @@ def prediction_error_chart(
     reference_band : bool, default False
         When ``True`` (and ``ci`` is ``None``), overlays a ±1 RMSE
         ribbon around the reference line.
+    compare : dict of str -> estimator or None, default None
+        Mapping of label -> fitted estimator to overlay alongside ``model``.
+        On the default scatter path the chart carries a ``model`` colour group
+        with one actual-vs-predicted series per model and a shared y=x reference
+        line. ``compare=`` cannot be combined with ``ci`` / ``reference_band``:
+        the residual band is a single-model aggregate computed over all rows, so
+        that combination raises ``ValueError`` (D-COMPARE-1: loud, documented
+        exclusion). To show a per-model band, build one chart per model and
+        compose them with ``|`` / ``&``.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
@@ -1163,6 +1225,18 @@ def prediction_error_chart(
     >>> import ferrum as fm
     >>> fm.prediction_error_chart(model, X_test, y_test, reference_line=True)
     """
+    # ``compare=`` is supported on the default scatter path (a ``model`` colour
+    # group overlays both series with the shared y=x reference line). The
+    # residual confidence band (``ci`` / ``reference_band``) is a single-model
+    # aggregate, so combining it with ``compare=`` is rejected loudly
+    # (D-COMPARE-1) rather than silently dropping the band.
+    if compare is not None and (ci is not None or reference_band):
+        raise ValueError(
+            "compare= is not supported with ci=/reference_band= for "
+            "prediction_error_chart: the band is a single-model aggregate. "
+            "Drop ci=/reference_band= to compare models, or compose one chart "
+            "per model instead."
+        )
     source = _resolve_source(
         model,
         X,
@@ -1170,6 +1244,7 @@ def prediction_error_chart(
         y_true=y_true,
         y_pred=y_pred,
         random_state=random_state,
+        compare=compare,
     )
     return _prediction_error_chart_from_source(
         source,
@@ -1190,6 +1265,7 @@ def cooks_distance_chart(
     y: Any = None,
     *,
     threshold: float | str | None = None,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -1219,6 +1295,13 @@ def cooks_distance_chart(
         Cook's-distance threshold for outlier highlighting. A float is
         used as an absolute cutoff; ``"auto"`` applies the ``4 / n``
         rule (Hair et al.); ``None`` disables highlighting.
+    compare : dict of str -> estimator or None, default None
+        Not supported. Cook's distance and leverage are derived from each
+        fitted model's own hat matrix, so a single residuals-vs-leverage
+        panel cannot overlay two models coherently. Passing a non-``None``
+        value raises ``ValueError`` (D-COMPARE-1: loud, documented
+        exclusion). To compare models, build one chart per model and compose
+        them with ``|`` / ``&``.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
@@ -1246,6 +1329,12 @@ def cooks_distance_chart(
     >>> import ferrum as fm
     >>> fm.cooks_distance_chart(linear_model, X_test, y_test, threshold="auto")
     """
+    _reject_compare(
+        compare,
+        chart="cooks_distance_chart",
+        reason="Cook's distance and leverage are per-model hat-matrix quantities; "
+        "compose one chart per model instead",
+    )
     source = _resolve_source(
         model,
         X,

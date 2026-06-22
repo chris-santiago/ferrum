@@ -30,6 +30,7 @@ from ferrum.encoding import X, Y
 from ferrum._overrides import _apply_overrides
 from ferrum.plots._helpers import (
     _finalize_chart,
+    _reject_compare,
     _require,
     _resolve_source,
     _should_facet_by_class,
@@ -526,6 +527,7 @@ def importance_chart(
     error_bars: bool = True,
     show_values: bool = True,
     subtitle: str | None = None,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -597,7 +599,21 @@ def importance_chart(
     >>> import ferrum as fm
     >>> from sklearn.ensemble import RandomForestClassifier
     >>> fm.importance_chart(RandomForestClassifier().fit(X_train, y_train), X_test, y_test)
+
+    Notes
+    -----
+    ``compare=`` is not supported. The ranked single-series bar layout (and
+    its per-bar value-text overlay and global x-domain) has no second
+    dimension for a model; comparing importances across models needs grouped
+    bars. Passing a non-``None`` ``compare`` raises ``ValueError``. Compose
+    one chart per model with ``|`` / ``&`` to compare models.
     """
+    _reject_compare(
+        compare,
+        chart="importance_chart",
+        reason="the ranked single-series bar layout has no dimension for a "
+        "second model; compose one chart per model instead",
+    )
     source = _resolve_source(model, X, y, random_state=random_state)
     return _importance_chart_from_source(
         source,
@@ -626,6 +642,7 @@ def shap_beeswarm_chart(
     background: Any = None,
     per_class: bool = False,
     zero_line: bool = True,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -689,7 +706,21 @@ def shap_beeswarm_chart(
     >>> import ferrum as fm
     >>> from sklearn.ensemble import GradientBoostingClassifier
     >>> fm.shap_beeswarm_chart(GradientBoostingClassifier().fit(X_train, y_train), X_test, y_test)
+
+    Notes
+    -----
+    ``compare=`` is not supported. The beeswarm packs per-sample SHAP values
+    with a per-model feature ordering and color scale; overlaying a second
+    model's swarm in one panel is not a coherent comparison. Passing a
+    non-``None`` ``compare`` raises ``ValueError``. Compose one chart per
+    model with ``|`` / ``&`` to compare models.
     """
+    _reject_compare(
+        compare,
+        chart="shap_beeswarm_chart",
+        reason="the per-sample swarm and its feature ordering / color scale are "
+        "per-model; compose one chart per model instead",
+    )
     source = _resolve_source(model, X, y, random_state=random_state)
     return _shap_beeswarm_chart_from_source(
         source,
@@ -715,6 +746,7 @@ def shap_bar_chart(
     order: str = "abs_mean",
     background: Any = None,
     per_class: bool = False,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -773,7 +805,21 @@ def shap_bar_chart(
     >>> import ferrum as fm
     >>> from sklearn.ensemble import GradientBoostingClassifier
     >>> fm.shap_bar_chart(GradientBoostingClassifier().fit(X_train, y_train), X_test, y_test)
+
+    Notes
+    -----
+    ``compare=`` is not supported. The aggregated single-series bar layout
+    has no dimension for a second model; comparing mean-|SHAP| across models
+    needs grouped bars. Passing a non-``None`` ``compare`` raises
+    ``ValueError``. Compose one chart per model with ``|`` / ``&`` to compare
+    models.
     """
+    _reject_compare(
+        compare,
+        chart="shap_bar_chart",
+        reason="the aggregated single-series bar layout has no dimension for a "
+        "second model; compose one chart per model instead",
+    )
     source = _resolve_source(model, X, y, random_state=random_state)
     return _shap_bar_chart_from_source(
         source,
@@ -799,6 +845,7 @@ def shap_waterfall_chart(
     order: str = "abs_mean",
     background: Any = None,
     per_class: bool = False,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -863,7 +910,21 @@ def shap_waterfall_chart(
     ...     GradientBoostingClassifier().fit(X_train, y_train), X_test, y_test,
     ...     sample_idx=0,
     ... )
+
+    Notes
+    -----
+    ``compare=`` is not supported. The waterfall traces one model's cumulative
+    contributions for a single sample; a second model's cumulative sum cannot
+    share the same bar stack. Passing a non-``None`` ``compare`` raises
+    ``ValueError``. Compose one chart per model with ``|`` / ``&`` to compare
+    models.
     """
+    _reject_compare(
+        compare,
+        chart="shap_waterfall_chart",
+        reason="the cumulative single-sample waterfall is per-model; compose one "
+        "chart per model instead",
+    )
     source = _resolve_source(model, X, y, random_state=random_state)
     return _shap_waterfall_chart_from_source(
         source,
@@ -890,6 +951,7 @@ def shap_chart(
     sample_idx: int | None = None,
     order: str = "abs_mean",
     background: Any = None,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -973,8 +1035,21 @@ def shap_chart(
     >>> import ferrum as fm
     >>> from sklearn.ensemble import GradientBoostingClassifier
     >>> fm.shap_chart(GradientBoostingClassifier().fit(X_train, y_train), X_test, y_test)
+
+    Notes
+    -----
+    ``compare=`` is not supported for any ``kind`` (the beeswarm, bar, and
+    waterfall layouts are all single-model). Passing a non-``None`` ``compare``
+    raises ``ValueError``. Compose one chart per model with ``|`` / ``&`` to
+    compare models.
     """
     _validate_choice("shap_chart", "kind", kind, {"beeswarm", "bar", "waterfall"})
+    _reject_compare(
+        compare,
+        chart="shap_chart",
+        reason="the beeswarm / bar / waterfall layouts are all single-model; "
+        "compose one chart per model instead",
+    )
 
     import warnings
 
@@ -1037,6 +1112,7 @@ def pdp_chart(
     kind: str = "average",
     ice_alpha: float = 0.2,
     center: bool = False,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -1111,12 +1187,26 @@ def pdp_chart(
     >>> import ferrum as fm
     >>> from sklearn.ensemble import GradientBoostingRegressor
     >>> fm.pdp_chart(GradientBoostingRegressor().fit(X_train, y_train), X_test, features=["age", "income"])
+
+    Notes
+    -----
+    ``compare=`` is not supported. PDP already facets one panel per feature
+    with per-panel independent scales; a second model would need an extra
+    color or facet dimension on top. Passing a non-``None`` ``compare`` raises
+    ``ValueError``. Compose one chart per model with ``|`` / ``&`` to compare
+    models.
     """
     _require(
         "pdp_chart",
         "features",
         features,
         hint="pass a list of column names or indices",
+    )
+    _reject_compare(
+        compare,
+        chart="pdp_chart",
+        reason="the per-feature facet layout has no free dimension for a second "
+        "model; compose one chart per model instead",
     )
     source = _resolve_source(model, X, y, random_state=random_state)
     return _pdp_chart_from_source(
