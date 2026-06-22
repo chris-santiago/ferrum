@@ -5,12 +5,29 @@ onto a ``Chart`` via ``chart + AUCLabel()``.  The private helpers
 (``_apply_metric_label``, ``_apply_metric_label_explicit``, etc.) are
 internal to this module; external callers should use the public classes or
 ``_apply_metric_label_explicit`` for figure-level builders.
+
+Single-source contract (T4.7b, 2026-06-22)
+-----------------------------------------
+There are two surfaces that overlay a metric value on a diagnostic curve:
+
+* the **direct-mark** composite (``Chart.mark_roc(annotate_auc=...)`` etc.),
+  whose ``__radd__`` path runs through ``_apply_metric_label``; and
+* the **figure-function** builders (``_roc_chart_from_source`` etc.), which
+  call ``_apply_metric_label_explicit`` with field overrides.
+
+Both paths share one definition of *what a metric kind is* — its value
+function and its overlay-text prefix — via :data:`_METRIC_LABEL_SPECS`.
+A placement or prefix fix therefore lands in one place and is observed by
+both surfaces.  (The value functions ``_trapezoid_auc`` / ``_ap_step`` /
+``_brier_score`` were already single-homed here; the metric→(fn, prefix)
+association was the piece duplicated between ``_apply_metric_label_explicit``
+and the per-class dataclass ``__radd__`` methods.)
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 import polars as pl
 
@@ -54,6 +71,24 @@ def _brier_score(p, obs) -> float:
     import numpy as np
 
     return float(np.mean((p - obs) ** 2))
+
+
+# Canonical metric-kind table — the single source for the
+# ``kind -> (value function, overlay-text prefix)`` association shared by the
+# direct-mark ``__radd__`` path and the figure-function explicit-field path.
+# Keys match the ``label_kind`` strings accepted by
+# ``_apply_metric_label_explicit``; the prefixes match the per-class dataclass
+# defaults so consolidating here is byte-identical on both surfaces.
+_METRIC_LABEL_SPECS: dict[str, tuple[Callable[[Any, Any], float], str]] = {
+    "auc": (_trapezoid_auc, "AUC = "),
+    "ap": (_ap_step, "AP = "),
+    "brier": (_brier_score, "Brier = "),
+}
+
+
+def _default_prefix(kind: str) -> str:
+    """Canonical overlay-text prefix for a metric kind (drives dataclass defaults)."""
+    return _METRIC_LABEL_SPECS[kind][1]
 
 
 def _apply_metric_label(
@@ -173,16 +208,17 @@ class AUCLabel:
     >>> annotated = chart + fm.AUCLabel()
     """
 
+    _kind = "auc"
     position: Literal["end", "corner"] = "end"
     format: str = ".3f"
-    prefix: str = "AUC = "
+    prefix: str = _default_prefix("auc")
 
     def __radd__(self, base: "Chart") -> "Chart":
         from ferrum.chart import Chart
 
         if not isinstance(base, Chart):
             return NotImplemented
-        return _apply_metric_label(base, self, metric_fn=_trapezoid_auc)
+        return _apply_metric_label(base, self, metric_fn=_METRIC_LABEL_SPECS[self._kind][0])
 
 
 @dataclass(frozen=True)
@@ -211,16 +247,17 @@ class APLabel:
     >>> annotated = chart + fm.APLabel()
     """
 
+    _kind = "ap"
     position: Literal["end", "corner"] = "end"
     format: str = ".3f"
-    prefix: str = "AP = "
+    prefix: str = _default_prefix("ap")
 
     def __radd__(self, base: "Chart") -> "Chart":
         from ferrum.chart import Chart
 
         if not isinstance(base, Chart):
             return NotImplemented
-        return _apply_metric_label(base, self, metric_fn=_ap_step)
+        return _apply_metric_label(base, self, metric_fn=_METRIC_LABEL_SPECS[self._kind][0])
 
 
 @dataclass(frozen=True)
@@ -248,16 +285,17 @@ class BrierLabel:
     >>> annotated = chart + fm.BrierLabel()
     """
 
+    _kind = "brier"
     position: Literal["end", "corner"] = "corner"
     format: str = ".3f"
-    prefix: str = "Brier = "
+    prefix: str = _default_prefix("brier")
 
     def __radd__(self, base: "Chart") -> "Chart":
         from ferrum.chart import Chart
 
         if not isinstance(base, Chart):
             return NotImplemented
-        return _apply_metric_label(base, self, metric_fn=_brier_score)
+        return _apply_metric_label(base, self, metric_fn=_METRIC_LABEL_SPECS[self._kind][0])
 
 
 @dataclass(frozen=True)
@@ -358,18 +396,17 @@ def _apply_metric_label_explicit(
     Schwabish SB3 helper used by figure-level diagnostic builders that
     compose ``AUCLabel`` / ``APLabel`` / ``BrierLabel`` onto charts whose
     ``_pending_stat_mark`` composite hides the encoding.
+
+    Shares the metric-kind table (:data:`_METRIC_LABEL_SPECS`) with the
+    direct-mark ``__radd__`` path, so a value-function or prefix change is
+    observed identically by both surfaces.
     """
-    metric_map = {
-        "auc": (_trapezoid_auc, "AUC = "),
-        "ap": (_ap_step, "AP = "),
-        "brier": (_brier_score, "Brier = "),
-    }
-    if label_kind not in metric_map:
+    if label_kind not in _METRIC_LABEL_SPECS:
         raise ValueError(
             f"_apply_metric_label_explicit(label_kind={label_kind!r}): "
-            f"expected one of {sorted(metric_map)}"
+            f"expected one of {sorted(_METRIC_LABEL_SPECS)}"
         )
-    metric_fn, default_prefix = metric_map[label_kind]
+    metric_fn, default_prefix = _METRIC_LABEL_SPECS[label_kind]
     pos_lit: Any = position
     prefix_str = prefix if prefix is not None else default_prefix
     if label_kind == "auc":

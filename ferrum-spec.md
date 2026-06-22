@@ -516,6 +516,18 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 >   each sample renders as its own polyline. Requires the Phase 10g `mark_line`
 >   composite (color, detail) grouping path and ordinal-x support.
 
+> **2026-06-22 (annotation default divergence — intentional):** `mark_roc`
+> defaults to `annotate_auc=False`, `mark_pr` to `annotate_ap=False`, while the
+> figure functions `roc_chart` / `pr_chart` (and `calibration_chart`'s
+> `annotate_brier`) default to `True`. This divergence is by design: a raw
+> primitive mark does not auto-annotate, whereas a figure function is a
+> finished plot that should carry its metric. The figure builders own the
+> overlay (calling `mark_roc(annotate_auc=False)` then layering the metric label
+> themselves), so the AUC/AP/Brier value and its overlay-text formatting come
+> from a single source — the metric-kind table in `ferrum._metric_labels`
+> (`_METRIC_LABEL_SPECS`), shared by both the direct-mark `AUCLabel`/`APLabel`/
+> `BrierLabel` `__radd__` path and the figure-function explicit-field path.
+
 ---
 
 ### 3.4 Stat Transforms

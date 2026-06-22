@@ -45,7 +45,10 @@ class ClassificationMarksMixin:
             (TPR=FPR).  Default is ``True``.
         annotate_auc : bool, optional
             Whether to annotate each curve with its AUC value.  Default is
-            ``False``.
+            ``False``: a raw mark stays un-annotated.  (The ``roc_chart``
+            figure function defaults to ``True`` and owns the overlay via
+            the shared ``_metric_labels`` helper; the divergent defaults
+            are intentional.)
         color_field : str or None, optional
             Column name to drive per-class colour.  Default is ``"class"``.
         position : Position, optional
@@ -106,7 +109,10 @@ class ClassificationMarksMixin:
             ``None`` (default) renders all classes.
         annotate_ap : bool, optional
             Whether to annotate each curve with its average-precision (AP)
-            value.  Default is ``False``.
+            value.  Default is ``False``: a raw mark stays un-annotated.
+            (The ``pr_chart`` figure function defaults to ``True`` and owns
+            the overlay via the shared ``_metric_labels`` helper; the
+            divergent defaults are intentional.)
         iso_lines : bool, optional
             Whether to draw iso-F1 reference lines in the background.
             Default is ``False``.

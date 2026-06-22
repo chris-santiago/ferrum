@@ -31,14 +31,25 @@ def desugar_roc(
     calling ``Chart.mark_roc`` method pre-sorts the data ascending by
     ``fpr`` so the diagonal line layer is monotonic.
 
-    When ``annotate_auc=True`` the chart builder
-    (``_roc_chart_from_source``) injects ``_auc_label_x`` / ``_auc_label_y``
-    / ``_auc_label`` columns — one non-null row per class — and this
-    desugar emits a ``mark_text`` layer that references them. Rust's
-    ``mark_text`` skips null rows, so exactly one label renders per
-    class. ``average`` is informational at the mark layer — the figure
-    builder is responsible for shaping the data appropriately before
-    constructing the chart.
+    Annotation surfaces (see ``_metric_labels`` for the single source of the
+    AUC value + overlay-text formatting shared by both surfaces):
+
+    * The default ``annotate_auc=False`` keeps a raw mark un-annotated — a
+      primitive mark should not silently inject a metric overlay. The
+      figure function ``roc_chart`` defaults to ``annotate_auc=True`` and
+      owns the annotation itself (it calls ``mark_roc(annotate_auc=False)``
+      then overlays via ``_apply_metric_label_explicit``); the divergent
+      defaults are intentional.
+    * When ``annotate_auc=True`` this desugar emits a ``mark_text`` layer
+      reading ``_auc_label_x`` / ``_auc_label_y`` / ``_auc_label`` columns.
+      Those columns must be injected upstream (the data does not carry them
+      out of ``ModelSource.roc_curve()``); the figure path supplies its
+      annotation through ``_metric_labels`` instead, so this branch is the
+      hook for a caller that pre-injects the columns.
+
+    ``average`` is informational at the mark layer — the figure builder is
+    responsible for shaping the data appropriately before constructing the
+    chart.
     """
     _ = average  # informational at the mark layer
     user_kw = _validate("roc", mark_kwargs)
@@ -92,10 +103,17 @@ def desugar_pr(
     Data contract: ``recall``, ``precision``, ``class``, ``ap`` as emitted
     by ``ModelSource.pr_curve()``.
 
-    When ``annotate_ap=True`` the chart builder
-    (``_pr_chart_from_source``) injects ``_ap_label_x`` / ``_ap_label_y`` /
-    ``_ap_label`` columns — one non-null row per class — and this
-    desugar emits a ``mark_text`` layer that references them.
+    Annotation surfaces (see ``_metric_labels`` for the single source of the
+    AP value + overlay-text formatting shared by both surfaces):
+
+    * The default ``annotate_ap=False`` keeps a raw mark un-annotated; the
+      figure function ``pr_chart`` defaults to ``annotate_ap=True`` and owns
+      the annotation via ``_apply_metric_label_explicit``. The divergent
+      defaults are intentional (raw mark vs. figure function).
+    * When ``annotate_ap=True`` this desugar emits a ``mark_text`` layer
+      reading ``_ap_label_x`` / ``_ap_label_y`` / ``_ap_label`` columns,
+      which must be injected upstream (they do not come out of
+      ``ModelSource.pr_curve()``).
 
     When ``iso_lines=True`` the chart builder appends F-score iso-curve rows
     for F in {0.2, 0.4, 0.6, 0.8} with synthetic columns ``_iso_recall``,

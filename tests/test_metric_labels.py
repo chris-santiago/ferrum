@@ -18,6 +18,52 @@ from ferrum import (
 )
 
 
+# ---- Single-source metric-kind table (T4.7b) ---------------------------------
+
+
+def test_metric_label_specs_single_source():
+    """The metric-kind table is the one source shared by the direct-mark
+    ``__radd__`` path and the figure-function explicit-field path.
+
+    Both surfaces must read the same ``(value_fn, prefix)`` per kind: the
+    per-class dataclass defaults derive their prefix from the table, and
+    ``_apply_metric_label_explicit`` looks the kind up in the same table.
+    A drift here is exactly the two-code-paths hazard MOD-05 flagged.
+    """
+    from ferrum._metric_labels import (
+        APLabel,
+        AUCLabel,
+        BrierLabel,
+        _METRIC_LABEL_SPECS,
+        _ap_step,
+        _brier_score,
+        _trapezoid_auc,
+    )
+
+    assert _METRIC_LABEL_SPECS == {
+        "auc": (_trapezoid_auc, "AUC = "),
+        "ap": (_ap_step, "AP = "),
+        "brier": (_brier_score, "Brier = "),
+    }
+    # The dataclass prefix defaults are the table's prefixes (no second copy).
+    for cls, kind in ((AUCLabel, "auc"), (APLabel, "ap"), (BrierLabel, "brier")):
+        assert cls().prefix == _METRIC_LABEL_SPECS[kind][1]
+        # __radd__ resolves its value function from the same table entry.
+        assert cls._kind == kind
+
+
+def test_metric_label_explicit_rejects_unknown_kind():
+    """Figure-path entry point validates against the shared table."""
+    import pytest
+
+    from ferrum import Chart
+    from ferrum._metric_labels import _apply_metric_label_explicit
+
+    base = Chart(_roc_data()).encode(x="fpr", y="tpr").mark_line()
+    with pytest.raises(ValueError, match="expected one of"):
+        _apply_metric_label_explicit(base, "f1", x_col="fpr", y_col="tpr")
+
+
 # ---- AUCLabel ----------------------------------------------------------------
 
 
