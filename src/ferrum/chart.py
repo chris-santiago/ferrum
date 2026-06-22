@@ -485,6 +485,7 @@ from ferrum.composition import (
     _expand_layers,
     _merge_top_transforms,
     _promote_layer_color,
+    _validate_share_modes,
     _warn_on_layer_conflicts,
 )
 
@@ -2400,11 +2401,8 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
         """
         if self._facet is None:
             raise ValueError("share_scale() requires a faceted chart; call facet() first")
-        _valid = ("shared", "independent")
-        if x is not None and x not in _valid:
-            raise ValueError(f"share_scale: x={x!r}; expected 'shared' or 'independent'")
-        if y is not None and y not in _valid:
-            raise ValueError(f"share_scale: y={y!r}; expected 'shared' or 'independent'")
+        to_validate = {ch: mode for ch, mode in (("x", x), ("y", y)) if mode is not None}
+        _validate_share_modes(to_validate)
         # Build updated resolve dict from existing + new values.
         existing_resolve = self._facet.resolve or {}
         new_resolve = dict(existing_resolve)
@@ -3542,9 +3540,7 @@ class Chart(ConfigureMixin, StatisticalMarksMixin, DiagnosticMarksMixin, _Render
             if isinstance(scale, dict):
                 domain = scale.get("domain")
                 if isinstance(domain, VariableParameter) and domain.name in selection_names:
-                    _check_param_collision(
-                        domain.name, is_selection=False, context="scale domain"
-                    )
+                    _check_param_collision(domain.name, is_selection=False, context="scale domain")
 
         ordered: list = []
         seen: set[str] = set()
