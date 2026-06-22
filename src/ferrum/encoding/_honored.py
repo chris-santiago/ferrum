@@ -45,8 +45,12 @@ PRIMARY_POSITIONAL = frozenset(
         # impute dict — honored by prepare.rs apply_impute.
         "impute",
         # format string + type — honored by prepare.rs apply_tick_format.
+        # format_type is the canonical snake_case spelling; formatType is the
+        # Vega-compat camelCase alias (D-FMT-1). Both serialize to the wire
+        # key format_type via _emit_format_type in base.py.
         "format",
         "format_type",
+        "formatType",
         # legend dict — honored by prepare.rs legend_orient_override / title.
         "legend",
     }
@@ -97,10 +101,11 @@ BARE = frozenset({"type"})
 
 #: Text-content channels with number/date formatting (Text).
 #:
-#: ``formatType`` is the camelCase (Vega-Lite) spelling honored by text
-#: channels; positional channels honor the snake_case ``format_type``. Unifying
-#: these two spellings is the separate D-FMT-1 task — preserved as-is here.
-TEXT_FORMATTED = frozenset({"type", "format", "formatType"})
+#: ``format_type`` is the canonical snake_case spelling (D-FMT-1); ``formatType``
+#: is the accepted Vega-compat camelCase alias. Both are honored on text channels
+#: and positional channels; both serialize to the wire key ``format_type`` via
+#: ``_emit_format_type`` in ``base.py``.
+TEXT_FORMATTED = frozenset({"type", "format", "format_type", "formatType"})
 
 #: A formatted text field that also carries its own label (TooltipField).
 TEXT_FORMATTED_TITLED = TEXT_FORMATTED | {"title"}

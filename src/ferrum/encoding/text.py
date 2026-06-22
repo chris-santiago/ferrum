@@ -26,9 +26,10 @@ class Text(ChannelBase):
     format : str, optional
         Number or date format string (e.g. ``".2f"`` for two decimal places,
         ``"%b %Y"`` for abbreviated month and year).
-    formatType : str, optional
-        Format type hint; ``"number"`` or ``"time"``.  Used in combination
-        with ``format``.
+    format_type : str, optional
+        Format type hint; ``"number"`` or ``"time"``. Used in combination
+        with ``format``. ``formatType`` is accepted as a Vega-compat alias
+        and normalizes to the same wire key.
 
     Examples
     --------
@@ -120,8 +121,9 @@ class TooltipField(ChannelBase):
         Custom tooltip label for this field.
     format : str, optional
         Number or date format string (e.g. ``".1f"``, ``"%Y-%m-%d"``).
-    formatType : str, optional
-        Format type hint; ``"number"`` or ``"time"``.
+    format_type : str, optional
+        Format type hint; ``"number"`` or ``"time"``. ``formatType`` is
+        accepted as a Vega-compat alias and normalizes to the same wire key.
 
     Examples
     --------
