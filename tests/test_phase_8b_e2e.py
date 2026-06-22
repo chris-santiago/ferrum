@@ -30,7 +30,7 @@ def test_boxplot_renders(df_grouped):
 
 
 def test_errorbar_renders(df_grouped):
-    svg = fe.Chart(df_grouped).mark_errorbar(extent="ci").encode(x="g", y="v").to_svg()
+    svg = fe.Chart(df_grouped).mark_errorbar(method="ci").encode(x="g", y="v").to_svg()
     assert "<svg" in svg
 
 
@@ -42,7 +42,7 @@ def test_errorband_renders():
             "v": [float(i) + 0.1 for i in range(10)] + [float(i) + 0.5 for i in range(10)],
         }
     )
-    svg = fe.Chart(df_lines).mark_errorband(extent="ci").encode(x="x", y="v").to_svg()
+    svg = fe.Chart(df_lines).mark_errorband(method="ci").encode(x="x", y="v").to_svg()
     assert "<svg" in svg
 
 

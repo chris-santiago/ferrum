@@ -861,7 +861,7 @@ class TestRound2Fixes:
         guard is that the chart renders at all after the V3 band_size fix.
         """
         df = _group_df()
-        svg = fm.Chart(df).mark_errorbar(extent="ci").encode(x="group", y="val").to_svg()
+        svg = fm.Chart(df).mark_errorbar(method="ci").encode(x="group", y="val").to_svg()
         assert "<svg" in svg, "Expected valid SVG for errorbar chart"
 
     # --- Histogram axis label (V4-V5) ------------------------------------

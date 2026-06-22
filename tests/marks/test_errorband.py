@@ -26,7 +26,7 @@ def test_errorband_borders_3_layers(df):
 
 
 def test_errorband_extent_stdev(df):
-    chart = fe.Chart(df).mark_errorband(extent="stdev").encode(x="x", y="y")
+    chart = fe.Chart(df).mark_errorband(method="stdev").encode(x="x", y="y")
     json_str = chart._build_spec().to_json()
     assert "stdev" in json_str
 

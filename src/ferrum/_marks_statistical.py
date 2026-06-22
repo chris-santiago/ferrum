@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from ferrum.encoding.base import ChannelBase
+from ferrum.marks.composite import _MISSING
 from ferrum.marks.statistical import (
     _resolve_density,
     _resolve_histogram,
@@ -254,7 +255,7 @@ class StatisticalMarksMixin:
     def mark_boxplot(
         self,
         *,
-        extent=1.5,
+        whisker_mult: float | str = _MISSING,  # type: ignore[assignment]
         size=None,
         width=None,
         outliers=True,
@@ -273,8 +274,14 @@ class StatisticalMarksMixin:
 
         Parameters
         ----------
-        extent : float, optional
-            Whisker reach as a multiple of IQR.  Default is ``1.5``.
+        whisker_mult : float or "min-max", optional
+            Whisker reach as a multiple of IQR, or ``"min-max"`` to extend
+            whiskers to the data minimum/maximum.  Default is ``1.5``.
+
+            .. deprecated::
+                The old spelling ``extent=`` is accepted as an alias for one
+                release.  Use ``whisker_mult=`` instead.  ``extent`` is
+                reserved for data-domain ``[min, max]`` bounds.
         size : float or None, optional
             Box band-width as a fraction of the category band (default ``0.6``).
             Alias: ``width``.
@@ -312,19 +319,27 @@ class StatisticalMarksMixin:
         >>> fm.Chart(df).mark_boxplot().encode(x="species", y="val")
         Chart(mark='point', encoding=[])
         """
-        from ferrum.marks.composite import desugar_boxplot
+        from ferrum.marks.composite import desugar_boxplot, _resolve_deprecated_extent
 
         # width is an alias for size; size takes precedence when both are given.
         effective_size = size if size is not None else width
         # Normalize orient/horizontal: orient= is canonical; horizontal= is a legacy
         # alias. When orient is given explicitly, it overrides horizontal.
         effective_horizontal = _normalize_orient(orient, horizontal)
+        # Resolve the deprecated extent= alias at the public API level using the
+        # shared resolver from composite.py.  Sentinel-based detection ensures that
+        # whisker_mult=1.5 (the default value, passed explicitly) is correctly
+        # treated as "canonically supplied" and triggers TypeError when extent= is
+        # also given.  mark_kwargs is mutated in-place (extent popped) by the helper.
+        whisker_mult = _resolve_deprecated_extent(
+            "whisker_mult", whisker_mult, mark_kwargs, real_default=1.5
+        )
 
         return self._set_composite_mark(
             "boxplot",
             desugar_boxplot,
             {
-                "extent": extent,
+                "whisker_mult": whisker_mult,
                 "size": effective_size,
                 "outliers": outliers,
                 "color_field": color_field,
@@ -416,7 +431,9 @@ class StatisticalMarksMixin:
             position=position,
         )
 
-    def mark_errorbar(self, *, extent="ci", ticks=True, position=None, **mark_kwargs) -> "Chart":
+    def mark_errorbar(
+        self, *, method=_MISSING, ticks=True, position=None, **mark_kwargs
+    ) -> "Chart":
         """Render error bars via the ``ErrorExtent`` transform.
 
         Computes extent values (CI, SD, SEM, or IQR) per group defined by the
@@ -425,10 +442,16 @@ class StatisticalMarksMixin:
 
         Parameters
         ----------
-        extent : {"ci", "stderr", "stdev", "iqr"}, default "ci"
-            Extent measure: confidence interval (``"ci"``), standard error
+        method : {"ci", "stderr", "stdev", "iqr"}, default "ci"
+            Aggregation method: confidence interval (``"ci"``), standard error
             (``"stderr"``), standard deviation (``"stdev"``), or
-            interquartile range (``"iqr"``).
+            interquartile range (``"iqr"``).  Forwarded verbatim as
+            ``ErrorExtent.method`` (wire field unchanged).
+
+            .. deprecated::
+                The old spelling ``extent=`` is accepted as an alias for one
+                release.  Use ``method=`` instead.  ``extent`` is reserved for
+                data-domain ``[min, max]`` bounds.
         ticks : bool, optional
             Whether to draw horizontal tick caps at the extent endpoints.
             Default is ``True``.
@@ -448,21 +471,28 @@ class StatisticalMarksMixin:
         >>> import polars as pl
         >>> df = pl.DataFrame({"group": ["a"]*10 + ["b"]*10,
         ...                    "val": list(range(10)) + list(range(5, 15))})
-        >>> fm.Chart(df).mark_errorbar(extent="stdev").encode(x="group", y="val")
+        >>> fm.Chart(df).mark_errorbar(method="stdev").encode(x="group", y="val")
         Chart(mark='point', encoding=[])
         """
-        from ferrum.marks.composite import desugar_errorbar
+        from ferrum.marks.composite import desugar_errorbar, _resolve_deprecated_extent
+
+        # Resolve the deprecated extent= alias at the public API level using the
+        # shared resolver from composite.py.  Using the _MISSING sentinel for the
+        # method default means method="ci" (the canonical default) passed explicitly
+        # is correctly detected as "canonically supplied" and triggers TypeError
+        # when extent= is also given.  mark_kwargs is mutated in-place by the helper.
+        method = _resolve_deprecated_extent("method", method, mark_kwargs, real_default="ci")
 
         return self._set_composite_mark(
             "errorbar",
             desugar_errorbar,
-            {"extent": extent, "ticks": ticks, **mark_kwargs},
+            {"method": method, "ticks": ticks, **mark_kwargs},
             placeholder="point",
             position=position,
         )
 
     def mark_errorband(
-        self, *, extent="ci", borders=False, position=None, **mark_kwargs
+        self, *, method=_MISSING, borders=False, position=None, **mark_kwargs
     ) -> "Chart":
         """Render an error band (ribbon) via the ``ErrorExtent`` transform.
 
@@ -472,10 +502,16 @@ class StatisticalMarksMixin:
 
         Parameters
         ----------
-        extent : {"ci", "stderr", "stdev", "iqr"}, default "ci"
-            Extent measure: confidence interval (``"ci"``), standard error
+        method : {"ci", "stderr", "stdev", "iqr"}, default "ci"
+            Aggregation method: confidence interval (``"ci"``), standard error
             (``"stderr"``), standard deviation (``"stdev"``), or
-            interquartile range (``"iqr"``).
+            interquartile range (``"iqr"``).  Forwarded verbatim as
+            ``ErrorExtent.method`` (wire field unchanged).
+
+            .. deprecated::
+                The old spelling ``extent=`` is accepted as an alias for one
+                release.  Use ``method=`` instead.  ``extent`` is reserved for
+                data-domain ``[min, max]`` bounds.
         borders : bool, optional
             Whether to draw line borders at the band edges.  Default is ``False``.
         position : Position, optional
@@ -493,15 +529,22 @@ class StatisticalMarksMixin:
         >>> import ferrum as fm
         >>> import polars as pl
         >>> df = pl.DataFrame({"x": list(range(10)), "y": [float(i) for i in range(10)]})
-        >>> fm.Chart(df).mark_errorband(extent="ci", borders=True).encode(x="x", y="y")
+        >>> fm.Chart(df).mark_errorband(method="ci", borders=True).encode(x="x", y="y")
         Chart(mark='point', encoding=[])
         """
-        from ferrum.marks.composite import desugar_errorband
+        from ferrum.marks.composite import desugar_errorband, _resolve_deprecated_extent
+
+        # Resolve the deprecated extent= alias at the public API level using the
+        # shared resolver from composite.py.  Using the _MISSING sentinel for the
+        # method default means method="ci" (the canonical default) passed explicitly
+        # is correctly detected as "canonically supplied" and triggers TypeError
+        # when extent= is also given.  mark_kwargs is mutated in-place by the helper.
+        method = _resolve_deprecated_extent("method", method, mark_kwargs, real_default="ci")
 
         return self._set_composite_mark(
             "errorband",
             desugar_errorband,
-            {"extent": extent, "borders": borders, **mark_kwargs},
+            {"method": method, "borders": borders, **mark_kwargs},
             placeholder="point",
             position=position,
         )

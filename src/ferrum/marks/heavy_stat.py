@@ -245,7 +245,7 @@ def desugar_violin(
     * ``inner="quartile"``   — ``BoxStats`` transform (named ``"quart"``)
       adds three ``rule`` layers at ``q1``, ``median``, ``q3``.
     * ``inner="box"`` (default) — full ``desugar_boxplot`` overlay with
-      ``extent=1.5``, ``outliers=False``, ``size=0.1``.
+      ``whisker_mult=1.5``, ``outliers=False``, ``size=0.1``.
 
     Parameters
     ----------
@@ -420,7 +420,7 @@ def desugar_violin(
     box_result = desugar_boxplot(
         x_field,
         y_field,
-        extent=1.5,
+        whisker_mult=1.5,
         outliers=False,
         size=0.1,
         horizontal=horizontal,

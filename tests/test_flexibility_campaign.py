@@ -2843,7 +2843,7 @@ def test_r1_errorbar_with_categorical_sort_renders() -> None:
     )
     svg = (
         fm.Chart(df)
-        .mark_errorbar(extent="stdev")
+        .mark_errorbar(method="stdev")
         .encode(x=fm.X("cat", type="N", sort="-y"), y=fm.Y("val", type="Q"))
         .to_svg()
     )

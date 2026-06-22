@@ -26,7 +26,7 @@ def test_errorbar_no_ticks_1_layer(df):
 
 
 def test_errorbar_extent_stderr(df):
-    chart = fe.Chart(df).mark_errorbar(extent="stderr").encode(x="x", y="y")
+    chart = fe.Chart(df).mark_errorbar(method="stderr").encode(x="x", y="y")
     json_str = chart._build_spec().to_json()
     assert "stderr" in json_str
 
