@@ -70,7 +70,7 @@ class DiagnosticMarksMixin:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_residuals
-        from ferrum._sentinels import _inject_constant
+        from ferrum._constant_columns import _inject_constant
 
         return self._set_composite_mark(
             "residuals",
@@ -831,7 +831,7 @@ class DiagnosticMarksMixin:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_shap_beeswarm
-        from ferrum._sentinels import _inject_constant
+        from ferrum._constant_columns import _inject_constant
 
         def _shap_beeswarm_prep(df):
             import polars as pl
@@ -1280,7 +1280,7 @@ class DiagnosticMarksMixin:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_alpha_selection
-        from ferrum._sentinels import _inject_constant
+        from ferrum._constant_columns import _inject_constant
 
         def _inject_best_alpha(df):
             import polars as pl
@@ -1360,7 +1360,7 @@ class DiagnosticMarksMixin:
         Chart(mark='rect', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_silhouette
-        from ferrum._sentinels import _inject_constant
+        from ferrum._constant_columns import _inject_constant
 
         def _silhouette_prep(df):
             import polars as pl
@@ -1445,7 +1445,7 @@ class DiagnosticMarksMixin:
             desugar_pca_scree,
             desugar_pca_scree_with_threshold,
         )
-        from ferrum._sentinels import _inject_constant
+        from ferrum._constant_columns import _inject_constant
 
         def _pca_scree_prep(df):
             import polars as pl

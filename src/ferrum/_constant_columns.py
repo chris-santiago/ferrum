@@ -1,6 +1,6 @@
-"""Shared sentinel-column helpers used by mark-side and chart-builder paths.
+"""Constant-column injection helpers used by mark-side and chart-builder paths.
 
-A *sentinel column* is a per-row column whose only purpose is to feed a
+A *constant column* is a per-row column whose only purpose is to feed a
 downstream same-data overlay layer (``mark_rule``, ``mark_text``, …) so
 that the renderer draws exactly one reference element per chart panel
 instead of one per data row. The pattern is:
