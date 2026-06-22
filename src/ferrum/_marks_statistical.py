@@ -1158,7 +1158,7 @@ class StatisticalMarksMixin:
             fn_chart = self.__class__(synthetic)
             fn_chart._mark = mark
             if remap:
-                from ferrum.chart import _apply_remap
+                from ferrum._desugar import _apply_remap
 
                 _apply_remap(fn_chart._encoding, remap, orig_encoding=self._encoding)
             fn_chart._position = position
@@ -1169,7 +1169,7 @@ class StatisticalMarksMixin:
         new._data = synthetic
         new._transforms = list(self._transforms) + list(transforms)
         if remap:
-            from ferrum.chart import _apply_remap
+            from ferrum._desugar import _apply_remap
 
             _apply_remap(new._encoding, remap, orig_encoding=self._encoding)
         new._position = position

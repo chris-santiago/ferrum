@@ -2938,7 +2938,7 @@ def _merge_top_transforms(new, rhs_top_xforms: list) -> None:
     Value deduplication prevents the same logical transform from running
     twice when both sides of ``+`` use an identical transform object.
     """
-    from ferrum.chart import _NamedTransform
+    from ferrum._layer_transforms import _NamedTransform
 
     existing = list(new._transforms or [])
     existing_ids = {id(t) for t in existing}
