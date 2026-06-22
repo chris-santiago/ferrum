@@ -705,6 +705,7 @@ mod tests {
     #[test]
     fn test_chart_spec_transforms_round_trip_with_one_bin() {
         use crate::transform::bin::BinSpec;
+        use crate::transform::bin_mode::BinMode;
         use crate::transform::core::TransformSpec;
         let spec = ChartSpec {
             data: DataRef::Named { name: "default".into() },
@@ -712,8 +713,7 @@ mod tests {
             encoding: Encoding::default(),
             transforms: vec![TransformSpec::Bin(BinSpec {
                 field: "x".into(),
-                bin_count: Some(10),
-                bin_width: None,
+                mode: BinMode::Fixed { n: 10 },
                 extent: None,
                 nice: true,
                 cumulative: false,

@@ -1619,12 +1619,12 @@ mod tests {
     #[test]
     fn fix_extents_pins_bin_to_niced_global_extent() {
         use crate::transform::bin::BinSpec;
+        use crate::transform::bin_mode::BinMode;
         use crate::transform::core::TransformSpec;
         let batch = extent_pin_batch();
         let spec = BinSpec {
             field: "v".into(),
-            bin_count: Some(10),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 10 },
             extent: None,
             nice: true,
             cumulative: false,
@@ -1726,14 +1726,14 @@ mod tests {
     #[test]
     fn fix_extents_respects_user_extent() {
         use crate::transform::bin::BinSpec;
+        use crate::transform::bin_mode::BinMode;
         use crate::transform::core::TransformSpec;
         use crate::transform::kde::KdeSpec;
         let batch = extent_pin_batch();
         let user = Some((-5.0, 100.0));
         let bin = BinSpec {
             field: "v".into(),
-            bin_count: Some(10),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 10 },
             extent: user,
             nice: true,
             cumulative: false,
@@ -1785,6 +1785,7 @@ mod tests {
     #[test]
     fn global_extent_nices_for_bin_but_raw_for_kde_and_violin() {
         use crate::transform::bin::BinSpec;
+        use crate::transform::bin_mode::BinMode;
         use crate::transform::kde::{BandwidthSpec, KdeSpec};
         use crate::transform::violin::ViolinSpec;
 
@@ -1792,8 +1793,7 @@ mod tests {
 
         let bin_spec = BinSpec {
             field: "v".into(),
-            bin_count: Some(10),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 10 },
             extent: None,
             nice: true,
             cumulative: false,
@@ -1919,14 +1919,15 @@ mod tests {
     /// y bin edges. Bin2D never nices, so the pin is the raw range.
     #[test]
     fn fix_extents_pins_bin2d_to_global_2d_extent() {
-        use crate::transform::bin_2d::{Bin2DSpec, BinSpec2DAxis};
+        use crate::transform::bin_2d::Bin2DSpec;
+        use crate::transform::bin_mode::BinMode;
         use crate::transform::core::TransformSpec;
         let batch = extent_pin_batch_2d();
         let spec = Bin2DSpec {
             x: "x".into(),
             y: "y".into(),
-            bins_x: BinSpec2DAxis::Fixed { n: 10 },
-            bins_y: BinSpec2DAxis::Fixed { n: 10 },
+            bins_x: BinMode::Fixed { n: 10 },
+            bins_y: BinMode::Fixed { n: 10 },
             extent_x: None,
             extent_y: None,
             cumulative: false,
@@ -1952,7 +1953,8 @@ mod tests {
     /// Covers both Kde2D (4-tuple) and Bin2D (per-axis extent_x/extent_y).
     #[test]
     fn fix_extents_respects_user_2d_extent() {
-        use crate::transform::bin_2d::{Bin2DSpec, BinSpec2DAxis};
+        use crate::transform::bin_2d::Bin2DSpec;
+        use crate::transform::bin_mode::BinMode;
         use crate::transform::core::TransformSpec;
         use crate::transform::kde::BandwidthSpec;
         use crate::transform::kde_2d::Kde2DSpec;
@@ -1974,8 +1976,8 @@ mod tests {
         let bin = Bin2DSpec {
             x: "x".into(),
             y: "y".into(),
-            bins_x: BinSpec2DAxis::Fixed { n: 10 },
-            bins_y: BinSpec2DAxis::Fixed { n: 10 },
+            bins_x: BinMode::Fixed { n: 10 },
+            bins_y: BinMode::Fixed { n: 10 },
             extent_x: Some(user_bin_x),
             extent_y: Some(user_bin_y),
             cumulative: false,
@@ -2004,7 +2006,8 @@ mod tests {
     /// the final pinned values at both axes simultaneously.
     #[test]
     fn fix_extents_bin2d_partial_user_extent_keeps_x_pins_y() {
-        use crate::transform::bin_2d::{Bin2DSpec, BinSpec2DAxis};
+        use crate::transform::bin_2d::Bin2DSpec;
+        use crate::transform::bin_mode::BinMode;
         use crate::transform::core::TransformSpec;
         let batch = extent_pin_batch_2d();
 
@@ -2013,8 +2016,8 @@ mod tests {
         let spec = Bin2DSpec {
             x: "x".into(),
             y: "y".into(),
-            bins_x: BinSpec2DAxis::Fixed { n: 10 },
-            bins_y: BinSpec2DAxis::Fixed { n: 10 },
+            bins_x: BinMode::Fixed { n: 10 },
+            bins_y: BinMode::Fixed { n: 10 },
             extent_x: Some(user_x),
             extent_y: None,
             cumulative: false,
@@ -2707,13 +2710,13 @@ mod tests {
     /// columns to keep `resolve_scales` happy.
     fn spec_with_one_bin(name: Option<String>) -> ChartSpec {
         use crate::transform::bin::BinSpec;
+        use crate::transform::bin_mode::BinMode;
         use crate::transform::core::TransformSpec;
         let named = name.is_some();
         let mut spec = single_layer_spec();
         spec.transforms = vec![TransformSpec::Bin(BinSpec {
             field: "price".into(),
-            bin_count: Some(2),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 2 },
             extent: Some((10.0, 30.0)),
             nice: false,
             cumulative: false,

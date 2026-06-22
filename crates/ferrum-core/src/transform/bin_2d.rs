@@ -14,7 +14,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::scale::ticks::sturges_floor;
+use crate::transform::bin_mode::{parse_bin_axis, resolve_bin_count, BinMode};
 use crate::transform::numeric_util::{coerce_to_float64, column_extent};
 
 // ---------------------------------------------------------------------------
@@ -22,20 +22,11 @@ use crate::transform::numeric_util::{coerce_to_float64, column_extent};
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum BinSpec2DAxis {
-    Sturges,
-    FreedmanDiaconis,
-    Fixed { n: usize },
-    Width { w: f64 },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Bin2DSpec {
     pub x: String,
     pub y: String,
-    pub bins_x: BinSpec2DAxis,
-    pub bins_y: BinSpec2DAxis,
+    pub bins_x: BinMode,
+    pub bins_y: BinMode,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub extent_x: Option<(f64, f64)>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -76,68 +67,6 @@ pub(crate) fn global_extent(
         None => column_extent(batch, &spec.y)?,
     };
     Some((x_lo, x_hi, y_lo, y_hi))
-}
-
-// ---------------------------------------------------------------------------
-// Algorithm helpers
-// ---------------------------------------------------------------------------
-
-/// Compute IQR for a sorted slice.
-fn iqr_sorted(sorted: &[f64]) -> f64 {
-    let n = sorted.len();
-    if n < 4 {
-        return 0.0;
-    }
-    let q1 = percentile_sorted(sorted, 0.25);
-    let q3 = percentile_sorted(sorted, 0.75);
-    q3 - q1
-}
-
-fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
-    let n = sorted.len();
-    let h = p * (n as f64 - 1.0);
-    let lo = h.floor() as usize;
-    let hi = h.ceil() as usize;
-    if lo == hi {
-        sorted[lo]
-    } else {
-        sorted[lo] * (hi as f64 - h) + sorted[hi] * (h - lo as f64)
-    }
-}
-
-/// Resolve a BinSpec2DAxis to a bin count given the data range and count.
-fn resolve_bin_count(spec: &BinSpec2DAxis, vals: &[f64], lo: f64, hi: f64) -> PyResult<usize> {
-    match spec {
-        BinSpec2DAxis::Sturges => Ok(sturges_floor(vals.len())),
-        BinSpec2DAxis::FreedmanDiaconis => {
-            let mut sorted = vals.to_vec();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let iqr_val = iqr_sorted(&sorted);
-            let h = 2.0 * iqr_val * (vals.len() as f64).powf(-1.0 / 3.0);
-            if h > 0.0 && h.is_finite() {
-                Ok(((hi - lo) / h).ceil().max(1.0) as usize)
-            } else {
-                // IQR == 0 or degenerate → fall back to Sturges
-                Ok(sturges_floor(vals.len()))
-            }
-        }
-        BinSpec2DAxis::Fixed { n } => {
-            if *n == 0 {
-                return Err(PyValueError::new_err(
-                    "Bin2D: Fixed bin count must be >= 1",
-                ));
-            }
-            Ok(*n)
-        }
-        BinSpec2DAxis::Width { w } => {
-            if !w.is_finite() || *w <= 0.0 {
-                return Err(PyValueError::new_err(
-                    "Bin2D: Width must be a positive finite number",
-                ));
-            }
-            Ok(((hi - lo) / w).ceil().max(1.0) as usize)
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -228,7 +157,7 @@ pub(crate) fn apply(spec: &Bin2DSpec, batch: &RecordBatch) -> PyResult<RecordBat
     let (bin_count_x, bin_width_x) = if x_min == x_max {
         (1usize, 1.0f64)
     } else {
-        let n = resolve_bin_count(&spec.bins_x, &xs, x_min, x_max)?;
+        let n = resolve_bin_count(&spec.bins_x, &xs, x_min, x_max, "Bin2D")?;
         let w = (x_max - x_min) / n as f64;
         (n, w)
     };
@@ -236,7 +165,7 @@ pub(crate) fn apply(spec: &Bin2DSpec, batch: &RecordBatch) -> PyResult<RecordBat
     let (bin_count_y, bin_width_y) = if y_min == y_max {
         (1usize, 1.0f64)
     } else {
-        let n = resolve_bin_count(&spec.bins_y, &ys, y_min, y_max)?;
+        let n = resolve_bin_count(&spec.bins_y, &ys, y_min, y_max, "Bin2D")?;
         let w = (y_max - y_min) / n as f64;
         (n, w)
     };
@@ -393,11 +322,11 @@ impl PyBin2D {
         name: Option<String>,
     ) -> PyResult<Self> {
         let bins_x = match bins_x {
-            None => BinSpec2DAxis::Sturges,
+            None => BinMode::Sturges,
             Some(obj) => parse_bin_axis(obj)?,
         };
         let bins_y = match bins_y {
-            None => BinSpec2DAxis::Sturges,
+            None => BinMode::Sturges,
             Some(obj) => parse_bin_axis(obj)?,
         };
         Ok(PyBin2D(TransformSpec::Bin2D(Bin2DSpec {
@@ -426,27 +355,6 @@ impl PyBin2D {
     }
 }
 
-fn parse_bin_axis(obj: &Bound<'_, PyAny>) -> PyResult<BinSpec2DAxis> {
-    if let Ok(s) = obj.extract::<&str>() {
-        return match s {
-            "sturges" => Ok(BinSpec2DAxis::Sturges),
-            "fd" | "freedman_diaconis" => Ok(BinSpec2DAxis::FreedmanDiaconis),
-            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Bin2D: unknown bins value '{s}'; expected 'sturges'|'fd'|int|float"
-            ))),
-        };
-    }
-    if let Ok(n) = obj.extract::<usize>() {
-        return Ok(BinSpec2DAxis::Fixed { n });
-    }
-    if let Ok(w) = obj.extract::<f64>() {
-        return Ok(BinSpec2DAxis::Width { w });
-    }
-    Err(pyo3::exceptions::PyValueError::new_err(
-        "Bin2D: bins must be 'sturges'|'fd'|int|float",
-    ))
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -454,6 +362,7 @@ fn parse_bin_axis(obj: &Bound<'_, PyAny>) -> PyResult<BinSpec2DAxis> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scale::ticks::sturges_floor;
     use arrow::array::{Float64Array, Int64Array, RecordBatch};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
@@ -505,8 +414,8 @@ mod tests {
         let batch = make_xy_batch(xs, ys);
         let spec = Bin2DSpec {
             x: "x".into(), y: "y".into(),
-            bins_x: BinSpec2DAxis::Fixed { n: 3 },
-            bins_y: BinSpec2DAxis::Fixed { n: 3 },
+            bins_x: BinMode::Fixed { n: 3 },
+            bins_y: BinMode::Fixed { n: 3 },
             extent_x: Some((0.0, 1.0)),
             extent_y: Some((0.0, 1.0)),
             cumulative: false,
@@ -530,8 +439,8 @@ mod tests {
         let batch = make_xy_batch(xs, ys);
         let spec = Bin2DSpec {
             x: "x".into(), y: "y".into(),
-            bins_x: BinSpec2DAxis::Sturges,
-            bins_y: BinSpec2DAxis::Fixed { n: 1 }, // any y binning
+            bins_x: BinMode::Sturges,
+            bins_y: BinMode::Fixed { n: 1 }, // any y binning
             extent_x: None, extent_y: None,
             cumulative: true, // emit all cells so we can count distinct x_lo values
             name: None,
@@ -562,8 +471,8 @@ mod tests {
         let bins = 4usize;
         let spec = Bin2DSpec {
             x: "x".into(), y: "y".into(),
-            bins_x: BinSpec2DAxis::Fixed { n: bins },
-            bins_y: BinSpec2DAxis::Fixed { n: bins },
+            bins_x: BinMode::Fixed { n: bins },
+            bins_y: BinMode::Fixed { n: bins },
             extent_x: None, extent_y: None,
             cumulative: true,
             name: None,
@@ -603,8 +512,8 @@ mod tests {
         let batch = make_xy_batch(xs, ys);
         let spec = Bin2DSpec {
             x: "x".into(), y: "y".into(),
-            bins_x: BinSpec2DAxis::Fixed { n: 2 },
-            bins_y: BinSpec2DAxis::Fixed { n: 1 },
+            bins_x: BinMode::Fixed { n: 2 },
+            bins_y: BinMode::Fixed { n: 1 },
             extent_x: Some((0.0, 1.0)),
             extent_y: None,
             cumulative: false,
@@ -642,8 +551,8 @@ mod tests {
         let spec = Bin2DSpec {
             x: "x".into(),
             y: "y".into(),
-            bins_x: BinSpec2DAxis::Fixed { n: 3 },
-            bins_y: BinSpec2DAxis::Fixed { n: 3 },
+            bins_x: BinMode::Fixed { n: 3 },
+            bins_y: BinMode::Fixed { n: 3 },
             extent_x: None,
             extent_y: None,
             cumulative: true,
@@ -678,8 +587,8 @@ mod tests {
         let spec = Bin2DSpec {
             x: "x".into(),
             y: "y".into(),
-            bins_x: BinSpec2DAxis::Fixed { n: 2 },
-            bins_y: BinSpec2DAxis::Fixed { n: 2 },
+            bins_x: BinMode::Fixed { n: 2 },
+            bins_y: BinMode::Fixed { n: 2 },
             extent_x: None,
             extent_y: None,
             cumulative: false,
@@ -706,8 +615,8 @@ mod tests {
         let spec = Bin2DSpec {
             x: "x".into(),
             y: "y".into(),
-            bins_x: BinSpec2DAxis::Fixed { n: 10 },
-            bins_y: BinSpec2DAxis::Fixed { n: 10 },
+            bins_x: BinMode::Fixed { n: 10 },
+            bins_y: BinMode::Fixed { n: 10 },
             extent_x: None,
             extent_y: None,
             cumulative: false,
@@ -730,8 +639,8 @@ mod tests {
         let spec = Bin2DSpec {
             x: "x".into(),
             y: "y".into(),
-            bins_x: BinSpec2DAxis::Fixed { n: 4 },
-            bins_y: BinSpec2DAxis::Fixed { n: 4 },
+            bins_x: BinMode::Fixed { n: 4 },
+            bins_y: BinMode::Fixed { n: 4 },
             // Only x is user-set; y must fall through to the raw data range.
             extent_x: Some((-10.0, 10.0)),
             extent_y: None,
@@ -753,8 +662,8 @@ mod tests {
         let spec = Bin2DSpec {
             x: "ghost".into(),
             y: "y".into(),
-            bins_x: BinSpec2DAxis::Fixed { n: 4 },
-            bins_y: BinSpec2DAxis::Fixed { n: 4 },
+            bins_x: BinMode::Fixed { n: 4 },
+            bins_y: BinMode::Fixed { n: 4 },
             extent_x: None,
             extent_y: None,
             cumulative: false,
@@ -769,8 +678,8 @@ mod tests {
         let batch = make_xy_batch(vec![], vec![]);
         let spec = Bin2DSpec {
             x: "x".into(), y: "y".into(),
-            bins_x: BinSpec2DAxis::Fixed { n: 3 },
-            bins_y: BinSpec2DAxis::Fixed { n: 3 },
+            bins_x: BinMode::Fixed { n: 3 },
+            bins_y: BinMode::Fixed { n: 3 },
             extent_x: None, extent_y: None,
             cumulative: false,
             name: None,

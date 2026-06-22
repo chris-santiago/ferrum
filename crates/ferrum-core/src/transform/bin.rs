@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::scale::ticks::sturges_floor;
+use crate::transform::bin_mode::{resolve_bin_count, BinMode};
 use crate::transform::group_key::{
     deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
     materialize_groupby_col, parse_groupby_pyany, KeyValue,
@@ -34,36 +35,109 @@ fn nice_extent(lo: f64, hi: f64, target: usize) -> (f64, f64) {
     }
 }
 
+/// 1-D equal-width binning spec.
+///
+/// The bin-count decision is a typed [`BinMode`] (no overlapping
+/// `bin_count`/`bin_width` `Option`s). The flat `bin_count`/`bin_width` JSON wire
+/// keys are preserved by the [`BinWire`] serde shim (see `#[serde(into/from)]`),
+/// so existing wire payloads round-trip byte-for-byte and the precedence
+/// (`bin_count` wins over `bin_width` wins over Sturges) is resolved once at the
+/// (de)serialization boundary rather than at apply time.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(into = "BinWire", from = "BinWire")]
 pub(crate) struct BinSpec {
     pub field: String,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub bin_count: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub bin_width: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mode: BinMode,
     pub extent: Option<(f64, f64)>,
-    #[serde(default = "default_true")]
     pub nice: bool,
-    #[serde(default)]
     pub cumulative: bool,
     /// When ``true`` and ``groupby`` is set, compute a single global extent
     /// from all rows before per-group binning so every group shares the same
     /// bin edges. Required for ``multiple="stack"`` / ``"fill"`` to produce
     /// aligned bars that can be stacked correctly.
-    #[serde(default)]
     pub shared_extent: bool,
     /// When non-empty, partition input by these columns and emit per-(bin, group)
     /// rows. Output schema gains one column per groupby field after the 4th field.
+    pub groupby: Vec<String>,
+    pub name: Option<String>,
+}
+
+/// Flat serde projection of [`BinSpec`] preserving the legacy wire shape.
+///
+/// `BinSpec` serializes/deserializes through this struct so the wire keeps the
+/// flat `bin_count`/`bin_width`/`groupby` keys that Python and the test suite
+/// assert on. `BinMode` is never serialized directly for the 1-D `Bin`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BinWire {
+    field: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    bin_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    bin_width: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    extent: Option<(f64, f64)>,
+    #[serde(default = "default_true")]
+    nice: bool,
+    #[serde(default)]
+    cumulative: bool,
+    #[serde(default)]
+    shared_extent: bool,
     /// Wire accepts: `null` → `[]`, `"col"` → `["col"]`, `["a","b"]` → `["a","b"]`.
     #[serde(
         skip_serializing_if = "Vec::is_empty",
         default,
         deserialize_with = "deserialize_groupby_vec"
     )]
-    pub groupby: Vec<String>,
+    groupby: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub name: Option<String>,
+    name: Option<String>,
+}
+
+impl From<BinWire> for BinSpec {
+    fn from(w: BinWire) -> Self {
+        // Resolve the flat-field precedence once at the boundary: bin_count wins,
+        // then bin_width, else Sturges (mirrors the old apply-time match).
+        let mode = if let Some(n) = w.bin_count {
+            BinMode::Fixed { n }
+        } else if let Some(width) = w.bin_width {
+            BinMode::Width { w: width }
+        } else {
+            BinMode::Sturges
+        };
+        BinSpec {
+            field: w.field,
+            mode,
+            extent: w.extent,
+            nice: w.nice,
+            cumulative: w.cumulative,
+            shared_extent: w.shared_extent,
+            groupby: w.groupby,
+            name: w.name,
+        }
+    }
+}
+
+impl From<BinSpec> for BinWire {
+    fn from(s: BinSpec) -> Self {
+        let (bin_count, bin_width) = match s.mode {
+            BinMode::Fixed { n } => (Some(n), None),
+            BinMode::Width { w } => (None, Some(w)),
+            BinMode::Sturges => (None, None),
+            // unreachable for 1-D Bin; the constructor only yields Sturges/Fixed/Width
+            BinMode::FreedmanDiaconis => (None, None),
+        };
+        BinWire {
+            field: s.field,
+            bin_count,
+            bin_width,
+            extent: s.extent,
+            nice: s.nice,
+            cumulative: s.cumulative,
+            shared_extent: s.shared_extent,
+            groupby: s.groupby,
+            name: s.name,
+        }
+    }
 }
 
 fn default_true() -> bool { true }
@@ -93,12 +167,13 @@ pub(crate) fn global_extent(spec: &BinSpec, batch: &RecordBatch) -> Option<(f64,
     // site, not in the shared fold. Only nice when `nice=true` and no explicit
     // extent was set.
     if spec.nice {
-        // Sturges fallback target from the clean count. When `bin_count` is set,
-        // `clean.len()` is unused but the coercion is cheap; extracting it avoids
-        // a second `column_extent` call.
-        let target = match spec.bin_count {
-            Some(c) => c.max(1),
-            None => {
+        // Sturges fallback target from the clean count. When the mode is
+        // `Fixed{n}`, `clean.len()` is unused but the coercion is cheap; extracting
+        // it avoids a second `column_extent` call. Width/Sturges/FD all fall back
+        // to the Sturges target, preserving the old `bin_count.unwrap_or(sturges)`.
+        let target = match &spec.mode {
+            BinMode::Fixed { n } => (*n).max(1),
+            _ => {
                 let schema = batch.schema();
                 let idx = schema.index_of(&spec.field).ok()?;
                 let arr = coerce_to_float64(batch.column(idx), "stat_bin", &spec.field).ok()?;
@@ -164,21 +239,21 @@ fn apply_one_group(
     };
 
     // Optional "nice" rounding of the extent. Only applies when extent is
-    // auto-derived (not when the caller explicitly set extent), and only when
-    // bin_count is fixed (or both bin_count and bin_width are unset, in which
-    // case Sturges runs after nicing).
+    // auto-derived (not when the caller explicitly set extent). When the mode is
+    // `Fixed{n}` the target is that count; Width/Sturges/FD round to the Sturges
+    // target (preserving the old `bin_count.unwrap_or(sturges)` behavior).
     let (lo, hi) = if spec.nice && spec.extent.is_none() {
-        let target = spec.bin_count.unwrap_or_else(|| sturges_floor(clean.len())).max(1);
+        let target = match &spec.mode {
+            BinMode::Fixed { n } => *n,
+            _ => sturges_floor(clean.len()),
+        }
+        .max(1);
         nice_extent(lo, hi, target)
     } else {
         (lo, hi)
     };
 
-    let n_bins: usize = match (spec.bin_count, spec.bin_width) {
-        (Some(c), _) if c > 0 => c,
-        (None, Some(w)) if w > 0.0 => ((hi - lo) / w).ceil().max(1.0) as usize,
-        _ => sturges_floor(clean.len()),
-    };
+    let n_bins: usize = resolve_bin_count(&spec.mode, &clean, lo, hi, "stat_bin")?;
 
     let edges: Vec<f64> = (0..=n_bins)
         .map(|i| lo + (hi - lo) * (i as f64) / (n_bins as f64))
@@ -451,10 +526,18 @@ impl PyBin {
             }
         }
         let groupby = parse_groupby_pyany(groupby)?;
+        // Resolve the flat constructor params to a typed mode with today's
+        // precedence: bin_count wins → Fixed; else bin_width → Width; else Sturges.
+        let mode = if let Some(n) = bin_count {
+            BinMode::Fixed { n }
+        } else if let Some(w) = bin_width {
+            BinMode::Width { w }
+        } else {
+            BinMode::Sturges
+        };
         Ok(PyBin(TransformSpec::Bin(BinSpec {
             field: field.to_string(),
-            bin_count,
-            bin_width,
+            mode,
             extent,
             nice,
             cumulative,
@@ -466,12 +549,21 @@ impl PyBin {
 
     fn __repr__(&self) -> String {
         match &self.0 {
-            TransformSpec::Bin(s) => format!(
-                "Bin(field='{}', bin_count={:?}, bin_width={:?}, extent={:?}, nice={}, cumulative={})",
-                s.field, s.bin_count, s.bin_width, s.extent,
-                if s.nice { "True" } else { "False" },
-                if s.cumulative { "True" } else { "False" },
-            ),
+            TransformSpec::Bin(s) => {
+                // Project the typed mode back to the public (bin_count, bin_width)
+                // spelling for continuity with the constructor signature.
+                let (bin_count, bin_width): (Option<usize>, Option<f64>) = match &s.mode {
+                    BinMode::Fixed { n } => (Some(*n), None),
+                    BinMode::Width { w } => (None, Some(*w)),
+                    BinMode::Sturges | BinMode::FreedmanDiaconis => (None, None),
+                };
+                format!(
+                    "Bin(field='{}', bin_count={:?}, bin_width={:?}, extent={:?}, nice={}, cumulative={})",
+                    s.field, bin_count, bin_width, s.extent,
+                    if s.nice { "True" } else { "False" },
+                    if s.cumulative { "True" } else { "False" },
+                )
+            }
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
         }
@@ -514,8 +606,7 @@ mod tests {
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(5),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 5 },
             extent: Some((1.0, 10.0)),
             nice: false,
             cumulative: false,
@@ -544,8 +635,7 @@ mod tests {
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(5),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 5 },
             extent: Some((1.0, 10.0)),
             nice: false,
             cumulative: false,
@@ -570,8 +660,7 @@ mod tests {
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: None,
-            bin_width: None,
+            mode: BinMode::Sturges,
             extent: None,
             nice: false,
             cumulative: false,
@@ -588,8 +677,7 @@ mod tests {
         let batch = batch_with(vec![3.0, 3.0, 3.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: None,
-            bin_width: None,
+            mode: BinMode::Sturges,
             extent: None,
             nice: false,
             cumulative: false,
@@ -616,8 +704,7 @@ mod tests {
         let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(2),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 2 },
             extent: Some((1.0, 3.0)),
             nice: false,
             cumulative: false,
@@ -637,8 +724,7 @@ mod tests {
         let batch = batch_with(vec![1.0, 2.0, 3.0]);
         let spec = BinSpec {
             field: "ghost".into(),
-            bin_count: Some(5),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 5 },
             extent: None,
             nice: false,
             cumulative: false,
@@ -663,8 +749,7 @@ mod tests {
         ).unwrap();
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(2),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 2 },
             extent: Some((1.0, 3.0)),
             nice: false,
             cumulative: false,
@@ -690,8 +775,7 @@ mod tests {
         ).unwrap();
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(2),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 2 },
             extent: None,
             nice: false,
             cumulative: false,
@@ -712,8 +796,7 @@ mod tests {
         let batch = batch_with(vec![0.13, 1.5, 4.5, 7.7, 9.7]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(10),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 10 },
             extent: None,
             nice: true,
             cumulative: false,
@@ -743,8 +826,7 @@ mod tests {
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(5),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 5 },
             extent: Some((1.0, 10.0)),
             nice: false,
             cumulative: true,
@@ -772,8 +854,7 @@ mod tests {
         let batch = batch_with(vec![42.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: None,
-            bin_width: None,
+            mode: BinMode::Sturges,
             extent: None,
             nice: false,
             cumulative: false,
@@ -793,8 +874,7 @@ mod tests {
         let batch = batch_with(vec![5.0; 10]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(5),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 5 },
             extent: None,
             nice: false,
             cumulative: false,
@@ -813,8 +893,7 @@ mod tests {
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(1),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 1 },
             extent: Some((1.0, 5.0)),
             nice: false,
             cumulative: false,
@@ -840,8 +919,7 @@ mod tests {
         let batch = batch_with(vec![1.5, 3.7, 2.2, 8.1]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(4),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 4 },
             extent: None,
             nice: false,
             cumulative: false,
@@ -865,8 +943,7 @@ mod tests {
         let batch = batch_with(vec![0.13, 1.5, 4.5, 7.7, 9.7]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(10),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 10 },
             extent: None,
             nice: true,
             cumulative: false,
@@ -908,8 +985,7 @@ mod tests {
         let batch = batch_with(vec![1.0, 5.0, 10.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(5),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 5 },
             extent: Some((0.0, 20.0)),
             nice: true,
             cumulative: false,
@@ -929,8 +1005,7 @@ mod tests {
         let batch = batch_with(vec![1.0, 2.0, 3.0]);
         let spec = BinSpec {
             field: "nonexistent".into(),
-            bin_count: Some(5),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 5 },
             extent: None,
             nice: false,
             cumulative: false,
@@ -954,8 +1029,7 @@ mod tests {
         ).unwrap();
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(3),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 3 },
             extent: None,
             nice: false,
             cumulative: false,
@@ -1084,8 +1158,7 @@ mod tests {
         );
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(2),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 2 },
             extent: Some((0.0, 10.0)),
             nice: false,
             cumulative: false,
@@ -1149,8 +1222,7 @@ mod tests {
 
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(2),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 2 },
             extent: Some((0.0, 10.0)),
             nice: false,
             cumulative: false,
@@ -1187,8 +1259,7 @@ mod tests {
         // Serialize a BinSpec with groupby=["col"] — must emit array form.
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: None,
-            bin_width: None,
+            mode: BinMode::Sturges,
             extent: None,
             nice: true,
             cumulative: false,
@@ -1213,5 +1284,73 @@ mod tests {
         let empty_spec = BinSpec { groupby: vec![], ..spec.clone() };
         let empty_json = serde_json::to_string(&empty_spec).unwrap();
         assert!(!empty_json.contains("groupby"), "empty groupby must be omitted: {empty_json}");
+    }
+
+    // ── T3.8b regression tests: BinWire flat-wire shim + precedence ────────────
+
+    fn sturges_spec() -> BinSpec {
+        BinSpec {
+            field: "x".into(),
+            mode: BinMode::Sturges,
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec![],
+            name: None,
+        }
+    }
+
+    /// `Fixed{n}` round-trips through serde as a flat `"bin_count":n` wire key and
+    /// parses back to `Fixed{n}` — never as a tagged `mode` object.
+    #[test]
+    fn bin_fixed_mode_serializes_flat_bin_count() {
+        let spec = BinSpec { mode: BinMode::Fixed { n: 5 }, ..sturges_spec() };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""bin_count":5"#), "flat bin_count expected, got: {json}");
+        assert!(!json.contains("mode"), "mode must not appear on the wire: {json}");
+        assert!(!json.contains("kind"), "no tagged enum on the wire: {json}");
+        let back: BinSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.mode, BinMode::Fixed { n: 5 });
+        assert_eq!(back, spec);
+    }
+
+    /// `Width{w}` round-trips through serde as a flat `"bin_width":w` wire key and
+    /// parses back to `Width{w}`.
+    #[test]
+    fn bin_width_mode_serializes_flat_bin_width() {
+        let spec = BinSpec { mode: BinMode::Width { w: 2.0 }, ..sturges_spec() };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""bin_width":2.0"#), "flat bin_width expected, got: {json}");
+        assert!(!json.contains("bin_count"), "bin_count must be omitted for Width: {json}");
+        let back: BinSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.mode, BinMode::Width { w: 2.0 });
+        assert_eq!(back, spec);
+    }
+
+    /// `Sturges` (neither count nor width) emits no `bin_count`/`bin_width` keys
+    /// and parses back to `Sturges`.
+    #[test]
+    fn bin_sturges_mode_omits_both_flat_keys() {
+        let spec = sturges_spec();
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("bin_count"), "Sturges must omit bin_count: {json}");
+        assert!(!json.contains("bin_width"), "Sturges must omit bin_width: {json}");
+        let back: BinSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.mode, BinMode::Sturges);
+        assert_eq!(back, spec);
+    }
+
+    /// A legacy wire that sets BOTH `bin_count` and `bin_width` resolves to
+    /// `Fixed` (bin_count wins) — pins the precedence-at-boundary contract.
+    #[test]
+    fn bin_legacy_both_keys_resolves_to_fixed() {
+        let legacy = r#"{"field":"x","bin_count":7,"bin_width":3.5}"#;
+        let parsed: BinSpec = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            parsed.mode,
+            BinMode::Fixed { n: 7 },
+            "bin_count must win over bin_width at the deserialization boundary"
+        );
     }
 }

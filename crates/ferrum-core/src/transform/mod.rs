@@ -6,6 +6,7 @@ pub(crate) mod core;
 pub(crate) mod group_key;
 pub(crate) mod bin;
 pub(crate) mod bin_2d;
+pub(crate) mod bin_mode;
 pub(crate) mod context;
 pub(crate) mod kde;
 pub(crate) mod kde_2d;

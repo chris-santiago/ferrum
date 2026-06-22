@@ -325,6 +325,7 @@ mod tests {
 
     use crate::transform::aggregate::{AggregateSpec, AggregateOp, AggFn};
     use crate::transform::bin::BinSpec;
+    use crate::transform::bin_mode::BinMode;
 
     fn make_one_col_batch(name: &str, values: Vec<f64>) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
@@ -350,8 +351,7 @@ mod tests {
     fn test_transform_spec_bin_round_trip() {
         let original = TransformSpec::Bin(BinSpec {
             field: "x".into(),
-            bin_count: Some(10),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 10 },
             extent: None,
             nice: true,
             cumulative: false,
@@ -384,8 +384,7 @@ mod tests {
         let pipeline = vec![
             TransformSpec::Bin(BinSpec {
                 field: "x".into(),
-                bin_count: Some(5),
-                bin_width: None,
+                mode: BinMode::Fixed { n: 5 },
                 extent: Some((1.0, 10.0)),
                 nice: false,
                 cumulative: false,
@@ -422,8 +421,7 @@ mod tests {
         let pipeline = vec![
             TransformSpec::Bin(BinSpec {
                 field: "x".into(),
-                bin_count: Some(3),
-                bin_width: None,
+                mode: BinMode::Fixed { n: 3 },
                 extent: Some((1.0, 5.0)),
                 nice: false,
                 cumulative: false,
@@ -452,8 +450,7 @@ mod tests {
     fn transform_spec_json_byte_identical_when_name_none() {
         let s = TransformSpec::Bin(BinSpec {
             field: "x".into(),
-            bin_count: Some(10),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 10 },
             extent: None,
             nice: true,
             cumulative: false,
@@ -468,11 +465,11 @@ mod tests {
 
     #[test]
     fn test_transform_spec_bin_2d_round_trip() {
-        use crate::transform::bin_2d::{Bin2DSpec, BinSpec2DAxis};
+        use crate::transform::bin_2d::Bin2DSpec;
         let original = TransformSpec::Bin2D(Bin2DSpec {
             x: "x".into(), y: "y".into(),
-            bins_x: BinSpec2DAxis::Fixed { n: 10 },
-            bins_y: BinSpec2DAxis::Sturges,
+            bins_x: BinMode::Fixed { n: 10 },
+            bins_y: BinMode::Sturges,
             extent_x: None, extent_y: None,
             cumulative: false, name: None,
         });
@@ -516,8 +513,7 @@ mod tests {
         let batch = make_one_col_batch("x", vec![1.0, 2.0, 3.0]);
         let spec = TransformSpec::Bin(BinSpec {
             field: "x".into(),
-            bin_count: Some(2),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 2 },
             extent: Some((1.0, 3.0)),
             nice: false,
             cumulative: false,
