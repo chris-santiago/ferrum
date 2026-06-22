@@ -617,6 +617,7 @@ def clustermap(
     *,
     method: str = "ward",
     metric: str = "euclidean",
+    scheme: str | None = None,
     cmap: str | None = None,
     z_score: Any = None,
     standard_scale: Any = None,
@@ -650,11 +651,13 @@ def clustermap(
     metric : str, default "euclidean"
         Distance metric forwarded to ``Linkage`` (e.g. ``"euclidean"``,
         ``"cosine"``, ``"correlation"``).
-    cmap : str or None, optional
+    scheme : str or None, optional
         Color scheme name for the center heatmap (e.g. ``"magma"``,
         ``"viridis"``, ``"rdbu"``).  Forwarded to the ``Color`` encoding's
         ``scheme`` scale option.  ``"magma"`` is preferred for dense heatmaps
         due to its perceptual uniformity across a wide luminance range.
+    cmap : str or None, optional
+        Back-compat alias for ``scheme``.  Pass at most one of the two.
     z_score : {0, 1, None}, optional
         Standardise data along rows (``0``) or columns (``1``) before
         clustering; forwarded to ``Linkage``.
@@ -777,8 +780,10 @@ def clustermap(
     # `drop_index=False` keeps the data columns intact (we're not dropping a
     # column from the chained batch — the index column lives in `from=` only).
     from ferrum.encoding import Color as _Color, X as _X, Y as _Y
+    from ferrum.marks._desugar_helpers import resolve_cmap_alias
 
-    _color_enc = _Color("value", scheme=cmap)
+    _resolved_scheme = resolve_cmap_alias(scheme=scheme, cmap=cmap, where="clustermap")
+    _color_enc = _Color("value", scheme=_resolved_scheme)
     # Suppress synthetic axis titles (_row_id, column) that bleed through from
     # the internal unpivot column names — real row-label columns keep their names.
     _x_enc = _X("column", title="")

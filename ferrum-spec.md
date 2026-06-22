@@ -1676,8 +1676,28 @@ Ferrum accepts the following as `data` in `Chart(data=...)` or figure-level func
 # with no user-facing benefit. This namespace will not be implemented.
 
 ferrum.color.palette(scheme, n)            # return n colors from a scheme as hex list
-ferrum.color.to_hex(color)                 # normalize color string to hex
+ferrum.color.to_hex(color, *, scale=None)  # normalize color to hex; scale="unit"|"byte"
+ferrum.color.sequential(name, n=256)       # n render-truth samples of a sequential scheme
+ferrum.color.diverging(name, n=11)         # n render-truth samples of a diverging scheme
 ferrum.color.diverging_palette(low, mid, high, n)
+
+# 2026-06-22 (T2.2, ENC-06/XNAME-02/XSIB-07/ENC-11): the palette registry in
+# crates/ferrum-core/src/render/palette.rs + .../color/continuous.rs is the
+# single source of truth. ferrum.color consumes it through the _core accessors
+# (list_palettes / palette_kind / palette_colors / palette_sample); the
+# hand-mirrored Python hex tables are gone. Surfaced behavior changes:
+#   * color.palette()/sequential()/diverging() for the 7 colorous-backed
+#     schemes (viridis, plasma, magma, inferno, cividis, blues, rdbu) now
+#     return RENDER-TRUTH colors (what actually renders), replacing the old
+#     hand-picked 7-stop approximations. The 19 other palettes are unchanged.
+#   * scheme= on Color/Fill/Stroke is validated at declaration time against the
+#     registry (a bogus name raises ValueError immediately, not at render).
+#   * to_hex(color, scale=) takes an explicit "unit"/"byte" override; the
+#     default (scale=None) heuristic is now range-based (any component > 1 means
+#     byte), so (1,0,0) and (1.0,0.0,0.0) agree. Pass scale="byte" for the old
+#     all-integers-are-bytes interpretation of ambiguous <=1 tuples.
+#   * scheme= is the canonical colormap kwarg on mark_raster/mark_contour/
+#     mark_hex/clustermap; cmap= remains a documented back-compat alias.
 
 ferrum.config.set_max_rows(n)              # raise/lower data size guard (default: None)
 ferrum.config.set_renderer(renderer)       # default renderer for .show()

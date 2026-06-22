@@ -280,6 +280,14 @@ class ChannelBase:
             # channel built with ``type_="quantitative"`` compares, hashes, and
             # serializes identically to one built with ``type_="Q"`` (ENC-08).
             self._kwargs["type"] = _TYPE_NORMALIZE[type_]
+        scheme = self._kwargs.get("scheme")
+        if scheme is not None and "scheme" in self._honored_kwargs:
+            # Validate the named color set at declaration time against the single
+            # palette registry (D-COLOR-1).  A bogus scheme name fails here with
+            # the canonical ``palette()`` message shape rather than at render.
+            from ferrum.color import _validate_scheme
+
+            _validate_scheme(scheme, where=f"{self.__class__.__name__}(scheme=...)")
         if self._stack_kwarg:
             stack = self._kwargs.get("stack")
             if stack is not None:

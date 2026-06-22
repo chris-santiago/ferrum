@@ -34,8 +34,19 @@ def test_unknown_palette_raises():
 
 
 def test_continuous_palette_list():
-    names = fe.continuous_palette.list()
-    assert set(names) == {"viridis", "plasma", "magma", "inferno", "cividis"}
+    # The list is derived from the Rust palette registry (all sequential +
+    # diverging schemes), so it covers the classic colormaps and the custom
+    # continuous palettes without drifting from what from_name() accepts.
+    from ferrum._core import list_palettes, palette_kind
+
+    names = set(fe.continuous_palette.list())
+    expected = {n for n in list_palettes() if palette_kind(n) in ("sequential", "diverging")}
+    assert names == expected
+    # The classic colormaps are always present.
+    assert {"viridis", "plasma", "magma", "inferno", "cividis"} <= names
+    # Every listed name must be constructible.
+    for n in names:
+        assert fe.continuous_palette(n) is not None
 
 
 def test_reversed_returns_new_scheme():

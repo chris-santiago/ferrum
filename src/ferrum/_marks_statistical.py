@@ -557,6 +557,7 @@ class StatisticalMarksMixin:
         thresholds=6,
         smooth=True,
         fill=False,
+        scheme=None,
         cmap=None,
         groupby=None,
         position=None,
@@ -582,9 +583,11 @@ class StatisticalMarksMixin:
             Render filled contour regions instead of contour lines.  Default is
             ``False``.  When ``groupby`` is set, this parameter is ignored and
             isoline (segment) mode is always used.
-        cmap : str or None, optional
+        scheme : str or None, optional
             Colour map name applied to contour levels.  ``None`` (default) defers
             to the theme's sequential scheme.  Ignored when ``groupby`` is set.
+        cmap : str or None, optional
+            Back-compat alias for ``scheme``.  Pass at most one of the two.
         groupby : str or None, optional
             Group column (Utf8). When set, one 2-D KDE surface is computed per
             group and contour lines for each group are colored by the group field.
@@ -610,6 +613,7 @@ class StatisticalMarksMixin:
         Chart(mark='polygon', encoding=['x', 'y'])
         """
         from ferrum.marks.heavy_stat import desugar_contour
+        from ferrum.marks._desugar_helpers import resolve_cmap_alias
 
         return self._set_composite_mark(
             "contour",
@@ -619,7 +623,7 @@ class StatisticalMarksMixin:
                 "thresholds": thresholds,
                 "smooth": smooth,
                 "fill": fill,
-                "cmap": cmap,
+                "cmap": resolve_cmap_alias(scheme=scheme, cmap=cmap, where="mark_contour"),
                 "groupby": groupby,
                 **mark_kwargs,
             },
@@ -765,6 +769,7 @@ class StatisticalMarksMixin:
         *,
         aggregate="count",
         field=None,
+        scheme=None,
         cmap=None,
         resolution="screen",
         blend="alpha",
@@ -787,9 +792,11 @@ class StatisticalMarksMixin:
             not ``"count"``, ``field`` must be provided.
         field : str or None, optional
             Column name to aggregate.  Required unless ``aggregate="count"``.
-        cmap : str or None, optional
+        scheme : str or None, optional
             Colour map name.  ``None`` (default) defers to the theme's sequential
             scheme.
+        cmap : str or None, optional
+            Back-compat alias for ``scheme``.  Pass at most one of the two.
         resolution : "screen" or int, optional
             Pixel grid resolution.  ``"screen"`` (default) matches the rendered
             chart dimensions; pass an integer to set an explicit grid width.
@@ -820,6 +827,7 @@ class StatisticalMarksMixin:
         Chart(mark='image', encoding=['x', 'y'])
         """
         from ferrum.marks.heavy_stat import desugar_raster
+        from ferrum.marks._desugar_helpers import resolve_cmap_alias
 
         return self._set_composite_mark(
             "raster",
@@ -827,7 +835,7 @@ class StatisticalMarksMixin:
             {
                 "aggregate": aggregate,
                 "field": field,
-                "cmap": cmap,
+                "cmap": resolve_cmap_alias(scheme=scheme, cmap=cmap, where="mark_raster"),
                 "resolution": resolution,
                 "blend": blend,
                 "min_count": min_count,
@@ -844,6 +852,7 @@ class StatisticalMarksMixin:
         bin_size=None,
         aggregate="count",
         field=None,
+        scheme=None,
         cmap=None,
         stroke=None,
         stroke_width=0,
@@ -865,9 +874,11 @@ class StatisticalMarksMixin:
             ``"min"``, ``"max"``.
         field : str or None, optional
             Column to aggregate.  Required unless ``aggregate="count"``.
-        cmap : str or None, optional
+        scheme : str or None, optional
             Colour map name.  ``None`` (default) defers to the theme's sequential
             scheme.
+        cmap : str or None, optional
+            Back-compat alias for ``scheme``.  Pass at most one of the two.
         stroke : str or None, optional
             Hex border colour.  ``None`` (default) means no border.
         stroke_width : float, optional
@@ -877,8 +888,8 @@ class StatisticalMarksMixin:
         **mark_kwargs
             Constant mark-style overrides forwarded to the polygon layer.
             Note: ``stroke`` and ``stroke_width`` are method parameters (cell borders);
-            ``cmap`` is a transform parameter (fill colormap). Other style kwargs
-            like ``opacity``, ``fill``, ``size`` override the polygon defaults.
+            ``scheme`` (alias ``cmap``) is a transform parameter (fill colormap). Other
+            style kwargs like ``opacity``, ``fill``, ``size`` override the polygon defaults.
 
         Returns
         -------
@@ -894,6 +905,7 @@ class StatisticalMarksMixin:
         Chart(mark='polygon', encoding=['x', 'y'])
         """
         from ferrum.marks.heavy_stat import desugar_hex
+        from ferrum.marks._desugar_helpers import resolve_cmap_alias
 
         return self._set_composite_mark(
             "hex",
@@ -902,7 +914,7 @@ class StatisticalMarksMixin:
                 "bin_size": bin_size,
                 "aggregate": aggregate,
                 "field": field,
-                "cmap": cmap,
+                "cmap": resolve_cmap_alias(scheme=scheme, cmap=cmap, where="mark_hex"),
                 "stroke": stroke,
                 "stroke_width": stroke_width,
                 **mark_kwargs,
