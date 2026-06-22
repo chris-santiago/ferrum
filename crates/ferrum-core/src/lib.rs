@@ -51,6 +51,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render::binding::compose_svg_vertical_py, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::compose_svg_grid_py, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::figure_title_nodes_py, m)?)?;
+    // Theme key contract (D-THEME-1): `ThemeOverridesSpec` is the single
+    // source of truth; Python derives its key lists from these accessors.
+    m.add_function(wrap_pyfunction!(render::binding::theme_known_keys, m)?)?;
+    m.add_function(wrap_pyfunction!(render::binding::theme_color_keys, m)?)?;
     // Phase 8b Task 37: continuous color schemes.
     m.add_class::<render::color::continuous::PyContinuousScheme>()?;
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;

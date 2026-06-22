@@ -4,71 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-
-def _expand_hex(color: str) -> str:
-    """Expand CSS shorthand hex colors to their full-length equivalents.
-
-    The Rust color parser (``from_hex_str``) already expands the CSS shorthand
-    forms ``#rgb`` (3-char) and ``#rgba`` (4-char) itself, so this helper is a
-    redundant safety step: it doubles each hex digit on the Python side so the
-    expansion is performed even if a caller bypasses the Rust parser.
-
-    Non-hex values (named colors, ``none``, ``transparent``, ``theme:*``) are
-    returned unchanged.
-
-    Parameters
-    ----------
-    color : str
-        A color string, possibly in CSS shorthand hex form.
-
-    Returns
-    -------
-    str
-        The expanded color string, or the original if no expansion is needed.
-
-    Examples
-    --------
-    >>> _expand_hex("#fff")
-    '#ffffff'
-    >>> _expand_hex("#abc")
-    '#aabbcc'
-    >>> _expand_hex("#abcd")
-    '#aabbccdd'
-    >>> _expand_hex("#aabbcc")
-    '#aabbcc'
-    >>> _expand_hex("red")
-    'red'
-    """
-    if not color.startswith("#"):
-        return color
-    tail = color[1:]
-    if len(tail) == 3:
-        r, g, b = tail
-        return f"#{r}{r}{g}{g}{b}{b}"
-    if len(tail) == 4:
-        r, g, b, a = tail
-        return f"#{r}{r}{g}{g}{b}{b}{a}{a}"
-    return color
-
-
-# Color-typed keys that must be expanded before reaching the Rust renderer.
-_COLOR_KEYS: frozenset[str] = frozenset(
-    {
-        "background",
-        "background_color",
-        "mark_color",
-        "font_color",
-        "title_color",
-        "label_color",
-        "grid_color",
-        "major_grid_color",
-        "minor_grid_color",
-        "axis_line_color",
-        "tick_color",
-        "strip_background_color",
-        "reference_line_color",
-    }
-)
+from ferrum._core import theme_known_keys as _theme_known_keys
 
 
 class Theme:
@@ -98,15 +34,16 @@ class Theme:
         Default mark fill/stroke color for marks that have no explicit color
         encoding.
     font_family, font_weight, font_color, font_size : optional
-        Default text styling. ``font_size`` sets the default font size for
-        tick labels and body text.
+        Default body-text styling. ``font_size`` sets the label/body font
+        size (the Rust binding's ``label_font_size``), the same way
+        ``background`` is the public alias for ``background_color``.
     title_font_family, title_font_size, title_font_weight, title_color, \
 title_anchor, title_offset : optional
         Chart title styling. ``title_anchor`` ∈ {"start", "middle", "end"}.
-        Unset values fall back to the corresponding body-text key
-        (``title_color`` → ``font_color``, etc.).
+        Unset ``title_*`` / ``label_*`` keys fall back to their body-text
+        counterpart (see the "Fallbacks" list below).
     label_font_family, label_color : optional
-        Tick label styling. Fall back to ``font_family`` / ``font_color``.
+        Tick label styling (see the "Fallbacks" list below).
     grid : bool, optional
         Whether to draw grid lines (default True).
     grid_color, grid_width, grid_dash, grid_opacity : optional
@@ -156,6 +93,14 @@ area_opacity, opacity : optional
         least this many pixels apart. Default 8 (set in Rust). Set to ``0`` to
         disable culling entirely.
 
+    Fallbacks
+    ---------
+    When a ``title_*`` / ``label_*`` key is unset, it falls back to its
+    body-text counterpart at render time. The pair list below is generated
+    from ``Theme._FALLBACKS`` (the single source of truth):
+
+    %(fallbacks)s
+
     Raises
     ------
     ValueError
@@ -173,69 +118,11 @@ area_opacity, opacity : optional
 
     __slots__ = ("_props",)
 
-    _KNOWN_KEYS: frozenset[str] = frozenset(
-        {
-            # Canvas
-            "background",
-            "background_color",
-            "padding",
-            # Typography
-            "font_family",
-            "font_weight",
-            "font_color",
-            "font_size",
-            "title_font_family",
-            "title_font_size",
-            "title_font_weight",
-            "title_color",
-            "title_anchor",
-            "title_offset",
-            "label_font_family",
-            "label_color",
-            # Grid
-            "grid",
-            "grid_color",
-            "grid_width",
-            "grid_dash",
-            "grid_opacity",
-            # Axes
-            "axis_line",
-            "axis_line_color",
-            "axis_line_width",
-            "tick_color",
-            "tick_size",
-            "tick_width",
-            # Marks
-            "mark_color",
-            "point_size",
-            "point_opacity",
-            "line_stroke_width",
-            "bar_corner_radius",
-            "area_opacity",
-            "opacity",
-            # Palette
-            "color_scheme",
-            "sequential_scheme",
-            "diverging_scheme",
-            # Strip
-            "strip_background_color",
-            "strip_text_size",
-            "strip_padding",
-            # Legend
-            "legend_orient",
-            "legend_direction",
-            "legend_title_font_size",
-            # Reference lines
-            "reference_line_color",
-            "reference_line_dash",
-            # Spacing
-            "axis_title_padding",
-            "column_padding",
-            "row_padding",
-            # Axis label culling
-            "cull_threshold",
-        }
-    )
+    # Derived from the Rust ``ThemeOverridesSpec`` key manifest (the single
+    # source of truth) so the Python and Rust accepted-key sets cannot drift.
+    # Includes the per-level grid keys (``major_grid_*`` / ``minor_grid_*`` /
+    # ``minor``) and the ``background`` alias for ``background_color``.
+    _KNOWN_KEYS: frozenset[str] = frozenset(_theme_known_keys())
 
     def __init__(self, **kwargs: Any) -> None:
         unknown = set(kwargs) - self._KNOWN_KEYS
@@ -276,11 +163,21 @@ area_opacity, opacity : optional
                 merged[k] = v
         return Theme(**merged)
 
+    # Every ``title_*`` / ``label_*`` key that has a body-text counterpart
+    # falls back to that counterpart when unset (resolved in ``to_spec_dict``).
+    # This is the single source for the fallback contract; the ``Theme``
+    # docstring's pair list is derived from this table at import time.  Keys
+    # with no body-text counterpart (``title_anchor``, ``title_offset``) are
+    # absent; there is no public ``label_font_weight`` / ``label_font_size``
+    # key, so no fallback exists for those.  ``font_size`` is the body/label
+    # font-size key, so ``title_font_size`` falls back to it.
     _FALLBACKS: dict[str, str] = {
         "title_color": "font_color",
         "label_color": "font_color",
         "title_font_family": "font_family",
         "label_font_family": "font_family",
+        "title_font_weight": "font_weight",
+        "title_font_size": "font_size",
     }
 
     def to_spec_dict(self) -> dict:
@@ -289,10 +186,10 @@ area_opacity, opacity : optional
         Resolves spec-defined fallbacks (e.g. ``title_color`` falls back to
         ``font_color`` if unset) and normalises the public Python alias
         ``background`` to the Rust binding's canonical ``background_color``
-        key.  CSS shorthand hex colors (``#rgb`` / ``#rgba``) are expanded to
-        their full-length equivalents (``#rrggbb`` / ``#rrggbbaa``) so the
-        Rust color parser never receives a shorthand string.  Rust sees a
-        fully-resolved dict; no Option fallback chains in the binding.
+        key.  CSS shorthand hex colors (``#rgb`` / ``#rgba``) are expanded by
+        the Rust color parser (``from_hex_str``); Python forwards color
+        strings unchanged.  Rust sees a fully-resolved dict; no Option
+        fallback chains in the binding.
         """
         d = dict(self._props)
         # Expand Grid value objects: if the "grid" prop is a value object
@@ -311,11 +208,6 @@ area_opacity, opacity : optional
         # background regardless of which key was used at construction.
         if "background" in d:
             d["background_color"] = d.pop("background")
-        # Expand CSS shorthand hex colors (#rgb → #rrggbb, #rgba → #rrggbbaa)
-        # for all color-typed keys before handing the dict to Rust.
-        for key in _COLOR_KEYS:
-            if key in d and isinstance(d[key], str):
-                d[key] = _expand_hex(d[key])
         return d
 
     def __eq__(self, other: object) -> bool:
@@ -336,6 +228,15 @@ area_opacity, opacity : optional
             return "Theme()"
         kv = ", ".join(f"{k}={v!r}" for k, v in sorted(self._props.items()))
         return f"Theme({kv})"
+
+
+# Render the docstring's fallback pair list from the single-source ``_FALLBACKS``
+# table so the prose and the runtime contract cannot drift.
+Theme.__doc__ = (Theme.__doc__ or "") % {
+    "fallbacks": "\n    ".join(
+        f"- ``{derived}`` → ``{source}``" for derived, source in Theme._FALLBACKS.items()
+    )
+}
 
 
 from ferrum.themes import builtins as _builtins  # noqa: E402

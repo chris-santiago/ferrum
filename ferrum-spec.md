@@ -1029,6 +1029,23 @@ Theme(
 > distinct from the others on the same chart (see
 > `tests/goldens/theme_gallery/`).
 
+> **2026-06-22 (D-THEME-1, T2.1):** The Python `Theme._KNOWN_KEYS` and color-key
+> sets are now *derived* from the Rust key manifest (`ferrum._core.theme_known_keys()`
+> / `theme_color_keys()`) so the Python and Rust accepted-key contracts cannot
+> drift. The accepted set now includes the per-level grid keys (`major_grid_*`,
+> `minor_grid_*`, `minor`) in `Theme(...)` as well (previously Python rejected
+> them though Rust accepted). The resolved-dict method is `Theme.to_spec_dict()`
+> (the older spec mention of `to_theme_inputs_dict()` is renamed). The
+> title/label → body-text fallback chain is now **complete**: in addition to the
+> four documented above it resolves `title_font_weight → font_weight` and
+> `title_font_size → font_size` (every `title_*`/`label_*` key that has a
+> body-text counterpart). There is no public `label_font_weight`/`label_font_size`
+> key — the public `font_size` key *is* the label/body font size (it routes to
+> the Rust binding's `label_font_size`, the same way `background` is the public
+> alias for `background_color`). CSS shorthand hex (`#rgb`/`#rgba`) is expanded
+> by the Rust color parser (`from_hex_str`); the prior redundant Python-side
+> expansion was removed.
+
 **Built-in themes** (`ferrum.themes`)
 
 | Name | Description |

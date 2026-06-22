@@ -970,6 +970,14 @@ def render_png(
     """
     ...
 
+# ---------- Theme key manifest (single source of truth) ----------
+# The complete valid theme-key set and its color-typed subset, published from
+# the Rust `ThemeOverridesSpec`. The Python `Theme` derives `_KNOWN_KEYS` from
+# `theme_known_keys()` so the two contracts cannot drift.
+
+def theme_known_keys() -> list[str]: ...
+def theme_color_keys() -> list[str]: ...
+
 # ---------- Missing functions (previously undeclared) ----------
 
 def calinski_harabasz_score(x_table: Any, labels: Any) -> float: ...
