@@ -26,25 +26,21 @@ def _gain_lift_score_matrix(y_pred: np.ndarray, classes: list) -> np.ndarray:
     For a 2-D ``y_pred`` (multiclass probability matrix), the columns are
     already per-class and returned as-is.
 
-    For any 1-D ``y_pred`` (binary or unusual 1-D multiclass), the score
-    column is tiled so each class column is identical — every class is ranked
-    by the same raw ``y_pred`` scores.  This reproduces the pre-T1.5 behavior
-    exactly: ``gain_frame``/``lift_frame`` call ``argsort(-score_matrix[:, i])``
-    per class, and with a tiled matrix every class sorts by ``y_pred``
-    descending, matching the old inline sort.
-
-    Note: the negative-class gain/lift thereby ranks by the positive-class
-    score ``p`` rather than ``1 - p``.  This is inconsistent with the roc/pr
-    precomputed 1-D binary path (which uses ``column_stack([1-p, p])`` to
-    rank the negative class by ``1 - p``).  That inconsistency is preserved
-    here for byte-identity with the pre-T1.5 output; it is a separate
-    deliberate fix to be made in a future pass.
+    For a 1-D ``y_pred`` (binary positive-class scores), the matrix is built
+    as ``column_stack([1 - y_pred, y_pred])`` so the negative class (column 0)
+    is ranked by ``1 - p`` and the positive class (column 1) by ``p``.  This
+    matches the precomputed 1-D binary roc/pr path
+    (``_PrecomputedSource.roc_curve`` / ``.pr_curve``) and the model-backed
+    path (where ``probabilities()`` already emits genuine per-class columns),
+    so the whole precomputed-1D-binary family ranks each class by its own
+    score.  ``gain_frame``/``lift_frame`` call ``argsort(-score_matrix[:, i])``
+    per class against this matrix.
     """
     if y_pred.ndim == 2:
         return y_pred
-    # Tile the 1-D scores so every class column is identical.
-    n_classes = len(classes)
-    return np.tile(y_pred[:, np.newaxis], (1, n_classes))
+    # Binary: 1-D y_pred is the positive-class score. Build a per-class matrix
+    # so the negative class ranks by 1 - p, mirroring the roc/pr binary path.
+    return np.column_stack([1.0 - y_pred, y_pred])
 
 
 class _PrecomputedSource:
