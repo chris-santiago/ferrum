@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import json as _json
+import re
 import struct
 from dataclasses import dataclass
 from typing import Optional
@@ -102,8 +103,8 @@ def _assemble_placed_children(
     merged["width"] = width
     merged["height"] = height
 
-    for pc in placed:
-        _merge_one_child(merged, pc.scene, pc.dx, pc.dy, pc.panel_id_offset)
+    for idx, pc in enumerate(placed):
+        _merge_one_child(merged, pc.scene, pc.dx, pc.dy, pc.panel_id_offset, clip_cell_idx=idx)
 
     # chrome_top_h = title+subtitle band height; chrome_bottom_h = caption band height;
     # together they are the figure chrome.
@@ -464,6 +465,7 @@ def _merge_one_child(
     dx: float,
     dy: float,
     panel_id_offset: int,
+    clip_cell_idx: int | None = None,
 ) -> int:
     """Merge a single child scene into *merged* at the given offset.
 
@@ -471,13 +473,21 @@ def _merge_one_child(
     linked_panels, zoom_enabled/pan_enabled propagation,
     background, and title/legend/decoration nodes.
 
+    Parameters
+    ----------
+    clip_cell_idx : int or None
+        Forwarded to :func:`_merge_scene_panels` and :func:`_offset_node`
+        for ``raw``-node clip-id uniquification.  ``None`` suppresses
+        uniquification (used by the figure-chrome offset pass and any
+        call site without a stable per-child index).
+
     Returns
     -------
     int
         The number of panels merged (so the caller can update
         ``panel_id_offset``).
     """
-    _merge_scene_panels(merged, scene, dx, dy, panel_id_offset)
+    _merge_scene_panels(merged, scene, dx, dy, panel_id_offset, clip_cell_idx)
     n_panels = len(scene.get("panels", []))
 
     merged["selections"].extend(scene.get("selections", []))
@@ -517,7 +527,7 @@ def _merge_one_child(
     for key in _OUTER_NODE_LIST_KEYS:
         for node in scene.get(key, []):
             n = copy.deepcopy(node)
-            _offset_node(n, dx, dy)
+            _offset_node(n, dx, dy, clip_cell_idx=clip_cell_idx)
             merged[key].append(n)
 
     return n_panels
@@ -706,6 +716,7 @@ def _merge_scene_panels(
     dx: float,
     dy: float,
     panel_id_offset: int,
+    clip_cell_idx: int | None = None,
 ) -> None:
     """Offset and append panels from *scene* into *merged*.
 
@@ -713,6 +724,13 @@ def _merge_scene_panels(
     dict is not modified in place — callers may re-read it (e.g.
     ``_merge_one_child`` counts ``scene.get("panels", [])`` after this
     call returns).
+
+    Parameters
+    ----------
+    clip_cell_idx : int or None
+        Forwarded to :func:`_offset_node` for ``raw``-node clip-id
+        uniquification.  ``None`` for call sites that do not have a
+        per-child index (e.g. the figure-chrome offset pass).
     """
     for panel in scene.get("panels", []):
         panel = copy.deepcopy(panel)
@@ -725,56 +743,157 @@ def _merge_scene_panels(
 
         for batch in panel.get("marks", []):
             for node in batch.get("nodes", []):
-                _offset_node(node, dx, dy)
+                _offset_node(node, dx, dy, clip_cell_idx=clip_cell_idx)
         for key in _PANEL_NODE_LIST_KEYS:
             for node in panel.get(key, []):
-                _offset_node(node, dx, dy)
+                _offset_node(node, dx, dy, clip_cell_idx=clip_cell_idx)
 
         merged["panels"].append(panel)
 
 
-def _offset_node(node: dict, dx: float, dy: float) -> None:
-    """Offset a scene node's position by ``(dx, dy)``."""
-    if dx == 0.0 and dy == 0.0:
+def _offset_raw_svg_rects(svg: str, dx: float, dy: float) -> str:
+    """Offset ``x`` and ``y`` attribute values inside ``<rect …>`` tags in an opaque SVG string.
+
+    This is conservative: only ``<rect>`` elements carry the baked
+    absolute coordinates that need translation (legend clip defs and
+    colorbar gradient clip rects).  Arbitrary baked geometry (circles,
+    paths, etc.) is left untouched because raw chrome defs do not
+    contain offsettable geometry beyond rect clip regions.
+
+    The regex matches a single attribute occurrence within a ``<rect``
+    tag (the tag may span lines); it does not attempt to parse full SVG.
+    """
+
+    def _shift_x(m: re.Match) -> str:
+        val = float(m.group(1))
+        return f'x="{val + dx}"'
+
+    def _shift_y(m: re.Match) -> str:
+        val = float(m.group(1))
+        return f'y="{val + dy}"'
+
+    # Process only within <rect ...> tags: find each rect tag and rewrite
+    # x/y attributes inside it.
+    def _rewrite_rect(m: re.Match) -> str:
+        tag = m.group(0)
+        if dx != 0.0:
+            tag = re.sub(r'\bx="([^"]*)"', _shift_x, tag)
+        if dy != 0.0:
+            tag = re.sub(r'\by="([^"]*)"', _shift_y, tag)
+        return tag
+
+    # Match <rect followed by attributes up to the closing > or />
+    return re.sub(r"<rect\b[^>]*>", _rewrite_rect, svg)
+
+
+def _uniquify_clip_ids(svg: str, cell_idx: int) -> str:
+    """Uniquify ferrum clip/colorbar/legend-clip ids in an SVG fragment.
+
+    Mirrors ``render/compositor.rs::uniquify_clip_ids`` exactly: replaces
+    ``id="ferrum-clip-``, ``url(#ferrum-clip-``, ``id="ferrum-colorbar-``,
+    ``url(#ferrum-colorbar-``, ``id="ferrum-legend-clip-``, and
+    ``url(#ferrum-legend-clip-`` with ``cell{cell_idx}-`` prefixed variants.
+    This makes clip-path ids disjoint across children in a composed
+    interactive render, matching the scheme the static SVG compositor uses.
+    """
+    clip_prefix = f"cell{cell_idx}-ferrum-clip-"
+    colorbar_prefix = f"cell{cell_idx}-ferrum-colorbar-"
+    legend_clip_prefix = f"cell{cell_idx}-ferrum-legend-clip-"
+    svg = svg.replace('id="ferrum-clip-', f'id="{clip_prefix}')
+    svg = svg.replace("url(#ferrum-clip-", f"url(#{clip_prefix}")
+    svg = svg.replace('id="ferrum-colorbar-', f'id="{colorbar_prefix}')
+    svg = svg.replace("url(#ferrum-colorbar-", f"url(#{colorbar_prefix}")
+    svg = svg.replace('id="ferrum-legend-clip-', f'id="{legend_clip_prefix}')
+    svg = svg.replace("url(#ferrum-legend-clip-", f"url(#{legend_clip_prefix}")
+    return svg
+
+
+def _offset_node(
+    node: dict,
+    dx: float,
+    dy: float,
+    *,
+    clip_cell_idx: int | None = None,
+) -> None:
+    """Offset a scene node's position by ``(dx, dy)``.
+
+    Parameters
+    ----------
+    node : dict
+        Scene node to mutate in place.
+    dx, dy : float
+        Lateral and vertical offset to apply.
+    clip_cell_idx : int or None
+        When not ``None``, uniquifies clip/colorbar/legend-clip ``id``
+        and ``url(#…)`` references inside ``raw`` nodes by prepending
+        ``cell{clip_cell_idx}-`` to the three ferrum clip-id prefixes.
+        ``None`` (the default) preserves the existing ids — used for all
+        non-per-child call sites such as the figure-chrome offset pass.
+    """
+    if dx == 0.0 and dy == 0.0 and clip_cell_idx is None:
         return
     t = node.get("type")
     if t == "circle":
-        node["cx"] = node.get("cx", 0) + dx
-        node["cy"] = node.get("cy", 0) + dy
+        if dx != 0.0 or dy != 0.0:
+            node["cx"] = node.get("cx", 0) + dx
+            node["cy"] = node.get("cy", 0) + dy
     elif t == "rect":
-        node["x"] = node.get("x", 0) + dx
-        node["y"] = node.get("y", 0) + dy
+        if dx != 0.0 or dy != 0.0:
+            node["x"] = node.get("x", 0) + dx
+            node["y"] = node.get("y", 0) + dy
     elif t == "line":
-        node["x1"] = node.get("x1", 0) + dx
-        node["y1"] = node.get("y1", 0) + dy
-        node["x2"] = node.get("x2", 0) + dx
-        node["y2"] = node.get("y2", 0) + dy
+        if dx != 0.0 or dy != 0.0:
+            node["x1"] = node.get("x1", 0) + dx
+            node["y1"] = node.get("y1", 0) + dy
+            node["x2"] = node.get("x2", 0) + dx
+            node["y2"] = node.get("y2", 0) + dy
     elif t == "text":
-        node["x"] = node.get("x", 0) + dx
-        node["y"] = node.get("y", 0) + dy
+        if dx != 0.0 or dy != 0.0:
+            node["x"] = node.get("x", 0) + dx
+            node["y"] = node.get("y", 0) + dy
     elif t == "path":
-        for cmd in node.get("commands", []):
-            for xkey in ("x", "cx", "c1x", "c2x"):
-                if xkey in cmd:
-                    cmd[xkey] = cmd[xkey] + dx
-            for ykey in ("y", "cy", "c1y", "c2y"):
-                if ykey in cmd:
-                    cmd[ykey] = cmd[ykey] + dy
+        if dx != 0.0 or dy != 0.0:
+            for cmd in node.get("commands", []):
+                for xkey in ("x", "cx", "c1x", "c2x"):
+                    if xkey in cmd:
+                        cmd[xkey] = cmd[xkey] + dx
+                for ykey in ("y", "cy", "c1y", "c2y"):
+                    if ykey in cmd:
+                        cmd[ykey] = cmd[ykey] + dy
     elif t == "image":
-        node["x"] = node.get("x", 0) + dx
-        node["y"] = node.get("y", 0) + dy
+        if dx != 0.0 or dy != 0.0:
+            node["x"] = node.get("x", 0) + dx
+            node["y"] = node.get("y", 0) + dy
     elif t == "polygon":
-        for ring in node.get("rings", []):
-            for pt in ring:
+        if dx != 0.0 or dy != 0.0:
+            for ring in node.get("rings", []):
+                for pt in ring:
+                    pt[0] += dx
+                    pt[1] += dy
+    elif t == "polyline":
+        if dx != 0.0 or dy != 0.0:
+            for pt in node.get("points", []):
                 pt[0] += dx
                 pt[1] += dy
-    elif t == "polyline":
-        for pt in node.get("points", []):
-            pt[0] += dx
-            pt[1] += dy
     elif t == "group":
         for child in node.get("children", []):
-            _offset_node(child, dx, dy)
+            _offset_node(child, dx, dy, clip_cell_idx=clip_cell_idx)
+    elif t == "raw":
+        # Scope (W4 / COMP-07): only the `<rect x/y>`-shaped chrome defs ferrum
+        # bakes into `raw` nodes (legend clipPath defs, colorbar gradient defs)
+        # are offset here, mirroring render/compositor.rs::uniquify_clip_ids for
+        # the clip-id half. Positioned wrapper raw nodes whose coords live on
+        # `<svg x/y>` (inset.rs) or `<image x/y>` (data-anchored annotation.rs)
+        # are intentionally NOT offset here: offsetting an `<image>` annotation
+        # is a real (non-inert) composed-interactive behavior change that needs
+        # its own design + browser verification (logged as a follow-up).
+        svg = node.get("svg", "")
+        if svg:
+            if dx != 0.0 or dy != 0.0:
+                svg = _offset_raw_svg_rects(svg, dx, dy)
+            if clip_cell_idx is not None:
+                svg = _uniquify_clip_ids(svg, clip_cell_idx)
+            node["svg"] = svg
 
 
 # ---------------------------------------------------------------------------

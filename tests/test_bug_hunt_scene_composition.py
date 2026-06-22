@@ -103,19 +103,68 @@ def test_offset_node_polyline_type():  # BUG: _offset_node ignores polyline node
 
 
 # ===========================================================================
-# 4. _offset_node: raw type (W4 -- silently left at original position)
+# 4. _offset_node: raw type (W4 -- rect-offset + clip-id uniquification)
 # ===========================================================================
 
 
-def test_offset_node_raw_type_is_no_op():
-    """_offset_node on a raw node cannot offset embedded SVG markup, but must
-    not crash. This documents the known limitation that raw nodes are not
-    position-adjusted during composition."""
-    node = {"type": "raw", "svg": '<circle cx="10" cy="20" r="5"/>'}
-    # Should not raise
+def test_offset_node_raw_rect_offset():
+    """_offset_node on a raw node offsets <rect> x/y attributes by (dx, dy).
+
+    The fix for W4 (COMP-07) makes _offset_node translate the baked absolute
+    <rect> coords in opaque SVG chrome defs.  Non-rect geometry (circles etc.)
+    is left untouched -- raw defs only carry clip-region rects.
+    """
+    node = {
+        "type": "raw",
+        "svg": '<rect x="10" y="20" width="100" height="40"/><circle cx="10" cy="20" r="5"/>',
+        "anchor": "chrome",
+    }
     _offset_node(node, 100.0, 50.0)
-    # SVG string is opaque -- cannot be offset without parsing
-    assert node["svg"] == '<circle cx="10" cy="20" r="5"/>'
+    # rect x/y shifted; circle coords are opaque (not <rect>) and unchanged
+    assert (
+        node["svg"]
+        == '<rect x="110.0" y="70.0" width="100" height="40"/><circle cx="10" cy="20" r="5"/>'
+    )
+
+
+def test_offset_node_raw_clip_uniquify():
+    """_offset_node on a raw node uniquifies ferrum clip/colorbar/legend-clip ids
+    when clip_cell_idx is provided, mirroring uniquify_clip_ids in compositor.rs.
+    """
+    svg = (
+        '<clipPath id="ferrum-clip-0"><rect x="0" y="0" width="100" height="80"/></clipPath>'
+        '<g clip-path="url(#ferrum-clip-0)"/>'
+        '<linearGradient id="ferrum-colorbar-0"/>'
+        '<clipPath id="ferrum-legend-clip-0"/>'
+        '<use href="url(#ferrum-legend-clip-0)"/>'
+    )
+    node = {"type": "raw", "svg": svg, "anchor": "chrome"}
+    _offset_node(node, 0.0, 0.0, clip_cell_idx=2)
+    result = node["svg"]
+    assert 'id="cell2-ferrum-clip-0"' in result
+    assert "url(#cell2-ferrum-clip-0)" in result
+    assert 'id="cell2-ferrum-colorbar-0"' in result
+    assert 'id="cell2-ferrum-legend-clip-0"' in result
+    assert "url(#cell2-ferrum-legend-clip-0)" in result
+    # Original ids should be gone
+    assert 'id="ferrum-clip-0"' not in result
+    assert 'id="ferrum-colorbar-0"' not in result
+    assert 'id="ferrum-legend-clip-0"' not in result
+
+
+def test_offset_node_raw_clip_none_leaves_ids_unchanged():
+    """_offset_node with clip_cell_idx=None must NOT rewrite clip ids (back-compat)."""
+    svg = (
+        '<clipPath id="ferrum-clip-0"><rect x="10" y="20" width="100" height="80"/></clipPath>'
+        '<g clip-path="url(#ferrum-clip-0)"/>'
+    )
+    node = {"type": "raw", "svg": svg, "anchor": "chrome"}
+    _offset_node(node, 5.0, 3.0, clip_cell_idx=None)
+    result = node["svg"]
+    # rect coords shifted but clip ids unchanged
+    assert 'id="ferrum-clip-0"' in result
+    assert "url(#ferrum-clip-0)" in result
+    assert "cell" not in result
 
 
 # ===========================================================================
@@ -792,3 +841,94 @@ def test_concat_chart_no_columns_single_row():
     assert y_coords[0] == y_coords[1] == y_coords[2], (
         f"all panels should have same y for single-row layout; got {y_coords}"
     )
+
+
+# ===========================================================================
+# 37. _offset_node raw branch: rect-offset + clip-id uniquification (COMP-07 / W4)
+# ===========================================================================
+
+
+def test_offset_node_raw_rect_offset_and_clip_uniquify():
+    """_offset_node on a raw node offsets <rect> x/y and uniquifies clip ids.
+
+    Regression for COMP-07 (W4): the raw branch was absent, leaving baked
+    SVG coords un-offset and clip ids colliding across composed children.
+    """
+    svg = (
+        '<rect x="10" y="20" width="80" height="40"/>'
+        '<clipPath id="ferrum-clip-0"><rect x="0" y="0" width="80" height="40"/></clipPath>'
+        '<g clip-path="url(#ferrum-clip-0)"/>'
+        '<linearGradient id="ferrum-colorbar-0"/>'
+        '<clipPath id="ferrum-legend-clip-0"/>'
+        '<use href="url(#ferrum-legend-clip-0)"/>'
+    )
+    node = {"type": "raw", "svg": svg, "anchor": "chrome"}
+
+    _offset_node(node, 100.0, 50.0, clip_cell_idx=2)
+    result = node["svg"]
+
+    # --- rect coords offset ---
+    assert 'x="110.0"' in result, f"outer rect x not shifted; got: {result}"
+    assert 'y="70.0"' in result, f"outer rect y not shifted; got: {result}"
+
+    # --- clip ids uniquified ---
+    assert 'id="cell2-ferrum-clip-0"' in result
+    assert "url(#cell2-ferrum-clip-0)" in result
+    assert 'id="cell2-ferrum-colorbar-0"' in result
+    assert 'id="cell2-ferrum-legend-clip-0"' in result
+    assert "url(#cell2-ferrum-legend-clip-0)" in result
+
+    # --- original ids gone ---
+    assert 'id="ferrum-clip-0"' not in result
+    assert 'id="ferrum-colorbar-0"' not in result
+    assert 'id="ferrum-legend-clip-0"' not in result
+
+
+def test_offset_node_raw_clip_none_preserves_ids_but_offsets_rect():
+    """With clip_cell_idx=None, rect x/y is still offset but clip ids are unchanged."""
+    svg = (
+        '<rect x="10" y="20" width="80" height="40"/>'
+        '<clipPath id="ferrum-clip-0"><rect x="5" y="5" width="10" height="10"/></clipPath>'
+        '<g clip-path="url(#ferrum-clip-0)"/>'
+    )
+    node = {"type": "raw", "svg": svg, "anchor": "chrome"}
+    _offset_node(node, 100.0, 50.0, clip_cell_idx=None)
+    result = node["svg"]
+
+    # rect shifted
+    assert 'x="110.0"' in result
+    assert 'y="70.0"' in result
+    # ids preserved (no uniquification)
+    assert 'id="ferrum-clip-0"' in result
+    assert "url(#ferrum-clip-0)" in result
+    assert "cell" not in result
+
+
+def test_offset_node_raw_group_nested_forward():
+    """A raw node nested inside a group gets offset+uniquified via recursive forward."""
+    inner_svg = (
+        '<rect x="5" y="10" width="50" height="30"/>'
+        '<clipPath id="ferrum-clip-0"/>'
+        '<g clip-path="url(#ferrum-clip-0)"/>'
+    )
+    node = {
+        "type": "group",
+        "attrs": [],
+        "children": [
+            {"type": "raw", "svg": inner_svg, "anchor": "chrome"},
+            {"type": "circle", "cx": 1.0, "cy": 2.0, "r": 3.0, "style": {}},
+        ],
+    }
+    _offset_node(node, 20.0, 30.0, clip_cell_idx=1)
+
+    raw_result = node["children"][0]["svg"]
+    # rect offset
+    assert 'x="25.0"' in raw_result
+    assert 'y="40.0"' in raw_result
+    # clip id uniquified with cell_idx=1
+    assert 'id="cell1-ferrum-clip-0"' in raw_result
+    assert "url(#cell1-ferrum-clip-0)" in raw_result
+
+    # sibling circle also offset
+    assert node["children"][1]["cx"] == 21.0
+    assert node["children"][1]["cy"] == 32.0
