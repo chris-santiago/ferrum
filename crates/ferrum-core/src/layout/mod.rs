@@ -60,17 +60,17 @@ pub struct LayoutResult {
 }
 
 /// Clamp a dynamically-estimated axis margin band to the per-axis
-/// `min_extent`/`max_extent` overrides (B5). `min` reserves at least that many
+/// `min_band`/`max_band` overrides (B5). `min` reserves at least that many
 /// px; `max` caps the reservation (labels may clip past the cap — allowed). When
 /// both are `None` the dynamic value passes through unchanged, preserving
 /// byte-identical default output. A `min > max` (user contradiction) resolves to
 /// `max` (the cap wins), matching the "max is a hard ceiling" semantic.
-fn clamp_axis_extent(dynamic: f64, min_extent: Option<f64>, max_extent: Option<f64>) -> f64 {
+fn clamp_axis_band(dynamic: f64, min_band: Option<f64>, max_band: Option<f64>) -> f64 {
     let mut band = dynamic;
-    if let Some(min) = min_extent {
+    if let Some(min) = min_band {
         band = band.max(min);
     }
-    if let Some(max) = max_extent {
+    if let Some(max) = max_band {
         band = band.min(max);
     }
     band
@@ -730,19 +730,19 @@ pub fn compute_layout(
     };
 
     // Reserved band totals per axis (label band + title gutter). The orphan
-    // `min_extent`/`max_extent` overrides (B5) clamp each total to `[min, max]`
+    // `min_band`/`max_band` overrides (B5) clamp each total to `[min, max]`
     // after the dynamic estimate: `min` reserves at least that much, `max` caps
     // it (labels may clip past the cap — allowed). `None`/unset leaves the
     // dynamic value unchanged, so default output is byte-identical.
-    let x_band = clamp_axis_extent(
+    let x_band = clamp_axis_band(
         x_label_band + x_title_gutter,
-        axes.x.overrides.min_extent,
-        axes.x.overrides.max_extent,
+        axes.x.overrides.min_band,
+        axes.x.overrides.max_band,
     );
-    let y_band = clamp_axis_extent(
+    let y_band = clamp_axis_band(
         y_label_band + y_title_gutter,
-        axes.y.overrides.min_extent,
-        axes.y.overrides.max_extent,
+        axes.y.overrides.min_band,
+        axes.y.overrides.max_band,
     );
 
     // Orient (B5): reserve each axis's band on its chosen side. x defaults to the
@@ -1250,38 +1250,38 @@ mod tests {
         );
     }
 
-    // ── B5 unit 2: clamp_axis_extent + orient band reservation ──────────────
+    // ── B5 unit 2: clamp_axis_band + orient band reservation ──────────────
 
     #[test]
-    fn clamp_axis_extent_passthrough_when_unset() {
+    fn clamp_axis_band_passthrough_when_unset() {
         // Default path (both None) must return the dynamic value unchanged so
         // existing layouts stay byte-identical.
-        assert_eq!(clamp_axis_extent(37.5, None, None), 37.5);
+        assert_eq!(clamp_axis_band(37.5, None, None), 37.5);
     }
 
     #[test]
-    fn clamp_axis_extent_min_reserves_at_least() {
-        assert_eq!(clamp_axis_extent(20.0, Some(80.0), None), 80.0);
+    fn clamp_axis_band_min_reserves_at_least() {
+        assert_eq!(clamp_axis_band(20.0, Some(80.0), None), 80.0);
         // Already above min: unchanged.
-        assert_eq!(clamp_axis_extent(120.0, Some(80.0), None), 120.0);
+        assert_eq!(clamp_axis_band(120.0, Some(80.0), None), 120.0);
     }
 
     #[test]
-    fn clamp_axis_extent_max_caps() {
-        assert_eq!(clamp_axis_extent(120.0, None, Some(40.0)), 40.0);
+    fn clamp_axis_band_max_caps() {
+        assert_eq!(clamp_axis_band(120.0, None, Some(40.0)), 40.0);
         // Already below max: unchanged.
-        assert_eq!(clamp_axis_extent(20.0, None, Some(40.0)), 20.0);
+        assert_eq!(clamp_axis_band(20.0, None, Some(40.0)), 20.0);
     }
 
     #[test]
-    fn clamp_axis_extent_max_wins_over_contradictory_min() {
+    fn clamp_axis_band_max_wins_over_contradictory_min() {
         // min > max is a user contradiction; the cap (max) wins.
-        assert_eq!(clamp_axis_extent(50.0, Some(90.0), Some(40.0)), 40.0);
+        assert_eq!(clamp_axis_band(50.0, Some(90.0), Some(40.0)), 40.0);
     }
 
     #[test]
-    fn min_extent_reserves_larger_left_band() {
-        // A y-axis min_extent of 200px must push the plot area right by at least
+    fn min_band_reserves_larger_left_band() {
+        // A y-axis min_band of 200px must push the plot area right by at least
         // that much vs. the unset baseline.
         let spec = minimal_chart_spec();
         let viewport = Viewport { width: 600.0, height: 400.0 };
@@ -1293,7 +1293,7 @@ mod tests {
         ).unwrap();
 
         let mut axes = dummy_axes();
-        axes.y.overrides.min_extent = Some(200.0);
+        axes.y.overrides.min_band = Some(200.0);
         let widened = compute_layout(
             &spec, &default_theme_inputs(), viewport, &axes,
             &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[],
@@ -1303,9 +1303,9 @@ mod tests {
         let wide_x = widened.panels[0].plot_area.x;
         assert!(
             wide_x >= base_x + 100.0,
-            "min_extent=200 must reserve a much larger left band: base x={base_x}, widened x={wide_x}"
+            "min_band=200 must reserve a much larger left band: base x={base_x}, widened x={wide_x}"
         );
-        // The reserved left band is at least min_extent.
+        // The reserved left band is at least min_band.
         assert!(wide_x - viewport.into_rect().x >= 200.0);
     }
 

@@ -598,25 +598,25 @@ class TestAxisRender:
         )
         assert shifted != base, "per-channel translate must shift the axis"
 
-    def test_min_extent_changes_render(self, scatter_df: pl.DataFrame) -> None:
+    def test_min_band_changes_render(self, scatter_df: pl.DataFrame) -> None:
         base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y").to_svg()
         extended = (
             fm.Chart(scatter_df)
             .mark_point()
-            .encode(x="x", y=fm.Y("y", axis=fm.Axis(min_extent=120.0)))
+            .encode(x="x", y=fm.Y("y", axis=fm.Axis(min_band=120.0)))
             .to_svg()
         )
-        assert extended != base, "per-channel min_extent must change axis-margin layout"
+        assert extended != base, "per-channel min_band must change axis-margin layout"
 
-    def test_max_extent_changes_render(self, scatter_df: pl.DataFrame) -> None:
+    def test_max_band_changes_render(self, scatter_df: pl.DataFrame) -> None:
         base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y").to_svg()
         clamped = (
             fm.Chart(scatter_df)
             .mark_point()
-            .encode(x="x", y=fm.Y("y", axis=fm.Axis(max_extent=20.0)))
+            .encode(x="x", y=fm.Y("y", axis=fm.Axis(max_band=20.0)))
             .to_svg()
         )
-        assert clamped != base, "per-channel max_extent must change axis-margin layout"
+        assert clamped != base, "per-channel max_band must change axis-margin layout"
 
     def test_zindex_changes_render(self, scatter_df: pl.DataFrame) -> None:
         base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y").to_svg()

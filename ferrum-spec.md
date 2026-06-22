@@ -720,10 +720,18 @@ Axis(title=None, *, orient=None, ticks=True, tick_count=None, tick_extra=False, 
      labels=True, label_angle=None, label_flush=True, label_overlap="parity",
      label_format=None, label_format_type=None, label_font_size=None, label_color=None,
      domain=True, domain_width=None, domain_color=None,
-     offset=None, translate=None, min_extent=None, max_extent=None,
+     offset=None, translate=None, min_band=None, max_band=None,
      title_orient=None, title_font_size=None, title_color=None, title_padding=None,
      values=None, encode=None, zindex=None)
 ```
+
+> **Vocabulary change (2026-06-22, cohesion-campaign T3.3b / D-EXTENT-1):** the
+> axis layout-band overrides were renamed `min_extent`/`max_extent` →
+> `min_band`/`max_band` so that `extent` is reserved for the data-domain sense
+> only (the layout already uses `band` internally). `min_extent`/`max_extent`
+> remain accepted as deprecated keyword aliases (emit a `DeprecationWarning`;
+> supplying both a canonical and its alias raises `TypeError`). The same rename
+> applies to `configure_axis(...)`.
 
 > **Design decision (2026-05-31, flexibility-campaign D3):** Per-channel
 > `Axis(label_format=...)` and `tick_count` are honored at layout time (the

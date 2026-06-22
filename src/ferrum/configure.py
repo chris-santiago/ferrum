@@ -21,7 +21,7 @@ def _warn_axis_xy_deprecated(*, x: bool, y: bool, stacklevel: int) -> None:
 
     ``x=True``/``y=True`` are the do-nothing defaults and never warn; only the
     meaningful (but no-op) ``False`` intent is flagged. Centralised here so the
-    direct-construction path (:meth:`AxisConfig.__post_init__`) and the
+    direct-construction path (:meth:`AxisConfig.__init__`) and the
     ``configure_axis`` mixin method share one message.
     """
     if x is False or y is False:
@@ -38,7 +38,7 @@ def _to_dict_omit_none(obj: Any) -> dict[str, Any]:
     return result
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class AxisConfig:
     """Chart-level axis configuration applied uniformly to all axes (or a specific one).
 
@@ -107,10 +107,15 @@ class AxisConfig:
         (or per-channel ``fm.Axis(orient=...)``) instead of the general ``axis``.
     translate : float, optional
         Pixel translation of the axis group perpendicular to its line.
-    min_extent : float, optional
+    min_band : float, optional
         Lower bound for the reserved axis margin band, in pixels.
-    max_extent : float, optional
+    max_band : float, optional
         Upper bound for the reserved axis margin band, in pixels.
+
+        .. deprecated:: 0.17.0
+            ``min_extent`` and ``max_extent`` are accepted as aliases for
+            ``min_band`` and ``max_band`` respectively, but are deprecated and
+            will be removed in a future release.
     tick_extra : bool, optional
         Append an extra tick at each domain boundary.
     tick_min_step : float, optional
@@ -150,24 +155,136 @@ class AxisConfig:
     grid_opacity: float | None = None
     orient: str | None = None
     translate: float | None = None
-    min_extent: float | None = None
-    max_extent: float | None = None
+    min_band: float | None = None
+    max_band: float | None = None
     tick_extra: bool | None = None
     tick_min_step: float | None = None
     title_orient: str | None = None
     zindex: int | None = None
 
-    def __post_init__(self) -> None:
-        _warn_axis_xy_deprecated(x=self.x, y=self.y, stacklevel=2)
-        if self.label_format is not None and self.label_format_raw is not None:
+    # ------------------------------------------------------------------
+    # Custom __init__ — accepts deprecated min_extent=/max_extent= aliases
+    # and maps them to the canonical min_band=/max_band= fields.
+    # The dataclass is declared with init=False so we own the full init.
+    # We use object.__setattr__ because the dataclass is frozen=True.
+    # ------------------------------------------------------------------
+
+    def __init__(
+        self,
+        x: bool = True,
+        y: bool = True,
+        label_angle: float | None = None,
+        label_font_size: float | None = None,
+        label_color: str | None = None,
+        label_format: str | None = None,
+        label_format_raw: str | None = None,
+        label_overlap: str | None = None,
+        tick_count: int | None = None,
+        tick_size: float | None = None,
+        tick_values: list | None = None,
+        title_font_size: float | None = None,
+        title_color: str | None = None,
+        title_padding: float | None = None,
+        domain: bool | None = None,
+        domain_color: str | None = None,
+        domain_width: float | None = None,
+        grid: bool | None = None,
+        grid_color: str | None = None,
+        grid_dash: list[float] | None = None,
+        grid_width: float | None = None,
+        domain_min: float | None = None,
+        domain_max: float | None = None,
+        nice: bool | None = None,
+        zero: bool | None = None,
+        label_padding: float | None = None,
+        grid_opacity: float | None = None,
+        orient: str | None = None,
+        translate: float | None = None,
+        min_band: float | None = None,
+        max_band: float | None = None,
+        tick_extra: bool | None = None,
+        tick_min_step: float | None = None,
+        title_orient: str | None = None,
+        zindex: int | None = None,
+        # Deprecated aliases — accepted with a DeprecationWarning.
+        min_extent: float | None = None,
+        max_extent: float | None = None,
+    ) -> None:
+        # Resolve deprecated aliases: min_extent → min_band, max_extent → max_band.
+        if min_extent is not None:
+            if min_band is not None:
+                raise TypeError(
+                    "Cannot supply both 'min_band=' and the deprecated 'min_extent=' alias; "
+                    "use 'min_band=' only."
+                )
+            warnings.warn(
+                "AxisConfig: 'min_extent=' is deprecated; use 'min_band=' instead. "
+                "'extent' is reserved for data-domain bounds.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            min_band = min_extent
+        if max_extent is not None:
+            if max_band is not None:
+                raise TypeError(
+                    "Cannot supply both 'max_band=' and the deprecated 'max_extent=' alias; "
+                    "use 'max_band=' only."
+                )
+            warnings.warn(
+                "AxisConfig: 'max_extent=' is deprecated; use 'max_band=' instead. "
+                "'extent' is reserved for data-domain bounds.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            max_band = max_extent
+
+        # Reuse the existing validation logic from __post_init__.
+        _warn_axis_xy_deprecated(x=x, y=y, stacklevel=2)
+        if label_format is not None and label_format_raw is not None:
             raise ValueError(
                 "AxisConfig: 'label_format' and 'label_format_raw' are mutually exclusive; "
                 "provide at most one."
             )
-        if self.label_format is not None:
+        if label_format is not None:
             from ferrum.format_presets import resolve_format
 
-            resolve_format(self.label_format)
+            resolve_format(label_format)
+
+        object.__setattr__(self, "x", x)
+        object.__setattr__(self, "y", y)
+        object.__setattr__(self, "label_angle", label_angle)
+        object.__setattr__(self, "label_font_size", label_font_size)
+        object.__setattr__(self, "label_color", label_color)
+        object.__setattr__(self, "label_format", label_format)
+        object.__setattr__(self, "label_format_raw", label_format_raw)
+        object.__setattr__(self, "label_overlap", label_overlap)
+        object.__setattr__(self, "tick_count", tick_count)
+        object.__setattr__(self, "tick_size", tick_size)
+        object.__setattr__(self, "tick_values", tick_values)
+        object.__setattr__(self, "title_font_size", title_font_size)
+        object.__setattr__(self, "title_color", title_color)
+        object.__setattr__(self, "title_padding", title_padding)
+        object.__setattr__(self, "domain", domain)
+        object.__setattr__(self, "domain_color", domain_color)
+        object.__setattr__(self, "domain_width", domain_width)
+        object.__setattr__(self, "grid", grid)
+        object.__setattr__(self, "grid_color", grid_color)
+        object.__setattr__(self, "grid_dash", grid_dash)
+        object.__setattr__(self, "grid_width", grid_width)
+        object.__setattr__(self, "domain_min", domain_min)
+        object.__setattr__(self, "domain_max", domain_max)
+        object.__setattr__(self, "nice", nice)
+        object.__setattr__(self, "zero", zero)
+        object.__setattr__(self, "label_padding", label_padding)
+        object.__setattr__(self, "grid_opacity", grid_opacity)
+        object.__setattr__(self, "orient", orient)
+        object.__setattr__(self, "translate", translate)
+        object.__setattr__(self, "min_band", min_band)
+        object.__setattr__(self, "max_band", max_band)
+        object.__setattr__(self, "tick_extra", tick_extra)
+        object.__setattr__(self, "tick_min_step", tick_min_step)
+        object.__setattr__(self, "title_orient", title_orient)
+        object.__setattr__(self, "zindex", zindex)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict, omitting None values.

@@ -108,12 +108,12 @@ class TestAxisConfigIntegration:
         assert svg_default != svg_faint, "grid_opacity should change SVG"
         assert 'opacity="0.3"' in svg_faint, "grid_opacity=0.3 should appear in SVG"
 
-    def test_min_extent(self, scatter_df: pl.DataFrame) -> None:
-        """configure_axis(min_extent=120) should change axis-margin layout."""
+    def test_min_band(self, scatter_df: pl.DataFrame) -> None:
+        """configure_axis(min_band=120) should change axis-margin layout."""
         base = fm.Chart(scatter_df).mark_point().encode(x="x", y="y")
         svg_default = base.to_svg()
-        svg_extent = base.configure_axis(min_extent=120).to_svg()
-        assert svg_default != svg_extent, "min_extent should change SVG layout"
+        svg_band = base.configure_axis(min_band=120).to_svg()
+        assert svg_default != svg_band, "min_band should change SVG layout"
 
     def test_title_orient(self, scatter_df: pl.DataFrame) -> None:
         """configure_axis(title_orient='top') should reposition axis titles."""

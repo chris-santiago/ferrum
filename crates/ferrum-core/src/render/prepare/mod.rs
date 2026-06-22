@@ -2955,8 +2955,8 @@ mod tests {
             "price",
             serde_json::json!({
                 "translate": 12.0,
-                "min_extent": 70.0,
-                "max_extent": 120.0,
+                "min_band": 70.0,
+                "max_band": 120.0,
                 "grid_opacity": 0.25,
                 "title_orient": "bottom",
                 "zindex": 1
@@ -2966,8 +2966,8 @@ mod tests {
         let prep =
             prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
         assert_eq!(prep.axes.x.overrides.translate, Some(12.0));
-        assert_eq!(prep.axes.x.overrides.min_extent, Some(70.0));
-        assert_eq!(prep.axes.x.overrides.max_extent, Some(120.0));
+        assert_eq!(prep.axes.x.overrides.min_band, Some(70.0));
+        assert_eq!(prep.axes.x.overrides.max_band, Some(120.0));
         assert_eq!(prep.axes.x.overrides.grid_opacity, Some(0.25));
         assert_eq!(prep.axes.x.overrides.title_orient, Some(AxisOrient::Bottom));
         assert_eq!(prep.axes.x.overrides.zindex, Some(1));

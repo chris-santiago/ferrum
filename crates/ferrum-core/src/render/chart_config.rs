@@ -132,7 +132,7 @@ fn default_connect_style() -> String { "lines".to_string() }
 /// callers and the keys the old `prepare.rs` hand-reader accepted.
 ///
 /// Some fields are **orphans** (no renderer honors them yet) — `orient`,
-/// `translate`, `min_extent`/`max_extent`, `tick_extra`, `tick_min_step`,
+/// `translate`, `min_band`/`max_band`, `tick_extra`, `tick_min_step`,
 /// `grid_opacity`, `title_orient`, `zindex`. They deserialize and round-trip now;
 /// their render support lands in later units.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -225,10 +225,10 @@ pub struct AxisStyleSpec {
     pub translate: Option<f64>,
     /// Orphan: lower bound for the reserved axis margin band.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_extent: Option<f64>,
+    pub min_band: Option<f64>,
     /// Orphan: upper bound for the reserved axis margin band.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_extent: Option<f64>,
+    pub max_band: Option<f64>,
     /// Orphan: offset of the axis from the plot area.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<f64>,
@@ -736,17 +736,42 @@ mod tests {
         // Orphan fields deserialize and round-trip even though no renderer honors
         // them yet (their render lands in later units).
         let s: AxisStyleSpec = serde_json::from_str(
-            r#"{"orient":"bottom","translate":3.0,"min_extent":10.0,"max_extent":40.0,"zindex":1}"#,
+            r#"{"orient":"bottom","translate":3.0,"min_band":10.0,"max_band":40.0,"zindex":1}"#,
         )
         .unwrap();
         assert_eq!(s.orient.as_deref(), Some("bottom"));
         assert_eq!(s.translate, Some(3.0));
-        assert_eq!(s.min_extent, Some(10.0));
-        assert_eq!(s.max_extent, Some(40.0));
+        assert_eq!(s.min_band, Some(10.0));
+        assert_eq!(s.max_band, Some(40.0));
         assert_eq!(s.zindex, Some(1));
         let back = serde_json::to_string(&s).unwrap();
         let reparsed: AxisStyleSpec = serde_json::from_str(&back).unwrap();
         assert_eq!(reparsed, s);
+    }
+
+    /// Wire-contract regression for D-EXTENT-1: the serde key is now `min_band`/
+    /// `max_band`. A stray `min_extent` key must be silently ignored (the struct
+    /// uses `deny_unknown_fields` only on the standalone per-channel path; the
+    /// chart-level flatten path is lenient). A `min_extent` key must NOT populate
+    /// `min_band`.
+    #[test]
+    fn axis_style_min_band_max_band_wire_keys() {
+        // New wire key is accepted.
+        let s: AxisStyleSpec =
+            serde_json::from_str(r#"{"min_band":10.0,"max_band":40.0}"#).unwrap();
+        assert_eq!(s.min_band, Some(10.0));
+        assert_eq!(s.max_band, Some(40.0));
+
+        // Old wire key (`min_extent`) is no longer a field — a stray key is
+        // silently ignored under the lenient `#[serde(default)]` path used by
+        // ChartConfig (via flatten).  We verify it does NOT populate `min_band`.
+        let via_config: crate::render::chart_config::ChartConfig =
+            serde_json::from_str(r#"{"axis_x": {"min_extent": 99.0}}"#).unwrap();
+        let axis_x = via_config.axis_x.unwrap_or_default();
+        assert_eq!(
+            axis_x.style.min_band, None,
+            "stray `min_extent` key must not populate `min_band`"
+        );
     }
 
     #[test]

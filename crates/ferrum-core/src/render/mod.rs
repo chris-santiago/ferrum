@@ -249,8 +249,8 @@ mod axis_style_fill_from_tests {
             label_padding: Some(3.0),
             orient: Some("bottom".into()),
             translate: Some(5.0),
-            min_extent: Some(10.0),
-            max_extent: Some(40.0),
+            min_band: Some(10.0),
+            max_band: Some(40.0),
             offset: Some(2.0),
             zindex: Some(1),
         }
@@ -290,8 +290,8 @@ mod axis_style_fill_from_tests {
         assert_eq!(o.label_padding, Some(3.0));
         assert_eq!(o.orient, Some(crate::layout::AxisOrient::Bottom));
         assert_eq!(o.translate, Some(5.0));
-        assert_eq!(o.min_extent, Some(10.0));
-        assert_eq!(o.max_extent, Some(40.0));
+        assert_eq!(o.min_band, Some(10.0));
+        assert_eq!(o.max_band, Some(40.0));
         assert_eq!(o.offset, Some(2.0));
         assert_eq!(o.zindex, Some(1));
     }
@@ -771,8 +771,8 @@ pub(crate) fn axis_style_fill_from(
             .transpose()?;
     }
     set(&mut o.translate, style.translate, fill_only_if_none);
-    set(&mut o.min_extent, style.min_extent, fill_only_if_none);
-    set(&mut o.max_extent, style.max_extent, fill_only_if_none);
+    set(&mut o.min_band, style.min_band, fill_only_if_none);
+    set(&mut o.max_band, style.max_band, fill_only_if_none);
     set(&mut o.grid_opacity, style.grid_opacity, fill_only_if_none);
     set(&mut o.zindex, style.zindex, fill_only_if_none);
     set(&mut o.tick_extra, style.tick_extra, fill_only_if_none);

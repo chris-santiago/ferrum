@@ -94,10 +94,10 @@ pub(crate) struct AxisStyleOverrides {
     pub translate: Option<f64>,
     /// Lower bound (px) for the reserved axis margin band — reserve at least this
     /// much. `None` → dynamic band only.
-    pub min_extent: Option<f64>,
+    pub min_band: Option<f64>,
     /// Upper bound (px) for the reserved axis margin band — cap at this much
     /// (labels may clip past it). `None` → no cap.
-    pub max_extent: Option<f64>,
+    pub max_band: Option<f64>,
     /// Per-axis grid-line opacity override `[0, 1]`. `None` → `theme.grid.grid_opacity`.
     pub grid_opacity: Option<f64>,
     /// Side/orientation of the axis title relative to its axis (e.g. a horizontal
