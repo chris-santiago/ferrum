@@ -245,7 +245,11 @@ def desugar_boxplot(
             d["y"] = Y(y_col, title=title) if title else y_col
             if y2_col:
                 d["y2"] = y2_col
-        if color_field:
+        # Attach the per-layer color encoding only when the hue is a distinct
+        # column from the categorical axis (split_hue). When color encodes the
+        # same field as cat, the color encoding is redundant with the axis, so
+        # it is suppressed to match the errorbar/errorband siblings.
+        if split_hue:
             d["color"] = color_field
         return d
 

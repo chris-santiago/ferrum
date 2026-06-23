@@ -353,7 +353,11 @@ def desugar_violin(
         body_encoding: dict = {"y": cat_enc, "x": X("violin_y", title=val_field)}
     else:
         body_encoding = {"x": cat_enc, "y": Y("violin_y", title=val_field)}
-    if color_field is not None:
+    # Attach the per-hue body fill only when the hue is a distinct column from
+    # the categorical axis (split_hue). When color encodes the same field as
+    # cat, the color encoding is redundant with the axis, so it is suppressed to
+    # match the errorbar/errorband siblings.
+    if split_hue:
         body_encoding["color"] = color_field
 
     transforms = [
@@ -401,7 +405,15 @@ def desugar_violin(
                 quart_encoding: dict = {"y": cat_enc, "x": col}
             else:
                 quart_encoding = {"x": cat_enc, "y": col}
-            if color_field is not None:
+            # The q1/median/q3 rules read the split "quart" BoxStats output
+            # (grouped by the same split_hue-gated `groupby` as the body), so
+            # attach the per-hue color only when the hue is a distinct column
+            # from the categorical axis (split_hue). When color encodes the same
+            # field as cat, the color is redundant with the axis and is
+            # suppressed, matching the body polygon and the errorbar/errorband
+            # siblings. (Contrast with the point inner above, which reads the
+            # unsplit original data and so always colors by the hue column.)
+            if split_hue:
                 quart_encoding["color"] = color_field
             layers.append(
                 _Layer(

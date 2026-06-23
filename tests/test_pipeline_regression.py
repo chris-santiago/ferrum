@@ -400,20 +400,28 @@ class TestBaselineOnText:
 
 class TestLayerSerialization:
     def test_boxplot_with_legend_false_suppresses_legend(self):
-        """color legend=False should be forwarded to boxplot layers."""
+        """color legend=False should be forwarded to boxplot layers.
+
+        The hue column ``h`` is distinct from the categorical axis ``g`` so the
+        color encoding is genuinely split (``split_hue=True``) and is attached
+        to the box layers. When the hue equals the categorical axis the color
+        encoding is redundant and is suppressed, so this test deliberately uses
+        a separate hue to exercise the legend-forwarding path.
+        """
         df = pl.DataFrame(
             {
                 "g": ["a", "a", "a", "b", "b", "b"],
+                "h": ["x", "y", "x", "y", "x", "y"],
                 "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
             }
         )
         svg_with_legend = (
-            fm.Chart(df).mark_boxplot().encode(x="g", y="y", color=fm.Color("g")).to_svg()
+            fm.Chart(df).mark_boxplot().encode(x="g", y="y", color=fm.Color("h")).to_svg()
         )
         svg_without_legend = (
             fm.Chart(df)
             .mark_boxplot()
-            .encode(x="g", y="y", color=fm.Color("g", legend=False))
+            .encode(x="g", y="y", color=fm.Color("h", legend=False))
             .to_svg()
         )
         assert "<svg" in svg_without_legend
