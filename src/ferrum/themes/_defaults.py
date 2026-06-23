@@ -6,7 +6,8 @@ import contextlib
 import contextvars
 from contextlib import AbstractContextManager
 
-from ferrum.themes import Theme, default as _ferrum_default
+from ferrum.themes._theme import Theme
+from ferrum.themes.builtins import default as _ferrum_default
 
 
 _default_theme: contextvars.ContextVar[Theme] = contextvars.ContextVar(
