@@ -221,30 +221,7 @@ impl ChartSpec {
             Some(obj) => Some(coerce_layers(obj)?),
         };
 
-        let coord = match coord {
-            None => None,
-            Some(obj) => {
-                // Accept a plain string ("flip", "cartesian") for back-compat,
-                // or a dict produced by CoordXxx._to_spec_dict() for new coord types.
-                if let Ok(s) = obj.extract::<String>() {
-                    Some(match s.as_str() {
-                        "cartesian" => crate::spec::coord::CoordKind::Cartesian {
-                            x_domain: None,
-                            y_domain: None,
-                            expand: true,
-                            clip: true,
-                        },
-                        "flip" => crate::spec::coord::CoordKind::Flip,
-                        other => return Err(PyValueError::new_err(format!(
-                            "unknown coord kind: '{other}'; expected 'cartesian', 'flip', \
-                             'fixed', 'polar', or 'geo'"
-                        ))),
-                    })
-                } else {
-                    Some(crate::pyo3_serde::from_py(obj, "coord")?)
-                }
-            }
-        };
+        let coord = coord.map(coerce_coord).transpose()?;
 
         let facet = facet
             .map(|obj| crate::pyo3_serde::from_py(obj, "facet"))
@@ -256,39 +233,11 @@ impl ChartSpec {
             .map(|obj| crate::pyo3_serde::from_py(obj, "position"))
             .transpose()?;
 
-        // Schwabish SB1 (2026-05-11): accept ``title=`` as either a plain
-        // string (back-compat) or a dict shaped by ``Title.to_spec_dict()``.
-        // Strings widen to ``TitleSpec { text }`` with default anchor; dicts
-        // round-trip through ``pyo3_serde::from_py``.
-        let title = match title {
-            None => None,
-            Some(obj) => {
-                if let Ok(s) = obj.extract::<String>() {
-                    Some(crate::spec::title::TitleSpec {
-                        text: s,
-                        ..Default::default()
-                    })
-                } else {
-                    Some(crate::pyo3_serde::from_py(obj, "title")?)
-                }
-            }
-        };
+        let title = title.map(coerce_title).transpose()?;
 
-        let selections = match selections {
-            None => Vec::new(),
-            Some(s) => serde_json::from_str(s)
-                .map_err(|e| PyValueError::new_err(format!("selections: {e}")))?,
-        };
-        let conditionals = match conditionals {
-            None => Vec::new(),
-            Some(s) => serde_json::from_str(s)
-                .map_err(|e| PyValueError::new_err(format!("conditionals: {e}")))?,
-        };
-        let params = match params {
-            None => Vec::new(),
-            Some(s) => serde_json::from_str(s)
-                .map_err(|e| PyValueError::new_err(format!("params: {e}")))?,
-        };
+        let selections = parse_json_field(selections, "selections")?;
+        let conditionals = parse_json_field(conditionals, "conditionals")?;
+        let params = parse_json_field(params, "params")?;
 
         Ok(ChartSpec {
             data,
@@ -494,6 +443,67 @@ impl ChartSpec {
     }
 }
 
+/// Deserialize an optional JSON string into a `Vec<T>`, mapping a parse error
+/// to a `ValueError` prefixed with the field `name` (SPEC-08).
+///
+/// `None` widens to the empty vec — the shared shape of the `selections`,
+/// `conditionals`, and `params` constructor fields. Mirrors the per-field
+/// `json_round` helper in `EncodingSpec::new`; single-sourcing it keeps the
+/// three blocks from drifting in error text or default behavior.
+fn parse_json_field<T: for<'de> serde::Deserialize<'de>>(
+    opt: Option<&str>,
+    name: &str,
+) -> PyResult<Vec<T>> {
+    match opt {
+        None => Ok(Vec::new()),
+        Some(s) => serde_json::from_str(s)
+            .map_err(|e| PyValueError::new_err(format!("{name}: {e}"))),
+    }
+}
+
+/// Coerce the `coord=` argument into an optional [`CoordKind`].
+///
+/// Accepts a plain string (`"flip"`, `"cartesian"`) for back-compat, or a dict
+/// produced by `CoordXxx._to_spec_dict()` for the typed coord kinds. Pulled out
+/// of `ChartSpec::new` so the constructor reads as a flat sequence of named
+/// coercions (SPEC-08); the string/dict widening logic is unchanged.
+fn coerce_coord(obj: &Bound<'_, PyAny>) -> PyResult<CoordKind> {
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok(match s.as_str() {
+            "cartesian" => CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            "flip" => CoordKind::Flip,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown coord kind: '{other}'; expected 'cartesian', 'flip', \
+                     'fixed', 'polar', or 'geo'"
+                )))
+            }
+        });
+    }
+    crate::pyo3_serde::from_py(obj, "coord")
+}
+
+/// Coerce the `title=` argument into a [`TitleSpec`](crate::spec::title::TitleSpec).
+///
+/// Schwabish SB1 (2026-05-11): accept `title=` as either a plain string
+/// (back-compat, widening to `TitleSpec { text }` with default anchor) or a dict
+/// shaped by `Title.to_spec_dict()`. Pulled out of `ChartSpec::new` so the
+/// constructor reads as orchestration only (SPEC-08); behavior is unchanged.
+fn coerce_title(obj: &Bound<'_, PyAny>) -> PyResult<crate::spec::title::TitleSpec> {
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok(crate::spec::title::TitleSpec {
+            text: s,
+            ..Default::default()
+        });
+    }
+    crate::pyo3_serde::from_py(obj, "title")
+}
+
 fn coerce_encoding(obj: &Bound<'_, PyAny>) -> PyResult<EncodingSpec> {
     if let Ok(s) = obj.extract::<String>() {
         if s.is_empty() {
@@ -596,6 +606,32 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn test_parse_json_field_none_is_empty() {
+        // SPEC-08: None widens to the empty vec (the selections/conditionals/
+        // params default), single-sourced so the three blocks can't drift.
+        let out: Vec<i64> = parse_json_field(None, "selections").unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_parse_json_field_parses_array() {
+        let out: Vec<i64> = parse_json_field(Some("[1,2,3]"), "params").unwrap();
+        assert_eq!(out, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_parse_json_field_error_is_name_prefixed() {
+        // The per-field error text ("<name>: ...") is preserved verbatim so the
+        // Python ValueError message is byte-identical to the old inline blocks.
+        let err = parse_json_field::<i64>(Some("{not json"), "conditionals").unwrap_err();
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let msg = err.value(py).to_string();
+            assert!(msg.starts_with("conditionals: "), "error text was: {msg}");
+        });
     }
 
     #[test]

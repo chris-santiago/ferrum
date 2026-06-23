@@ -1431,7 +1431,10 @@ fn emit_warnings(py: Python<'_>, warnings: &[super::RenderWarning]) -> PyResult<
     }
     let warnings_mod = py.import("warnings")?;
     for w in warnings {
-        let msg = format!("{w:?}");
+        // Forward the intentional Display contract (a stable user-facing
+        // sentence), not the derived Debug of the enum's internal fields
+        // (SEAM-07). See `RenderWarning`'s Display impl in `render/mod.rs`.
+        let msg = format!("{w}");
         warnings_mod.call_method1("warn", (msg,))?;
     }
     Ok(())

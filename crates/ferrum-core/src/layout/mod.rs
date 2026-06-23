@@ -117,6 +117,42 @@ pub enum LayoutWarning {
     EmptyPartitions { keys: Vec<String> },
 }
 
+impl std::fmt::Display for LayoutWarning {
+    /// User-facing warning text forwarded to Python's ``warnings.warn``.
+    ///
+    /// These messages are an intentional, stable Display contract — not the
+    /// derived Debug of the enum's internal fields. Callers (and the test
+    /// suite) may match on the wording below; restructuring a variant's fields
+    /// must not change the sentence a user sees unless deliberately revised.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LayoutWarning::PanelCollapsed { panel_index } => write!(
+                f,
+                "panel {panel_index} collapsed to zero size and was not drawn"
+            ),
+            LayoutWarning::LabelsElided { axis, count } => write!(
+                f,
+                "{count} tick label(s) on axis {axis} were elided to avoid overlap"
+            ),
+            LayoutWarning::LegendOverflowed { entries_dropped } => write!(
+                f,
+                "legend overflowed; {entries_dropped} entry(ies) were dropped"
+            ),
+            LayoutWarning::PanelsDropped { count, keys } => write!(
+                f,
+                "{count} facet panel(s) were dropped because the grid is smaller \
+                 than the number of facet groups: {}",
+                keys.join("; ")
+            ),
+            LayoutWarning::EmptyPartitions { keys } => write!(
+                f,
+                "facet grid has empty cell(s) with no data: {}",
+                keys.join("; ")
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum LayoutError {
     InvalidViewport { width: f64, height: f64 },

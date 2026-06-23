@@ -708,8 +708,10 @@ def test_d5_boxen_sort_descending(sort_boxen_df: pl.DataFrame) -> None:
             .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
             .to_svg()
         )
-    sort_ignored = any("SortSpecIgnored" in str(ww.message) for ww in w)
-    assert not sort_ignored, "sort='-y' on mark_boxen must not emit SortSpecIgnored"
+    # SEAM-07: the Rust SortSpecIgnored warning now forwards a stable Display
+    # sentence ("sort spec could not be applied (...)"), not the Debug variant.
+    sort_ignored = any("sort spec could not be applied" in str(ww.message) for ww in w)
+    assert not sort_ignored, "sort='-y' on mark_boxen must not emit a sort-ignored warning"
 
     # Check 2: aggregate sort lives on the LetterValue transform, not the layer.
     # Z≈80 > B≈50 > A≈20, so descending by sum reorders the emitted group rows.
@@ -1329,7 +1331,8 @@ def test_d9a_twelve_row_facet_kde_renders_nonblank(month_temp_df: pl.DataFrame) 
         c = fm.displot(month_temp_df, x="temp", row="month", kind="kde", fill=True)
         svg = c.to_svg()
 
-    empty_panel_warns = [x for x in w if "EmptyPanel" in str(x.message)]
+    # SEAM-07: the empty-panel warning now reads "panel N is too small to render".
+    empty_panel_warns = [x for x in w if "too small to render" in str(x.message)]
     assert not empty_panel_warns, (
         f"displot with 12 row facets must not emit EmptyPanel; got {[str(x.message) for x in empty_panel_warns]}"
     )
@@ -1347,7 +1350,8 @@ def test_d9a_twelve_row_facet_hist_renders_nonblank(month_temp_df: pl.DataFrame)
         c = fm.displot(month_temp_df, x="temp", row="month", kind="hist")
         svg = c.to_svg()
 
-    empty_panel_warns = [x for x in w if "EmptyPanel" in str(x.message)]
+    # SEAM-07: the empty-panel warning now reads "panel N is too small to render".
+    empty_panel_warns = [x for x in w if "too small to render" in str(x.message)]
     assert not empty_panel_warns, (
         f"12-row hist facet must not emit EmptyPanel; got {[str(x.message) for x in empty_panel_warns]}"
     )
@@ -1371,7 +1375,8 @@ def test_d9a_height_param_is_per_panel(month_temp_df: pl.DataFrame) -> None:
         c = fm.displot(month_temp_df, x="temp", row="month", kind="kde", fill=True, height=80)
         svg = c.to_svg()
 
-    empty_panel_warns = [x for x in w if "EmptyPanel" in str(x.message)]
+    # SEAM-07: the empty-panel warning now reads "panel N is too small to render".
+    empty_panel_warns = [x for x in w if "too small to render" in str(x.message)]
     assert not empty_panel_warns, (
         f"displot height=80/panel must not emit EmptyPanel; got {[str(x.message) for x in empty_panel_warns]}"
     )
@@ -2048,7 +2053,8 @@ def test_cleanup_three_digit_hex_parses(three_cat_df: pl.DataFrame) -> None:
             .encode(x="cat:N", y="val:Q", color=Color("cat:N", scale=scale))
             .to_svg()
         )
-    parse_failure_warns = [str(x.message) for x in w if "ColorRangeParseFailure" in str(x.message)]
+    # SEAM-07: the parse-failure warning now reads "could not parse color '...'".
+    parse_failure_warns = [str(x.message) for x in w if "could not parse color" in str(x.message)]
     assert not parse_failure_warns, (
         f"3-digit hex in OrdinalScale.range must not emit ColorRangeParseFailure; "
         f"got: {parse_failure_warns}"
@@ -2376,9 +2382,9 @@ def test_rf2_boxen_sort_descending_pandas(sort_boxen_pandas_df) -> None:
             .encode(x=fm.X("cat:N", sort="-y"), y="val:Q")
             .to_svg()
         )
-    sort_ignored = any("SortSpecIgnored" in str(ww.message) for ww in w)
+    sort_ignored = any("sort spec could not be applied" in str(ww.message) for ww in w)
     assert not sort_ignored, (
-        "sort='-y' on mark_boxen with pandas input must not emit SortSpecIgnored"
+        "sort='-y' on mark_boxen with pandas input must not emit a sort-ignored warning"
     )
 
     # Check 2: the aggregate sort lives on the LetterValue transform, not the layer.
@@ -2425,9 +2431,9 @@ def test_rf2_boxen_sort_descending_pyarrow() -> None:
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         (fm.Chart(table).mark_boxen().encode(x=fm.X("cat:N", sort="-y"), y="val:Q").to_svg())
-    sort_ignored = any("SortSpecIgnored" in str(ww.message) for ww in w)
+    sort_ignored = any("sort spec could not be applied" in str(ww.message) for ww in w)
     assert not sort_ignored, (
-        "sort='-y' on mark_boxen with PyArrow Table input must not emit SortSpecIgnored"
+        "sort='-y' on mark_boxen with PyArrow Table input must not emit a sort-ignored warning"
     )
 
     chart_resolved = (

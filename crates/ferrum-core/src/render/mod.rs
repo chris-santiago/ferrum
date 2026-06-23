@@ -152,6 +152,52 @@ pub enum RenderWarning {
     SortSpecIgnored { reason: String },
 }
 
+impl std::fmt::Display for RenderWarning {
+    /// User-facing warning text forwarded to Python's ``warnings.warn`` by
+    /// [`binding::emit_warnings`](crate::render::binding).
+    ///
+    /// This is an intentional, stable Display contract — not the derived Debug
+    /// of the enum's internal fields. The previous behavior leaked the Rust
+    /// variant/struct shape (e.g. `UnsupportedEncodingCombo { channel: "x" }`)
+    /// across the Python boundary; these sentences are the supported message
+    /// surface instead. `RenderWarning::Layout` delegates to
+    /// [`LayoutWarning`]'s own Display so the layout messages live next to that
+    /// enum.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RenderWarning::Layout(w) => write!(f, "{w}"),
+            RenderWarning::OutOfDomainRows { mark, count } => write!(
+                f,
+                "{count} {mark} row(s) fell outside the scale domain and were not drawn"
+            ),
+            RenderWarning::ColorPaletteOverflowed { categories } => write!(
+                f,
+                "color palette has fewer entries than the {categories} categories; \
+                 colors were recycled"
+            ),
+            RenderWarning::ShapePaletteOverflowed { categories } => write!(
+                f,
+                "shape palette has fewer entries than the {categories} categories; \
+                 shapes were recycled"
+            ),
+            RenderWarning::EmptyPanel { panel_index } => write!(
+                f,
+                "panel {panel_index} is too small to render and was left empty"
+            ),
+            RenderWarning::ColorRangeParseFailure { entry } => write!(
+                f,
+                "could not parse color '{entry}'; the explicit color range was \
+                 discarded in favor of the theme palette"
+            ),
+            RenderWarning::SortSpecIgnored { reason } => write!(
+                f,
+                "sort spec could not be applied ({reason}); categories fall back \
+                 to insertion order"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RenderOutput<T> {
     pub bytes: T,
@@ -189,6 +235,42 @@ mod tests {
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, w);
         }
+    }
+
+    #[test]
+    fn render_warning_display_is_intentional_not_debug() {
+        use crate::layout::LayoutWarning;
+        // Display must be a human sentence, never the derived-Debug variant
+        // shape (SEAM-07). The substrings below are the stable contract the
+        // Python warning-filter tests match on.
+        let sort = RenderWarning::SortSpecIgnored {
+            reason: "missing field".into(),
+        };
+        let text = format!("{sort}");
+        assert!(
+            text.contains("sort spec could not be applied"),
+            "Display text was: {text}"
+        );
+        assert!(text.contains("missing field"), "Display text was: {text}");
+        // Display must NOT leak the variant name (the old Debug behavior did).
+        assert!(!text.contains("SortSpecIgnored"), "Display leaked Debug: {text}");
+
+        let parse_fail = RenderWarning::ColorRangeParseFailure {
+            entry: "#zzz".into(),
+        };
+        assert!(format!("{parse_fail}").contains("could not parse color"));
+
+        let empty = RenderWarning::EmptyPanel { panel_index: 2 };
+        assert!(format!("{empty}").contains("too small to render"));
+
+        // `Layout` delegates to LayoutWarning's Display and carries the keys.
+        let dropped = RenderWarning::Layout(LayoutWarning::PanelsDropped {
+            count: 1,
+            keys: vec!["col_cat=c2".into()],
+        });
+        let dropped_text = format!("{dropped}");
+        assert!(dropped_text.contains("facet panel(s) were dropped"));
+        assert!(dropped_text.contains("col_cat=c2"));
     }
 
     #[test]
