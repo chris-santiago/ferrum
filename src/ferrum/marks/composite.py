@@ -39,6 +39,12 @@ from ferrum.marks._mark_kwargs import (
 # runtime-built strings (which may not be interned).
 _MISSING = object()
 
+# Number of nested letter-value bands ``desugar_boxen`` builds.  This single
+# constant drives both the ``range`` loop that creates the ``depth_*`` layers
+# and the ``register_layer_names("boxen", ...)`` call that declares their names,
+# so the two cannot drift apart.
+_BOXEN_K_MAX = 6
+
 
 def _resolve_deprecated_extent(
     canonical_name: str,
@@ -742,14 +748,15 @@ def desugar_boxen(
         ),
     ]
 
-    # Per-depth named outputs (lv_depth_1 … lv_depth_6) let each rect layer
-    # read its own slice — no overlap. K_MAX = 6 visible bands; for data with
-    # fewer effective depths, unused outputs are zero-row batches and render
-    # nothing.
-    K_MAX = 6
+    # Per-depth named outputs (lv_depth_1 … lv_depth_{_BOXEN_K_MAX}) let each
+    # rect layer read its own slice (no overlap). ``_BOXEN_K_MAX`` visible
+    # bands; for data with fewer effective depths, unused outputs are zero-row
+    # batches and render nothing.  The same constant derives the registry's
+    # ``depth_*`` names below, so the loop bound and the registered set cannot
+    # drift apart.
     layers: list = []
-    for k in range(1, K_MAX + 1):
-        opacity = 0.85 - (0.55 * (k - 1) / max(K_MAX - 1, 1))
+    for k in range(1, _BOXEN_K_MAX + 1):
+        opacity = 0.85 - (0.55 * (k - 1) / max(_BOXEN_K_MAX - 1, 1))
         enc = (
             {"x": "lower", "x2": "upper", "y": group_enc_y}
             if horizontal
@@ -796,18 +803,7 @@ def desugar_boxen(
 
 register_layer_names(
     "boxen",
-    frozenset(
-        {
-            "depth_1",
-            "depth_2",
-            "depth_3",
-            "depth_4",
-            "depth_5",
-            "depth_6",
-            "median",
-            "outlier",
-        }
-    ),
+    frozenset({f"depth_{k}" for k in range(1, _BOXEN_K_MAX + 1)}) | {"median", "outlier"},
 )
 
 

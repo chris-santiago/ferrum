@@ -88,6 +88,22 @@ class MarkDesugarResult:
     ['ribbon', 'line']
     >>> layered.mark is None
     True
+
+    An empty layered result is still layered mode (``layers`` present, even if
+    no layers are built for this configuration):
+
+    >>> MarkDesugarResult(layers=[]).layers
+    []
+
+    The two modes are mutually exclusive.  Setting both ``mark`` and ``layers``
+    (or neither) is rejected at construction:
+
+    >>> MarkDesugarResult(mark="bar", layers=[])  # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+    ValueError: MarkDesugarResult must be either layered ...
+    >>> MarkDesugarResult()  # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+    ValueError: MarkDesugarResult must be either layered ...
     """
 
     mark: Optional[str] = None
@@ -96,6 +112,22 @@ class MarkDesugarResult:
     position: Any = None
     layers: Optional[list] = None
     data: Any = None  # synthetic data (e.g. desugar_function)
+
+    def __post_init__(self) -> None:
+        """Enforce the layered-XOR-single-mark invariant.
+
+        Exactly one mode must be populated, discriminated by presence
+        (``is not None``), not truthiness: an empty ``layers=[]`` is still a
+        valid layered result.  A result that sets both ``mark`` and ``layers``,
+        or neither, is contradictory and rejected.
+        """
+        if (self.layers is not None) == (self.mark is not None):
+            raise ValueError(
+                "MarkDesugarResult must be either layered (layers set, mark "
+                "None) or single-mark (mark set, layers None), not both or "
+                f"neither; got mark={self.mark!r}, "
+                f"layers={'set' if self.layers is not None else 'None'}."
+            )
 
 
 @dataclass(frozen=True)

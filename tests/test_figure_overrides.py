@@ -182,6 +182,75 @@ class TestConditionalSubLayers:
             fm.calibration_chart(model, X, y, mark={"bogus": False})
 
 
+class TestCvScoresBoxOverride:
+    """Regression: cv_scores box sub-layer overrides raised 'Unknown sub-layer'
+    (MARK-05, T6.1b).
+
+    ``mark_cv_scores(kind="box")`` delegates to ``desugar_boxplot`` and builds
+    boxplot's six sub-layers, but the ``cv_scores`` registry formerly declared
+    only ``{point, bar, mean}``. A valid box sub-layer override therefore failed
+    catalog validation and raised ``ValueError("Unknown sub-layer")``. The
+    registry now declares the union of all three kinds' names, so the override
+    applies. These tests fail on the old registry and pass on the fixed one.
+    """
+
+    @staticmethod
+    def _cv_scores_box_chart():
+        # cv_scores schema as emitted by ModelSource.cv_scores(): one row per
+        # (fold, split) with fold/split/score columns. Built directly to keep
+        # the test independent of sklearn.
+        df = pl.DataFrame(
+            {
+                "fold": [0, 1, 2, 0, 1, 2],
+                "split": ["test", "test", "test", "train", "train", "train"],
+                "score": [0.81, 0.78, 0.84, 0.91, 0.93, 0.90],
+            }
+        )
+        return fm.Chart(df).mark_cv_scores(kind="box")
+
+    def test_box_sublayer_override_applies(self):
+        chart = self._cv_scores_box_chart()
+        overridden = _apply_overrides(chart, mark={"box": {"stroke_width": 5}})
+        resolved = overridden._resolve_pending()
+        box_layer = next(ly for ly in resolved._layers if ly.name == "box")
+        assert box_layer.mark_kwargs.get("stroke_width") == 5
+
+    def test_box_sublayer_override_does_not_raise(self):
+        chart = self._cv_scores_box_chart()
+        # Must not raise ValueError("Unknown sub-layer"): "box" is a valid name.
+        _apply_overrides(chart, mark={"box": {"opacity": 0.4}})
+
+    def test_box_sublayer_suppression_applies(self):
+        chart = self._cv_scores_box_chart()
+        overridden = _apply_overrides(chart, mark={"outlier": False})
+        assert "outlier" not in overridden.layer_names
+
+    def test_borrowed_box_name_is_in_catalog(self):
+        # The borrowed boxplot sub-layer names are now registered under cv_scores.
+        registered = LAYER_NAME_CATALOG["cv_scores"]
+        for name in ("whisker", "lower_cap", "upper_cap", "box", "median", "outlier"):
+            assert name in registered
+
+    def test_bar_kind_unaffected_by_box_names(self):
+        # The newly-registered box names are benign no-op override targets on the
+        # bar kind: overriding the active `bar` layer still applies, and the
+        # box-only names neither raise nor alter the bar chart's layers.
+        df = pl.DataFrame(
+            {
+                "fold": [0, 1, 2],
+                "split": ["test", "test", "test"],
+                "score": [0.81, 0.78, 0.84],
+                "_mean_score": [0.81, 0.81, 0.81],
+            }
+        )
+        chart = fm.Chart(df).mark_cv_scores(kind="bar")
+        overridden = _apply_overrides(chart, mark={"bar": {"opacity": 0.5}})
+        resolved = overridden._resolve_pending()
+        assert {ly.name for ly in resolved._layers} == {"bar", "mean"}
+        bar_layer = next(ly for ly in resolved._layers if ly.name == "bar")
+        assert bar_layer.mark_kwargs.get("opacity") == 0.5
+
+
 # ---------------------------------------------------------------------------
 # Encode overrides
 # ---------------------------------------------------------------------------

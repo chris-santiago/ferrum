@@ -243,7 +243,27 @@ def desugar_cv_scores(
     raise ValueError(f"mark_cv_scores(kind={kind!r}) — expected 'box', 'bar', or 'strip'.")
 
 
-register_layer_names("cv_scores", frozenset({"point", "bar", "mean"}))
+# cv_scores registers the UNION of all three kinds' sub-layer names so a valid
+# override resolves regardless of `kind`: strip -> {point}; bar -> {bar, mean};
+# box delegates to desugar_boxplot and borrows its six sub-layer names
+# ({whisker, lower_cap, upper_cap, box, median, outlier}). Names absent from the
+# active kind are benign no-op override targets (the catalog's documented contract).
+register_layer_names(
+    "cv_scores",
+    frozenset(
+        {
+            "point",
+            "bar",
+            "mean",
+            "whisker",
+            "lower_cap",
+            "upper_cap",
+            "box",
+            "median",
+            "outlier",
+        }
+    ),
+)
 
 
 def desugar_alpha_selection(

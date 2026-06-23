@@ -34,6 +34,7 @@ def doctests(session: nox.Session) -> None:
         "run",
         "pytest",
         "--doctest-modules",
+        "src/ferrum/_layer.py",
         "src/ferrum/marks/composite.py",
         "src/ferrum/marks/statistical.py",
         "src/ferrum/marks/heavy_stat.py",
