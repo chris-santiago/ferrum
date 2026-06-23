@@ -99,11 +99,39 @@ pub struct ContinuousScaleCommon {
 }
 
 /// Scale override on an encoding channel. Honored by scale_resolve.rs in Phase 8a.
-/// Mirrors the Python ScaleLog/ScalePow/etc. classes via tagged enum.
 ///
-/// Uses `tag = "type"` (NOT the spec-module convention `tag = "kind"`) for Vega-Lite wire-format
-/// alignment — see design spec §11 row 16 ("Vega-Lite interop stays open without translation").
-/// This is the only tagged enum in this module that uses `"type"`; the choice is intentional.
+/// **`ScaleSpec` is the canonical wire + render contract for scales.** It is what
+/// serializes across the Arrow/JSON boundary and what the render path resolves into
+/// compute scales (`ScaleKind`) in `render::scale_resolve::positional`. The resolution
+/// mapping is:
+///
+/// | `ScaleSpec` variant | `ScaleKind` produced |
+/// |---|---|
+/// | `Linear` | `ScaleKind::Linear` |
+/// | `Log` | `ScaleKind::Log` |
+/// | `Time`, `Utc` | `ScaleKind::Time` |
+/// | `Symlog` | `ScaleKind::Symlog` |
+/// | `Pow` | `ScaleKind::Pow` (stored exponent) |
+/// | `Sqrt` | `ScaleKind::Pow(0.5)` |
+/// | `Ordinal` | `ScaleKind::Ordinal` |
+/// | `Band` | `ScaleKind::Ordinal` (`padding_inner` as effective padding) |
+/// | `Point` | `ScaleKind::Ordinal` (outer `padding`) |
+/// | `Sequential`, `Diverging`, `Quantize` | `ScaleKind::Linear` (positional fallback) |
+/// | `BinOrdinal` | `ScaleKind::Linear` |
+///
+/// **Dual-representation hazard.** The user-facing PyO3 `*Scale` classes in
+/// `crate::scale` (BandScale, PointScale, QuantileScale, etc.) are a **separate,
+/// parallel construction surface** with independent field sets, defaults, and
+/// validation. There is no `From`, `TryFrom`, or `to_scale_spec` link between them
+/// and this enum, so the two can drift independently. When adding or changing a scale
+/// type, both representations must be updated in lockstep. The full reconciliation
+/// (a single canonical representation, or a `to_scale_spec` bridge so Python emits
+/// `ScaleSpec` JSON directly) is a tracked follow-up.
+///
+/// Uses `tag = "type"` (NOT the spec-module convention `tag = "kind"`) for Vega-Lite
+/// wire-format alignment — see design spec §11 row 16 ("Vega-Lite interop stays open
+/// without translation"). This is the only tagged enum in this module that uses
+/// `"type"`; the choice is intentional.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ScaleSpec {
