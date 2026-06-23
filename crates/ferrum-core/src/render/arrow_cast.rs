@@ -15,9 +15,6 @@
 
 use arrow::array::{
     Array, BooleanArray,
-    Date32Array, Date64Array,
-    DurationMillisecondArray, DurationMicrosecondArray,
-    DurationNanosecondArray, DurationSecondArray,
     Float32Array, Float64Array,
     Int16Array, Int32Array, Int64Array, Int8Array,
     LargeStringArray, StringArray,
@@ -29,27 +26,6 @@ use arrow::datatypes::{DataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
 
 use super::RenderError;
-
-/// Multiplier to convert a Duration tick in the given `unit` to nanoseconds.
-///
-/// Both `col_as_f64` and `min_max_f64` normalize Duration values to nanoseconds
-/// so that the two functions always agree numerically (T0-closeout / D-DTYPE-1).
-/// This is the single source of truth for that scale factor; a third divergence
-/// is unrepresentable because both callers delegate here.
-///
-/// Values on live Python paths are pre-cast to `Timestamp(ms)` by
-/// `_coerce.normalize_for_rust` before crossing the CDI boundary, so these arms
-/// are unreachable in production. The helper is retained for internal callers and
-/// will be deleted together with its call sites in T6.2.
-#[inline]
-fn duration_unit_scale(unit: &TimeUnit) -> f64 {
-    match unit {
-        TimeUnit::Nanosecond  => 1.0,
-        TimeUnit::Microsecond => 1_000.0,
-        TimeUnit::Millisecond => 1_000_000.0,
-        TimeUnit::Second      => 1_000_000_000.0,
-    }
-}
 
 /// Category label for a null value in an ordinal/nominal column (FA-9).
 ///
@@ -69,12 +45,14 @@ pub(crate) const NULL_CATEGORY: &str = "null";
 /// different coverage (RSUP-02 / D-DTYPE-1).
 ///
 /// Covered set: Float64/32, Int64/32/16/8, UInt64/32/16/8,
-/// Timestamp(any unit), Duration(any unit), Date32, Date64.
+/// Timestamp(any unit).
 ///
-/// Note: on live Python paths Date32/Date64/Duration never arrive — they
-/// are pre-cast to Timestamp(ms) by `_coerce.normalize_for_rust` before
-/// crossing the CDI boundary. The predicate covers them so that internal
-/// callers and future code paths are consistent with `col_as_f64`.
+/// Note: `Date32`/`Date64`/`Duration` are deliberately NOT covered. Every batch
+/// reaching the render layer has already passed through
+/// `_coerce.normalize_for_rust`, which pre-casts those dtypes to `Timestamp(ms)`
+/// before crossing the CDI boundary, so they can never arrive here. Keeping them
+/// out of the predicate means the predicate, `col_as_f64`, and `min_max_f64` all
+/// agree that they are unsupported (RSUP-02).
 pub(crate) fn supported_numeric_dtype(dtype: &DataType) -> bool {
     matches!(
         dtype,
@@ -82,9 +60,6 @@ pub(crate) fn supported_numeric_dtype(dtype: &DataType) -> bool {
             | DataType::Int64 | DataType::Int32 | DataType::Int16 | DataType::Int8
             | DataType::UInt64 | DataType::UInt32 | DataType::UInt16 | DataType::UInt8
             | DataType::Timestamp(_, _)
-            | DataType::Duration(_)
-            | DataType::Date32
-            | DataType::Date64
     )
 }
 
@@ -106,7 +81,10 @@ pub(crate) fn is_numeric(dtype: &DataType) -> bool {
 /// dtypes — matches the prior `draw::col_as_f64` semantics exactly.
 ///
 /// Supported dtypes: Float64/32, Int64/32/16/8, UInt64/32/16/8,
-/// TimestampMillisecond.
+/// Timestamp(any unit). `Date32`/`Date64`/`Duration` are pre-cast to
+/// `Timestamp(ms)` by `_coerce.normalize_for_rust` before reaching the render
+/// layer, so they hit the unsupported-dtype error arm here (and never occur on
+/// live paths); see [`supported_numeric_dtype`].
 pub(crate) fn col_as_f64(batch: &RecordBatch, field: &str) -> Result<Vec<Option<f64>>, RenderError> {
     let col = batch.column_by_name(field)
         .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
@@ -134,43 +112,6 @@ pub(crate) fn col_as_f64(batch: &RecordBatch, field: &str) -> Result<Vec<Option<
         DataType::Timestamp(TimeUnit::Microsecond, _) => collect_as!(TimestampMicrosecondArray),
         DataType::Timestamp(TimeUnit::Millisecond, _) => collect_as!(TimestampMillisecondArray),
         DataType::Timestamp(TimeUnit::Second, _) => collect_as!(TimestampSecondArray),
-        // Duration and Date arms below are unreachable on live Python paths:
-        // `_coerce.normalize_for_rust` pre-casts both to Timestamp(ms) before
-        // the CDI boundary crossing. They remain for correctness of internal
-        // callers and are tracked for removal in T6.2.
-        //
-        // Duration values are normalized to nanoseconds via `duration_unit_scale`
-        // so this function and `min_max_f64` always agree numerically (T0-closeout).
-        DataType::Duration(TimeUnit::Nanosecond) => {
-            let scale = duration_unit_scale(&TimeUnit::Nanosecond);
-            let a = col.as_any().downcast_ref::<DurationNanosecondArray>().expect("dtype matched");
-            Ok(a.iter().map(|v| v.map(|x| x as f64 * scale)).collect())
-        }
-        DataType::Duration(TimeUnit::Microsecond) => {
-            let scale = duration_unit_scale(&TimeUnit::Microsecond);
-            let a = col.as_any().downcast_ref::<DurationMicrosecondArray>().expect("dtype matched");
-            Ok(a.iter().map(|v| v.map(|x| x as f64 * scale)).collect())
-        }
-        DataType::Duration(TimeUnit::Millisecond) => {
-            let scale = duration_unit_scale(&TimeUnit::Millisecond);
-            let a = col.as_any().downcast_ref::<DurationMillisecondArray>().expect("dtype matched");
-            Ok(a.iter().map(|v| v.map(|x| x as f64 * scale)).collect())
-        }
-        DataType::Duration(TimeUnit::Second) => {
-            let scale = duration_unit_scale(&TimeUnit::Second);
-            let a = col.as_any().downcast_ref::<DurationSecondArray>().expect("dtype matched");
-            Ok(a.iter().map(|v| v.map(|x| x as f64 * scale)).collect())
-        }
-        // Date32: days since epoch → epoch-milliseconds (matches JS Date / Altair convention).
-        DataType::Date32 => {
-            let a = col.as_any().downcast_ref::<Date32Array>().expect("dtype matched");
-            Ok(a.iter().map(|v| v.map(|d| d as f64 * 86_400_000.0)).collect())
-        }
-        // Date64: milliseconds since epoch → f64 directly.
-        DataType::Date64 => {
-            let a = col.as_any().downcast_ref::<Date64Array>().expect("dtype matched");
-            Ok(a.iter().map(|v| v.map(|d| d as f64)).collect())
-        }
         other => Err(RenderError::UnsupportedDtype {
             field: field.to_string(),
             dtype: format!("{other:?}"),
@@ -364,53 +305,11 @@ pub(crate) fn min_max_f64(col: &dyn Array) -> Result<(f64, f64), String> {
         DataType::Timestamp(TimeUnit::Microsecond, _) => min_max_int!(TimestampMicrosecondArray, i64),
         DataType::Timestamp(TimeUnit::Millisecond, _) => min_max_int!(TimestampMillisecondArray, i64),
         DataType::Timestamp(TimeUnit::Second, _) => min_max_int!(TimestampSecondArray, i64),
-        // Duration and Date arms: unreachable on live Python paths because
-        // `_coerce.normalize_for_rust` pre-casts them to Timestamp(ms) before
-        // crossing the CDI boundary. Covered here so that `min_max_f64` agrees
-        // with `col_as_f64` and `supported_numeric_dtype` (D-DTYPE-1 / T6.2).
-        //
-        // Duration values are normalized to nanoseconds via `duration_unit_scale`
-        // so this function and `col_as_f64` always agree numerically (T0-closeout).
-        DataType::Duration(TimeUnit::Nanosecond) => {
-            let scale = duration_unit_scale(&TimeUnit::Nanosecond);
-            let a = col.as_any().downcast_ref::<DurationNanosecondArray>().expect("dtype matched");
-            let min = a.iter().flatten().fold(i64::MAX, i64::min) as f64 * scale;
-            let max = a.iter().flatten().fold(i64::MIN, i64::max) as f64 * scale;
-            Ok((min, max))
-        }
-        DataType::Duration(TimeUnit::Microsecond) => {
-            let scale = duration_unit_scale(&TimeUnit::Microsecond);
-            let a = col.as_any().downcast_ref::<DurationMicrosecondArray>().expect("dtype matched");
-            let min = a.iter().flatten().fold(i64::MAX, i64::min) as f64 * scale;
-            let max = a.iter().flatten().fold(i64::MIN, i64::max) as f64 * scale;
-            Ok((min, max))
-        }
-        DataType::Duration(TimeUnit::Millisecond) => {
-            let scale = duration_unit_scale(&TimeUnit::Millisecond);
-            let a = col.as_any().downcast_ref::<DurationMillisecondArray>().expect("dtype matched");
-            let min = a.iter().flatten().fold(i64::MAX, i64::min) as f64 * scale;
-            let max = a.iter().flatten().fold(i64::MIN, i64::max) as f64 * scale;
-            Ok((min, max))
-        }
-        DataType::Duration(TimeUnit::Second) => {
-            let scale = duration_unit_scale(&TimeUnit::Second);
-            let a = col.as_any().downcast_ref::<DurationSecondArray>().expect("dtype matched");
-            let min = a.iter().flatten().fold(i64::MAX, i64::min) as f64 * scale;
-            let max = a.iter().flatten().fold(i64::MIN, i64::max) as f64 * scale;
-            Ok((min, max))
-        }
-        DataType::Date32 => {
-            let a = col.as_any().downcast_ref::<Date32Array>().expect("Date32");
-            let min = a.iter().flatten().fold(i32::MAX, i32::min) as f64 * 86_400_000.0;
-            let max = a.iter().flatten().fold(i32::MIN, i32::max) as f64 * 86_400_000.0;
-            Ok((min, max))
-        }
-        DataType::Date64 => {
-            let a = col.as_any().downcast_ref::<Date64Array>().expect("Date64");
-            let min = a.iter().flatten().fold(i64::MAX, i64::min) as f64;
-            let max = a.iter().flatten().fold(i64::MIN, i64::max) as f64;
-            Ok((min, max))
-        }
+        // `Date32`/`Date64`/`Duration` fall through to the error arm: every batch
+        // reaching the render layer has been pre-cast to `Timestamp(ms)` by
+        // `_coerce.normalize_for_rust`, so they never occur here on live paths and
+        // are treated as unsupported, matching `col_as_f64` and
+        // `supported_numeric_dtype` (RSUP-02).
         other => Err(format!("unsupported column dtype: {other:?}")),
     }
 }
@@ -526,6 +425,10 @@ mod tests {
         Float64Array, Int32Array, Int8Array, StringArray, UInt8Array, UInt32Array,
         TimestampMillisecondArray,
     };
+    // Date/Duration arrays are still constructed in the RSUP-02 test below — but
+    // only to assert that the predicate + value functions treat them as
+    // *unsupported* (they are pre-cast to Timestamp(ms) by normalize_for_rust
+    // before reaching the render layer, so they never arrive here on live paths).
     use arrow::datatypes::{Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
@@ -680,78 +583,125 @@ mod tests {
         assert_eq!(out, vec!["100", "200"]);
     }
 
-    // ── col_as_f64: Duration and Date types ──────────────────────────────────
+    // ── col_as_f64: Date/Duration are NOT supported (pre-cast upstream) ───────
+    //
+    // `Date32`/`Date64`/`Duration` are cast to `Timestamp(ms)` by
+    // `_coerce.normalize_for_rust` before any RecordBatch reaches the render
+    // layer, so `col_as_f64` must reject them via its unsupported-dtype error
+    // arm. These tests pin that contract (see RSUP-02 for the full four-way
+    // agreement check).
 
     #[test]
-    fn col_as_f64_duration_nanosecond() {
-        // 1 second = 1_000_000_000 nanoseconds → f64 1_000_000_000.0
+    fn col_as_f64_rejects_duration() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("d", DataType::Duration(TimeUnit::Nanosecond), true),
         ]));
-        let arr = DurationNanosecondArray::from(vec![Some(1_000_000_000i64), None, Some(2_000_000_000i64)]);
+        let arr = DurationNanosecondArray::from(vec![Some(1_000_000_000i64), None]);
         let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
-        let out = col_as_f64(&b, "d").unwrap();
-        assert_eq!(out, vec![Some(1_000_000_000.0), None, Some(2_000_000_000.0)]);
+        let err = col_as_f64(&b, "d").unwrap_err();
+        assert!(format!("{err}").contains("unsupported dtype"), "{err}");
     }
 
     #[test]
-    fn col_as_f64_duration_microsecond() {
-        // 1 second = 1_000_000 microseconds → f64 1_000_000_000.0 nanoseconds
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("d", DataType::Duration(TimeUnit::Microsecond), true),
-        ]));
-        let arr = DurationMicrosecondArray::from(vec![Some(1_000_000i64), None]);
+    fn col_as_f64_rejects_date32() {
+        let schema = Arc::new(Schema::new(vec![Field::new("d", DataType::Date32, true)]));
+        let arr = Date32Array::from(vec![Some(1i32), None]);
         let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
-        let out = col_as_f64(&b, "d").unwrap();
-        assert_eq!(out, vec![Some(1_000_000_000.0), None]);
+        let err = col_as_f64(&b, "d").unwrap_err();
+        assert!(format!("{err}").contains("unsupported dtype"), "{err}");
     }
 
     #[test]
-    fn col_as_f64_duration_millisecond() {
-        // 1000 ms = 1 second → 1_000_000_000 ns
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("d", DataType::Duration(TimeUnit::Millisecond), true),
-        ]));
-        let arr = DurationMillisecondArray::from(vec![Some(1000i64)]);
-        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
-        let out = col_as_f64(&b, "d").unwrap();
-        assert_eq!(out, vec![Some(1_000_000_000.0)]);
-    }
-
-    #[test]
-    fn col_as_f64_duration_second() {
-        // 1 s → 1_000_000_000 ns
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("d", DataType::Duration(TimeUnit::Second), true),
-        ]));
-        let arr = DurationSecondArray::from(vec![Some(1i64)]);
-        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
-        let out = col_as_f64(&b, "d").unwrap();
-        assert_eq!(out, vec![Some(1_000_000_000.0)]);
-    }
-
-    #[test]
-    fn col_as_f64_date32_days_to_epoch_millis() {
-        // Day 1 (1970-01-02) → 86_400_000 ms
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("d", DataType::Date32, true),
-        ]));
-        let arr = Date32Array::from(vec![Some(1i32), None, Some(0i32)]);
-        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
-        let out = col_as_f64(&b, "d").unwrap();
-        assert_eq!(out, vec![Some(86_400_000.0), None, Some(0.0)]);
-    }
-
-    #[test]
-    fn col_as_f64_date64_ms_to_f64() {
-        // Date64 stores milliseconds since epoch directly.
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("d", DataType::Date64, true),
-        ]));
+    fn col_as_f64_rejects_date64() {
+        let schema = Arc::new(Schema::new(vec![Field::new("d", DataType::Date64, true)]));
         let arr = Date64Array::from(vec![Some(86_400_000i64), None]);
         let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
-        let out = col_as_f64(&b, "d").unwrap();
-        assert_eq!(out, vec![Some(86_400_000.0), None]);
+        let err = col_as_f64(&b, "d").unwrap_err();
+        assert!(format!("{err}").contains("unsupported dtype"), "{err}");
+    }
+
+    // ── min_max_f64: Date/Duration are NOT supported (pre-cast upstream) ─────
+    //
+    // Parallel to the `col_as_f64_rejects_*` tests above. `Date32`/`Date64`/
+    // `Duration` are pre-cast to `Timestamp(ms)` by `_coerce.normalize_for_rust`
+    // before any RecordBatch reaches the render layer. `min_max_f64` must reject
+    // them via its unsupported-dtype error arm. These tests pin that contract
+    // directly on `min_max_f64` (T6.2b).
+
+    /// Regression: Date/Duration are pre-cast to Timestamp(ms) by normalize_for_rust
+    /// upstream, so min_max_f64 must reject DurationNanosecond (T6.2b).
+    #[test]
+    fn min_max_f64_rejects_duration() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::Duration(TimeUnit::Nanosecond), true),
+        ]));
+        let arr = DurationNanosecondArray::from(vec![Some(1_000_000_000i64), None]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let err = min_max_f64(b.column(0).as_ref()).unwrap_err();
+        assert!(err.contains("unsupported"), "expected 'unsupported' in error, got: {err}");
+    }
+
+    /// Regression: Date/Duration are pre-cast to Timestamp(ms) by normalize_for_rust
+    /// upstream, so min_max_f64 must reject Date32 (T6.2b).
+    #[test]
+    fn min_max_f64_rejects_date32() {
+        let schema = Arc::new(Schema::new(vec![Field::new("d", DataType::Date32, true)]));
+        let arr = Date32Array::from(vec![Some(1i32), None]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let err = min_max_f64(b.column(0).as_ref()).unwrap_err();
+        assert!(err.contains("unsupported"), "expected 'unsupported' in error, got: {err}");
+    }
+
+    /// Regression: Date/Duration are pre-cast to Timestamp(ms) by normalize_for_rust
+    /// upstream, so min_max_f64 must reject Date64 (T6.2b).
+    #[test]
+    fn min_max_f64_rejects_date64() {
+        let schema = Arc::new(Schema::new(vec![Field::new("d", DataType::Date64, true)]));
+        let arr = Date64Array::from(vec![Some(86_400_000i64), None]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let err = min_max_f64(b.column(0).as_ref()).unwrap_err();
+        assert!(err.contains("unsupported"), "expected 'unsupported' in error, got: {err}");
+    }
+
+    /// Regression: `finite_min_max_f64` delegates to `min_max_f64` via `.ok()?`.
+    /// After T6.2b, `min_max_f64` returns `Err` for Date32, Date64, and
+    /// DurationNanosecond (these types are pre-cast to Timestamp(ms) by
+    /// `normalize_for_rust` upstream before they reach these helpers). The `.ok()?`
+    /// propagation means `finite_min_max_f64` must return `None` for all three. This
+    /// test would fail if `min_max_f64` ever stopped rejecting Date/Duration, or if
+    /// `finite_min_max_f64` stopped delegating to it.
+    #[test]
+    fn finite_min_max_f64_returns_none_for_date_duration() {
+        // Date32
+        let schema = Arc::new(Schema::new(vec![Field::new("d", DataType::Date32, true)]));
+        let arr = Date32Array::from(vec![Some(1i32), None]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        assert!(
+            finite_min_max_f64(b.column(0).as_ref()).is_none(),
+            "Date32: expected None from finite_min_max_f64"
+        );
+
+        // Date64
+        let schema = Arc::new(Schema::new(vec![Field::new("d", DataType::Date64, true)]));
+        let arr = Date64Array::from(vec![Some(86_400_000i64), None]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        assert!(
+            finite_min_max_f64(b.column(0).as_ref()).is_none(),
+            "Date64: expected None from finite_min_max_f64"
+        );
+
+        // DurationNanosecond
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "dur",
+            DataType::Duration(TimeUnit::Nanosecond),
+            true,
+        )]));
+        let arr = DurationNanosecondArray::from(vec![Some(1_000_000_000i64), None]);
+        let b = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        assert!(
+            finite_min_max_f64(b.column(0).as_ref()).is_none(),
+            "DurationNanosecond: expected None from finite_min_max_f64"
+        );
     }
 
     // ── col_as_ordinal_category_str ──────────────────────────────────────────
@@ -940,12 +890,18 @@ mod tests {
     }
 
     // ── RSUP-02 regression: supported_numeric_dtype / is_numeric / col_as_f64 /
-    //    min_max_f64 must agree on every dtype in the supported set ─────────────
+    //    min_max_f64 must agree on every dtype ──────────────────────────────────
     //
-    // This test would FAIL on the old code because `is_numeric` and `min_max_f64`
-    // omitted Date32/Date64/Duration — returning false/Err for dtypes that
-    // `col_as_f64` could read successfully.  After D-DTYPE-1 all three branch
-    // from `supported_numeric_dtype` and must agree for every dtype below.
+    // The four functions must never disagree about a dtype: for a *supported*
+    // dtype all four say "yes" (predicate true, col_as_f64/min_max_f64 Ok) and
+    // agree numerically; for an *unsupported* dtype all four say "no" (predicate
+    // false, both functions Err).
+    //
+    // Date32/Date64/Duration are on the unsupported side: `_coerce.normalize_for_rust`
+    // pre-casts them to Timestamp(ms) before any RecordBatch reaches the render
+    // layer, so the render functions never see them on live paths and deliberately
+    // reject them. This test pins that contract (T6.2b) — it constructs Date/Duration
+    // batches only to confirm all four functions agree they are not supported.
 
     /// Helper: build a one-element RecordBatch with a single column of the given
     /// dtype containing a plausible non-null value, ready for agreement checks.
@@ -994,28 +950,29 @@ mod tests {
             }
             DataType::Date32 => A::new(Date32Array::from(vec![Some(1i32)])),
             DataType::Date64 => A::new(Date64Array::from(vec![Some(1i64)])),
+            DataType::Utf8 => A::new(StringArray::from(vec![Some("x")])),
+            DataType::Boolean => A::new(BooleanArray::from(vec![Some(true)])),
             other => panic!("one_elem_batch_for_dtype: unhandled dtype {other:?}"),
         };
         RecordBatch::try_new(schema, vec![col]).unwrap()
     }
 
     /// RSUP-02 regression: `supported_numeric_dtype`, `is_numeric`, `col_as_f64`,
-    /// and `min_max_f64` must all agree — each returning true/Ok — for every
-    /// dtype in the covered set, AND must agree NUMERICALLY (same f64 scale).
+    /// and `min_max_f64` must never disagree about a dtype.
     ///
-    /// On the old code this test would fail for `Date32`, `Date64`, and all four
-    /// `Duration` variants because `is_numeric` returned `false` and `min_max_f64`
-    /// returned `Err` for those dtypes, even though `col_as_f64` could read them.
+    /// For every *supported* dtype all four say "yes": the predicate is true and
+    /// both value functions return `Ok`, with `min_max_f64` agreeing NUMERICALLY
+    /// (same f64 scale) with the min/max of `col_as_f64`'s output.
     ///
-    /// After T0-closeout the test additionally fails on the old code for
-    /// `Duration(Microsecond)`, `Duration(Millisecond)`, and `Duration(Second)`
-    /// because `min_max_f64` used raw i64 ticks while `col_as_f64` normalized to
-    /// nanoseconds — e.g. Duration(ms) value=1 gave min_max → 1.0 but col_as_f64
-    /// → 1_000_000.0 (off by 1e6). The numeric equality assertions below catch
-    /// this: min_max_f64 min/max must equal the min/max of col_as_f64's output.
+    /// For every *unsupported* dtype all four say "no": the predicate is false and
+    /// both value functions return `Err`. `Date32`/`Date64`/`Duration` are on this
+    /// side — `_coerce.normalize_for_rust` pre-casts them to `Timestamp(ms)` before
+    /// any RecordBatch reaches the render layer (T6.2b), so the render functions
+    /// never see them on live paths and deliberately reject them. This test
+    /// constructs Date/Duration batches only to confirm all four agree on rejection.
     #[test]
     fn supported_numeric_dtype_is_numeric_col_as_f64_min_max_agree() {
-        let dtypes = [
+        let supported = [
             DataType::Float64,
             DataType::Float32,
             DataType::Int64,
@@ -1030,24 +987,28 @@ mod tests {
             DataType::Timestamp(TimeUnit::Microsecond, None),
             DataType::Timestamp(TimeUnit::Nanosecond, None),
             DataType::Timestamp(TimeUnit::Second, None),
-            // The next four are the latent-bug cases (RSUP-02): old code returned
-            // false / Err for these while col_as_f64 could read them.
-            // T0-closeout additionally requires numeric agreement (nanosecond scale).
+        ];
+
+        // Date/Duration are pre-cast to Timestamp(ms) by normalize_for_rust before
+        // reaching the render layer, so all four functions must reject them.
+        let unsupported = [
             DataType::Duration(TimeUnit::Nanosecond),
             DataType::Duration(TimeUnit::Microsecond),
             DataType::Duration(TimeUnit::Millisecond),
             DataType::Duration(TimeUnit::Second),
             DataType::Date32,
             DataType::Date64,
+            DataType::Utf8,
+            DataType::Boolean,
         ];
 
-        for dtype in &dtypes {
+        for dtype in &supported {
             let batch = one_elem_batch_for_dtype(dtype);
 
             // 1. supported_numeric_dtype and is_numeric must agree and both be true.
             assert!(
                 supported_numeric_dtype(dtype),
-                "supported_numeric_dtype returned false for {dtype:?}"
+                "supported_numeric_dtype returned false for supported {dtype:?}"
             );
             assert!(
                 is_numeric(dtype),
@@ -1056,19 +1017,17 @@ mod tests {
 
             // 2. col_as_f64 must succeed.
             let f64_vals = col_as_f64(&batch, "v").unwrap_or_else(|e| {
-                panic!("col_as_f64 returned Err for {dtype:?}: {e:?}")
+                panic!("col_as_f64 returned Err for supported {dtype:?}: {e:?}")
             });
 
             // 3. min_max_f64 must succeed.
             let (mm_min, mm_max) = min_max_f64(batch.column(0).as_ref()).unwrap_or_else(|e| {
-                panic!("min_max_f64 returned Err for {dtype:?}: {e}")
+                panic!("min_max_f64 returned Err for supported {dtype:?}: {e}")
             });
 
             // 4. NUMERIC AGREEMENT: min_max_f64 values must match the min/max of
             //    col_as_f64's output. This is the key invariant — both must produce
-            //    the same f64 scale (e.g. nanoseconds for Duration). On the old code
-            //    this assertion fails for Duration(µs/ms/s) because min_max_f64 used
-            //    raw ticks while col_as_f64 normalized to nanoseconds.
+            //    the same f64 scale.
             let non_null_vals: Vec<f64> = f64_vals.into_iter().flatten().collect();
             let expected_min = non_null_vals.iter().cloned()
                 .fold(f64::INFINITY, f64::min);
@@ -1087,10 +1046,27 @@ mod tests {
             );
         }
 
-        // Sanity: non-numeric dtypes return false from both predicates.
-        assert!(!supported_numeric_dtype(&DataType::Utf8));
-        assert!(!supported_numeric_dtype(&DataType::Boolean));
-        assert!(!is_numeric(&DataType::Utf8));
-        assert!(!is_numeric(&DataType::Boolean));
+        // All four functions must agree that the unsupported dtypes are NOT
+        // directly supported (RSUP-02): predicate false, both value functions Err.
+        for dtype in &unsupported {
+            assert!(
+                !supported_numeric_dtype(dtype),
+                "supported_numeric_dtype returned true for unsupported {dtype:?}"
+            );
+            assert!(
+                !is_numeric(dtype),
+                "is_numeric returned true for {dtype:?} (disagreement with supported_numeric_dtype)"
+            );
+
+            let batch = one_elem_batch_for_dtype(dtype);
+            assert!(
+                col_as_f64(&batch, "v").is_err(),
+                "col_as_f64 returned Ok for unsupported {dtype:?}"
+            );
+            assert!(
+                min_max_f64(batch.column(0).as_ref()).is_err(),
+                "min_max_f64 returned Ok for unsupported {dtype:?}"
+            );
+        }
     }
 }
