@@ -1,4 +1,7 @@
-//! Color = palette::Srgba<u8>. SVG-formatted output, hex parsing, opacity.
+//! The universal color primitive: `Color = palette::Srgba<u8>` (RGBA backed by
+//! the `palette` crate). Provides SVG-formatted output, hex/CSS-name parsing,
+//! and opacity application. Categorical palettes live in the sibling
+//! [`super::palette`] module; this file is the primitive they are built from.
 
 use palette::Srgba;
 

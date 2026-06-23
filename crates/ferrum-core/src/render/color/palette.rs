@@ -2,7 +2,7 @@
 
 use std::sync::LazyLock;
 
-use super::color::{from_rgb, Color};
+use super::{from_rgb, Color};
 
 /// Okabe-Ito 8-color categorical palette. Lazy-initialized because palette's
 /// `Srgba::new` is not const-fn and the internal struct layout (`Alpha<Rgb<...>, u8>`)
@@ -168,7 +168,7 @@ pub fn categorical_palette(name: &str) -> &'static [Color] {
 
 use pyo3::prelude::*;
 
-use super::color::{fmt_svg, ContinuousScheme, NamedContinuous};
+use super::{fmt_svg, ContinuousScheme, NamedContinuous};
 
 /// Number of evenly-spaced stops returned by [`palette_colors`] for a
 /// continuous (sequential/diverging) scheme. Endpoints are inclusive: the

@@ -6,7 +6,6 @@ pub(crate) mod arrow_cast;
 pub(crate) mod chart_config;
 pub(crate) mod config;
 pub(crate) mod color;
-pub(crate) mod palette;
 pub(crate) mod font;
 pub(crate) mod format;
 pub(crate) mod svg;

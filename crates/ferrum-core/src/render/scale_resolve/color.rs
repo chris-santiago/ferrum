@@ -9,7 +9,7 @@ use crate::layout::ThemeInputs;
 use crate::spec::encoding::DataType as SpecDataType;
 
 use crate::render::color::Color;
-use crate::render::palette;
+use crate::render::color::palette;
 use crate::render::RenderError;
 
 use super::domain::{apply_sort_to_domain, locate_field, SortContext};

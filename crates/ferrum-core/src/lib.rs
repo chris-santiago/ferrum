@@ -62,10 +62,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;
     // T2.2 (D-COLOR-1): palette registry accessors — the single source of truth
     // that Python `color.py` consumes instead of hand-mirroring hex tables.
-    m.add_function(wrap_pyfunction!(render::palette::list_palettes, m)?)?;
-    m.add_function(wrap_pyfunction!(render::palette::palette_kind, m)?)?;
-    m.add_function(wrap_pyfunction!(render::palette::palette_colors, m)?)?;
-    m.add_function(wrap_pyfunction!(render::palette::palette_sample, m)?)?;
+    m.add_function(wrap_pyfunction!(render::color::palette::list_palettes, m)?)?;
+    m.add_function(wrap_pyfunction!(render::color::palette::palette_kind, m)?)?;
+    m.add_function(wrap_pyfunction!(render::color::palette::palette_colors, m)?)?;
+    m.add_function(wrap_pyfunction!(render::color::palette::palette_sample, m)?)?;
     // Phase 10g Task 35: Kendall's tau-b (Knight's O(n log n)).
     m.add_function(wrap_pyfunction!(diagnostics::py_kendall_tau_b, m)?)?;
     // Classification diagnostic curve kernels (sklearn-parity).

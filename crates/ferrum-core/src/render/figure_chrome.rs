@@ -17,6 +17,7 @@
 //! consistent with per-chart titles even when no theme dict is passed to the PyO3
 //! compositor binding (which operates at the SVG string level, post-render).
 
+use super::color::fmt_svg;
 use super::svg::{escape_text, fmt_f};
 use super::compositor::{parse_svg_root, write_svg_open, CompositorError};
 use ferrum_scene::{Color, FontWeight, SceneNode, TextAnchor, TextBaseline, TextStyle};
@@ -201,6 +202,51 @@ enum ChromeRole {
     Caption,
 }
 
+/// Font weight for a chrome line. Bold renders `font-weight="600"` in the SVG
+/// path and [`FontWeight::Custom("600")`] in the scene path; Normal omits the
+/// SVG attribute entirely (matching the previous emitter) and maps to
+/// [`FontWeight::Normal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChromeWeight {
+    /// Title weight — `font-weight="600"`.
+    Bold600,
+    /// Subtitle/caption weight — no `font-weight` attribute.
+    Normal,
+}
+
+/// The single source of truth for per-role chrome styling.
+///
+/// Both emitters read this struct so the static SVG band and the interactive
+/// scene-node band stay byte-identical: the SVG path formats `color` via
+/// [`crate::render::color::fmt_svg`] (yielding the same lowercase 6-digit hex
+/// the band previously hardcoded) and consults `weight` for the optional
+/// `font-weight="600"` attribute; the scene path consumes `color`/`weight`
+/// directly. `text_anchor` is geometry, not role-keyed, so it stays on
+/// [`ChromeLine`] — it is resolved per [`FigureChrome`] (the same value for all
+/// three lines), not per role.
+#[derive(Debug, Clone, Copy)]
+struct ChromeRoleStyle {
+    color: Color,
+    weight: ChromeWeight,
+}
+
+impl ChromeRole {
+    /// Resolve the color + weight for this chrome role. Editing the styling for
+    /// a role here updates both the SVG and scene emitters at once.
+    fn style(self) -> ChromeRoleStyle {
+        match self {
+            ChromeRole::Title => ChromeRoleStyle {
+                color: FIGURE_TITLE_COLOR,
+                weight: ChromeWeight::Bold600,
+            },
+            ChromeRole::Subtitle | ChromeRole::Caption => ChromeRoleStyle {
+                color: FIGURE_MUTED_COLOR,
+                weight: ChromeWeight::Normal,
+            },
+        }
+    }
+}
+
 /// One fully-positioned chrome text line in the outer-canvas coordinate space.
 #[derive(Debug, Clone, Copy)]
 struct ChromeLine<'a> {
@@ -367,41 +413,50 @@ fn compute_footer_height(chrome: &FigureChrome<'_>) -> f64 {
     CAPTION_TOP_PAD + FIGURE_CAPTION_FONT_SIZE + CAPTION_BOTTOM_PAD
 }
 
-/// Emit one positioned chrome `<text>` element.
-///
-/// The two SVG variants (title vs. subtitle/caption) differ only in `fill` and
-/// whether a `font-weight="600"` attribute is present. The branch reproduces the
-/// exact byte sequence the previous `emit_header`/`emit_footer` produced, so the
-/// concat figure band stays byte-identical.
-fn emit_chrome_text(out: &mut String, line: &ChromeLine<'_>) {
-    match line.role {
-        ChromeRole::Title => out.push_str(&format!(
-            "<text x=\"{}\" y=\"{}\" fill=\"#1f2937\" font-family=\"Inter\" font-size=\"{}\" font-weight=\"600\" text-anchor=\"{}\">{}</text>",
-            fmt_f(line.x),
-            fmt_f(line.y),
-            fmt_f(line.font_size),
-            line.text_anchor,
-            escape_text(line.content),
-        )),
-        ChromeRole::Subtitle | ChromeRole::Caption => out.push_str(&format!(
-            "<text x=\"{}\" y=\"{}\" fill=\"#6b7280\" font-family=\"Inter\" font-size=\"{}\" text-anchor=\"{}\">{}</text>",
-            fmt_f(line.x),
-            fmt_f(line.y),
-            fmt_f(line.font_size),
-            line.text_anchor,
-            escape_text(line.content),
-        )),
-    }
+/// Format a chrome `Color` to its SVG `fill` hex string using the renderer's
+/// canonical [`crate::render::color::fmt_svg`]. Chrome colors are always opaque,
+/// so this yields the lowercase 6-digit form (`#1f2937` / `#6b7280`) the band
+/// previously hardcoded — routing through `fmt_svg` makes the SVG fill track the
+/// single styling source instead of a literal.
+fn chrome_fill_hex(color: Color) -> String {
+    fmt_svg(super::color::from_rgba(color.r, color.g, color.b, color.a))
 }
 
-/// Build the `TextStyle` for a chrome line's scene node, mirroring the per-role
-/// styling the SVG emitter bakes into literal attributes (color, weight, family,
-/// anchor). Baseline is `Alphabetic` to match SVG's default text baseline (the
-/// `y` is a baseline, not a top edge).
+/// Emit one positioned chrome `<text>` element.
+///
+/// Color and weight come from [`ChromeRole::style`] — the same source the scene
+/// path ([`chrome_text_style`]) consumes — so the static and interactive renders
+/// can never desync. Bold (title) emits `font-weight="600"`; Normal omits the
+/// attribute entirely, reproducing the previous emitter's byte sequence.
+fn emit_chrome_text(out: &mut String, line: &ChromeLine<'_>) {
+    let style = line.role.style();
+    let fill = chrome_fill_hex(style.color);
+    let weight_attr = match style.weight {
+        ChromeWeight::Bold600 => " font-weight=\"600\"",
+        ChromeWeight::Normal => "",
+    };
+    out.push_str(&format!(
+        "<text x=\"{}\" y=\"{}\" fill=\"{}\" font-family=\"Inter\" font-size=\"{}\"{} text-anchor=\"{}\">{}</text>",
+        fmt_f(line.x),
+        fmt_f(line.y),
+        fill,
+        fmt_f(line.font_size),
+        weight_attr,
+        line.text_anchor,
+        escape_text(line.content),
+    ));
+}
+
+/// Build the `TextStyle` for a chrome line's scene node from the same
+/// [`ChromeRole::style`] the SVG emitter reads (color + weight), so the static
+/// SVG band and the interactive scene band carry identical per-role styling.
+/// Baseline is `Alphabetic` to match SVG's default text baseline (the `y` is a
+/// baseline, not a top edge).
 fn chrome_text_style(line: &ChromeLine<'_>) -> TextStyle {
-    let (color, font_weight) = match line.role {
-        ChromeRole::Title => (FIGURE_TITLE_COLOR, FontWeight::Custom("600".to_string())),
-        ChromeRole::Subtitle | ChromeRole::Caption => (FIGURE_MUTED_COLOR, FontWeight::Normal),
+    let style = line.role.style();
+    let font_weight = match style.weight {
+        ChromeWeight::Bold600 => FontWeight::Custom("600".to_string()),
+        ChromeWeight::Normal => FontWeight::Normal,
     };
     TextStyle {
         font_size: line.font_size,
@@ -413,7 +468,7 @@ fn chrome_text_style(line: &ChromeLine<'_>) -> TextStyle {
         },
         baseline: TextBaseline::Alphabetic,
         angle: 0.0,
-        color,
+        color: style.color,
         opacity: 1.0,
         font_family: FIGURE_FONT_FAMILY.to_string(),
     }
@@ -785,19 +840,15 @@ mod tests {
             "footer_h {footer_h} != compute_footer_height {expected}");
     }
 
-    /// Tripwire: the `Color` consts used by the scene-node path and the hex
-    /// literals baked into `emit_chrome_text` (SVG path) must agree.
+    /// Byte tripwire: the chrome color consts, the canonical `fmt_svg` formatter
+    /// the SVG path now routes through (`chrome_fill_hex`), and the manual
+    /// `#{r:02x}{g:02x}{b:02x}` formula must all agree on the golden literals.
     ///
     /// Both `FIGURE_TITLE_COLOR` and `FIGURE_MUTED_COLOR` are fully opaque
-    /// (`a == 0xff`), so `crate::render::color::fmt_svg` would format them via
-    /// `format!("#{:02x}{:02x}{:02x}", r, g, b)`. This test applies that same
-    /// formula to the const's fields and asserts the result equals the exact
-    /// literal string in `emit_chrome_text` — so any edit to one without the
-    /// other will trip this assertion.
-    ///
-    /// **If you change a const, also update the corresponding literal in
-    /// `emit_chrome_text` (and vice versa) to keep the SVG and interactive
-    /// renders byte-identical.**
+    /// (`a == 0xff`), so `crate::render::color::fmt_svg` formats them as
+    /// `#{r:02x}{g:02x}{b:02x}` (lowercase, 6-digit, no alpha). The goldens
+    /// encode `#1f2937` / `#6b7280`; this test fails if any of the three
+    /// representations drifts.
     #[test]
     fn color_consts_match_svg_emit_literals() {
         // Format using the same formula as `crate::render::color::fmt_svg` for
@@ -810,15 +861,75 @@ mod tests {
             "#{:02x}{:02x}{:02x}",
             FIGURE_MUTED_COLOR.r, FIGURE_MUTED_COLOR.g, FIGURE_MUTED_COLOR.b
         );
-        // These must equal the hardcoded fill="..." literals in emit_chrome_text.
+        // These must equal the golden fill="..." literals.
         assert_eq!(
             title_hex, "#1f2937",
-            "FIGURE_TITLE_COLOR const diverged from the fill=\"#1f2937\" literal in emit_chrome_text"
+            "FIGURE_TITLE_COLOR const diverged from the golden fill=\"#1f2937\""
         );
         assert_eq!(
             muted_hex, "#6b7280",
-            "FIGURE_MUTED_COLOR const diverged from the fill=\"#6b7280\" literal in emit_chrome_text"
+            "FIGURE_MUTED_COLOR const diverged from the golden fill=\"#6b7280\""
         );
+        // The canonical formatter the SVG path uses must produce the same bytes.
+        assert_eq!(chrome_fill_hex(FIGURE_TITLE_COLOR), "#1f2937");
+        assert_eq!(chrome_fill_hex(FIGURE_MUTED_COLOR), "#6b7280");
+    }
+
+    /// Pins the single styling source ([`ChromeRole::style`]) to the exact
+    /// byte contract the goldens encode: title is `#1f2937` + weight 600,
+    /// subtitle/caption are `#6b7280` + normal. Both the SVG emitter
+    /// (`chrome_fill_hex` + `weight_attr`) and the scene emitter
+    /// (`chrome_text_style`) read this struct, so this test guards both paths.
+    #[test]
+    fn chrome_role_style_pins_color_weight_and_svg_fill() {
+        // Title: dark text, bold-600, fill="#1f2937".
+        let title = ChromeRole::Title.style();
+        assert_eq!(title.color, FIGURE_TITLE_COLOR);
+        assert_eq!(title.weight, ChromeWeight::Bold600);
+        assert_eq!(
+            chrome_fill_hex(title.color),
+            "#1f2937",
+            "title SVG fill must be exactly #1f2937 (golden byte contract)"
+        );
+
+        // Subtitle + caption: muted gray, normal weight, fill="#6b7280".
+        for role in [ChromeRole::Subtitle, ChromeRole::Caption] {
+            let s = role.style();
+            assert_eq!(s.color, FIGURE_MUTED_COLOR, "{role:?} color");
+            assert_eq!(s.weight, ChromeWeight::Normal, "{role:?} weight");
+            assert_eq!(
+                chrome_fill_hex(s.color),
+                "#6b7280",
+                "{role:?} SVG fill must be exactly #6b7280 (golden byte contract)"
+            );
+        }
+
+        // The SVG weight attribute fragment: bold emits the attr, normal omits it.
+        // (Mirrors `weight_attr` in `emit_chrome_text`; pins the byte sequence.)
+        let title_weight_attr = match ChromeRole::Title.style().weight {
+            ChromeWeight::Bold600 => " font-weight=\"600\"",
+            ChromeWeight::Normal => "",
+        };
+        assert_eq!(title_weight_attr, " font-weight=\"600\"");
+        let caption_weight_attr = match ChromeRole::Caption.style().weight {
+            ChromeWeight::Bold600 => " font-weight=\"600\"",
+            ChromeWeight::Normal => "",
+        };
+        assert_eq!(caption_weight_attr, "");
+
+        // The scene anchor mapping stays Alphabetic baseline + role colors:
+        // assert chrome_text_style derives FontWeight from the same struct.
+        let line = ChromeLine {
+            role: ChromeRole::Title,
+            content: "x",
+            x: 0.0,
+            y: 0.0,
+            text_anchor: "start",
+            font_size: FIGURE_TITLE_FONT_SIZE,
+        };
+        let ts = chrome_text_style(&line);
+        assert_eq!(ts.font_weight, FontWeight::Custom("600".to_string()));
+        assert_eq!(ts.color, FIGURE_TITLE_COLOR);
     }
 
     #[test]

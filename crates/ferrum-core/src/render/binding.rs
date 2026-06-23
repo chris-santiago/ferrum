@@ -473,32 +473,32 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
 
     // Palette
     if let Some(s) = spec.color_scheme {
-        if !super::palette::is_categorical_scheme(&s)
-            && !super::palette::is_sequential_scheme(&s)
+        if !super::color::palette::is_categorical_scheme(&s)
+            && !super::color::palette::is_sequential_scheme(&s)
         {
             return Err(PyValueError::new_err(format!(
                 "Unknown color_scheme: '{s}'. Supported categorical: {}. \
                  Supported sequential: {}.",
-                super::palette::CATEGORICAL_SCHEMES.join(", "),
-                super::palette::SEQUENTIAL_SCHEMES.join(", "),
+                super::color::palette::CATEGORICAL_SCHEMES.join(", "),
+                super::color::palette::SEQUENTIAL_SCHEMES.join(", "),
             )));
         }
         t.palette.color_scheme = s;
     }
     if let Some(s) = spec.sequential_scheme {
-        if !super::palette::is_sequential_scheme(&s) {
+        if !super::color::palette::is_sequential_scheme(&s) {
             return Err(PyValueError::new_err(format!(
                 "Unknown sequential_scheme: '{s}'. Supported: {}.",
-                super::palette::SEQUENTIAL_SCHEMES.join(", "),
+                super::color::palette::SEQUENTIAL_SCHEMES.join(", "),
             )));
         }
         t.palette.sequential_scheme = s;
     }
     if let Some(s) = spec.diverging_scheme {
-        if !super::palette::is_sequential_scheme(&s) {
+        if !super::color::palette::is_sequential_scheme(&s) {
             return Err(PyValueError::new_err(format!(
                 "Unknown diverging_scheme: '{s}'. Supported: {}.",
-                super::palette::SEQUENTIAL_SCHEMES.join(", "),
+                super::color::palette::SEQUENTIAL_SCHEMES.join(", "),
             )));
         }
         t.palette.diverging_scheme = s;
