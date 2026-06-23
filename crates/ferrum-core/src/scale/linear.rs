@@ -147,8 +147,8 @@ impl LinearScale {
     /// minor tick *density* is always controlled by the locked
     /// `DEFAULT_MINOR_SUBDIVISIONS` constant (5 sub-intervals → 4 interior
     /// minors per major gap); there is no per-call override.
-    // Wired to the render layer in Task 2 of the grid subsystem.
-    #[allow(dead_code)]
+    // Wired to the render layer via `ScaleKind::minor_tick_fractions`
+    // (`render/scale_resolve/mod.rs`, dispatched through `dispatch_continuous!`).
     pub(crate) fn minor_ticks_internal(&self) -> Vec<Tick> {
         let majors = self.data.ticks(10);
         minor_ticks_default(&majors, |x| x)

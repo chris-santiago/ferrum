@@ -133,8 +133,8 @@ impl PowScale {
     /// The major tick count is fixed at 10 (the conventional default).  Minor
     /// tick density is always `DEFAULT_MINOR_SUBDIVISIONS` (5 sub-intervals →
     /// 4 interior minors per gap); there is no per-call override.
-    // Wired to the render layer in Task 2 of the grid subsystem.
-    #[allow(dead_code)]
+    // Wired to the render layer via `ScaleKind::minor_tick_fractions`
+    // (`render/scale_resolve/mod.rs`, dispatched through `dispatch_continuous!`).
     pub(crate) fn minor_ticks_internal(&self) -> Vec<Tick> {
         let majors = self.data.ticks(10);
         let exp = self.data.exponent;
@@ -297,22 +297,6 @@ impl SqrtScale {
     #[allow(dead_code)]
     pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> {
         self.data.ticks(count)
-    }
-
-    /// Return minor ticks subdivided in sqrt-transformed space (exponent=0.5).
-    ///
-    /// The major tick count is fixed at 10.  Minor tick density is always
-    /// `DEFAULT_MINOR_SUBDIVISIONS` (5 sub-intervals → 4 interior minors per
-    /// gap); there is no per-call override.
-    // Wired to the render layer in Task 2 of the grid subsystem.
-    #[allow(dead_code)]
-    pub(crate) fn minor_ticks_internal(&self) -> Vec<Tick> {
-        let majors = self.data.ticks(10);
-        // SqrtScale has exponent = 0.5: fwd = sqrt, inv = square.
-        let fwd = |v: f64| v.signum() * v.abs().powf(0.5);
-        let inv = |t: f64| t.signum() * t.abs().powf(2.0);
-        let transformed: Vec<f64> = majors.iter().map(|&v| fwd(v)).collect();
-        minor_ticks_default(&transformed, inv)
     }
 }
 
@@ -590,28 +574,4 @@ mod tests {
         }
     }
 
-    /// Sqrt scale minors are evenly spaced in sqrt-transformed space.
-    ///
-    /// `minor_ticks_internal()` uses the fixed major count of 10 internally.
-    #[test]
-    fn sqrt_minors_evenly_spaced_in_sqrt_space() {
-        let scale = SqrtScale {
-            data: PowScaleData { domain: [0.0, 100.0], range: [0.0, 600.0], exponent: 0.5, clamp: false },
-            padding: None,
-            range_user_set: true,
-            domain_user_set: true,
-        };
-        let minors = scale.minor_ticks_internal();
-        assert!(!minors.is_empty(), "expected non-empty sqrt minors");
-
-        // minor_ticks_internal uses fixed count=10 for majors.
-        let majors = scale.ticks_internal(10);
-        let major_set: std::collections::HashSet<u64> =
-            majors.iter().map(|&v| v.to_bits()).collect();
-        for m in &minors {
-            assert!(!major_set.contains(&m.position.to_bits()),
-                "sqrt minor at {} coincides with major", m.position);
-            assert!(!m.is_major);
-        }
-    }
 }
