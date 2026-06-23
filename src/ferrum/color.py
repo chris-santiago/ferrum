@@ -13,6 +13,7 @@ colors that actually render.
 
 from __future__ import annotations
 
+import warnings
 from typing import Literal
 
 from ferrum._core import (
@@ -187,7 +188,24 @@ def to_hex(
         # Range-based heuristic: any component above 1 means a byte ([0, 255])
         # encoding; otherwise treat as unit ([0, 1]).  Inspecting the value
         # range (not the Python type) keeps 1.0 and 1 in the same bucket.
-        scale = "byte" if max(r, g, b) > 1 else "unit"
+        if max(r, g, b) > 1:
+            scale = "byte"
+            # Warn when the input looks like a fractional unit-range overshoot
+            # (e.g. (0.9, 0.9, 1.1) from float color math) rather than an
+            # unambiguous integer-valued byte tuple like (255, 0, 0).  The
+            # discriminator: at least one component is non-integer-valued.
+            # Integer-valued byte tuples are unambiguous and stay silent.
+            if any(c != int(c) for c in (r, g, b) if isinstance(c, float)):
+                warnings.warn(
+                    f"to_hex: ambiguous color tuple {(r, g, b)!r} — "
+                    "at least one component is non-integer and exceeds the unit range [0, 1]. "
+                    "Defaulting to byte interpretation ([0, 255]). "
+                    'Pass scale="unit" or scale="byte" to suppress this warning.',
+                    UserWarning,
+                    stacklevel=2,
+                )
+        else:
+            scale = "unit"
 
     if scale == "unit":
         ri = int(round(float(r) * 255))

@@ -168,28 +168,44 @@ def test_to_hex_255_is_byte_under_new_heuristic() -> None:
     assert fm.color.to_hex((255, 0, 0)) == "#ff0000"
 
 
-def test_to_hex_unit_overshoot_uses_byte_interpretation_current_behavior() -> None:
-    """A near-white unit tuple ``(0.9, 0.9, 1.1)`` is interpreted as BYTE by the heuristic.
+def test_to_hex_unit_overshoot_warns_and_uses_byte() -> None:
+    """A fractional unit-overshoot ``(0.9, 0.9, 1.1)`` emits a UserWarning and uses byte.
 
-    Characterization of the T2.2#3 range-based default; the (0.9, 0.9, 1.1) ->
-    near-black overshoot edge is flagged for user ratification, not a fixed contract.
+    Ratified behavior (T2.2#3 + no-silent-guess follow-up): the heuristic still
+    resolves to byte (default UNCHANGED), but a UserWarning is emitted because the
+    input is genuinely ambiguous — non-integer components exceeding the unit range
+    could be a unit-space overshoot from float color math, not an intentional
+    byte tuple.
 
-    Path: ``to_hex`` scale=None branch.  ``max=1.1 > 1`` triggers BYTE mode for
-    *all* three components: ``int(0.9)=0``, ``int(0.9)=0``, ``int(1.1)=1`` -> ``#000001``.
-    This is the current behavior under ``color.py:190``'s heuristic
-    (``scale = "byte" if max(r,g,b) > 1 else "unit"``).
-
-    The explicit ``scale="unit"`` escape hatch recovers the near-white reading
-    ``#e6e6ff``, proving the behavior is recoverable and the intended color is
-    reachable — the heuristic just doesn't choose it for floating-point overshoots.
+    Path: ``to_hex`` scale=None branch; ``max=1.1 > 1`` picks byte, then the
+    fractional-component check fires the warning.
     """
-    # Current heuristic: any component > 1 forces byte interpretation for all components.
-    heuristic_result = fm.color.to_hex((0.9, 0.9, 1.1))
+    # Heuristic result is unchanged: byte interpretation -> #000001.
+    with pytest.warns(UserWarning, match="ambiguous color tuple"):
+        heuristic_result = fm.color.to_hex((0.9, 0.9, 1.1))
     assert heuristic_result == "#000001"
 
-    # The explicit escape hatch recovers the near-white intended color.
-    explicit_unit = fm.color.to_hex((0.9, 0.9, 1.1), scale="unit")
+    # scale="unit" suppresses the warning AND recovers the near-white color.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning would fail the test
+        explicit_unit = fm.color.to_hex((0.9, 0.9, 1.1), scale="unit")
     assert explicit_unit == "#e6e6ff"
+
+
+def test_to_hex_integer_byte_tuple_does_not_warn() -> None:
+    """``(255, 0, 0)`` — an integer-valued byte tuple — must NOT emit a warning.
+
+    The fractional-overshoot guard fires only when at least one component is
+    non-integer-valued.  An integer-only tuple like ``(255, 0, 0)`` has
+    unambiguous byte intent and must stay silent.
+
+    Path: ``to_hex`` scale=None branch; ``max=255 > 1`` picks byte; the
+    ``isinstance(c, float)`` guard keeps all-int tuples silent.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning would fail the test
+        result = fm.color.to_hex((255, 0, 0))
+    assert result == "#ff0000"
 
 
 def test_to_hex_unit_scale_clamps_out_of_range() -> None:
