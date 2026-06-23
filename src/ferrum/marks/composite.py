@@ -113,7 +113,7 @@ def desugar_boxplot(
     x_sort: Any = None,
     y_sort: Any = None,
     **mark_kwargs: Any,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Box-plot composite mark desugar.
 
     Converts ``chart.mark_boxplot(...)`` into a ``BoxStats`` transform plus
@@ -174,9 +174,8 @@ def desugar_boxplot(
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", transforms, None, None, layers)``
-        consumed by ``Chart._resolve_pending``.
+    MarkDesugarResult
+        Layered mode (``.layers`` set) consumed by ``Chart._resolve_pending``.
 
     Raises
     ------
@@ -189,10 +188,10 @@ def desugar_boxplot(
     Examples
     --------
     >>> result = desugar_boxplot("species", "sepal_length")
-    >>> result[0]
-    '__layered__'
-    >>> len(result[4])  # 6 layers: whisker, lower cap, upper cap, box, median, outlier
+    >>> len(result.layers)  # whisker, lower cap, upper cap, box, median, outlier
     6
+    >>> [layer.mark for layer in result.layers]
+    ['rule', 'tick', 'tick', 'rect', 'tick', 'point']
     """
     whisker_mult = _resolve_deprecated_extent(
         "whisker_mult", whisker_mult, mark_kwargs, real_default=1.5
@@ -319,7 +318,7 @@ def desugar_errorbar(
     color_field: Optional[str] = None,
     x_sort: Any = None,
     **mark_kwargs: Any,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Error-bar composite mark desugar.
 
     Converts ``chart.mark_errorbar(...)`` into an ``ErrorExtent`` transform
@@ -371,8 +370,8 @@ def desugar_errorbar(
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", transforms, None, None, layers)``.
+    MarkDesugarResult
+        Layered mode (``.layers`` set).
 
     Raises
     ------
@@ -385,9 +384,7 @@ def desugar_errorbar(
     Examples
     --------
     >>> result = desugar_errorbar("day", "tip")
-    >>> result[0]
-    '__layered__'
-    >>> [l.mark for l in result[4]]
+    >>> [layer.mark for layer in result.layers]
     ['rule', 'tick', 'tick']
     """
     method = _resolve_deprecated_extent("method", method, mark_kwargs, real_default="ci")
@@ -460,7 +457,7 @@ def desugar_errorband(
     borders: bool = False,
     color_field: Optional[str] = None,
     **mark_kwargs: Any,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Error-band (shaded CI ribbon) composite mark desugar.
 
     Converts ``chart.mark_errorband(...)`` into an ``ErrorExtent`` transform
@@ -507,8 +504,8 @@ def desugar_errorband(
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", transforms, None, None, layers)``.
+    MarkDesugarResult
+        Layered mode (``.layers`` set).
 
     Raises
     ------
@@ -521,9 +518,7 @@ def desugar_errorband(
     Examples
     --------
     >>> result = desugar_errorband("x", "y")
-    >>> result[0]
-    '__layered__'
-    >>> result[4][0].mark
+    >>> result.layers[0].mark
     'ribbon'
     """
     method = _resolve_deprecated_extent("method", method, mark_kwargs, real_default="ci")
@@ -596,7 +591,7 @@ def desugar_ribbon(
     opacity: float = 0.2,
     interpolate: str = "linear",
     **mark_kwargs: Any,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Primitive ribbon (shaded band) mark desugar — no transform.
 
     Emits a single ribbon layer directly.  Unlike ``desugar_errorband``,
@@ -634,8 +629,9 @@ def desugar_ribbon(
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", [], None, None, layers)``.
+    MarkDesugarResult
+        Layered mode with a single ribbon layer (``.layers`` set, no
+        transforms).
 
     Raises
     ------
@@ -645,7 +641,7 @@ def desugar_ribbon(
     Examples
     --------
     >>> result = desugar_ribbon("x", "lower", y2_field="upper")
-    >>> result[4][0].mark
+    >>> result.layers[0].mark
     'ribbon'
     """
     user_kw = _validate("ribbon", mark_kwargs)
@@ -695,7 +691,7 @@ def desugar_boxen(
     y_sort: Any = None,
     boxen_agg_sort: dict | None = None,
     **mark_kwargs: Any,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Letter-value (boxen) composite mark.
 
     Desugars into a `LetterValue` transform plus N nested rect bands (one per

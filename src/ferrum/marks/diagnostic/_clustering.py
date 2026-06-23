@@ -21,7 +21,7 @@ def desugar_silhouette(
     zero_line: bool = True,
     color_field: str | None = "cluster",
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Rousseeuw silhouette plot: one horizontal bar per sample.
 
     Data contract: ``y_position`` (Int64 stack order, 0..n-1 — packed by
@@ -70,7 +70,7 @@ def desugar_pca_scree(
     threshold_line: float | None = None,
     n_components: int | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """PCA scree plot: bar of per-component variance + optional cumulative
     line and threshold rule.
 
@@ -89,7 +89,7 @@ def desugar_pca_scree(
     horizontal reference rule).
     """
     del x_field, y_field, n_components
-    _ = threshold_line
+    del threshold_line
     from ferrum.encoding import X, Y
 
     user_kw = _validate("pca_scree", mark_kwargs)
@@ -138,7 +138,7 @@ def desugar_pca_scree_with_threshold(
     cumulative_line: bool = True,
     n_components: int | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Variant of ``desugar_pca_scree`` that appends a threshold rule.
 
     Used by ``Chart.mark_pca_scree`` when ``threshold_line`` is non-None;
@@ -178,7 +178,7 @@ def desugar_intercluster_distance(
     min_size: float = 60.0,
     max_size: float = 600.0,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Cluster-center 2D embedding: one point per cluster, sized by count.
 
     Data contract: ``cluster`` (Utf8), ``x`` (Float64), ``y`` (Float64),
@@ -225,7 +225,7 @@ def desugar_decision_boundary(
     proba: bool = False,
     color_field: str = "z",
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Decision-boundary background heatmap: one rect per grid cell.
 
     Data contract: pre-computed grid with columns ``x``, ``x2``, ``y``,
@@ -241,7 +241,7 @@ def desugar_decision_boundary(
     # proba is informational at the mark layer — the chart builder
     # chooses the data and the renderer's continuous-color scale handles
     # both kinds of z identically.
-    _ = proba
+    del proba
 
     user_kw = _validate("decision_boundary", mark_kwargs)
     layers: list = [

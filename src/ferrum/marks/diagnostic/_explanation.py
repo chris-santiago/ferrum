@@ -24,7 +24,7 @@ def desugar_importance(
     color_field: str | None = None,
     x_scale_domain: tuple[float, float] | list[float] | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Feature-importance mark: bars (per feature) + optional error bars.
 
     Data contract: ``feature`` (Utf8), ``importance`` (Float64), ``std``
@@ -49,7 +49,7 @@ def desugar_importance(
     del x_field, y_field
     # top_k is wired via data_transform in mark_importance; informational
     # at the desugar layer.
-    _ = top_k
+    del top_k
     user_kw = _validate("importance", mark_kwargs)
     if orient not in ("horizontal", "vertical"):
         raise ValueError(
@@ -103,7 +103,7 @@ def desugar_shap_beeswarm(
     zero_line: bool = True,
     x_scale_domain: tuple[float, float] | list[float] | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """SHAP beeswarm mark: categorical scatter of per-sample shap values.
 
     Data contract: ``feature`` (Utf8), ``shap_value`` (Float64),
@@ -130,7 +130,7 @@ def desugar_shap_beeswarm(
     del x_field, y_field
     # max_display is wired via data_transform in mark_shap_beeswarm;
     # color_bar and order are consumed upstream by the chart builder.
-    _ = max_display, color_bar, order
+    del max_display, color_bar, order
     user_kw = _validate("shap_beeswarm", mark_kwargs)
 
     def _x_channel(field: str) -> Any:
@@ -182,7 +182,7 @@ def desugar_shap_bar(
     max_display: int = 20,
     x_scale_domain: tuple[float, float] | list[float] | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Aggregated-SHAP bar mark: mean(|shap_value|) per feature.
 
     Data contract: ``feature`` (Utf8), ``abs_mean_shap`` (Float64) — the
@@ -191,7 +191,7 @@ def desugar_shap_bar(
     """
     del x_field, y_field
     # max_display is wired via data_transform in mark_shap_bar.
-    _ = max_display
+    del max_display
     user_kw = _validate("shap_bar", mark_kwargs)
 
     def _x_channel(field: str, title: str | None = None) -> Any:
@@ -230,7 +230,7 @@ def desugar_shap_waterfall(
     max_display: int = 20,
     x_scale_domain: tuple[float, float] | list[float] | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """SHAP waterfall mark: per-feature contribution segments for one sample.
 
     Data contract: ``feature`` (Utf8), ``x0`` (cumulative start),
@@ -241,7 +241,7 @@ def desugar_shap_waterfall(
     """
     del x_field, y_field
     # max_display is wired via data_transform in mark_shap_waterfall.
-    _ = max_display
+    del max_display
     user_kw = _validate("shap_waterfall", mark_kwargs)
     if sample_idx < 0:
         raise ValueError(
@@ -288,7 +288,7 @@ def desugar_pdp(
     center: bool = False,
     color_field: str | None = "feature",
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Partial-dependence mark.
 
     Data contract (from ``ModelSource.partial_dependence``): ``feature``

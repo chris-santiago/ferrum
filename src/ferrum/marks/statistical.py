@@ -35,14 +35,14 @@ def desugar_density(
     Routes to either a 1D or bivariate 2D KDE path based on the chart's
     encoding state.
 
-    **1D path** (only x encoded): returns the legacy 3-tuple
-    ``(mark, transforms, remap)`` with ``mark="area"`` (when ``fill=True``)
-    or ``mark="line"`` (when ``fill=False``), a single ``Kde`` transform, and
-    the encoding remap ``{"x": "value", "y": "density"}``.
+    **1D path** (only x encoded): single-mark ``MarkDesugarResult`` with
+    ``mark="area"`` (when ``fill=True``) or ``mark="line"`` (when
+    ``fill=False``), a single ``Kde`` transform, and the encoding remap
+    ``{"x": "value", "y": "density"}``.
 
     **2D/bivariate path** (both x AND y encoded): routes through
-    ``desugar_contour(fill=True)`` and returns the 5-tuple
-    ``("__layered__", transforms, None, None, layers)``.
+    ``desugar_contour(fill=True)`` and returns its layered
+    ``MarkDesugarResult`` (``.layers`` set).
 
     Data contract (1D path)
     -----------------------
@@ -52,8 +52,8 @@ def desugar_density(
 
     Layers emitted (1D)
     -------------------
-    Returns legacy 3-tuple, not a layer list.  The chart's x encoding
-    remaps to ``"value"`` and y to ``"density"``.
+    Single-mark mode, not a layer list.  The chart's x encoding remaps to
+    ``"value"`` and y to ``"density"``.
 
     Parameters
     ----------
@@ -102,17 +102,25 @@ def desugar_density(
 
     Returns
     -------
-    tuple
-        3-tuple ``(mark, transforms, remap)`` for ``multiple="layer"``;
-        4-tuple ``(mark, transforms, remap, position)`` for ``multiple="stack"``
-        or ``"fill"``; or 5-tuple ``("__layered__", transforms, None, None, layers)``
-        on the 2D bivariate path.
+    MarkDesugarResult
+        Single-mark mode on the 1D path: ``.mark`` is ``"area"`` or ``"line"``,
+        ``.remap`` is ``{"x": "value", "y": "density"}``, and ``.position`` is a
+        ``Stack`` adjuster for ``multiple="stack"`` or ``"fill"``.  Layered mode
+        on the 2D bivariate path (``.layers`` set, via ``desugar_contour``).
 
     Raises
     ------
     ValueError
         If ``multiple`` is not one of ``"layer"``, ``"stack"``, ``"fill"``,
         ``"dodge"`` (dodge raises because it is not yet implemented).
+
+    Examples
+    --------
+    >>> result = desugar_density("value")
+    >>> result.mark
+    'area'
+    >>> result.remap
+    {'x': 'value', 'y': 'density'}
     """
     # Bivariate routing: when the chart has both x and y bound, emit a 2D KDE
     # contour fill instead of a 1D KDE area.
@@ -262,15 +270,17 @@ def desugar_histogram(
 
     Returns
     -------
-    tuple
-        3-tuple ``("bar", transforms, encoding_remap)``.
+    MarkDesugarResult
+        Single-mark mode with ``.mark="bar"`` and ``.remap`` mapping the
+        positional channels onto the binned output columns.  ``.position`` is
+        a ``Stack`` or ``Dodge`` adjuster when ``multiple`` requests one.
 
     Examples
     --------
     >>> result = desugar_histogram("tip")
-    >>> result[0]
+    >>> result.mark
     'bar'
-    >>> result[2]
+    >>> result.remap
     {'x': 'bin_start', 'x2': 'bin_end', 'y': 'count'}
     """
     if right:
@@ -363,8 +373,8 @@ def desugar_smooth(
 
     Layers emitted
     --------------
-    *No CI*: returns the legacy 3-tuple ``("line", transforms, remap)``
-    with remap ``{"x": "x", "y": "y"}``.
+    *No CI*: single-mark mode with ``.mark="line"`` and remap
+    ``{"x": "x", "y": "y"}`` (no ``.layers``).
 
     *With CI*:
     1. ``ribbon`` — ``y="ci_lower"``, ``y2="ci_upper"``, ``opacity=0.3``
@@ -381,7 +391,7 @@ def desugar_smooth(
         Smoothing method (e.g. ``"loess"``, ``"linear"``, ``"quadratic"``).
     ci : float or None, default None
         Confidence interval level (e.g. ``0.95``).  ``None`` disables the
-        CI band and returns a single-line legacy 3-tuple.
+        CI band and returns a single-mark (line) result.
     bandwidth : float, default 0.75
         Smoothing bandwidth fraction (LOESS).
     degree : int, default 2
@@ -414,23 +424,23 @@ def desugar_smooth(
 
     Returns
     -------
-    tuple
-        3-tuple ``("line", transforms, remap)`` when ``ci=None``, or
-        5-tuple ``("__layered__", transforms, None, None, layers)``
-        when ``ci`` is set.
+    MarkDesugarResult
+        Single-mark mode (``.mark="line"``, remap ``{"x": "x", "y": "y"}``)
+        when ``ci=None`` and ``show_metrics=False``.  Layered mode (``.layers``
+        set: a ribbon CI band then the fitted line) when ``ci`` is set.
 
     Examples
     --------
     >>> result = desugar_smooth("x", "y")
-    >>> result[0]
+    >>> result.mark
     'line'
     >>> result_ci = desugar_smooth("x", "y", ci=0.95)
-    >>> result_ci[0]
-    '__layered__'
+    >>> [layer.mark for layer in result_ci.layers]
+    ['ribbon', 'line']
     """
 
     if ci is None and not show_metrics:
-        # 8a-compatible single-line path: keep the legacy 3-tuple shape so the
+        # 8a-compatible single-line path: keep the single-mark result so the
         # 6 SVG goldens stay byte-identical. Only thread x_bins/x_estimator when
         # explicitly set; otherwise omit (so existing goldens stay identical).
         smooth_kwargs: dict = dict(method=method, ci=None, bandwidth=bandwidth, degree=degree, n=n)

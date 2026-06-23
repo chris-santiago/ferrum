@@ -21,7 +21,7 @@ def desugar_residuals(
     cook_threshold: float | None = None,
     color_field: str | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Residuals diagnostic: scatter of (y_pred, residual) plus optional y=0 rule.
 
     Data contract: the chart's data must carry columns ``y_pred`` and either
@@ -90,7 +90,7 @@ def desugar_prediction_error(
     reference_band: bool = False,
     color_field: str | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Actual vs predicted: scatter of (y_true, y_pred) + optional identity line.
 
     Data contract: columns ``y_true`` and ``y_pred``. When

@@ -31,15 +31,63 @@ class MarkDesugarResult:
     """Typed return from a desugar function consumed by ``_resolve_pending``.
 
     Replaces the legacy tuple protocol that used 3-tuple, 4-tuple, and 5-tuple
-    shapes to signal different modes.
+    shapes to signal different modes.  The mode is selected by whether
+    ``layers`` is set, not by the result's arity.
 
     Modes
     -----
-    **Layered** (``layers`` is not ``None``): multi-layer chart.
-    ``mark`` is ignored; ``transforms`` apply at the chart level.
+    **Layered** (``layers`` is not ``None``): a multi-layer mark such as a
+    boxplot, violin, or CI smooth.  ``layers`` is a list of ``_Layer``
+    descriptors and ``transforms`` apply at the chart level.  ``mark``,
+    ``remap``, ``position``, and ``data`` are ignored in this mode.
 
-    **Single-mark** (``layers`` is ``None``): single mark with optional
-    encoding remap and position adjustment.
+    **Single-mark** (``layers`` is ``None``): one primitive mark.  ``mark``
+    names it (e.g. ``"bar"``, ``"line"``), ``remap`` rewrites the chart's
+    encoding channels onto the transform output columns, ``transforms`` is
+    the per-mark transform chain, ``position`` is an optional position
+    adjustment, and ``data`` carries a synthetic table when the desugar
+    materialises its own data (only ``desugar_function`` does so today).
+
+    Attributes
+    ----------
+    mark : str or None
+        Primitive mark name in single-mark mode.  Ignored in layered mode.
+    transforms : list
+        Transform chain.  Applied at the chart level in layered mode; the
+        per-mark chain in single-mark mode.
+    remap : dict
+        Encoding-channel remap (e.g. ``{"x": "value", "y": "density"}``).
+        Single-mark mode only.
+    position : Any
+        Optional position adjustment (e.g. ``Stack``, ``Dodge``).
+        Single-mark mode only.
+    layers : list or None
+        ``_Layer`` descriptors.  Non-``None`` selects layered mode.
+    data : Any
+        Synthetic data table.  Single-mark mode only; ``None`` unless the
+        desugar materialises its own data.
+
+    Examples
+    --------
+    Single-mark mode (a histogram bar):
+
+    >>> single = MarkDesugarResult(
+    ...     mark="bar", remap={"x": "bin_start", "x2": "bin_end", "y": "count"}
+    ... )
+    >>> single.mark
+    'bar'
+    >>> single.layers is None
+    True
+
+    Layered mode (two stacked layers):
+
+    >>> layered = MarkDesugarResult(
+    ...     layers=[_Layer(mark="ribbon"), _Layer(mark="line")]
+    ... )
+    >>> [layer.mark for layer in layered.layers]
+    ['ribbon', 'line']
+    >>> layered.mark is None
+    True
     """
 
     mark: Optional[str] = None

@@ -15,12 +15,12 @@ Two helpers enforce the Phase 9+ no-defer principle on this surface:
   and raises ``TypeError`` on unknown keys, mirroring ``MarkBase`` /
   ``_set_mark`` validation for primitive marks.
 - ``apply_user_mark_kwargs(layers, kwargs)`` merges validated kwargs
-  into every layer's ``mark_kwargs`` dict for layered (5-tuple)
-  desugars, with **user-wins** semantics on conflict so explicit user
-  intent overrides a desugar's hard-coded defaults (e.g. ribbon's
-  ``opacity=0.3``).
+  into every layer's ``mark_kwargs`` dict for layered-mode desugars
+  (``MarkDesugarResult.layers`` set), with **user-wins** semantics on
+  conflict so explicit user intent overrides a desugar's hard-coded
+  defaults (e.g. ribbon's ``opacity=0.3``).
 
-Legacy 3-tuple desugars (``desugar_density``, ``desugar_histogram``,
+Single-mark desugars (``desugar_density``, ``desugar_histogram``,
 ``desugar_smooth`` with ``ci=None``) have no per-layer mark_kwargs slot
 in ``Chart._resolve_pending``; for those, callers invoke only
 ``validate_user_mark_kwargs`` to reject unknown kwargs, and forwarding

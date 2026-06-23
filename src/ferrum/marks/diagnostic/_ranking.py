@@ -19,7 +19,7 @@ def desugar_rank1d(
     orient: str = "horizontal",
     color_field: str | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Univariate feature ranking — one bar per feature, sized by score.
 
     Data contract: ``feature`` (Utf8), ``score`` (Float64), ``rank``
@@ -55,7 +55,7 @@ def desugar_rank2d(
     text_field: str = "correlation_fmt",
     cmap: str | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Pairwise feature ranking — long-form correlation matrix heatmap.
 
     Data contract: ``feature_x`` (Utf8), ``feature_y`` (Utf8),
@@ -107,7 +107,7 @@ def desugar_parallel_coordinates(
     alpha: float = 0.5,
     color_field: str | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Parallel coordinates — one polyline per sample, x = feature, y = value.
 
     Data contract: ``feature`` (Utf8 — ordinal x axis), ``value``

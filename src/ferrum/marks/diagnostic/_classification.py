@@ -23,7 +23,7 @@ def desugar_roc(
     annotate_auc: bool = False,
     color_field: str | None = "class",
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """ROC curve mark.
 
     Data contract: columns ``fpr``, ``tpr``, ``class``, ``auc`` as emitted
@@ -51,7 +51,7 @@ def desugar_roc(
     responsible for shaping the data appropriately before constructing the
     chart.
     """
-    _ = average  # informational at the mark layer
+    del average  # informational at the mark layer
     user_kw = _validate("roc", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "fpr", "y": "tpr"}
     if color_field is not None:
@@ -97,7 +97,7 @@ def desugar_pr(
     iso_lines: bool = False,
     color_field: str | None = "class",
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Precision-recall curve mark.
 
     Data contract: ``recall``, ``precision``, ``class``, ``ap`` as emitted
@@ -122,7 +122,7 @@ def desugar_pr(
     desugar emits a grey dashed line layer grouped by ``_iso_f`` plus a text
     layer at ``(_iso_label_x, _iso_label_y)`` for the iso labels.
     """
-    _ = average  # informational at the mark layer
+    del average  # informational at the mark layer
     user_kw = _validate("pr", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "recall", "y": "precision"}
     if color_field is not None:
@@ -187,7 +187,7 @@ def desugar_calibration(
     reference_line: bool = True,
     color_field: str | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Calibration (reliability) curve mark.
 
     Data contract: ``mean_predicted``, ``fraction_positive``, ``count`` as
@@ -206,7 +206,7 @@ def desugar_calibration(
     # n_bins and strategy are consumed upstream by the chart builder
     # (source.calibration_curve(n_bins=..., strategy=...)); informational
     # at the mark layer — the data is already binned.
-    _ = n_bins, strategy
+    del n_bins, strategy
     user_kw = _validate("calibration", mark_kwargs)
     line_enc: dict[str, Any] = {
         "x": "mean_predicted",
@@ -250,7 +250,7 @@ def desugar_gain(
     reference_line: bool = True,
     color_field: str | None = "class",
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Cumulative-gain mark.
 
     Data contract: ``percent_population``, ``gain``, ``class`` per
@@ -258,7 +258,7 @@ def desugar_gain(
     ``class='baseline'`` rows that render as the diagonal reference when
     ``color_field='class'``; ``reference_line`` is informational.
     """
-    _ = reference_line  # baseline already in data
+    del reference_line  # baseline already in data
     user_kw = _validate("gain", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "percent_population", "y": "gain"}
     if color_field is not None:
@@ -277,7 +277,7 @@ def desugar_lift(
     reference_line: bool = True,
     color_field: str | None = "class",
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Lift curve mark.
 
     Data contract: ``percent_population``, ``lift``, ``class`` per
@@ -285,7 +285,7 @@ def desugar_lift(
     the lift=1 reference line when ``color_field='class'``;
     ``reference_line`` is informational.
     """
-    _ = reference_line  # baseline already in data
+    del reference_line  # baseline already in data
     user_kw = _validate("lift", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "percent_population", "y": "lift"}
     if color_field is not None:
@@ -306,7 +306,7 @@ def desugar_discrimination_threshold(
     threshold_line: bool = False,
     optimum_label: bool = True,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Discrimination-threshold sweep mark.
 
     Data contract (long form): ``threshold``, ``metric``, ``value`` — the
@@ -327,7 +327,7 @@ def desugar_discrimination_threshold(
     feature works for both chart-API and figure-function entry points
     (Schwabish C7 audit-rework, 2026-05-12).
     """
-    _ = metrics, n_thresholds  # informational; data is pre-melted
+    del metrics, n_thresholds  # informational; data is pre-melted
     user_kw = _validate("discrimination_threshold", mark_kwargs)
     layers: list = [
         _Layer(
@@ -370,7 +370,7 @@ def desugar_confusion(
     color_field: str = "value",
     cmap: str | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Confusion-matrix mark: ordinal heatmap + per-cell value labels.
 
     Data contract: ``actual``, ``predicted``, ``value``, ``value_fmt`` as
@@ -420,7 +420,7 @@ def desugar_class_prediction_error(
     color_field: str = "predicted",
     show_counts: bool = True,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Stacked-bar diagnostic of predicted-class composition.
 
     Data contract: ``actual``, ``predicted``, ``value`` (same shape as

@@ -145,7 +145,10 @@ class StatisticalMarksMixin:
         density : bool, optional
             Normalise counts to a probability density.  Default is ``False``.
         right : bool, optional
-            Whether bins are closed on the right.  Default is ``True``.
+            Whether bins are closed on the right.  Default is ``False``.
+            ``right=True`` is not currently supported and raises
+            ``ValueError``; bins are always left-closed, right-open
+            ``[lo, hi)``.
         cumulative : bool, optional
             Render a cumulative histogram.  Default is ``False``.
         multiple : str, optional
