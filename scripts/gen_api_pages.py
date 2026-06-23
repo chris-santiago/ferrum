@@ -49,8 +49,9 @@ PAGES: dict[str, tuple[str, str]] = {
     "position": ("Position", "Position adjustments — `Dodge`, `Stack`, `Jitter`, `Identity`."),
     "layer": ("Layer", "`Layer` and the `layer()` helper for explicit layering."),
     "repeat": ("Repeat", "`Repeat` for faceted repeat patterns."),
-    "structural": ("Structural", "Structural view modifiers — `BreakAxis`, `Inset`, `SecondaryY`, `Grid`."),
+    "structural": ("Structural", "Structural view modifiers — `BreakAxis`, `Inset`, `SecondaryY`."),
     "axis": ("Axis", "`Axis` value class for axis configuration."),
+    "grid": ("Grid", "`Grid` value class for gridline configuration."),
     "legend": ("Legend", "`Legend` value class for legend configuration."),
     "title": ("Title", "`Title` value class for figure titles."),
     "render_config": ("Render Config", "`RenderConfig` for auto-raster, scale, and output tuning."),
@@ -89,7 +90,7 @@ MODULE_RULES: list[tuple[str, str]] = [
     # are not referenced by any autoref; they stay UNHOMED (reported, not a
     # page). The `ferrum.config` namespace keeps its hand-written config.md.
     ("ferrum.structural", "structural"),
-    ("ferrum.grid", "structural"),
+    ("ferrum.grid", "grid"),
     ("ferrum.chart", "chart"),
 ]
 

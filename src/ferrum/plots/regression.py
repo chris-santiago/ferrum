@@ -2,7 +2,8 @@
 
 Public API
 ----------
-lmplot, residplot, residuals_chart, prediction_error_chart, cooks_distance_chart.
+lmplot, regplot, residplot, residuals_chart, prediction_error_chart,
+cooks_distance_chart.
 
 Each public function wraps ``_resolve_source`` (shared across all figure
 functions) and dispatches to a co-located ``_*_from_source`` builder that

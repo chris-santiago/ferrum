@@ -1,13 +1,11 @@
-# Structural
+# Grid
 
-Structural view modifiers — `BreakAxis`, `Inset`, `SecondaryY`.
+`Grid` value class for gridline configuration.
 
 ::: ferrum
     options:
       members:
-        - BreakAxis
-        - Inset
-        - SecondaryY
+        - Grid
       show_root_heading: false
       show_root_toc_entry: false
       filters: ["!^_"]
