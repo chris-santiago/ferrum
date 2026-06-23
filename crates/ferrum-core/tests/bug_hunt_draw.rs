@@ -200,20 +200,6 @@ mod tests {
         }
     }
 
-    // ── format_ordinal_number (format.rs, FIXED: unsigned_abs) ──────────
-
-    fn format_ordinal_number(n: i64) -> String {
-        let abs = n.unsigned_abs();
-        let suffix = match (abs % 100, abs % 10) {
-            (11..=13, _) => "th",
-            (_, 1) => "st",
-            (_, 2) => "nd",
-            (_, 3) => "rd",
-            _ => "th",
-        };
-        format!("{n}{suffix}")
-    }
-
     // ── format_time (format.rs) ─────────────────────────────────────────
 
     fn epoch_ms_to_ymdhms(epoch_ms: i64) -> (i64, u32, u32, u32, u32, u32) {
@@ -438,23 +424,6 @@ mod tests {
         let s = format_numeric(f64::NEG_INFINITY);
         assert!(s.is_empty(),
             "FIXED: format_numeric(-INFINITY) must return empty string; got: '{s}'");
-    }
-
-    // ── Fix verification: format_ordinal_number i64::MIN no panic ────────
-
-    #[test]
-    fn bug_hunt_r2_ordinal_i64_min_no_panic() {
-        // Round 1 found: i64::MIN.abs() panics in debug.
-        // Fix: uses unsigned_abs() which never panics.
-        let s = format_ordinal_number(i64::MIN);
-        // i64::MIN = -9223372036854775808
-        // unsigned_abs = 9223372036854775808
-        // 9223372036854775808 % 100 = 8; 9223372036854775808 % 10 = 8
-        // Neither matches 11..=13 nor 1/2/3, so suffix = "th"
-        assert!(s.ends_with("th"),
-            "FIXED: i64::MIN ordinal must end with 'th' without panicking; got: '{s}'");
-        assert!(s.starts_with("-9223372036854775808"),
-            "FIXED: i64::MIN ordinal must start with the i64::MIN value; got: '{s}'");
     }
 
     // ── Fix verification: escape_text strips null bytes ──────────────────
@@ -1623,36 +1592,6 @@ mod tests {
         let result = escape_attr("x\x00=\"y\"");
         assert_eq!(result, "x=&quot;y&quot;",
             "null byte stripped AND quotes escaped");
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    //  ROUND 2 TESTS — ORDINAL FORMATTING EXTENDED CASES
-    // ═══════════════════════════════════════════════════════════════════════
-
-    #[test]
-    fn bug_hunt_r2_ordinal_i64_max() {
-        // i64::MAX = 9223372036854775807
-        // unsigned_abs = 9223372036854775807
-        // 9223372036854775807 % 100 = 7; % 10 = 7 → "th"
-        let s = format_ordinal_number(i64::MAX);
-        assert!(s.ends_with("th"),
-            "i64::MAX ordinal should end with 'th'; got: '{s}'");
-        assert!(s.starts_with("9223372036854775807"),
-            "i64::MAX ordinal should start with the value; got: '{s}'");
-    }
-
-    #[test]
-    fn bug_hunt_r2_ordinal_negative_teens() {
-        assert_eq!(format_ordinal_number(-11), "-11th");
-        assert_eq!(format_ordinal_number(-12), "-12th");
-        assert_eq!(format_ordinal_number(-13), "-13th");
-    }
-
-    #[test]
-    fn bug_hunt_r2_ordinal_negative_twenties() {
-        assert_eq!(format_ordinal_number(-21), "-21st");
-        assert_eq!(format_ordinal_number(-22), "-22nd");
-        assert_eq!(format_ordinal_number(-23), "-23rd");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

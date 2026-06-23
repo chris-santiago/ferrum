@@ -69,6 +69,7 @@ pub(crate) enum SortOrder {
 /// makes the boxen categorical axis come out sorted — no separate layer sort or
 /// domain step is required.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct LetterValueSort {
     pub op: SortOp,
     pub order: SortOrder,
@@ -630,6 +631,40 @@ mod tests {
             TransformSpec::LetterValue(s) => assert_eq!(s, spec),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn test_letter_value_sort_round_trip_and_deny_unknown() {
+        // A valid sort dict round-trips losslessly (byte-identity for the
+        // ferrum-produced wire: LetterValueSort serializes exactly {op, order}).
+        let spec = LetterValueSpec {
+            value: "v".into(),
+            group: Some("g".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: Some(LetterValueSort { op: SortOp::Sum, order: SortOrder::Desc }),
+        };
+        let wrapped = TransformSpec::LetterValue(spec.clone());
+        let json = serde_json::to_string(&wrapped).unwrap();
+        let parsed: TransformSpec = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TransformSpec::LetterValue(s) => assert_eq!(s, spec),
+            _ => panic!("wrong variant"),
+        }
+
+        // An EXTRA key inside the sort dict must now error (no-silent-drop:
+        // matches the SEAM-04 deny_unknown_fields contract on the parent spec).
+        // `TransformSpec` is internally tagged (`tag = "type"`), so the spec
+        // fields — including `sort` — sit at the object root.
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value["sort"]["bogus"] = serde_json::json!("oops");
+        let polluted = serde_json::to_string(&value).unwrap();
+        let err = serde_json::from_str::<TransformSpec>(&polluted);
+        assert!(
+            err.is_err(),
+            "deny_unknown_fields must reject an unknown key in the sort dict; got: {err:?}",
+        );
     }
 
     #[test]
