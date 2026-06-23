@@ -11,6 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+# Primitive (renderer-native) mark names — those that do not desugar into a
+# composite of other marks.  Single-sourced here (a stdlib-only leaf imported by
+# the desugar pipeline) so chart.py, _desugar.py, and the statistical
+# chart-method mixin cannot drift across the T4.1 split seam.
+_PRIMITIVE_MARKS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
+
 
 @dataclass(frozen=True)
 class _Layer:

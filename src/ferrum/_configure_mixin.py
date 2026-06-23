@@ -25,8 +25,18 @@ def _resolve_band_alias(
     *,
     canonical_name: str,
     alias_name: str,
+    owner: str = "configure_axis",
+    stacklevel: int = 3,
 ) -> "float | None":
     """Resolve a renamed band kwarg against its deprecated alias.
+
+    Shared by all three surfaces that accept the ``min_band``/``max_band`` band
+    kwargs with deprecated ``min_extent``/``max_extent`` aliases: the
+    ``configure_axis`` mixin method, :class:`ferrum.axis.Axis`, and
+    :class:`ferrum.configure.AxisConfig`.  Single-sourcing the resolution here
+    keeps the three siblings from drifting on the explicit-``None`` edge (an
+    explicit ``min_extent=None`` is treated as "supplied" via the
+    :data:`_MISSING` sentinel, consistently across all three).
 
     Parameters
     ----------
@@ -40,6 +50,14 @@ def _resolve_band_alias(
         The new canonical kwarg name shown in warnings/errors.
     alias_name
         The deprecated kwarg name shown in warnings/errors.
+    owner
+        The owning surface name shown as the prefix of the DeprecationWarning
+        (e.g. ``"Axis"``, ``"AxisConfig"``, ``"configure_axis"``).  Defaults to
+        ``"configure_axis"`` for backward compatibility with the mixin call site.
+    stacklevel
+        The :func:`warnings.warn` ``stacklevel``.  Direct constructors
+        (``Axis``/``AxisConfig``) pass ``2`` (one frame to the caller); the
+        mixin method passes ``3`` (caller → ``configure_axis`` → helper).
 
     Returns
     -------
@@ -61,10 +79,10 @@ def _resolve_band_alias(
             f"use '{canonical_name}=' only."
         )
     warnings.warn(
-        f"configure_axis: '{alias_name}=' is deprecated; use '{canonical_name}=' instead. "
+        f"{owner}: '{alias_name}=' is deprecated; use '{canonical_name}=' instead. "
         "'extent' is reserved for data-domain bounds.",
         DeprecationWarning,
-        stacklevel=3,
+        stacklevel=stacklevel,
     )
     return alias_value  # type: ignore[return-value]
 

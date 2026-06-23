@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ferrum._layer import _PRIMITIVE_MARKS
 from ferrum.encoding.base import ChannelBase
 from ferrum.marks.composite import _MISSING
 from ferrum.marks.statistical import (
@@ -17,8 +18,6 @@ from ferrum.marks.statistical import (
     _resolve_histogram,
     _resolve_smooth,
 )
-
-_PRIMITIVE_MARKS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
 
 
 def _normalize_orient(orient: str | None, horizontal: bool) -> bool:

@@ -45,7 +45,9 @@ from ferrum._desugar import (  # noqa: F401  (back-compat re-export)
     _split_style_kwargs,
 )
 
-_PRIMITIVE_MARKS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
+# Single-sourced in ``_layer`` (the desugar leaf); re-exported here so any
+# existing ``from ferrum.chart import _PRIMITIVE_MARKS`` keeps resolving.
+from ferrum._layer import _PRIMITIVE_MARKS  # noqa: F401  (back-compat re-export)
 
 
 def _strip_unstackable(d: dict, mark: str | None) -> None:

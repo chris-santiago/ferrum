@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass, fields
 from typing import Any
 
+from ferrum._configure_mixin import _MISSING, _resolve_band_alias
 from ferrum._title_sentinel import TitleParam, _UNSET, serialize_title
 
 
@@ -203,36 +203,27 @@ class Axis:
         zindex: int | None = None,
         label_map: dict[str, str] | None = None,
         # Deprecated aliases — accepted with a DeprecationWarning.
-        min_extent: float | None = None,
-        max_extent: float | None = None,
+        min_extent: object = _MISSING,
+        max_extent: object = _MISSING,
     ) -> None:
-        # Resolve deprecated aliases: min_extent → min_band, max_extent → max_band.
-        if min_extent is not None:
-            if min_band is not None:
-                raise TypeError(
-                    "Cannot supply both 'min_band=' and the deprecated 'min_extent=' alias; "
-                    "use 'min_band=' only."
-                )
-            warnings.warn(
-                "Axis: 'min_extent=' is deprecated; use 'min_band=' instead. "
-                "'extent' is reserved for data-domain bounds.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            min_band = min_extent
-        if max_extent is not None:
-            if max_band is not None:
-                raise TypeError(
-                    "Cannot supply both 'max_band=' and the deprecated 'max_extent=' alias; "
-                    "use 'max_band=' only."
-                )
-            warnings.warn(
-                "Axis: 'max_extent=' is deprecated; use 'max_band=' instead. "
-                "'extent' is reserved for data-domain bounds.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            max_band = max_extent
+        # Resolve deprecated aliases (min_extent → min_band, max_extent → max_band)
+        # through the shared canonical helper so all three surfaces stay in sync.
+        min_band = _resolve_band_alias(
+            min_band,
+            min_extent,
+            canonical_name="min_band",
+            alias_name="min_extent",
+            owner="Axis",
+            stacklevel=2,
+        )
+        max_band = _resolve_band_alias(
+            max_band,
+            max_extent,
+            canonical_name="max_band",
+            alias_name="max_extent",
+            owner="Axis",
+            stacklevel=2,
+        )
 
         object.__setattr__(self, "title", title)
         object.__setattr__(self, "orient", orient)

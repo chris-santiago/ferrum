@@ -30,16 +30,13 @@ import inspect
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Callable
 
-from ferrum._layer import _Layer
+from ferrum._layer import _PRIMITIVE_MARKS, _Layer
 from ferrum.encoding.base import ChannelBase
 from ferrum.marks.base import MarkBase
 from ferrum.marks.statistical import _build_prior_layer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ferrum.chart import Chart
-
-
-_PRIMITIVE_MARKS = frozenset(["point", "line", "bar", "area", "rule", "text", "tick", "rect"])
 
 
 def _resolve_sort_for_composite(sort: Any, x_field: str | None, y_field: str | None) -> Any:
