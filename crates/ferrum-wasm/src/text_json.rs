@@ -44,14 +44,6 @@ fn color_string(style: &ferrum_scene::TextStyle) -> String {
 
 // ── Public serialization functions ──────────────────────────────────────────
 
-/// Build the full text-element JSON array from scene data's text elements.
-///
-/// Called from `WasmRenderer::reset_zoom` (wasm32-only path).
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn build_text_json(data: &crate::scene_load::SceneData) -> String {
-    build_text_json_from(&data.text_elements)
-}
-
 /// Build the combined overlay JSON object `{"text": [...], "raw": [...]}` for
 /// `WasmRenderer::load_scene`.
 ///

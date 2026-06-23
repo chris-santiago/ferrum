@@ -1,8 +1,8 @@
-use ferrum_scene::{
-    ChannelName, ConditionalEncoding, EncodingValue, FieldValue, MarkBatch, Panel, SceneNode,
-};
+use ferrum_scene::{ConditionalEncoding, EncodingValue, FieldValue, MarkBatch, Panel, SceneNode};
 
-use crate::scene_load::{color_to_linear, stroke_dash_index, CircleInstance, PackedBatchMeta, RectInstance};
+use crate::scene_load::{
+    color_to_linear, stroke_dash_index, CircleInstance, DrawKind, PackedBatchMeta, RectInstance,
+};
 use crate::selection_state::SelectionState;
 
 use std::collections::HashMap;
@@ -70,12 +70,12 @@ pub struct ConditionalUpdates {
 fn packed_base_offsets(packed_batch_meta: &HashMap<(u32, u32), PackedBatchMeta>) -> (usize, usize) {
     let total_packed_circles: usize = packed_batch_meta
         .values()
-        .filter(|m| m.kind == 0)
+        .filter(|m| m.kind == DrawKind::Circle)
         .map(|m| m.instance_count)
         .sum();
     let total_packed_rects: usize = packed_batch_meta
         .values()
-        .filter(|m| m.kind == 1)
+        .filter(|m| m.kind == DrawKind::Rect)
         .map(|m| m.instance_count)
         .sum();
     (total_packed_circles, total_packed_rects)
@@ -111,9 +111,10 @@ pub(crate) fn apply_crossfilter_to_panel(
     packed_batch_meta: &HashMap<(u32, u32), PackedBatchMeta>,
 ) {
     // A filtered-in mark keeps its opacity; a filtered-out mark is dimmed.
+    // The targeted channel is implied by the value variant (`Opacity`); the
+    // apply path dispatches on the value alone.
     let if_selected = EncodingValue::Opacity { value: 1.0 };
     let if_not = EncodingValue::Opacity { value: dimmed_opacity };
-    let channel = ChannelName::Opacity;
 
     let (total_packed_circles, total_packed_rects) = packed_base_offsets(packed_batch_meta);
     let mut circle_offset = total_packed_circles;
@@ -128,7 +129,7 @@ pub(crate) fn apply_crossfilter_to_panel(
                 // Do NOT advance circle_offset/rect_offset for packed batches.
                 if panel_idx == target_panel && !matches!(selection, SelectionState::Empty) {
                     apply_conditional_to_packed(
-                        &channel, &if_selected, &if_not, selection, meta, circles, rects,
+                        &if_selected, &if_not, selection, meta, circles, rects,
                     );
                 }
             } else {
@@ -146,7 +147,7 @@ pub(crate) fn apply_crossfilter_to_panel(
                             rect_offset,
                         };
                         apply_conditional_to_batch(
-                            &channel, &if_selected, &if_not, selection, indices, batch, &mut bufs,
+                            &if_selected, &if_not, selection, indices, batch, &mut bufs,
                         );
                     }
                 }
@@ -228,7 +229,6 @@ pub fn resolve_conditionals_with_packed(
                         continue;
                     }
                     apply_conditional_to_packed(
-                        &cond.channel,
                         &cond.if_selected,
                         &cond.if_not,
                         sel,
@@ -257,7 +257,6 @@ pub fn resolve_conditionals_with_packed(
                             rect_offset,
                         };
                         apply_conditional_to_batch(
-                            &cond.channel,
                             &cond.if_selected,
                             &cond.if_not,
                             sel,
@@ -328,8 +327,11 @@ fn packed_instance_selected(
 /// center against the selection rectangle. For Point selections this matches
 /// either by `field_values` (against the packed tooltip table) or by data
 /// index — the same rules the unpacked path uses.
+///
+/// The visual effect is determined by the [`EncodingValue`] variant alone
+/// (`apply_value_to_circle`/`apply_value_to_rect`); the targeted channel is
+/// `value.channel()`. There is no separate channel argument to disagree.
 pub(crate) fn apply_conditional_to_packed(
-    channel: &ChannelName,
     if_selected: &EncodingValue,
     if_not: &EncodingValue,
     sel: &SelectionState,
@@ -341,8 +343,7 @@ pub(crate) fn apply_conditional_to_packed(
     let count = meta.instance_count;
 
     match meta.kind {
-        0 => {
-            // Packed circles.
+        DrawKind::Circle => {
             for i in 0..count {
                 let idx = start + i;
                 let selected = packed_instance_selected(sel, meta, i, || {
@@ -352,12 +353,11 @@ pub(crate) fn apply_conditional_to_packed(
                 });
                 let value = if selected { if_selected } else { if_not };
                 if let Some(inst) = circles.get_mut(idx) {
-                    apply_value_to_circle(inst, channel, value);
+                    apply_value_to_circle(inst, value);
                 }
             }
         }
-        1 => {
-            // Packed rects.
+        DrawKind::Rect => {
             for i in 0..count {
                 let idx = start + i;
                 let selected = packed_instance_selected(sel, meta, i, || {
@@ -369,11 +369,10 @@ pub(crate) fn apply_conditional_to_packed(
                 });
                 let value = if selected { if_selected } else { if_not };
                 if let Some(inst) = rects.get_mut(idx) {
-                    apply_value_to_rect(inst, channel, value);
+                    apply_value_to_rect(inst, value);
                 }
             }
         }
-        _ => {}
     }
 }
 
@@ -391,7 +390,6 @@ pub(crate) fn count_instances(batch: &MarkBatch) -> (usize, usize) {
 }
 
 pub(crate) fn apply_conditional_to_batch(
-    channel: &ChannelName,
     if_selected: &EncodingValue,
     if_not: &EncodingValue,
     sel: &SelectionState,
@@ -442,13 +440,13 @@ pub(crate) fn apply_conditional_to_batch(
         match node {
             SceneNode::Circle { .. } => {
                 if let Some(inst) = bufs.circles.get_mut(bufs.circle_offset + ci) {
-                    apply_value_to_circle(inst, channel, value);
+                    apply_value_to_circle(inst, value);
                 }
                 ci += 1;
             }
             SceneNode::Rect { .. } => {
                 if let Some(inst) = bufs.rects.get_mut(bufs.rect_offset + ri) {
-                    apply_value_to_rect(inst, channel, value);
+                    apply_value_to_rect(inst, value);
                 }
                 ri += 1;
             }
@@ -457,74 +455,100 @@ pub(crate) fn apply_conditional_to_batch(
     }
 }
 
-/// Apply the 7 conditional encoding arms that are identical for circles and
-/// rects.  Returns `true` when the value was handled; returns `false` when the
-/// `Size` arm fires (the caller applies per-geometry size logic) or when no arm
-/// matches.
+/// Mutable view over the fill/stroke fields shared by [`CircleInstance`] and
+/// [`RectInstance`].
 ///
-/// Using explicit mutable references instead of a trait keeps the call sites
-/// simple and avoids introducing a new trait for two implementors.
-#[allow(clippy::too_many_arguments)]
-fn apply_common_channels(
-    channel: &ChannelName,
-    value: &EncodingValue,
-    fill_color: &mut [f32; 4],
-    opacity: &mut f32,
-    stroke_width: &mut f32,
-    stroke_dash: &mut f32,
-    stroke_opacity: &mut f32,
-    angle: &mut f32,
-) -> bool {
-    match (channel, value) {
-        (ChannelName::Color, EncodingValue::Color { value: c }) => {
-            *fill_color = color_to_linear(c, 1.0);
-            true
+/// The seven conditional-encoding arms that are identical for both geometries
+/// (Color, Opacity, StrokeWidth, StrokeDash, StrokeOpacity, FillOpacity, Angle)
+/// mutate exactly these fields. Routing both instance types through one view
+/// means [`apply_value_common`] has a single copy of those arms, so a new
+/// shared channel cannot be added to circles and silently forgotten for rects.
+struct FillStrokeView<'a> {
+    fill_color: &'a mut [f32; 4],
+    opacity: &'a mut f32,
+    stroke_width: &'a mut f32,
+    stroke_dash: &'a mut f32,
+    stroke_opacity: &'a mut f32,
+    angle: &'a mut f32,
+}
+
+impl<'a> FillStrokeView<'a> {
+    fn of_circle(inst: &'a mut CircleInstance) -> Self {
+        Self {
+            fill_color: &mut inst.fill_color,
+            opacity: &mut inst.opacity,
+            stroke_width: &mut inst.stroke_width,
+            stroke_dash: &mut inst.stroke_dash,
+            stroke_opacity: &mut inst.stroke_opacity,
+            angle: &mut inst.angle,
         }
-        (ChannelName::Opacity, EncodingValue::Opacity { value: o }) => {
-            *opacity = *o as f32;
-            true
+    }
+
+    fn of_rect(inst: &'a mut RectInstance) -> Self {
+        Self {
+            fill_color: &mut inst.fill_color,
+            opacity: &mut inst.opacity,
+            stroke_width: &mut inst.stroke_width,
+            stroke_dash: &mut inst.stroke_dash,
+            stroke_opacity: &mut inst.stroke_opacity,
+            angle: &mut inst.angle,
         }
-        (_, EncodingValue::StrokeWidth { value: w }) => {
-            *stroke_width = *w as f32;
-            true
-        }
-        (_, EncodingValue::StrokeDash { value: pattern }) => {
-            *stroke_dash = stroke_dash_index(&Some(pattern.clone()));
-            true
-        }
-        (ChannelName::StrokeOpacity, EncodingValue::StrokeOpacity { value: o }) => {
-            *stroke_opacity = *o as f32;
-            true
-        }
-        (ChannelName::FillOpacity, EncodingValue::FillOpacity { value: o }) => {
-            fill_color[3] = *o as f32;
-            true
-        }
-        (ChannelName::Angle, EncodingValue::Angle { value: a }) => {
-            *angle = *a as f32;
-            true
-        }
-        // Size arm and unknown combinations are left to the caller.
-        _ => false,
     }
 }
 
-fn apply_value_to_circle(inst: &mut CircleInstance, channel: &ChannelName, value: &EncodingValue) {
-    if !apply_common_channels(
-        channel,
-        value,
-        &mut inst.fill_color,
-        &mut inst.opacity,
-        &mut inst.stroke_width,
-        &mut inst.stroke_dash,
-        &mut inst.stroke_opacity,
-        &mut inst.angle,
-    ) {
-        // Only the Size arm differs per geometry.
-        if let EncodingValue::Size { value: s } = value {
-            inst.radius = (*s as f32 / std::f32::consts::PI).sqrt();
+/// Apply the conditional-encoding arms that are identical for circles and rects,
+/// dispatching on the [`EncodingValue`] variant ALONE.
+///
+/// Each `EncodingValue` variant targets exactly one channel
+/// (`EncodingValue::channel()` is the source of truth), so the value uniquely
+/// determines the effect — there is no separate `channel` argument to disagree
+/// with it. Returns `true` when a shared arm handled the value; returns `false`
+/// for `Size` (the caller applies per-geometry size logic) and for `Field` /
+/// any value with no rendered effect on these fields.
+fn apply_value_common(value: &EncodingValue, view: &mut FillStrokeView<'_>) -> bool {
+    match value {
+        EncodingValue::Color { value: c } => {
+            *view.fill_color = color_to_linear(c, 1.0);
+            true
         }
+        EncodingValue::Opacity { value: o } => {
+            *view.opacity = *o as f32;
+            true
+        }
+        EncodingValue::StrokeWidth { value: w } => {
+            *view.stroke_width = *w as f32;
+            true
+        }
+        EncodingValue::StrokeDash { value: pattern } => {
+            *view.stroke_dash = stroke_dash_index(&Some(pattern.clone()));
+            true
+        }
+        EncodingValue::StrokeOpacity { value: o } => {
+            *view.stroke_opacity = *o as f32;
+            true
+        }
+        EncodingValue::FillOpacity { value: o } => {
+            view.fill_color[3] = *o as f32;
+            true
+        }
+        EncodingValue::Angle { value: a } => {
+            *view.angle = *a as f32;
+            true
+        }
+        // Size is per-geometry (radius vs width/height); Field/any other value
+        // has no shared-field effect. Both are left to the caller.
+        EncodingValue::Size { .. } | EncodingValue::Field { .. } => false,
     }
+}
+
+fn apply_value_to_circle(inst: &mut CircleInstance, value: &EncodingValue) {
+    // Only the Size arm differs per geometry; everything else is shared.
+    if let EncodingValue::Size { value: s } = value {
+        inst.radius = (*s as f32 / std::f32::consts::PI).sqrt();
+        return;
+    }
+    let mut view = FillStrokeView::of_circle(inst);
+    apply_value_common(value, &mut view);
 }
 
 /// Test whether a mark's tooltip satisfies all (field, value) constraints,
@@ -588,35 +612,30 @@ fn field_value_matches_tooltip(tooltip_value: &str, field_value: &FieldValue) ->
     }
 }
 
-fn apply_value_to_rect(inst: &mut RectInstance, channel: &ChannelName, value: &EncodingValue) {
-    if !apply_common_channels(
-        channel,
-        value,
-        &mut inst.fill_color,
-        &mut inst.opacity,
-        &mut inst.stroke_width,
-        &mut inst.stroke_dash,
-        &mut inst.stroke_opacity,
-        &mut inst.angle,
-    ) {
-        // Only the Size arm differs per geometry.
-        // Without orientation context (h-bar vs v-bar) we apply the size to
-        // both width and height so the conditional always has a visible effect.
-        // The rendering layer controls which dimension is the data extent; the
-        // other is the band width set by the scale.  Applying to both is the
-        // conservative fallback that matches the circle counterpart's intent
-        // (scale the mark proportionally to the encoded value).
-        if let EncodingValue::Size { value: s } = value {
-            inst.size = [*s as f32, *s as f32];
-        }
+fn apply_value_to_rect(inst: &mut RectInstance, value: &EncodingValue) {
+    // Only the Size arm differs per geometry.
+    // Without orientation context (h-bar vs v-bar) we apply the size to both
+    // width and height so the conditional always has a visible effect. The
+    // rendering layer controls which dimension is the data extent; the other is
+    // the band width set by the scale. Applying to both is the conservative
+    // fallback that matches the circle counterpart's intent (scale the mark
+    // proportionally to the encoded value).
+    if let EncodingValue::Size { value: s } = value {
+        inst.size = [*s as f32, *s as f32];
+        return;
     }
+    let mut view = FillStrokeView::of_rect(inst);
+    apply_value_common(value, &mut view);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::scene_load::srgb_to_linear;
-    use ferrum_scene::{Color, FieldValue};
+    // `ChannelName` is still a field on `ConditionalEncoding` (kept for wire
+    // compatibility), so test fixtures construct it; the runtime apply path no
+    // longer dispatches on it (WASM-05: value is the source of truth).
+    use ferrum_scene::{ChannelName, Color, FieldValue};
 
     // ── D6 crossfilter: apply_crossfilter_to_panel dims only the target panel ─
 
@@ -789,7 +808,6 @@ mod tests {
         };
         apply_value_to_circle(
             &mut inst,
-            &ChannelName::Color,
             &EncodingValue::Color { value: red },
         );
         assert!((inst.fill_color[0] - 1.0).abs() < 0.01);
@@ -812,7 +830,6 @@ mod tests {
         };
         apply_value_to_rect(
             &mut inst,
-            &ChannelName::Opacity,
             &EncodingValue::Opacity { value: 0.3 },
         );
         assert!((inst.opacity - 0.3).abs() < 0.01);
@@ -834,7 +851,6 @@ mod tests {
         };
         apply_value_to_rect(
             &mut inst,
-            &ChannelName::Size,
             &EncodingValue::Size { value: 20.0 },
         );
         assert!((inst.size[0] - 20.0).abs() < 0.01);
@@ -1702,7 +1718,6 @@ mod tests {
         };
         apply_value_to_circle(
             &mut inst,
-            &ChannelName::Size,
             &EncodingValue::Size { value: std::f64::consts::PI * 100.0 },
         );
         // Expected: sqrt(PI*100 / PI) = sqrt(100) = 10
@@ -1714,9 +1729,11 @@ mod tests {
     }
 
     #[test]
-    fn bug_hunt_apply_unknown_channel_is_noop() {
-        // Applying an X-channel value (not Color/Opacity/Size) to a circle
-        // should be a no-op (falls through the match).
+    fn bug_hunt_apply_field_value_is_noop() {
+        // Value-is-source-of-truth: the only value with no rendered effect on a
+        // circle's shared fill/stroke fields (and no per-geometry size effect)
+        // is `Field` — it names a data field rather than a literal value, so the
+        // apply path leaves the instance untouched.
         let mut inst = CircleInstance {
             center: [0.0, 0.0],
             radius: 5.0,
@@ -1734,15 +1751,20 @@ mod tests {
 
         apply_value_to_circle(
             &mut inst,
-            &ChannelName::X,
-            &EncodingValue::Opacity { value: 0.1 },
+            &EncodingValue::Field { name: "category".to_string() },
         );
-        assert_eq!(inst.fill_color, original_fill, "X channel must not change fill");
-        assert!((inst.opacity - original_opacity).abs() < 1e-10, "X channel must not change opacity");
-        assert!((inst.radius - original_radius).abs() < 1e-10, "X channel must not change radius");
+        assert_eq!(inst.fill_color, original_fill, "Field value must not change fill");
+        assert!((inst.opacity - original_opacity).abs() < 1e-10, "Field value must not change opacity");
+        assert!((inst.radius - original_radius).abs() < 1e-10, "Field value must not change radius");
     }
 
     // ── W7: StrokeWidth and StrokeDash conditional values ────────────────
+    //
+    // WASM-05: `apply_value_*` now dispatches on the `EncodingValue` variant
+    // alone (the value is the single source of truth for the targeted channel —
+    // `EncodingValue::channel()` proves the 1:1 mapping). There is no separate
+    // channel argument that could be ignored or disagree, so a `StrokeWidth`
+    // value sets stroke width unconditionally.
 
     /// apply_value_to_circle must set stroke_width when value is StrokeWidth.
     #[test]
@@ -1760,7 +1782,6 @@ mod tests {
         };
         apply_value_to_circle(
             &mut inst,
-            &ChannelName::Color, // channel field is ignored for StrokeWidth value
             &EncodingValue::StrokeWidth { value: 3.5 },
         );
         assert!(
@@ -1787,7 +1808,6 @@ mod tests {
         // [6.0, 3.0] maps to dash index 1.0
         apply_value_to_circle(
             &mut inst,
-            &ChannelName::Color,
             &EncodingValue::StrokeDash { value: vec![6.0, 3.0] },
         );
         assert!(
@@ -1814,7 +1834,6 @@ mod tests {
         };
         apply_value_to_rect(
             &mut inst,
-            &ChannelName::Color,
             &EncodingValue::StrokeWidth { value: 2.0 },
         );
         assert!(
@@ -1842,7 +1861,6 @@ mod tests {
         // [2.0, 3.0] maps to dash index 2.0
         apply_value_to_rect(
             &mut inst,
-            &ChannelName::Color,
             &EncodingValue::StrokeDash { value: vec![2.0, 3.0] },
         );
         assert!(
@@ -1850,6 +1868,72 @@ mod tests {
             "StrokeDash [2,3] must set rect stroke_dash index to 2.0, got {}",
             inst.stroke_dash
         );
+    }
+
+    /// WASM-05 parity: every shared arm produces the SAME result on a circle and
+    /// a rect (so the shared logic cannot drift between the two geometries).
+    #[test]
+    fn w7_shared_arms_circle_rect_parity() {
+        use ferrum_scene::Color;
+
+        let circle_base = CircleInstance {
+            center: [0.0, 0.0],
+            radius: 5.0,
+            fill_color: [0.1, 0.2, 0.3, 1.0],
+            stroke_color: [0.0; 4],
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        };
+        let rect_base = RectInstance {
+            position: [0.0, 0.0],
+            size: [10.0, 10.0],
+            corner_radius: 0.0,
+            fill_color: [0.1, 0.2, 0.3, 1.0],
+            stroke_color: [0.0; 4],
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        };
+
+        let shared_values = [
+            EncodingValue::Color { value: Color { r: 200, g: 100, b: 50, a: 255 } },
+            EncodingValue::Opacity { value: 0.4 },
+            EncodingValue::StrokeWidth { value: 2.5 },
+            EncodingValue::StrokeDash { value: vec![6.0, 3.0] },
+            EncodingValue::StrokeOpacity { value: 0.6 },
+            EncodingValue::FillOpacity { value: 0.7 },
+            EncodingValue::Angle { value: 30.0 },
+        ];
+
+        for value in &shared_values {
+            let mut c = circle_base;
+            let mut r = rect_base;
+            apply_value_to_circle(&mut c, value);
+            apply_value_to_rect(&mut r, value);
+            assert_eq!(
+                c.fill_color, r.fill_color,
+                "fill_color must match across geometries for {value:?}"
+            );
+            assert!((c.opacity - r.opacity).abs() < 1e-6, "opacity parity for {value:?}");
+            assert!(
+                (c.stroke_width - r.stroke_width).abs() < 1e-6,
+                "stroke_width parity for {value:?}"
+            );
+            assert!(
+                (c.stroke_dash - r.stroke_dash).abs() < 1e-6,
+                "stroke_dash parity for {value:?}"
+            );
+            assert!(
+                (c.stroke_opacity - r.stroke_opacity).abs() < 1e-6,
+                "stroke_opacity parity for {value:?}"
+            );
+            assert!((c.angle - r.angle).abs() < 1e-6, "angle parity for {value:?}");
+        }
     }
 
     #[test]
@@ -2143,7 +2227,7 @@ mod tests {
             PackedBatchMeta {
                 data_indices: None,
                 tooltip_bytes: None,
-                kind: 0, // circles
+                kind: DrawKind::Circle,
                 instance_start: 0,
                 instance_count: 3,
             },
@@ -2252,7 +2336,7 @@ mod tests {
             PackedBatchMeta {
                 data_indices: None,
                 tooltip_bytes: None,
-                kind: 1, // rects
+                kind: DrawKind::Rect,
                 instance_start: 0,
                 instance_count: 2,
             },
@@ -2377,7 +2461,7 @@ mod tests {
             PackedBatchMeta {
                 data_indices: Some(vec![0, 1]),
                 tooltip_bytes: None,
-                kind: 0,
+                kind: DrawKind::Circle,
                 instance_start: 0,
                 instance_count: 2,
             },
@@ -2516,7 +2600,7 @@ mod tests {
             PackedBatchMeta {
                 data_indices: Some(vec![0, 1, 2]),
                 tooltip_bytes: None,
-                kind: 0, // circles
+                kind: DrawKind::Circle,
                 instance_start: 0,
                 instance_count: 3,
             },
@@ -2637,7 +2721,7 @@ mod tests {
             PackedBatchMeta {
                 data_indices: None,
                 tooltip_bytes: None,
-                kind: 0,
+                kind: DrawKind::Circle,
                 instance_start: 0,
                 instance_count: 3,
             },
@@ -2770,7 +2854,7 @@ mod tests {
             PackedBatchMeta {
                 data_indices: Some(vec![0, 1, 2]),
                 tooltip_bytes: Some(tooltip_bytes),
-                kind: 0,
+                kind: DrawKind::Circle,
                 instance_start: 0,
                 instance_count: 3,
             },

@@ -95,7 +95,8 @@ export class WasmRenderer {
      * conditional encodings (dim non-selected marks), re-render frame, and
      * return the new selection state as a JSON string.
      *
-     * The returned JSON is a map of `selection_name → {field_name: field_value}`.
+     * Returns the BARE selection-state map `{selection_name: {field: value}}`
+     * (see the two-shape contract note above the selection-mutating methods).
      * The JS caller should forward this to `model.set('selection_state', ...)`.
      * @param {number} x
      * @param {number} y
@@ -124,6 +125,11 @@ export class WasmRenderer {
      * Handle a brush-drag on a panel: update interval selection state, apply
      * conditional encodings, rebuild GPU buffers, re-render, and return
      * the new selection state as JSON.
+     *
+     * Returns the ENVELOPE shape `{selection, rescaled, rescaled_text}` (the
+     * only selection-mutating method that does — see the two-shape contract
+     * note above the selection-mutating methods). `rescaled`/`rescaled_text`
+     * are non-null only when a D6 Domain binding rescaled a target panel.
      * @param {number} panel_id
      * @param {number} x0
      * @param {number} y0
@@ -204,91 +210,10 @@ export class WasmRenderer {
         const ret = wasm.wasmrenderer_maxTextureSize(this.__wbg_ptr);
         return ret >>> 0;
     }
-    /**
-     * Apply a pan delta on the given panel and re-render via GPU affine transform.
-     *
-     * Returns updated text-element JSON.
-     * @param {number} panel_id
-     * @param {number} dx
-     * @param {number} dy
-     * @returns {string}
-     */
-    onPan(panel_id, dx, dy) {
-        let deferred2_0;
-        let deferred2_1;
-        try {
-            const ret = wasm.wasmrenderer_onPan(this.__wbg_ptr, panel_id, dx, dy);
-            var ptr1 = ret[0];
-            var len1 = ret[1];
-            if (ret[3]) {
-                ptr1 = 0; len1 = 0;
-                throw takeFromExternrefTable0(ret[2]);
-            }
-            deferred2_0 = ptr1;
-            deferred2_1 = len1;
-            return getStringFromWasm0(ptr1, len1);
-        } finally {
-            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-        }
-    }
-    /**
-     * Apply a wheel-zoom event on the given panel and re-render via GPU affine transform.
-     *
-     * Returns updated text-element JSON (tick labels at new positions) so the JS
-     * overlay can reposition axis labels without a Python round-trip.
-     * @param {number} panel_id
-     * @param {number} delta_y
-     * @param {number} cx
-     * @param {number} cy
-     * @returns {string}
-     */
-    onWheel(panel_id, delta_y, cx, cy) {
-        let deferred2_0;
-        let deferred2_1;
-        try {
-            const ret = wasm.wasmrenderer_onWheel(this.__wbg_ptr, panel_id, delta_y, cx, cy);
-            var ptr1 = ret[0];
-            var len1 = ret[1];
-            if (ret[3]) {
-                ptr1 = 0; len1 = 0;
-                throw takeFromExternrefTable0(ret[2]);
-            }
-            deferred2_0 = ptr1;
-            deferred2_1 = len1;
-            return getStringFromWasm0(ptr1, len1);
-        } finally {
-            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-        }
-    }
     renderFrame() {
         const ret = wasm.wasmrenderer_renderFrame(this.__wbg_ptr);
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
-        }
-    }
-    /**
-     * Reset zoom/pan to identity for the given panel and re-render.
-     *
-     * Returns text-element JSON with tick labels at their original positions.
-     * @param {number} panel_id
-     * @returns {string}
-     */
-    resetZoom(panel_id) {
-        let deferred2_0;
-        let deferred2_1;
-        try {
-            const ret = wasm.wasmrenderer_resetZoom(this.__wbg_ptr, panel_id);
-            var ptr1 = ret[0];
-            var len1 = ret[1];
-            if (ret[3]) {
-                ptr1 = 0; len1 = 0;
-                throw takeFromExternrefTable0(ret[2]);
-            }
-            deferred2_0 = ptr1;
-            deferred2_1 = len1;
-            return getStringFromWasm0(ptr1, len1);
-        } finally {
-            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
         }
     }
     /**
@@ -299,45 +224,11 @@ export class WasmRenderer {
         wasm.wasmrenderer_resize(this.__wbg_ptr, width, height);
     }
     /**
-     * Select all indexed marks (circles and rects) within the given scene-space
-     * rectangle `(x0, y0) – (x1, y1)` using the R-tree spatial index.
-     *
-     * Updates the first `Interval` selection spec found in `self.selections`,
-     * then applies conditional encodings and re-renders.  Returns the new
-     * selection state JSON.
-     *
-     * If no spatial index has been built yet (scene not loaded), returns `"{}"`.
-     * @param {number} _panel_id
-     * @param {number} x0
-     * @param {number} y0
-     * @param {number} x1
-     * @param {number} y1
-     * @returns {string}
-     */
-    selectInRect(_panel_id, x0, y0, x1, y1) {
-        let deferred2_0;
-        let deferred2_1;
-        try {
-            const ret = wasm.wasmrenderer_selectInRect(this.__wbg_ptr, _panel_id, x0, y0, x1, y1);
-            var ptr1 = ret[0];
-            var len1 = ret[1];
-            if (ret[3]) {
-                ptr1 = 0; len1 = 0;
-                throw takeFromExternrefTable0(ret[2]);
-            }
-            deferred2_0 = ptr1;
-            deferred2_1 = len1;
-            return getStringFromWasm0(ptr1, len1);
-        } finally {
-            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
-        }
-    }
-    /**
      * Set an absolute zoom+pan transform from D3-zoom for the given panel.
      *
      * `panel_id` identifies the panel to zoom (0-indexed); `k` is the uniform
      * scale factor; `tx`/`ty` are the translation offsets.
-     * This replaces the accumulated state from `onWheel`/`onPan` and is the
+     * This replaces any accumulated per-panel zoom/pan state and is the sole
      * entry point for HTML-export zoom driven by D3's `d3.zoom()`.
      *
      * Returns updated text-element JSON so the JS overlay can reposition labels.

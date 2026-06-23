@@ -224,16 +224,46 @@ pub struct ImageQuad {
 pub struct PackedBatchMeta {
     pub data_indices: Option<Vec<u32>>,
     pub tooltip_bytes: Option<Vec<u8>>,
-    pub kind: u32,
+    /// Which GPU instance buffer this batch's instances live in. Decoded once
+    /// from the packed `kind: u32` header in [`unpack_binary_instances`] via
+    /// [`DrawKind::try_from`], so all downstream sites match on the typed enum
+    /// rather than re-interpreting the magic `0`/`1` values.
+    pub kind: DrawKind,
     pub instance_start: usize,
     pub instance_count: usize,
 }
 
 /// Which GPU instance buffer a draw command targets.
+///
+/// This is the single typed representation of the circle-vs-rect distinction.
+/// The packed binary sidecar encodes it as a `u32` (`0` = circle, `1` = rect);
+/// [`DrawKind::try_from`] decodes that wire value once at unpack time so no
+/// downstream site re-interprets the raw magic numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrawKind {
     Circle,
     Rect,
+}
+
+/// An unrecognized packed `kind` discriminant.
+///
+/// The packed sidecar uses `0` for circles and `1` for rects; any other value
+/// is a malformed/unsupported batch header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnknownDrawKind(pub u32);
+
+impl TryFrom<u32> for DrawKind {
+    type Error = UnknownDrawKind;
+
+    /// Decode the packed `kind: u32` header. `0` → [`DrawKind::Circle`],
+    /// `1` → [`DrawKind::Rect`]; any other value is rejected.
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(DrawKind::Circle),
+            1 => Ok(DrawKind::Rect),
+            other => Err(UnknownDrawKind(other)),
+        }
+    }
 }
 
 /// A single instanced draw call for circle or rect batches.
@@ -569,12 +599,8 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
             // unpack_binary_instances above). Otherwise, collect from nodes.
             let key = (panel_idx as u32, batch_idx as u32);
             if let Some(meta) = batch_meta.get(&key) {
-                let kind = match meta.kind {
-                    0 => DrawKind::Circle,
-                    _ => DrawKind::Rect,
-                };
                 collector.draw_commands.push(DrawCommand {
-                    kind,
+                    kind: meta.kind,
                     instance_start: meta.instance_start as u32,
                     instance_count: meta.instance_count as u32,
                     additive,
@@ -658,7 +684,9 @@ fn read_u32_le(data: &[u8], offset: usize) -> u32 {
 /// followed by instance data, then optional data_indices and tooltip bytes
 /// based on `flags`.
 ///
-/// kind=0 → CircleInstance, kind=1 → RectInstance.
+/// The `kind: u32` header is decoded once into [`DrawKind`] via
+/// [`DrawKind::try_from`] (`0` → Circle, `1` → Rect); an unrecognized value
+/// halts parsing.
 ///
 fn unpack_binary_instances(
     data: &[u8],
@@ -670,7 +698,12 @@ fn unpack_binary_instances(
     while offset + 20 <= data.len() {
         let panel_idx = read_u32_le(data, offset);
         let batch_idx = read_u32_le(data, offset + 4);
-        let kind = read_u32_le(data, offset + 8);
+        // Decode the packed kind discriminant ONCE into the typed `DrawKind`.
+        // An unrecognized value is a malformed batch header; stop parsing (the
+        // same effect the old `_ => break` fallthrough had for unknown `u32`).
+        let Ok(kind) = DrawKind::try_from(read_u32_le(data, offset + 8)) else {
+            break;
+        };
         let count = read_u32_le(data, offset + 12) as usize;
         let flags = read_u32_le(data, offset + 16);
         offset += 20;
@@ -680,7 +713,7 @@ fn unpack_binary_instances(
         // loaded_count reflects what was ACTUALLY pushed (0 on bytemuck failure)
         // so PackedBatchMeta.instance_count never points at phantom instances.
         let (instance_byte_len, instance_start, loaded_count) = match kind {
-            0 => {
+            DrawKind::Circle => {
                 let byte_len = count * std::mem::size_of::<CircleInstance>();
                 if offset + byte_len > data.len() { break; }
                 let start = circles.len();
@@ -695,7 +728,7 @@ fn unpack_binary_instances(
                 let loaded = circles.len() - start;
                 (byte_len, start, loaded)
             }
-            1 => {
+            DrawKind::Rect => {
                 let byte_len = count * std::mem::size_of::<RectInstance>();
                 if offset + byte_len > data.len() { break; }
                 let start = rects.len();
@@ -710,7 +743,6 @@ fn unpack_binary_instances(
                 let loaded = rects.len() - start;
                 (byte_len, start, loaded)
             }
-            _ => break,
         };
         offset += instance_byte_len;
 
@@ -4807,4 +4839,15 @@ mod bug_hunt_tests {
         assert!(m1.tooltip_bytes.is_none(), "batch 1 must have no tooltip_bytes");
     }
 
+    // ── WASM-02: DrawKind::try_from decodes the packed kind discriminant ─────
+
+    /// `0` → Circle, `1` → Rect; any other value is rejected. This is the single
+    /// decode point for the packed `kind: u32` header.
+    #[test]
+    fn draw_kind_try_from_maps_known_values() {
+        assert_eq!(DrawKind::try_from(0), Ok(DrawKind::Circle));
+        assert_eq!(DrawKind::try_from(1), Ok(DrawKind::Rect));
+        assert_eq!(DrawKind::try_from(2), Err(UnknownDrawKind(2)));
+        assert_eq!(DrawKind::try_from(u32::MAX), Err(UnknownDrawKind(u32::MAX)));
+    }
 }

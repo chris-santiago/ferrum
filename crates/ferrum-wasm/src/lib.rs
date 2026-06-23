@@ -52,7 +52,7 @@ use crate::spatial_index::SpatialIndex;
 #[cfg(target_arch = "wasm32")]
 use crate::transition::{ease_in_out_cubic, lerp_circles, lerp_rects};
 #[cfg(target_arch = "wasm32")]
-use crate::zoom_pan::{ScaleMode, ZoomPanState};
+use crate::zoom_pan::ZoomPanState;
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
@@ -224,11 +224,38 @@ impl WasmRenderer {
         Ok(())
     }
 
+    // ── Selection-mutating methods: TWO return-shape contracts ───────────────
+    //
+    // WASM-07 (tracked carry): the four selection-mutating wasm_bindgen methods
+    // all update selection state, run `apply_conditionals_and_render`, and
+    // return JSON for the same JS `onSelectionChange` consumer — but they return
+    // TWO DIFFERENT JSON SHAPES, and the JS loader unwraps each accordingly:
+    //
+    //   * `handleClick`, `clearSelections`, `toggleLegend`
+    //         → the BARE selection-state map: `{selection_name: {field: value}}`.
+    //         JS does `onSelectionChange(JSON.parse(stateJson))` directly.
+    //
+    //   * `handleDrag`
+    //         → an ENVELOPE: `{ "selection": <state-map>, "rescaled": <panel|null>,
+    //           "rescaled_text": <label-json|null> }`. JS does
+    //           `onSelectionChange(result.selection)` and separately consumes
+    //           `rescaled`/`rescaled_text` for the D6 Domain-rescale path.
+    //
+    // The envelope exists ONLY on `handleDrag` because a Domain rescale can today
+    // only be signaled from a drag. Unifying all four onto the single envelope
+    // shape is desirable (it would let a future click-driven rescale be
+    // expressed without another shape change) but is deferred: it is
+    // behavior-preserving ONLY if the JS `ferrum-anywidget.js` consumer is
+    // updated in lock-step AND validated in a headless browser, which this
+    // campaign cannot perform. Tracked as the full-envelope-unification carry —
+    // do NOT change any return shape here without the JS + browser lockstep.
+
     /// Hit-test a click at canvas pixel (x, y), update selection state, apply
     /// conditional encodings (dim non-selected marks), re-render frame, and
     /// return the new selection state as a JSON string.
     ///
-    /// The returned JSON is a map of `selection_name → {field_name: field_value}`.
+    /// Returns the BARE selection-state map `{selection_name: {field: value}}`
+    /// (see the two-shape contract note above the selection-mutating methods).
     /// The JS caller should forward this to `model.set('selection_state', ...)`.
     #[wasm_bindgen(js_name = "handleClick")]
     pub fn handle_click(&mut self, x: f32, y: f32, shift_held: bool) -> Result<String, JsValue> {
@@ -254,6 +281,11 @@ impl WasmRenderer {
     /// Handle a brush-drag on a panel: update interval selection state, apply
     /// conditional encodings, rebuild GPU buffers, re-render, and return
     /// the new selection state as JSON.
+    ///
+    /// Returns the ENVELOPE shape `{selection, rescaled, rescaled_text}` (the
+    /// only selection-mutating method that does — see the two-shape contract
+    /// note above the selection-mutating methods). `rescaled`/`rescaled_text`
+    /// are non-null only when a D6 Domain binding rescaled a target panel.
     #[wasm_bindgen(js_name = "handleDrag")]
     pub fn handle_drag(
         &mut self,
@@ -324,65 +356,11 @@ impl WasmRenderer {
         .to_string())
     }
 
-    /// Apply a wheel-zoom event on the given panel and re-render via GPU affine transform.
-    ///
-    /// Returns updated text-element JSON (tick labels at new positions) so the JS
-    /// overlay can reposition axis labels without a Python round-trip.
-    #[wasm_bindgen(js_name = "onWheel")]
-    pub fn on_wheel(&mut self, panel_id: u32, delta_y: f32, cx: f32, cy: f32) -> Result<String, JsValue> {
-        let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
-        let coord = loaded.scene.panels.get(panel_id as usize).map(|p| &p.coord);
-        if matches!(coord, Some(ferrum_scene::CoordKind::Polar { .. } | ferrum_scene::CoordKind::Geo { .. })) {
-            return Ok(text_json::build_text_json_from(&loaded.data.text_elements));
-        }
-        let scale_mode = match coord {
-            Some(ferrum_scene::CoordKind::Fixed { .. }) => ScaleMode::Uniform,
-            _ => ScaleMode::Independent,
-        };
-        self.zoom.on_wheel(panel_id as usize, delta_y as f64, cx as f64, cy as f64, scale_mode);
-        self.upload_transform_and_render(panel_id as usize)
-    }
-
-    /// Apply a pan delta on the given panel and re-render via GPU affine transform.
-    ///
-    /// Returns updated text-element JSON.
-    #[wasm_bindgen(js_name = "onPan")]
-    pub fn on_pan(&mut self, panel_id: u32, dx: f32, dy: f32) -> Result<String, JsValue> {
-        let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
-        let coord = loaded.scene.panels.get(panel_id as usize).map(|p| &p.coord);
-        if matches!(coord, Some(ferrum_scene::CoordKind::Polar { .. } | ferrum_scene::CoordKind::Geo { .. })) {
-            return Ok(text_json::build_text_json_from(&loaded.data.text_elements));
-        }
-        self.zoom.on_pan(panel_id as usize, dx as f64, dy as f64);
-        self.upload_transform_and_render(panel_id as usize)
-    }
-
-    /// Reset zoom/pan to identity for the given panel and re-render.
-    ///
-    /// Returns text-element JSON with tick labels at their original positions.
-    #[wasm_bindgen(js_name = "resetZoom")]
-    pub fn reset_zoom(&mut self, panel_id: u32) -> Result<String, JsValue> {
-        let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
-        self.zoom.reset(panel_id as usize);
-        // Re-upload every panel's affine (the reset panel is now identity;
-        // siblings keep whatever zoom/pan state they had) so resetting one
-        // panel does not disturb the others.
-        loaded.buffers.upload_panel_transforms(
-            &self.gpu,
-            loaded.data.width,
-            loaded.data.height,
-            &self.zoom.transforms,
-        );
-        render::render_frame(&self.gpu, &self.pipelines, &loaded.buffers, loaded.data.background)
-            .map_err(JsValue::from)?;
-        Ok(text_json::build_text_json(&loaded.data))
-    }
-
     /// Set an absolute zoom+pan transform from D3-zoom for the given panel.
     ///
     /// `panel_id` identifies the panel to zoom (0-indexed); `k` is the uniform
     /// scale factor; `tx`/`ty` are the translation offsets.
-    /// This replaces the accumulated state from `onWheel`/`onPan` and is the
+    /// This replaces any accumulated per-panel zoom/pan state and is the sole
     /// entry point for HTML-export zoom driven by D3's `d3.zoom()`.
     ///
     /// Returns updated text-element JSON so the JS overlay can reposition labels.
@@ -484,56 +462,6 @@ impl WasmRenderer {
             .and_then(|opt| opt.as_deref())
             .unwrap_or_default()
             .to_owned()
-    }
-
-    /// Select all indexed marks (circles and rects) within the given scene-space
-    /// rectangle `(x0, y0) – (x1, y1)` using the R-tree spatial index.
-    ///
-    /// Updates the first `Interval` selection spec found in `self.selections`,
-    /// then applies conditional encodings and re-renders.  Returns the new
-    /// selection state JSON.
-    ///
-    /// If no spatial index has been built yet (scene not loaded), returns `"{}"`.
-    #[wasm_bindgen(js_name = "selectInRect")]
-    pub fn select_in_rect(
-        &mut self,
-        _panel_id: u32,
-        x0: f32,
-        y0: f32,
-        x1: f32,
-        y1: f32,
-    ) -> Result<String, JsValue> {
-        if self.loaded.is_none() {
-            return Ok("{}".to_string());
-        }
-
-        // Normalise the selection rectangle to (lo, hi) on each axis.
-        let lo_x = (x0 as f64).min(x1 as f64);
-        let hi_x = (x0 as f64).max(x1 as f64);
-        let lo_y = (y0 as f64).min(y1 as f64);
-        let hi_y = (y0 as f64).max(y1 as f64);
-
-        // Update the interval selection state with the bounding rectangle.
-        // The Interval selection uses spatial containment (contains_point) during
-        // conditional encoding resolution — it does not need explicit data indices.
-        // The R-tree query above determines *which* marks are inside the box;
-        // the conditional layer uses contains_point against mark positions at
-        // render time, so storing x_range/y_range is sufficient.
-        for spec in &self.selections {
-            if let ferrum_scene::SelectionSpec::Interval { name, .. } = spec {
-                let name = name.clone();
-                self.interaction_state.selections.insert(
-                    name,
-                    crate::selection_state::SelectionState::Interval {
-                        x_range: Some((lo_x, hi_x)),
-                        y_range: Some((lo_y, hi_y)),
-                    },
-                );
-                break;
-            }
-        }
-
-        self.apply_conditionals_and_render()
     }
 
     #[wasm_bindgen(js_name = "clearSelections")]
@@ -986,7 +914,7 @@ mod tests {
     fn test_hit_test_packed_uses_spatial_index() {
         // Verify that packed batches (empty nodes, instances in binary sidecar)
         // are findable through the spatial index path in hit_test_nearest_with_index.
-        use crate::scene_load::{CircleInstance, PackedBatchMeta, SceneData};
+        use crate::scene_load::{CircleInstance, DrawKind, PackedBatchMeta, SceneData};
         use crate::spatial_index::SpatialIndex;
         use ferrum_scene::{
             BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect,
@@ -1027,7 +955,7 @@ mod tests {
             PackedBatchMeta {
                 data_indices: Some(vec![7, 8, 9]),
                 tooltip_bytes: None,
-                kind: 0,
+                kind: DrawKind::Circle,
                 instance_start: 0,
                 instance_count: 3,
             },
