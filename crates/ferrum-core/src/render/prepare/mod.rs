@@ -168,6 +168,11 @@ pub struct PreparedInputs {
     /// with `data_source: None` resolve to `FINAL_OUTPUT_KEY` via
     /// [`PreparedInputs::final_batch`].
     pub transform_outputs: HashMap<String, RecordBatch>,
+    /// Scales resolved once during prepare **for tick-label generation only**.
+    /// Their pixel ranges are not panel-specific, so the final per-panel scales —
+    /// whose ranges differ per panel — are resolved fresh by
+    /// `scene_build::resolve_panel_scales` (SPINE-04). Do not consume these for
+    /// per-panel mark/grid positioning; use the per-panel scales there instead.
     pub provisional_scales: ResolvedScales,
     pub axes: AxesInput,
     pub facet_groups: Vec<FacetGroup>,
@@ -3834,6 +3839,54 @@ mod tests {
         assert!(y_proj.is_none());
         // Ordinal labels are NOT reversed for y (top-down convention preserved).
         assert_eq!(x_labels, y_labels);
+    }
+
+    /// MOD-09 seam: the shared (`Thread`) and independent (`Immediate`) paths run
+    /// the SAME `build_axis_tick_inputs` and agree on labels + major fractions for
+    /// the same scale, while the independent path keeps `minor` EMPTY even when the
+    /// shared path is handed a non-empty minor vec. This pins the byte-identity
+    /// invariant the independent-facet goldens rely on: routing both axis paths
+    /// through one helper must not start emitting per-panel minor ticks.
+    #[test]
+    fn build_axis_tick_inputs_independent_keeps_minor_empty_while_shared_carries_it() {
+        let scale = linear_scale(0.0, 100.0);
+
+        // Shared/global path: numeric format threads forward (not applied here),
+        // and a non-empty minor vec is carried into the projection.
+        let shared_minor = vec![0.1_f64, 0.3, 0.7];
+        let (shared_labels, shared_proj, shared_threaded) = build_axis_tick_inputs(
+            &scale,
+            10,
+            TickFormatMode::Thread { format: None, format_type: None },
+            false,
+            shared_minor.clone(),
+        );
+
+        // Independent/per-panel path: format applied immediately, minor empty.
+        let (indep_labels, indep_proj, indep_threaded) = build_axis_tick_inputs(
+            &scale,
+            10,
+            TickFormatMode::Immediate { format: None, format_type: None },
+            false,
+            Vec::new(),
+        );
+
+        // Same scale, same count, no format on either → identical labels + majors.
+        assert_eq!(shared_labels, indep_labels);
+        let shared_proj = shared_proj.expect("continuous scale yields a projection");
+        let indep_proj = indep_proj.expect("continuous scale yields a projection");
+        assert_eq!(shared_proj.major, indep_proj.major, "major fractions must agree");
+        assert_eq!(shared_proj.padding_frac, indep_proj.padding_frac);
+
+        // The minor vec is the only intentional divergence: shared carries the
+        // caller's minor ticks; independent stays empty (no per-panel minors).
+        assert_eq!(shared_proj.minor, shared_minor, "shared path carries minor ticks");
+        assert!(indep_proj.minor.is_empty(), "independent path keeps minor empty");
+
+        // Neither mode threads a format when none is supplied; only Thread can
+        // ever thread, and only for a numeric format string.
+        assert_eq!(shared_threaded, None);
+        assert_eq!(indep_threaded, None);
     }
 }
 

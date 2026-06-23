@@ -123,7 +123,7 @@ pub fn build_scene(
         // Per-panel axes — collected from the globally-computed layout.
         // When a facet channel requests independent scale resolution, the global
         // axis layout is replaced with a fresh per-panel layout derived from the
-        // per-panel scales resolved above.
+        // per-panel scales resolved above (`resolve_panel_axes`).
         let panel_axes_layout: Vec<&crate::layout::AxisLayout> = layout
             .axes
             .iter()
@@ -140,294 +140,58 @@ pub fn build_scene(
             .find(|a| matches!(a.orient,
                 crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right));
 
-        // Independent-axis override: when the facet spec requests independent
-        // resolution for x or y, rebuild that channel's AxisLayout from the
-        // per-panel scales. Shared channels keep the global layout as-is.
-        let x_independent = spec.facet.as_ref()
-            .map(|f| f.resolve.x == ResolveMode::Independent)
-            .unwrap_or(false);
-        let y_independent = spec.facet.as_ref()
-            .map(|f| f.resolve.y == ResolveMode::Independent)
-            .unwrap_or(false);
-
-        // Re-derive raw format specs from the merged rendering encoding so that
-        // independent-axis label formatting uses the same precedence logic as
-        // the shared path (Axis(label_format=) > encoding.format > none).
-        // `resolve_axis_label_format` is the canonical single source of truth
-        // for this precedence — calling it here avoids duplicating the logic
-        // and ensures both paths stay in sync.
-        let (x_fmt_spec, x_fmt_type) = super::prepare::resolve_axis_label_format(
-            rendering_spec_for_panel.encoding.x.as_ref(),
+        // Independent-axis rebuild (MOD-09): owns the per-panel layouts so the
+        // effective references below stay valid for the rest of the block.
+        let panel_axes = resolve_panel_axes(
+            &rendering_spec_for_panel,
+            spec,
+            &scales,
+            prep,
+            panel,
+            panel_idx,
+            theme,
+            &facet_metrics,
         );
-        let (y_fmt_spec, y_fmt_type) = super::prepare::resolve_axis_label_format(
-            rendering_spec_for_panel.encoding.y.as_ref(),
-        );
-
-        // Storage for owned AxisLayout values when rebuilding independent axes.
-        // Declared as Options so they live long enough for references into them
-        // to remain valid for the rest of the panel block.
-        let independent_x_layout: Option<AxisLayout> = if x_independent {
-            // Use the global tick count as the hint so per-panel independent axes
-            // produce a similar label density to what the layout engine chose globally.
-            let x_tick_count = prep.axes.x.tick_labels.len().max(1);
-            let mut x_input = prep.axes.x.clone();
-            // Re-derive the per-panel labels + projection through the SAME
-            // `build_axis_tick_inputs` helper the global axis path uses, so the
-            // tick_labels → non-ordinal-y reverse → format → projection sequence
-            // lives in one place. `Immediate` mode applies the encoding-level label
-            // format to the fresh per-panel raw labels right away (the per-panel
-            // layout is built directly below, bypassing `apply_label_format_to_axis`).
-            // Independent panels keep `minor: Vec::new()` (no per-panel minor-tick
-            // rebuild), passed as the empty minor vec.
-            let (new_x_labels, x_projection, _threaded) = super::prepare::build_axis_tick_inputs(
-                &scales.x,
-                x_tick_count,
-                super::prepare::TickFormatMode::Immediate {
-                    format: x_fmt_spec.as_deref(),
-                    format_type: x_fmt_type.as_deref(),
-                },
-                false,
-                Vec::new(),
-            );
-            x_input.tick_labels = new_x_labels;
-            x_input.tick_projection = x_projection;
-            let x_label_fs = x_input
-                .overrides
-                .label_font_size
-                .unwrap_or(theme.typography.label_font_size);
-            let (new_x_layout, _warn) = crate::layout::axis::layout_x_axis(
-                &x_input,
-                panel.plot_area,
-                panel_idx,
-                x_label_fs,
-                theme.typography.title_font_size,
-                theme.padding.axis_title_padding,
-                crate::layout::DEFAULT_CULL_THRESHOLD,
-                theme.sizes.tick_size,
-                &facet_metrics,
-            );
-            Some(new_x_layout)
-        } else {
-            None
-        };
-
-        let independent_y_layout: Option<AxisLayout> = if y_independent {
-            let y_tick_count = prep.axes.y.tick_labels.len().max(1);
-            let mut y_input = prep.axes.y.clone();
-            // Same `build_axis_tick_inputs` helper as the global/x path. `is_y =
-            // true` carries the non-ordinal-y label/fraction reversal (high values
-            // at the top of the inverted y pixel range) and the projection's
-            // reversed fractions, in lockstep — so the carrier stays index-aligned
-            // with the reversed labels. `Immediate` format mode; empty minor vec.
-            let (new_y_labels, y_projection, _threaded) = super::prepare::build_axis_tick_inputs(
-                &scales.y,
-                y_tick_count,
-                super::prepare::TickFormatMode::Immediate {
-                    format: y_fmt_spec.as_deref(),
-                    format_type: y_fmt_type.as_deref(),
-                },
-                true,
-                Vec::new(),
-            );
-            y_input.tick_labels = new_y_labels;
-            y_input.tick_projection = y_projection;
-            let y_label_fs = y_input
-                .overrides
-                .label_font_size
-                .unwrap_or(theme.typography.label_font_size);
-            let new_y_layout = crate::layout::axis::layout_y_axis(
-                &y_input,
-                panel.plot_area,
-                panel_idx,
-                y_label_fs,
-                theme.typography.title_font_size,
-                theme.padding.axis_title_padding,
-                &facet_metrics,
-            );
-            Some(new_y_layout)
-        } else {
-            None
-        };
 
         // Resolve the effective per-panel axis references: use the freshly-built
         // independent layout when available, otherwise the global shared one.
-        let panel_x_axis: Option<&AxisLayout> = independent_x_layout
+        let panel_x_axis: Option<&AxisLayout> = panel_axes
+            .independent_x
             .as_ref()
             .or(panel_x_axis_global);
-        let panel_y_axis: Option<&AxisLayout> = independent_y_layout
+        let panel_y_axis: Option<&AxisLayout> = panel_axes
+            .independent_y
             .as_ref()
             .or(panel_y_axis_global);
 
-        // Polar and Geo coordinates suppress Cartesian axes and gridlines.
-        let suppress_axes = matches!(
-            &spec.coord,
-            Some(crate::spec::coord::CoordKind::Polar { .. })
-            | Some(crate::spec::coord::CoordKind::Geo { .. })
+        // Grid + axis build and above/below routing (MOD-09).
+        let PanelAxisGrid {
+            axes_below: mut axes_nodes,
+            axes_above: axes_above_nodes,
+            grid: mut grid_nodes,
+            grid_above,
+        } = route_panel_axes_and_grid(
+            spec,
+            &scales,
+            panel,
+            &panel_axes_layout,
+            panel_x_axis,
+            panel_y_axis,
+            panel_axes.x_independent,
+            panel_axes.y_independent,
+            theme,
+            chart_config,
         );
 
-        let grid_band_colors: &[String] = chart_config.grid
-            .as_ref()
-            .and_then(|g| g.band_colors.as_deref())
-            .unwrap_or(&[]);
-        let mut grid_nodes = if suppress_axes {
-            Vec::new()
-        } else {
-            marks::axis::build_grid(panel.plot_area, panel_x_axis, panel_y_axis, theme, grid_band_colors)
-        };
-        // zindex (B5): gridlines follow their axis above/below the marks. When a
-        // grid-bearing axis requests `zindex >= 1`, the whole grid block is routed
-        // above the marks (into the annotation list) alongside that axis. Computed
-        // here so the break-axis remap below still sees the grid before routing.
-        let grid_above = !suppress_axes
-            && [panel_x_axis, panel_y_axis]
-                .into_iter()
-                .flatten()
-                .any(|a| a.show_grid && a.draws_above_marks());
-
-        // Axes — draw from the effective (possibly per-panel) AxisLayout values.
-        // `panel_x_axis` and `panel_y_axis` already point to either the
-        // independent (per-panel) or the shared (global) layout. Emit them
-        // first, then any additional axes (e.g. secondary Top/Right) from the
-        // global layout that were not overridden.
-        //
-        // zindex (B5): an axis with `zindex >= 1` draws ABOVE the data marks. Its
-        // nodes are routed into `axes_above_nodes` (appended to the panel's
-        // annotation list, which the renderer emits after marks) instead of
-        // `axes_nodes` (emitted before marks). `<= 0`/absent keeps the historical
-        // below-marks behavior, so default output is byte-identical.
-        let mut axes_nodes: Vec<SceneNode> = Vec::new();
-        let mut axes_above_nodes: Vec<SceneNode> = Vec::new();
-        let route_axis = |axis: &AxisLayout, above: &mut Vec<SceneNode>, below: &mut Vec<SceneNode>| {
-            let nodes = marks::axis::build_axis(axis, theme);
-            if axis.draws_above_marks() {
-                above.extend(nodes);
-            } else {
-                below.extend(nodes);
-            }
-        };
-        if !suppress_axes {
-            if x_independent || y_independent {
-                // Emit the effective x and y axes (may be independent).
-                if let Some(ax) = panel_x_axis {
-                    route_axis(ax, &mut axes_above_nodes, &mut axes_nodes);
-                }
-                if let Some(ay) = panel_y_axis {
-                    route_axis(ay, &mut axes_above_nodes, &mut axes_nodes);
-                }
-                // Also emit any other orientations (Top, Right) from the global
-                // layout that are not covered by the independent overrides.
-                for axis in &panel_axes_layout {
-                    if !matches!(axis.orient,
-                        crate::layout::AxisOrient::Bottom | crate::layout::AxisOrient::Top
-                        | crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right)
-                    {
-                        route_axis(axis, &mut axes_above_nodes, &mut axes_nodes);
-                    }
-                }
-            } else {
-                for axis in &panel_axes_layout {
-                    route_axis(axis, &mut axes_above_nodes, &mut axes_nodes);
-                }
-            }
-        }
-
-        // Polar axis: circular boundary + radial tick marks (replaces Cartesian axes)
-        if matches!(&spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. })) {
-            let cx = panel.plot_area.x + panel.plot_area.w / 2.0;
-            let cy = panel.plot_area.y + panel.plot_area.h / 2.0;
-            let outer_r = polar_outer_radius(&panel.plot_area);
-            axes_nodes.extend(build_polar_axes(cx, cy, outer_r, &scales, theme));
-        }
-
-        // Mark batches
-        let mut mark_batches: Vec<MarkBatch> = Vec::new();
-
-        for (li, layer) in prep.layers.iter().enumerate() {
-            let layer_batch = &layer_batches[li];
-            if layer_batch.num_rows() == 0 {
-                continue;
-            }
-
-            // Position adjustment — always call apply_position; it is the
-            // single authority for all adjustments (explicit layer.position
-            // *and* encoding-level encoding.y.stack).  When neither is set
-            // it returns a cheap reference-counted clone and is a no-op.
-            let adjusted_owned = position::apply_position(
-                layer_batch,
-                layer.position.as_ref(),
-                &scales,
-                &layer.encoding,
-                prep.coord_flipped,
-            )?;
-            let layer_batch: &RecordBatch = &adjusted_owned;
-
-            // Synthetic ChartSpec for this layer
-            let layer_spec = ChartSpec {
-                mark: layer.mark,
-                encoding: layer.encoding.clone(),
-                ..spec.clone()
-            };
-            let mark_style = draw::resolve_mark_style(
-                layer.mark_style.as_ref(), theme, &layer.mark,
-            );
-            let ctx = DrawCtx {
-                spec: &layer_spec,
-                panel,
-                theme,
-                scales: &scales,
-                batch: layer_batch,
-                mark_style: &mark_style,
-            };
-
-            validate_mark_encoding(&layer.mark, &layer.encoding)?;
-            let mut result = draw::dispatch_mark_build(&layer.mark, &ctx);
-
-            // For CoordPolar, transform all mark nodes from Cartesian pixel
-            // space to polar pixel space. Arc marks (Mark::Arc) handle their
-            // own polar geometry and must not be transformed again.  Bars under
-            // CoordPolar route through `build_polar`, which also generates
-            // arc-geometry nodes (MarkBatchKind::Arc) in polar space — those
-            // must likewise be excluded from the transform, or the wedge
-            // coordinates are corrupted by a second polar projection.
-            let is_arc_geometry = matches!(result.kind, ferrum_scene::MarkBatchKind::Arc);
-            if matches!(&spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. }))
-                && !matches!(layer.mark, crate::spec::mark::Mark::Arc)
-                && !is_arc_geometry
-            {
-                apply_polar_node_transform(&mut result.nodes, &panel.plot_area);
-            }
-
-            let keys = extract_keys(&layer.encoding, layer_batch, result.data_indices.as_deref());
-            // #6 alignment guard (spec §7): each present per-node vector must
-            // have exactly one entry per node. All five channels — tooltips,
-            // hrefs, descriptions, data_indices, and keys — are independent and
-            // checked independently so any misaligned channel trips the guard
-            // under a debug build. data_indices and keys are the alignment
-            // vector and key channel; covering them here catches builders (like
-            // the pre-fix label.rs) that diverge data_indices while leaving
-            // metadata None (which the three-channel guard could not detect).
-            crate::render::mark_nodes::debug_assert_nodes_metadata_aligned(
-                result.nodes.len(),
-                result.tooltips.as_ref().map(|t| t.len()),
-                result.hrefs.as_ref().map(|h| h.len()),
-                result.descriptions.as_ref().map(|d| d.len()),
-                result.data_indices.as_ref().map(|d| d.len()),
-                keys.as_ref().map(|k| k.len()),
-            );
-            mark_batches.push(MarkBatch {
-                kind: result.kind,
-                nodes: result.nodes,
-                data_indices: result.data_indices,
-                tooltips: result.tooltips,
-                hrefs: result.hrefs,
-                descriptions: result.descriptions,
-                keys,
-                blend: layer.blend.unwrap_or(BlendMode::Normal),
-                stroke_cap: mark_style.stroke_cap.as_deref().and_then(draw::parse_stroke_cap),
-                stroke_join: mark_style.stroke_join.as_deref().and_then(draw::parse_stroke_join),
-                packed_instances: None,
-            });
-        }
+        // Per-layer mark batches (MOD-09).
+        let mut mark_batches = build_panel_mark_batches(
+            spec,
+            prep,
+            &layer_batches,
+            &scales,
+            panel,
+            theme,
+        )?;
 
         let plot_area = ferrum_scene::Rect {
             x: panel.plot_area.x,
@@ -724,6 +488,373 @@ fn resolve_panel_scales(
     }
 
     Ok((rendering_spec_for_panel, scales))
+}
+
+/// Per-panel axis layouts for the independent-resolve facet case (MOD-09).
+///
+/// When a facet channel requests [`ResolveMode::Independent`], the x and/or y
+/// axis is rebuilt from this panel's freshly-resolved scales (its pixel range
+/// and tick labels differ per panel). Shared channels keep the global layout, so
+/// the matching field stays `None` and the caller falls back to the global axis.
+///
+/// The struct OWNS the rebuilt layouts so references into them stay valid for the
+/// rest of the panel block; `*_independent` mirror the facet resolve mode so the
+/// caller routes axes the same way the inline code did.
+struct PanelAxes {
+    independent_x: Option<AxisLayout>,
+    independent_y: Option<AxisLayout>,
+    x_independent: bool,
+    y_independent: bool,
+}
+
+/// Rebuild the per-panel independent axes (MOD-09 extraction of the inline
+/// independent-axis block). Pure extraction — same tick-input derivation through
+/// the shared [`build_axis_tick_inputs`] helper (SPINE-07), same `Immediate`
+/// format mode, same empty minor vec (independent panels do not rebuild minor
+/// ticks), same `layout_x_axis`/`layout_y_axis` calls. A non-independent channel
+/// yields `None`, so the caller keeps the global layout for it.
+#[allow(clippy::too_many_arguments)]
+fn resolve_panel_axes(
+    rendering_spec_for_panel: &ChartSpec,
+    spec: &ChartSpec,
+    scales: &scale_resolve::ResolvedScales,
+    prep: &PreparedInputs,
+    panel: &crate::layout::PanelLayout,
+    panel_idx: usize,
+    theme: &ThemeInputs,
+    facet_metrics: &super::font::FontdueMetrics,
+) -> PanelAxes {
+    // Independent-axis override: when the facet spec requests independent
+    // resolution for x or y, rebuild that channel's AxisLayout from the
+    // per-panel scales. Shared channels keep the global layout as-is.
+    let x_independent = spec.facet.as_ref()
+        .map(|f| f.resolve.x == ResolveMode::Independent)
+        .unwrap_or(false);
+    let y_independent = spec.facet.as_ref()
+        .map(|f| f.resolve.y == ResolveMode::Independent)
+        .unwrap_or(false);
+
+    // Re-derive raw format specs from the merged rendering encoding so that
+    // independent-axis label formatting uses the same precedence logic as
+    // the shared path (Axis(label_format=) > encoding.format > none).
+    // `resolve_axis_label_format` is the canonical single source of truth
+    // for this precedence — calling it here avoids duplicating the logic
+    // and ensures both paths stay in sync.
+    let (x_fmt_spec, x_fmt_type) = super::prepare::resolve_axis_label_format(
+        rendering_spec_for_panel.encoding.x.as_ref(),
+    );
+    let (y_fmt_spec, y_fmt_type) = super::prepare::resolve_axis_label_format(
+        rendering_spec_for_panel.encoding.y.as_ref(),
+    );
+
+    let independent_x = if x_independent {
+        // Use the global tick count as the hint so per-panel independent axes
+        // produce a similar label density to what the layout engine chose globally.
+        let x_tick_count = prep.axes.x.tick_labels.len().max(1);
+        let mut x_input = prep.axes.x.clone();
+        // Re-derive the per-panel labels + projection through the SAME
+        // `build_axis_tick_inputs` helper the global axis path uses, so the
+        // tick_labels → non-ordinal-y reverse → format → projection sequence
+        // lives in one place. `Immediate` mode applies the encoding-level label
+        // format to the fresh per-panel raw labels right away (the per-panel
+        // layout is built directly below, bypassing `apply_label_format_to_axis`).
+        // Independent panels keep `minor: Vec::new()` (no per-panel minor-tick
+        // rebuild), passed as the empty minor vec.
+        let (new_x_labels, x_projection, _threaded) = super::prepare::build_axis_tick_inputs(
+            &scales.x,
+            x_tick_count,
+            super::prepare::TickFormatMode::Immediate {
+                format: x_fmt_spec.as_deref(),
+                format_type: x_fmt_type.as_deref(),
+            },
+            false,
+            Vec::new(),
+        );
+        x_input.tick_labels = new_x_labels;
+        x_input.tick_projection = x_projection;
+        let x_label_fs = x_input
+            .overrides
+            .label_font_size
+            .unwrap_or(theme.typography.label_font_size);
+        let (new_x_layout, _warn) = crate::layout::axis::layout_x_axis(
+            &x_input,
+            panel.plot_area,
+            panel_idx,
+            x_label_fs,
+            theme.typography.title_font_size,
+            theme.padding.axis_title_padding,
+            crate::layout::DEFAULT_CULL_THRESHOLD,
+            theme.sizes.tick_size,
+            facet_metrics,
+        );
+        Some(new_x_layout)
+    } else {
+        None
+    };
+
+    let independent_y = if y_independent {
+        let y_tick_count = prep.axes.y.tick_labels.len().max(1);
+        let mut y_input = prep.axes.y.clone();
+        // Same `build_axis_tick_inputs` helper as the global/x path. `is_y =
+        // true` carries the non-ordinal-y label/fraction reversal (high values
+        // at the top of the inverted y pixel range) and the projection's
+        // reversed fractions, in lockstep — so the carrier stays index-aligned
+        // with the reversed labels. `Immediate` format mode; empty minor vec.
+        let (new_y_labels, y_projection, _threaded) = super::prepare::build_axis_tick_inputs(
+            &scales.y,
+            y_tick_count,
+            super::prepare::TickFormatMode::Immediate {
+                format: y_fmt_spec.as_deref(),
+                format_type: y_fmt_type.as_deref(),
+            },
+            true,
+            Vec::new(),
+        );
+        y_input.tick_labels = new_y_labels;
+        y_input.tick_projection = y_projection;
+        let y_label_fs = y_input
+            .overrides
+            .label_font_size
+            .unwrap_or(theme.typography.label_font_size);
+        let new_y_layout = crate::layout::axis::layout_y_axis(
+            &y_input,
+            panel.plot_area,
+            panel_idx,
+            y_label_fs,
+            theme.typography.title_font_size,
+            theme.padding.axis_title_padding,
+            facet_metrics,
+        );
+        Some(new_y_layout)
+    } else {
+        None
+    };
+
+    PanelAxes {
+        independent_x,
+        independent_y,
+        x_independent,
+        y_independent,
+    }
+}
+
+/// Routed axis + grid scene nodes for one panel (MOD-09).
+///
+/// `axes_below`/`grid` paint before the data marks; `axes_above` paints after
+/// (the zindex >= 1 / `draws_above_marks()` case). `grid_above` reports whether
+/// the grid block as a whole should follow an above-marks axis into the
+/// annotation slot; the caller does the grid_below/grid_above split AFTER the
+/// break-axis remap (which still needs to mutate the below-grid in place).
+struct PanelAxisGrid {
+    axes_below: Vec<SceneNode>,
+    axes_above: Vec<SceneNode>,
+    grid: Vec<SceneNode>,
+    grid_above: bool,
+}
+
+/// Build and route this panel's grid + axis nodes (MOD-09 extraction of the
+/// inline suppress/grid/route block). Pure extraction — same suppress test, same
+/// `build_grid`, same `grid_above` computation, same above/below `route_axis`
+/// dispatch, same independent-vs-shared axis selection, same polar-axis append.
+#[allow(clippy::too_many_arguments)]
+fn route_panel_axes_and_grid(
+    spec: &ChartSpec,
+    scales: &scale_resolve::ResolvedScales,
+    panel: &crate::layout::PanelLayout,
+    panel_axes_layout: &[&AxisLayout],
+    panel_x_axis: Option<&AxisLayout>,
+    panel_y_axis: Option<&AxisLayout>,
+    x_independent: bool,
+    y_independent: bool,
+    theme: &ThemeInputs,
+    chart_config: &super::chart_config::ChartConfig,
+) -> PanelAxisGrid {
+    // Polar and Geo coordinates suppress Cartesian axes and gridlines.
+    let suppress_axes = matches!(
+        &spec.coord,
+        Some(crate::spec::coord::CoordKind::Polar { .. })
+        | Some(crate::spec::coord::CoordKind::Geo { .. })
+    );
+
+    let grid_band_colors: &[String] = chart_config.grid
+        .as_ref()
+        .and_then(|g| g.band_colors.as_deref())
+        .unwrap_or(&[]);
+    let grid = if suppress_axes {
+        Vec::new()
+    } else {
+        marks::axis::build_grid(panel.plot_area, panel_x_axis, panel_y_axis, theme, grid_band_colors)
+    };
+    // zindex (B5): gridlines follow their axis above/below the marks. When a
+    // grid-bearing axis requests `zindex >= 1`, the whole grid block is routed
+    // above the marks (into the annotation list) alongside that axis. Computed
+    // here so the break-axis remap below still sees the grid before routing.
+    let grid_above = !suppress_axes
+        && [panel_x_axis, panel_y_axis]
+            .into_iter()
+            .flatten()
+            .any(|a| a.show_grid && a.draws_above_marks());
+
+    // Axes — draw from the effective (possibly per-panel) AxisLayout values.
+    // `panel_x_axis` and `panel_y_axis` already point to either the
+    // independent (per-panel) or the shared (global) layout. Emit them
+    // first, then any additional axes (e.g. secondary Top/Right) from the
+    // global layout that were not overridden.
+    //
+    // zindex (B5): an axis with `zindex >= 1` draws ABOVE the data marks. Its
+    // nodes are routed into `axes_above` (appended to the panel's annotation
+    // list, which the renderer emits after marks) instead of `axes_below`
+    // (emitted before marks). `<= 0`/absent keeps the historical below-marks
+    // behavior, so default output is byte-identical.
+    let mut axes_below: Vec<SceneNode> = Vec::new();
+    let mut axes_above: Vec<SceneNode> = Vec::new();
+    let route_axis = |axis: &AxisLayout, above: &mut Vec<SceneNode>, below: &mut Vec<SceneNode>| {
+        let nodes = marks::axis::build_axis(axis, theme);
+        if axis.draws_above_marks() {
+            above.extend(nodes);
+        } else {
+            below.extend(nodes);
+        }
+    };
+    if !suppress_axes {
+        if x_independent || y_independent {
+            // Emit the effective x and y axes (may be independent).
+            if let Some(ax) = panel_x_axis {
+                route_axis(ax, &mut axes_above, &mut axes_below);
+            }
+            if let Some(ay) = panel_y_axis {
+                route_axis(ay, &mut axes_above, &mut axes_below);
+            }
+            // Also emit any other orientations (Top, Right) from the global
+            // layout that are not covered by the independent overrides.
+            for axis in panel_axes_layout {
+                if !matches!(axis.orient,
+                    crate::layout::AxisOrient::Bottom | crate::layout::AxisOrient::Top
+                    | crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right)
+                {
+                    route_axis(axis, &mut axes_above, &mut axes_below);
+                }
+            }
+        } else {
+            for axis in panel_axes_layout {
+                route_axis(axis, &mut axes_above, &mut axes_below);
+            }
+        }
+    }
+
+    // Polar axis: circular boundary + radial tick marks (replaces Cartesian axes)
+    if matches!(&spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. })) {
+        let cx = panel.plot_area.x + panel.plot_area.w / 2.0;
+        let cy = panel.plot_area.y + panel.plot_area.h / 2.0;
+        let outer_r = polar_outer_radius(&panel.plot_area);
+        axes_below.extend(build_polar_axes(cx, cy, outer_r, scales, theme));
+    }
+
+    PanelAxisGrid { axes_below, axes_above, grid, grid_above }
+}
+
+/// Build this panel's per-layer mark batches (MOD-09 extraction of the inline
+/// mark-batch loop). Pure extraction — same position adjustment, same synthetic
+/// per-layer ChartSpec, same polar node transform, same alignment guard, same
+/// MarkBatch assembly. Returns the batches in layer order.
+fn build_panel_mark_batches(
+    spec: &ChartSpec,
+    prep: &PreparedInputs,
+    layer_batches: &[RecordBatch],
+    scales: &scale_resolve::ResolvedScales,
+    panel: &crate::layout::PanelLayout,
+    theme: &ThemeInputs,
+) -> Result<Vec<MarkBatch>, RenderError> {
+    let mut mark_batches: Vec<MarkBatch> = Vec::new();
+
+    for (li, layer) in prep.layers.iter().enumerate() {
+        let layer_batch = &layer_batches[li];
+        if layer_batch.num_rows() == 0 {
+            continue;
+        }
+
+        // Position adjustment — always call apply_position; it is the
+        // single authority for all adjustments (explicit layer.position
+        // *and* encoding-level encoding.y.stack).  When neither is set
+        // it returns a cheap reference-counted clone and is a no-op.
+        let adjusted_owned = position::apply_position(
+            layer_batch,
+            layer.position.as_ref(),
+            scales,
+            &layer.encoding,
+            prep.coord_flipped,
+        )?;
+        let layer_batch: &RecordBatch = &adjusted_owned;
+
+        // Synthetic ChartSpec for this layer
+        let layer_spec = ChartSpec {
+            mark: layer.mark,
+            encoding: layer.encoding.clone(),
+            ..spec.clone()
+        };
+        let mark_style = draw::resolve_mark_style(
+            layer.mark_style.as_ref(), theme, &layer.mark,
+        );
+        let ctx = DrawCtx {
+            spec: &layer_spec,
+            panel,
+            theme,
+            scales,
+            batch: layer_batch,
+            mark_style: &mark_style,
+        };
+
+        validate_mark_encoding(&layer.mark, &layer.encoding)?;
+        let mut result = draw::dispatch_mark_build(&layer.mark, &ctx);
+
+        // For CoordPolar, transform all mark nodes from Cartesian pixel
+        // space to polar pixel space. Arc marks (Mark::Arc) handle their
+        // own polar geometry and must not be transformed again.  Bars under
+        // CoordPolar route through `build_polar`, which also generates
+        // arc-geometry nodes (MarkBatchKind::Arc) in polar space — those
+        // must likewise be excluded from the transform, or the wedge
+        // coordinates are corrupted by a second polar projection.
+        let is_arc_geometry = matches!(result.kind, ferrum_scene::MarkBatchKind::Arc);
+        if matches!(&spec.coord, Some(crate::spec::coord::CoordKind::Polar { .. }))
+            && !matches!(layer.mark, crate::spec::mark::Mark::Arc)
+            && !is_arc_geometry
+        {
+            apply_polar_node_transform(&mut result.nodes, &panel.plot_area);
+        }
+
+        let keys = extract_keys(&layer.encoding, layer_batch, result.data_indices.as_deref());
+        // #6 alignment guard (spec §7): each present per-node vector must
+        // have exactly one entry per node. All five channels — tooltips,
+        // hrefs, descriptions, data_indices, and keys — are independent and
+        // checked independently so any misaligned channel trips the guard
+        // under a debug build. data_indices and keys are the alignment
+        // vector and key channel; covering them here catches builders (like
+        // the pre-fix label.rs) that diverge data_indices while leaving
+        // metadata None (which the three-channel guard could not detect).
+        crate::render::mark_nodes::debug_assert_nodes_metadata_aligned(
+            result.nodes.len(),
+            result.tooltips.as_ref().map(|t| t.len()),
+            result.hrefs.as_ref().map(|h| h.len()),
+            result.descriptions.as_ref().map(|d| d.len()),
+            result.data_indices.as_ref().map(|d| d.len()),
+            keys.as_ref().map(|k| k.len()),
+        );
+        mark_batches.push(MarkBatch {
+            kind: result.kind,
+            nodes: result.nodes,
+            data_indices: result.data_indices,
+            tooltips: result.tooltips,
+            hrefs: result.hrefs,
+            descriptions: result.descriptions,
+            keys,
+            blend: layer.blend.unwrap_or(BlendMode::Normal),
+            stroke_cap: mark_style.stroke_cap.as_deref().and_then(draw::parse_stroke_cap),
+            stroke_join: mark_style.stroke_join.as_deref().and_then(draw::parse_stroke_join),
+            packed_instances: None,
+        });
+    }
+
+    Ok(mark_batches)
 }
 
 fn resolve_param_domains(spec: &mut ChartSpec) {
@@ -2058,5 +2189,94 @@ mod tests {
             .expect("subtitle text node must be emitted");
         assert_eq!(subtitle_node.font_size, theme.typography.title_font_size * 0.85);
         assert_eq!(subtitle_node.color, to_scene_color(theme.colors.font_color));
+    }
+
+    // ── SPINE-04: resolve_panel_scales per-panel seam ────────────────────────
+
+    /// The per-panel scale seam (`resolve_panel_scales`) resolves each panel's
+    /// scales over THAT panel's pixel range, so two panels with different
+    /// `plot_area` widths get different resolved x pixel ranges. This pins the
+    /// provisional/final duality the finding calls out as REAL: the prepare
+    /// provisional pass is for tick labels only; per-panel ranges differ and must
+    /// be resolved fresh here. (A regression that accidentally unified the two
+    /// passes — e.g. by reusing `prep.provisional_scales` — would make both panels
+    /// share one pixel range and fail this assertion.)
+    #[test]
+    fn resolve_panel_scales_differs_per_panel_pixel_range() {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            ],
+        )
+        .unwrap();
+
+        let theme = ThemeInputs::default();
+        let prep = super::super::prepare::prepare_render_inputs(&spec, &batch, &theme).unwrap();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+
+        // Two panels with deliberately different plot_area widths.
+        let panel_narrow = crate::layout::PanelLayout {
+            plot_area: crate::layout::Rect { x: 0.0, y: 0.0, w: 100.0, h: 200.0 },
+            ..Default::default()
+        };
+        let panel_wide = crate::layout::PanelLayout {
+            plot_area: crate::layout::Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 },
+            ..Default::default()
+        };
+
+        let mut warnings = Vec::new();
+        let (_spec_a, scales_a) = resolve_panel_scales(
+            &spec, &prep, &panel_narrow, &batch, &theme, &chart_config, &mut warnings,
+        )
+        .unwrap();
+        let (_spec_b, scales_b) = resolve_panel_scales(
+            &spec, &prep, &panel_wide, &batch, &theme, &chart_config, &mut warnings,
+        )
+        .unwrap();
+
+        let (a_lo, a_hi) = scales_a.x.pixel_range();
+        let (b_lo, b_hi) = scales_b.x.pixel_range();
+        // Each panel's x range spans its own plot_area width.
+        assert!((a_hi - a_lo).abs() <= 100.0 + 1e-6, "narrow panel x range within 100px");
+        assert!((b_hi - b_lo).abs() > 100.0 + 1e-6, "wide panel x range exceeds 100px");
+        // The two panels do NOT share a pixel range — the per-panel resolution is real.
+        assert!(
+            (a_hi - a_lo - (b_hi - b_lo)).abs() > 1e-6,
+            "per-panel x pixel ranges must differ ({a_lo}..{a_hi} vs {b_lo}..{b_hi})"
+        );
     }
 }
