@@ -87,14 +87,6 @@ def _get_widget_class() -> Any:
         return None
 
 
-class InteractiveRenderError(RuntimeError):
-    """Raised when the WASM interactive renderer fails."""
-
-
-class WasmNotAvailableError(RuntimeError):
-    """Raised when WASM artifacts are not found in the package."""
-
-
 class InteractiveChart:
     """Interactive chart widget backed by the ferrum WASM renderer.
 
