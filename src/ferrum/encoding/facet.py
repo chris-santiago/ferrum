@@ -1,7 +1,13 @@
-"""Facet encoding channels (Facet, FacetRow, FacetCol)."""
+"""Facet encoding channels (Facet, FacetRow, FacetCol).
+
+Each channel references the ``FACET`` role from :mod:`ferrum.encoding._honored`;
+``_honored_kwargs`` is the single, machine-readable source of truth for which
+kwargs the channel honors (see the ``ChannelBase`` docstring for the contract).
+"""
 
 from __future__ import annotations
 
+from ferrum.encoding._honored import FACET
 from ferrum.encoding.base import ChannelBase
 
 
@@ -37,7 +43,7 @@ class Facet(ChannelBase):
     """
 
     _channel_name = "facet"
-    _honored_kwargs = frozenset(["type", "title"])
+    _honored_kwargs = FACET
 
 
 class FacetRow(ChannelBase):
@@ -56,11 +62,6 @@ class FacetRow(ChannelBase):
     title : str, optional
         Row-facet title override.  When omitted the field name is used.
 
-    Notes
-    -----
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -69,7 +70,7 @@ class FacetRow(ChannelBase):
 
     _channel_name = "facet_row"
 
-    _honored_kwargs = frozenset(["type", "title"])
+    _honored_kwargs = FACET
 
 
 class FacetCol(ChannelBase):
@@ -89,11 +90,6 @@ class FacetCol(ChannelBase):
     title : str, optional
         Column-facet title override.  When omitted the field name is used.
 
-    Notes
-    -----
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -102,4 +98,4 @@ class FacetCol(ChannelBase):
 
     _channel_name = "facet_col"
 
-    _honored_kwargs = frozenset(["type", "title"])
+    _honored_kwargs = FACET

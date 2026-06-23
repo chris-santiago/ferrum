@@ -86,8 +86,8 @@ class TestAxisConfig:
         assert cfg.grid_opacity is None
         assert cfg.orient is None
         assert cfg.translate is None
-        assert cfg.min_extent is None
-        assert cfg.max_extent is None
+        assert cfg.min_band is None
+        assert cfg.max_band is None
         assert cfg.tick_extra is None
         assert cfg.tick_min_step is None
         assert cfg.title_orient is None
@@ -98,8 +98,8 @@ class TestAxisConfig:
             grid_opacity=0.3,
             orient="top",
             translate=5.0,
-            min_extent=10.0,
-            max_extent=40.0,
+            min_band=10.0,
+            max_band=40.0,
             tick_extra=True,
             tick_min_step=2.0,
             title_orient="left",
@@ -109,8 +109,8 @@ class TestAxisConfig:
         assert d["grid_opacity"] == 0.3
         assert d["orient"] == "top"
         assert d["translate"] == 5.0
-        assert d["min_extent"] == 10.0
-        assert d["max_extent"] == 40.0
+        assert d["min_band"] == 10.0
+        assert d["max_band"] == 40.0
         assert d["tick_extra"] is True
         assert d["tick_min_step"] == 2.0
         assert d["title_orient"] == "left"
@@ -122,8 +122,8 @@ class TestAxisConfig:
             "grid_opacity",
             "orient",
             "translate",
-            "min_extent",
-            "max_extent",
+            "min_band",
+            "max_band",
             "tick_extra",
             "tick_min_step",
             "title_orient",

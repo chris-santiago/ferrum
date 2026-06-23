@@ -211,14 +211,17 @@ def test_pyarrow_list_column():
 
 
 def test_pyarrow_duration_column_passthrough():
-    """PyArrow table with a duration[us] column passes through unchanged.
-    Duration cast only applies to polars Duration, not pyarrow duration.
-    Targets lines 105-118: duration is not date32/date64.
+    """PyArrow table with a duration[us] column passes through to_arrow_table unchanged.
+    Duration normalization to timestamp[ms] is normalize_for_rust's responsibility,
+    not to_arrow_table's.  Both frontends now produce the same result after
+    normalize_for_rust (see test_duration_frontend_agreement in test_coerce.py).
+    Targets lines 105-118: duration is not date32/date64, so no cast in to_arrow_table.
     """
     arr = pa.array([1000, 2000], type=pa.duration("us"))
     tbl_in = pa.table({"dur": arr, "y": [1.0, 2.0]})
     tbl_out = to_arrow_table(tbl_in)
     assert tbl_out is tbl_in
+    assert pa.types.is_duration(tbl_out.schema.field("dur").type)
 
 
 # ================================================================
@@ -531,12 +534,13 @@ def test_lazyframe_categorical_cast_fixed():
 
 
 def test_lazyframe_duration_cast_fixed():
-    """Verify LazyFrame Duration cast fix from bd182a8.
-    Targets line 88.
+    """LazyFrame Duration passes through to_arrow_table as Arrow duration[ns].
+    normalize_for_rust (not to_arrow_table) converts it to timestamp[ms].
+    Targets line 88: recursive call collects LazyFrame before to_arrow_table.
     """
     lf = pl.LazyFrame({"dur": pl.Series([1000, 2000], dtype=pl.Duration("ns")), "y": [1.0, 2.0]})
     tbl = to_arrow_table(lf)
-    assert pa.types.is_int64(tbl.schema.field("dur").type)
+    assert pa.types.is_duration(tbl.schema.field("dur").type)
 
 
 def test_lazyframe_with_enum_cast():
@@ -557,6 +561,8 @@ def test_lazyframe_with_enum_cast():
 def test_lazyframe_with_multiple_cast_columns():
     """LazyFrame with Date + Categorical + Duration columns simultaneously.
     Targets line 88: recursive call handles all casts.
+    Duration is left as Arrow duration[us] by to_arrow_table; normalize_for_rust
+    converts it to timestamp[ms].
     """
     from datetime import date
 
@@ -573,7 +579,7 @@ def test_lazyframe_with_multiple_cast_columns():
     assert pa.types.is_large_string(tbl.schema.field("cat").type) or pa.types.is_string(
         tbl.schema.field("cat").type
     )
-    assert pa.types.is_int64(tbl.schema.field("dur").type)
+    assert pa.types.is_duration(tbl.schema.field("dur").type)
 
 
 def test_lazyframe_with_filter():
@@ -956,8 +962,10 @@ def test_generator_raises_type_error():
 
 def test_polars_with_all_cast_types_and_nulls():
     """DataFrame where every castable column type also has nulls.
-    Tests that null propagation works through all three cast branches.
-    Targets lines 74-86: all cast branches with nulls.
+    Tests that null propagation works through all cast branches.
+    Duration is left as Arrow duration[ns] by to_arrow_table (normalize_for_rust
+    converts it to timestamp[ms]); nulls survive that conversion.
+    Targets the polars cast branches with nulls.
     """
     from datetime import date
 
@@ -975,7 +983,7 @@ def test_polars_with_all_cast_types_and_nulls():
     cat_type = tbl.schema.field("cat").type
     assert pa.types.is_large_string(cat_type) or pa.types.is_string(cat_type)
     assert tbl.column("cat").null_count == 1
-    assert pa.types.is_int64(tbl.schema.field("dur").type)
+    assert pa.types.is_duration(tbl.schema.field("dur").type)
     assert tbl.column("dur").null_count == 1
 
 
@@ -1012,7 +1020,8 @@ def test_polars_empty_date():
 
 def test_polars_empty_duration():
     """Empty Duration column (0 rows).
-    Targets line 83: cast on empty duration series.
+    to_arrow_table leaves Duration as Arrow duration[ms]; normalize_for_rust
+    converts it to timestamp[ms].  This test verifies to_arrow_table's behavior.
     """
     df = pl.DataFrame(
         {
@@ -1022,7 +1031,7 @@ def test_polars_empty_duration():
     )
     tbl = to_arrow_table(df)
     assert tbl.num_rows == 0
-    assert pa.types.is_int64(tbl.schema.field("dur").type)
+    assert pa.types.is_duration(tbl.schema.field("dur").type)
 
 
 def test_polars_categorical_many_categories():
@@ -1079,8 +1088,8 @@ def test_polars_null_type_column():
 
 
 def test_polars_duration_column_renders_no_nan():
-    """Duration column cast to Int64 should render without NaN in SVG.
-    Targets lines 82-83 + full pipeline.
+    """Duration column normalized to timestamp[ms] should render without NaN in SVG.
+    Targets normalize_for_rust + full pipeline.
     """
     import ferrum as fr
 
@@ -1199,12 +1208,13 @@ def test_polars_series_date():
 
 
 def test_polars_series_duration():
-    """Polars Series with Duration dtype should be cast to Int64.
-    Targets line 72 -> lines 82-83.
+    """Polars Series with Duration dtype passes through as Arrow duration[ns].
+    normalize_for_rust converts it to timestamp[ms].
+    Targets line 72: Series -> to_frame() -> to_arrow() preserves duration type.
     """
     s = pl.Series("dur", [1000, 2000, 3000], dtype=pl.Duration("ns"))
     tbl = to_arrow_table(s)
-    assert pa.types.is_int64(tbl.schema.field("dur").type)
+    assert pa.types.is_duration(tbl.schema.field("dur").type)
 
 
 def test_polars_series_boolean():
@@ -1293,14 +1303,22 @@ def test_polars_date_values_preserved_after_cast():
     assert vals[1].date() == date(2024, 12, 31)
 
 
-def test_polars_duration_values_preserved_after_cast():
-    """After Duration -> Int64 cast, the nanosecond values should be preserved.
-    Targets lines 82-83: cast preserves duration semantics.
+def test_polars_duration_values_preserved_after_normalize():
+    """After Duration -> timestamp[ms] normalization, temporal semantics are preserved.
+    1_000_000 ns = 1 ms = datetime(1970, 1, 1, 0, 0, 0, 1000 us).
+    Checks that normalize_for_rust preserves the physical duration value when
+    converting to timestamp[ms].
     """
+    from datetime import datetime, timezone
+    from ferrum._coerce import normalize_for_rust
+
     df = pl.DataFrame({"dur": pl.Series([1_000_000, 2_000_000], dtype=pl.Duration("ns"))})
-    tbl = to_arrow_table(df)
+    tbl = normalize_for_rust(to_arrow_table(df))
+    assert pa.types.is_timestamp(tbl.schema.field("dur").type)
     vals = tbl.column("dur").to_pylist()
-    assert vals == [1_000_000, 2_000_000]
+    # 1_000_000 ns = 1 ms = 1970-01-01T00:00:00.001
+    assert vals[0] == datetime(1970, 1, 1, 0, 0, 0, 1000)
+    assert vals[1] == datetime(1970, 1, 1, 0, 0, 0, 2000)
 
 
 def test_polars_categorical_order_preserved_after_cast():

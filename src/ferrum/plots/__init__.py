@@ -26,7 +26,7 @@ from ferrum.plots.regression import (
 )
 from ferrum.plots.explanation import (
     importance_chart,
-    shap_chart,
+    shap_chart,  # noqa: F401  # deprecated dispatcher: importable but out of __all__
     shap_beeswarm_chart,
     shap_bar_chart,
     shap_waterfall_chart,
@@ -47,7 +47,7 @@ from ferrum.plots.clustering import (
     elbow_chart,
 )
 from ferrum.plots.ranking import (
-    rank_chart,
+    rank_chart,  # noqa: F401  # deprecated dispatcher: importable but out of __all__
     rank1d_chart,
     rank2d_chart,
     parallel_coordinates_chart,
@@ -83,7 +83,8 @@ __all__ = [
     "residplot",
     "regplot",
     "importance_chart",
-    "shap_chart",
+    # shap_chart is a deprecated dispatcher (use shap_beeswarm_chart /
+    # shap_bar_chart / shap_waterfall_chart); kept importable but out of __all__.
     "shap_beeswarm_chart",
     "shap_bar_chart",
     "shap_waterfall_chart",
@@ -98,7 +99,8 @@ __all__ = [
     "silhouette_chart",
     "manifold_chart",
     "elbow_chart",
-    "rank_chart",
+    # rank_chart is a deprecated dispatcher (use rank1d_chart / rank2d_chart);
+    # kept importable but out of __all__.
     "rank1d_chart",
     "rank2d_chart",
     "parallel_coordinates_chart",

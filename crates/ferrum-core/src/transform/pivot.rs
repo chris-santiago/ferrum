@@ -17,6 +17,7 @@ use crate::transform::group_key::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PivotSpec {
     /// Column whose unique values become new column headers.
     pub field: String,
@@ -220,44 +221,10 @@ fn aggregate_values(vals: &[f64], op: &str) -> f64 {
     }
 }
 
-// ─── PyO3 wrapper ──────────────────────────────────────────────────────────
-
-use pyo3::prelude::*;
-use crate::transform::core::TransformSpec;
-
-#[pyclass(module = "ferrum._core", name = "DataPivot")]
-#[derive(Debug, Clone)]
-pub(crate) struct PyDataPivot(pub(crate) TransformSpec);
-
-#[pymethods]
-impl PyDataPivot {
-    #[new]
-    #[pyo3(signature = (field, value, *, groupby = None, limit = None, op = "sum", name = None))]
-    fn new(
-        field: String,
-        value: String,
-        groupby: Option<Vec<String>>,
-        limit: Option<usize>,
-        op: &str,
-        name: Option<String>,
-    ) -> PyResult<Self> {
-        Ok(PyDataPivot(TransformSpec::Pivot(PivotSpec {
-            field,
-            value,
-            groupby,
-            limit,
-            op: op.into(),
-            name,
-        })))
-    }
-
-    fn __repr__(&self) -> String {
-        match &self.0 {
-            TransformSpec::Pivot(s) => format!("DataPivot(field='{}', value='{}')", s.field, s.value),
-            _ => "DataPivot(?)".to_string(),
-        }
-    }
-}
+// No PyO3 wrapper: `DataPivot` is constructed only via the dict-emitting
+// `transform_pivot` Python function and carried through the `transforms_json`
+// serde path (SEAM-02). The removed `#[new]` performed no validation beyond
+// serde's required fields. `PivotSpec` above is the serde target.
 
 #[cfg(test)]
 mod tests {

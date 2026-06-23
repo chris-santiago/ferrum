@@ -14,6 +14,8 @@ import logging
 import pathlib
 from typing import TYPE_CHECKING, Any, Callable
 
+from ferrum._scene import ZoomRebuildable, _render_scene
+
 if TYPE_CHECKING:
     from ferrum.chart import Chart
 
@@ -87,14 +89,6 @@ def _get_widget_class() -> Any:
         return None
 
 
-class InteractiveRenderError(RuntimeError):
-    """Raised when the WASM interactive renderer fails."""
-
-
-class WasmNotAvailableError(RuntimeError):
-    """Raised when WASM artifacts are not found in the package."""
-
-
 class InteractiveChart:
     """Interactive chart widget backed by the ferrum WASM renderer.
 
@@ -146,7 +140,7 @@ class InteractiveChart:
         import json as _json
 
         # Compositions don't support zoom rebuild (no _clone / coord override).
-        if not hasattr(self._chart, "_clone"):
+        if not isinstance(self._chart, ZoomRebuildable):
             return
 
         zoom = _json.loads(change.get("new", "{}"))
@@ -233,34 +227,61 @@ class InteractiveChart:
                 names=["selection_state"],
             )
 
-    def save(self, path: str, **kwargs: Any) -> None:
-        """Save as self-contained HTML file.
+    def save(
+        self,
+        path: str,
+        *,
+        format: str | None = None,
+        embed_wasm: bool = True,
+        csp_nonce: str | None = None,
+        scale: float = 2.0,
+    ) -> None:
+        """Save the underlying chart to a file, dispatching on extension/format.
 
-        Uses the pre-rendered scene JSON and packed data so this works
-        for both plain ``Chart`` objects and composition types that lack
-        ``_render_inputs()``.
+        Routes through :func:`ferrum.display.save_chart` — the single
+        save-format router shared with ``Chart.save`` and the composition
+        ``save`` methods — so the path extension is honored (``.html`` /
+        ``.svg`` / ``.png`` / ``.json`` / ``.pdf``) rather than always writing
+        HTML.  The interactive ``toolbar`` flag captured at construction time
+        is carried into HTML output.
+
+        Parameters
+        ----------
+        path : str
+            Destination file path.  The extension determines the format when
+            *format* is omitted.
+        format : {"svg", "png", "html", "json", "pdf"}, optional
+            Explicit format override.  When omitted the extension of ``path``
+            is used.
+        embed_wasm : bool, default True
+            For ``"html"`` format only.  When True, the WASM binary is
+            base64-inlined for single-file distribution.  When False, an
+            adjacent ``ferrum_wasm_bg.wasm`` sidecar is written alongside.
+        csp_nonce : str, optional
+            For ``"html"`` format only.  When provided, both the ``<style>``
+            and ``<script type="module">`` tags receive a ``nonce="..."``
+            attribute so they pass strict Content-Security-Policy headers.
+        scale : float, default 2.0
+            Pixel-density multiplier for PNG and PDF output.  Has no effect on
+            SVG, HTML, or JSON exports.
+
+        Raises
+        ------
+        ValueError
+            If the path extension (or *format*) is not a recognised export
+            format.
         """
-        from pathlib import Path as _Path
+        from ferrum.display import save_chart
 
-        from ferrum._html import assemble_html, _copy_wasm_sidecar
-
-        from ferrum.display import figure_title_text
-
-        embed_wasm = kwargs.pop("embed_wasm", True)
-        csp_nonce = kwargs.pop("csp_nonce", None)
-        title = figure_title_text(self._chart)
-        html = assemble_html(
-            self._scene_json,
-            packed_data=self._packed_data,
-            title=title,
+        save_chart(
+            self._chart,
+            path,
+            format=format,
             embed_wasm=embed_wasm,
             csp_nonce=csp_nonce,
+            scale=scale,
             toolbar=self._toolbar,
         )
-        dest = _Path(path)
-        dest.write_text(html)
-        if not embed_wasm:
-            _copy_wasm_sidecar(dest)
 
     def _repr_mimebundle_(self, **kwargs: Any) -> dict | None:
         if self._widget is None:
@@ -278,52 +299,3 @@ class InteractiveChart:
     def __repr__(self) -> str:
         selections = getattr(self._chart, "_selections", [])
         return f"InteractiveChart(selections={len(selections)})"
-
-
-def _render_scene(chart: "Chart") -> tuple[str, bytes]:
-    """Return (scene_json, packed_bytes) for the interactive renderer.
-
-    Dispatches to ``_render_interactive()`` when the object is a
-    composition type (HConcat, VConcat, Layer, etc.), and falls through
-    to the standard Rust ``render_interactive`` for plain ``Chart``.
-    """
-    # Composition types implement _render_interactive(); plain Charts do not.
-    if hasattr(chart, "_render_interactive"):
-        return chart._render_interactive()
-
-    import json as _json
-
-    from ferrum._core import render_interactive
-
-    spec, data, viewport, theme_dict, chart_config_dict = chart._render_inputs(_auto_tooltips=True)
-    if data.num_rows == 0:
-        w, h = viewport
-        return _json.dumps(
-            {
-                "panels": [],
-                "width": w,
-                "height": h,
-                "background": None,
-                "title": [],
-                "legend": [],
-                "decorations": [],
-                "selections": [],
-                "interaction": {
-                    "zoom_enabled": True,
-                    "pan_enabled": True,
-                    "toolbar": True,
-                    "conditionals": [],
-                    "linked_panels": [],
-                    "tick_levels": [],
-                    "params": [],
-                    "param_bindings": [],
-                },
-            }
-        ), b""
-    return render_interactive(
-        spec,
-        data,
-        viewport=viewport,
-        theme=theme_dict,
-        chart_config=chart_config_dict or None,
-    )

@@ -36,7 +36,7 @@ pub use self::geometry::{Inset, Rect, Viewport};
 pub use self::legend::{
     ColorbarInput, ColorbarLayout, ColorbarTick, LegendDirection, LegendEntry,
     AuxLegendInput, LegendEntryLayout, LegendLayout, LegendOrient, LegendOverrides,
-    ShapeLegendEntry, SizeLegendEntry, SymbolKind,
+    LegendStyleOpts, ShapeLegendEntry, SizeLegendEntry, SymbolKind,
 };
 pub use self::panel::{FacetKey, PanelLayout, StripTitleLayout, TextAnchor};
 pub use self::text_metrics::{HeuristicMetrics, TextMetrics};
@@ -60,17 +60,17 @@ pub struct LayoutResult {
 }
 
 /// Clamp a dynamically-estimated axis margin band to the per-axis
-/// `min_extent`/`max_extent` overrides (B5). `min` reserves at least that many
+/// `min_band`/`max_band` overrides (B5). `min` reserves at least that many
 /// px; `max` caps the reservation (labels may clip past the cap — allowed). When
 /// both are `None` the dynamic value passes through unchanged, preserving
 /// byte-identical default output. A `min > max` (user contradiction) resolves to
 /// `max` (the cap wins), matching the "max is a hard ceiling" semantic.
-fn clamp_axis_extent(dynamic: f64, min_extent: Option<f64>, max_extent: Option<f64>) -> f64 {
+fn clamp_axis_band(dynamic: f64, min_band: Option<f64>, max_band: Option<f64>) -> f64 {
     let mut band = dynamic;
-    if let Some(min) = min_extent {
+    if let Some(min) = min_band {
         band = band.max(min);
     }
-    if let Some(max) = max_extent {
+    if let Some(max) = max_band {
         band = band.min(max);
     }
     band
@@ -115,6 +115,42 @@ pub enum LayoutWarning {
     /// identify the missing data combination.  One aggregated warning is
     /// emitted listing all empty cells (spec §4/§11).
     EmptyPartitions { keys: Vec<String> },
+}
+
+impl std::fmt::Display for LayoutWarning {
+    /// User-facing warning text forwarded to Python's ``warnings.warn``.
+    ///
+    /// These messages are an intentional, stable Display contract — not the
+    /// derived Debug of the enum's internal fields. Callers (and the test
+    /// suite) may match on the wording below; restructuring a variant's fields
+    /// must not change the sentence a user sees unless deliberately revised.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LayoutWarning::PanelCollapsed { panel_index } => write!(
+                f,
+                "panel {panel_index} collapsed to zero size and was not drawn"
+            ),
+            LayoutWarning::LabelsElided { axis, count } => write!(
+                f,
+                "{count} tick label(s) on axis {axis} were elided to avoid overlap"
+            ),
+            LayoutWarning::LegendOverflowed { entries_dropped } => write!(
+                f,
+                "legend overflowed; {entries_dropped} entry(ies) were dropped"
+            ),
+            LayoutWarning::PanelsDropped { count, keys } => write!(
+                f,
+                "{count} facet panel(s) were dropped because the grid is smaller \
+                 than the number of facet groups: {}",
+                keys.join("; ")
+            ),
+            LayoutWarning::EmptyPartitions { keys } => write!(
+                f,
+                "facet grid has empty cell(s) with no data: {}",
+                keys.join("; ")
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -469,115 +505,95 @@ impl Default for ThemeInputs {
     }
 }
 
-pub fn compute_layout(
+/// 840: the strip-band size shared by the facet reservation, the per-panel column
+/// strip, and the row-header strip — one line of strip text plus vertical padding
+/// on each side. Computed once and reused at every strip site.
+fn strip_band_size(theme: &ThemeInputs, metrics: &dyn TextMetrics) -> f64 {
+    metrics.line_height(theme.sizes.strip_text_size) + 2.0 * theme.padding.strip_padding
+}
+
+/// One panel's grid placement before per-panel layout:
+/// `(grid_row, grid_col, cell_rect, col_facet_key, row_facet_key)`. `row_facet_key`
+/// is `Some` only in two-way grid mode (`FacetSpec.row` set). 400: names the tuple
+/// threaded between `split_panels` and `layout_panel_axes`.
+type PanelRect = (u32, u32, Rect, Option<FacetKey>, Option<FacetKey>);
+
+/// 400 stage 1 — reserve the chart-level (top-of-SVG) title band off the top of
+/// `inner` (Themes-T2.5a; Schwabish SB1 adds the subtitle line). Returns the
+/// placed title (or `None`) and the remaining rect. Pure extraction of the
+/// former inline block; arithmetic unchanged.
+fn reserve_chart_title(
+    inner: Rect,
     spec: &crate::spec::chart::ChartSpec,
     theme: &ThemeInputs,
-    viewport: Viewport,
-    axes: &AxesInput,
-    facet_groups: &[FacetGroup],
+    metrics: &dyn TextMetrics,
+) -> (Option<ChartTitleLayout>, Rect) {
+    let Some(title_spec) = spec.title.as_ref() else {
+        return (None, inner);
+    };
+    // D1-D6: per-chart TitleSpec overrides for layout geometry.
+    let resolved_font_size = title_spec
+        .font_size
+        .unwrap_or(theme.typography.title_font_size);
+    let resolved_offset = title_spec
+        .offset
+        .unwrap_or(theme.typography.title_offset);
+    let resolved_anchor = match title_spec.anchor.as_deref() {
+        Some("middle") => TextAnchor::Middle,
+        Some("end")    => TextAnchor::End,
+        Some(_)        => TextAnchor::Start,
+        None           => theme.typography.title_anchor,
+    };
+    let title_line_h = metrics.line_height(resolved_font_size);
+    let subtitle_font_size = title_spec
+        .subtitle_font_size
+        .or(theme.typography.subtitle_font_size)
+        .unwrap_or(resolved_font_size * 0.85);
+    let subtitle_line_h = if title_spec.subtitle.is_some() {
+        metrics.line_height(subtitle_font_size)
+    } else {
+        0.0
+    };
+    let band_h = title_line_h + subtitle_line_h + resolved_offset;
+    let (band, rest) = inner.split_top(band_h);
+    let x = match resolved_anchor {
+        TextAnchor::Start => band.x,
+        TextAnchor::Middle => band.x + band.w / 2.0,
+        TextAnchor::End => band.x + band.w,
+    };
+    let y = band.y + title_line_h;
+    let subtitle_y = if title_spec.subtitle.is_some() {
+        Some(y + subtitle_line_h)
+    } else {
+        None
+    };
+    let chart_title = ChartTitleLayout {
+        text: title_spec.text.clone(),
+        subtitle: title_spec.subtitle.clone(),
+        x,
+        y,
+        subtitle_y,
+        anchor: resolved_anchor,
+    };
+    (Some(chart_title), rest)
+}
+
+/// 400 stage 2 — reserve the color legend strip (categorical entries or
+/// continuous colorbar) plus any stacked auxiliary (size / shape) legend blocks,
+/// off `inner`. Returns the color legend, the aux blocks, the plot rect remaining
+/// after both reservations, and the number of categorical entries dropped on
+/// overflow. Pure extraction of the former inline blocks; arithmetic unchanged.
+#[allow(clippy::too_many_arguments)]
+fn reserve_legends(
+    inner: Rect,
+    theme: &ThemeInputs,
     legend_entries: &[LegendEntry],
     legend_title: Option<String>,
     colorbar: Option<&ColorbarInput>,
     metrics: &dyn TextMetrics,
     legend_overrides: &legend::LegendOverrides,
     aux_legend_inputs: &[legend::AuxLegendInput],
-) -> Result<LayoutResult, LayoutError> {
-    // 1. Validate inputs.
-    if viewport.width <= 0.0 || viewport.height <= 0.0 {
-        return Err(LayoutError::InvalidViewport {
-            width: viewport.width,
-            height: viewport.height,
-        });
-    }
-    if let Some(facet) = &spec.facet {
-        match &facet.mode {
-            FacetMode::Wrap { ncols } if *ncols == 0 => {
-                return Err(LayoutError::InvalidFacetSpec("ncols must be > 0".into()));
-            }
-            FacetMode::Grid { nrows, ncols } if *nrows == 0 || *ncols == 0 => {
-                return Err(LayoutError::InvalidFacetSpec("nrows and ncols must be > 0".into()));
-            }
-            _ => {}
-        }
-        if facet_groups.is_empty() {
-            return Err(LayoutError::EmptyFacetGroups);
-        }
-    }
-
-    // 2. Apply outer padding.
-    let viewport_rect = viewport.into_rect();
-    let inset = Inset {
-        top:    theme.padding.padding_top.unwrap_or(theme.padding.padding),
-        right:  theme.padding.padding_right.unwrap_or(theme.padding.padding),
-        bottom: theme.padding.padding_bottom.unwrap_or(theme.padding.padding),
-        left:   theme.padding.padding_left.unwrap_or(theme.padding.padding),
-    };
-    let inner = viewport_rect.shrink(inset);
-    if inner.w <= 0.0 || inner.h <= 0.0 {
-        let dim = viewport.width.min(viewport.height);
-        return Err(LayoutError::PaddingExceedsViewport {
-            padding: theme.padding.padding,
-            viewport_dim: dim,
-        });
-    }
-
-    // 2b. Reserve chart-level title band (Themes-T2.5a; Schwabish SB1 adds subtitle).
-    // Band height ≈ title_font_size * 1.4 + (subtitle_font_size * 1.4 if subtitle)
-    //   + title_offset. Without a subtitle, layout is byte-identical to T2.5a.
-    let (chart_title_layout, inner) = if let Some(title_spec) = spec.title.as_ref() {
-        // D1-D6: per-chart TitleSpec overrides for layout geometry.
-        let resolved_font_size = title_spec
-            .font_size
-            .unwrap_or(theme.typography.title_font_size);
-        let resolved_offset = title_spec
-            .offset
-            .unwrap_or(theme.typography.title_offset);
-        let resolved_anchor = match title_spec.anchor.as_deref() {
-            Some("middle") => TextAnchor::Middle,
-            Some("end")    => TextAnchor::End,
-            Some(_)        => TextAnchor::Start,
-            None           => theme.typography.title_anchor,
-        };
-        let title_line_h = metrics.line_height(resolved_font_size);
-        let subtitle_font_size = title_spec
-            .subtitle_font_size
-            .or(theme.typography.subtitle_font_size)
-            .unwrap_or(resolved_font_size * 0.85);
-        let subtitle_line_h = if title_spec.subtitle.is_some() {
-            metrics.line_height(subtitle_font_size)
-        } else {
-            0.0
-        };
-        let band_h = title_line_h + subtitle_line_h + resolved_offset;
-        let (band, rest) = inner.split_top(band_h);
-        let x = match resolved_anchor {
-            TextAnchor::Start => band.x,
-            TextAnchor::Middle => band.x + band.w / 2.0,
-            TextAnchor::End => band.x + band.w,
-        };
-        let y = band.y + title_line_h;
-        let subtitle_y = if title_spec.subtitle.is_some() {
-            Some(y + subtitle_line_h)
-        } else {
-            None
-        };
-        let chart_title = ChartTitleLayout {
-            text: title_spec.text.clone(),
-            subtitle: title_spec.subtitle.clone(),
-            x,
-            y,
-            subtitle_y,
-            anchor: resolved_anchor,
-        };
-        (Some(chart_title), rest)
-    } else {
-        (None, inner)
-    };
-
-    // 3. Reserve legend strip. Continuous color scales emit a colorbar
-    //    instead of categorical entries; both paths consume the same
-    //    legend gutter.
-    //
+) -> (Option<LegendLayout>, Vec<LegendLayout>, Rect, u32) {
     // D13+: Per-chart overrides from `encoding.color.legend` extra fields:
     //   labelFontSize  → overrides theme.label_font_size for entries/ticks
     //   direction      → overrides theme.legend_direction for categorical layout
@@ -586,7 +602,7 @@ pub fn compute_layout(
     //   tickCount      → subsample colorbar ticks to at most N
     //   values         → replace auto-generated tick labels
     //   gradientLength / gradientThickness → colorbar bar dimensions
-    let effective_label_font_size = legend_overrides.label_font_size.unwrap_or(theme.typography.label_font_size);
+    let effective_label_font_size = legend_overrides.style.label_font_size.unwrap_or(theme.typography.label_font_size);
     let effective_direction = legend_overrides.direction.or(theme.legend.legend_direction);
     let force_colorbar = legend_overrides.legend_type.as_deref() == Some("gradient");
     let force_symbol   = legend_overrides.legend_type.as_deref() == Some("symbol");
@@ -622,9 +638,9 @@ pub fn compute_layout(
             theme.padding.column_padding,
             legend_overrides.gradient_length,
             legend_overrides.gradient_thickness,
-            legend_overrides.clip_height,
-            legend_overrides.label_color.clone(),
-            legend_overrides.label_font_size,
+            legend_overrides.style.clip_height,
+            legend_overrides.style.label_color.clone(),
+            legend_overrides.style.label_font_size,
         )
     } else {
         legend::layout_legend(
@@ -638,19 +654,9 @@ pub fn compute_layout(
             theme.typography.legend_title_font_size,
             theme.legend.legend_columns,
             legend_overrides.symbol_type.as_deref(),
-            legend::LegendStyleOpts {
-                symbol_stroke_width: legend_overrides.symbol_stroke_width,
-                row_padding: legend_overrides.row_padding,
-                column_padding: legend_overrides.column_padding,
-                label_limit: legend_overrides.label_limit,
-                clip_height: legend_overrides.clip_height,
-                padding: legend_overrides.padding,
-                title_padding: legend_overrides.title_padding,
-                offset: legend_overrides.offset,
-                symbol_size: legend_overrides.symbol_size,
-                label_color: legend_overrides.label_color.clone(),
-                label_font_size: legend_overrides.label_font_size,
-            },
+            // 380: the 11 categorical-style fields live once on
+            // `LegendOverrides.style`; no field-by-field copy.
+            legend_overrides.style.clone(),
         )
     };
     let legend_dropped = legend_entries
@@ -674,7 +680,19 @@ pub fn compute_layout(
         theme.padding.column_padding,
     );
 
-    // 4 + 5. Reserve y-axis title gutter + label band; reserve x-axis label band.
+    (legend_layout, aux_legends, inner_after_legend, legend_dropped)
+}
+
+/// 400 stage 3 — reserve the x/y axis margin bands off `inner_after_legend`,
+/// returning the shrunk plot region and the `x_label_band` (also needed for the
+/// inter-row facet gutter). Pure extraction of the former inline gutter/band/clamp
+/// block; arithmetic unchanged.
+fn reserve_axis_bands(
+    inner_after_legend: Rect,
+    axes: &AxesInput,
+    theme: &ThemeInputs,
+    metrics: &dyn TextMetrics,
+) -> (Rect, f64) {
     let y_title_gutter = axis::compute_y_title_width(
         &axes.y,
         theme.typography.title_font_size,
@@ -718,31 +736,31 @@ pub fn compute_layout(
     };
 
     // L-3: use per-axis title_font_size/title_padding overrides for gutter
-    // reservation, matching the y-axis pattern in compute_y_title_width.
-    // Previously used theme.title_font_size unconditionally, which caused the
-    // gutter to be undersized when axes.x.title_font_size was larger than theme.
-    let x_title_gutter = if axes.x.title.is_some() {
-        let effective_title_font_size = axes.x.overrides.title_font_size.unwrap_or(theme.typography.title_font_size);
-        let effective_title_padding = axes.x.overrides.title_padding.unwrap_or(theme.padding.axis_title_padding);
-        metrics.line_height(effective_title_font_size) + effective_title_padding
-    } else {
-        0.0
-    };
+    // reservation, via the `compute_x_title_width` sibling of `compute_y_title_width`
+    // (cohesion finding LAYOUT-855 — was inlined here "mirroring the y-axis pattern"
+    // to fix an undersizing bug, leaving the axis family asymmetric). Both axes now
+    // reserve the gutter through a named helper, so the formula has a single home.
+    let x_title_gutter = axis::compute_x_title_width(
+        &axes.x,
+        theme.typography.title_font_size,
+        theme.padding.axis_title_padding,
+        metrics,
+    );
 
     // Reserved band totals per axis (label band + title gutter). The orphan
-    // `min_extent`/`max_extent` overrides (B5) clamp each total to `[min, max]`
+    // `min_band`/`max_band` overrides (B5) clamp each total to `[min, max]`
     // after the dynamic estimate: `min` reserves at least that much, `max` caps
     // it (labels may clip past the cap — allowed). `None`/unset leaves the
     // dynamic value unchanged, so default output is byte-identical.
-    let x_band = clamp_axis_extent(
+    let x_band = clamp_axis_band(
         x_label_band + x_title_gutter,
-        axes.x.overrides.min_extent,
-        axes.x.overrides.max_extent,
+        axes.x.overrides.min_band,
+        axes.x.overrides.max_band,
     );
-    let y_band = clamp_axis_extent(
+    let y_band = clamp_axis_band(
         y_label_band + y_title_gutter,
-        axes.y.overrides.min_extent,
-        axes.y.overrides.max_extent,
+        axes.y.overrides.min_band,
+        axes.y.overrides.max_band,
     );
 
     // Orient (B5): reserve each axis's band on its chosen side. x defaults to the
@@ -759,16 +777,28 @@ pub fn compute_layout(
         left: if y_on_right { 0.0 } else { y_band },
     });
 
-    // 6. Split into facet cells (or a single panel).
-    let mut panels: Vec<PanelLayout> = Vec::new();
+    (plot_region, x_label_band)
+}
+
+/// 400 stage 4 — split `plot_region` into facet cells (or a single panel),
+/// returning the per-panel grid placements and any facet warnings (dropped
+/// panels, empty cells). 840: the row-header strip band is the shared
+/// `strip_band` value. Pure extraction of the former inline `panel_rects` block;
+/// arithmetic + warning order unchanged.
+fn split_panels(
+    plot_region: Rect,
+    spec: &crate::spec::chart::ChartSpec,
+    facet_groups: &[FacetGroup],
+    theme: &ThemeInputs,
+    x_label_band: f64,
+    show_x: bool,
+    strip_band: f64,
+) -> (Vec<PanelRect>, Vec<LayoutWarning>) {
     let mut warnings: Vec<LayoutWarning> = Vec::new();
-    if legend_dropped > 0 {
-        warnings.push(LayoutWarning::LegendOverflowed { entries_dropped: legend_dropped });
-    }
 
     // panel_rects: (grid_row, grid_col, cell_rect, col_facet_key, row_facet_key)
     // row_facet_key is Some only in grid mode (FacetSpec.row is set).
-    let panel_rects: Vec<(u32, u32, Rect, Option<FacetKey>, Option<FacetKey>)> = if let Some(facet) = &spec.facet {
+    let panel_rects: Vec<PanelRect> = if let Some(facet) = &spec.facet {
         let n_panels = facet_groups.len() as u32;
         let (gx, gy) = facet
             .spacing
@@ -784,7 +814,7 @@ pub fn compute_layout(
             }
             FacetMode::Grid { nrows, .. } => nrows.max(1),
         };
-        let gy = if effective_nrows > 1 && axes.show_x {
+        let gy = if effective_nrows > 1 && show_x {
             gy + x_label_band
         } else {
             gy
@@ -793,13 +823,8 @@ pub fn compute_layout(
         // row headers (ggplot2 / Altair convention — row strips on the right).
         // Reserving on the right keeps the y-axis title and tick labels
         // unobstructed on the left. The band width equals one line of
-        // strip text plus vertical padding on each side.
-        let row_strip_width = if facet.row.is_some() {
-            let text_h = metrics.line_height(theme.sizes.strip_text_size);
-            text_h + 2.0 * theme.padding.strip_padding
-        } else {
-            0.0
-        };
+        // strip text plus vertical padding on each side (840: `strip_band`).
+        let row_strip_width = if facet.row.is_some() { strip_band } else { 0.0 };
         let grid_region = if row_strip_width > 0.0 {
             Rect {
                 x: plot_region.x,
@@ -874,11 +899,31 @@ pub fn compute_layout(
         vec![(0, 0, plot_region, None, None)]
     };
 
-    let strip_band_height = if spec.facet.is_some() {
-        metrics.line_height(theme.sizes.strip_text_size) + 2.0 * theme.padding.strip_padding
-    } else {
-        0.0
-    };
+    (panel_rects, warnings)
+}
+
+/// 400 stage 5 — lay out each panel: clamp degenerate rects, reserve column /
+/// row-header strips, apply CoordFixed aspect correction, and build the per-axis
+/// layouts (with facet title suppression on non-edge panels). Returns the panels,
+/// the flat axis-layout list, and any per-panel warnings (collapse, x-label
+/// elision). 840: column + row strip bands are the shared `strip_band`. Pure
+/// extraction of the former per-panel loop; arithmetic + warning/axis push order
+/// unchanged.
+fn layout_panel_axes(
+    panel_rects: Vec<PanelRect>,
+    spec: &crate::spec::chart::ChartSpec,
+    axes: &AxesInput,
+    theme: &ThemeInputs,
+    metrics: &dyn TextMetrics,
+    strip_band: f64,
+) -> (Vec<PanelLayout>, Vec<AxisLayout>, Vec<LayoutWarning>) {
+    let mut panels: Vec<PanelLayout> = Vec::new();
+    let mut axis_layouts: Vec<AxisLayout> = Vec::new();
+    let mut warnings: Vec<LayoutWarning> = Vec::new();
+
+    // 840: column-strip and row-header-strip bands are the same shared size; the
+    // column strip applies whenever faceting, the row strip only in grid mode.
+    let strip_band_height = if spec.facet.is_some() { strip_band } else { 0.0 };
 
     // Compute the maximum row index so non-bottom panels can suppress the
     // x-axis title (only the bottom row needs it — duplicating it in every
@@ -892,8 +937,7 @@ pub fn compute_layout(
     // Width of the row-header strip on the right side of the grid region (grid
     // mode only). Mirrored from the reservation made when building panel_rects.
     let row_strip_band_width = if spec.facet.as_ref().is_some_and(|f| f.row.is_some()) {
-        let text_h = metrics.line_height(theme.sizes.strip_text_size);
-        text_h + 2.0 * theme.padding.strip_padding
+        strip_band
     } else {
         0.0
     };
@@ -908,7 +952,6 @@ pub fn compute_layout(
     let mut emitted_row_strips: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // 7. Per-panel: clamp degenerate rects, collect axes.
-    let mut axis_layouts: Vec<AxisLayout> = Vec::new();
     for (panel_index, (row, col, mut rect, facet_key, row_facet_key)) in panel_rects.into_iter().enumerate() {
         if rect.w <= MIN_PANEL_DIM || rect.h <= MIN_PANEL_DIM {
             warnings.push(LayoutWarning::PanelCollapsed { panel_index });
@@ -1074,6 +1117,108 @@ pub fn compute_layout(
         }
     }
 
+    (panels, axis_layouts, warnings)
+}
+
+pub fn compute_layout(
+    spec: &crate::spec::chart::ChartSpec,
+    theme: &ThemeInputs,
+    viewport: Viewport,
+    axes: &AxesInput,
+    facet_groups: &[FacetGroup],
+    legend_entries: &[LegendEntry],
+    legend_title: Option<String>,
+    colorbar: Option<&ColorbarInput>,
+    metrics: &dyn TextMetrics,
+    legend_overrides: &legend::LegendOverrides,
+    aux_legend_inputs: &[legend::AuxLegendInput],
+) -> Result<LayoutResult, LayoutError> {
+    // 1. Validate inputs.
+    if viewport.width <= 0.0 || viewport.height <= 0.0 {
+        return Err(LayoutError::InvalidViewport {
+            width: viewport.width,
+            height: viewport.height,
+        });
+    }
+    if let Some(facet) = &spec.facet {
+        match &facet.mode {
+            FacetMode::Wrap { ncols } if *ncols == 0 => {
+                return Err(LayoutError::InvalidFacetSpec("ncols must be > 0".into()));
+            }
+            FacetMode::Grid { nrows, ncols } if *nrows == 0 || *ncols == 0 => {
+                return Err(LayoutError::InvalidFacetSpec("nrows and ncols must be > 0".into()));
+            }
+            _ => {}
+        }
+        if facet_groups.is_empty() {
+            return Err(LayoutError::EmptyFacetGroups);
+        }
+    }
+
+    // 2. Apply outer padding.
+    let viewport_rect = viewport.into_rect();
+    let inset = Inset {
+        top:    theme.padding.padding_top.unwrap_or(theme.padding.padding),
+        right:  theme.padding.padding_right.unwrap_or(theme.padding.padding),
+        bottom: theme.padding.padding_bottom.unwrap_or(theme.padding.padding),
+        left:   theme.padding.padding_left.unwrap_or(theme.padding.padding),
+    };
+    let inner = viewport_rect.shrink(inset);
+    if inner.w <= 0.0 || inner.h <= 0.0 {
+        let dim = viewport.width.min(viewport.height);
+        return Err(LayoutError::PaddingExceedsViewport {
+            padding: theme.padding.padding,
+            viewport_dim: dim,
+        });
+    }
+
+    // 2b. Reserve chart-level title band (Themes-T2.5a; Schwabish SB1 adds subtitle).
+    // Band height ≈ title_font_size * 1.4 + (subtitle_font_size * 1.4 if subtitle)
+    //   + title_offset. Without a subtitle, layout is byte-identical to T2.5a.
+    let (chart_title_layout, inner) = reserve_chart_title(inner, spec, theme, metrics);
+
+    // 3 + 3b. Reserve the color legend strip (categorical or colorbar) plus any
+    //    stacked size/shape aux blocks. Both consume the same legend gutter.
+    let (legend_layout, aux_legends, inner_after_legend, legend_dropped) = reserve_legends(
+        inner,
+        theme,
+        legend_entries,
+        legend_title,
+        colorbar,
+        metrics,
+        legend_overrides,
+        aux_legend_inputs,
+    );
+
+    // 4 + 5. Reserve the x/y axis margin bands, yielding the plot region. The
+    //    `x_label_band` is also needed for the inter-row facet gutter below.
+    let (plot_region, x_label_band) = reserve_axis_bands(inner_after_legend, axes, theme, metrics);
+
+    // 6 + 7. Split into facet cells, then lay out each panel's strips + axes.
+    //    840: compute the strip band size once and thread it to both stages.
+    let strip_band = strip_band_size(theme, metrics);
+    let (panel_rects, facet_warnings) = split_panels(
+        plot_region,
+        spec,
+        facet_groups,
+        theme,
+        x_label_band,
+        axes.show_x,
+        strip_band,
+    );
+    let (panels, axis_layouts, panel_warnings) =
+        layout_panel_axes(panel_rects, spec, axes, theme, metrics, strip_band);
+
+    // Assemble warnings in the original push order: legend overflow first, then
+    // the facet stage (dropped panels / empty cells), then the per-panel stage
+    // (collapse / x-label elision).
+    let mut warnings: Vec<LayoutWarning> = Vec::new();
+    if legend_dropped > 0 {
+        warnings.push(LayoutWarning::LegendOverflowed { entries_dropped: legend_dropped });
+    }
+    warnings.extend(facet_warnings);
+    warnings.extend(panel_warnings);
+
     Ok(LayoutResult {
         viewport: viewport_rect,
         panels,
@@ -1129,6 +1274,18 @@ mod tests {
     use crate::spec::data_ref::DataRef;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
+
+    /// 840: the strip band is one line of strip text plus padding on each side,
+    /// computed once via `strip_band_size` and reused at every strip site.
+    #[test]
+    fn strip_band_size_is_line_height_plus_padding_both_sides() {
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let mut theme = ThemeInputs::default();
+        theme.sizes.strip_text_size = 12.0;
+        theme.padding.strip_padding = 6.0;
+        // line_height(12) = 12 * 1.2 = 14.4; + 2 * 6 = 26.4.
+        assert!((strip_band_size(&theme, &m) - (12.0 * 1.2 + 2.0 * 6.0)).abs() < 1e-9);
+    }
 
     fn minimal_chart_spec() -> ChartSpec {
         ChartSpec {
@@ -1250,38 +1407,38 @@ mod tests {
         );
     }
 
-    // ── B5 unit 2: clamp_axis_extent + orient band reservation ──────────────
+    // ── B5 unit 2: clamp_axis_band + orient band reservation ──────────────
 
     #[test]
-    fn clamp_axis_extent_passthrough_when_unset() {
+    fn clamp_axis_band_passthrough_when_unset() {
         // Default path (both None) must return the dynamic value unchanged so
         // existing layouts stay byte-identical.
-        assert_eq!(clamp_axis_extent(37.5, None, None), 37.5);
+        assert_eq!(clamp_axis_band(37.5, None, None), 37.5);
     }
 
     #[test]
-    fn clamp_axis_extent_min_reserves_at_least() {
-        assert_eq!(clamp_axis_extent(20.0, Some(80.0), None), 80.0);
+    fn clamp_axis_band_min_reserves_at_least() {
+        assert_eq!(clamp_axis_band(20.0, Some(80.0), None), 80.0);
         // Already above min: unchanged.
-        assert_eq!(clamp_axis_extent(120.0, Some(80.0), None), 120.0);
+        assert_eq!(clamp_axis_band(120.0, Some(80.0), None), 120.0);
     }
 
     #[test]
-    fn clamp_axis_extent_max_caps() {
-        assert_eq!(clamp_axis_extent(120.0, None, Some(40.0)), 40.0);
+    fn clamp_axis_band_max_caps() {
+        assert_eq!(clamp_axis_band(120.0, None, Some(40.0)), 40.0);
         // Already below max: unchanged.
-        assert_eq!(clamp_axis_extent(20.0, None, Some(40.0)), 20.0);
+        assert_eq!(clamp_axis_band(20.0, None, Some(40.0)), 20.0);
     }
 
     #[test]
-    fn clamp_axis_extent_max_wins_over_contradictory_min() {
+    fn clamp_axis_band_max_wins_over_contradictory_min() {
         // min > max is a user contradiction; the cap (max) wins.
-        assert_eq!(clamp_axis_extent(50.0, Some(90.0), Some(40.0)), 40.0);
+        assert_eq!(clamp_axis_band(50.0, Some(90.0), Some(40.0)), 40.0);
     }
 
     #[test]
-    fn min_extent_reserves_larger_left_band() {
-        // A y-axis min_extent of 200px must push the plot area right by at least
+    fn min_band_reserves_larger_left_band() {
+        // A y-axis min_band of 200px must push the plot area right by at least
         // that much vs. the unset baseline.
         let spec = minimal_chart_spec();
         let viewport = Viewport { width: 600.0, height: 400.0 };
@@ -1293,7 +1450,7 @@ mod tests {
         ).unwrap();
 
         let mut axes = dummy_axes();
-        axes.y.overrides.min_extent = Some(200.0);
+        axes.y.overrides.min_band = Some(200.0);
         let widened = compute_layout(
             &spec, &default_theme_inputs(), viewport, &axes,
             &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[],
@@ -1303,9 +1460,9 @@ mod tests {
         let wide_x = widened.panels[0].plot_area.x;
         assert!(
             wide_x >= base_x + 100.0,
-            "min_extent=200 must reserve a much larger left band: base x={base_x}, widened x={wide_x}"
+            "min_band=200 must reserve a much larger left band: base x={base_x}, widened x={wide_x}"
         );
-        // The reserved left band is at least min_extent.
+        // The reserved left band is at least min_band.
         assert!(wide_x - viewport.into_rect().x >= 200.0);
     }
 

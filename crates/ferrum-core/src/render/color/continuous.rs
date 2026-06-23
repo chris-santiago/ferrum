@@ -1,7 +1,7 @@
 //! Continuous colormaps for raster/hex/bivariate-density marks.
 //! Backed by `colorous` for the 5 named maps; supports user Gradient and Reverse.
 
-use crate::render::color::categorical::{from_rgba, Color};
+use crate::render::color::primitive::{from_rgba, Color};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NamedContinuous {

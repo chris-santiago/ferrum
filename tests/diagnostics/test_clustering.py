@@ -151,13 +151,13 @@ def test_cluster_diagnostics_hierarchical():
 
 def test_cluster_diagnostics_rejects_dbscan():
     df = load_dataset("clustering")
-    with pytest.raises(ValueError, match="don't fit the sweep-k framework"):
+    with pytest.raises(ValueError, match="must be one of"):
         ferrum.cluster_diagnostics(df, ks=[2, 3], method="dbscan")
 
 
 def test_cluster_diagnostics_rejects_bad_scoring():
     df = load_dataset("clustering")
-    with pytest.raises(ValueError, match="expected one of"):
+    with pytest.raises(ValueError, match="must be one of"):
         ferrum.cluster_diagnostics(df, ks=[2, 3], scoring="invalid")
 
 

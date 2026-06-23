@@ -20,7 +20,7 @@ use super::domain::{
     apply_sort_to_domain, distinct_positional_categories_shared, locate_field,
     numeric_domain_union, SortContext,
 };
-use super::{distinct_positional_categories, infer_spec_type, ScaleKind};
+use super::{column_min_max_f64, distinct_positional_categories, infer_spec_type, ScaleKind};
 use crate::transform::core::FINAL_OUTPUT_KEY;
 
 /// The x/y field names bound at chart level, used to resolve data-aware sort
@@ -359,8 +359,4 @@ pub(in crate::render) fn apply_coord_domain_overrides(
             ));
         }
     }
-}
-
-fn column_min_max_f64(col: &dyn Array) -> Result<(f64, f64), String> {
-    crate::render::arrow_cast::min_max_f64(col)
 }

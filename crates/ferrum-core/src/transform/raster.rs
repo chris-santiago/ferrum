@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::transform::context::TransformContext;
+use crate::transform::numeric_util::column_extent;
 
 fn default_aggregate() -> String {
     "count".into()
@@ -46,6 +47,7 @@ impl Default for ResolutionSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RasterSpec {
     pub x: String,
     pub y: String,
@@ -86,42 +88,27 @@ pub(crate) struct RasterSpec {
 ///
 /// When `spec.extent_x`/`spec.extent_y` are already set, each is returned
 /// unchanged so the faceted pin never clobbers an explicit value.
+/// NICENESS CONTRACT (XFORM-08): returns the RAW per-axis `(min, max)` (no
+/// nicing), like the other 2-D pins and unlike 1-D `Bin`. Each axis uses the
+/// shared `column_extent` helper, which coerces integer columns to Float64 —
+/// previously this transform's local fold hard-required Float64 and returned
+/// `None` for integer axes, diverging from its 2-D siblings (XFORM-02). The
+/// divergence was inert (`apply` rejects non-Float64 x/y outright, so an integer
+/// axis never reaches a successful render), and coercion is now the single
+/// behavior across every extent-pin transform.
 pub(crate) fn global_extent(
     spec: &RasterSpec,
     batch: &RecordBatch,
 ) -> Option<(f64, f64, f64, f64)> {
     let (x_lo, x_hi) = match spec.extent_x {
         Some(e) => e,
-        None => raw_axis_extent(batch, &spec.x)?,
+        None => column_extent(batch, &spec.x)?,
     };
     let (y_lo, y_hi) = match spec.extent_y {
         Some(e) => e,
-        None => raw_axis_extent(batch, &spec.y)?,
+        None => column_extent(batch, &spec.y)?,
     };
     Some((x_lo, x_hi, y_lo, y_hi))
-}
-
-fn raw_axis_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f64)> {
-    let schema = batch.schema();
-    let idx = schema.index_of(field).ok()?;
-    if schema.field(idx).data_type() != &arrow::datatypes::DataType::Float64 {
-        return None;
-    }
-    let arr = batch
-        .column(idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()?;
-    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
-        if arr.is_null(i) { return (lo, hi); }
-        let v = arr.value(i);
-        if v.is_nan() { return (lo, hi); }
-        (lo.min(v), hi.max(v))
-    });
-    if lo.is_finite() && hi.is_finite() && lo < hi {
-        Some((lo, hi))
-    } else {
-        None
-    }
 }
 
 pub(crate) fn apply(spec: &RasterSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {

@@ -20,9 +20,8 @@ if TYPE_CHECKING:
     from ferrum import Chart
 
 from ferrum.encoding import X, Y
-from ferrum._overrides import _apply_overrides
 from ferrum.plots._helpers import _charts_with_endpoint_labels, _dedupe_aggregated, _finalize_chart
-from ferrum.plots._helpers import _resolve_source, _require
+from ferrum.plots._helpers import _reject_compare, _resolve_source, _require
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +293,7 @@ def learning_curve_chart(
     train_sizes: Any = None,
     ci_style: str = "band",
     subtitle: str | None = None,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -358,7 +358,20 @@ def learning_curve_chart(
     >>> import ferrum as fm
     >>> from sklearn.svm import SVC
     >>> fm.learning_curve_chart(SVC(), X_train, y_train, cv=5)
+
+    Notes
+    -----
+    ``compare=`` is not supported. The train/validation lines are already
+    colored by ``split``, leaving no color channel for a model dimension;
+    passing a non-``None`` ``compare`` raises ``ValueError``. Compose one
+    chart per model with ``|`` / ``&`` to compare models.
     """
+    _reject_compare(
+        compare,
+        chart="learning_curve_chart",
+        reason="the curve is already colored by train/test split, leaving no "
+        "color channel for a model dimension; compose one chart per model instead",
+    )
     source = _resolve_source(model, X, y, random_state=random_state)
     return _learning_curve_chart_from_source(
         source,
@@ -387,6 +400,7 @@ def validation_curve_chart(
     log_scale: Any = "auto",
     ci_style: str = "band",
     subtitle: str | None = None,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -463,12 +477,25 @@ def validation_curve_chart(
     >>> import ferrum as fm
     >>> from sklearn.linear_model import Ridge
     >>> fm.validation_curve_chart(Ridge(), X_train, y_train, param="alpha", values=[0.01, 0.1, 1, 10])
+
+    Notes
+    -----
+    ``compare=`` is not supported. The train/validation lines are already
+    colored by ``split``, leaving no color channel for a model dimension;
+    passing a non-``None`` ``compare`` raises ``ValueError``. Compose one
+    chart per model with ``|`` / ``&`` to compare models.
     """
     _require(
         "validation_curve_chart",
         "values",
         values,
         hint="pass an explicit list of values to sweep for the given param",
+    )
+    _reject_compare(
+        compare,
+        chart="validation_curve_chart",
+        reason="the curve is already colored by train/test split, leaving no "
+        "color channel for a model dimension; compose one chart per model instead",
     )
     source = _resolve_source(model, X, y, random_state=random_state)
     return _validation_curve_chart_from_source(
@@ -497,6 +524,7 @@ def cv_scores_chart(
     scoring: Any = None,
     kind: str = "box",
     split: str = "both",
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -559,7 +587,21 @@ def cv_scores_chart(
     >>> import ferrum as fm
     >>> from sklearn.ensemble import RandomForestClassifier
     >>> fm.cv_scores_chart(RandomForestClassifier(), X_train, y_train, cv=10)
+
+    Notes
+    -----
+    ``compare=`` is not supported. The box/strip/bar layout is grouped by
+    train/test ``split`` for a single model; a second model needs an extra
+    grouping dimension this chart does not carry. Passing a non-``None``
+    ``compare`` raises ``ValueError``. Compose one chart per model with
+    ``|`` / ``&`` to compare models.
     """
+    _reject_compare(
+        compare,
+        chart="cv_scores_chart",
+        reason="the per-fold distribution is grouped by train/test split for a "
+        "single model; compose one chart per model instead",
+    )
     source = _resolve_source(model, X, y, random_state=random_state)
     return _cv_scores_chart_from_source(
         source,
@@ -585,6 +627,7 @@ def alpha_selection_chart(
     scoring: Any = None,
     log_scale: bool = True,
     highlight_best: bool = True,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -654,12 +697,26 @@ def alpha_selection_chart(
     >>> import ferrum as fm
     >>> from sklearn.linear_model import Ridge
     >>> fm.alpha_selection_chart(Ridge(), X_train, y_train, alphas=[0.001, 0.01, 0.1, 1, 10, 100])
+
+    Notes
+    -----
+    ``compare=`` is not supported. The chart draws one CV-score curve with a
+    single best-alpha highlight; the best-alpha sentinel is per-model, so a
+    second model needs its own annotation. Passing a non-``None`` ``compare``
+    raises ``ValueError``. Compose one chart per model with ``|`` / ``&`` to
+    compare models.
     """
     _require(
         "alpha_selection_chart",
         "alphas",
         alphas,
         hint="pass an explicit list of regularization-strength values to sweep",
+    )
+    _reject_compare(
+        compare,
+        chart="alpha_selection_chart",
+        reason="the single CV-score curve and its best-alpha highlight are "
+        "per-model; compose one chart per model instead",
     )
     source = _resolve_source(model, X, y, random_state=random_state)
     return _alpha_selection_chart_from_source(

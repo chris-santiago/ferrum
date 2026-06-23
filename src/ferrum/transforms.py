@@ -3,14 +3,139 @@
 Each function returns a plain dict matching the Rust ``TransformSpec`` serde
 wire format (``#[serde(tag = "type", rename_all = "snake_case")]``). The dict
 is passed through the ``transforms_json`` path at render time.
+
+Spelling note — two ``as`` forms
+---------------------------------
+There are two intentionally different spellings of the output-column name:
+
+* **Wrapper-level kwarg:** ``as_`` (a valid Python identifier; trailing
+  underscore avoids the ``as`` keyword).  Every ``transform_*`` wrapper that
+  accepts an output-column name uses ``as_`` as the kwarg.
+
+* **Inner-dict Vega wire form:** ``"as"`` — used inside the user-supplied
+  aggregate/window operation dicts that are passed verbatim to the Rust
+  engine (e.g. ``{"field": "price", "fn": "mean", "as": "avg_price"}``).
+  The Vega wire protocol uses ``"as"`` without the trailing underscore.
+
+The two spellings are intentional and not drift: the wrapper kwarg is a
+Python API convenience; the inner-dict key is the Rust/Vega serialization
+contract.  Do not change the inner-dict key.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Sequence
 
+from ferrum.position import _validate_stack_offset
+
 if TYPE_CHECKING:
     from ferrum.parameter import Parameter
+
+
+# ---------------------------------------------------------------------------
+# as_ validation helpers (SEAM-03 parity)
+# ---------------------------------------------------------------------------
+
+
+def _validate_as_str(value: str, *, where: str) -> None:
+    """Raise ``ValueError`` if *value* is not a non-empty string.
+
+    Used for single-column ``as_`` parameters (``transform_calculate``,
+    ``transform_bin``, ``transform_timeunit``).
+
+    Parameters
+    ----------
+    value : str
+        The output-column name to validate.
+    where : str
+        Caller name, used in the error message.
+
+    Raises
+    ------
+    ValueError
+        If *value* is not a non-empty string.
+    """
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{where}: as_ must be a non-empty string, got {value!r}")
+
+
+def _validate_as_pair(value: tuple[str, str], *, where: str) -> list[str]:
+    """Validate and materialize a pair ``as_`` argument.
+
+    Used for two-column ``as_`` parameters (``transform_fold``,
+    ``transform_density``, ``transform_regression``, ``transform_loess``,
+    ``transform_stack``).
+
+    Parameters
+    ----------
+    value : tuple of (str, str)
+        The pair of output-column names to validate.
+    where : str
+        Caller name, used in the error message.
+
+    Returns
+    -------
+    list of str
+        The materialized two-element list.  Callers MUST use this return
+        value — not ``list(as_)`` — so that one-shot iterables (generators,
+        map, zip) are consumed exactly once.
+
+    Raises
+    ------
+    ValueError
+        If *value* is not a length-2 sequence of non-empty strings.
+        A bare string is rejected even if it has exactly 2 characters,
+        because iterating a string yields individual characters, not
+        column names.
+    """
+    if isinstance(value, str):
+        raise ValueError(
+            f"{where}: as_ must be a pair of non-empty strings (tuple or list),"
+            f" got a bare string {value!r}"
+        )
+    try:
+        items = list(value)
+    except TypeError:
+        raise ValueError(f"{where}: as_ must be a pair of non-empty strings, got {value!r}")
+    if len(items) != 2 or not all(isinstance(s, str) and s for s in items):
+        raise ValueError(f"{where}: as_ must be a pair of non-empty strings, got {value!r}")
+    return items
+
+
+def _validate_as_seq(value: Sequence[str], *, where: str) -> list[str]:
+    """Validate and materialize a variable-length ``as_`` argument.
+
+    Used for variable-length ``as_`` parameters (``transform_flatten``).
+
+    Parameters
+    ----------
+    value : sequence of str
+        The output-column names to validate.
+    where : str
+        Caller name, used in the error message.
+
+    Returns
+    -------
+    list of str
+        The materialized list.  Callers MUST use this return value — not
+        ``list(as_)`` — so that one-shot iterables (generators, map, zip)
+        are consumed exactly once.
+
+    Raises
+    ------
+    ValueError
+        If *value* is empty or contains a non-string or empty-string element.
+    """
+    try:
+        items = list(value)
+    except TypeError:
+        raise ValueError(f"{where}: as_ must be a non-empty sequence of strings, got {value!r}")
+    if not items or not all(isinstance(s, str) and s for s in items):
+        raise ValueError(
+            f"{where}: as_ must be a non-empty sequence of non-empty strings, got {value!r}"
+        )
+    return items
+
 
 __all__ = [
     "transform_filter",
@@ -107,6 +232,7 @@ def transform_calculate(as_: str, expr: str) -> dict:
     >>> t["as_field"]
     'ratio'
     """
+    _validate_as_str(as_, where="transform_calculate")
     return {"type": "calculate", "as_field": as_, "expr": expr}
 
 
@@ -185,6 +311,8 @@ def transform_bin(
     >>> t["field"]
     'horsepower'
     """
+    if as_ is not None:
+        _validate_as_str(as_, where="transform_bin")
     spec: dict = {"type": "data_bin", "field": field, "nice": nice}
     if as_ is not None:
         spec["as_"] = as_
@@ -223,10 +351,11 @@ def transform_fold(
     >>> t["as_"]
     ['key', 'value']
     """
+    as_list = _validate_as_pair(as_, where="transform_fold")
     return {
         "type": "fold",
         "fields": list(fields),
-        "as_": list(as_),
+        "as_": as_list,
     }
 
 
@@ -402,11 +531,12 @@ def transform_density(
     >>> t["as_"]
     ['value', 'density']
     """
+    as_list = _validate_as_pair(as_, where="transform_density")
     spec: dict = {
         "type": "density_data",
         "field": field,
         "cumulative": cumulative,
-        "as_": list(as_),
+        "as_": as_list,
     }
     if bandwidth is not None:
         spec["bandwidth"] = bandwidth
@@ -459,13 +589,14 @@ def transform_regression(
     >>> t["method"]
     'poly'
     """
+    as_list = _validate_as_pair(as_, where="transform_regression")
     spec: dict = {
         "type": "regression_data",
         "x": x,
         "y": y,
         "method": method,
         "order": order,
-        "as_": list(as_),
+        "as_": as_list,
     }
     if groupby is not None:
         spec["groupby"] = list(groupby)
@@ -509,12 +640,13 @@ def transform_loess(
     >>> t["bandwidth"]
     0.5
     """
+    as_list = _validate_as_pair(as_, where="transform_loess")
     spec: dict = {
         "type": "loess_data",
         "x": x,
         "y": y,
         "bandwidth": bandwidth,
-        "as_": list(as_),
+        "as_": as_list,
     }
     if groupby is not None:
         spec["groupby"] = list(groupby)
@@ -596,9 +728,10 @@ def transform_flatten(
     >>> t["fields"]
     ['tags']
     """
+    as_list = _validate_as_seq(as_, where="transform_flatten") if as_ is not None else None
     spec: dict = {"type": "flatten", "fields": list(fields)}
-    if as_ is not None:
-        spec["as_"] = list(as_)
+    if as_list is not None:
+        spec["as_"] = as_list
     return spec
 
 
@@ -666,9 +799,6 @@ def transform_top_k(
     return {"type": "top_k", "n": n, "field": field, "op": op, "sort": sort}
 
 
-_VALID_STACK_OFFSETS: frozenset[str] = frozenset(["zero", "normalize", "center"])
-
-
 def transform_stack(
     field: str,
     *,
@@ -711,16 +841,13 @@ def transform_stack(
     >>> t["as_"]
     ['y0', 'y1']
     """
-    if offset not in _VALID_STACK_OFFSETS:
-        raise ValueError(
-            f"transform_stack: offset={offset!r} is not valid. "
-            f"Valid values: {sorted(_VALID_STACK_OFFSETS)}"
-        )
+    _validate_stack_offset(offset, where="transform_stack")
+    as_list = _validate_as_pair(as_, where="transform_stack")
     spec: dict = {
         "type": "data_stack",
         "field": field,
         "groupby": list(groupby),
-        "as_": list(as_),
+        "as_": as_list,
         "offset": offset,
     }
     if sort is not None:
@@ -763,6 +890,8 @@ def transform_timeunit(
     >>> t["unit"]
     'month'
     """
+    if as_ is not None:
+        _validate_as_str(as_, where="transform_timeunit")
     spec: dict = {"type": "time_unit", "field": field, "unit": unit, "utc": utc}
     if as_ is not None:
         spec["as_"] = as_

@@ -15,7 +15,7 @@ Top-level public surface of the `ferrum` package.
 | [Parameters](parameters.md) | Reactive parameters — `param`, `Parameter`, `VariableParameter` |
 | [Composition](composition.md) | `HConcatChart`, `VConcatChart`, `LayerChart`, `hconcat`, `vconcat` |
 | [Annotations](annotations.md) | `annotate_text`, `annotate_line`, `annotate_rect`, label helpers |
-| [Structural](structural.md) | `BreakAxis`, `Inset`, `SecondaryY`, `Grid` view modifiers |
+| [Structural](structural.md) | `BreakAxis`, `Inset`, `SecondaryY` view modifiers |
 | [Transforms](transforms.md) | `transform_filter`, `transform_aggregate`, `transform_calculate`, etc. |
 | [Statistics](statistics.md) | Statistical transform value-objects — `Kde`, `Smooth`, `Bin`, `Violin`, etc. |
 | [Scales](scales.md) | `Scale`, `LinearScale`, `LogScale`, `OrdinalScale`, etc. |
@@ -25,6 +25,7 @@ Top-level public surface of the `ferrum` package.
 | [Layer](layer.md) | `Layer` class for explicit layer construction |
 | [Repeat](repeat.md) | `RepeatChart` for faceted repeat patterns |
 | [Axis](axis.md) | `Axis` value class for axis configuration |
+| [Grid](grid.md) | `Grid` value class for gridline configuration |
 | [Legend](legend.md) | `Legend` value class for legend configuration |
 | [Title](title.md) | `Title` value class for title configuration |
 | [Render Config](render_config.md) | `RenderConfig` for auto-raster, scale, and output tuning |

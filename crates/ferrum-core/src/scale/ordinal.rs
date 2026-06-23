@@ -213,16 +213,6 @@ impl OrdinalScale {
         self.data.domain.clone()
     }
 
-    /// Categorical scales have no numeric continuum to subdivide.
-    ///
-    /// Returns an empty `Vec` — this is a documented semantic absence, not an
-    /// error.  `minor=True` on a categorical axis produces no minor gridlines.
-    // Wired to the render layer in Task 2 of the grid subsystem.
-    #[allow(dead_code)]
-    pub(crate) fn minor_ticks_internal(&self) -> Vec<crate::scale::ticks::Tick> {
-        Vec::new()
-    }
-
     /// Per-category band width in pixels (the full step between consecutive
     /// band centers). Used by render-side position adjustments (Phase 9c
     /// Dodge) to compute sub-band offsets. The returned value is positive even
@@ -394,32 +384,6 @@ mod tests {
     fn ordinal_unknown_category_returns_nan() {
         let s = d(vec!["a"], vec![0.0, 10.0], 0.0);
         assert!(s.scale_str("z").is_nan());
-    }
-
-    // ── Minor tick tests ─────────────────────────────────────────────────────
-
-    /// Categorical (ordinal) scales have no continuum to subdivide.
-    /// minor_ticks_internal must always return empty — this is a documented
-    /// semantic absence (not an error or unimplemented path).
-    #[test]
-    fn ordinal_minor_ticks_always_empty() {
-        let scale = OrdinalScale {
-            data: OrdinalScaleData {
-                domain: vec!["a".into(), "b".into(), "c".into()],
-                range: vec![0.0, 300.0],
-                padding: 0.1,
-            },
-            range_user_set: true,
-            range_orig: Some(vec![
-                OrdinalRangeValue::Number(0.0),
-                OrdinalRangeValue::Number(300.0),
-            ]),
-        };
-        let minors = scale.minor_ticks_internal();
-        assert!(
-            minors.is_empty(),
-            "ordinal minor_ticks_internal must return empty, got {minors:?}",
-        );
     }
 
     // ── OrdinalRangeValue round-trip tests ───────────────────────────────────

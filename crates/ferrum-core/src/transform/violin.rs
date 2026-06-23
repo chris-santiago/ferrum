@@ -33,6 +33,7 @@ fn default_violin_width() -> f64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ViolinSpec {
     pub field: String,
     #[serde(default)]
@@ -58,6 +59,12 @@ pub(crate) struct ViolinSpec {
     pub shared_extent: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
+    /// When true the violin is oriented horizontally: the value axis is x and
+    /// the category axis is y. The density offset column emitted is
+    /// `__pos_y_offset__` (computed from panel HEIGHT) instead of
+    /// `__pos_x_offset__` (computed from panel WIDTH). Default false.
+    #[serde(default)]
+    pub horizontal: bool,
 }
 
 /// Compute the global `(lo, hi)` extent of `spec.field` over the full `batch`.
@@ -67,34 +74,14 @@ pub(crate) struct ViolinSpec {
 /// value axis before partitioning, so every facet panel shares the same KDE grid
 /// range (see `fix_transform_extents_for_facet`).
 ///
-/// Uses `coerce_to_float64` (like the KDE sibling) so Int64/Float32/etc.
-/// pre-facet batches produce a valid shared extent instead of returning None.
-/// (`apply` hard-errors on non-Float64 per group, but `global_extent` is called
-/// on the raw pre-cast batch, which may carry integer-typed columns.)
+/// NICENESS CONTRACT (XFORM-08): returns the RAW `(lo, hi)` (no nicing), like the
+/// KDE sibling and unlike `Bin`. Uses the shared `column_extent` helper, which
+/// coerces Int64/Float32/etc. pre-facet batches to Float64 so they produce a
+/// valid shared extent instead of returning None. (`apply` hard-errors on
+/// non-Float64 per group, but `global_extent` is called on the raw pre-cast
+/// batch, which may carry integer-typed columns.)
 pub(crate) fn global_extent(spec: &ViolinSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
-    let schema = batch.schema();
-    let idx = schema.index_of(&spec.field).ok()?;
-    let arr = crate::transform::numeric_util::coerce_to_float64(
-        batch.column(idx),
-        "violin_global_extent",
-        &spec.field,
-    )
-    .ok()?;
-    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
-        if arr.is_null(i) {
-            return (lo, hi);
-        }
-        let v = arr.value(i);
-        if v.is_nan() {
-            return (lo, hi);
-        }
-        (lo.min(v), hi.max(v))
-    });
-    if lo.is_finite() && hi.is_finite() && lo < hi {
-        Some((lo, hi))
-    } else {
-        None
-    }
+    crate::transform::numeric_util::column_extent(batch, &spec.field)
 }
 
 pub(crate) fn apply(spec: &ViolinSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -149,10 +136,17 @@ pub(crate) fn apply_with_context(
     }
     fields.push(Field::new("violin_x", DataType::Float64, false));
     fields.push(Field::new("violin_y", DataType::Float64, false));
-    // __pos_x_offset__ = per-vertex pixel offset on the category axis, so the
-    // polygon mark's ordinal-x dispatch path can position each vertex relative
-    // to its category band center. Computed below from panel width / n_groups.
-    fields.push(Field::new("__pos_x_offset__", DataType::Float64, false));
+    // __pos_x_offset__ (vertical violin) or __pos_y_offset__ (horizontal violin):
+    // per-vertex pixel offset on the category axis, so the polygon mark's
+    // ordinal-axis dispatch path can position each vertex relative to its
+    // category band center. Computed below from panel width (vertical) or panel
+    // height (horizontal) divided by n_groups.
+    let offset_col_name = if spec.horizontal {
+        "__pos_y_offset__"
+    } else {
+        "__pos_x_offset__"
+    };
+    fields.push(Field::new(offset_col_name, DataType::Float64, false));
     let out_schema = Arc::new(Schema::new(fields));
 
     if n_rows == 0 {
@@ -301,7 +295,7 @@ pub(crate) fn apply_with_context(
             extent: Some(kde_extent),
             cumulative: false,
             kernel: crate::transform::kde::default_kernel(),
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let kde_out = kde::apply(&kde_spec, &synth_batch)?;
@@ -380,15 +374,23 @@ pub(crate) fn apply_with_context(
     }
     // Convert violin_x (in normalized polygon-width units; |violin_x| ≤ spec.width)
     // to per-vertex pixel offsets on the category axis. With n_groups categories
-    // sharing panel_w pixels, each band is roughly panel_w / n_groups wide, and
-    // we use that as the conversion factor — a violin of `width=0.4` (default)
-    // then spans 80% of its band, which matches the standard violin convention.
+    // sharing panel pixels (width for vertical, height for horizontal), each band
+    // is roughly panel_dim / n_groups wide, and we use that as the conversion
+    // factor — a violin of `width=0.4` (default) then spans 80% of its band,
+    // which matches the standard violin convention.
     // Without panel context (e.g. tests calling `apply` directly) we fall back
     // to a sensible per-band default so the column is still populated.
     let n_groups = groups.len().max(1);
-    let band_pixels: f64 = match ctx.panel_pixel_size {
-        Some((w, _)) if w > 0 => (w as f64) / (n_groups as f64),
-        _ => 100.0,
+    let band_pixels: f64 = if spec.horizontal {
+        match ctx.panel_pixel_size {
+            Some((_, h)) if h > 0 => (h as f64) / (n_groups as f64),
+            _ => 100.0,
+        }
+    } else {
+        match ctx.panel_pixel_size {
+            Some((w, _)) if w > 0 => (w as f64) / (n_groups as f64),
+            _ => 100.0,
+        }
     };
     let pos_x_offset: Vec<f64> = violin_x.iter().map(|x| x * band_pixels).collect();
 
@@ -441,7 +443,7 @@ pub(crate) struct PyViolin(pub(crate) crate::transform::core::TransformSpec);
 #[pymethods]
 impl PyViolin {
     #[new]
-    #[pyo3(signature = (field, *, groupby = vec![], bandwidth = None, bw_adjust = 1.0, n = 256, width = 0.4, shared_extent = false, name = None))]
+    #[pyo3(signature = (field, *, groupby = vec![], bandwidth = None, bw_adjust = 1.0, n = 256, width = 0.4, shared_extent = false, horizontal = false, name = None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         field: &str,
@@ -451,6 +453,7 @@ impl PyViolin {
         n: usize,
         width: f64,
         shared_extent: bool,
+        horizontal: bool,
         name: Option<String>,
     ) -> PyResult<Self> {
         if !bw_adjust.is_finite() || bw_adjust <= 0.0 {
@@ -513,6 +516,7 @@ impl PyViolin {
                 extent: None,
                 shared_extent,
                 name,
+                horizontal,
             },
         )))
     }
@@ -595,6 +599,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         let out = apply(&spec, &b).unwrap();
         let n = 64usize;
@@ -645,6 +650,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         let out = apply(&spec, &b).unwrap();
         assert_eq!(out.num_rows(), 2 * 32 * 2, "expected 128 rows");
@@ -699,6 +705,7 @@ mod tests {
                 extent: None,
                 shared_extent: false,
                 name: None,
+                horizontal: false,
             };
             let out = apply(&spec, &b).unwrap();
             assert_eq!(out.num_rows(), 2 * n, "bw {:?}: expected {} rows", bw, 2 * n);
@@ -739,6 +746,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         let out = apply(&spec, &b).unwrap();
 
@@ -778,6 +786,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         let out = apply(&spec, &b).unwrap();
 
@@ -825,6 +834,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         let out = apply(&spec, &b).unwrap();
 
@@ -894,6 +904,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         let out = apply(&spec, &b).unwrap();
         // Output groupby column must retain Int64 dtype.
@@ -953,6 +964,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         // Must not error: the non-nullable schema declaration was the bug.
         let out = apply(&spec, &batch).unwrap();
@@ -998,6 +1010,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         let out = apply(&spec, &b).unwrap();
         assert_eq!(
@@ -1038,6 +1051,7 @@ mod tests {
             extent: Some((pinned_lo, pinned_hi)),
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         let out = apply(&spec, &b).unwrap();
         let ys = col_f64(&out, "violin_y");
@@ -1087,6 +1101,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         let out = apply(&spec, &b).unwrap();
         let ys = col_f64(&out, "violin_y");
@@ -1134,6 +1149,7 @@ mod tests {
             extent: None,
             shared_extent: true, // <-- the field under test
             name: None,
+            horizontal: false,
         };
         let out = apply(&spec, &b).unwrap();
         let ys = col_f64(&out, "violin_y");
@@ -1189,6 +1205,7 @@ mod tests {
             extent: None,
             shared_extent: false, // <-- per-group behavior
             name: None,
+            horizontal: false,
         };
         let out = apply(&spec, &b).unwrap();
         let ys = col_f64(&out, "violin_y");
@@ -1248,6 +1265,7 @@ mod tests {
             extent: Some((pinned_lo, pinned_hi)), // explicit pin
             shared_extent: true,                  // must NOT override the explicit pin
             name: None,
+            horizontal: false,
         };
         let out = apply(&spec, &b).unwrap();
         let ys = col_f64(&out, "violin_y");
@@ -1295,6 +1313,7 @@ mod tests {
             extent: None,
             shared_extent: true,
             name: None,
+            horizontal: false,
         };
         let spec_per_group = ViolinSpec {
             shared_extent: false,
@@ -1314,24 +1333,31 @@ mod tests {
         );
     }
 
-    /// Serde round-trip: ViolinSpec with explicit `extent` and `shared_extent`
-    /// round-trips through JSON with the new fields preserved.
+    /// Serde round-trip: ViolinSpec with explicit `extent`, `shared_extent`, and
+    /// `horizontal` round-trips through JSON with all fields preserved.
     #[test]
     fn violin_serde_round_trip_with_new_fields() {
-        let spec = ViolinSpec {
-            field: "val".into(),
-            groupby: vec!["cat".into()],
-            bandwidth: BandwidthSpec::Scott,
-            bw_adjust: 1.5,
-            n: 128,
-            width: 0.3,
-            extent: Some((0.0, 10.0)),
-            shared_extent: true,
-            name: Some("violin_out".into()),
-        };
-        let json = serde_json::to_string(&spec).unwrap();
-        let parsed: ViolinSpec = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, spec, "ViolinSpec round-trip must preserve all fields");
+        // Test both horizontal=false and horizontal=true round-trips.
+        for horizontal in [false, true] {
+            let spec = ViolinSpec {
+                field: "val".into(),
+                groupby: vec!["cat".into()],
+                bandwidth: BandwidthSpec::Scott,
+                bw_adjust: 1.5,
+                n: 128,
+                width: 0.3,
+                extent: Some((0.0, 10.0)),
+                shared_extent: true,
+                name: Some("violin_out".into()),
+                horizontal,
+            };
+            let json = serde_json::to_string(&spec).unwrap();
+            let parsed: ViolinSpec = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                parsed, spec,
+                "ViolinSpec round-trip must preserve all fields (horizontal={horizontal})"
+            );
+        }
     }
 
     /// Serde backward compat: JSON without `extent` and `shared_extent` (as
@@ -1351,6 +1377,7 @@ mod tests {
         assert_eq!(parsed.extent, None, "extent must default to None");
         assert!(!parsed.shared_extent, "shared_extent must default to false");
         assert_eq!(parsed.name, None, "name must default to None");
+        assert!(!parsed.horizontal, "horizontal must default to false");
     }
 
     /// `global_extent` returns the full-data range over the value field.
@@ -1368,6 +1395,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         let ext = global_extent(&spec, &b);
         assert_eq!(ext, Some((0.0, 99.0)), "global_extent should return (0.0, 99.0)");
@@ -1387,6 +1415,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         let ext = global_extent(&spec, &b);
         assert_eq!(ext, None, "global_extent on missing field must return None");
@@ -1410,6 +1439,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         let ext = global_extent(&spec, &b);
         assert_eq!(ext, None, "global_extent on all-null field must return None");
@@ -1440,6 +1470,7 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         // Pre-fix: raw downcast returns None for Int64 → no shared extent.
         // Post-fix: coerce_to_float64 casts Int64 → Float64 → Some((1.0, 9.0)).
@@ -1462,8 +1493,183 @@ mod tests {
             extent: None,
             shared_extent: false,
             name: None,
+            horizontal: false,
         };
         let ext = global_extent(&spec, &b);
         assert_eq!(ext, Some((0.1, 8.8)), "global_extent on Float64 must be unchanged by fix");
+    }
+
+    // ── T0.4: horizontal orientation fork ─────────────────────────────────────
+    //
+    // Before this fix, `ViolinSpec` had no `horizontal` field and
+    // `apply_with_context` always emitted `__pos_x_offset__` computed from
+    // panel WIDTH regardless of violin orientation. For horizontal violins the
+    // density must expand along the y (category) axis, so the transform must
+    // emit `__pos_y_offset__` from panel HEIGHT instead.
+    //
+    // These tests fail on pre-fix code because:
+    //   1. `ViolinSpec` has no `horizontal` field → struct literal fails to compile.
+    //   2. Even if horizontal were somehow true, the output schema would still
+    //      contain `__pos_x_offset__` not `__pos_y_offset__`.
+
+    /// T0.4 — `horizontal=false` (vertical, default) emits `__pos_x_offset__`
+    /// computed from panel WIDTH, and does NOT emit `__pos_y_offset__`.
+    ///
+    /// Fails on pre-fix code because `ViolinSpec` lacks the `horizontal` field.
+    #[test]
+    fn violin_vertical_emits_pos_x_offset_from_panel_width() {
+        pyo3::Python::initialize();
+        let vals: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        let b = batch("v", vals);
+
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec![],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+            horizontal: false, // vertical (default)
+        };
+
+        // Panel is 600×400 px, 1 group → band = 600/1 = 600 px.
+        let ctx = crate::transform::context::TransformContext {
+            panel_pixel_size: Some((600, 400)),
+            ..Default::default()
+        };
+        let out = apply_with_context(&spec, &b, &ctx).unwrap();
+        let schema = out.schema();
+
+        // Must have __pos_x_offset__, must NOT have __pos_y_offset__.
+        assert!(
+            schema.index_of("__pos_x_offset__").is_ok(),
+            "vertical violin must emit __pos_x_offset__; schema: {:?}",
+            schema.fields().iter().map(|f| f.name().as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            schema.index_of("__pos_y_offset__").is_err(),
+            "vertical violin must NOT emit __pos_y_offset__; schema: {:?}",
+            schema.fields().iter().map(|f| f.name().as_str()).collect::<Vec<_>>()
+        );
+
+        // Spot-check: the offset is proportional to panel WIDTH (600), not height.
+        // violin_x values are in [-0.4, 0.4]; offset = violin_x * 600.
+        let violin_xs = col_f64(&out, "violin_x");
+        let offsets = col_f64(&out, "__pos_x_offset__");
+        for (i, (&vx, &off)) in violin_xs.iter().zip(offsets.iter()).enumerate() {
+            let expected = vx * 600.0;
+            assert!(
+                (off - expected).abs() < 1e-9,
+                "__pos_x_offset__[{i}]: expected {expected} (violin_x={vx} × panel_w=600), got {off}"
+            );
+        }
+    }
+
+    /// T0.4 — `horizontal=true` emits `__pos_y_offset__` computed from panel
+    /// HEIGHT, and does NOT emit `__pos_x_offset__`.
+    ///
+    /// Fails on pre-fix code because `ViolinSpec` lacks the `horizontal` field,
+    /// and even if it existed, the output schema would always name the column
+    /// `__pos_x_offset__` and use panel WIDTH.
+    #[test]
+    fn violin_horizontal_emits_pos_y_offset_from_panel_height() {
+        pyo3::Python::initialize();
+        let vals: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        let b = batch("v", vals);
+
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec![],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 32,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+            horizontal: true, // horizontal orientation
+        };
+
+        // Panel is 600×400 px, 1 group → band = 400/1 = 400 px.
+        let ctx = crate::transform::context::TransformContext {
+            panel_pixel_size: Some((600, 400)),
+            ..Default::default()
+        };
+        let out = apply_with_context(&spec, &b, &ctx).unwrap();
+        let schema = out.schema();
+
+        // Must have __pos_y_offset__, must NOT have __pos_x_offset__.
+        assert!(
+            schema.index_of("__pos_y_offset__").is_ok(),
+            "horizontal violin must emit __pos_y_offset__; schema: {:?}",
+            schema.fields().iter().map(|f| f.name().as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            schema.index_of("__pos_x_offset__").is_err(),
+            "horizontal violin must NOT emit __pos_x_offset__; schema: {:?}",
+            schema.fields().iter().map(|f| f.name().as_str()).collect::<Vec<_>>()
+        );
+
+        // Spot-check: the offset is proportional to panel HEIGHT (400), not width.
+        // violin_x values are in [-0.4, 0.4]; offset = violin_x * 400.
+        let violin_xs = col_f64(&out, "violin_x");
+        let offsets = col_f64(&out, "__pos_y_offset__");
+        for (i, (&vx, &off)) in violin_xs.iter().zip(offsets.iter()).enumerate() {
+            let expected = vx * 400.0;
+            assert!(
+                (off - expected).abs() < 1e-9,
+                "__pos_y_offset__[{i}]: expected {expected} (violin_x={vx} × panel_h=400), got {off}"
+            );
+        }
+    }
+
+    /// T0.4 — `horizontal=true` fallback (no panel context) uses 100px default
+    /// for panel HEIGHT and emits `__pos_y_offset__`.
+    #[test]
+    fn violin_horizontal_no_panel_context_fallback_emits_pos_y_offset() {
+        pyo3::Python::initialize();
+        let vals: Vec<f64> = (0..30).map(|i| i as f64).collect();
+        let b = batch("v", vals);
+
+        let spec = ViolinSpec {
+            field: "v".into(),
+            groupby: vec![],
+            bandwidth: BandwidthSpec::Scott,
+            bw_adjust: 1.0,
+            n: 16,
+            width: 0.4,
+            extent: None,
+            shared_extent: false,
+            name: None,
+            horizontal: true,
+        };
+
+        // No panel context → fallback band_pixels = 100.
+        let ctx = crate::transform::context::TransformContext::default();
+        let out = apply_with_context(&spec, &b, &ctx).unwrap();
+        let schema = out.schema();
+
+        assert!(
+            schema.index_of("__pos_y_offset__").is_ok(),
+            "horizontal violin without panel context must still emit __pos_y_offset__"
+        );
+        assert!(
+            schema.index_of("__pos_x_offset__").is_err(),
+            "horizontal violin without panel context must NOT emit __pos_x_offset__"
+        );
+
+        // Offsets must be violin_x * 100.0 (the fallback band_pixels).
+        let violin_xs = col_f64(&out, "violin_x");
+        let offsets = col_f64(&out, "__pos_y_offset__");
+        for (i, (&vx, &off)) in violin_xs.iter().zip(offsets.iter()).enumerate() {
+            let expected = vx * 100.0;
+            assert!(
+                (off - expected).abs() < 1e-9,
+                "__pos_y_offset__[{i}]: expected {expected} (violin_x={vx} × fallback=100), got {off}"
+            );
+        }
     }
 }

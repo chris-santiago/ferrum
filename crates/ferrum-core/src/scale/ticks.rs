@@ -13,10 +13,12 @@
 /// scales), not in pixel coordinates.
 ///
 /// # Note
-/// This type is consumed by the scale's `minor_ticks_internal()` methods,
-/// which are wired into the render layer in the grid/minor-tick rendering task
-/// (Task 2 of the grid subsystem).  The `#[allow(dead_code)]` suppresses the
-/// compiler's dead-code lint while Task 2 is still pending.
+/// This type is consumed by the scale's `minor_ticks_internal()` methods, which
+/// are live: the continuous scales (linear/log/pow/symlog/time) return
+/// `Vec<Tick>` that the render layer reads through `ScaleKind::minor_tick_fractions`
+/// for minor-gridline generation. The `is_major` field, however, is not read on
+/// the render path (the consumer keeps only minor positions), so the blanket
+/// `#[allow(dead_code)]` is retained for the unread field rather than per-field.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Tick {
@@ -31,13 +33,15 @@ pub(crate) struct Tick {
 ///
 /// `5` sub-intervals → 4 interior minor ticks per major interval.  This
 /// matches the conventional matplotlib/D3 default for linear scales.
-// Consumed by minor_ticks_default, which is wired to render in Task 2.
+// Read by `minor_ticks_default`, which the continuous scales call from their
+// live `minor_ticks_internal()` methods.
 #[allow(dead_code)]
 const DEFAULT_MINOR_SUBDIVISIONS: usize = 5;
 
 /// Generate minor ticks for the **default** (linear / pow / sqrt / symlog /
 /// time) algorithm.
-// Wired to the render layer in Task 2 of the grid subsystem.
+// Consumed by the continuous scales' live `minor_ticks_internal()` methods,
+// which the render layer reads through `ScaleKind::minor_tick_fractions`.
 #[allow(dead_code)]
 ///
 /// The minor positions are computed in the *transformed* space (the space
@@ -80,7 +84,8 @@ pub(crate) fn minor_ticks_default(
 
 /// Generate minor ticks for **log** scales using the standard 2-9
 /// intra-decade multiples.
-// Wired to the render layer in Task 2 of the grid subsystem.
+// Consumed by the log scale's live `minor_ticks_internal()` method, which the
+// render layer reads through `ScaleKind::minor_tick_fractions`.
 #[allow(dead_code)]
 ///
 /// For a base-10 log scale with positive domain `[lo, hi]`, the minor ticks

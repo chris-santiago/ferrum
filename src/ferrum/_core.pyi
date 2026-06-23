@@ -436,7 +436,7 @@ class Bin:
         nice: bool = True,
         cumulative: bool = False,
         shared_extent: bool = False,
-        groupby: Optional[str] = None,
+        groupby: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -476,7 +476,7 @@ class Kde:
         cumulative: bool = False,
         shared_extent: bool = False,
         kernel: str = "gaussian",
-        groupby: Optional[str] = None,
+        groupby: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -489,7 +489,7 @@ class Kde2D:
         bandwidth: object = None,  # str ("scott"|"silverman") or float; None → scott
         n: int = 128,
         extent: Optional[Tuple[float, float, float, float]] = None,
-        groupby: Optional[str] = None,
+        groupby: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -520,7 +520,7 @@ class Smooth:
         output: str = "fitted",
         inject_zero_ref: bool = False,
         inject_metrics: bool = False,
-        groupby: Optional[str] = None,
+        groupby: Optional[Union[str, List[str]]] = None,
         name: Optional[str] = None,
         x_range: Optional[Tuple[float, float]] = None,
     ) -> None: ...
@@ -583,6 +583,7 @@ class Violin:
         n: int = 256,
         width: float = 0.4,
         shared_extent: bool = False,
+        horizontal: bool = False,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -731,82 +732,14 @@ class Robust:
     ) -> None: ...
 
 # ---------- Data transforms (Vega-lite-style, declared missing from stub) ----------
-
-class DataAggregate:
-    def __init__(
-        self,
-        *,
-        groupby: Optional[List[str]] = None,
-        name: Optional[str] = None,
-    ) -> None: ...
-
-class DataBin:
-    def __init__(
-        self,
-        field: str,
-        *,
-        as_: Optional[str] = None,
-        maxbins: Optional[int] = None,
-        step: Optional[float] = None,
-        nice: bool = True,
-        name: Optional[str] = None,
-    ) -> None: ...
-
-class DataCalculate:
-    def __init__(
-        self,
-        expr: str,
-        as_field: str,
-        *,
-        name: Optional[str] = None,
-    ) -> None: ...
-
-class DataFilter:
-    def __init__(
-        self,
-        predicate: str,
-        *,
-        name: Optional[str] = None,
-    ) -> None: ...
-
-class DataFold:
-    def __init__(
-        self,
-        fields: List[str],
-        *,
-        as_key: str = "key",
-        as_value: str = "value",
-        name: Optional[str] = None,
-    ) -> None: ...
-
-class DataPivot:
-    def __init__(
-        self,
-        field: str,
-        value: str,
-        *,
-        groupby: Optional[List[str]] = None,
-        limit: Optional[int] = None,
-        op: str = "sum",
-        name: Optional[str] = None,
-    ) -> None: ...
-
-class DataStack:
-    def __init__(
-        self,
-        field: str,
-        groupby: List[str],
-        *,
-        offset: str = "zero",
-        name: Optional[str] = None,
-    ) -> None: ...
-
-class DataWindow:
-    def __init__(
-        self,
-        *,
-        name: Optional[str] = None,
-    ) -> None: ...
+#
+# The eight Phase-12 ``Data*`` transforms (DataAggregate / DataBin /
+# DataCalculate / DataFilter / DataFold / DataPivot / DataStack / DataWindow)
+# have no Python class. They are constructed exclusively via the dict-emitting
+# ``ferrum.transform_*`` functions (see ``ferrum/transforms.py``) and carried to
+# Rust through the ``transforms_json`` serde path (SEAM-02). The typed pyclasses
+# that used to be declared here were never imported or exported, so they were
+# removed.
 
 class DensityData:
     def __init__(
@@ -968,6 +901,25 @@ def render_png(
     >>> png_bytes = fm.render_png(chart_spec_json, layout_json, data_batch)
     """
     ...
+
+# ---------- Theme key manifest (single source of truth) ----------
+# The complete valid theme-key set and its color-typed subset, published from
+# the Rust `ThemeOverridesSpec`. The Python `Theme` derives `_KNOWN_KEYS` from
+# `theme_known_keys()` so the two contracts cannot drift.
+
+def theme_known_keys() -> list[str]: ...
+def theme_color_keys() -> list[str]: ...
+
+# ---------- Palette registry accessors ----------
+#
+# Read-only views over the Rust palette registry (categorical + continuous).
+# ``ferrum.color`` consumes these as the single source of truth instead of
+# hand-mirroring hex tables.
+
+def list_palettes() -> list[str]: ...
+def palette_kind(name: str) -> Optional[str]: ...
+def palette_colors(name: str) -> Optional[list[str]]: ...
+def palette_sample(name: str, t: float) -> Optional[str]: ...
 
 # ---------- Missing functions (previously undeclared) ----------
 

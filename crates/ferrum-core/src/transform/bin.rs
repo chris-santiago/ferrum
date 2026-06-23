@@ -1,5 +1,4 @@
 use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch, UInt64Array};
-use arrow::compute::cast;
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
@@ -7,42 +6,16 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::scale::ticks::sturges_floor;
+use crate::transform::bin_mode::{resolve_bin_count, BinMode};
 use crate::transform::group_key::{
-    groupby_field_nullable, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
-    KeyValue,
+    deserialize_groupby_vec, group_partition_multi, groupby_field_nullable,
+    materialize_groupby_col, parse_groupby_pyany, KeyValue,
+};
+use crate::transform::numeric_util::{
+    clean_float64_values, coerce_to_float64, column_extent, resolve_shared_extent,
 };
 
 // ── Shared private helpers ────────────────────────────────────────────────────
-
-/// Compute the raw `(lo, hi)` Float64 extent of `field` from `batch`.
-///
-/// Casts numeric columns to Float64 via the Arrow cast kernel, then drops nulls
-/// and NaN values via `clean_float64_values`, and folds the result to find the
-/// minimum and maximum.  Returns `None` when the field is missing or
-/// non-numeric, when the batch is empty after cleaning, or when the resulting
-/// extent is degenerate (`lo >= hi` or non-finite).
-///
-/// This is the single source for the cast→clean→fold pattern that previously
-/// appeared separately in `global_extent` and the `apply_grouped` shared_extent
-/// block.
-fn raw_float64_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f64)> {
-    let schema = batch.schema();
-    let idx = schema.index_of(field).ok()?;
-    let col = batch.column(idx);
-    let arr = crate::transform::numeric_util::coerce_to_float64(col, "stat_bin", field).ok()?;
-    let clean = crate::transform::numeric_util::clean_float64_values(&arr, None);
-    if clean.is_empty() {
-        return None;
-    }
-    let (lo, hi) = clean
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| (a.min(v), b.max(v)));
-    if lo.is_finite() && hi.is_finite() && lo < hi {
-        Some((lo, hi))
-    } else {
-        None
-    }
-}
 
 /// Apply nice rounding to a raw `(lo, hi)` extent for a target bin count.
 ///
@@ -62,31 +35,110 @@ fn nice_extent(lo: f64, hi: f64, target: usize) -> (f64, f64) {
     }
 }
 
+/// 1-D equal-width binning spec.
+///
+/// The bin-count decision is a typed [`BinMode`] (no overlapping
+/// `bin_count`/`bin_width` `Option`s). The flat `bin_count`/`bin_width` JSON wire
+/// keys are preserved by the [`BinWire`] serde shim (see `#[serde(into/from)]`),
+/// so existing wire payloads round-trip byte-for-byte and the precedence
+/// (`bin_count` wins over `bin_width` wins over Sturges) is resolved once at the
+/// (de)serialization boundary rather than at apply time.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(into = "BinWire", from = "BinWire")]
 pub(crate) struct BinSpec {
     pub field: String,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub bin_count: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub bin_width: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub mode: BinMode,
     pub extent: Option<(f64, f64)>,
-    #[serde(default = "default_true")]
     pub nice: bool,
-    #[serde(default)]
     pub cumulative: bool,
     /// When ``true`` and ``groupby`` is set, compute a single global extent
     /// from all rows before per-group binning so every group shares the same
     /// bin edges. Required for ``multiple="stack"`` / ``"fill"`` to produce
     /// aligned bars that can be stacked correctly.
-    #[serde(default)]
     pub shared_extent: bool,
-    /// When set, partition input by this Utf8 column and emit per-(bin, group)
-    /// rows. Output schema gains the groupby column as the 5th field.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub groupby: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// When non-empty, partition input by these columns and emit per-(bin, group)
+    /// rows. Output schema gains one column per groupby field after the 4th field.
+    pub groupby: Vec<String>,
     pub name: Option<String>,
+}
+
+/// Flat serde projection of [`BinSpec`] preserving the legacy wire shape.
+///
+/// `BinSpec` serializes/deserializes through this struct so the wire keeps the
+/// flat `bin_count`/`bin_width`/`groupby` keys that Python and the test suite
+/// assert on. `BinMode` is never serialized directly for the 1-D `Bin`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BinWire {
+    field: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    bin_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    bin_width: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    extent: Option<(f64, f64)>,
+    #[serde(default = "default_true")]
+    nice: bool,
+    #[serde(default)]
+    cumulative: bool,
+    #[serde(default)]
+    shared_extent: bool,
+    /// Wire accepts: `null` → `[]`, `"col"` → `["col"]`, `["a","b"]` → `["a","b"]`.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        default,
+        deserialize_with = "deserialize_groupby_vec"
+    )]
+    groupby: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    name: Option<String>,
+}
+
+impl From<BinWire> for BinSpec {
+    fn from(w: BinWire) -> Self {
+        // Resolve the flat-field precedence once at the boundary: bin_count wins,
+        // then bin_width, else Sturges (mirrors the old apply-time match).
+        let mode = if let Some(n) = w.bin_count {
+            BinMode::Fixed { n }
+        } else if let Some(width) = w.bin_width {
+            BinMode::Width { w: width }
+        } else {
+            BinMode::Sturges
+        };
+        BinSpec {
+            field: w.field,
+            mode,
+            extent: w.extent,
+            nice: w.nice,
+            cumulative: w.cumulative,
+            shared_extent: w.shared_extent,
+            groupby: w.groupby,
+            name: w.name,
+        }
+    }
+}
+
+impl From<BinSpec> for BinWire {
+    fn from(s: BinSpec) -> Self {
+        let (bin_count, bin_width) = match s.mode {
+            BinMode::Fixed { n } => (Some(n), None),
+            BinMode::Width { w } => (None, Some(w)),
+            BinMode::Sturges => (None, None),
+            // unreachable for 1-D Bin; the constructor only yields Sturges/Fixed/Width
+            BinMode::FreedmanDiaconis => (None, None),
+        };
+        BinWire {
+            field: s.field,
+            bin_count,
+            bin_width,
+            extent: s.extent,
+            nice: s.nice,
+            cumulative: s.cumulative,
+            shared_extent: s.shared_extent,
+            groupby: s.groupby,
+            name: s.name,
+        }
+    }
 }
 
 fn default_true() -> bool { true }
@@ -107,24 +159,26 @@ pub(crate) fn global_extent(spec: &BinSpec, batch: &RecordBatch) -> Option<(f64,
     if let Some(e) = spec.extent {
         return Some(e);
     }
-    let (lo, hi) = raw_float64_extent(batch, &spec.field)?;
-    // Apply the same nicing as apply_one_group so the global extent aligns with
-    // per-group bin edges. Only when nice=true and no explicit extent is set.
+    let (lo, hi) = column_extent(batch, &spec.field)?;
+    // NICENESS CONTRACT (XFORM-08): `Bin` nices its faceted-pin extent so the
+    // pinned range reproduces the same bin edges every per-group/per-panel
+    // partition would compute. This is the one extent-deriving transform that
+    // nices — `Kde`/`Violin`/`DensityData`/`Bin2D`/`Hex`/`Raster`/`Kde2D` all
+    // return the raw `column_extent`. The divergence lives here, at the call
+    // site, not in the shared fold. Only nice when `nice=true` and no explicit
+    // extent was set.
     if spec.nice {
-        // Compute the Sturges fallback target from the clean count. When
-        // bin_count is already set, clean.len() is unused but the coercion is
-        // cheap; extracting it avoids a second raw_float64_extent call.
-        let target = match spec.bin_count {
-            Some(c) => c.max(1),
-            None => {
+        // Sturges fallback target from the clean count. When the mode is
+        // `Fixed{n}`, `clean.len()` is unused but the coercion is cheap; extracting
+        // it avoids a second `column_extent` call. Width/Sturges/FD all fall back
+        // to the Sturges target, preserving the old `bin_count.unwrap_or(sturges)`.
+        let target = match &spec.mode {
+            BinMode::Fixed { n } => (*n).max(1),
+            _ => {
                 let schema = batch.schema();
                 let idx = schema.index_of(&spec.field).ok()?;
-                let col = batch.column(idx);
-                let arr = crate::transform::numeric_util::coerce_to_float64(
-                    col, "stat_bin", &spec.field,
-                )
-                .ok()?;
-                let n = crate::transform::numeric_util::clean_float64_values(&arr, None).len();
+                let arr = coerce_to_float64(batch.column(idx), "stat_bin", &spec.field).ok()?;
+                let n = clean_float64_values(&arr, None).len();
                 sturges_floor(n).max(1)
             }
         };
@@ -135,11 +189,9 @@ pub(crate) fn global_extent(spec: &BinSpec, batch: &RecordBatch) -> Option<(f64,
 }
 
 pub(crate) fn apply(spec: &BinSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    // Phase 9 finalize: groupby support. Partition input by the groupby column,
-    // run bin_one_group per partition, then stack the per-group outputs into a
-    // single batch with the group column preserved as the 5th field.
-    if let Some(g) = &spec.groupby {
-        return apply_grouped(spec, batch, g);
+    // D-GROUPBY-1: groupby is now Vec<String>. Non-empty → grouped path.
+    if !spec.groupby.is_empty() {
+        return apply_grouped(spec, batch, &spec.groupby);
     }
     apply_one_group(spec, batch, None)
 }
@@ -157,38 +209,13 @@ fn apply_one_group(
             schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
         ))
     })?;
-    let field = schema.field(idx);
     // Auto-cast integer types to Float64 so that Int32/Int64 columns work without
     // requiring the caller to pre-cast (e.g. JointChart marginal histograms).
-    let col_ref: ArrayRef;
-    let arr: &Float64Array = match field.data_type() {
-        DataType::Float64 => batch
-            .column(idx)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .expect("dtype guarantees Float64Array"),
-        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64
-        | DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64
-        | DataType::Float32 => {
-            col_ref = cast(batch.column(idx), &DataType::Float64)
-                .map_err(|e| PyValueError::new_err(format!(
-                    "stat_bin: could not cast column '{}' to Float64: {e}", spec.field
-                )))?;
-            col_ref
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .expect("cast to Float64 succeeded")
-        }
-        other => {
-            return Err(PyValueError::new_err(format!(
-                "stat_bin: column '{}' must be numeric; got {:?}",
-                spec.field, other
-            )));
-        }
-    };
+    // `coerce_to_float64` is the single source for this cast (XFORM-05).
+    let arr = coerce_to_float64(batch.column(idx), "stat_bin", &spec.field)?;
 
     // Drop nulls and NaN; optionally restrict to a subset of row indices (for groupby).
-    let clean = crate::transform::numeric_util::clean_float64_values(arr, only_indices);
+    let clean = clean_float64_values(&arr, only_indices);
 
     // Empty input → empty output (per spec §6: stat_bin is the exception that allows empty)
     if clean.is_empty() {
@@ -213,21 +240,21 @@ fn apply_one_group(
     };
 
     // Optional "nice" rounding of the extent. Only applies when extent is
-    // auto-derived (not when the caller explicitly set extent), and only when
-    // bin_count is fixed (or both bin_count and bin_width are unset, in which
-    // case Sturges runs after nicing).
+    // auto-derived (not when the caller explicitly set extent). When the mode is
+    // `Fixed{n}` the target is that count; Width/Sturges/FD round to the Sturges
+    // target (preserving the old `bin_count.unwrap_or(sturges)` behavior).
     let (lo, hi) = if spec.nice && spec.extent.is_none() {
-        let target = spec.bin_count.unwrap_or_else(|| sturges_floor(clean.len())).max(1);
+        let target = match &spec.mode {
+            BinMode::Fixed { n } => *n,
+            _ => sturges_floor(clean.len()),
+        }
+        .max(1);
         nice_extent(lo, hi, target)
     } else {
         (lo, hi)
     };
 
-    let n_bins: usize = match (spec.bin_count, spec.bin_width) {
-        (Some(c), _) if c > 0 => c,
-        (None, Some(w)) if w > 0.0 => ((hi - lo) / w).ceil().max(1.0) as usize,
-        _ => sturges_floor(clean.len()),
-    };
+    let n_bins: usize = resolve_bin_count(&spec.mode, &clean, lo, hi, "stat_bin")?;
 
     let edges: Vec<f64> = (0..=n_bins)
         .map(|i| lo + (hi - lo) * (i as f64) / (n_bins as f64))
@@ -278,9 +305,9 @@ fn apply_one_group(
     build_bin_batch(bin_starts, bin_ends, final_counts, final_densities)
 }
 
-/// Partition input batch by `group_col` (Utf8), call apply_one_group per
+/// Partition input batch by the groupby columns, call apply_one_group per
 /// partition, then stack the results into a single batch with the group
-/// column preserved as the 5th field.
+/// columns appended after the 4th field.
 ///
 /// When `spec.shared_extent` is `true` and `spec.extent` is `None`, a global
 /// extent is computed across all rows of the field before per-group binning so
@@ -289,60 +316,25 @@ fn apply_one_group(
 fn apply_grouped(
     spec: &BinSpec,
     batch: &RecordBatch,
-    group_col: &str,
+    group_cols: &[String],
 ) -> PyResult<RecordBatch> {
-    use std::collections::BTreeMap;
-    let schema = batch.schema();
-    let gi = schema.index_of(group_col).map_err(|_|
-        PyValueError::new_err(format!(
-            "stat_bin: groupby column '{}' not found", group_col)))?;
-    let gtype = schema.field(gi).data_type().clone();
-    if !is_groupby_supported_dtype(&gtype) {
-        return Err(PyValueError::new_err(format!(
-            "stat_bin: groupby column '{}' has unsupported dtype {:?}; \
-             supported: Utf8/LargeUtf8, Float64/Float32, \
-             Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean",
-            group_col, gtype)));
-    }
-    let garr = batch.column(gi);
+    // Multi-column partition via the shared helper (first-appearance order,
+    // null-key skip, dtype-preservation — same policy as single-column path).
+    let (group_order, group_idx_map, gtypes) =
+        group_partition_multi(batch, group_cols, "stat_bin")?;
 
-    // Group row indices by first-appearance order of the group value (FA-7:
-    // int/uint/bool/float/string all supported). A null group key collapses
-    // into its own group (KeyValue::Null), distinct from any real value.
-    let mut group_order: Vec<KeyValue> = Vec::new();
-    let mut group_idx_map: BTreeMap<KeyValue, Vec<usize>> = BTreeMap::new();
-    for i in 0..garr.len() {
-        let gv = groupby_key_at(garr.as_ref(), &gtype, i).ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "stat_bin: internal error extracting groupby key at row {i}"
-            ))
-        })?;
-        // Skip null group keys: the pre-existing behaviour excluded null rows
-        // from the grouped output, and a KDE/bin over a null bucket is not
-        // meaningful as its own series.
-        if matches!(gv, KeyValue::Null) {
-            continue;
-        }
-        if !group_idx_map.contains_key(&gv) {
-            group_order.push(gv.clone());
-        }
-        group_idx_map.entry(gv).or_default().push(i);
-    }
-
-    // When shared_extent=true, compute the global raw extent from all rows of
-    // the field so all groups receive the same bin edges. Only override when
-    // the caller has not explicitly set spec.extent.
-    let effective_spec: std::borrow::Cow<BinSpec> = if spec.shared_extent && spec.extent.is_none() {
-        if let Some((global_lo, global_hi)) = raw_float64_extent(batch, &spec.field) {
-            let mut patched = spec.clone();
-            patched.extent = Some((global_lo, global_hi));
-            std::borrow::Cow::Owned(patched)
-        } else {
-            std::borrow::Cow::Borrowed(spec)
-        }
-    } else {
-        std::borrow::Cow::Borrowed(spec)
-    };
+    // When shared_extent=true, inject the global raw extent so every group gets
+    // the same bin edges (required for stack/fill). resolve_shared_extent returns
+    // the explicit extent unchanged when set, else None unless shared is on.
+    let effective_spec: std::borrow::Cow<BinSpec> =
+        match resolve_shared_extent(spec.extent, spec.shared_extent, batch, &spec.field) {
+            Some(e) if spec.extent.is_none() => {
+                let mut patched = spec.clone();
+                patched.extent = Some(e);
+                std::borrow::Cow::Owned(patched)
+            }
+            _ => std::borrow::Cow::Borrowed(spec),
+        };
     let spec_ref: &BinSpec = &effective_spec;
 
     // Per-group output, then stack.
@@ -370,12 +362,12 @@ fn apply_grouped(
             all_ends.push(ends.value(i));
             all_counts.push(counts.value(i));
             all_densities.push(densities.value(i));
-            group_keys_out.push(vec![g.clone()]);
+            group_keys_out.push(g.clone());
         }
     }
 
     build_bin_batch_grouped(
-        all_starts, all_ends, all_counts, all_densities, group_keys_out, group_col, &gtype,
+        all_starts, all_ends, all_counts, all_densities, group_keys_out, group_cols, &gtypes,
     )
 }
 
@@ -407,27 +399,32 @@ fn build_bin_batch_grouped(
     counts: Vec<u64>,
     densities: Vec<f64>,
     group_keys: Vec<Vec<KeyValue>>,
-    group_col_name: &str,
-    group_dtype: &DataType,
+    group_col_names: &[String],
+    group_dtypes: &[DataType],
 ) -> PyResult<RecordBatch> {
-    let schema = Arc::new(Schema::new(vec![
+    let mut fields = vec![
         Field::new("bin_start", DataType::Float64, false),
         Field::new("bin_end",   DataType::Float64, false),
         Field::new("count",     DataType::UInt64,  false),
         Field::new("density",   DataType::Float64, false),
-        // FA-7: preserve the original groupby dtype (nullable for FA-9 null keys,
-        // though null keys are skipped upstream for stat_bin).
-        Field::new(group_col_name, group_dtype.clone(), groupby_field_nullable()),
-    ]));
-    let group_col = materialize_groupby_col(&group_keys, 0, group_dtype)
-        .map_err(PyValueError::new_err)?;
-    let cols: Vec<ArrayRef> = vec![
+    ];
+    // FA-7: preserve original groupby dtypes (nullable for FA-9 null keys,
+    // though null keys are skipped upstream for stat_bin).
+    for (name, dtype) in group_col_names.iter().zip(group_dtypes.iter()) {
+        fields.push(Field::new(name, dtype.clone(), groupby_field_nullable()));
+    }
+    let mut cols: Vec<ArrayRef> = vec![
         Arc::new(Float64Array::from(starts)),
         Arc::new(Float64Array::from(ends)),
         Arc::new(UInt64Array::from(counts)),
         Arc::new(Float64Array::from(densities)),
-        group_col,
     ];
+    for (gi, dtype) in group_dtypes.iter().enumerate() {
+        let group_col = materialize_groupby_col(&group_keys, gi, dtype)
+            .map_err(PyValueError::new_err)?;
+        cols.push(group_col);
+    }
+    let schema = Arc::new(Schema::new(fields));
     RecordBatch::try_new(schema, cols)
         .map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))
 }
@@ -470,8 +467,10 @@ use crate::transform::core::TransformSpec;
 ///     Round bin edges to visually clean numbers.
 /// cumulative : bool, default False
 ///     When True, append a ``cumulative`` count column.
-/// groupby : str, optional
-///     Single group-key column; bins computed independently per group.
+/// groupby : list[str] or str or None, optional
+///     One or more group-key columns; bins computed independently per group.
+///     Pass a single string or a one-element list for single-column groupby
+///     (byte-identical to the old ``Option<String>`` behavior).
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 ///
@@ -502,7 +501,7 @@ impl PyBin {
         nice: bool,
         cumulative: bool,
         shared_extent: bool,
-        groupby: Option<String>,
+        groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
     ) -> PyResult<Self> {
         if field.is_empty() {
@@ -527,10 +526,19 @@ impl PyBin {
                 ));
             }
         }
+        let groupby = parse_groupby_pyany(groupby)?;
+        // Resolve the flat constructor params to a typed mode with today's
+        // precedence: bin_count wins → Fixed; else bin_width → Width; else Sturges.
+        let mode = if let Some(n) = bin_count {
+            BinMode::Fixed { n }
+        } else if let Some(w) = bin_width {
+            BinMode::Width { w }
+        } else {
+            BinMode::Sturges
+        };
         Ok(PyBin(TransformSpec::Bin(BinSpec {
             field: field.to_string(),
-            bin_count,
-            bin_width,
+            mode,
             extent,
             nice,
             cumulative,
@@ -542,12 +550,21 @@ impl PyBin {
 
     fn __repr__(&self) -> String {
         match &self.0 {
-            TransformSpec::Bin(s) => format!(
-                "Bin(field='{}', bin_count={:?}, bin_width={:?}, extent={:?}, nice={}, cumulative={})",
-                s.field, s.bin_count, s.bin_width, s.extent,
-                if s.nice { "True" } else { "False" },
-                if s.cumulative { "True" } else { "False" },
-            ),
+            TransformSpec::Bin(s) => {
+                // Project the typed mode back to the public (bin_count, bin_width)
+                // spelling for continuity with the constructor signature.
+                let (bin_count, bin_width): (Option<usize>, Option<f64>) = match &s.mode {
+                    BinMode::Fixed { n } => (Some(*n), None),
+                    BinMode::Width { w } => (None, Some(*w)),
+                    BinMode::Sturges | BinMode::FreedmanDiaconis => (None, None),
+                };
+                format!(
+                    "Bin(field='{}', bin_count={:?}, bin_width={:?}, extent={:?}, nice={}, cumulative={})",
+                    s.field, bin_count, bin_width, s.extent,
+                    if s.nice { "True" } else { "False" },
+                    if s.cumulative { "True" } else { "False" },
+                )
+            }
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
         }
@@ -590,13 +607,12 @@ mod tests {
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(5),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 5 },
             extent: Some((1.0, 10.0)),
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -620,13 +636,12 @@ mod tests {
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(5),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 5 },
             extent: Some((1.0, 10.0)),
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -646,13 +661,12 @@ mod tests {
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: None,
-            bin_width: None,
+            mode: BinMode::Sturges,
             extent: None,
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -664,13 +678,12 @@ mod tests {
         let batch = batch_with(vec![3.0, 3.0, 3.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: None,
-            bin_width: None,
+            mode: BinMode::Sturges,
             extent: None,
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -692,13 +705,12 @@ mod tests {
         let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(2),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 2 },
             extent: Some((1.0, 3.0)),
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -713,13 +725,12 @@ mod tests {
         let batch = batch_with(vec![1.0, 2.0, 3.0]);
         let spec = BinSpec {
             field: "ghost".into(),
-            bin_count: Some(5),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 5 },
             extent: None,
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -739,13 +750,12 @@ mod tests {
         ).unwrap();
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(2),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 2 },
             extent: Some((1.0, 3.0)),
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -766,13 +776,12 @@ mod tests {
         ).unwrap();
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(2),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 2 },
             extent: None,
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let result = apply(&spec, &batch);
@@ -788,13 +797,12 @@ mod tests {
         let batch = batch_with(vec![0.13, 1.5, 4.5, 7.7, 9.7]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(10),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 10 },
             extent: None,
             nice: true,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -819,13 +827,12 @@ mod tests {
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(5),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 5 },
             extent: Some((1.0, 10.0)),
             nice: false,
             cumulative: true,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -848,13 +855,12 @@ mod tests {
         let batch = batch_with(vec![42.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: None,
-            bin_width: None,
+            mode: BinMode::Sturges,
             extent: None,
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -869,13 +875,12 @@ mod tests {
         let batch = batch_with(vec![5.0; 10]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(5),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 5 },
             extent: None,
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -889,13 +894,12 @@ mod tests {
         let batch = batch_with(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(1),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 1 },
             extent: Some((1.0, 5.0)),
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let out = apply(&spec, &batch).unwrap();
@@ -916,13 +920,12 @@ mod tests {
         let batch = batch_with(vec![1.5, 3.7, 2.2, 8.1]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(4),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 4 },
             extent: None,
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -941,13 +944,12 @@ mod tests {
         let batch = batch_with(vec![0.13, 1.5, 4.5, 7.7, 9.7]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(10),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 10 },
             extent: None,
             nice: true,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -984,13 +986,12 @@ mod tests {
         let batch = batch_with(vec![1.0, 5.0, 10.0]);
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(5),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 5 },
             extent: Some((0.0, 20.0)),
             nice: true,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -1005,13 +1006,12 @@ mod tests {
         let batch = batch_with(vec![1.0, 2.0, 3.0]);
         let spec = BinSpec {
             field: "nonexistent".into(),
-            bin_count: Some(5),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 5 },
             extent: None,
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -1030,13 +1030,12 @@ mod tests {
         ).unwrap();
         let spec = BinSpec {
             field: "x".into(),
-            bin_count: Some(3),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 3 },
             extent: None,
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let ext = super::global_extent(&spec, &batch);
@@ -1076,38 +1075,635 @@ mod tests {
         assert!(hi >= 2.0, "niced hi must not be below raw hi");
     }
 
-    /// `raw_float64_extent` returns the min/max of a clean Float64 batch.
+    // `Bin`'s extent now delegates to `numeric_util::column_extent`; these tests
+    // exercise that shared helper through the path `global_extent` takes.
+    use crate::transform::numeric_util::column_extent;
+
+    /// `column_extent` returns the min/max of a clean Float64 batch.
     #[test]
-    fn test_raw_float64_extent_basic() {
+    fn test_column_extent_basic() {
         let batch = batch_with(vec![3.0, 1.0, 5.0, 2.0]);
-        let ext = super::raw_float64_extent(&batch, "x");
+        let ext = column_extent(&batch, "x");
         assert_eq!(ext, Some((1.0, 5.0)));
     }
 
-    /// `raw_float64_extent` drops nulls and NaN values.
+    /// `column_extent` drops nulls and NaN values.
     #[test]
-    fn test_raw_float64_extent_drops_nulls_and_nan() {
+    fn test_column_extent_drops_nulls_and_nan() {
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
         let arr = Float64Array::from(vec![Some(2.0), None, Some(f64::NAN), Some(8.0)]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
-        let ext = super::raw_float64_extent(&batch, "x");
+        let ext = column_extent(&batch, "x");
         assert_eq!(ext, Some((2.0, 8.0)));
     }
 
-    /// `raw_float64_extent` returns None for a missing field.
+    /// `column_extent` returns None for a missing field.
     #[test]
-    fn test_raw_float64_extent_missing_field() {
+    fn test_column_extent_missing_field() {
         pyo3::Python::initialize();
         let batch = batch_with(vec![1.0, 2.0]);
-        let ext = super::raw_float64_extent(&batch, "ghost");
+        let ext = column_extent(&batch, "ghost");
         assert_eq!(ext, None);
     }
 
-    /// `raw_float64_extent` returns None when lo == hi (degenerate extent).
+    /// `column_extent` returns None when lo == hi (degenerate extent).
     #[test]
-    fn test_raw_float64_extent_degenerate_all_equal() {
+    fn test_column_extent_degenerate_all_equal() {
         let batch = batch_with(vec![5.0, 5.0, 5.0]);
-        let ext = super::raw_float64_extent(&batch, "x");
+        let ext = column_extent(&batch, "x");
         assert_eq!(ext, None, "degenerate extent (lo==hi) must return None");
+    }
+
+    // ── T3.8a regression tests ────────────────────────────────────────────────
+
+    /// Helper: build a batch with an `x` float column plus two string group columns.
+    fn batch_with_two_groups(
+        xs: Vec<f64>,
+        g1s: Vec<&str>,
+        g2s: Vec<&str>,
+    ) -> RecordBatch {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("g1", DataType::Utf8, false),
+            Field::new("g2", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs)) as arrow::array::ArrayRef,
+                Arc::new(StringArray::from(g1s)) as arrow::array::ArrayRef,
+                Arc::new(StringArray::from(g2s)) as arrow::array::ArrayRef,
+            ],
+        )
+        .unwrap()
+    }
+
+    fn col_str<'a>(b: &'a RecordBatch, name: &str) -> &'a arrow::array::StringArray {
+        b.column(b.schema().index_of(name).unwrap())
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap()
+    }
+
+    /// D-GROUPBY-1 regression (T3.8a): a 2-column groupby on `Bin` must produce one
+    /// set of bins per distinct `(g1, g2)` combination, with the two group columns
+    /// appended after the standard 4 bin output columns.
+    #[test]
+    fn bin_two_column_groupby_produces_per_combination_rows() {
+        // 8 rows: two g1 values × two g2 values × 2 x values each.
+        let batch = batch_with_two_groups(
+            vec![1.0, 9.0, 1.0, 9.0, 1.0, 9.0, 1.0, 9.0],
+            vec!["A", "A", "A", "A", "B", "B", "B", "B"],
+            vec!["x", "x", "y", "y", "x", "x", "y", "y"],
+        );
+        let spec = BinSpec {
+            field: "x".into(),
+            mode: BinMode::Fixed { n: 2 },
+            extent: Some((0.0, 10.0)),
+            nice: false,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec!["g1".into(), "g2".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+
+        // Output must have columns: bin_start, bin_end, count, density, g1, g2.
+        let schema = out.schema();
+        assert!(schema.index_of("bin_start").is_ok(), "missing bin_start");
+        assert!(schema.index_of("bin_end").is_ok(), "missing bin_end");
+        assert!(schema.index_of("count").is_ok(), "missing count");
+        assert!(schema.index_of("density").is_ok(), "missing density");
+        assert!(schema.index_of("g1").is_ok(), "missing g1 column");
+        assert!(schema.index_of("g2").is_ok(), "missing g2 column");
+
+        // 4 distinct groups × 2 bins each = 8 output rows.
+        assert_eq!(out.num_rows(), 8, "expected 4 groups × 2 bins = 8 rows, got {}", out.num_rows());
+
+        // Each group contributes 2 bins with count=2 (2 x-values per group).
+        let counts = col_u64(&out, "count");
+        for i in 0..8 {
+            assert_eq!(counts.value(i), 1, "each bin should have count=1, row {i} has {}", counts.value(i));
+        }
+
+        // Verify both group columns are present and contain the right values.
+        let g1 = col_str(&out, "g1");
+        let g2 = col_str(&out, "g2");
+        // Collect all (g1, g2) pairs seen in the output.
+        let mut combos: std::collections::BTreeSet<(String, String)> =
+            (0..out.num_rows())
+            .map(|i| (g1.value(i).to_string(), g2.value(i).to_string()))
+            .collect();
+        assert_eq!(combos.len(), 4, "must have 4 distinct (g1,g2) groups in output");
+        assert!(combos.contains(&("A".into(), "x".into())));
+        assert!(combos.contains(&("A".into(), "y".into())));
+        assert!(combos.contains(&("B".into(), "x".into())));
+        assert!(combos.contains(&("B".into(), "y".into())));
+    }
+
+    /// D-GROUPBY-1 regression (T3.8a): a single-column groupby via `vec!["g"]`
+    /// must produce the same output schema and row values as the old `Some("g")`
+    /// path did before the migration.
+    #[test]
+    fn bin_single_column_groupby_matches_pre_migration_shape() {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 9.0, 1.0, 9.0])) as arrow::array::ArrayRef,
+                Arc::new(StringArray::from(vec!["A", "A", "B", "B"])) as arrow::array::ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let spec = BinSpec {
+            field: "x".into(),
+            mode: BinMode::Fixed { n: 2 },
+            extent: Some((0.0, 10.0)),
+            nice: false,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec!["g".into()],
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+
+        // Schema: bin_start, bin_end, count, density, g
+        let s = out.schema();
+        assert!(s.index_of("bin_start").is_ok());
+        assert!(s.index_of("bin_end").is_ok());
+        assert!(s.index_of("count").is_ok());
+        assert!(s.index_of("density").is_ok());
+        assert!(s.index_of("g").is_ok());
+        assert_eq!(s.fields().len(), 5, "single-groupby output has exactly 5 columns");
+
+        // 2 groups × 2 bins = 4 rows.
+        assert_eq!(out.num_rows(), 4);
+
+        // Each bin should have count=1.
+        let counts = col_u64(&out, "count");
+        for i in 0..4 {
+            assert_eq!(counts.value(i), 1);
+        }
+    }
+
+    /// D-GROUPBY-1 regression (T3.8a): the BinSpec serde round-trip preserves
+    /// the canonical array wire form; deserializing the old bare-string form
+    /// yields a one-element vec identical to the direct vec!["col"] construction.
+    #[test]
+    fn bin_groupby_serde_round_trip_and_back_compat() {
+        // Serialize a BinSpec with groupby=["col"] — must emit array form.
+        let spec = BinSpec {
+            field: "x".into(),
+            mode: BinMode::Sturges,
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec!["col".into()],
+            name: None,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""groupby":["col"]"#), "must serialize as array, got: {json}");
+
+        // Deserialize a legacy JSON that has a bare string for groupby.
+        let legacy = r#"{"field":"x","groupby":"col"}"#;
+        let from_legacy: BinSpec = serde_json::from_str(legacy).unwrap();
+        assert_eq!(from_legacy.groupby, vec!["col"], "bare-string legacy must parse to [\"col\"]");
+
+        // Deserialize null → [].
+        let null_json = r#"{"field":"x","groupby":null}"#;
+        let from_null: BinSpec = serde_json::from_str(null_json).unwrap();
+        assert!(from_null.groupby.is_empty(), "null groupby must parse to []");
+
+        // Empty groupby must be omitted from serialization (skip_serializing_if).
+        let empty_spec = BinSpec { groupby: vec![], ..spec.clone() };
+        let empty_json = serde_json::to_string(&empty_spec).unwrap();
+        assert!(!empty_json.contains("groupby"), "empty groupby must be omitted: {empty_json}");
+    }
+
+    // ── T3.8b regression tests: BinWire flat-wire shim + precedence ────────────
+
+    fn sturges_spec() -> BinSpec {
+        BinSpec {
+            field: "x".into(),
+            mode: BinMode::Sturges,
+            extent: None,
+            nice: true,
+            cumulative: false,
+            shared_extent: false,
+            groupby: vec![],
+            name: None,
+        }
+    }
+
+    /// `Fixed{n}` round-trips through serde as a flat `"bin_count":n` wire key and
+    /// parses back to `Fixed{n}` — never as a tagged `mode` object.
+    #[test]
+    fn bin_fixed_mode_serializes_flat_bin_count() {
+        let spec = BinSpec { mode: BinMode::Fixed { n: 5 }, ..sturges_spec() };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""bin_count":5"#), "flat bin_count expected, got: {json}");
+        assert!(!json.contains("mode"), "mode must not appear on the wire: {json}");
+        assert!(!json.contains("kind"), "no tagged enum on the wire: {json}");
+        let back: BinSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.mode, BinMode::Fixed { n: 5 });
+        assert_eq!(back, spec);
+    }
+
+    /// `Width{w}` round-trips through serde as a flat `"bin_width":w` wire key and
+    /// parses back to `Width{w}`.
+    #[test]
+    fn bin_width_mode_serializes_flat_bin_width() {
+        let spec = BinSpec { mode: BinMode::Width { w: 2.0 }, ..sturges_spec() };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""bin_width":2.0"#), "flat bin_width expected, got: {json}");
+        assert!(!json.contains("bin_count"), "bin_count must be omitted for Width: {json}");
+        let back: BinSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.mode, BinMode::Width { w: 2.0 });
+        assert_eq!(back, spec);
+    }
+
+    /// `Sturges` (neither count nor width) emits no `bin_count`/`bin_width` keys
+    /// and parses back to `Sturges`.
+    #[test]
+    fn bin_sturges_mode_omits_both_flat_keys() {
+        let spec = sturges_spec();
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("bin_count"), "Sturges must omit bin_count: {json}");
+        assert!(!json.contains("bin_width"), "Sturges must omit bin_width: {json}");
+        let back: BinSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.mode, BinMode::Sturges);
+        assert_eq!(back, spec);
+    }
+
+    /// A legacy wire that sets BOTH `bin_count` and `bin_width` resolves to
+    /// `Fixed` (bin_count wins) — pins the precedence-at-boundary contract.
+    #[test]
+    fn bin_legacy_both_keys_resolves_to_fixed() {
+        let legacy = r#"{"field":"x","bin_count":7,"bin_width":3.5}"#;
+        let parsed: BinSpec = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            parsed.mode,
+            BinMode::Fixed { n: 7 },
+            "bin_count must win over bin_width at the deserialization boundary"
+        );
+    }
+
+    // ── BUG-HUNT (step4): BinWire shim + degenerate wires + apply edges ─────────
+
+    /// Round-trip every constructable 1-D BinMode through BinWire and assert the
+    /// `BinSpec` is byte-identical after one serialize→deserialize cycle. The
+    /// constructor only yields Sturges/Fixed/Width, so all three MUST round-trip.
+    #[test]
+    fn bughunt_binwire_round_trip_every_constructable_mode_is_stable() {
+        for mode in [
+            BinMode::Sturges,
+            BinMode::Fixed { n: 1 },
+            BinMode::Fixed { n: 42 },
+            BinMode::Width { w: 0.5 },
+            BinMode::Width { w: 100.0 },
+        ] {
+            let spec = BinSpec { mode: mode.clone(), ..sturges_spec() };
+            let json = serde_json::to_string(&spec).unwrap();
+            let back: BinSpec = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, spec, "BinMode {mode:?} did not round-trip byte-stably via BinWire");
+            // Second cycle must be byte-identical to the first (idempotent wire).
+            let json2 = serde_json::to_string(&back).unwrap();
+            assert_eq!(json, json2, "second serialization differs for {mode:?}");
+        }
+    }
+
+    /// A hand-authored `BinSpec` with `mode = FreedmanDiaconis` is NOT
+    /// representable on the flat 1-D wire: `From<BinSpec>` maps FD → (None, None),
+    /// identical to Sturges, so a serialize→deserialize cycle silently DOWNGRADES
+    /// FD to Sturges. This pins that lossy collapse as a documented contract; if a
+    /// future change makes the 1-D Bin emit FD, this test will fail and force the
+    /// wire to gain an `fd` flag instead of silently corrupting the mode.
+    #[test]
+    fn bughunt_binwire_freedman_diaconis_collapses_to_sturges() {
+        let spec = BinSpec { mode: BinMode::FreedmanDiaconis, ..sturges_spec() };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("freedman"), "FD must not appear on flat wire: {json}");
+        let back: BinSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.mode,
+            BinMode::Sturges,
+            "FD silently collapses to Sturges on the flat 1-D wire (lossy by design)"
+        );
+    }
+
+    /// A degenerate hand-authored wire with `bin_count:0` deserializes WITHOUT
+    /// error (the From shim does no validation), so the zero-count must be caught
+    /// at apply-time by `resolve_bin_count`, not silently coerced to a usable count.
+    #[test]
+    fn bughunt_wire_bin_count_zero_deserializes_then_errors_at_apply() {
+        pyo3::Python::initialize();
+        let spec: BinSpec = serde_json::from_str(r#"{"field":"x","bin_count":0}"#).unwrap();
+        assert_eq!(spec.mode, BinMode::Fixed { n: 0 }, "wire bin_count:0 → Fixed{{0}}");
+        let batch = batch_with(vec![1.0, 2.0, 3.0]);
+        let err = apply(&spec, &batch).unwrap_err();
+        assert!(
+            err.to_string().contains("must be >= 1"),
+            "Fixed{{0}} must error at apply, got: {err}"
+        );
+    }
+
+    /// A degenerate hand-authored wire with `bin_width:0` must error at apply.
+    #[test]
+    fn bughunt_wire_bin_width_zero_errors_at_apply() {
+        pyo3::Python::initialize();
+        let spec: BinSpec = serde_json::from_str(r#"{"field":"x","bin_width":0}"#).unwrap();
+        assert_eq!(spec.mode, BinMode::Width { w: 0.0 });
+        let batch = batch_with(vec![1.0, 2.0, 3.0]);
+        let err = apply(&spec, &batch).unwrap_err();
+        assert!(err.to_string().contains("positive finite"), "got: {err}");
+    }
+
+    /// A degenerate hand-authored wire with a negative `bin_width` must error at
+    /// apply, not produce reversed/negative-stride bin edges.
+    #[test]
+    fn bughunt_wire_bin_width_negative_errors_at_apply() {
+        pyo3::Python::initialize();
+        let spec: BinSpec = serde_json::from_str(r#"{"field":"x","bin_width":-2.5}"#).unwrap();
+        assert_eq!(spec.mode, BinMode::Width { w: -2.5 });
+        let batch = batch_with(vec![1.0, 2.0, 3.0]);
+        let err = apply(&spec, &batch).unwrap_err();
+        assert!(err.to_string().contains("positive finite"), "got: {err}");
+    }
+
+    /// A wire `bin_width:1e400` (out of f64 range) is REJECTED by serde_json at
+    /// the deserialization boundary ("number out of range"), so an overflowing
+    /// width can never reach `apply` as `Width{inf}`. Pins that the JSON layer is
+    /// the first line of defense for out-of-range float widths. (The `inf`-reaching
+    /// path is instead exercised directly in bin_mode's `resolve_width_infinity`.)
+    #[test]
+    fn bughunt_wire_bin_width_overflow_is_rejected_at_deserialize() {
+        let r: Result<BinSpec, _> = serde_json::from_str(r#"{"field":"x","bin_width":1e400}"#);
+        assert!(
+            r.is_err(),
+            "an out-of-range (1e400) bin_width must be rejected at deserialize, not coerced to inf"
+        );
+        assert!(
+            r.unwrap_err().to_string().contains("out of range"),
+            "the rejection must name the out-of-range cause"
+        );
+    }
+
+    /// BinWire uses `deny_unknown_fields`; a wire with the OLD tagged-enum `mode`
+    /// key must be rejected, proving the flat-wire contract is enforced and a
+    /// stray `mode` cannot silently slip through and be ignored.
+    #[test]
+    fn bughunt_wire_rejects_tagged_mode_key() {
+        let r: Result<BinSpec, _> =
+            serde_json::from_str(r#"{"field":"x","mode":{"kind":"sturges"}}"#);
+        assert!(r.is_err(), "deny_unknown_fields must reject a stray 'mode' key");
+    }
+
+    /// A bin field that is entirely null produces empty output (zero rows) with
+    /// the correct 4-column schema, not a panic on the min/max fold or a div-by-0.
+    #[test]
+    fn bughunt_bin_all_null_column_emits_empty_output() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Float64, true)]));
+        let arr = Float64Array::from(vec![None, None, None]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let spec = BinSpec { field: "x".into(), mode: BinMode::Fixed { n: 5 }, ..sturges_spec() };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 0, "all-null column must produce zero bins");
+        assert_eq!(out.num_columns(), 4, "schema must still be the 4 bin columns");
+        assert_eq!(out.schema().field(0).name(), "bin_start");
+    }
+
+    /// A zero-row column (columns exist, no rows) produces empty output, not a
+    /// panic indexing `clean[0]` or folding an empty iterator into a bad extent.
+    #[test]
+    fn bughunt_bin_zero_row_column_emits_empty_output() {
+        let batch = batch_with(vec![]);
+        let spec = BinSpec { field: "x".into(), mode: BinMode::Sturges, ..sturges_spec() };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 0);
+        assert_eq!(out.num_columns(), 4);
+    }
+
+    /// All-NaN column behaves like all-null: every value dropped → empty output.
+    #[test]
+    fn bughunt_bin_all_nan_column_emits_empty_output() {
+        let batch = batch_with(vec![f64::NAN, f64::NAN]);
+        let spec = BinSpec { field: "x".into(), mode: BinMode::Fixed { n: 3 }, ..sturges_spec() };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 0, "all-NaN column must produce zero bins");
+    }
+
+    /// An explicit extent with `lo >= hi` must error at apply with a legible
+    /// message — the bin-edge stride `(hi-lo)/n` would otherwise be <= 0.
+    #[test]
+    fn bughunt_bin_reversed_explicit_extent_errors() {
+        pyo3::Python::initialize();
+        let batch = batch_with(vec![1.0, 2.0, 3.0]);
+        let spec = BinSpec {
+            field: "x".into(),
+            mode: BinMode::Fixed { n: 4 },
+            extent: Some((10.0, 1.0)),
+            ..sturges_spec()
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        assert!(err.to_string().contains("lo < hi"), "reversed extent must error: {err}");
+    }
+
+    /// An explicit extent where `lo == hi` must also error (not slip into the
+    /// all-equal single-unit-bin branch, which is only reached when extent is None).
+    #[test]
+    fn bughunt_bin_equal_explicit_extent_errors() {
+        pyo3::Python::initialize();
+        let batch = batch_with(vec![5.0, 5.0, 5.0]);
+        let spec = BinSpec {
+            field: "x".into(),
+            mode: BinMode::Fixed { n: 4 },
+            extent: Some((5.0, 5.0)),
+            ..sturges_spec()
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        assert!(err.to_string().contains("lo < hi"), "lo==hi extent must error: {err}");
+    }
+
+    /// Off-by-one: a value sitting exactly on an interior bin edge must land in
+    /// the UPPER bin (half-open `[edge, next)`), and the value exactly at `hi`
+    /// must land in the LAST bin (the only inclusive edge). 2 bins over [0,10]:
+    /// edge at 5.0 → bin 1; value 10.0 → bin 1; value 0.0 → bin 0.
+    #[test]
+    fn bughunt_bin_interior_edge_value_lands_in_upper_bin() {
+        let batch = batch_with(vec![0.0, 5.0, 10.0]);
+        let spec = BinSpec {
+            field: "x".into(),
+            mode: BinMode::Fixed { n: 2 },
+            extent: Some((0.0, 10.0)),
+            nice: false,
+            ..sturges_spec()
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let counts = col_u64(&out, "count");
+        assert_eq!(counts.value(0), 1, "bin 0 [0,5): only 0.0");
+        assert_eq!(counts.value(1), 2, "bin 1 [5,10]: 5.0 (interior edge → upper) and 10.0 (hi)");
+    }
+
+    /// `i64::MAX`-magnitude data must not panic and must produce a finite,
+    /// NaN-free, single-bin output (range collapses under f64 rounding) or a
+    /// valid multi-bin output. Asserts no NaN/Inf leaks into bin edges.
+    #[test]
+    fn bughunt_bin_extreme_large_values_no_nan_in_edges() {
+        let batch = batch_with(vec![1e300, 2e300, 3e300]);
+        let spec = BinSpec {
+            field: "x".into(),
+            mode: BinMode::Fixed { n: 3 },
+            extent: None,
+            nice: false,
+            ..sturges_spec()
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let starts = col_f64(&out, "bin_start");
+        let ends = col_f64(&out, "bin_end");
+        for i in 0..out.num_rows() {
+            assert!(starts.value(i).is_finite(), "bin_start[{i}] not finite");
+            assert!(ends.value(i).is_finite(), "bin_end[{i}] not finite");
+        }
+    }
+
+    // ── BUG-HUNT (step4): groupby cardinality / mixed-dtype / non-existent col ──
+
+    /// A groupby on a column that does not exist must error (via the shared
+    /// `group_partition_multi`), naming the missing column.
+    #[test]
+    fn bughunt_bin_groupby_missing_column_errors() {
+        pyo3::Python::initialize();
+        let batch = batch_with(vec![1.0, 2.0, 3.0]);
+        let spec = BinSpec {
+            field: "x".into(),
+            mode: BinMode::Fixed { n: 2 },
+            extent: Some((0.0, 10.0)),
+            groupby: vec!["ghost".into()],
+            ..sturges_spec()
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        assert!(err.to_string().contains("ghost"), "missing groupby col must error: {err}");
+    }
+
+    /// A row whose groupby key is NULL must be skipped (not assigned to any
+    /// group) — internally consistent with kde/smooth via `group_partition_multi`.
+    /// Build g=[A, null, A]; only the two A rows are binned, the null row dropped.
+    #[test]
+    fn bughunt_bin_null_group_key_row_is_skipped() {
+        pyo3::Python::initialize();
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 9.0, 2.0])) as arrow::array::ArrayRef,
+                Arc::new(StringArray::from(vec![Some("A"), None, Some("A")])) as arrow::array::ArrayRef,
+            ],
+        )
+        .unwrap();
+        let spec = BinSpec {
+            field: "x".into(),
+            mode: BinMode::Fixed { n: 2 },
+            extent: Some((0.0, 10.0)),
+            nice: false,
+            groupby: vec!["g".into()],
+            ..sturges_spec()
+        };
+        let out = apply(&spec, &batch).unwrap();
+        // Only group "A" survives → 2 bins, total count 2 (rows 0 and 2; row 1's
+        // null-keyed value 9.0 is dropped along with its null key).
+        let counts = col_u64(&out, "count");
+        let total: u64 = (0..out.num_rows()).map(|i| counts.value(i)).sum();
+        assert_eq!(total, 2, "null-keyed row must be excluded from all groups, got total {total}");
+        let g = col_str(&out, "g");
+        for i in 0..out.num_rows() {
+            assert!(!g.is_null(i), "no null-keyed group should appear, row {i}");
+            assert_eq!(g.value(i), "A");
+        }
+    }
+
+    /// A 3-column groupby with three DIFFERENT dtypes (Utf8 + Int64 + Boolean)
+    /// must partition jointly, preserve each column's dtype in the output, and
+    /// yield exactly the number of distinct (s, i, b) combinations present.
+    #[test]
+    fn bughunt_bin_three_mixed_dtype_groupby_cardinality_and_dtypes() {
+        pyo3::Python::initialize();
+        use arrow::array::{BooleanArray, Int64Array, StringArray};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("s", DataType::Utf8, false),
+            Field::new("i", DataType::Int64, false),
+            Field::new("b", DataType::Boolean, false),
+        ]));
+        // 4 rows: (A,1,true), (A,1,true) [dup], (A,2,true), (B,1,false) → 3 distinct combos.
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 1.0, 1.0])) as arrow::array::ArrayRef,
+                Arc::new(StringArray::from(vec!["A", "A", "A", "B"])) as arrow::array::ArrayRef,
+                Arc::new(Int64Array::from(vec![1_i64, 1, 2, 1])) as arrow::array::ArrayRef,
+                Arc::new(BooleanArray::from(vec![true, true, true, false])) as arrow::array::ArrayRef,
+            ],
+        )
+        .unwrap();
+        let spec = BinSpec {
+            field: "x".into(),
+            mode: BinMode::Fixed { n: 1 },
+            extent: Some((0.0, 2.0)),
+            nice: false,
+            groupby: vec!["s".into(), "i".into(), "b".into()],
+            ..sturges_spec()
+        };
+        let out = apply(&spec, &batch).unwrap();
+        // 3 distinct combos × 1 bin each = 3 rows.
+        assert_eq!(out.num_rows(), 3, "expected 3 distinct (s,i,b) combos, got {}", out.num_rows());
+        // Output dtypes preserved per column.
+        let s = out.schema();
+        assert_eq!(s.field(s.index_of("s").unwrap()).data_type(), &DataType::Utf8);
+        assert_eq!(s.field(s.index_of("i").unwrap()).data_type(), &DataType::Int64);
+        assert_eq!(s.field(s.index_of("b").unwrap()).data_type(), &DataType::Boolean);
+        // The duplicate (A,1,true) combo aggregates to a single bin with count 2.
+        let counts = col_u64(&out, "count");
+        let total: u64 = (0..out.num_rows()).map(|i| counts.value(i)).sum();
+        assert_eq!(total, 4, "all 4 rows must be counted across the 3 groups, got {total}");
+    }
+
+    /// `group_partition_multi` called with an EMPTY group_cols slice (the shape
+    /// `apply` guards against but the helper itself must define): a non-empty
+    /// batch collapses to ONE group with an empty composite key holding all rows.
+    /// This pins the degenerate contract so a future caller bypassing the
+    /// `is_empty()` guard gets a defined (not panicking) result.
+    #[test]
+    fn bughunt_group_partition_multi_empty_cols_single_all_rows_group() {
+        pyo3::Python::initialize();
+        let batch = batch_with(vec![1.0, 2.0, 3.0]);
+        let (order, map, dtypes) =
+            crate::transform::group_key::group_partition_multi(&batch, &[], "stat_bin").unwrap();
+        assert_eq!(dtypes.len(), 0, "no group columns → no dtypes");
+        assert_eq!(order.len(), 1, "non-empty batch with [] cols → one empty-key group");
+        assert!(order[0].is_empty(), "the single group's composite key is empty");
+        assert_eq!(map[&order[0]], vec![0, 1, 2], "the empty-key group holds every row");
+    }
+
+    /// `group_partition_multi` with empty cols on an EMPTY batch yields zero
+    /// groups (no rows to form the empty-key group), not a phantom group.
+    #[test]
+    fn bughunt_group_partition_multi_empty_cols_empty_batch_zero_groups() {
+        pyo3::Python::initialize();
+        let batch = batch_with(vec![]);
+        let (order, map, _) =
+            crate::transform::group_key::group_partition_multi(&batch, &[], "stat_bin").unwrap();
+        assert_eq!(order.len(), 0, "empty batch + [] cols → zero groups");
+        assert!(map.is_empty());
     }
 }

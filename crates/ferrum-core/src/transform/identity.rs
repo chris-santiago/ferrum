@@ -11,6 +11,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct IdentitySpec {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,

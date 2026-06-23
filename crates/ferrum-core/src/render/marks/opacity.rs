@@ -23,6 +23,39 @@
 //! defaults/finite-check/clamp logic is identical regardless of sampling mode.
 
 use crate::render::draw::{col_as_f64, DrawCtx};
+use crate::render::scale_resolve::OpacityScale;
+
+/// Map a single row's `opacity` channel value through the opacity *scale*,
+/// falling back to `default` when no scale/column applies or the mapping fails.
+///
+/// This is the scale-mapped sibling of [`OpacityResolver`] (which only does the
+/// raw finite-check/clamp/default of the `opacity`/`fill_opacity`/`stroke_opacity`
+/// encoding columns). The `opacity` channel additionally passes through
+/// `ctx.scales.opacity` — a per-row block that was previously copy-pasted across
+/// `arc`/`point`/`rect`/`polygon` (FA-11, MOD-06). Resolution is byte-identical
+/// to that inline `if let (Some(values), Some(scale)) = (&opacity_values,
+/// &ctx.scales.opacity) { … } else { default }` block.
+///
+/// `opacity_values` is the raw `col_as_f64` column for the `opacity` field (or
+/// `None` when unbound); `idx` is the per-row index (per-row marks) or the
+/// group's representative row (group marks like `polygon`).
+#[inline]
+pub(crate) fn resolve_scaled_opacity(
+    opacity_values: &Option<Vec<Option<f64>>>,
+    scale: &Option<OpacityScale>,
+    idx: usize,
+    default: f64,
+) -> f64 {
+    match (opacity_values, scale) {
+        (Some(values), Some(scale)) => values
+            .get(idx)
+            .copied()
+            .flatten()
+            .and_then(|v| scale.inner.to_pixel_f64(v))
+            .unwrap_or(default),
+        _ => default,
+    }
+}
 
 /// How an absent `fill_opacity` value is defaulted.
 ///
@@ -201,5 +234,52 @@ mod tests {
             (1.0, 1.0, 1.0),
         );
         assert_eq!(r.at_row(1), r.at_group_first(1));
+    }
+
+    // ── resolve_scaled_opacity (FA-11 / MOD-06) ──────────────────────────────
+
+    use crate::render::scale_resolve::ScaleKind;
+    use crate::scale::linear::LinearScale;
+
+    /// An opacity scale mapping data domain `[0, 10]` to the opacity band
+    /// `[0.2, 1.0]` (the pixel range encodes the opacity endpoints).
+    fn opacity_scale() -> OpacityScale {
+        OpacityScale {
+            inner: ScaleKind::Linear(LinearScale::new_internal(
+                vec![0.0, 10.0],
+                vec![0.2, 1.0],
+                false,
+                false,
+            )),
+        }
+    }
+
+    /// MOD-06 guard: a bound `opacity` column maps each value through the scale.
+    /// `v=0` → band lower (0.2), `v=10` → band upper (1.0), `v=5` → midpoint 0.6.
+    #[test]
+    fn scaled_opacity_maps_through_scale() {
+        let values = Some(vec![Some(0.0), Some(5.0), Some(10.0)]);
+        let scale = Some(opacity_scale());
+        assert!((resolve_scaled_opacity(&values, &scale, 0, 0.5) - 0.2).abs() < 1e-9);
+        assert!((resolve_scaled_opacity(&values, &scale, 1, 0.5) - 0.6).abs() < 1e-9);
+        assert!((resolve_scaled_opacity(&values, &scale, 2, 0.5) - 1.0).abs() < 1e-9);
+    }
+
+    /// MOD-06 guard: an absent column or absent scale falls back to `default`,
+    /// and a null cell falls back too — byte-identical to the prior inline
+    /// `else { ctx.mark_style.paint.opacity }` arms.
+    #[test]
+    fn scaled_opacity_falls_back_to_default() {
+        let scale = Some(opacity_scale());
+        // No column.
+        assert_eq!(resolve_scaled_opacity(&None, &scale, 0, 0.42), 0.42);
+        // No scale.
+        let values = Some(vec![Some(5.0)]);
+        assert_eq!(resolve_scaled_opacity(&values, &None, 0, 0.42), 0.42);
+        // Null cell.
+        let with_null = Some(vec![None]);
+        assert_eq!(resolve_scaled_opacity(&with_null, &scale, 0, 0.42), 0.42);
+        // Out-of-range index.
+        assert_eq!(resolve_scaled_opacity(&values, &scale, 9, 0.42), 0.42);
     }
 }

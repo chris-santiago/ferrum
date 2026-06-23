@@ -291,25 +291,32 @@ def test_stroke_dropped_by_color_stroke_field_is_absent_from_spec():
     assert "<svg" in svg, "Chart with color+stroke (stroke dropped) must still render"
 
 
-def test_ghost_channel_docstring_no_longer_says_reserved_for_future_use():
-    """Ghost positional channel docstrings must not claim 'reserved for future use'.
+def test_ghost_channel_docstrings_do_not_narrate_render_status():
+    """Ghost positional channels must not narrate per-channel render status.
 
-    X2, Y2, XError, YError, XError2, YError2, Theta2, Radius2 all have
-    _honored_kwargs = frozenset(['type']).  Their Notes must say the unsupported
-    kwargs emit a warning, not that they are 'reserved for future use'.
+    ENC-09: ``_honored_kwargs`` is the single, machine-readable source of truth
+    for the honored-kwarg contract.  Per-channel docstrings must not duplicate it
+    in prose (``"reserved for future use"`` / ``"no-op today"``), which drifts.
+    X2, Y2, XError, YError, XError2, YError2, Theta2, Radius2 are all
+    secondary-extent channels honoring only ``{"type"}``.
     """
     from ferrum.encoding import X2, Y2, XError, YError, XError2, YError2
+    from ferrum.encoding._honored import SECONDARY_EXTENT
     from ferrum.encoding.positional import Theta2, Radius2
 
     ghost_channels = [X2, Y2, XError, YError, XError2, YError2, Theta2, Radius2]
     for cls in ghost_channels:
         doc = cls.__doc__ or ""
         assert "reserved for future use" not in doc, (
-            f"{cls.__name__}.__doc__ still contains 'reserved for future use'; "
-            "update the docstring to say unsupported kwargs emit a warning."
+            f"{cls.__name__}.__doc__ still narrates render status "
+            "('reserved for future use'); the honored-kwarg contract lives in "
+            "_honored_kwargs, not per-channel prose (ENC-09)."
         )
-        # Also confirm the corrected language is present.
-        assert "not supported" in doc or "warning is emitted" in doc, (
-            f"{cls.__name__}.__doc__ does not mention the warning behavior; "
-            "expected 'not supported' or 'warning is emitted' in the Notes section."
+        assert "no-op today" not in doc, (
+            f"{cls.__name__}.__doc__ still narrates render status ('no-op today'); "
+            "the honored-kwarg contract lives in _honored_kwargs (ENC-09)."
+        )
+        # The machine-readable contract is the single source of truth.
+        assert cls._honored_kwargs == SECONDARY_EXTENT, (
+            f"{cls.__name__}._honored_kwargs is not the SECONDARY_EXTENT role."
         )

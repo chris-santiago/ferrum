@@ -37,6 +37,7 @@ pub(crate) struct AggregateOp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AggregateSpec {
     pub ops: Vec<AggregateOp>,
     #[serde(default)]

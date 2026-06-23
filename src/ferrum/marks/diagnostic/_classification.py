@@ -23,7 +23,7 @@ def desugar_roc(
     annotate_auc: bool = False,
     color_field: str | None = "class",
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """ROC curve mark.
 
     Data contract: columns ``fpr``, ``tpr``, ``class``, ``auc`` as emitted
@@ -31,16 +31,27 @@ def desugar_roc(
     calling ``Chart.mark_roc`` method pre-sorts the data ascending by
     ``fpr`` so the diagonal line layer is monotonic.
 
-    When ``annotate_auc=True`` the chart builder
-    (``_roc_chart_from_source``) injects ``_auc_label_x`` / ``_auc_label_y``
-    / ``_auc_label`` columns — one non-null row per class — and this
-    desugar emits a ``mark_text`` layer that references them. Rust's
-    ``mark_text`` skips null rows, so exactly one label renders per
-    class. ``average`` is informational at the mark layer — the figure
-    builder is responsible for shaping the data appropriately before
-    constructing the chart.
+    Annotation surfaces (see ``_metric_labels`` for the single source of the
+    AUC value + overlay-text formatting shared by both surfaces):
+
+    * The default ``annotate_auc=False`` keeps a raw mark un-annotated — a
+      primitive mark should not silently inject a metric overlay. The
+      figure function ``roc_chart`` defaults to ``annotate_auc=True`` and
+      owns the annotation itself (it calls ``mark_roc(annotate_auc=False)``
+      then overlays via ``_apply_metric_label_explicit``); the divergent
+      defaults are intentional.
+    * When ``annotate_auc=True`` this desugar emits a ``mark_text`` layer
+      reading ``_auc_label_x`` / ``_auc_label_y`` / ``_auc_label`` columns.
+      Those columns must be injected upstream (the data does not carry them
+      out of ``ModelSource.roc_curve()``); the figure path supplies its
+      annotation through ``_metric_labels`` instead, so this branch is the
+      hook for a caller that pre-injects the columns.
+
+    ``average`` is informational at the mark layer — the figure builder is
+    responsible for shaping the data appropriately before constructing the
+    chart.
     """
-    _ = average  # informational at the mark layer
+    del average  # informational at the mark layer
     user_kw = _validate("roc", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "fpr", "y": "tpr"}
     if color_field is not None:
@@ -86,16 +97,23 @@ def desugar_pr(
     iso_lines: bool = False,
     color_field: str | None = "class",
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Precision-recall curve mark.
 
     Data contract: ``recall``, ``precision``, ``class``, ``ap`` as emitted
     by ``ModelSource.pr_curve()``.
 
-    When ``annotate_ap=True`` the chart builder
-    (``_pr_chart_from_source``) injects ``_ap_label_x`` / ``_ap_label_y`` /
-    ``_ap_label`` columns — one non-null row per class — and this
-    desugar emits a ``mark_text`` layer that references them.
+    Annotation surfaces (see ``_metric_labels`` for the single source of the
+    AP value + overlay-text formatting shared by both surfaces):
+
+    * The default ``annotate_ap=False`` keeps a raw mark un-annotated; the
+      figure function ``pr_chart`` defaults to ``annotate_ap=True`` and owns
+      the annotation via ``_apply_metric_label_explicit``. The divergent
+      defaults are intentional (raw mark vs. figure function).
+    * When ``annotate_ap=True`` this desugar emits a ``mark_text`` layer
+      reading ``_ap_label_x`` / ``_ap_label_y`` / ``_ap_label`` columns,
+      which must be injected upstream (they do not come out of
+      ``ModelSource.pr_curve()``).
 
     When ``iso_lines=True`` the chart builder appends F-score iso-curve rows
     for F in {0.2, 0.4, 0.6, 0.8} with synthetic columns ``_iso_recall``,
@@ -104,7 +122,7 @@ def desugar_pr(
     desugar emits a grey dashed line layer grouped by ``_iso_f`` plus a text
     layer at ``(_iso_label_x, _iso_label_y)`` for the iso labels.
     """
-    _ = average  # informational at the mark layer
+    del average  # informational at the mark layer
     user_kw = _validate("pr", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "recall", "y": "precision"}
     if color_field is not None:
@@ -169,7 +187,7 @@ def desugar_calibration(
     reference_line: bool = True,
     color_field: str | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Calibration (reliability) curve mark.
 
     Data contract: ``mean_predicted``, ``fraction_positive``, ``count`` as
@@ -188,7 +206,7 @@ def desugar_calibration(
     # n_bins and strategy are consumed upstream by the chart builder
     # (source.calibration_curve(n_bins=..., strategy=...)); informational
     # at the mark layer — the data is already binned.
-    _ = n_bins, strategy
+    del n_bins, strategy
     user_kw = _validate("calibration", mark_kwargs)
     line_enc: dict[str, Any] = {
         "x": "mean_predicted",
@@ -232,7 +250,7 @@ def desugar_gain(
     reference_line: bool = True,
     color_field: str | None = "class",
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Cumulative-gain mark.
 
     Data contract: ``percent_population``, ``gain``, ``class`` per
@@ -240,7 +258,7 @@ def desugar_gain(
     ``class='baseline'`` rows that render as the diagonal reference when
     ``color_field='class'``; ``reference_line`` is informational.
     """
-    _ = reference_line  # baseline already in data
+    del reference_line  # baseline already in data
     user_kw = _validate("gain", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "percent_population", "y": "gain"}
     if color_field is not None:
@@ -259,7 +277,7 @@ def desugar_lift(
     reference_line: bool = True,
     color_field: str | None = "class",
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Lift curve mark.
 
     Data contract: ``percent_population``, ``lift``, ``class`` per
@@ -267,7 +285,7 @@ def desugar_lift(
     the lift=1 reference line when ``color_field='class'``;
     ``reference_line`` is informational.
     """
-    _ = reference_line  # baseline already in data
+    del reference_line  # baseline already in data
     user_kw = _validate("lift", mark_kwargs)
     line_enc: dict[str, Any] = {"x": "percent_population", "y": "lift"}
     if color_field is not None:
@@ -288,7 +306,7 @@ def desugar_discrimination_threshold(
     threshold_line: bool = False,
     optimum_label: bool = True,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Discrimination-threshold sweep mark.
 
     Data contract (long form): ``threshold``, ``metric``, ``value`` — the
@@ -309,7 +327,7 @@ def desugar_discrimination_threshold(
     feature works for both chart-API and figure-function entry points
     (Schwabish C7 audit-rework, 2026-05-12).
     """
-    _ = metrics, n_thresholds  # informational; data is pre-melted
+    del metrics, n_thresholds  # informational; data is pre-melted
     user_kw = _validate("discrimination_threshold", mark_kwargs)
     layers: list = [
         _Layer(
@@ -352,7 +370,7 @@ def desugar_confusion(
     color_field: str = "value",
     cmap: str | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Confusion-matrix mark: ordinal heatmap + per-cell value labels.
 
     Data contract: ``actual``, ``predicted``, ``value``, ``value_fmt`` as
@@ -402,7 +420,7 @@ def desugar_class_prediction_error(
     color_field: str = "predicted",
     show_counts: bool = True,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Stacked-bar diagnostic of predicted-class composition.
 
     Data contract: ``actual``, ``predicted``, ``value`` (same shape as

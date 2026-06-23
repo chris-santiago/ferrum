@@ -31,14 +31,16 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scale::quantize::QuantizeScale>()?;
     m.add_class::<scale::bin_ordinal::BinOrdinalScale>()?;
     // Transform PyO3 wrappers, driven by the single-source-of-truth macro
-    // in transform/core.rs. Adding a new transform is one line there;
-    // registration happens automatically here.
+    // in transform/core.rs. Adding a new transform with a Python class is one
+    // line in `for_each_py_transform!`; registration happens automatically here.
+    // The dict-only Phase-12 `Data*` transforms are intentionally absent from
+    // that table (SEAM-02) — they expose no Python class.
     macro_rules! register_transforms {
         ($($V:ident => $mod:ident : $py:ident,)*) => {{
             $( m.add_class::<crate::transform::$mod::$py>()?; )*
         }};
     }
-    crate::transform::core::for_each_transform!(register_transforms);
+    crate::transform::core::for_each_py_transform!(register_transforms);
     // PyAggregateOp is the op-spec helper class, not a TransformSpec
     // variant — registered manually.
     m.add_class::<transform::aggregate::PyAggregateOp>()?;
@@ -51,9 +53,19 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render::binding::compose_svg_vertical_py, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::compose_svg_grid_py, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::figure_title_nodes_py, m)?)?;
+    // Theme key contract (D-THEME-1): `ThemeOverridesSpec` is the single
+    // source of truth; Python derives its key lists from these accessors.
+    m.add_function(wrap_pyfunction!(render::binding::theme_known_keys, m)?)?;
+    m.add_function(wrap_pyfunction!(render::binding::theme_color_keys, m)?)?;
     // Phase 8b Task 37: continuous color schemes.
     m.add_class::<render::color::continuous::PyContinuousScheme>()?;
     m.add_function(wrap_pyfunction!(render::color::continuous::Gradient, m)?)?;
+    // T2.2 (D-COLOR-1): palette registry accessors — the single source of truth
+    // that Python `color.py` consumes instead of hand-mirroring hex tables.
+    m.add_function(wrap_pyfunction!(render::color::palette::list_palettes, m)?)?;
+    m.add_function(wrap_pyfunction!(render::color::palette::palette_kind, m)?)?;
+    m.add_function(wrap_pyfunction!(render::color::palette::palette_colors, m)?)?;
+    m.add_function(wrap_pyfunction!(render::color::palette::palette_sample, m)?)?;
     // Phase 10g Task 35: Kendall's tau-b (Knight's O(n log n)).
     m.add_function(wrap_pyfunction!(diagnostics::py_kendall_tau_b, m)?)?;
     // Classification diagnostic curve kernels (sklearn-parity).

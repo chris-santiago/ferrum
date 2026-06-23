@@ -20,13 +20,27 @@
 use ferrum_scene::{MarkBatch, MarkBatchKind, Panel, SceneNode};
 use rstar::{PointDistance, RTree, RTreeObject, AABB};
 
-use crate::scene_load::SceneData;
+use crate::scene_load::{DrawKind, SceneData};
 
 /// Maximum distance (scene-space pixels) for [`SpatialIndex::nearest`] to
 /// return a result.  Queries farther than this snap threshold return `None`.
 pub const SNAP_DISTANCE: f64 = 50.0;
 
 // ── MarkEntry ────────────────────────────────────────────────────────────────
+
+/// Geometry of an indexed mark.
+///
+/// This replaces the old `radius > 0.0` sentinel, which mis-treated a
+/// legitimately zero-radius circle as a rect. The variant — not the radius
+/// value — now decides which distance/containment formula applies, so a
+/// circle of radius `0.0` stays a circle (point distance to its center).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MarkGeom {
+    /// Circle of the given radius (may be `0.0`).
+    Circle { r: f64 },
+    /// Rectangle (extent comes from the entry's AABB).
+    Rect,
+}
 
 /// A single indexed mark node inside the R*-tree.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,8 +53,9 @@ pub struct MarkEntry {
     pub node_idx: usize,
     /// Optional data-row index from `batch.data_indices[node_idx]`.
     pub data_idx: Option<usize>,
-    /// For circles: the circle radius.  For rects: `0.0` (use the AABB).
-    pub radius: f64,
+    /// Mark geometry — the typed circle-vs-rect discriminant. Drives
+    /// `distance_2` and `geometry_contains`.
+    pub geom: MarkGeom,
     /// Axis-aligned bounding box of the mark.
     pub aabb: AABB<[f64; 2]>,
 }
@@ -64,21 +79,24 @@ impl rstar::PointDistance for MarkEntry {
         let px = point[0];
         let py = point[1];
 
-        if self.radius > 0.0 {
-            // Circle: Euclidean distance to center, clamped to 0 when inside.
-            let dx = px - self.point[0];
-            let dy = py - self.point[1];
-            let dist = (dx * dx + dy * dy).sqrt() - self.radius;
-            if dist <= 0.0 { 0.0 } else { dist * dist }
-        } else {
-            // Rect: distance to nearest point on the AABB.
-            let lower = self.aabb.lower();
-            let upper = self.aabb.upper();
-            let cx = px.clamp(lower[0], upper[0]);
-            let cy = py.clamp(lower[1], upper[1]);
-            let dx = px - cx;
-            let dy = py - cy;
-            dx * dx + dy * dy
+        match self.geom {
+            MarkGeom::Circle { r } => {
+                // Circle: Euclidean distance to center, clamped to 0 when inside.
+                let dx = px - self.point[0];
+                let dy = py - self.point[1];
+                let dist = (dx * dx + dy * dy).sqrt() - r;
+                if dist <= 0.0 { 0.0 } else { dist * dist }
+            }
+            MarkGeom::Rect => {
+                // Rect: distance to nearest point on the AABB.
+                let lower = self.aabb.lower();
+                let upper = self.aabb.upper();
+                let cx = px.clamp(lower[0], upper[0]);
+                let cy = py.clamp(lower[1], upper[1]);
+                let dx = px - cx;
+                let dy = py - cy;
+                dx * dx + dy * dy
+            }
         }
     }
 }
@@ -209,13 +227,37 @@ impl SpatialIndex {
     }
 }
 
+// ── MarkEntry constructors ───────────────────────────────────────────────────
+
+/// Build a [`MarkEntry`] for a circle node.
+///
+/// Used by both `collect_batch_entries` (scene-graph path) and
+/// `collect_packed_entries` (packed instance path) so the AABB convention and
+/// center computation are defined in one place.
+fn circle_entry(cx: f64, cy: f64, r: f64, batch_idx: usize, node_idx: usize, data_idx: Option<usize>) -> MarkEntry {
+    let aabb = AABB::from_corners([cx - r, cy - r], [cx + r, cy + r]);
+    MarkEntry { point: [cx, cy], batch_idx, node_idx, data_idx, geom: MarkGeom::Circle { r }, aabb }
+}
+
+/// Build a [`MarkEntry`] for a rect node.
+///
+/// Used by both `collect_batch_entries` (scene-graph path) and
+/// `collect_packed_entries` (packed instance path) so the AABB convention and
+/// center computation are defined in one place.
+fn rect_entry(x: f64, y: f64, w: f64, h: f64, batch_idx: usize, node_idx: usize, data_idx: Option<usize>) -> MarkEntry {
+    let cx = x + w / 2.0;
+    let cy = y + h / 2.0;
+    let aabb = AABB::from_corners([x, y], [x + w, y + h]);
+    MarkEntry { point: [cx, cy], batch_idx, node_idx, data_idx, geom: MarkGeom::Rect, aabb }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Build the list of [`MarkEntry`]s for one panel.
 fn entries_for_panel(panel: &Panel) -> Vec<MarkEntry> {
     let mut entries = Vec::new();
     for (batch_idx, batch) in panel.marks.iter().enumerate() {
-        if !is_indexed_kind(batch) {
+        if !is_indexed_kind(batch.kind) {
             continue;
         }
         collect_batch_entries(batch, batch_idx, &mut entries);
@@ -223,12 +265,15 @@ fn entries_for_panel(panel: &Panel) -> Vec<MarkEntry> {
     entries
 }
 
-/// Return `true` for batch kinds whose nodes are indexed by the spatial index.
-fn is_indexed_kind(batch: &MarkBatch) -> bool {
-    matches!(
-        batch.kind,
-        MarkBatchKind::Point | MarkBatchKind::Bar | MarkBatchKind::Rect
-    )
+/// Return `true` for `MarkBatchKind` values that are indexed by the spatial index.
+///
+/// The spatial index covers circles (from `Point` batches) and rects (from
+/// `Bar` and `Rect` batches).  This is the single policy definition: both
+/// `SpatialIndex::entries_for_panel` and `hit_test::hit_test_with_index` route
+/// through this function so the indexed-kind set cannot drift between the two
+/// modules.
+pub fn is_indexed_kind(kind: MarkBatchKind) -> bool {
+    matches!(kind, MarkBatchKind::Point | MarkBatchKind::Bar | MarkBatchKind::Rect)
 }
 
 /// Append [`MarkEntry`] values for each indexable node in `batch`.
@@ -241,35 +286,10 @@ fn collect_batch_entries(batch: &MarkBatch, batch_idx: usize, out: &mut Vec<Mark
 
         match node {
             SceneNode::Circle { cx, cy, r, .. } => {
-                let r = *r;
-                let cx = *cx;
-                let cy = *cy;
-                let aabb = AABB::from_corners([cx - r, cy - r], [cx + r, cy + r]);
-                out.push(MarkEntry {
-                    point: [cx, cy],
-                    batch_idx,
-                    node_idx,
-                    data_idx,
-                    radius: r,
-                    aabb,
-                });
+                out.push(circle_entry(*cx, *cy, *r, batch_idx, node_idx, data_idx));
             }
             SceneNode::Rect { x, y, w, h, .. } => {
-                let x = *x;
-                let y = *y;
-                let w = *w;
-                let h = *h;
-                let cx = x + w / 2.0;
-                let cy = y + h / 2.0;
-                let aabb = AABB::from_corners([x, y], [x + w, y + h]);
-                out.push(MarkEntry {
-                    point: [cx, cy],
-                    batch_idx,
-                    node_idx,
-                    data_idx,
-                    radius: 0.0,
-                    aabb,
-                });
+                out.push(rect_entry(*x, *y, *w, *h, batch_idx, node_idx, data_idx));
             }
             _ => {}
         }
@@ -293,56 +313,43 @@ fn collect_packed_entries(
         };
 
         match meta.kind {
-            0 => {
-                // Packed circles.
+            DrawKind::Circle => {
                 for i in 0..meta.instance_count {
                     let idx = meta.instance_start + i;
                     let Some(ci) = data.circle_instances.get(idx) else { continue };
-                    let cx = ci.center[0] as f64;
-                    let cy = ci.center[1] as f64;
-                    let r = ci.radius as f64;
-                    let aabb = AABB::from_corners([cx - r, cy - r], [cx + r, cy + r]);
                     let data_idx = meta.data_indices
                         .as_ref()
                         .and_then(|dis| dis.get(i))
                         .map(|&di| di as usize);
-                    out.push(MarkEntry {
-                        point: [cx, cy],
+                    out.push(circle_entry(
+                        ci.center[0] as f64,
+                        ci.center[1] as f64,
+                        ci.radius as f64,
                         batch_idx,
-                        node_idx: i,
+                        i,
                         data_idx,
-                        radius: r,
-                        aabb,
-                    });
+                    ));
                 }
             }
-            1 => {
-                // Packed rects.
+            DrawKind::Rect => {
                 for i in 0..meta.instance_count {
                     let idx = meta.instance_start + i;
                     let Some(ri) = data.rect_instances.get(idx) else { continue };
-                    let x = ri.position[0] as f64;
-                    let y = ri.position[1] as f64;
-                    let w = ri.size[0] as f64;
-                    let h = ri.size[1] as f64;
-                    let cx = x + w / 2.0;
-                    let cy = y + h / 2.0;
-                    let aabb = AABB::from_corners([x, y], [x + w, y + h]);
                     let data_idx = meta.data_indices
                         .as_ref()
                         .and_then(|dis| dis.get(i))
                         .map(|&di| di as usize);
-                    out.push(MarkEntry {
-                        point: [cx, cy],
+                    out.push(rect_entry(
+                        ri.position[0] as f64,
+                        ri.position[1] as f64,
+                        ri.size[0] as f64,
+                        ri.size[1] as f64,
                         batch_idx,
-                        node_idx: i,
+                        i,
                         data_idx,
-                        radius: 0.0,
-                        aabb,
-                    });
+                    ));
                 }
             }
-            _ => {}
         }
     }
 }
@@ -350,20 +357,23 @@ fn collect_packed_entries(
 /// Check whether `(x, y)` lies within the geometry of `entry` (with
 /// `tolerance` added on all sides).
 fn geometry_contains(entry: &MarkEntry, x: f64, y: f64, tolerance: f64) -> bool {
-    if entry.radius > 0.0 {
-        // Circle: check distance to center vs. (radius + tolerance).
-        let dx = x - entry.point[0];
-        let dy = y - entry.point[1];
-        let r = entry.radius + tolerance;
-        dx * dx + dy * dy <= r * r
-    } else {
-        // Rect: check containment within AABB expanded by tolerance.
-        let lower = entry.aabb.lower();
-        let upper = entry.aabb.upper();
-        x >= lower[0] - tolerance
-            && x <= upper[0] + tolerance
-            && y >= lower[1] - tolerance
-            && y <= upper[1] + tolerance
+    match entry.geom {
+        MarkGeom::Circle { r } => {
+            // Circle: check distance to center vs. (radius + tolerance).
+            let dx = x - entry.point[0];
+            let dy = y - entry.point[1];
+            let r = r + tolerance;
+            dx * dx + dy * dy <= r * r
+        }
+        MarkGeom::Rect => {
+            // Rect: check containment within AABB expanded by tolerance.
+            let lower = entry.aabb.lower();
+            let upper = entry.aabb.upper();
+            x >= lower[0] - tolerance
+                && x <= upper[0] + tolerance
+                && y >= lower[1] - tolerance
+                && y <= upper[1] + tolerance
+        }
     }
 }
 
@@ -1010,7 +1020,7 @@ mod tests {
             batch_idx: 0,
             node_idx: 0,
             data_idx: None,
-            radius: 0.0,
+            geom: MarkGeom::Rect,
             aabb: AABB::from_corners([40.0, 40.0], [60.0, 60.0]),
         };
         assert!(entry.distance_2(&[50.0, 50.0]) < 1e-12);
@@ -1024,7 +1034,7 @@ mod tests {
             batch_idx: 0,
             node_idx: 0,
             data_idx: None,
-            radius: 0.0,
+            geom: MarkGeom::Rect,
             aabb: AABB::from_corners([40.0, 40.0], [60.0, 60.0]),
         };
         // Right of rect at x=70, y=50 → nearest point (60, 50) → dist=10
@@ -1039,7 +1049,7 @@ mod tests {
             batch_idx: 0,
             node_idx: 0,
             data_idx: None,
-            radius: 20.0,
+            geom: MarkGeom::Circle { r: 20.0 },
             aabb: AABB::from_corners([80.0, 80.0], [120.0, 120.0]),
         };
         assert!(entry.distance_2(&[100.0, 100.0]) < 1e-12); // center
@@ -1053,7 +1063,7 @@ mod tests {
             batch_idx: 0,
             node_idx: 0,
             data_idx: None,
-            radius: 10.0,
+            geom: MarkGeom::Circle { r: 10.0 },
             aabb: AABB::from_corners([-10.0, -10.0], [10.0, 10.0]),
         };
         // Distance from edge = 30 - 10 = 20 → distance_2 should be 400
@@ -1080,7 +1090,7 @@ mod tests {
             PackedBatchMeta {
                 data_indices: Some(vec![10, 20, 30]),
                 tooltip_bytes: None,
-                kind: 0, // circles
+                kind: DrawKind::Circle,
                 instance_start: 0,
                 instance_count: 3,
             },
@@ -1154,7 +1164,7 @@ mod tests {
             PackedBatchMeta {
                 data_indices: Some(vec![42, 99]),
                 tooltip_bytes: None,
-                kind: 1, // rects
+                kind: DrawKind::Rect,
                 instance_start: 0,
                 instance_count: 2,
             },
@@ -1221,7 +1231,7 @@ mod tests {
             PackedBatchMeta {
                 data_indices: Some(vec![2]),
                 tooltip_bytes: None,
-                kind: 0,
+                kind: DrawKind::Circle,
                 instance_start: 0,
                 instance_count: 1,
             },
@@ -1261,5 +1271,125 @@ mod tests {
         // Packed circle at (400, 400).
         let (e_pk, _) = idx.nearest(0, 400.0, 400.0).expect("must find packed circle");
         assert_eq!(e_pk.data_idx, Some(2));
+    }
+
+    // ── WASM-06: is_indexed_kind policy ──────────────────────────────────────
+
+    /// Point, Bar, and Rect are indexed; all other kinds are not.
+    ///
+    /// This test pins the policy that `is_indexed_kind` defines so that
+    /// `spatial_index` and `hit_test` cannot drift from each other.
+    #[test]
+    fn is_indexed_kind_returns_true_for_indexed_kinds() {
+        assert!(is_indexed_kind(MarkBatchKind::Point), "Point must be indexed");
+        assert!(is_indexed_kind(MarkBatchKind::Bar),   "Bar must be indexed");
+        assert!(is_indexed_kind(MarkBatchKind::Rect),  "Rect must be indexed");
+    }
+
+    #[test]
+    fn is_indexed_kind_returns_false_for_non_indexed_kinds() {
+        assert!(!is_indexed_kind(MarkBatchKind::Line),    "Line must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Area),    "Area must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Arc),     "Arc must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Tick),    "Tick must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Text),    "Text must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Label),   "Label must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Ribbon),  "Ribbon must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Segment), "Segment must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Image),   "Image must not be indexed");
+        assert!(!is_indexed_kind(MarkBatchKind::Polygon), "Polygon must not be indexed");
+    }
+
+    // ── WASM-09: circle_entry / rect_entry constructors ──────────────────────
+
+    /// `circle_entry` must set center, geometry, AABB, and pass through indices.
+    #[test]
+    fn circle_entry_sets_correct_fields() {
+        let e = circle_entry(10.0, 20.0, 5.0, 1, 2, Some(99));
+        assert_eq!(e.point, [10.0, 20.0], "center must be (cx, cy)");
+        assert_eq!(e.geom, MarkGeom::Circle { r: 5.0 }, "geom must be Circle{{r}}");
+        assert_eq!(e.batch_idx, 1);
+        assert_eq!(e.node_idx, 2);
+        assert_eq!(e.data_idx, Some(99));
+        // AABB must enclose (cx±r, cy±r).
+        let lower = e.aabb.lower();
+        let upper = e.aabb.upper();
+        assert!((lower[0] - 5.0).abs() < 1e-10,  "AABB lower x must be cx-r");
+        assert!((lower[1] - 15.0).abs() < 1e-10, "AABB lower y must be cy-r");
+        assert!((upper[0] - 15.0).abs() < 1e-10, "AABB upper x must be cx+r");
+        assert!((upper[1] - 25.0).abs() < 1e-10, "AABB upper y must be cy+r");
+    }
+
+    /// `circle_entry` with `data_idx: None` passes None through.
+    #[test]
+    fn circle_entry_none_data_idx() {
+        let e = circle_entry(0.0, 0.0, 1.0, 0, 0, None);
+        assert_eq!(e.data_idx, None);
+    }
+
+    /// `rect_entry` must set center to (x + w/2, y + h/2), geom to Rect,
+    /// and AABB to the rect corners.
+    #[test]
+    fn rect_entry_sets_correct_fields() {
+        // Rect at (10, 20), 40 wide, 30 tall.
+        // Center = (10 + 20, 20 + 15) = (30, 35).
+        let e = rect_entry(10.0, 20.0, 40.0, 30.0, 3, 4, Some(7));
+        assert!((e.point[0] - 30.0).abs() < 1e-10, "center x = x + w/2 = 30");
+        assert!((e.point[1] - 35.0).abs() < 1e-10, "center y = y + h/2 = 35");
+        assert_eq!(e.geom, MarkGeom::Rect, "rect entry must have geom Rect");
+        assert_eq!(e.batch_idx, 3);
+        assert_eq!(e.node_idx, 4);
+        assert_eq!(e.data_idx, Some(7));
+        let lower = e.aabb.lower();
+        let upper = e.aabb.upper();
+        assert!((lower[0] - 10.0).abs() < 1e-10, "AABB lower x = x");
+        assert!((lower[1] - 20.0).abs() < 1e-10, "AABB lower y = y");
+        assert!((upper[0] - 50.0).abs() < 1e-10, "AABB upper x = x + w");
+        assert!((upper[1] - 50.0).abs() < 1e-10, "AABB upper y = y + h");
+    }
+
+    /// `rect_entry` with `data_idx: None` passes None through.
+    #[test]
+    fn rect_entry_none_data_idx() {
+        let e = rect_entry(0.0, 0.0, 10.0, 10.0, 0, 0, None);
+        assert_eq!(e.data_idx, None);
+    }
+
+    /// The PointDistance implementation for a circle entry treats the query
+    /// point as inside (distance 0) when it lies within the circle's radius.
+    #[test]
+    fn circle_entry_distance_inside_is_zero() {
+        let e = circle_entry(50.0, 50.0, 10.0, 0, 0, None);
+        // Query at center — distance must be 0.
+        assert!((e.distance_2(&[50.0, 50.0])).abs() < 1e-10);
+        // Query at surface edge — distance must be 0 (inside or on boundary).
+        assert!((e.distance_2(&[60.0, 50.0])).abs() < 1e-10);
+    }
+
+    /// The PointDistance implementation for a rect entry treats a query inside
+    /// the AABB as distance 0.
+    #[test]
+    fn rect_entry_distance_inside_is_zero() {
+        let e = rect_entry(10.0, 10.0, 20.0, 20.0, 0, 0, None);
+        // Center (20, 20) is inside the rect.
+        assert!((e.distance_2(&[20.0, 20.0])).abs() < 1e-10);
+    }
+
+    // ── WASM-02: zero-radius circle stays a circle (latent-bug fix) ──────────
+
+    /// A zero-radius circle is classified as [`MarkGeom::Circle`], not a rect.
+    ///
+    /// The old `radius > 0.0` sentinel would have classified this entry as a
+    /// rect. Because a zero-radius circle's AABB collapses to a single point at
+    /// the center, both the old rect path and the new circle path measure the
+    /// distance to that center, so the numeric result is identical — this test
+    /// pins the corrected *classification* without changing observable distance.
+    #[test]
+    fn zero_radius_circle_classified_as_circle() {
+        let e = circle_entry(50.0, 50.0, 0.0, 0, 0, None);
+        assert_eq!(e.geom, MarkGeom::Circle { r: 0.0 }, "zero-radius circle must stay a circle");
+        // Distance to center is 0; distance to a point 10px away is 10.
+        assert!((e.distance_2(&[50.0, 50.0])).abs() < 1e-10);
+        assert!((e.distance_2(&[60.0, 50.0]).sqrt() - 10.0).abs() < 1e-6);
     }
 }

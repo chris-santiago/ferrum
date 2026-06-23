@@ -1,6 +1,6 @@
-use ferrum_scene::{MarkBatch, MarkBatchKind, SceneNode};
+use ferrum_scene::{MarkBatch, MarkBatchKind, Panel, SceneNode};
 
-use crate::spatial_index::SpatialIndex;
+use crate::spatial_index::{is_indexed_kind, SpatialIndex};
 
 pub struct HitResult {
     pub panel_id: usize,
@@ -9,10 +9,29 @@ pub struct HitResult {
     pub data_idx: Option<usize>,
 }
 
-/// Returns `true` for batch kinds that are indexed by the spatial index
-/// (circles from `Point` batches and rects from `Bar`/`Rect` batches).
-fn is_indexed_batch_kind(kind: MarkBatchKind) -> bool {
-    matches!(kind, MarkBatchKind::Point | MarkBatchKind::Bar | MarkBatchKind::Rect)
+/// Resolve the `data_idx` for a spatial-index hit result.
+///
+/// The spatial index stores a `data_idx` in each `MarkEntry` (populated from
+/// `PackedBatchMeta` for packed batches).  For non-packed batches the entry's
+/// `data_idx` may be `None`; fall back to the scene-graph's
+/// `batch.data_indices[node_idx]` in that case.
+///
+/// This rule is the same at all four call sites inside `hit_test_with_index`
+/// and `hit_test_nearest_with_index`, so a single helper eliminates the
+/// four-way copy-paste and ensures the precedence order cannot drift.
+pub(crate) fn resolve_data_idx(
+    panel: &Panel,
+    batch_idx: usize,
+    node_idx: usize,
+    entry_data_idx: Option<usize>,
+) -> Option<usize> {
+    entry_data_idx.or_else(|| {
+        panel
+            .marks
+            .get(batch_idx)
+            .and_then(|b| b.data_indices.as_ref())
+            .and_then(|ids| ids.get(node_idx).copied())
+    })
 }
 
 pub fn hit_test(
@@ -49,13 +68,7 @@ pub fn hit_test_with_index(
         // R-tree path for indexed batch kinds (Point, Bar, Rect).
         if let Some(idx) = spatial_index {
             if let Some(entry) = idx.hit_test(panel_pos, px, py, 0.0) {
-                let data_idx = entry.data_idx.or_else(|| {
-                    panel
-                        .marks
-                        .get(entry.batch_idx)
-                        .and_then(|b| b.data_indices.as_ref())
-                        .and_then(|ids| ids.get(entry.node_idx).copied())
-                });
+                let data_idx = resolve_data_idx(panel, entry.batch_idx, entry.node_idx, entry.data_idx);
                 return Some(HitResult {
                     panel_id: panel_pos,
                     batch_idx: entry.batch_idx,
@@ -69,7 +82,7 @@ pub fn hit_test_with_index(
         // and for the full linear path when no spatial index is available.
         for (bi, batch) in panel.marks.iter().enumerate().rev() {
             // When a spatial index is available, skip indexed kinds — already handled above.
-            if spatial_index.is_some() && is_indexed_batch_kind(batch.kind) {
+            if spatial_index.is_some() && is_indexed_kind(batch.kind) {
                 continue;
             }
             if let Some(ni) = hit_test_batch(batch, panel, px, py) {
@@ -129,17 +142,7 @@ pub fn hit_test_nearest_with_index(
         // R-tree nearest for indexed batch kinds.
         if let Some(idx) = spatial_index {
             if let Some((entry, dist)) = idx.nearest(panel_pos, px, py) {
-                // Prefer the data_idx stored in the spatial index entry (which
-                // is populated from PackedBatchMeta for packed batches). Fall
-                // back to the scene-graph's batch.data_indices for non-packed
-                // batches where the entry's data_idx may be None.
-                let data_idx = entry.data_idx.or_else(|| {
-                    panel
-                        .marks
-                        .get(entry.batch_idx)
-                        .and_then(|b| b.data_indices.as_ref())
-                        .and_then(|ids| ids.get(entry.node_idx).copied())
-                });
+                let data_idx = resolve_data_idx(panel, entry.batch_idx, entry.node_idx, entry.data_idx);
                 let is_closer = best.as_ref().is_none_or(|(d, _)| dist < *d);
                 if is_closer {
                     best = Some((dist, HitResult {
@@ -155,7 +158,7 @@ pub fn hit_test_nearest_with_index(
         // Linear scan for non-indexed batch kinds (and the full path when no index given).
         for (bi, batch) in panel.marks.iter().enumerate() {
             // When a spatial index is available, skip indexed kinds — already covered above.
-            if spatial_index.is_some() && is_indexed_batch_kind(batch.kind) {
+            if spatial_index.is_some() && is_indexed_kind(batch.kind) {
                 continue;
             }
             if let Some((ni, dist)) = nearest_in_batch(batch, px, py) {
@@ -1513,5 +1516,82 @@ mod tests {
             hit_test_batch(&batch, &panel, 400.0, 400.0).is_none(),
             "Label batch must miss far from anchor"
         );
+    }
+
+    // ── WASM-10: resolve_data_idx ─────────────────────────────────────────────
+
+    fn make_panel_with_data_indices(data_indices: Option<Vec<usize>>) -> Panel {
+        Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![circle_node(50.0, 50.0, 5.0)],
+                data_indices,
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: ferrum_scene::BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+        }
+    }
+
+    /// When `entry_data_idx` is `Some`, it is returned directly (packed-batch
+    /// precedence — the spatial index stores it from `PackedBatchMeta`).
+    #[test]
+    fn resolve_data_idx_returns_entry_data_idx_when_some() {
+        let panel = make_panel_with_data_indices(Some(vec![42]));
+        // entry_data_idx = Some(99) takes priority over batch.data_indices[0] = 42.
+        let result = resolve_data_idx(&panel, 0, 0, Some(99));
+        assert_eq!(result, Some(99), "entry_data_idx must take priority over batch.data_indices");
+    }
+
+    /// When `entry_data_idx` is `None`, fall back to `batch.data_indices[node_idx]`.
+    #[test]
+    fn resolve_data_idx_falls_back_to_batch_data_indices() {
+        let panel = make_panel_with_data_indices(Some(vec![42]));
+        let result = resolve_data_idx(&panel, 0, 0, None);
+        assert_eq!(result, Some(42), "must fall back to batch.data_indices[node_idx]");
+    }
+
+    /// When both `entry_data_idx` and `batch.data_indices` are `None`, returns `None`.
+    #[test]
+    fn resolve_data_idx_returns_none_when_both_absent() {
+        let panel = make_panel_with_data_indices(None);
+        let result = resolve_data_idx(&panel, 0, 0, None);
+        assert_eq!(result, None, "must return None when both sources are absent");
+    }
+
+    /// When `batch_idx` is out of range, returns `None` gracefully.
+    #[test]
+    fn resolve_data_idx_out_of_range_batch_idx_returns_none() {
+        let panel = make_panel_with_data_indices(Some(vec![7]));
+        // batch_idx = 99 does not exist.
+        let result = resolve_data_idx(&panel, 99, 0, None);
+        assert_eq!(result, None, "out-of-range batch_idx must return None");
+    }
+
+    /// When `node_idx` is out of range for `batch.data_indices`, returns `None`.
+    #[test]
+    fn resolve_data_idx_out_of_range_node_idx_returns_none() {
+        let panel = make_panel_with_data_indices(Some(vec![7]));
+        // node_idx = 99 is beyond the single-element data_indices.
+        let result = resolve_data_idx(&panel, 0, 99, None);
+        assert_eq!(result, None, "out-of-range node_idx must return None");
     }
 }

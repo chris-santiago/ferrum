@@ -16,6 +16,7 @@ use crate::transform::group_key::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DensityDataSpec {
     pub field: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -47,32 +48,12 @@ fn default_density_as() -> (String, String) {
 /// to pin the value axis before partitioning so every facet panel shares the same
 /// KDE grid range (archaeology bug #7, extended to DensityData by round-3 T1).
 ///
-/// Uses `coerce_to_float64` (like the KDE sibling) so Int64/Float32/etc.
-/// pre-facet batches produce a valid shared extent instead of returning None.
+/// NICENESS CONTRACT (XFORM-08): returns the RAW `(lo, hi)` (no nicing), mirroring
+/// the KDE sibling and unlike `Bin`. Uses the shared `column_extent` helper, which
+/// coerces Int64/Float32/etc. pre-facet batches to Float64 so they produce a valid
+/// shared extent instead of returning None.
 pub(crate) fn global_extent(spec: &DensityDataSpec, batch: &RecordBatch) -> Option<(f64, f64)> {
-    let schema = batch.schema();
-    let idx = schema.index_of(&spec.field).ok()?;
-    let arr = crate::transform::numeric_util::coerce_to_float64(
-        batch.column(idx),
-        "density_global_extent",
-        &spec.field,
-    )
-    .ok()?;
-    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
-        if arr.is_null(i) {
-            return (lo, hi);
-        }
-        let v = arr.value(i);
-        if v.is_nan() {
-            return (lo, hi);
-        }
-        (lo.min(v), hi.max(v))
-    });
-    if lo.is_finite() && hi.is_finite() && lo < hi {
-        Some((lo, hi))
-    } else {
-        None
-    }
+    crate::transform::numeric_util::column_extent(batch, &spec.field)
 }
 
 pub(crate) fn apply(spec: &DensityDataSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {

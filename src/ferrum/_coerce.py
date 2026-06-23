@@ -8,11 +8,147 @@ Supports (per spec §3.18):
 - numpy.ndarray (2D, auto-named "col_0", "col_1", ...)
 
 Raises TypeError for unsupported types or numpy 1D without column names.
+
+Boundary normalization (``normalize_for_rust``)
+------------------------------------------------
+``to_arrow_table`` converts any input to an Arrow table.  Before the table
+crosses the Rust CDI boundary, callers must run it through
+``normalize_for_rust``, which owns the single canonical list of Arrow dtypes
+the Rust renderer accepts and their required forms:
+
+- ``date32`` / ``date64`` → ``timestamp[ms]``
+- ``timestamp[us]`` / ``timestamp[ns]`` / ``timestamp[s]`` → ``timestamp[ms]``
+- ``Duration(any unit)`` → ``timestamp[ms]``  (same temporal scaling as Date)
+- ``Dictionary``-encoded → decoded to the plain value type
+- ``Null`` (all-None, unknown type) → ``float64``
+
+The SVG path (``_render.py::_render_inputs``) and the interactive path both
+call ``normalize_for_rust(to_arrow_table(data))`` so the contract is applied
+exactly once, by one function.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+
+def _normalize_column(col: "pyarrow.Array", pa: object, pc: object) -> "tuple[pyarrow.Array, bool]":
+    """Normalize a single decoded (non-dictionary) Arrow column to a Rust-safe dtype.
+
+    Returns ``(normalized_col, changed)`` where ``changed`` is True when the
+    column was modified.  Callers must not pass a Dictionary-typed column here;
+    dictionary decoding is the caller's responsibility (``normalize_for_rust``
+    does it before calling this function).
+
+    Normalizations (applied in priority order):
+
+    - ``date32`` / ``date64``                    → ``timestamp[ms]``
+    - ``timestamp[us/ns/s]``                     → ``timestamp[ms]``
+    - ``duration(any unit)``                     → ``timestamp[ms]``
+    - ``null`` (all-None, unknown type)          → ``float64``
+    - everything else                            → unchanged
+    """
+    field_type = col.type
+
+    if pa.types.is_date32(field_type) or pa.types.is_date64(field_type):
+        return col.cast(pa.timestamp("ms")), True
+
+    if pa.types.is_timestamp(field_type) and field_type.unit != "ms":
+        return col.cast(pa.timestamp("ms")), True
+
+    if pa.types.is_duration(field_type):
+        # Arrow does not support a direct duration→timestamp cast, and
+        # duration[ns/us]→duration[ms] is a lossy safe-cast (Arrow refuses
+        # values not divisible by the scale factor).  Instead we reinterpret
+        # the integer representation with unit-aware scaling:
+        #   duration[unit] → int64          (raw ticks in source unit)
+        #   int64 * scale_to_ms             (convert ticks to ms)
+        #   int64 → timestamp[ms]           (attach temporal semantics)
+        unit = field_type.unit  # "ns", "us", "ms", or "s"
+        as_int = col.cast(pa.int64())
+        if unit == "ns":
+            ms_ints = pc.divide(as_int, 1_000_000)
+        elif unit == "us":
+            ms_ints = pc.divide(as_int, 1_000)
+        elif unit == "ms":
+            ms_ints = as_int
+        else:  # "s"
+            # NOTE: pc.multiply wraps on overflow; only affects durations
+            # exceeding ~292 million years, which is not a practical concern.
+            ms_ints = pc.multiply(as_int, 1_000)
+        return ms_ints.cast(pa.timestamp("ms")), True
+
+    if pa.types.is_null(field_type):
+        return col.cast(pa.float64()), True
+
+    return col, False
+
+
+def normalize_for_rust(tbl: "pyarrow.Table") -> "pyarrow.Table":
+    """Apply CDI-boundary dtype casts required by the Rust renderer.
+
+    This is the pre-Rust boundary normalizer that **owns** the
+    ``Duration``→``timestamp[ms]``, ``Dictionary``-decode, and
+    ``Null``→``float64`` rules, and **re-asserts** the date/timestamp
+    canonicalization that ``to_arrow_table`` also applies at ingest (so a
+    caller passing a raw pyarrow table directly is still safe).  Note that
+    ``to_arrow_table``'s polars and pyarrow branches already cast
+    ``date32``/``date64``→``timestamp[ms]`` and non-ms timestamps at ingest,
+    making those casts here idempotent for the common path.  Both the SVG
+    render path and the interactive render path must call this function after
+    ``to_arrow_table`` and before handing data to any ``ferrum._core``
+    binding.
+
+    Normalizations applied (in column order, one pass):
+
+    - ``date32`` / ``date64`` → ``timestamp[ms]``
+    - ``timestamp[us]`` / ``timestamp[ns]`` / ``timestamp[s]`` →
+      ``timestamp[ms]``
+    - ``duration(any unit)`` → ``timestamp[ms]``  (temporal scaling; matches
+      how Date is handled so a Duration axis and a Date axis use the same
+      epoch-millisecond units)
+    - ``Dictionary``-encoded column → decoded to the plain value type, then
+      the decoded column passes through the same full normalization above
+      (date, timestamp, duration, null are all handled after decode)
+    - ``Null`` (all-None column with unknown type) → ``float64``
+
+    Parameters
+    ----------
+    tbl : pyarrow.Table
+        An Arrow table produced by ``to_arrow_table``.
+
+    Returns
+    -------
+    pyarrow.Table
+        The same table with normalized dtypes.  Returned as-is when no
+        column requires a cast.
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    new_cols: list = []
+    needs_rebuild = False
+    for i in range(len(tbl.schema)):
+        col = tbl.column(i)
+        field_type = tbl.schema.field(i).type
+
+        if pa.types.is_dictionary(field_type):
+            # Decode first, then apply the full per-column normalization so
+            # that a dict-over-duration, dict-over-timestamp[us], or
+            # dict-over-null is handled identically to the non-dict path.
+            col = pc.dictionary_decode(col)
+            col, _ = _normalize_column(col, pa, pc)
+            needs_rebuild = True
+        else:
+            col, changed = _normalize_column(col, pa, pc)
+            if changed:
+                needs_rebuild = True
+
+        new_cols.append(col)
+
+    if not needs_rebuild:
+        return tbl
+    return pa.table(new_cols, names=[tbl.schema.field(i).name for i in range(len(tbl.schema))])
 
 
 def to_arrow_table(data: Any) -> "pyarrow.Table":
@@ -83,9 +219,9 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
                     casts.append(pl.col(c).cast(pl.Datetime("ms")))
                 elif dt == pl.Categorical or isinstance(dt, pl.Enum):
                     casts.append(pl.col(c).cast(pl.Utf8))
-                # K6: Duration columns → Int64 (nanoseconds) for Rust compat.
-                elif isinstance(dt, pl.Duration):
-                    casts.append(pl.col(c).cast(pl.Int64))
+                # Duration columns: do NOT pre-cast here.  polars.to_arrow()
+                # produces Arrow duration[unit], which normalize_for_rust then
+                # converts to timestamp[ms] uniformly for both frontends.
             if casts:
                 data = data.with_columns(casts)
             return data.to_arrow()

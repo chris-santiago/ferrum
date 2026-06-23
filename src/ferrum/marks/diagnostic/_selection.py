@@ -34,7 +34,7 @@ def desugar_learning_curve(
     ci_style: str = "band",
     color_field: str | None = "split",
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Learning-curve mark: per-split CI band/errorbar + mean line.
 
     Data contract: ``train_size`` (Int64), ``split`` (Utf8: "train"|"test"),
@@ -107,7 +107,7 @@ def desugar_validation_curve(
     color_field: str | None = "split",
     param_label: str | None = None,
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Validation-curve mark: same shape as learning_curve over a
     hyperparameter sweep.
 
@@ -180,7 +180,7 @@ def desugar_cv_scores(
     kind: str = "box",
     split: str = "both",
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Per-fold CV score distribution.
 
     Data contract: ``fold`` (Int64), ``split`` (Utf8), ``score`` (Float64)
@@ -193,7 +193,7 @@ def desugar_cv_scores(
     del x_field, y_field
     # split is consumed upstream by the chart builder (filters DataFrame
     # to the requested split); informational at the mark layer.
-    _ = split
+    del split
     from ferrum.encoding import Y
 
     user_kw = _validate("cv_scores", mark_kwargs)
@@ -243,7 +243,27 @@ def desugar_cv_scores(
     raise ValueError(f"mark_cv_scores(kind={kind!r}) — expected 'box', 'bar', or 'strip'.")
 
 
-register_layer_names("cv_scores", frozenset({"point", "bar", "mean"}))
+# cv_scores registers the UNION of all three kinds' sub-layer names so a valid
+# override resolves regardless of `kind`: strip -> {point}; bar -> {bar, mean};
+# box delegates to desugar_boxplot and borrows its six sub-layer names
+# ({whisker, lower_cap, upper_cap, box, median, outlier}). Names absent from the
+# active kind are benign no-op override targets (the catalog's documented contract).
+register_layer_names(
+    "cv_scores",
+    frozenset(
+        {
+            "point",
+            "bar",
+            "mean",
+            "whisker",
+            "lower_cap",
+            "upper_cap",
+            "box",
+            "median",
+            "outlier",
+        }
+    ),
+)
 
 
 def desugar_alpha_selection(
@@ -254,7 +274,7 @@ def desugar_alpha_selection(
     highlight_best: bool = True,
     ci_style: str = "band",
     **mark_kwargs: Any,
-) -> tuple:
+) -> MarkDesugarResult:
     """Regularization-strength selection mark: mean-score line + best-alpha rule.
 
     Data contract: ``alpha`` (Float64), ``mean_score`` (Float64) — the
@@ -270,7 +290,7 @@ def desugar_alpha_selection(
     del x_field, y_field
     # ci_style is informational at the mark layer — alpha_selection
     # renders a single curve without CI bands.
-    _ = ci_style
+    del ci_style
     from ferrum.encoding import Y
 
     user_kw = _validate("alpha_selection", mark_kwargs)

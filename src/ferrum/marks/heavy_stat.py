@@ -32,7 +32,7 @@ def desugar_contour(
     fill: bool = True,
     cmap: str | None = None,
     groupby: str | None = None,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Bivariate-density contour mark desugar.
 
     Converts ``chart.mark_contour(...)`` into a ``Kde2D`` → ``Contour``
@@ -215,7 +215,8 @@ def desugar_violin(
     y_sort: Any = None,
     color_field: str | None = None,
     shared_extent: bool = False,
-) -> "MarkDesugarResult":
+    horizontal: bool = False,
+) -> MarkDesugarResult:
     """Violin-plot composite mark desugar.
 
     Converts ``chart.mark_violin(...)`` into a ``Violin`` transform plus a
@@ -244,7 +245,7 @@ def desugar_violin(
     * ``inner="quartile"``   — ``BoxStats`` transform (named ``"quart"``)
       adds three ``rule`` layers at ``q1``, ``median``, ``q3``.
     * ``inner="box"`` (default) — full ``desugar_boxplot`` overlay with
-      ``extent=1.5``, ``outliers=False``, ``size=0.1``.
+      ``whisker_mult=1.5``, ``outliers=False``, ``size=0.1``.
 
     Parameters
     ----------
@@ -273,11 +274,22 @@ def desugar_violin(
         axis directly comparable across groups.  When ``False`` (default),
         each group's KDE is evaluated on its own per-group data range.
         Mirrors ``mark_density(multiple="stack"/"fill")`` behavior.
+    horizontal : bool, default False
+        When ``True``, swap axes so the categorical grouping is on ``y`` and
+        the value distribution is on ``x``.  Mirrors the ``horizontal``
+        parameter on ``desugar_boxplot``.  The body encoding is swapped
+        (``y=cat``, ``x=violin_y``) and the inner box/quartile/point layers
+        are similarly swapped.
+
+        Horizontal rendering is fully supported: the ``Violin`` transform
+        emits ``__pos_y_offset__`` (scaled by panel height) instead of
+        ``__pos_x_offset__`` when ``horizontal=True``, so the KDE width
+        expands along the category band on the ``y`` axis.
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", transforms, None, None, layers)``.
+    MarkDesugarResult
+        Layered mode (``.layers`` set).
 
     Raises
     ------
@@ -288,9 +300,9 @@ def desugar_violin(
     Examples
     --------
     >>> result = desugar_violin("species", "petal_length", inner=None)
-    >>> result[4][0]["mark"]
+    >>> result.layers[0].mark
     'polygon'
-    >>> len(result[4])
+    >>> len(result.layers)
     1
     """
     if x_field is None or y_field is None:
@@ -302,33 +314,59 @@ def desugar_violin(
 
     from ferrum.encoding import X, Y
 
-    # Violin always uses x_field as the categorical grouping axis.
-    # Wrap it in X(..., sort=x_sort) when sort is present so the rendered axis
-    # honors the user's sort request across all inner layers.
-    x_enc_val = X(x_field, sort=x_sort) if x_sort is not None else x_field
+    # Resolve cat/val axes.  When horizontal=True the categorical grouping moves
+    # to y and the numeric values move to x, mirroring the boxplot pattern.
+    if horizontal:
+        cat_field = y_field  # categorical grouping on y
+        val_field = x_field  # numeric values on x
+        cat_sort = y_sort
+    else:
+        cat_field = x_field  # categorical grouping on x (default)
+        val_field = y_field  # numeric values on y
+        cat_sort = x_sort
+
+    # Wrap the categorical encoding in X/Y with sort when a sort is present.
+    if horizontal:
+        cat_enc = Y(cat_field, sort=cat_sort) if cat_sort is not None else cat_field
+    else:
+        cat_enc = X(cat_field, sort=cat_sort) if cat_sort is not None else cat_field
 
     # When a hue (color) field is present, the KDE — and every inner summary —
-    # must split per (x, hue) group rather than pooling across hues.  The Violin
-    # and BoxStats transforms propagate all groupby columns to their output, so
-    # `color_field` is available as an output column on the violin batch and can
-    # drive a per-hue fill on the body polygon.  `detail="group_id"` keeps each
-    # (x, hue) group drawing as a distinct closed polygon (group_id is per
-    # groupby-group), so the per-hue violins overlay within each x band.
+    # must split per (cat, hue) group rather than pooling across hues.  The
+    # Violin and BoxStats transforms propagate all groupby columns to their
+    # output, so `color_field` is available as an output column on the violin
+    # batch and can drive a per-hue fill on the body polygon.
+    # `detail="group_id"` keeps each (cat, hue) group drawing as a distinct
+    # closed polygon, so the per-hue violins overlay within each category band.
     # Add the hue field to the groupby only when it is a distinct column; when
-    # color encodes the same field as x the KDE is already split per x-category
-    # and the body just colors by the surviving x column.
-    groupby, split_hue = resolve_color_groupby(x_field, color_field, [x_field])
+    # color encodes the same field as cat the KDE is already split per category
+    # and the body just colors by the surviving cat column.
+    groupby, split_hue = resolve_color_groupby(cat_field, color_field, [cat_field])
 
-    body_encoding: dict = {"x": x_enc_val, "y": Y("violin_y", title=y_field)}
-    if color_field is not None:
+    # Body encoding: for vertical violin x=cat, y=violin_y (value grid points).
+    # For horizontal violin y=cat, x=violin_y (value grid points on x-axis).
+    # violin_x (the mirrored KDE density offset) is handled by the position
+    # offset column emitted by the Rust Violin transform (__pos_x_offset__ for
+    # vertical; __pos_y_offset__ for horizontal — both are implemented; the
+    # Violin transform emits __pos_y_offset__ from panel height).
+    if horizontal:
+        body_encoding: dict = {"y": cat_enc, "x": X("violin_y", title=val_field)}
+    else:
+        body_encoding = {"x": cat_enc, "y": Y("violin_y", title=val_field)}
+    # Attach the per-hue body fill only when the hue is a distinct column from
+    # the categorical axis (split_hue). When color encodes the same field as
+    # cat, the color encoding is redundant with the axis, so it is suppressed to
+    # match the errorbar/errorband siblings.
+    if split_hue:
         body_encoding["color"] = color_field
 
     transforms = [
         Violin(
-            field=y_field,
+            field=val_field,
             groupby=groupby,
             bandwidth=bandwidth,
             shared_extent=shared_extent,
+            horizontal=horizontal,
             name="violin",
         )
     ]
@@ -342,7 +380,11 @@ def desugar_violin(
     if inner is None:
         return MarkDesugarResult(transforms=transforms, layers=[violin_layer])
     if inner == "point":
-        point_encoding: dict = {"x": x_enc_val, "y": y_field}
+        # Raw points on the original data (not the violin batch).
+        if horizontal:
+            point_encoding: dict = {"y": cat_enc, "x": val_field}
+        else:
+            point_encoding = {"x": cat_enc, "y": val_field}
         if color_field is not None:
             point_encoding["color"] = color_field
         # raw points read from the original (unsplit) data, so coloring by the
@@ -355,12 +397,23 @@ def desugar_violin(
             ],
         )
     if inner == "quartile":
-        transforms.append(BoxStats(field=y_field, groupby=groupby, name="quart"))
+        transforms.append(BoxStats(field=val_field, groupby=groupby, name="quart"))
         layers = [violin_layer]
         for col in ("q1", "median", "q3"):
             mk = {} if col == "median" else {"stroke_dash": [2, 2]}
-            quart_encoding: dict = {"x": x_enc_val, "y": col}
-            if color_field is not None:
+            if horizontal:
+                quart_encoding: dict = {"y": cat_enc, "x": col}
+            else:
+                quart_encoding = {"x": cat_enc, "y": col}
+            # The q1/median/q3 rules read the split "quart" BoxStats output
+            # (grouped by the same split_hue-gated `groupby` as the body), so
+            # attach the per-hue color only when the hue is a distinct column
+            # from the categorical axis (split_hue). When color encodes the same
+            # field as cat, the color is redundant with the axis and is
+            # suppressed, matching the body polygon and the errorbar/errorband
+            # siblings. (Contrast with the point inner above, which reads the
+            # unsplit original data and so always colors by the hue column.)
+            if split_hue:
                 quart_encoding["color"] = color_field
             layers.append(
                 _Layer(
@@ -372,15 +425,17 @@ def desugar_violin(
                 )
             )
         return MarkDesugarResult(transforms=transforms, layers=layers)
-    # inner == "box"
+    # inner == "box": delegate to desugar_boxplot with the swapped axes so the
+    # inner box also respects the horizontal orientation.
     from ferrum.marks.composite import desugar_boxplot
 
     box_result = desugar_boxplot(
         x_field,
         y_field,
-        extent=1.5,
+        whisker_mult=1.5,
         outliers=False,
         size=0.1,
+        horizontal=horizontal,
         x_sort=x_sort,
         y_sort=y_sort,
         color_field=color_field if split_hue else None,
@@ -416,7 +471,7 @@ def desugar_qq(
     distribution: str = "normal",
     dequantize: bool = False,
     line: bool = True,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Q-Q (quantile-quantile) plot mark desugar.
 
     Converts ``chart.mark_qq(...)`` into a ``QQ`` transform plus a point
@@ -454,8 +509,8 @@ def desugar_qq(
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", transforms, None, None, layers)``.
+    MarkDesugarResult
+        Layered mode (``.layers`` set).
 
     Raises
     ------
@@ -465,7 +520,7 @@ def desugar_qq(
     Examples
     --------
     >>> result = desugar_qq("residuals")
-    >>> [l.mark for l in result[4]]
+    >>> [layer.mark for layer in result.layers]
     ['point', 'rule']
     """
     if distribution not in ("normal", "uniform", "exponential"):
@@ -533,7 +588,7 @@ def desugar_raster(
     blend: str = "alpha",
     min_count: Optional[int] = None,
     log_scale: bool = False,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Datashader-style raster aggregation mark desugar.
 
     Converts ``chart.mark_raster(...)`` into a ``Raster`` transform plus an
@@ -581,8 +636,8 @@ def desugar_raster(
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", transforms, None, None, layers)``.
+    MarkDesugarResult
+        Layered mode with a single image layer (``.layers`` set).
 
     Raises
     ------
@@ -593,7 +648,7 @@ def desugar_raster(
     Examples
     --------
     >>> result = desugar_raster("x", "y")
-    >>> result[4][0].mark
+    >>> result.layers[0].mark
     'image'
     """
     if x_field is None or y_field is None:
@@ -652,7 +707,7 @@ def desugar_hex(
     cmap: str | None = None,
     stroke: Optional[str] = None,
     stroke_width: float = 0,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Hexagonal-bin mark desugar.
 
     Converts ``chart.mark_hex(...)`` into a ``Hex`` transform plus a polygon
@@ -680,8 +735,10 @@ def desugar_hex(
         Numeric y field. Required.
     bin_size : float or None, default None
         Hexagon bin radius in data units.  ``None`` auto-selects.
-    aggregate : {"count", "mean", "sum"}, default "count"
-        Aggregation function applied per hex cell.
+    aggregate : str, default "count"
+        Aggregation function applied per hex cell.  One of ``"count"``,
+        ``"mean"``, ``"sum"``, ``"min"``, ``"max"``, ``"median"``, ``"std"``,
+        or ``"var"``.
     field : str or None, default None
         Column to aggregate for ``mean`` or ``sum``; required when
         ``aggregate`` is not ``"count"``.
@@ -702,24 +759,20 @@ def desugar_hex(
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", transforms, None, None, layers)``.
+    MarkDesugarResult
+        Layered mode with a single polygon layer (``.layers`` set).
 
     Raises
     ------
     ValueError
-        If either ``x_field`` or ``y_field`` is ``None``, or if
-        ``aggregate`` is ``"mean"`` or ``"sum"`` and ``field`` is ``None``.
-
-    Notes
-    -----
-    Aggregate values other than ``"count"``, ``"mean"``, and ``"sum"`` emit
-    a ``warn_once`` and fall back to ``"count"``.
+        If either ``x_field`` or ``y_field`` is ``None``; if ``aggregate`` is
+        not one of the eight valid functions; or if ``aggregate`` is not
+        ``"count"`` and ``field`` is ``None``.
 
     Examples
     --------
     >>> result = desugar_hex("x", "y")
-    >>> result[4][0].mark
+    >>> result.layers[0].mark
     'polygon'
     """
     if x_field is None or y_field is None:
@@ -778,7 +831,7 @@ def desugar_swarm(
     dodge: Optional[str] = None,
     x_sort: Any = None,
     y_sort: Any = None,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Beeswarm plot mark desugar.
 
     Converts ``chart.mark_swarm(...)`` into a ``Swarm`` transform plus a
@@ -830,8 +883,8 @@ def desugar_swarm(
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", transforms, None, None, layers)``.
+    MarkDesugarResult
+        Layered mode with a single point layer (``.layers`` set).
 
     Raises
     ------
@@ -841,7 +894,7 @@ def desugar_swarm(
     Examples
     --------
     >>> result = desugar_swarm("species", "petal_length")
-    >>> result[4][0].mark
+    >>> result.layers[0].mark
     'point'
     """
     if x_field is None or y_field is None:
@@ -916,12 +969,12 @@ def desugar_function(
     domain: Optional[tuple] = None,
     n: int = 200,
     clip: bool = True,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Arbitrary-function line mark desugar — the only synthetic-data desugar.
 
     Materializes a new Arrow table by evaluating ``fn`` over ``n`` evenly
-    spaced x-values in ``domain``, then returns a 4-tuple whose fourth
-    element is the synthetic table.  No transforms are emitted.
+    spaced x-values in ``domain``, then returns a single-mark result whose
+    ``.data`` field carries the synthetic table.  No transforms are emitted.
 
     Data contract
     -------------
@@ -935,9 +988,8 @@ def desugar_function(
     Layers emitted
     --------------
     1. ``line`` — ``x="x"``, ``y="y"`` via the encoding remap
-       ``{"x": "x", "y": "y"}``.  Returned as the legacy 4-tuple
-       ``(mark, transforms, remap, synthetic)`` rather than the 5-tuple
-       layered form.
+       ``{"x": "x", "y": "y"}``.  Returned in single-mark mode (``.mark``,
+       ``.remap``, ``.data``) rather than the layered form.
 
     Parameters
     ----------
@@ -957,9 +1009,9 @@ def desugar_function(
 
     Returns
     -------
-    tuple
-        4-tuple ``("line", [], {"x": "x", "y": "y"}, synthetic_table)``
-        where ``synthetic_table`` is a ``pyarrow.Table``.
+    MarkDesugarResult
+        Single-mark mode with ``.mark="line"``, ``.remap={"x": "x", "y": "y"}``,
+        and ``.data`` set to the synthetic ``pyarrow.Table``.
 
     Raises
     ------
@@ -972,9 +1024,9 @@ def desugar_function(
     --------
     >>> import numpy as np
     >>> result = desugar_function(np.sin, domain=(0, 6.28))
-    >>> result[0]
+    >>> result.mark
     'line'
-    >>> result[3].num_rows
+    >>> result.data.num_rows
     200
     """
     if not clip:

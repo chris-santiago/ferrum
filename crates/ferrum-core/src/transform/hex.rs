@@ -27,13 +27,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::transform::numeric_util::coerce_to_float64;
+use crate::transform::numeric_util::{coerce_to_float64, column_extent};
 
 fn default_aggregate() -> String {
     "count".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct HexSpec {
     pub x: String,
     pub y: String,
@@ -328,10 +329,12 @@ pub(crate) fn apply(spec: &HexSpec, batch: &RecordBatch) -> PyResult<RecordBatch
 /// over the full `batch`. Used by `fix_transform_extents_for_facet` to pin every
 /// facet panel to a comparable hex lattice anchor and auto bin_size.
 ///
-/// Returns the RAW per-axis `(min, max)` (no nicing). Nicing and auto bin_size
-/// derive inside `apply` from the pinned range, so every panel derives them
-/// identically. Returns `None` when either field is missing, non-numeric, all
-/// values are null/NaN, or an axis range is degenerate.
+/// NICENESS CONTRACT (XFORM-08): returns the RAW per-axis `(min, max)` (no
+/// nicing), like the other 2-D pins and unlike 1-D `Bin`. Nicing and auto
+/// bin_size derive inside `apply` from the pinned range, so every panel derives
+/// them identically. Returns `None` when either field is missing, non-numeric,
+/// all values are null/NaN, or an axis range is degenerate. Each axis uses the
+/// shared `column_extent` helper (coerces integer columns to Float64).
 ///
 /// When `spec.extent_x`/`spec.extent_y` are already set, each is returned
 /// unchanged so the faceted pin never clobbers an explicit value.
@@ -341,34 +344,13 @@ pub(crate) fn global_extent(
 ) -> Option<(f64, f64, f64, f64)> {
     let (x_lo, x_hi) = match spec.extent_x {
         Some(e) => e,
-        None => raw_axis_extent(batch, &spec.x)?,
+        None => column_extent(batch, &spec.x)?,
     };
     let (y_lo, y_hi) = match spec.extent_y {
         Some(e) => e,
-        None => raw_axis_extent(batch, &spec.y)?,
+        None => column_extent(batch, &spec.y)?,
     };
     Some((x_lo, x_hi, y_lo, y_hi))
-}
-
-fn raw_axis_extent(batch: &RecordBatch, field: &str) -> Option<(f64, f64)> {
-    let schema = batch.schema();
-    let idx = schema.index_of(field).ok()?;
-    let arr = coerce_to_float64(batch.column(idx), "stat_hex", field).ok()?;
-    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
-        if arr.is_null(i) {
-            return (lo, hi);
-        }
-        let v = arr.value(i);
-        if v.is_nan() {
-            return (lo, hi);
-        }
-        (lo.min(v), hi.max(v))
-    });
-    if lo.is_finite() && hi.is_finite() && lo < hi {
-        Some((lo, hi))
-    } else {
-        None
-    }
 }
 
 fn empty_output() -> PyResult<RecordBatch> {

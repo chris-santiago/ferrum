@@ -9,7 +9,7 @@
 //! - The field named by `encoding.url` (Utf8) — holds a `data:<mime>;base64,<payload>`
 //!   URL.  Rows with nulls or malformed URLs are skipped silently.
 //! - Optional `width`, `height` columns (Float64) for per-row pixel sizing.
-//!   When absent, `mark_style.width` / `mark_style.height` are used, defaulting
+//!   When absent, `mark_style.misc.width` / `mark_style.misc.height` are used, defaulting
 //!   to 32.0 × 32.0 pixels.
 //!
 //! Each tile is center-anchored at `(px, py)` — consistent with `mark_point`.
@@ -23,7 +23,7 @@
 //! extent.
 //!
 //! Colormap resolution priority (three-step):
-//!   1. `mark_style.cmap` name (explicit kwarg on the mark)
+//!   1. `mark_style.group.cmap` name (explicit kwarg on the mark)
 //!   2. `theme.palette.sequential_scheme` (theme default)
 //!   3. Viridis fallback
 
@@ -31,6 +31,7 @@ use arrow::array::{BinaryArray, Float64Array, UInt32Array};
 
 use crate::render::color::{ContinuousScheme, NamedContinuous};
 use crate::render::draw::{col_as_f64, col_as_str, DrawCtx, MetadataColumns};
+use crate::render::mark_nodes::MarkNodes;
 use crate::render::rasterize::encode_png;
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
@@ -92,14 +93,13 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
     };
 
     // Optional per-row width/height columns (Float64). If absent, fall back
-    // to mark_style.width / mark_style.height, then to 32.0 pixels.
+    // to mark_style.misc.width / mark_style.misc.height, then to 32.0 pixels.
     let widths: Option<Vec<Option<f64>>> = col_as_f64(batch, "width").ok();
     let heights: Option<Vec<Option<f64>>> = col_as_f64(batch, "height").ok();
-    let default_w = ctx.mark_style.width.unwrap_or(32.0);
-    let default_h = ctx.mark_style.height.unwrap_or(32.0);
+    let default_w = ctx.mark_style.misc.width.unwrap_or(32.0);
+    let default_h = ctx.mark_style.misc.height.unwrap_or(32.0);
 
-    let mut nodes: Vec<SceneNode> = Vec::with_capacity(n);
-    let mut data_indices: Vec<usize> = Vec::with_capacity(n);
+    let mut acc = MarkNodes::with_capacity(n);
 
     for i in 0..n {
         // Skip nulls in required fields.
@@ -143,16 +143,16 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
         let img_x = px - tile_w / 2.0;
         let img_y = py - tile_h / 2.0;
 
-        nodes.push(SceneNode::Image {
+        acc.push(SceneNode::Image {
             x: img_x,
             y: img_y,
             w: tile_w,
             h: tile_h,
             data: ImageData::Url { url: url_val.to_string() },
-        });
-        data_indices.push(i);
+        }, i);
     }
 
+    let (nodes, data_indices) = acc.finalize();
     let meta = MetadataColumns::from_ctx(ctx);
     let (tooltips, hrefs, descriptions) = meta.build_metadata_for_indices(&data_indices);
 
@@ -233,9 +233,10 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         return empty();
     }
 
-    // Resolve colormap: mark_style.cmap → theme.palette.sequential_scheme → Viridis.
+    // Resolve colormap: mark_style.group.cmap → theme.palette.sequential_scheme → Viridis.
     let named = ctx
         .mark_style
+        .group
         .cmap
         .as_deref()
         .and_then(NamedContinuous::from_name)

@@ -27,7 +27,7 @@ def test_boxplot_no_outliers_5_layers(df):
 
 
 def test_boxplot_extent_min_max(df):
-    chart = fe.Chart(df).mark_boxplot(extent="min-max").encode(x="group", y="value")
+    chart = fe.Chart(df).mark_boxplot(whisker_mult="min-max").encode(x="group", y="value")
     json_str = chart._build_spec().to_json()
     assert "min-max" in json_str
 

@@ -11,7 +11,80 @@ the new instance.
 
 from __future__ import annotations
 
+import warnings
 from abc import abstractmethod
+
+# Sentinel for "caller did not pass this kwarg" — used by the deprecated-alias
+# resolver so that an explicit alias=None is still detected as "supplied".
+_MISSING = object()
+
+
+def _resolve_band_alias(
+    canonical_value: "float | None",
+    alias_value: object,
+    *,
+    canonical_name: str,
+    alias_name: str,
+    owner: str = "configure_axis",
+    stacklevel: int = 3,
+) -> "float | None":
+    """Resolve a renamed band kwarg against its deprecated alias.
+
+    Shared by all three surfaces that accept the ``min_band``/``max_band`` band
+    kwargs with deprecated ``min_extent``/``max_extent`` aliases: the
+    ``configure_axis`` mixin method, :class:`ferrum.axis.Axis`, and
+    :class:`ferrum.configure.AxisConfig`.  Single-sourcing the resolution here
+    keeps the three siblings from drifting on the explicit-``None`` edge (an
+    explicit ``min_extent=None`` is treated as "supplied" via the
+    :data:`_MISSING` sentinel, consistently across all three).
+
+    Parameters
+    ----------
+    canonical_value
+        Value supplied under the canonical name (``min_band`` or ``max_band``),
+        or ``None`` if the caller used the default.
+    alias_value
+        Value supplied under the deprecated alias name (``min_extent`` or
+        ``max_extent``), or :data:`_MISSING` if not supplied.
+    canonical_name
+        The new canonical kwarg name shown in warnings/errors.
+    alias_name
+        The deprecated kwarg name shown in warnings/errors.
+    owner
+        The owning surface name shown as the prefix of the DeprecationWarning
+        (e.g. ``"Axis"``, ``"AxisConfig"``, ``"configure_axis"``).  Defaults to
+        ``"configure_axis"`` for backward compatibility with the mixin call site.
+    stacklevel
+        The :func:`warnings.warn` ``stacklevel``.  Direct constructors
+        (``Axis``/``AxisConfig``) pass ``2`` (one frame to the caller); the
+        mixin method passes ``3`` (caller → ``configure_axis`` → helper).
+
+    Returns
+    -------
+    float | None
+        The resolved value (canonical wins; alias accepted when canonical is
+        absent; both raises ``TypeError``; neither returns ``None``).
+
+    Raises
+    ------
+    TypeError
+        When both the canonical and alias kwarg are supplied.
+    """
+    if alias_value is _MISSING:
+        return canonical_value
+    # alias was supplied
+    if canonical_value is not None:
+        raise TypeError(
+            f"Cannot supply both '{canonical_name}=' and the deprecated '{alias_name}=' alias; "
+            f"use '{canonical_name}=' only."
+        )
+    warnings.warn(
+        f"{owner}: '{alias_name}=' is deprecated; use '{canonical_name}=' instead. "
+        "'extent' is reserved for data-domain bounds.",
+        DeprecationWarning,
+        stacklevel=stacklevel,
+    )
+    return alias_value  # type: ignore[return-value]
 
 
 class ConfigureMixin:
@@ -60,12 +133,15 @@ class ConfigureMixin:
         nice: "bool | None" = None,
         zero: "bool | None" = None,
         translate: "float | None" = None,
-        min_extent: "float | None" = None,
-        max_extent: "float | None" = None,
+        min_band: "float | None" = None,
+        max_band: "float | None" = None,
         tick_extra: "bool | None" = None,
         tick_min_step: "float | None" = None,
         title_orient: "str | None" = None,
         zindex: "int | None" = None,
+        # Deprecated aliases — accepted with a DeprecationWarning.
+        min_extent: object = _MISSING,
+        max_extent: object = _MISSING,
     ):
         """Apply axis configuration.
 
@@ -126,8 +202,12 @@ class ConfigureMixin:
             Include zero in the scale domain.
         translate : float, optional
             Pixel translation of the axis group perpendicular to its line.
-        min_extent, max_extent : float, optional
-            Bounds for the reserved axis margin band, in pixels.
+        min_band, max_band : float, optional
+            Lower / upper bounds for the reserved axis margin band, in pixels.
+
+            .. deprecated:: 0.17.0
+                ``min_extent=`` and ``max_extent=`` are accepted as aliases
+                but are deprecated; use ``min_band=`` / ``max_band=`` instead.
         tick_extra : bool, optional
             Append an extra tick at each domain boundary.
         tick_min_step : float, optional
@@ -151,6 +231,14 @@ class ConfigureMixin:
         ``fm.X("f", axis=fm.Axis(orient="top"))``.
         """
         from ferrum.configure import AxisConfig, Configure
+
+        # Resolve deprecated aliases before forwarding to AxisConfig.
+        min_band = _resolve_band_alias(
+            min_band, min_extent, canonical_name="min_band", alias_name="min_extent"
+        )
+        max_band = _resolve_band_alias(
+            max_band, max_extent, canonical_name="max_band", alias_name="max_extent"
+        )
 
         cfg = AxisConfig(
             x=x,
@@ -181,8 +269,8 @@ class ConfigureMixin:
             nice=nice,
             zero=zero,
             translate=translate,
-            min_extent=min_extent,
-            max_extent=max_extent,
+            min_band=min_band,
+            max_band=max_band,
             tick_extra=tick_extra,
             tick_min_step=tick_min_step,
             title_orient=title_orient,

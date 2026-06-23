@@ -43,7 +43,7 @@ from ferrum._core import (
     roc_auc,
     roc_curve_kernel,
 )
-from ferrum._diagnostics.precomputed import _PrecomputedSource
+from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 from tests.fixtures import load_dataset, load_fixture
 
 _ATOL = 1e-9

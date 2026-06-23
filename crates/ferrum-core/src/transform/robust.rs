@@ -36,6 +36,7 @@ use crate::transform::residuals;
 use crate::transform::smooth::SmoothOutput;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RobustSpec {
     pub x: String,
     pub y: String,

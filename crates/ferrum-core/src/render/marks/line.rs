@@ -9,7 +9,7 @@
 //! Grouping rules:
 //! - Color encoding only: one polyline per color category (rows of the
 //!   same color value linked in batch order). Color determines stroke.
-//! - `mark_style.detail` only: one polyline per detail value, theme-default
+//! - `mark_style.group.detail` only: one polyline per detail value, theme-default
 //!   stroke. Polylines are not legendable.
 //! - Both: one polyline per (color, detail) pair — color determines stroke,
 //!   detail subdivides each color group. Used by parallel_coordinates so
@@ -19,6 +19,7 @@
 use crate::render::color::with_opacity;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, resolve_stroke_dash, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
+use crate::render::marks::channels::build_color_detail_groups;
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 use crate::render::scale_resolve::ScaleKind;
 
@@ -61,18 +62,11 @@ fn build_line_cmds(points: &[(f64, f64)], interpolate: Option<&str>) -> Vec<ferr
 
 pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{
-        to_scene_fill_stroke, to_scene_stroke, MarkBuildResult, MetadataColumns,
+        to_scene_fill_stroke_full, to_scene_stroke, MarkBuildResult, MetadataColumns,
     };
     use ferrum_scene::MarkBatchKind;
 
-    let empty = || MarkBuildResult {
-        kind: MarkBatchKind::Line,
-        nodes: vec![],
-        data_indices: Some(vec![]),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
-    };
+    let empty = || MarkBuildResult::empty(MarkBatchKind::Line);
 
     let spec = ctx.spec;
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
@@ -119,54 +113,17 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let cf = color_field(ctx, spec);
     let color_values = cf.and_then(|f| col_as_str(ctx.batch, f).ok());
-    let detail_values = ctx.mark_style.detail.as_deref()
+    let detail_values = ctx.mark_style.group.detail.as_deref()
         .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
 
-    let groups: Vec<(Option<String>, Vec<usize>)> = match (
+    let groups = build_color_detail_groups(
         color_values.as_ref(),
         detail_values.as_ref(),
-        &ctx.scales.color,
-    ) {
-        (Some(cv), None, Some(_)) => {
-            let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
-            for (i, v) in cv.iter().enumerate() {
-                let key = v.clone();
-                match groups.iter().position(|(k, _)| k == &key) {
-                    Some(p) => groups[p].1.push(i),
-                    None => groups.push((key, vec![i])),
-                }
-            }
-            groups
-        }
-        (None, Some(dv), _) => {
-            let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
-            for (i, v) in dv.iter().enumerate() {
-                let key = v.clone();
-                match groups.iter().position(|(k, _)| k == &key) {
-                    Some(p) => groups[p].1.push(i),
-                    None => groups.push((key, vec![i])),
-                }
-            }
-            groups.into_iter().map(|(_, rows)| (None, rows)).collect()
-        }
-        (Some(cv), Some(dv), _) => {
-            let mut groups: Vec<(Option<String>, Vec<usize>)> = Vec::new();
-            for i in 0..n_rows {
-                let composite = (cv[i].clone(), dv[i].clone());
-                match groups.iter().position(|(_, rows)| {
-                    rows.first().map(|&r| (cv[r].clone(), dv[r].clone()) == composite)
-                        .unwrap_or(false)
-                }) {
-                    Some(p) => groups[p].1.push(i),
-                    None => groups.push((cv[i].clone(), vec![i])),
-                }
-            }
-            groups
-        }
-        _ => vec![(None, (0..n_rows).collect())],
-    };
+        ctx.scales.color.is_some(),
+        n_rows,
+    );
 
-    let interpolate = ctx.mark_style.interpolate.as_deref();
+    let interpolate = ctx.mark_style.line.interpolate.as_deref();
     let use_path = interpolate.is_some() && interpolate != Some("linear");
 
     // Per-row stroke channel vectors — sampled at the first valid row of each group.
@@ -175,8 +132,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let sd_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_dash.as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     // opacity / fill_opacity / stroke_opacity resolution (shared resolver, FA-11).
-    // Defaults: opacity → mark_style.opacity, fill_opacity → 1.0, stroke_opacity → 1.0.
-    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
+    // Defaults: opacity → mark_style.paint.opacity, fill_opacity → 1.0, stroke_opacity → 1.0.
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
 
     let meta = MetadataColumns::from_ctx(ctx);
 
@@ -210,32 +167,34 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let group_stroke_width = sw_vals.as_ref()
             .and_then(|v| v.get(first).copied().flatten())
             .filter(|v| *v >= 0.0 && v.is_finite())
-            .unwrap_or(ctx.mark_style.stroke_width);
+            .unwrap_or(ctx.mark_style.paint.stroke_width);
         let dash_vec: Option<Vec<f64>> = sd_vals.as_ref()
             .and_then(|v| v.get(first).copied().flatten())
             .filter(|v| v.is_finite())
             .and_then(resolve_stroke_dash);
-        let effective_dash = dash_vec.as_deref().or(ctx.mark_style.stroke_dash.as_deref());
+        let effective_dash = dash_vec.as_deref().or(ctx.mark_style.paint.stroke_dash.as_deref());
 
         let stroke_color = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) =>
-                scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-            _ => ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill),
+                scale.lookup(v).unwrap_or(ctx.mark_style.paint.fill),
+            _ => ctx.mark_style.paint.stroke.unwrap_or(ctx.mark_style.paint.fill),
         };
         let stroke_color = with_opacity(stroke_color, group_opacity);
 
         let node = if use_path {
             let cmds = build_line_cmds(&points, interpolate);
-            let mut style = to_scene_fill_stroke(
+            // FA-11: honor the stroke_opacity and fill_opacity channels (the
+            // latter was previously dropped) via the complete FillStroke builder.
+            let style = to_scene_fill_stroke_full(
                 None,
                 Some(stroke_color),
                 group_stroke_width,
                 1.0,
                 effective_dash,
+                group_fill_opacity,
+                group_stroke_opacity,
+                0.0,
             );
-            style.stroke_opacity = group_stroke_opacity;
-            // FA-11: honor the fill_opacity channel (was previously dropped).
-            style.fill_opacity = group_fill_opacity;
             ferrum_scene::SceneNode::Path {
                 commands: cmds,
                 style,
@@ -247,8 +206,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 group_stroke_width,
                 1.0,
                 effective_dash,
-                ctx.mark_style.stroke_cap.as_deref(),
-                ctx.mark_style.stroke_join.as_deref(),
+                ctx.mark_style.line.stroke_cap.as_deref(),
+                ctx.mark_style.line.stroke_join.as_deref(),
             );
             stroke_style.stroke_opacity = group_stroke_opacity;
             // Polyline uses `StrokeStyle`, which has no fill channel — the

@@ -29,9 +29,21 @@ use super::ticks::{calendar_ticks, minor_ticks_default, nice_calendar_interval, 
 ///
 ///     import ferrum as fr
 ///     chart = fr.Chart(df).encode(x=fr.X("date:T"))
+// Named-field PyO3 facade for the temporal scale.
+//
+// `utc` and `domain_user_set` are **separate** fields. They previously shared a
+// single positional tuple slot across the continuous-scale family (Linear/Log/...
+// used slot `.3` for `domain_user_set` while `TimeScale` silently repurposed it
+// for `utc`); naming them makes that conflation impossible (SPEC-01).
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct TimeScale(LinearScaleData, Option<f64>, bool, bool);
+pub struct TimeScale {
+    data: LinearScaleData,
+    padding: Option<f64>,
+    range_user_set: bool,
+    utc: bool,
+    domain_user_set: bool,
+}
 
 impl TimeScale {
     /// Crate-internal constructor (no PyO3, no validation), for render-side use.
@@ -43,13 +55,19 @@ impl TimeScale {
             range:  [range[0],  range[1]],
             clamp,
         };
-        let s = TimeScale(inner, None, true, false);
+        let s = TimeScale {
+            data: inner,
+            padding: None,
+            range_user_set: true,
+            utc: false,
+            domain_user_set: true,
+        };
         if nice { s.time_nice() } else { s }
     }
 
     /// Crate-internal scale call (no PyO3 boundary).
     pub(crate) fn scale_internal(&self, x: f64) -> f64 {
-        self.0.scale(x)
+        self.data.scale(x)
     }
 
     /// Crate-internal tick call (uses time-aware nice intervals).
@@ -67,8 +85,8 @@ impl TimeScale {
     /// The major tick count is fixed at 10 (the conventional default).  Minor
     /// tick density is always `DEFAULT_MINOR_SUBDIVISIONS` (5 sub-intervals →
     /// 4 interior minors per gap); there is no per-call override.
-    // Wired to the render layer in Task 2 of the grid subsystem.
-    #[allow(dead_code)]
+    // Wired to the render layer via `ScaleKind::minor_tick_fractions`
+    // (`render/scale_resolve/mod.rs`, dispatched through `dispatch_continuous!`).
     pub(crate) fn minor_ticks_internal(&self) -> Vec<Tick> {
         let majors = self.time_ticks(10);
         // Time domain is already linear (epoch-ms), so the identity transform
@@ -77,16 +95,16 @@ impl TimeScale {
     }
 
     pub(crate) fn range_pair(&self) -> [f64; 2] {
-        self.0.range
+        self.data.range
     }
 
     pub(crate) fn domain_pair(&self) -> [f64; 2] {
-        self.0.domain
+        self.data.domain
     }
 
     pub(crate) fn repr_string(&self) -> String {
-        let LinearScaleData { domain, range, clamp } = &self.0;
-        let prefix = if self.3 { "TimeScale(utc=True, " } else { "TimeScale(" };
+        let LinearScaleData { domain, range, clamp } = &self.data;
+        let prefix = if self.utc { "TimeScale(utc=True, " } else { "TimeScale(" };
         format!(
             "{}domain=[{}, {}], range=[{}, {}], clamp={})",
             prefix, domain[0], domain[1], range[0], range[1], if *clamp { "True" } else { "False" }
@@ -94,13 +112,13 @@ impl TimeScale {
     }
 
     fn time_ticks(&self, count: usize) -> Vec<f64> {
-        let [d0, d1] = self.0.domain;
+        let [d0, d1] = self.data.domain;
         // Pass domain values directly; calendar_ticks handles reversal when d0 > d1.
         calendar_ticks(d0, d1, count)
     }
 
     fn time_nice(&self) -> Self {
-        let [d0, d1] = self.0.domain;
+        let [d0, d1] = self.data.domain;
         let lo = d0.min(d1);
         let hi = d0.max(d1);
         let span = hi - lo;
@@ -112,10 +130,17 @@ impl TimeScale {
                 let Some(dt_lo) = Utc.timestamp_millis_opt(lo as i64).single() else {
                     let iv = nice_time_interval_ms(span, 10);
                     if !iv.is_finite() || iv <= 0.0 { return self.clone(); }
-                    return TimeScale(LinearScaleData {
-                        domain: [(lo / iv).floor() * iv, (hi / iv).ceil() * iv],
-                        range: self.0.range, clamp: self.0.clamp,
-                    }, self.1, self.2, self.3);
+                    return TimeScale {
+                        data: LinearScaleData {
+                            domain: [(lo / iv).floor() * iv, (hi / iv).ceil() * iv],
+                            range: self.data.range,
+                            clamp: self.data.clamp,
+                        },
+                        padding: self.padding,
+                        range_user_set: self.range_user_set,
+                        utc: self.utc,
+                        domain_user_set: self.domain_user_set,
+                    };
                 };
                 let Some(dt_hi) = Utc.timestamp_millis_opt(hi as i64).single() else {
                     return self.clone();
@@ -149,10 +174,13 @@ impl TimeScale {
             }
         };
         let new_domain = if d0 <= d1 { [new_lo, new_hi] } else { [new_hi, new_lo] };
-        TimeScale(
-            LinearScaleData { domain: new_domain, range: self.0.range, clamp: self.0.clamp },
-            self.1, self.2, self.3,
-        )
+        TimeScale {
+            data: LinearScaleData { domain: new_domain, range: self.data.range, clamp: self.data.clamp },
+            padding: self.padding,
+            range_user_set: self.range_user_set,
+            utc: self.utc,
+            domain_user_set: self.domain_user_set,
+        }
     }
 }
 
@@ -168,6 +196,10 @@ impl TimeScale {
         padding: Option<f64>,
         utc: bool,
     ) -> PyResult<Self> {
+        // `domain` is a required positional argument, so it is always
+        // user-set when constructed through Python; the field exists for
+        // parity with the other continuous scales (SPEC-06) so `domain()`
+        // returns `Option<Vec<f64>>` uniformly.
         let range_user_set = range.is_some();
         let r = range.unwrap_or_else(|| vec![0.0, 1.0]);
         validate_continuous_pair(&domain, &r)?;
@@ -176,7 +208,13 @@ impl TimeScale {
             range:  [r[0],  r[1]],
             clamp,
         };
-        let s = TimeScale(inner, padding, range_user_set, utc);
+        let s = TimeScale {
+            data: inner,
+            padding,
+            range_user_set,
+            utc,
+            domain_user_set: true,
+        };
         if nice {
             Ok(s.time_nice())
         } else {
@@ -185,9 +223,9 @@ impl TimeScale {
     }
 
     /// Map an epoch-millisecond value ``x`` to its output range coordinate.
-    fn scale(&self, x: f64) -> f64 { self.0.scale(x) }
+    fn scale(&self, x: f64) -> f64 { self.data.scale(x) }
     /// Invert a range coordinate ``y`` back to an epoch-millisecond value.
-    fn invert(&self, y: f64) -> f64 { self.0.invert(y) }
+    fn invert(&self, y: f64) -> f64 { self.data.invert(y) }
 
     /// Return approximately ``count`` time-aligned tick values within the domain.
     ///
@@ -199,29 +237,37 @@ impl TimeScale {
     /// Return a copy of this scale with domain endpoints rounded to the nearest calendar interval.
     fn nice(&self) -> Self { self.time_nice() }
 
-    /// Input domain as ``[t_min, t_max]`` in epoch milliseconds.
+    /// Input domain as ``[t_min, t_max]`` in epoch milliseconds, or ``None``
+    /// when data-derived.
+    ///
+    /// `TimeScale`'s ``#[new]`` requires a domain, so a Python caller always
+    /// sees the list (PyO3 maps ``Some(x) → x``); the ``Option`` return type
+    /// matches the other continuous scales (SPEC-06) and yields ``None`` only
+    /// for a hypothetical future data-derived construction path.
     #[getter]
-    fn domain(&self) -> Vec<f64> { self.0.domain.to_vec() }
+    fn domain(&self) -> Option<Vec<f64>> {
+        if self.domain_user_set { Some(self.data.domain.to_vec()) } else { None }
+    }
 
     /// Output range as ``[lo, hi]`` pixel coordinates, or ``None`` when
     /// the renderer should auto-fill from the plot-area dimensions.
     #[getter]
     fn range(&self) -> Option<Vec<f64>> {
-        if self.2 { Some(self.0.range.to_vec()) } else { None }
+        if self.range_user_set { Some(self.data.range.to_vec()) } else { None }
     }
 
     /// Whether out-of-domain inputs are clamped to the range endpoints.
     #[getter]
-    fn clamp(&self) -> bool { self.0.clamp }
+    fn clamp(&self) -> bool { self.data.clamp }
 
     /// Fractional inward pixel padding (themes-T4). ``None`` lets the renderer
     /// apply the 5% default when ``domain`` is unset.
     #[getter]
-    fn padding(&self) -> Option<f64> { self.1 }
+    fn padding(&self) -> Option<f64> { self.padding }
 
     /// Whether this is a UTC time scale (affects type serialization).
     #[getter]
-    fn utc(&self) -> bool { self.3 }
+    fn utc(&self) -> bool { self.utc }
 
     fn __repr__(&self) -> String { self.repr_string() }
 }
@@ -260,6 +306,44 @@ mod tests {
         ).unwrap();
         let ticks = t.ticks(10);
         assert!(!ticks.is_empty(), "expected non-empty ticks");
+    }
+
+    /// SPEC-01 regression: `utc` and `domain_user_set` are independent fields.
+    ///
+    /// Under the old positional tuple `(Data, Option<f64>, bool, bool)` the
+    /// `utc` flag occupied slot `.3` — the same slot Linear/Log/... used for
+    /// `domain_user_set`. Setting `utc=true` therefore also flipped the slot
+    /// that the family treats as `domain_user_set`. With named fields the two
+    /// are distinct: `utc` can be true while the domain is still user-set, and
+    /// `domain()` must keep returning the list regardless of `utc`. This test
+    /// would not compile/pass against the conflated tuple representation.
+    #[test]
+    fn test_time_utc_independent_of_domain_user_set() {
+        let domain = vec![1_767_225_600_000.0, 1_798_761_599_000.0];
+        let utc_scale = TimeScale::new(
+            domain.clone(), Some(vec![0.0, 1000.0]), false, false, None, true,
+        ).unwrap();
+        let local_scale = TimeScale::new(
+            domain.clone(), Some(vec![0.0, 1000.0]), false, false, None, false,
+        ).unwrap();
+
+        assert!(utc_scale.utc(), "utc flag must be honoured");
+        assert!(!local_scale.utc(), "non-utc flag must be honoured");
+        // utc must not bleed into the domain getter: both report the domain.
+        assert_eq!(utc_scale.domain(), Some(domain.clone()));
+        assert_eq!(local_scale.domain(), Some(domain));
+    }
+
+    /// SPEC-06 regression: `domain()` returns `Option<Vec<f64>>` for parity
+    /// with the other continuous scales; in practice it is always `Some`
+    /// because `#[new]` requires a domain.
+    #[test]
+    fn test_time_domain_returns_option() {
+        let t = TimeScale::new(
+            vec![0.0, 1000.0], Some(vec![0.0, 1.0]), false, false, None, false,
+        ).unwrap();
+        let domain: Option<Vec<f64>> = t.domain();
+        assert_eq!(domain, Some(vec![0.0, 1000.0]));
     }
 
     // ── Minor tick tests ─────────────────────────────────────────────────────

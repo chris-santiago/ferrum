@@ -1,7 +1,13 @@
-"""Text and tooltip encoding channels (Text, Detail, Tooltip, Href, ...)."""
+"""Text and tooltip encoding channels (Text, Detail, Tooltip, Href, ...).
+
+Each channel references one named role from :mod:`ferrum.encoding._honored`;
+``_honored_kwargs`` is the single, machine-readable source of truth for which
+kwargs the channel honors (see the ``ChannelBase`` docstring for the contract).
+"""
 
 from __future__ import annotations
 
+from ferrum.encoding._honored import BARE, TEXT_FORMATTED, TEXT_FORMATTED_TITLED
 from ferrum.encoding.base import ChannelBase
 
 
@@ -20,14 +26,10 @@ class Text(ChannelBase):
     format : str, optional
         Number or date format string (e.g. ``".2f"`` for two decimal places,
         ``"%b %Y"`` for abbreviated month and year).
-    formatType : str, optional
-        Format type hint; ``"number"`` or ``"time"``.  Used in combination
-        with ``format``.
-
-    Notes
-    -----
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
+    format_type : str, optional
+        Format type hint; ``"number"`` or ``"time"``. Used in combination
+        with ``format``. ``formatType`` is accepted as a Vega-compat alias
+        and normalizes to the same wire key.
 
     Examples
     --------
@@ -38,7 +40,7 @@ class Text(ChannelBase):
 
     _channel_name = "text"
 
-    _honored_kwargs = frozenset(["type", "format", "formatType"])
+    _honored_kwargs = TEXT_FORMATTED
 
 
 class Detail(ChannelBase):
@@ -55,11 +57,6 @@ class Detail(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -68,7 +65,7 @@ class Detail(ChannelBase):
 
     _channel_name = "detail"
 
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = BARE
 
 
 class Tooltip(ChannelBase):
@@ -85,11 +82,6 @@ class Tooltip(ChannelBase):
         include in the tooltip.  Passing a single string is equivalent to
         ``Tooltip(TooltipField(field))``.
 
-    Notes
-    -----
-    ``type`` kwarg is accepted but is reserved for future use (no-op today)
-    — it triggers a one-time deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -101,7 +93,7 @@ class Tooltip(ChannelBase):
 
     _channel_name = "tooltip"
 
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = BARE
 
     def __init__(self, *fields, **kwargs):
         # Tooltip(*fields) is a special case: takes a list of fields, not just one
@@ -129,13 +121,9 @@ class TooltipField(ChannelBase):
         Custom tooltip label for this field.
     format : str, optional
         Number or date format string (e.g. ``".1f"``, ``"%Y-%m-%d"``).
-    formatType : str, optional
-        Format type hint; ``"number"`` or ``"time"``.
-
-    Notes
-    -----
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
+    format_type : str, optional
+        Format type hint; ``"number"`` or ``"time"``. ``formatType`` is
+        accepted as a Vega-compat alias and normalizes to the same wire key.
 
     Examples
     --------
@@ -146,7 +134,7 @@ class TooltipField(ChannelBase):
 
     _channel_name = "tooltip_field"
 
-    _honored_kwargs = frozenset(["type", "title", "format", "formatType"])
+    _honored_kwargs = TEXT_FORMATTED_TITLED
 
 
 class Href(ChannelBase):
@@ -164,9 +152,7 @@ class Href(ChannelBase):
 
     Notes
     -----
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.  Interactive renderers
-    only; SVG export does not embed hyperlinks.
+    Interactive renderers only; SVG export does not embed hyperlinks.
 
     Examples
     --------
@@ -176,7 +162,7 @@ class Href(ChannelBase):
 
     _channel_name = "href"
 
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = BARE
 
 
 class Description(ChannelBase):
@@ -192,11 +178,6 @@ class Description(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -205,7 +186,7 @@ class Description(ChannelBase):
 
     _channel_name = "description"
 
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = BARE
 
 
 class Key(ChannelBase):
@@ -221,11 +202,6 @@ class Key(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -234,7 +210,7 @@ class Key(ChannelBase):
 
     _channel_name = "key"
 
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = BARE
 
 
 class Url(ChannelBase):
@@ -260,4 +236,4 @@ class Url(ChannelBase):
 
     _channel_name = "url"
 
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = BARE

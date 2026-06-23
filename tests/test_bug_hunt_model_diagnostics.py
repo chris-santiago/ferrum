@@ -7,10 +7,10 @@ import polars as pl
 import pytest
 
 import ferrum
-from ferrum._diagnostics.precomputed import _PrecomputedSource
-from ferrum._diagnostics.sources._base import BaseSource, _coerce_X_y
-from ferrum._diagnostics.sources._classification import _coerce_class_label
-from ferrum._diagnostics.sources._compared import ComparedModelSource
+from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
+from ferrum.diagnostics.sources._base import BaseSource, _coerce_X_y
+from ferrum.diagnostics.sources._classification import _coerce_class_label
+from ferrum.diagnostics.sources._compared import ComparedModelSource
 
 
 # ---------------------------------------------------------------------------
@@ -1425,31 +1425,31 @@ def test_roc_visualizer_double_fit():
 
 
 def test_rank_helpers_coerce_pandas_dataframe():
-    """_coerce_to_arrow_batch should handle pandas DataFrame."""
+    """polars_or_array_to_record_batch should handle pandas DataFrame."""
     import pandas as pd
-    from ferrum._diagnostics._rank_helpers import _coerce_to_arrow_batch
+    from ferrum.diagnostics._internal._rank_helpers import polars_or_array_to_record_batch
 
     df_pd = pd.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0]})
-    batch = _coerce_to_arrow_batch(df_pd)
+    batch = polars_or_array_to_record_batch(df_pd)
     assert batch.num_rows == 2
 
 
 def test_rank_helpers_coerce_2d_numpy():
-    """_coerce_to_arrow_batch should handle 2D numpy array."""
-    from ferrum._diagnostics._rank_helpers import _coerce_to_arrow_batch
+    """polars_or_array_to_record_batch should handle 2D numpy array."""
+    from ferrum.diagnostics._internal._rank_helpers import polars_or_array_to_record_batch
 
     arr = np.array([[1.0, 2.0], [3.0, 4.0]])
-    batch = _coerce_to_arrow_batch(arr)
+    batch = polars_or_array_to_record_batch(arr)
     assert batch.num_rows == 2
     assert batch.num_columns == 2
 
 
 def test_rank_helpers_coerce_1d_numpy_raises():
-    """_coerce_to_arrow_batch should raise for 1D array."""
-    from ferrum._diagnostics._rank_helpers import _coerce_to_arrow_batch
+    """polars_or_array_to_record_batch should raise for 1D array."""
+    from ferrum.diagnostics._internal._rank_helpers import polars_or_array_to_record_batch
 
     with pytest.raises(ValueError, match="2D"):
-        _coerce_to_arrow_batch(np.array([1.0, 2.0, 3.0]))
+        polars_or_array_to_record_batch(np.array([1.0, 2.0, 3.0]))
 
 
 # ---------------------------------------------------------------------------
@@ -1615,18 +1615,34 @@ def test_silhouette_with_predict_fallback():
 
 def test_base_visualizer_unfit_repr():
     """FerrumVisualizer base class repr before fit."""
-    from ferrum._diagnostics.visualizers.base import FerrumVisualizer
+    from ferrum.diagnostics.visualizers._base import FerrumVisualizer
 
     viz = FerrumVisualizer()
     assert repr(viz) == "FerrumVisualizer(unfit)"
 
 
 def test_base_visualizer_score_returns_zero():
-    """FerrumVisualizer.score() should return 0.0."""
-    from ferrum._diagnostics.visualizers.base import FerrumVisualizer
+    """A no-model FerrumVisualizer falls through to the 0.0 score fallback."""
+    from ferrum.diagnostics.visualizers._base import FerrumVisualizer
 
     viz = FerrumVisualizer()
     assert viz.score(None, None) == 0.0
+    assert viz.has_score is False
+
+
+def test_base_visualizer_score_delegates_to_model():
+    """A FerrumVisualizer wrapping a model with .score delegates to it, and
+    the derived has_score property tracks that automatically (T4.6 part A).
+    """
+    from ferrum.diagnostics.visualizers._base import FerrumVisualizer
+
+    class _Scorer:
+        def score(self, X, y):
+            return 0.75
+
+    viz = FerrumVisualizer(_Scorer())
+    assert viz.score(None, None) == 0.75
+    assert viz.has_score is True
 
 
 # ---------------------------------------------------------------------------

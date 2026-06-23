@@ -48,12 +48,12 @@ fn rule_stroke_style(
     let stroke_width = sw_vals.as_ref()
         .and_then(|v| v.get(i).copied().flatten())
         .filter(|v| *v >= 0.0 && v.is_finite())
-        .unwrap_or(ctx.mark_style.stroke_width);
+        .unwrap_or(ctx.mark_style.paint.stroke_width);
     let dash_vec: Option<Vec<f64>> = sd_vals.as_ref()
         .and_then(|v| v.get(i).copied().flatten())
         .filter(|v| v.is_finite())
         .and_then(resolve_stroke_dash);
-    let effective_dash = dash_vec.as_deref().or(ctx.mark_style.stroke_dash.as_deref());
+    let effective_dash = dash_vec.as_deref().or(ctx.mark_style.paint.stroke_dash.as_deref());
     // Precedence (explicit constant stroke > per-row color > theme > fill) lives
     // in `resolve_stroke_color`. An explicit `stroke=` in mark_kwargs must not be
     // overridden by a color encoding inherited from a parent chart (e.g. boxplot
@@ -79,7 +79,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // by the shared OpacityResolver (C7); `stroke_width` / `stroke_dash` stay
     // local. Rule has no fill, so the resolver's fill default is unused.
     let opacity_res =
-        OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
+        OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
     let sw_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_width.as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let sd_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_dash.as_ref()
@@ -88,14 +88,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let meta = MetadataColumns::from_ctx(ctx);
 
-    let empty = || MarkBuildResult {
-        kind: MarkBatchKind::Rule,
-        nodes: vec![],
-        data_indices: Some(vec![]),
-        tooltips: None,
-        hrefs: None,
-        descriptions: None,
-    };
+    let empty = || MarkBuildResult::empty(MarkBatchKind::Rule);
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
     let xf_opt = x_field(ctx, spec);
@@ -464,7 +457,7 @@ mod tests {
         // Explicit constant stroke override — simulates what boxplot whisker layers do.
         let overrides = MarkKwargsSpec { stroke: Some("#6b7280".into()), stroke_dash: Some(vec![]), ..Default::default() };
         let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Rule);
-        assert!(mark_style.stroke_is_user_set, "stroke_is_user_set must be true after explicit override");
+        assert!(mark_style.paint.stroke_is_user_set, "stroke_is_user_set must be true after explicit override");
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         let strokes: Vec<_> = result.nodes.iter().filter_map(|n| match n {

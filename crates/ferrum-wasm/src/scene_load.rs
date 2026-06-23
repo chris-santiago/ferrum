@@ -224,16 +224,46 @@ pub struct ImageQuad {
 pub struct PackedBatchMeta {
     pub data_indices: Option<Vec<u32>>,
     pub tooltip_bytes: Option<Vec<u8>>,
-    pub kind: u32,
+    /// Which GPU instance buffer this batch's instances live in. Decoded once
+    /// from the packed `kind: u32` header in [`unpack_binary_instances`] via
+    /// [`DrawKind::try_from`], so all downstream sites match on the typed enum
+    /// rather than re-interpreting the magic `0`/`1` values.
+    pub kind: DrawKind,
     pub instance_start: usize,
     pub instance_count: usize,
 }
 
 /// Which GPU instance buffer a draw command targets.
+///
+/// This is the single typed representation of the circle-vs-rect distinction.
+/// The packed binary sidecar encodes it as a `u32` (`0` = circle, `1` = rect);
+/// [`DrawKind::try_from`] decodes that wire value once at unpack time so no
+/// downstream site re-interprets the raw magic numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrawKind {
     Circle,
     Rect,
+}
+
+/// An unrecognized packed `kind` discriminant.
+///
+/// The packed sidecar uses `0` for circles and `1` for rects; any other value
+/// is a malformed/unsupported batch header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnknownDrawKind(pub u32);
+
+impl TryFrom<u32> for DrawKind {
+    type Error = UnknownDrawKind;
+
+    /// Decode the packed `kind: u32` header. `0` → [`DrawKind::Circle`],
+    /// `1` → [`DrawKind::Rect`]; any other value is rejected.
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(DrawKind::Circle),
+            1 => Ok(DrawKind::Rect),
+            other => Err(UnknownDrawKind(other)),
+        }
+    }
 }
 
 /// A single instanced draw call for circle or rect batches.
@@ -569,12 +599,8 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
             // unpack_binary_instances above). Otherwise, collect from nodes.
             let key = (panel_idx as u32, batch_idx as u32);
             if let Some(meta) = batch_meta.get(&key) {
-                let kind = match meta.kind {
-                    0 => DrawKind::Circle,
-                    _ => DrawKind::Rect,
-                };
                 collector.draw_commands.push(DrawCommand {
-                    kind,
+                    kind: meta.kind,
                     instance_start: meta.instance_start as u32,
                     instance_count: meta.instance_count as u32,
                     additive,
@@ -658,7 +684,9 @@ fn read_u32_le(data: &[u8], offset: usize) -> u32 {
 /// followed by instance data, then optional data_indices and tooltip bytes
 /// based on `flags`.
 ///
-/// kind=0 → CircleInstance, kind=1 → RectInstance.
+/// The `kind: u32` header is decoded once into [`DrawKind`] via
+/// [`DrawKind::try_from`] (`0` → Circle, `1` → Rect); an unrecognized value
+/// halts parsing.
 ///
 fn unpack_binary_instances(
     data: &[u8],
@@ -670,7 +698,12 @@ fn unpack_binary_instances(
     while offset + 20 <= data.len() {
         let panel_idx = read_u32_le(data, offset);
         let batch_idx = read_u32_le(data, offset + 4);
-        let kind = read_u32_le(data, offset + 8);
+        // Decode the packed kind discriminant ONCE into the typed `DrawKind`.
+        // An unrecognized value is a malformed batch header; stop parsing (the
+        // same effect the old `_ => break` fallthrough had for unknown `u32`).
+        let Ok(kind) = DrawKind::try_from(read_u32_le(data, offset + 8)) else {
+            break;
+        };
         let count = read_u32_le(data, offset + 12) as usize;
         let flags = read_u32_le(data, offset + 16);
         offset += 20;
@@ -680,7 +713,7 @@ fn unpack_binary_instances(
         // loaded_count reflects what was ACTUALLY pushed (0 on bytemuck failure)
         // so PackedBatchMeta.instance_count never points at phantom instances.
         let (instance_byte_len, instance_start, loaded_count) = match kind {
-            0 => {
+            DrawKind::Circle => {
                 let byte_len = count * std::mem::size_of::<CircleInstance>();
                 if offset + byte_len > data.len() { break; }
                 let start = circles.len();
@@ -695,7 +728,7 @@ fn unpack_binary_instances(
                 let loaded = circles.len() - start;
                 (byte_len, start, loaded)
             }
-            1 => {
+            DrawKind::Rect => {
                 let byte_len = count * std::mem::size_of::<RectInstance>();
                 if offset + byte_len > data.len() { break; }
                 let start = rects.len();
@@ -710,7 +743,6 @@ fn unpack_binary_instances(
                 let loaded = rects.len() - start;
                 (byte_len, start, loaded)
             }
-            _ => break,
         };
         offset += instance_byte_len;
 
@@ -729,37 +761,18 @@ fn unpack_binary_instances(
 
         // Read tooltip bytes if flagged.
         let tooltip_bytes = if flags & HAS_TOOLTIPS != 0 {
-            // Scan the string table to find its total length:
-            //   [num_fields: u32]
-            //   num_fields × [len: u32][bytes]     (field names)
-            //   count × num_fields × [len: u32][bytes]  (values)
-            let scan_start = offset;
-            if offset + 4 > data.len() { break; }
-            let num_fields = read_u32_le(data, offset) as usize;
-            offset += 4;
-
-            // Skip field names.
-            for _ in 0..num_fields {
-                if offset + 4 > data.len() { break; }
-                let slen = read_u32_le(data, offset) as usize;
-                offset += 4 + slen;
-                if offset > data.len() { break; }
-            }
-
-            // Skip row values: count rows × num_fields entries.
-            for _ in 0..count * num_fields {
-                if offset + 4 > data.len() { break; }
-                let slen = read_u32_le(data, offset) as usize;
-                offset += 4 + slen;
-                if offset > data.len() { break; }
-            }
-
-            // Clamp the slice end to the buffer length so a malformed/truncated
-            // tooltip table (where the scan loop advanced offset past the end)
-            // does not panic. scan_start is always <= data.len() (it was set
-            // immediately after the 20-byte header bounds check), so only the
-            // end needs clamping. (F2)
-            Some(data[scan_start..offset.min(data.len())].to_vec())
+            // Delegate to PackedTooltipTable to measure the table's byte length.
+            // Pass `count` (the batch's instance count from the header) so the
+            // walker stops after exactly `count × num_fields` value entries rather
+            // than running to buffer-end, which would over-run into subsequent
+            // batches in the concatenated sidecar. (WASM-03 fix)
+            if offset > data.len() { break; }
+            let table_slice = &data[offset..];
+            let table_len = PackedTooltipTable::total_byte_length(table_slice, count);
+            let end = (offset + table_len).min(data.len());
+            let bytes = data[offset..end].to_vec();
+            offset = end;
+            Some(bytes)
         } else {
             None
         };
@@ -922,80 +935,203 @@ fn decode_image_quad(x: f64, y: f64, w: f64, h: f64, png_bytes: &[u8]) -> Option
     })
 }
 
+// ── PackedTooltipTable ────────────────────────────────────────────────────────
+
+/// A zero-copy cursor over the packed tooltip string-table format.
+///
+/// Binary layout (written by `ferrum-core/src/render/pack_instances.rs`):
+/// ```text
+/// [num_fields: u32]
+/// num_fields × { [name_len: u32] [name bytes] }
+/// total_rows × num_fields × { [value_len: u32] [value bytes] }
+/// ```
+///
+/// `parse()` reads the header (field count + names) once.  Callers then use
+/// the returned table to walk individual rows without re-parsing the header.
+/// The four former hand-rolled walkers (`unpack_binary_instances` skip-scan,
+/// `parse_tooltip_json`, `tooltip_field_value`, and the `format_tooltip_content`
+/// non-packed consumer) are all driven through this single canonical layout
+/// description.
+pub(crate) struct PackedTooltipTable<'a> {
+    bytes: &'a [u8],
+    /// Names of the `num_fields` columns, in order.
+    field_names: Vec<&'a str>,
+    /// Byte offset of the first value entry (start of row 0, column 0).
+    values_start: usize,
+}
+
+impl<'a> PackedTooltipTable<'a> {
+    /// Parse the header (field count + names) of a tooltip byte slice.
+    ///
+    /// Returns `None` when the slice is empty, the `num_fields` header is
+    /// missing or zero, or a name entry is truncated.  The returned table is
+    /// cheap to construct — it borrows `bytes` without copying.
+    pub(crate) fn parse(bytes: &'a [u8]) -> Option<Self> {
+        let mut offset = 0usize;
+        if offset + 4 > bytes.len() {
+            return None;
+        }
+        let num_fields = read_u32_le(bytes, offset) as usize;
+        offset += 4;
+        if num_fields == 0 {
+            return None;
+        }
+
+        let mut field_names = Vec::with_capacity(num_fields);
+        for _ in 0..num_fields {
+            if offset + 4 > bytes.len() {
+                return None;
+            }
+            let slen = read_u32_le(bytes, offset) as usize;
+            offset += 4;
+            if offset + slen > bytes.len() {
+                return None;
+            }
+            let name = std::str::from_utf8(&bytes[offset..offset + slen]).unwrap_or("");
+            field_names.push(name);
+            offset += slen;
+        }
+
+        Some(PackedTooltipTable { bytes, field_names, values_start: offset })
+    }
+
+    /// Number of columns in this table.
+    fn num_fields(&self) -> usize {
+        self.field_names.len()
+    }
+
+    /// Advance `offset` past `count` length-prefixed string entries.
+    ///
+    /// Returns `None` (bounds violation) if the data is truncated; updates
+    /// `offset` in place on success.
+    fn skip_entries(bytes: &[u8], offset: &mut usize, count: usize) -> Option<()> {
+        for _ in 0..count {
+            if *offset + 4 > bytes.len() {
+                return None;
+            }
+            let slen = read_u32_le(bytes, *offset) as usize;
+            *offset += 4 + slen;
+            if *offset > bytes.len() {
+                return None;
+            }
+        }
+        Some(())
+    }
+
+    /// Read the next length-prefixed string at `offset`, advancing past it.
+    ///
+    /// Returns `None` on truncation.
+    fn read_str<'b>(bytes: &'b [u8], offset: &mut usize) -> Option<&'b str> {
+        if *offset + 4 > bytes.len() {
+            return None;
+        }
+        let slen = read_u32_le(bytes, *offset) as usize;
+        *offset += 4;
+        if *offset + slen > bytes.len() {
+            return None;
+        }
+        let s = std::str::from_utf8(&bytes[*offset..*offset + slen]).ok()?;
+        *offset += slen;
+        Some(s)
+    }
+
+    /// Seek to the start of `row_idx` in the values section.
+    ///
+    /// Returns `None` when the row is out of range or the data is truncated.
+    fn seek_to_row(&self, row_idx: usize) -> Option<usize> {
+        let mut offset = self.values_start;
+        Self::skip_entries(self.bytes, &mut offset, row_idx * self.num_fields())?;
+        Some(offset)
+    }
+
+    /// Total byte length of the table (header + exactly `count` value rows).
+    ///
+    /// Used by `unpack_binary_instances` to measure how many bytes this batch's
+    /// tooltip table occupies in the concatenated sidecar buffer so the outer
+    /// batch-load cursor can advance to the next batch's 20-byte header.
+    ///
+    /// The walk is bounded to exactly `count × num_fields` value entries —
+    /// mirroring the producer's layout in `pack_instances.rs::pack_tooltips`.
+    /// Walking to buffer-end instead would over-run this batch's table into the
+    /// next batch's header/instance bytes when multiple batches are concatenated,
+    /// corrupting the first batch's tooltip slice and causing the outer
+    /// `while offset+20 <= data.len()` loop to terminate early so every
+    /// subsequent batch would silently never load.
+    ///
+    /// Returns `bytes.len()` (clamped) when the table header is malformed or the
+    /// data is truncated — the caller's `.min(data.len())` guard handles it.
+    pub(crate) fn total_byte_length(bytes: &'_ [u8], count: usize) -> usize {
+        let Some(table) = PackedTooltipTable::parse(bytes) else {
+            // If parse fails (empty or malformed header), return the full slice
+            // length so the caller's `.min(data.len())` guard clamps safely.
+            return bytes.len();
+        };
+        let mut offset = table.values_start;
+        // Walk exactly count × num_fields value entries — NOT to buffer end.
+        // This is the critical boundary: the old "walk until buffer runs out"
+        // loop over-ran this batch's table into subsequent batches' bytes.
+        let total_value_entries = count * table.num_fields();
+        if Self::skip_entries(bytes, &mut offset, total_value_entries).is_none() {
+            // Truncated table — clamp to whatever offset we reached.
+            return bytes.len();
+        }
+        offset
+    }
+
+    /// Return all field values for `row_idx` as `Vec<(name, value)>` pairs.
+    ///
+    /// Returns `None` when the row is out of range or data is malformed.
+    pub(crate) fn row_fields(&self, row_idx: usize) -> Option<Vec<(&str, &str)>> {
+        let mut offset = self.seek_to_row(row_idx)?;
+        let mut result = Vec::with_capacity(self.num_fields());
+        for &name in &self.field_names {
+            let value = Self::read_str(self.bytes, &mut offset)?;
+            result.push((name, value));
+        }
+        Some(result)
+    }
+
+    /// Return the value for `field` in `row_idx`, or `None` if absent.
+    pub(crate) fn field_value(&self, row_idx: usize, field: &str) -> Option<&str> {
+        let field_col = self.field_names.iter().position(|&n| n == field)?;
+        let mut offset = self.seek_to_row(row_idx)?;
+        for col in 0..self.num_fields() {
+            let value = Self::read_str(self.bytes, &mut offset)?;
+            if col == field_col {
+                return Some(value);
+            }
+        }
+        None
+    }
+}
+
+// ── Public tooltip helpers ────────────────────────────────────────────────────
+
 /// Parse a tooltip string table and return a JSON string for one row.
 ///
-/// The `tooltip_bytes` slice starts with `[num_fields: u32]`, followed by
-/// `num_fields` length-prefixed field name strings, then `total_rows ×
-/// num_fields` length-prefixed value strings (row-major).
+/// The `tooltip_bytes` slice uses the [`PackedTooltipTable`] format:
+/// `[num_fields: u32]`, followed by `num_fields` length-prefixed field name
+/// strings, then `total_rows × num_fields` length-prefixed value strings
+/// (row-major).
 ///
 /// Returns `{"fields":[{"name":"x","value":"1.23"},…]}` for the requested
 /// `row_idx`, or `"{}"` if the index is out of range or the data is malformed.
 pub fn parse_tooltip_json(tooltip_bytes: &[u8], row_idx: usize) -> String {
-    let mut offset = 0;
-
-    // Read num_fields.
-    if offset + 4 > tooltip_bytes.len() {
+    let Some(table) = PackedTooltipTable::parse(tooltip_bytes) else {
         return "{}".to_string();
-    }
-    let num_fields = read_u32_le(tooltip_bytes, offset) as usize;
-    offset += 4;
-
-    if num_fields == 0 {
+    };
+    let Some(fields) = table.row_fields(row_idx) else {
         return "{}".to_string();
-    }
+    };
 
-    // Read field names.
-    let mut field_names = Vec::with_capacity(num_fields);
-    for _ in 0..num_fields {
-        if offset + 4 > tooltip_bytes.len() {
-            return "{}".to_string();
-        }
-        let slen = read_u32_le(tooltip_bytes, offset) as usize;
-        offset += 4;
-        if offset + slen > tooltip_bytes.len() {
-            return "{}".to_string();
-        }
-        let name = std::str::from_utf8(&tooltip_bytes[offset..offset + slen])
-            .unwrap_or("");
-        field_names.push(name);
-        offset += slen;
-    }
-
-    // Skip to row `row_idx`: each value entry is [len: u32][bytes].
-    for _ in 0..row_idx * num_fields {
-        if offset + 4 > tooltip_bytes.len() {
-            return "{}".to_string();
-        }
-        let slen = read_u32_le(tooltip_bytes, offset) as usize;
-        offset += 4 + slen;
-        if offset > tooltip_bytes.len() {
-            return "{}".to_string();
-        }
-    }
-
-    // Read this row's values.
-    let mut fields_json = Vec::with_capacity(num_fields);
-    for field_name in &field_names {
-        if offset + 4 > tooltip_bytes.len() {
-            return "{}".to_string();
-        }
-        let slen = read_u32_le(tooltip_bytes, offset) as usize;
-        offset += 4;
-        if offset + slen > tooltip_bytes.len() {
-            return "{}".to_string();
-        }
-        let value = std::str::from_utf8(&tooltip_bytes[offset..offset + slen])
-            .unwrap_or("");
-        offset += slen;
-
-        // Escape quotes in name/value for JSON safety.
-        let escaped_name = field_name.replace('\\', "\\\\").replace('"', "\\\"");
-        let escaped_value = value.replace('\\', "\\\\").replace('"', "\\\"");
-        fields_json.push(format!(
-            r#"{{"name":"{}","value":"{}"}}"#,
-            escaped_name, escaped_value
-        ));
-    }
+    let fields_json: Vec<String> = fields
+        .iter()
+        .map(|(name, value)| {
+            let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
+            let escaped_value = value.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(r#"{{"name":"{}","value":"{}"}}"#, escaped_name, escaped_value)
+        })
+        .collect();
 
     format!(r#"{{"fields":[{}]}}"#, fields_json.join(","))
 }
@@ -1003,75 +1139,13 @@ pub fn parse_tooltip_json(tooltip_bytes: &[u8], row_idx: usize) -> String {
 /// Read a single tooltip field value (as a string) for one row of a packed
 /// batch's tooltip string table.
 ///
-/// The layout matches [`parse_tooltip_json`]: `[num_fields: u32]`, then
-/// `num_fields` length-prefixed field-name strings, then `total_rows ×
-/// num_fields` length-prefixed value strings (row-major). This walks the table
-/// for `row_idx` and returns the value owned by the named field.
-///
+/// The layout matches [`parse_tooltip_json`] (see [`PackedTooltipTable`]).
 /// Returns `None` when the field is absent, the row is out of range, or the
 /// data is malformed — packed legend/field-value matching uses this to mirror
 /// the unpacked tooltip-field path on `< 1000`-mark batches.
 pub fn tooltip_field_value(tooltip_bytes: &[u8], row_idx: usize, field: &str) -> Option<String> {
-    let mut offset = 0usize;
-
-    if offset + 4 > tooltip_bytes.len() {
-        return None;
-    }
-    let num_fields = read_u32_le(tooltip_bytes, offset) as usize;
-    offset += 4;
-    if num_fields == 0 {
-        return None;
-    }
-
-    // Read field names, tracking which column holds the requested field.
-    let mut field_col = None;
-    for col in 0..num_fields {
-        if offset + 4 > tooltip_bytes.len() {
-            return None;
-        }
-        let slen = read_u32_le(tooltip_bytes, offset) as usize;
-        offset += 4;
-        if offset + slen > tooltip_bytes.len() {
-            return None;
-        }
-        let name = std::str::from_utf8(&tooltip_bytes[offset..offset + slen]).unwrap_or("");
-        if name == field {
-            field_col = Some(col);
-        }
-        offset += slen;
-    }
-    let field_col = field_col?;
-
-    // Skip whole rows before `row_idx`.
-    for _ in 0..row_idx * num_fields {
-        if offset + 4 > tooltip_bytes.len() {
-            return None;
-        }
-        let slen = read_u32_le(tooltip_bytes, offset) as usize;
-        offset += 4 + slen;
-        if offset > tooltip_bytes.len() {
-            return None;
-        }
-    }
-
-    // Walk this row's columns up to and including the target column.
-    for col in 0..num_fields {
-        if offset + 4 > tooltip_bytes.len() {
-            return None;
-        }
-        let slen = read_u32_le(tooltip_bytes, offset) as usize;
-        offset += 4;
-        if offset + slen > tooltip_bytes.len() {
-            return None;
-        }
-        if col == field_col {
-            let value = std::str::from_utf8(&tooltip_bytes[offset..offset + slen]).ok()?;
-            return Some(value.to_string());
-        }
-        offset += slen;
-    }
-
-    None
+    let table = PackedTooltipTable::parse(tooltip_bytes)?;
+    table.field_value(row_idx, field).map(|s| s.to_string())
 }
 
 /// Returns `true` when a mark batch should use the additive blend pipeline.
@@ -4448,4 +4522,332 @@ mod bug_hunt_tests {
         assert!(data.raw_fragments[0].svg.contains("nested"));
     }
 
+    // ── WASM-03: PackedTooltipTable ───────────────────────────────────────────
+
+    /// Build a well-formed packed tooltip byte slice with the given fields and rows.
+    fn build_tooltip_bytes(field_names: &[&str], rows: &[Vec<&str>]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(field_names.len() as u32).to_le_bytes());
+        for name in field_names {
+            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            buf.extend_from_slice(name.as_bytes());
+        }
+        for row in rows {
+            for val in row {
+                buf.extend_from_slice(&(val.len() as u32).to_le_bytes());
+                buf.extend_from_slice(val.as_bytes());
+            }
+        }
+        buf
+    }
+
+    /// `parse` returns `None` on empty input.
+    #[test]
+    fn packed_tooltip_table_parse_empty_returns_none() {
+        assert!(PackedTooltipTable::parse(&[]).is_none());
+    }
+
+    /// `parse` returns `None` when num_fields is zero.
+    #[test]
+    fn packed_tooltip_table_parse_zero_fields_returns_none() {
+        let bytes: Vec<u8> = 0u32.to_le_bytes().to_vec();
+        assert!(PackedTooltipTable::parse(&bytes).is_none());
+    }
+
+    /// `parse` returns `None` when the header is truncated (only 2 bytes).
+    #[test]
+    fn packed_tooltip_table_parse_truncated_header_returns_none() {
+        assert!(PackedTooltipTable::parse(&[0x01, 0x00]).is_none());
+    }
+
+    /// `parse` succeeds on a minimal valid table (1 field, 0 rows).
+    #[test]
+    fn packed_tooltip_table_parse_single_field_no_rows() {
+        let bytes = build_tooltip_bytes(&["x"], &[]);
+        let table = PackedTooltipTable::parse(&bytes).expect("must parse single field");
+        assert_eq!(table.field_names, vec!["x"]);
+    }
+
+    /// `row_fields` returns the correct pairs for a single row.
+    #[test]
+    fn packed_tooltip_table_row_fields_single_row() {
+        let bytes = build_tooltip_bytes(&["name", "val"], &[vec!["alice", "42"]]);
+        let table = PackedTooltipTable::parse(&bytes).unwrap();
+        let fields = table.row_fields(0).expect("must return row 0");
+        assert_eq!(fields, vec![("name", "alice"), ("val", "42")]);
+    }
+
+    /// `row_fields` works correctly for multiple rows.
+    #[test]
+    fn packed_tooltip_table_row_fields_multiple_rows() {
+        let bytes = build_tooltip_bytes(
+            &["cat"],
+            &[vec!["a"], vec!["b"], vec!["c"]],
+        );
+        let table = PackedTooltipTable::parse(&bytes).unwrap();
+        assert_eq!(table.row_fields(0).unwrap(), vec![("cat", "a")]);
+        assert_eq!(table.row_fields(1).unwrap(), vec![("cat", "b")]);
+        assert_eq!(table.row_fields(2).unwrap(), vec![("cat", "c")]);
+    }
+
+    /// `row_fields` returns `None` when the row is out of range.
+    #[test]
+    fn packed_tooltip_table_row_fields_out_of_range_returns_none() {
+        let bytes = build_tooltip_bytes(&["x"], &[vec!["1"]]);
+        let table = PackedTooltipTable::parse(&bytes).unwrap();
+        assert!(table.row_fields(1).is_none(), "row 1 does not exist — must return None");
+    }
+
+    /// `field_value` returns the correct value by column name.
+    #[test]
+    fn packed_tooltip_table_field_value_correct_column() {
+        let bytes = build_tooltip_bytes(
+            &["a", "b", "c"],
+            &[vec!["x", "y", "z"]],
+        );
+        let table = PackedTooltipTable::parse(&bytes).unwrap();
+        assert_eq!(table.field_value(0, "a"), Some("x"));
+        assert_eq!(table.field_value(0, "b"), Some("y"));
+        assert_eq!(table.field_value(0, "c"), Some("z"));
+    }
+
+    /// `field_value` returns `None` for an unknown field name.
+    #[test]
+    fn packed_tooltip_table_field_value_unknown_field_returns_none() {
+        let bytes = build_tooltip_bytes(&["x"], &[vec!["1"]]);
+        let table = PackedTooltipTable::parse(&bytes).unwrap();
+        assert!(table.field_value(0, "unknown").is_none());
+    }
+
+    /// `field_value` returns `None` when the row is out of range.
+    #[test]
+    fn packed_tooltip_table_field_value_out_of_range_row_returns_none() {
+        let bytes = build_tooltip_bytes(&["x"], &[vec!["1"]]);
+        let table = PackedTooltipTable::parse(&bytes).unwrap();
+        assert!(table.field_value(99, "x").is_none());
+    }
+
+    /// `total_byte_length` with the correct count equals the whole byte slice.
+    #[test]
+    fn packed_tooltip_table_total_byte_length_matches_buffer() {
+        // 2 rows, 2 fields each → count=2
+        let bytes = build_tooltip_bytes(&["cat", "val"], &[vec!["a", "1"], vec!["b", "2"]]);
+        let len = PackedTooltipTable::total_byte_length(&bytes, 2);
+        assert_eq!(len, bytes.len(), "total_byte_length with count=2 must equal the full buffer length");
+    }
+
+    /// `total_byte_length` on an empty slice returns `bytes.len()` (0) without panicking.
+    #[test]
+    fn packed_tooltip_table_total_byte_length_empty_returns_zero() {
+        let len = PackedTooltipTable::total_byte_length(&[], 0);
+        assert_eq!(len, 0, "empty input must return 0");
+    }
+
+    /// `parse_tooltip_json` produces valid JSON with correctly escaped special chars.
+    ///
+    /// The `name` column in each fields entry is the column name (e.g. "col_name");
+    /// the `value` column is the cell value (which may contain special chars).
+    #[test]
+    fn packed_tooltip_table_parse_tooltip_json_produces_valid_json() {
+        // Field names: "col_name" and "col_val" (plain strings).
+        // Row values: one contains a double-quote, one contains a backslash.
+        let bytes = build_tooltip_bytes(
+            &["col_name", "col_val"],
+            &[vec![r#"key"with"quotes"#, r"val\backslash"]],
+        );
+        let json = parse_tooltip_json(&bytes, 0);
+        // Must parse as valid JSON.
+        let parsed: serde_json::Value = serde_json::from_str(&json)
+            .expect("parse_tooltip_json must produce valid JSON for special chars");
+        // The "name" JSON key holds the column name; the "value" key holds the cell value.
+        assert_eq!(parsed["fields"][0]["name"], "col_name", "first column name");
+        assert_eq!(
+            parsed["fields"][0]["value"], r#"key"with"quotes"#,
+            "value with embedded quotes must round-trip correctly"
+        );
+        assert_eq!(parsed["fields"][1]["name"], "col_val", "second column name");
+        assert_eq!(
+            parsed["fields"][1]["value"], r"val\backslash",
+            "value with backslash must round-trip correctly"
+        );
+    }
+
+    /// `tooltip_field_value` (the public entry point) delegates correctly to
+    /// `PackedTooltipTable::field_value`.
+    #[test]
+    fn packed_tooltip_table_tooltip_field_value_correct() {
+        let bytes = build_tooltip_bytes(&["x", "y"], &[vec!["10", "20"]]);
+        assert_eq!(tooltip_field_value(&bytes, 0, "x"), Some("10".to_string()));
+        assert_eq!(tooltip_field_value(&bytes, 0, "y"), Some("20".to_string()));
+        assert_eq!(tooltip_field_value(&bytes, 0, "z"), None);
+        assert_eq!(tooltip_field_value(&bytes, 1, "x"), None);
+    }
+
+    // ── WASM-03 regression: two-batch concatenated packed stream ────────────
+    //
+    // This test guards against the exact regression fixed by the WASM-03 patch:
+    // `total_byte_length` previously walked to buffer-end instead of stopping
+    // after `count × num_fields` value entries, so for a concatenated two-batch
+    // sidecar where batch 0 has HAS_TOOLTIPS:
+    //   (a) batch 0's tooltip slice was over-run into batch 1's header/instance bytes
+    //   (b) the outer `while offset+20 <= data.len()` loop saw a bad offset and
+    //       terminated early, so batch 1 silently never loaded.
+    //
+    // This test MUST FAIL on the old `total_byte_length(bytes)` (no count param)
+    // and MUST PASS on the fixed `total_byte_length(bytes, count)`.
+
+    /// Build a single packed-batch byte vector from its components.
+    ///
+    /// `panel_idx`, `batch_idx`, `kind` (0=circle, 1=rect), `count` form the
+    /// 20-byte header.  `instance_bytes` is the raw instance data.
+    /// `tooltip_rows` is packed into a HAS_TOOLTIPS table appended after.
+    fn build_two_batch_packed(
+        // batch 0
+        b0_count: usize,
+        b0_instance_bytes: &[u8],
+        b0_tooltip_names: &[&str],
+        b0_tooltip_rows: &[Vec<&str>],
+        // batch 1
+        b1_count: usize,
+        b1_instance_bytes: &[u8],
+    ) -> Vec<u8> {
+        let has_tooltips: u32 = 0x1;
+
+        let mut buf = Vec::new();
+
+        // ── batch 0 header (panel=0, batch=0, kind=0/circle, count, flags=HAS_TOOLTIPS)
+        buf.extend_from_slice(&0u32.to_le_bytes()); // panel_idx
+        buf.extend_from_slice(&0u32.to_le_bytes()); // batch_idx
+        buf.extend_from_slice(&0u32.to_le_bytes()); // kind = circle
+        buf.extend_from_slice(&(b0_count as u32).to_le_bytes());
+        buf.extend_from_slice(&has_tooltips.to_le_bytes());
+        // batch 0 instance data
+        buf.extend_from_slice(b0_instance_bytes);
+        // batch 0 tooltip table
+        buf.extend_from_slice(&build_tooltip_bytes(b0_tooltip_names, b0_tooltip_rows));
+
+        // ── batch 1 header (panel=0, batch=1, kind=0/circle, count, flags=0)
+        buf.extend_from_slice(&0u32.to_le_bytes()); // panel_idx
+        buf.extend_from_slice(&1u32.to_le_bytes()); // batch_idx
+        buf.extend_from_slice(&0u32.to_le_bytes()); // kind = circle
+        buf.extend_from_slice(&(b1_count as u32).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags = 0 (no tooltips)
+        // batch 1 instance data
+        buf.extend_from_slice(b1_instance_bytes);
+
+        buf
+    }
+
+    /// Two-batch packed stream: batch 0 has HAS_TOOLTIPS, batch 1 follows.
+    ///
+    /// Asserts:
+    /// - BOTH batches load (meta contains (0,0) and (0,1))
+    /// - batch 0's tooltip slice decodes correctly (not over-run into batch 1)
+    /// - `parse_tooltip_json` on batch 0's tooltip bytes returns valid data
+    ///
+    /// This test fails on the old `total_byte_length` (no count param) because
+    /// the walk runs to buffer-end, consuming batch 1's header bytes as if they
+    /// were tooltip values; the outer loop then sees `offset > data.len() - 20`
+    /// and batch 1 is never added to `meta`.
+    ///
+    /// Tooltip field/value strings are chosen so the tooltip table's byte length
+    /// is divisible by 4, keeping subsequent batch instance data 4-byte aligned
+    /// for `bytemuck::try_cast_slice` on native (non-WASM) platforms.
+    ///   field "xyz" (3 chars) → 4+3 = 7 bytes
+    ///   3 rows, value "abc"/"def"/"ghi" (3 chars each) → 3 × (4+3) = 21 bytes
+    ///   + num_fields header (4 bytes) = 4+7+21 = 32 bytes (32 % 4 = 0 ✓)
+    #[test]
+    fn wasm03_two_batch_packed_stream_both_batches_load_and_tooltip_slice_correct() {
+        // Build minimal valid CircleInstance bytes (64 bytes each, all zeros is
+        // a valid bytemuck cast since CircleInstance: Zeroable).
+        let mk_circle_bytes = |n: usize| -> Vec<u8> {
+            vec![0u8; n * std::mem::size_of::<CircleInstance>()]
+        };
+
+        // 3 circles in batch 0, 3 tooltip rows (one per instance).
+        // Tooltip table is 32 bytes (divisible by 4) so batch 1's header and
+        // instance data land on 4-byte-aligned offsets for bytemuck.
+        let b0_count = 3usize;
+        let b1_count = 2usize;
+
+        let b0_tooltip_names = &["xyz"];
+        let b0_tooltip_rows: Vec<Vec<&str>> = vec![
+            vec!["abc"],
+            vec!["def"],
+            vec!["ghi"],
+        ];
+
+        let packed = build_two_batch_packed(
+            b0_count,
+            &mk_circle_bytes(b0_count),
+            b0_tooltip_names,
+            &b0_tooltip_rows,
+            b1_count,
+            &mk_circle_bytes(b1_count),
+        );
+
+        // Parse via unpack_binary_instances.
+        let mut circles: Vec<CircleInstance> = Vec::new();
+        let mut rects: Vec<RectInstance> = Vec::new();
+        let mut meta = HashMap::new();
+        unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
+
+        // BOTH batches must load.
+        assert!(
+            meta.contains_key(&(0, 0)),
+            "batch (0,0) must be present in meta after loading two-batch stream"
+        );
+        assert!(
+            meta.contains_key(&(0, 1)),
+            "batch (0,1) must be present in meta — old bug caused batch 1 to be silently dropped"
+        );
+
+        // Batch 0 must have loaded b0_count instances.
+        let m0 = &meta[&(0, 0)];
+        assert_eq!(m0.instance_count, b0_count, "batch 0 must have {} instances", b0_count);
+
+        // Batch 1 must have loaded b1_count instances.
+        let m1 = &meta[&(0, 1)];
+        assert_eq!(m1.instance_count, b1_count, "batch 1 must have {} instances", b1_count);
+
+        // Batch 0's tooltip slice must decode to the correct values (not garbled
+        // by over-running into batch 1's bytes).
+        let tip0 = m0.tooltip_bytes.as_deref().expect("batch 0 must have tooltip_bytes");
+        assert_eq!(
+            parse_tooltip_json(tip0, 0),
+            r#"{"fields":[{"name":"xyz","value":"abc"}]}"#,
+            "batch 0 tooltip row 0 must decode to xyz=abc"
+        );
+        assert_eq!(
+            parse_tooltip_json(tip0, 1),
+            r#"{"fields":[{"name":"xyz","value":"def"}]}"#,
+            "batch 0 tooltip row 1 must decode to xyz=def"
+        );
+        assert_eq!(
+            parse_tooltip_json(tip0, 2),
+            r#"{"fields":[{"name":"xyz","value":"ghi"}]}"#,
+            "batch 0 tooltip row 2 must decode to xyz=ghi"
+        );
+        // Row 3 is out of range for batch 0 (only 3 rows).
+        assert_eq!(
+            parse_tooltip_json(tip0, 3),
+            "{}",
+            "batch 0 tooltip row 3 must return empty JSON (only 3 rows in this batch)"
+        );
+
+        // Batch 1 has no tooltips.
+        assert!(m1.tooltip_bytes.is_none(), "batch 1 must have no tooltip_bytes");
+    }
+
+    // ── WASM-02: DrawKind::try_from decodes the packed kind discriminant ─────
+
+    /// `0` → Circle, `1` → Rect; any other value is rejected. This is the single
+    /// decode point for the packed `kind: u32` header.
+    #[test]
+    fn draw_kind_try_from_maps_known_values() {
+        assert_eq!(DrawKind::try_from(0), Ok(DrawKind::Circle));
+        assert_eq!(DrawKind::try_from(1), Ok(DrawKind::Rect));
+        assert_eq!(DrawKind::try_from(2), Err(UnknownDrawKind(2)));
+        assert_eq!(DrawKind::try_from(u32::MAX), Err(UnknownDrawKind(u32::MAX)));
+    }
 }

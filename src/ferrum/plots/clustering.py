@@ -13,6 +13,7 @@ Internal-only builders
 ----------------------
 _silhouette_chart_from_source, _pca_scree_chart_from_source,
 _pca_scree_chart_from_variance_df, _intercluster_distance_chart_from_source,
+_manifold_chart_from_source, _elbow_chart_from_source, _elbow_scores,
 _cluster_diagnostics_chart.
 """
 
@@ -26,13 +27,23 @@ if TYPE_CHECKING:
     from ferrum import Chart, HConcatChart
 
 from ferrum.encoding import X, Y
-from ferrum._overrides import _apply_overrides
-from ferrum.plots._helpers import _finalize_chart, _resolve_source
+from ferrum.plots._helpers import (
+    _UNSET,
+    _finalize_chart,
+    _reject_compare,
+    _resolve_first_param,
+    _resolve_source,
+    _validate_choice,
+)
 
 
 # ---------------------------------------------------------------------------
 # Builders (private)
 # ---------------------------------------------------------------------------
+
+# Valid elbow scoring metrics, shared by ``_elbow_scores`` and
+# ``ElbowVisualizer`` so the two cannot drift.
+_ELBOW_METRICS: tuple[str, ...] = ("distortion", "silhouette", "calinski_harabasz")
 
 
 def _silhouette_chart_from_source(
@@ -208,8 +219,146 @@ def _intercluster_distance_chart_from_source(
     )
 
 
+def _manifold_chart_from_source(
+    source: Any,
+    *,
+    method: str = "umap",
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+):
+    """Low-dimensional manifold-embedding scatter from a source.
+
+    Computes the 2D embedding via ``source.embeddings(method=...)`` and
+    renders a point chart with axes ``dim_0`` / ``dim_1`` colored by the
+    ``label`` column (Utf8, so the nominal color scale is auto-inferred).
+    Shared by ``manifold_chart`` and ``ManifoldVisualizer._build_chart``.
+    """
+    import ferrum
+
+    emb = source.embeddings(method=method)
+    chart = ferrum.Chart(emb).mark_point().encode(x="dim_0", y="dim_1", color="label:N")
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
+
+
+def _elbow_scores(
+    model_class: Any,
+    X: Any,
+    *,
+    ks: "list[int]",
+    metric: str = "distortion",
+    random_state: int | None = None,
+) -> pl.DataFrame:
+    """Fit one clusterer per k and score it; return a ``k``/``score`` frame.
+
+    Owns the per-k model-fitting + Rust scoring loop so the visualizer's
+    ``fit()`` only orchestrates. ``"distortion"`` reads ``.inertia_``;
+    ``"silhouette"`` and ``"calinski_harabasz"`` call the corresponding Rust
+    kernel on the fitted labels and skip ``k < 2`` (undefined there).
+
+    Parameters
+    ----------
+    model_class : type
+        Uninstantiated clustering class accepting ``n_clusters`` /
+        ``random_state`` / ``n_init`` keyword arguments.
+    X : array-like
+        Feature matrix used to fit each per-k model.
+    ks : list of int
+        Candidate k values to sweep.
+    metric : {"distortion", "silhouette", "calinski_harabasz"}
+        Score to compute per k.
+    random_state : int or None
+        Seed passed to every per-k model instantiation; ``None`` uses ``0``.
+
+    Returns
+    -------
+    polars.DataFrame
+        One row per scored k with columns ``k`` (int) and ``score`` (float).
+
+    Raises
+    ------
+    ValueError
+        When ``metric`` is not one of the three supported metrics, or when
+        the sweep produces no scores (e.g. silhouette over ``ks`` that are
+        all ``< 2``).
+    """
+    if metric not in _ELBOW_METRICS:
+        raise ValueError(
+            f"ElbowVisualizer(metric={metric!r}) is not valid; expected one of {_ELBOW_METRICS}."
+        )
+    from ..diagnostics._internal.deps import require_sklearn
+
+    require_sklearn("ElbowVisualizer")
+    import numpy as np
+    import pyarrow as pa
+    from ferrum import _core
+
+    X_np = np.ascontiguousarray(np.asarray(X, dtype=np.float64))
+    x_arrow = pa.RecordBatch.from_pydict(
+        {f"f{j}": X_np[:, j].tolist() for j in range(X_np.shape[1])}
+    )
+    seed = 0 if random_state is None else int(random_state)
+    rows: list[dict] = []
+    for k in ks:
+        k_int = int(k)
+        if metric in ("silhouette", "calinski_harabasz") and k_int < 2:
+            continue
+        m = model_class(
+            n_clusters=k_int,
+            random_state=seed,
+            n_init=10,
+        ).fit(X)
+        if metric == "distortion":
+            score = float(m.inertia_)
+        else:
+            labels = getattr(m, "labels_", None)
+            if labels is None:
+                labels = m.predict(X)
+            labels_arrow = pa.array(np.asarray(labels).astype(int).tolist(), type=pa.int64())
+            if metric == "silhouette":
+                score = float(_core.silhouette_score(x_arrow, labels_arrow, "euclidean"))
+            else:  # "calinski_harabasz"
+                score = float(_core.calinski_harabasz_score(x_arrow, labels_arrow))
+        rows.append({"k": k_int, "score": score})
+    if not rows:
+        raise ValueError(
+            f"ElbowVisualizer.fit produced no scores for metric={metric!r} over "
+            f"ks={ks!r}. For silhouette/calinski_harabasz, ks must contain "
+            "values >= 2."
+        )
+    return pl.DataFrame(rows)
+
+
+def _elbow_chart_from_source(
+    scores: pl.DataFrame,
+    *,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+):
+    """Score-vs-k line chart from an ``_elbow_scores`` frame.
+
+    Takes the ``k``/``score`` DataFrame produced by :func:`_elbow_scores`
+    (the elbow sweep is over a model *class*, not a ``ModelSource``, so the
+    builder consumes the scored frame directly). Shared by ``elbow_chart``
+    and ``ElbowVisualizer.fit``.
+    """
+    import ferrum
+
+    chart = ferrum.Chart(scores).mark_line().encode(x="k", y="score")
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
+
+
 def _cluster_diagnostics_chart(
-    X: Any,  # noqa: N803 — matches public API parameter name
+    model: Any,
     *,
     ks: Any,
     method: str,
@@ -226,7 +375,9 @@ def _cluster_diagnostics_chart(
 
     Unlike the other builders, this one sweeps the clusterer over the
     requested ``ks`` rather than wrapping a single fitted ``ModelSource``.
-    See ``ferrum.cluster_diagnostics`` for the user-facing parameter docs.
+    ``model`` here is the feature matrix to cluster (the family-canonical
+    first-param name; see D-FIRSTPARAM-1). See ``ferrum.cluster_diagnostics``
+    for the user-facing parameter docs.
     """
     import ferrum
     import numpy as np
@@ -237,7 +388,7 @@ def _cluster_diagnostics_chart(
     from ferrum._layer import _Layer
 
     # numpy required: manual inertia computation uses 2D positional indexing and mask ops.
-    X_np = np.asarray(X, dtype=np.float64)
+    X_np = np.asarray(model, dtype=np.float64)
     X_np = np.ascontiguousarray(X_np)
     x_arrow = pa.RecordBatch.from_pydict(
         {f"f{j}": X_np[:, j].tolist() for j in range(X_np.shape[1])}
@@ -342,7 +493,7 @@ def _cluster_diagnostics_chart(
     else:
         # scoring="both" returns HConcatChart — mark/encode/layers overrides
         # don't apply meaningfully to compound views. Only properties= is
-        # forwarded (via _apply_overrides, which calls .properties() on the
+        # forwarded (via _finalize_chart, which calls .properties() on the
         # compound). mark=/encode=/layers= are silently ignored.
         chart = elbow | sil
     return _finalize_chart(
@@ -363,6 +514,7 @@ def pca_scree_chart(
     cumulative_line: bool = True,
     threshold: float | None = 0.95,
     subtitle: str | None = None,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -429,7 +581,20 @@ def pca_scree_chart(
     Raw DataFrame (no sklearn required):
 
     >>> fm.pca_scree_chart(X_train, n_components=10)
+
+    Notes
+    -----
+    ``compare=`` is not supported. PCA scree is an unsupervised single-fit
+    diagnostic with no ``y`` target, so cross-model comparison is meaningless.
+    Passing a non-``None`` ``compare`` raises ``ValueError`` (D-COMPARE-1:
+    loud, documented exclusion).
     """
+    _reject_compare(
+        compare,
+        chart="pca_scree_chart",
+        reason="PCA scree is an unsupervised single-fit diagnostic with no y "
+        "target; cross-model comparison is meaningless",
+    )
     import numpy as np
     import pyarrow as pa
 
@@ -488,12 +653,14 @@ def pca_scree_chart(
 
 
 def cluster_diagnostics(
-    X: Any,  # noqa: N803 — matches ferrum-spec.md parameter name
+    model: Any = _UNSET,
     *,
+    X: Any = _UNSET,  # noqa: N803 — deprecated keyword alias for ``model``
     ks: Any,
     method: str = "kmeans",
     scoring: str = "both",
     n_init: int = 10,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -511,10 +678,11 @@ def cluster_diagnostics(
 
     Parameters
     ----------
-    X : array-like
+    model : array-like
         Feature matrix. All samples are used for fitting and scoring.
         Polars DataFrames, pandas DataFrames, and 2D numpy arrays are
-        accepted.
+        accepted. (Family-canonical first-param name; the legacy keyword
+        ``X=`` is accepted as a deprecated alias.)
     ks : iterable of int
         Values of k (number of clusters) to evaluate.
     method : {"kmeans", "hierarchical"}, default "kmeans"
@@ -577,23 +745,36 @@ def cluster_diagnostics(
     >>> fm.cluster_diagnostics(X_train, ks=range(2, 11))
     >>> fm.cluster_diagnostics(X_train, ks=range(2, 11),
     ...                         method="hierarchical", scoring="silhouette")
-    """
-    from ferrum._diagnostics.deps import require_sklearn
 
-    require_sklearn("cluster_diagnostics")
-    if method not in ("kmeans", "hierarchical"):
-        raise ValueError(
-            f"cluster_diagnostics(method={method!r}) — expected one of "
-            "'kmeans', 'hierarchical'. DBSCAN and other density-based "
-            "methods don't fit the sweep-k framework and are not supported."
-        )
-    if scoring not in ("elbow", "silhouette", "both"):
-        raise ValueError(
-            f"cluster_diagnostics(scoring={scoring!r}) — expected one of "
-            "'elbow', 'silhouette', 'both'."
-        )
-    return _cluster_diagnostics_chart(
+    Notes
+    -----
+    ``compare=`` is not supported. This sweeps one clusterer class over a range
+    of ``k`` on a single feature matrix (no ``y`` target); cross-model
+    comparison via ``compare=`` is meaningless. Passing a non-``None``
+    ``compare`` raises ``ValueError`` (D-COMPARE-1).
+    """
+    from ferrum.diagnostics._internal.deps import require_sklearn
+
+    _reject_compare(
+        compare,
+        chart="cluster_diagnostics",
+        reason="this sweeps one clusterer class over k on an unsupervised "
+        "feature matrix; cross-model comparison is meaningless",
+    )
+    model = _resolve_first_param(
+        model,
         X,
+        canonical_name="model",
+        alias_name="X",
+        func_name="cluster_diagnostics",
+    )
+    if model is _UNSET:
+        raise TypeError("cluster_diagnostics() missing required argument: 'model'")
+    require_sklearn("cluster_diagnostics")
+    _validate_choice("cluster_diagnostics", "method", method, {"kmeans", "hierarchical"})
+    _validate_choice("cluster_diagnostics", "scoring", scoring, {"elbow", "silhouette", "both"})
+    return _cluster_diagnostics_chart(
+        model,
         ks=ks,
         method=method,
         scoring=scoring,
@@ -613,6 +794,7 @@ def intercluster_distance_chart(
     *,
     k: int | None = None,
     method: str = "mds",
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -679,7 +861,19 @@ def intercluster_distance_chart(
     >>> import ferrum as fm
     >>> from sklearn.cluster import KMeans
     >>> fm.intercluster_distance_chart(KMeans(n_clusters=5).fit(X_train), X_train)
+
+    Notes
+    -----
+    ``compare=`` is not supported. This embeds one clusterer's centers in 2D
+    (no ``y`` target); cross-model comparison via ``compare=`` is meaningless.
+    Passing a non-``None`` ``compare`` raises ``ValueError`` (D-COMPARE-1).
     """
+    _reject_compare(
+        compare,
+        chart="intercluster_distance_chart",
+        reason="this embeds one clusterer's centers in 2D with no y target; "
+        "cross-model comparison is meaningless",
+    )
     source = _resolve_source(model, X, None, random_state=random_state)
     if k is None:
         if hasattr(source.model, "n_clusters"):
@@ -709,6 +903,7 @@ def silhouette_chart(
     X: Any = None,
     *,
     subtitle: str | None = None,
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -760,7 +955,20 @@ def silhouette_chart(
     >>> import ferrum as fm
     >>> from sklearn.cluster import KMeans
     >>> fm.silhouette_chart(KMeans(n_clusters=3, random_state=0).fit(X), X)
+
+    Notes
+    -----
+    ``compare=`` is not supported. The silhouette plot is an unsupervised
+    single-clusterer diagnostic (no ``y`` target); cross-model comparison via
+    ``compare=`` is meaningless. Passing a non-``None`` ``compare`` raises
+    ``ValueError`` (D-COMPARE-1).
     """
+    _reject_compare(
+        compare,
+        chart="silhouette_chart",
+        reason="the silhouette plot is an unsupervised single-clusterer "
+        "diagnostic; cross-model comparison is meaningless",
+    )
     source = _resolve_source(model, X, None, random_state=random_state)
     return _silhouette_chart_from_source(
         source,
@@ -778,6 +986,7 @@ def manifold_chart(
     X: Any = None,
     *,
     method: str = "umap",
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -828,14 +1037,29 @@ def manifold_chart(
     >>> import ferrum as fm
     >>> from sklearn.cluster import KMeans
     >>> fm.manifold_chart(KMeans(n_clusters=4, random_state=0).fit(X), X, method="tsne")
-    """
-    import ferrum
 
+    Notes
+    -----
+    ``compare=`` is not supported. The manifold scatter embeds one model's data
+    in 2D (no ``y`` target); cross-model comparison via ``compare=`` is
+    meaningless. Passing a non-``None`` ``compare`` raises ``ValueError``
+    (D-COMPARE-1).
+    """
+    _reject_compare(
+        compare,
+        chart="manifold_chart",
+        reason="the manifold scatter embeds one model's data in 2D with no y "
+        "target; cross-model comparison is meaningless",
+    )
     source = _resolve_source(model, X, None, random_state=random_state)
-    emb = source.embeddings(method=method)
-    chart = ferrum.Chart(emb).mark_point().encode(x="dim_0", y="dim_1", color="label:N")
-    return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    return _manifold_chart_from_source(
+        source,
+        method=method,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
+        theme=theme,
     )
 
 
@@ -845,6 +1069,7 @@ def elbow_chart(
     *,
     ks: Any,
     metric: str = "distortion",
+    compare: dict[str, Any] | None = None,
     random_state: int | None = None,
     mark: dict | None = None,
     encode: dict | None = None,
@@ -896,18 +1121,26 @@ def elbow_chart(
     >>> import ferrum as fm
     >>> from sklearn.cluster import KMeans
     >>> fm.elbow_chart(KMeans, X_train, ks=range(2, 9))
+
+    Notes
+    -----
+    ``compare=`` is not supported. This sweeps one clusterer class over a range
+    of ``k`` on an unsupervised feature matrix (no ``y`` target); cross-model
+    comparison via ``compare=`` is meaningless. Passing a non-``None``
+    ``compare`` raises ``ValueError`` (D-COMPARE-1).
     """
-    from ferrum._diagnostics.visualizers.clustering import ElbowVisualizer
-
-    viz = ElbowVisualizer(
-        model,
-        ks=ks,
-        metric=metric,
-        random_state=random_state,
+    _reject_compare(
+        compare,
+        chart="elbow_chart",
+        reason="this sweeps one clusterer class over k on an unsupervised "
+        "feature matrix; cross-model comparison is meaningless",
+    )
+    scores = _elbow_scores(model, X, ks=list(ks), metric=metric, random_state=random_state)
+    return _elbow_chart_from_source(
+        scores,
+        mark=mark,
+        encode=encode,
+        properties=properties,
+        layers=layers,
         theme=theme,
-    ).fit(X)
-
-    chart = viz._chart
-    return _finalize_chart(
-        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=None
     )

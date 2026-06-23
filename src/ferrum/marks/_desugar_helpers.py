@@ -6,6 +6,46 @@ These utilities are internal to the marks package and not part of the public API
 from __future__ import annotations
 
 
+def resolve_cmap_alias(
+    *,
+    scheme: str | None,
+    cmap: str | None,
+    where: str,
+) -> str | None:
+    """Resolve the canonical ``scheme=`` / legacy ``cmap=`` colormap alias.
+
+    ``scheme`` is the canonical kwarg name for a named color set (D-COLOR-1);
+    ``cmap`` is a documented back-compat alias.  Exactly one of them (or
+    neither) may be supplied.  The resolved name is returned for the mark's
+    internal colormap kwarg; ``None`` means "defer to the theme's scheme".
+
+    Parameters
+    ----------
+    scheme:
+        The canonical colormap name, or None.
+    cmap:
+        The legacy-alias colormap name, or None.
+    where:
+        Construction-site label (e.g. ``"mark_raster"``) for the error message.
+
+    Returns
+    -------
+    str or None
+        The resolved colormap name, or None when both are None.
+
+    Raises
+    ------
+    ValueError
+        When both ``scheme`` and ``cmap`` are supplied with different values.
+    """
+    if scheme is not None and cmap is not None and scheme != cmap:
+        raise ValueError(
+            f"{where}: pass either scheme= or cmap= (its alias), not both with "
+            f"different values; got scheme={scheme!r}, cmap={cmap!r}"
+        )
+    return scheme if scheme is not None else cmap
+
+
 def resolve_color_groupby(
     cat_field: str | None,
     color_field: str | None,

@@ -134,8 +134,8 @@ from ferrum.transforms import (
 )
 
 # Phase 10 — model diagnostics
-from ferrum._diagnostics import ComparedModelSource, ModelSource
-from ferrum._diagnostics.visualizers import (
+from ferrum.diagnostics import ComparedModelSource, ModelSource
+from ferrum.diagnostics.visualizers import (
     CalibrationVisualizer,
     ClassBalanceVisualizer,
     ClassificationReportVisualizer,
@@ -181,7 +181,7 @@ from ferrum.plots import (
     classification_report_chart,
     class_balance_chart,
     importance_chart,
-    shap_chart,
+    shap_chart,  # noqa: F401  # deprecated dispatcher: importable but out of __all__
     shap_beeswarm_chart,
     shap_bar_chart,
     shap_waterfall_chart,
@@ -197,7 +197,7 @@ from ferrum.plots import (
     manifold_chart,
     elbow_chart,
     decision_boundary_chart,
-    rank_chart,
+    rank_chart,  # noqa: F401  # deprecated dispatcher: importable but out of __all__
     rank1d_chart,
     rank2d_chart,
     parallel_coordinates_chart,
@@ -602,7 +602,8 @@ __all__ = [
     "classification_report_chart",
     "class_balance_chart",
     "importance_chart",
-    "shap_chart",
+    # shap_chart is a deprecated dispatcher (use shap_beeswarm_chart /
+    # shap_bar_chart / shap_waterfall_chart); kept importable but out of __all__.
     "shap_beeswarm_chart",
     "shap_bar_chart",
     "shap_waterfall_chart",
@@ -618,7 +619,8 @@ __all__ = [
     "manifold_chart",
     "elbow_chart",
     "decision_boundary_chart",
-    "rank_chart",
+    # rank_chart is a deprecated dispatcher (use rank1d_chart / rank2d_chart);
+    # kept importable but out of __all__.
     "rank1d_chart",
     "rank2d_chart",
     "parallel_coordinates_chart",

@@ -42,6 +42,7 @@ from ferrum.encoding.text import (
     Url,
 )
 from ferrum.encoding.facet import Facet, FacetRow, FacetCol
+from ferrum.encoding._aliases import apply_channel_aliases
 
 __all__ = [
     "X",
@@ -132,57 +133,7 @@ def _channel_class_for(name: str):
     return _channel_class_map().get(name)
 
 
-def _apply_channel_aliases(enc: dict, mk: dict) -> tuple[dict, dict]:
-    """Apply channel-alias rules, mapping convenience channels to their targets.
-
-    Operates on shallow copies of the encoding and mark-kwargs dicts from
-    ``to_spec()`` — does not mutate the chart's internal state.
-
-    Alias rules (order matters — earlier aliases take priority):
-
-    1. ``fill`` -> ``color`` when ``color`` is not already present.
-    2. ``stroke`` -> ``color`` when ``color`` is not already present;
-       when ``color`` IS present, the stroke encoding is silently dropped.
-    3. ``detail`` -> ``mk["detail"]`` via ``setdefault`` (always, regardless
-       of other channels).
-
-    Note: ``fill_opacity`` is no longer aliased to ``opacity``. It is a
-    first-class renderer-honored channel that emits a per-element SVG
-    ``fill-opacity`` attribute, separate from ``opacity`` (which bakes
-    into the fill RGBA alpha).
-
-    Returns the (possibly-modified) ``(enc, mk)`` pair.
-    """
-    from ferrum.repeat import _RepeatPlaceholder
-
-    # Fill -> color
-    if "fill" in enc and "color" not in enc:
-        enc["color"] = enc["fill"]
-
-    # Stroke -> color (when color absent); warn-once and drop otherwise.
-    if "stroke" in enc:
-        stroke_ch = enc["stroke"]
-        if "color" not in enc:
-            enc["color"] = stroke_ch
-        elif stroke_ch.field is not None and not isinstance(stroke_ch.field, _RepeatPlaceholder):
-            # Can't map to a scale -- inject as a mark_style grouping hint.
-            # mark_style.stroke expects a hex color, not a field name, so
-            # this is a best-effort: when the user maps a field to stroke
-            # while color is already mapped, the stroke encoding produces no
-            # visual effect.  Warn once so callers know the channel was dropped.
-            from ferrum._warn import warn_once
-
-            warn_once(
-                "encoding",
-                "stroke_dropped_by_color",
-                "encode(stroke=...) is ignored when color= is also encoded; "
-                "stroke is aliased to color only when color is absent.",
-            )
-
-    # Detail -> mark_style.detail
-    if "detail" in enc:
-        detail_ch = enc["detail"]
-        if detail_ch.field is not None and not isinstance(detail_ch.field, _RepeatPlaceholder):
-            mk.setdefault("detail", detail_ch.field)
-
-    return enc, mk
+# Re-exported from encoding/_aliases.py (its real home, next to the channel
+# classes); the package init stays an export surface.  The leading-underscore
+# name is preserved because chart.py imports it from here.
+_apply_channel_aliases = apply_channel_aliases

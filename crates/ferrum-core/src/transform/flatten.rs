@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct FlattenSpec {
     /// Column names to flatten (must be list/array typed or semi-colon strings).
     pub fields: Vec<String>,

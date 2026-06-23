@@ -1,12 +1,12 @@
 //! mark_point: render each row as a shape glyph at (scale_x(row.x), scale_y(row.y)).
-//! Phase 7: always emits <circle> using ctx.mark_style.point_size.
+//! Phase 7: always emits <circle> using ctx.mark_style.point.point_size.
 //! Phase 8a: honors per-row size/shape/opacity from ctx.scales when populated.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_positional_category_str, col_as_str, resolve_fill_color, resolve_stroke_dash, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
-use crate::render::scale_resolve::{ColorScale, ScaleKind, ShapeKind};
+use crate::render::marks::opacity::{resolve_scaled_opacity, OpacityFallback, OpacityResolver};
+use crate::render::scale_resolve::{ScaleKind, ShapeKind};
 
 /// Parse a shape name string to a `ShapeKind`.
 ///
@@ -61,7 +61,7 @@ pub(crate) fn emit_shape_nodes(
     style: ShapeStyle,
 ) -> Vec<ferrum_scene::SceneNode> {
     let ShapeStyle { fill, stroke, stroke_width, opacity, stroke_opacity, fill_opacity, stroke_dash_idx, angle } = style;
-    use crate::render::draw::{to_scene_fill_stroke, to_scene_stroke};
+    use crate::render::draw::{to_scene_fill_stroke_full, to_scene_stroke};
     use ferrum_scene::{PathCmd, SceneNode};
 
     let dash_vec: Option<Vec<f64>> = stroke_dash_idx.and_then(resolve_stroke_dash);
@@ -69,18 +69,16 @@ pub(crate) fn emit_shape_nodes(
 
     match kind {
         ShapeKind::Circle => {
-            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
-            style.stroke_opacity = stroke_opacity;
-            style.fill_opacity = fill_opacity;
-            style.angle = angle;
+            let style = to_scene_fill_stroke_full(
+                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity, angle,
+            );
             vec![SceneNode::Circle { cx, cy, r, style }]
         }
         ShapeKind::Square => {
             let s = r * 1.6;
-            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
-            style.stroke_opacity = stroke_opacity;
-            style.fill_opacity = fill_opacity;
-            style.angle = angle;
+            let style = to_scene_fill_stroke_full(
+                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity, angle,
+            );
             vec![SceneNode::Rect {
                 x: cx - s / 2.0,
                 y: cy - s / 2.0,
@@ -95,8 +93,10 @@ pub(crate) fn emit_shape_nodes(
                 fill.unwrap_or(crate::render::color::from_rgb(0, 0, 0));
             let arm = r * 0.5;
             let sw = r * 0.4;
-            let s1 = to_scene_stroke(stroke_color, sw, 1.0, None, None, None);
-            let s2 = to_scene_stroke(stroke_color, sw, 1.0, None, None, None);
+            let mut s1 = to_scene_stroke(stroke_color, sw, opacity, None, None, None);
+            s1.stroke_opacity = stroke_opacity;
+            let mut s2 = to_scene_stroke(stroke_color, sw, opacity, None, None, None);
+            s2.stroke_opacity = stroke_opacity;
             vec![
                 SceneNode::Line {
                     x1: cx - arm,
@@ -116,10 +116,9 @@ pub(crate) fn emit_shape_nodes(
         }
         ShapeKind::Diamond => {
             let d = r * 1.4;
-            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
-            style.stroke_opacity = stroke_opacity;
-            style.fill_opacity = fill_opacity;
-            style.angle = angle;
+            let style = to_scene_fill_stroke_full(
+                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity, angle,
+            );
             vec![SceneNode::Path {
                 commands: vec![
                     PathCmd::MoveTo { x: cx, y: cy - d },
@@ -134,10 +133,9 @@ pub(crate) fn emit_shape_nodes(
         }
         ShapeKind::TriangleUp => {
             let h = r * 1.4;
-            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
-            style.stroke_opacity = stroke_opacity;
-            style.fill_opacity = fill_opacity;
-            style.angle = angle;
+            let style = to_scene_fill_stroke_full(
+                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity, angle,
+            );
             vec![SceneNode::Path {
                 commands: vec![
                     PathCmd::MoveTo { x: cx, y: cy - h },
@@ -151,10 +149,9 @@ pub(crate) fn emit_shape_nodes(
         }
         ShapeKind::TriangleDown => {
             let h = r * 1.4;
-            let mut style = to_scene_fill_stroke(fill, stroke, stroke_width, opacity, dash_ref);
-            style.stroke_opacity = stroke_opacity;
-            style.fill_opacity = fill_opacity;
-            style.angle = angle;
+            let style = to_scene_fill_stroke_full(
+                fill, stroke, stroke_width, opacity, dash_ref, fill_opacity, stroke_opacity, angle,
+            );
             vec![SceneNode::Path {
                 commands: vec![
                     PathCmd::MoveTo { x: cx, y: cy + h },
@@ -170,7 +167,8 @@ pub(crate) fn emit_shape_nodes(
             let stroke_color = fill.unwrap_or(crate::render::color::from_rgb(0, 0, 0));
             let arm = r * 0.7;
             let sw = r * 0.35;
-            let s = to_scene_stroke(stroke_color, sw, 1.0, None, None, None);
+            let mut s = to_scene_stroke(stroke_color, sw, opacity, None, None, None);
+            s.stroke_opacity = stroke_opacity;
             vec![SceneNode::Line {
                 x1: cx,
                 y1: cy - arm,
@@ -183,7 +181,8 @@ pub(crate) fn emit_shape_nodes(
             let stroke_color = fill.unwrap_or(crate::render::color::from_rgb(0, 0, 0));
             let arm = r * 0.7;
             let sw = r * 0.35;
-            let s = to_scene_stroke(stroke_color, sw, 1.0, None, None, None);
+            let mut s = to_scene_stroke(stroke_color, sw, opacity, None, None, None);
+            s.stroke_opacity = stroke_opacity;
             vec![SceneNode::Line {
                 x1: cx - arm,
                 y1: cy,
@@ -202,25 +201,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let spec = ctx.spec;
     let xf = match x_field(ctx, spec) {
         Some(f) => f,
-        None => return MarkBuildResult {
-            kind: MarkBatchKind::Point,
-            nodes: vec![],
-            data_indices: Some(vec![]),
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-        },
+        None => return MarkBuildResult::empty(MarkBatchKind::Point),
     };
     let yf = match y_field(ctx, spec) {
         Some(f) => f,
-        None => return MarkBuildResult {
-            kind: MarkBatchKind::Point,
-            nodes: vec![],
-            data_indices: Some(vec![]),
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-        },
+        None => return MarkBuildResult::empty(MarkBatchKind::Point),
     };
 
     let xs_f64 = col_as_f64(ctx.batch, xf).ok();
@@ -239,14 +224,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .or_else(|| ys_str.as_ref().map(|v| v.len()))
         .unwrap_or(0);
     if n == 0 || n != n_y {
-        return MarkBuildResult {
-            kind: MarkBatchKind::Point,
-            nodes: vec![],
-            data_indices: Some(vec![]),
-            tooltips: None,
-            hrefs: None,
-            descriptions: None,
-        };
+        return MarkBuildResult::empty(MarkBatchKind::Point);
     }
 
     // Color encoding (shared loader, C9 — byte-identical to the prior inline
@@ -271,7 +249,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // per-row. Defaults: fill_opacity → 1.0, stroke_opacity → 1.0. The opacity
     // channel is mapped through `ctx.scales.opacity` at the call site below, so
     // the resolver's opacity output is unused here (its default is irrelevant).
-    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
 
     // Per-row stroke/angle channel values (direct passthrough — no scale transform).
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
@@ -286,7 +264,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
-    let default_radius = (ctx.mark_style.point_size / std::f64::consts::PI).sqrt();
+    let default_radius = (ctx.mark_style.point.point_size / std::f64::consts::PI).sqrt();
 
     // Per-row pixel offsets from position adjustment.
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
@@ -344,46 +322,31 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let cx = cx + x_offsets[i];
         let cy = cy + y_offsets[i];
 
-        // Resolve color.
-        let fill_base = match (&ctx.scales.color, &color_values_f64, &color_values_str) {
-            (Some(scale @ ColorScale::Continuous { .. }), Some(values), _) => {
-                match values[i] {
-                    Some(v) if v.is_finite() => scale.lookup_f64(v).unwrap_or(ctx.mark_style.fill),
-                    _ => ctx.mark_style.fill,
-                }
-            }
-            (Some(scale @ ColorScale::Categorical { .. }), _, Some(values)) => {
-                match values[i].as_deref() {
-                    Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-                    None => ctx.mark_style.fill,
-                }
-            }
-            _ => ctx.mark_style.fill,
-        };
+        // Resolve color via the shared per-row fill resolver (RMARK-03).
+        let fill_base = resolve_fill_color(
+            ctx.scales.color.as_ref(),
+            color_values_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
+            color_values_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
+            ctx.mark_style.paint.fill,
+        );
 
-        // Resolve per-row opacity.
-        let row_opacity = if let (Some(values), Some(scale)) = (&opacity_values, &ctx.scales.opacity) {
-            match values[i].and_then(|v| scale.inner.to_pixel_f64(v)) {
-                Some(op) => op,
-                None => ctx.mark_style.opacity,
-            }
-        } else {
-            ctx.mark_style.opacity
-        };
+        // Resolve per-row opacity (through scale if present).
+        let row_opacity =
+            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
 
         let fill = with_opacity(fill_base, row_opacity);
 
         // filled=false → hollow points.
         let (effective_fill, effective_stroke, effective_sw) =
-            if ctx.mark_style.filled == Some(false) {
-                let sw = if ctx.mark_style.stroke_width > 0.0 {
-                    ctx.mark_style.stroke_width
+            if ctx.mark_style.point.filled == Some(false) {
+                let sw = if ctx.mark_style.paint.stroke_width > 0.0 {
+                    ctx.mark_style.paint.stroke_width
                 } else {
                     1.5
                 };
                 (None, Some(fill_base), sw)
             } else {
-                (Some(fill), ctx.mark_style.stroke, ctx.mark_style.stroke_width)
+                (Some(fill), ctx.mark_style.paint.stroke, ctx.mark_style.paint.stroke_width)
             };
 
         // Resolve per-row radius from size encoding.
@@ -402,7 +365,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 Some(v) => scale.lookup(v).unwrap_or(ShapeKind::Circle),
                 None => ShapeKind::Circle,
             }
-        } else if let Some(ref shape_name) = ctx.mark_style.shape {
+        } else if let Some(ref shape_name) = ctx.mark_style.point.shape {
             shape_from_str(shape_name)
         } else {
             ShapeKind::Circle
@@ -938,6 +901,120 @@ mod tests {
                 assert!((y1 - y2).abs() < 1e-10, "HLine y1 and y2 must be equal (horizontal line): y1={y1}, y2={y2}");
             }
             other => panic!("Expected SceneNode::Line, got: {other:?}"),
+        }
+    }
+
+    /// RMARK-01 regression: line-based shapes (Cross, VLine, HLine) must honor
+    /// the opacity channel. Before the fix, to_scene_stroke was called with a
+    /// hardcoded 1.0, so mark_point(shape="cross", opacity=0.3) rendered fully
+    /// opaque while shape="circle" honored 0.3. This test verifies the fix by
+    /// calling emit_shape_nodes directly with a non-1.0 opacity and asserting
+    /// that the emitted StrokeStyle carries the expected opacity — NOT 1.0.
+    #[test]
+    fn line_shapes_honor_opacity_channel_rmark01() {
+        use ferrum_scene::SceneNode;
+
+        let opacity_val = 0.3_f64;
+        let stroke_opacity_val = 0.5_f64;
+
+        let style = ShapeStyle {
+            fill: Some(crate::render::color::from_rgb(100, 150, 200)),
+            stroke: None,
+            stroke_width: 1.0,
+            opacity: opacity_val,
+            stroke_opacity: stroke_opacity_val,
+            fill_opacity: 1.0,
+            stroke_dash_idx: None,
+            angle: 0.0,
+        };
+
+        // Cross emits 2 Line nodes — both must carry the row opacity.
+        let cross_nodes = emit_shape_nodes(ShapeKind::Cross, 50.0, 50.0, 5.0, ShapeStyle {
+            fill: style.fill,
+            stroke: style.stroke,
+            stroke_width: style.stroke_width,
+            opacity: opacity_val,
+            stroke_opacity: stroke_opacity_val,
+            fill_opacity: style.fill_opacity,
+            stroke_dash_idx: style.stroke_dash_idx,
+            angle: style.angle,
+        });
+        assert_eq!(cross_nodes.len(), 2, "Cross must emit 2 Line nodes");
+        for (i, node) in cross_nodes.iter().enumerate() {
+            match node {
+                SceneNode::Line { style: s, .. } => {
+                    assert!(
+                        (s.opacity - opacity_val).abs() < 1e-9,
+                        "Cross line[{i}] opacity: expected {opacity_val}, got {}. \
+                         RMARK-01 regression — line shapes must honor the opacity channel.",
+                        s.opacity
+                    );
+                    assert!(
+                        (s.stroke_opacity - stroke_opacity_val).abs() < 1e-9,
+                        "Cross line[{i}] stroke_opacity: expected {stroke_opacity_val}, got {}.",
+                        s.stroke_opacity
+                    );
+                }
+                other => panic!("Expected SceneNode::Line for Cross, got: {other:?}"),
+            }
+        }
+
+        // VLine emits 1 Line node.
+        let vline_nodes = emit_shape_nodes(ShapeKind::VLine, 50.0, 50.0, 5.0, ShapeStyle {
+            fill: style.fill,
+            stroke: style.stroke,
+            stroke_width: style.stroke_width,
+            opacity: opacity_val,
+            stroke_opacity: stroke_opacity_val,
+            fill_opacity: style.fill_opacity,
+            stroke_dash_idx: style.stroke_dash_idx,
+            angle: style.angle,
+        });
+        assert_eq!(vline_nodes.len(), 1, "VLine must emit 1 Line node");
+        match &vline_nodes[0] {
+            SceneNode::Line { style: s, .. } => {
+                assert!(
+                    (s.opacity - opacity_val).abs() < 1e-9,
+                    "VLine opacity: expected {opacity_val}, got {}. \
+                     RMARK-01 regression — line shapes must honor the opacity channel.",
+                    s.opacity
+                );
+                assert!(
+                    (s.stroke_opacity - stroke_opacity_val).abs() < 1e-9,
+                    "VLine stroke_opacity: expected {stroke_opacity_val}, got {}.",
+                    s.stroke_opacity
+                );
+            }
+            other => panic!("Expected SceneNode::Line for VLine, got: {other:?}"),
+        }
+
+        // HLine emits 1 Line node.
+        let hline_nodes = emit_shape_nodes(ShapeKind::HLine, 50.0, 50.0, 5.0, ShapeStyle {
+            fill: style.fill,
+            stroke: style.stroke,
+            stroke_width: style.stroke_width,
+            opacity: opacity_val,
+            stroke_opacity: stroke_opacity_val,
+            fill_opacity: style.fill_opacity,
+            stroke_dash_idx: style.stroke_dash_idx,
+            angle: style.angle,
+        });
+        assert_eq!(hline_nodes.len(), 1, "HLine must emit 1 Line node");
+        match &hline_nodes[0] {
+            SceneNode::Line { style: s, .. } => {
+                assert!(
+                    (s.opacity - opacity_val).abs() < 1e-9,
+                    "HLine opacity: expected {opacity_val}, got {}. \
+                     RMARK-01 regression — line shapes must honor the opacity channel.",
+                    s.opacity
+                );
+                assert!(
+                    (s.stroke_opacity - stroke_opacity_val).abs() < 1e-9,
+                    "HLine stroke_opacity: expected {stroke_opacity_val}, got {}.",
+                    s.stroke_opacity
+                );
+            }
+            other => panic!("Expected SceneNode::Line for HLine, got: {other:?}"),
         }
     }
 

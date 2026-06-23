@@ -16,6 +16,7 @@ use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, Ke
 
 /// A single aggregation specification for JoinAggregate.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AggSpec {
     pub field: String,
     #[serde(rename = "fn")]
@@ -25,6 +26,7 @@ pub(crate) struct AggSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct JoinAggregateSpec {
     pub aggregates: Vec<AggSpec>,
     #[serde(skip_serializing_if = "Option::is_none", default)]

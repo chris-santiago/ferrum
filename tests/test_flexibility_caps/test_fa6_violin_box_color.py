@@ -199,6 +199,94 @@ def test_standalone_boxplot_with_hue_carries_color():
 
 
 # ---------------------------------------------------------------------------
+# MARK-08: boxplot/violin-body suppress the redundant color==categorical-axis
+# encoding, matching the errorbar/errorband siblings (gate on split_hue).
+# ---------------------------------------------------------------------------
+
+
+def _layer_has_color(spec: dict, mark: str | None = None) -> bool:
+    """True if any layer (optionally filtered by mark) carries a color encoding."""
+    layers = spec["layers"] if mark is None else _layers_by_mark(spec, mark)
+    return any("color" in lyr.get("encoding", {}) for lyr in layers)
+
+
+def test_boxplot_color_equals_x_suppresses_layer_color():
+    """color==x (split_hue=False) → no box layer carries a color encoding.
+
+    When the hue column equals the categorical axis the per-layer color
+    encoding is redundant with the axis, so it is suppressed.
+    """
+    df = _make_df()
+    chart = fm.Chart(df).mark_boxplot().encode(x="g:N", y="v:Q", color="g:N")
+    spec = _spec_dict(chart)
+
+    for lyr in spec["layers"]:
+        enc = lyr.get("encoding", {})
+        assert "color" not in enc, (
+            f"boxplot layer {lyr['mark']!r} kept a redundant color==x encoding; enc: {enc}"
+        )
+
+
+def test_violin_body_color_equals_x_suppresses_body_color():
+    """color==x → the violin body polygon carries no color encoding."""
+    df = _make_df()
+    chart = fm.Chart(df).mark_violin().encode(x="g:N", y="v:Q", color="g:N")
+    spec = _spec_dict(chart)
+
+    poly_layers = _layers_by_mark(spec, "polygon")
+    assert poly_layers, "expected a violin body polygon layer"
+    for body in poly_layers:
+        enc = body.get("encoding", {})
+        assert "color" not in enc, f"violin body kept a redundant color==x encoding; enc: {enc}"
+
+
+def test_boxplot_and_errorbar_agree_on_color_equals_x():
+    """Sibling consistency: for color==x neither boxplot nor errorbar attach color."""
+    df = _make_df()
+    box = _spec_dict(fm.Chart(df).mark_boxplot().encode(x="g:N", y="v:Q", color="g:N"))
+    err = _spec_dict(fm.Chart(df).mark_errorbar().encode(x="g:N", y="v:Q", color="g:N"))
+
+    assert not _layer_has_color(box), "boxplot attached color for color==x"
+    assert not _layer_has_color(err), "errorbar attached color for color==x"
+
+
+def test_boxplot_and_errorbar_agree_on_color_not_equals_x():
+    """Sibling consistency: for color!=x both boxplot and errorbar attach color."""
+    df = _make_df()
+    box = _spec_dict(fm.Chart(df).mark_boxplot().encode(x="g:N", y="v:Q", color="h:N"))
+    err = _spec_dict(fm.Chart(df).mark_errorbar().encode(x="g:N", y="v:Q", color="h:N"))
+
+    assert _layer_has_color(box), "boxplot dropped color for a distinct hue"
+    assert _layer_has_color(err), "errorbar dropped color for a distinct hue"
+
+
+def test_violin_quartile_color_equals_x_full_internal_consistency():
+    """color==x → NEITHER the body polygon NOR the q1/median/q3 rule layers carry color.
+
+    The quartile rules read the split "quart" BoxStats output, exactly like the
+    body polygon, so both gate on split_hue. When the hue equals the categorical
+    axis (split_hue=False) the per-layer color is redundant with the axis, so the
+    body and all three quartile rules must agree by suppressing it — full
+    intra-violin consistency, matching the errorbar/errorband siblings.
+    """
+    df = _make_df()
+    chart = fm.Chart(df).mark_violin(inner="quartile").encode(x="g:N", y="v:Q", color="g:N")
+    spec = _spec_dict(chart)
+
+    poly_layers = _layers_by_mark(spec, "polygon")
+    assert poly_layers, "expected a violin body polygon layer"
+    for body in poly_layers:
+        enc = body.get("encoding", {})
+        assert "color" not in enc, f"violin body kept a redundant color==x encoding; enc: {enc}"
+
+    rules = _layers_by_mark(spec, "rule")
+    assert rules, "expected q1/median/q3 quartile rule layers"
+    for rule in rules:
+        enc = rule.get("encoding", {})
+        assert "color" not in enc, f"quartile rule kept a redundant color==x encoding; enc: {enc}"
+
+
+# ---------------------------------------------------------------------------
 # Consistency with existing T10 tests: quartile inner and body still work
 # ---------------------------------------------------------------------------
 

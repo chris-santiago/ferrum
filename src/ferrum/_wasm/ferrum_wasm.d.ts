@@ -26,7 +26,8 @@ export class WasmRenderer {
      * conditional encodings (dim non-selected marks), re-render frame, and
      * return the new selection state as a JSON string.
      *
-     * The returned JSON is a map of `selection_name → {field_name: field_value}`.
+     * Returns the BARE selection-state map `{selection_name: {field: value}}`
+     * (see the two-shape contract note above the selection-mutating methods).
      * The JS caller should forward this to `model.set('selection_state', ...)`.
      */
     handleClick(x: number, y: number, shift_held: boolean): string;
@@ -34,6 +35,11 @@ export class WasmRenderer {
      * Handle a brush-drag on a panel: update interval selection state, apply
      * conditional encodings, rebuild GPU buffers, re-render, and return
      * the new selection state as JSON.
+     *
+     * Returns the ENVELOPE shape `{selection, rescaled, rescaled_text}` (the
+     * only selection-mutating method that does — see the two-shape contract
+     * note above the selection-mutating methods). `rescaled`/`rescaled_text`
+     * are non-null only when a D6 Domain binding rescaled a target panel.
      */
     handleDrag(panel_id: number, x0: number, y0: number, x1: number, y1: number): string;
     /**
@@ -45,44 +51,14 @@ export class WasmRenderer {
     hitTestAt(x: number, y: number): string;
     loadScene(scene_json: string, packed_data: Uint8Array): string;
     maxTextureSize(): number;
-    /**
-     * Apply a pan delta on the given panel and re-render via GPU affine transform.
-     *
-     * Returns updated text-element JSON.
-     */
-    onPan(panel_id: number, dx: number, dy: number): string;
-    /**
-     * Apply a wheel-zoom event on the given panel and re-render via GPU affine transform.
-     *
-     * Returns updated text-element JSON (tick labels at new positions) so the JS
-     * overlay can reposition axis labels without a Python round-trip.
-     */
-    onWheel(panel_id: number, delta_y: number, cx: number, cy: number): string;
     renderFrame(): void;
-    /**
-     * Reset zoom/pan to identity for the given panel and re-render.
-     *
-     * Returns text-element JSON with tick labels at their original positions.
-     */
-    resetZoom(panel_id: number): string;
     resize(width: number, height: number): void;
-    /**
-     * Select all indexed marks (circles and rects) within the given scene-space
-     * rectangle `(x0, y0) – (x1, y1)` using the R-tree spatial index.
-     *
-     * Updates the first `Interval` selection spec found in `self.selections`,
-     * then applies conditional encodings and re-renders.  Returns the new
-     * selection state JSON.
-     *
-     * If no spatial index has been built yet (scene not loaded), returns `"{}"`.
-     */
-    selectInRect(_panel_id: number, x0: number, y0: number, x1: number, y1: number): string;
     /**
      * Set an absolute zoom+pan transform from D3-zoom for the given panel.
      *
      * `panel_id` identifies the panel to zoom (0-indexed); `k` is the uniform
      * scale factor; `tx`/`ty` are the translation offsets.
-     * This replaces the accumulated state from `onWheel`/`onPan` and is the
+     * This replaces any accumulated per-panel zoom/pan state and is the sole
      * entry point for HTML-export zoom driven by D3's `d3.zoom()`.
      *
      * Returns updated text-element JSON so the JS overlay can reposition labels.
@@ -147,12 +123,8 @@ export interface InitOutput {
     readonly wasmrenderer_hitTestAt: (a: number, b: number, c: number) => [number, number];
     readonly wasmrenderer_loadScene: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly wasmrenderer_maxTextureSize: (a: number) => number;
-    readonly wasmrenderer_onPan: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly wasmrenderer_onWheel: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly wasmrenderer_renderFrame: (a: number) => [number, number];
-    readonly wasmrenderer_resetZoom: (a: number, b: number) => [number, number, number, number];
     readonly wasmrenderer_resize: (a: number, b: number, c: number) => void;
-    readonly wasmrenderer_selectInRect: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly wasmrenderer_setTransform: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly wasmrenderer_startTransition: (a: number, b: number, c: number) => [number, number];
     readonly wasmrenderer_tickTransition: (a: number, b: number) => [number, number];

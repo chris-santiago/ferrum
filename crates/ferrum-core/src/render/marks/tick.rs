@@ -15,19 +15,21 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     use crate::render::draw::{MarkBuildResult, to_scene_stroke, MetadataColumns};
     use ferrum_scene::{MarkBatchKind, SceneNode};
 
+    let empty = || MarkBuildResult::empty(MarkBatchKind::Tick);
+
     let spec = ctx.spec;
     let panel = ctx.panel.plot_area;
 
     // Common setup shared by all four tick modes.
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
-    let stroke_color = ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill);
-    let default_stroke_width = ctx.mark_style.stroke_width.max(1.0);
+    let stroke_color = ctx.mark_style.paint.stroke.unwrap_or(ctx.mark_style.paint.fill);
+    let default_stroke_width = ctx.mark_style.paint.stroke_width.max(1.0);
 
     // Per-row opacity via the shared OpacityResolver (C7); stroke_width stays
     // local. Tick is a stroke-only mark (no fill / stroke_opacity columns), so
     // only the resolver's `opacity` slot is read.
     let opacity_res =
-        OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
+        OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
@@ -54,17 +56,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             if matches!(&ctx.scales.y, ScaleKind::Ordinal(_)) {
                 let ys = match col_as_positional_category_str(ctx.batch, yf) {
                     Ok(v) => v,
-                    Err(_) => return MarkBuildResult {
-                        kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-                        tooltips: None, hrefs: None, descriptions: None,
-                    },
+                    Err(_) => return empty(),
                 };
                 let n_cats = {
                     let mut set = std::collections::HashSet::<&str>::new();
                     for v in ys.iter().flatten() { set.insert(v.as_str()); }
                     set.len().max(1)
                 };
-                let tick_half = (panel.w / n_cats as f64) * ctx.mark_style.band_size.unwrap_or(0.3);
+                let tick_half = (panel.w / n_cats as f64) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
                 let baseline_x = panel.x;
                 let mut acc = MarkNodes::with_capacity(ys.len());
                 for i in 0..ys.len() {
@@ -92,10 +91,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let tick_len = ctx.theme.sizes.tick_size * 2.0;
             let ys = match col_as_f64(ctx.batch, yf) {
                 Ok(v) => v,
-                Err(_) => return MarkBuildResult {
-                    kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-                    tooltips: None, hrefs: None, descriptions: None,
-                },
+                Err(_) => return empty(),
             };
             let baseline_x = panel.x;
             let mut acc = MarkNodes::with_capacity(ys.len());
@@ -118,10 +114,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             };
         }
         // No x and no y: return empty.
-        return MarkBuildResult {
-            kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-            tooltips: None, hrefs: None, descriptions: None,
-        };
+        return empty();
     }
 
     let xf = xf_opt.expect("invariant: xf_opt is Some — None case returned above");
@@ -129,20 +122,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Ordinal x + quantitative y → horizontal tick at data y position.
     if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) {
         if let Some(yf) = y_field(ctx, spec) {
-            let xs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return MarkBuildResult {
-                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-                tooltips: None, hrefs: None, descriptions: None,
-            }};
-            let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return MarkBuildResult {
-                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-                tooltips: None, hrefs: None, descriptions: None,
-            }};
+            let xs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
+            let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
             let n_cats = {
                 let mut set = std::collections::HashSet::<&str>::new();
                 for v in xs.iter().flatten() { set.insert(v.as_str()); }
                 set.len().max(1)
             };
-            let tick_half = (panel.w / n_cats as f64) * ctx.mark_style.band_size.unwrap_or(0.3);
+            let tick_half = (panel.w / n_cats as f64) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
             let mut acc = MarkNodes::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -175,20 +162,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Ordinal y + quantitative x → vertical tick at data x position (strip plot).
     if matches!(&ctx.scales.y, ScaleKind::Ordinal(_)) {
         if let Some(yf) = y_field(ctx, spec) {
-            let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return MarkBuildResult {
-                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-                tooltips: None, hrefs: None, descriptions: None,
-            }};
-            let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return MarkBuildResult {
-                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-                tooltips: None, hrefs: None, descriptions: None,
-            }};
+            let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
+            let ys = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
             let n_cats = {
                 let mut set = std::collections::HashSet::<&str>::new();
                 for v in ys.iter().flatten() { set.insert(v.as_str()); }
                 set.len().max(1)
             };
-            let tick_half = (panel.h / n_cats as f64) * ctx.mark_style.band_size.unwrap_or(0.3);
+            let tick_half = (panel.h / n_cats as f64) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
             let mut acc = MarkNodes::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -222,17 +203,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     if matches!(&ctx.scales.x, ScaleKind::Ordinal(_)) && y_field(ctx, spec).is_none() {
         let xs = match col_as_positional_category_str(ctx.batch, xf) {
             Ok(v) => v,
-            Err(_) => return MarkBuildResult {
-                kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-                tooltips: None, hrefs: None, descriptions: None,
-            },
+            Err(_) => return empty(),
         };
         let n_cats = {
             let mut set = std::collections::HashSet::<&str>::new();
             for v in xs.iter().flatten() { set.insert(v.as_str()); }
             set.len().max(1)
         };
-        let tick_half = (panel.h / n_cats as f64) * ctx.mark_style.band_size.unwrap_or(0.3);
+        let tick_half = (panel.h / n_cats as f64) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
         let baseline_y = panel.y + panel.h;
         let mut acc = MarkNodes::with_capacity(xs.len());
         for i in 0..xs.len() {
@@ -258,10 +236,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     // Quantitative x → rug-style vertical tick at panel baseline.
     let tick_len = ctx.theme.sizes.tick_size * 2.0;
-    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return MarkBuildResult {
-        kind: MarkBatchKind::Tick, nodes: vec![], data_indices: Some(vec![]),
-        tooltips: None, hrefs: None, descriptions: None,
-    }};
+    let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
     let baseline_y = panel.y + panel.h;
     let mut acc = MarkNodes::with_capacity(xs.len());
     for (i, xopt) in xs.iter().enumerate() {
@@ -388,8 +363,8 @@ mod tests {
     fn tick_uses_stroke_color_when_mark_style_stroke_is_set() {
         // Composite structural ticks (boxplot caps, median, errorbar caps) pass
         // stroke: "theme:label" via mark_kwargs. After resolve_mark_style,
-        // mark_style.stroke = Some(label_color). tick.rs must use that stroke
-        // color, not fall back to mark_style.fill (which is mark_color = blue).
+        // mark_style.paint.stroke = Some(label_color). tick.rs must use that stroke
+        // color, not fall back to mark_style.paint.fill (which is mark_color = blue).
         use arrow::array::StringArray;
         use crate::spec::mark_style::MarkKwargsSpec;
         let spec = ChartSpec {
@@ -422,15 +397,15 @@ mod tests {
         let overrides = MarkKwargsSpec { stroke: Some("#aabbcc".into()), ..Default::default() };
         let mark_style = crate::render::draw::resolve_mark_style(Some(&overrides), &theme, &Mark::Tick);
         // Confirm fill is NOT #aabbcc (it's still mark_color blue)
-        assert_ne!(mark_style.fill.red, 0xAA, "fill should not be the stroke color");
+        assert_ne!(mark_style.paint.fill.red, 0xAA, "fill should not be the stroke color");
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
         let line = result.nodes.iter().find_map(|n| {
             if let ferrum_scene::SceneNode::Line { style, .. } = n { Some(style.clone()) } else { None }
         }).expect("expected at least one Line node");
-        assert_eq!(line.color.r, 0xAA, "tick stroke must use mark_style.stroke, not mark_style.fill");
-        assert_eq!(line.color.g, 0xBB, "tick stroke must use mark_style.stroke, not mark_style.fill");
-        assert_eq!(line.color.b, 0xCC, "tick stroke must use mark_style.stroke, not mark_style.fill");
+        assert_eq!(line.color.r, 0xAA, "tick stroke must use mark_style.paint.stroke, not mark_style.paint.fill");
+        assert_eq!(line.color.g, 0xBB, "tick stroke must use mark_style.paint.stroke, not mark_style.paint.fill");
+        assert_eq!(line.color.b, 0xCC, "tick stroke must use mark_style.paint.stroke, not mark_style.paint.fill");
     }
 
     #[test]
@@ -808,7 +783,7 @@ mod tests {
         let panel = make_panel();
         let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
-        let default_opacity = mark_style.opacity;
+        let default_opacity = mark_style.paint.opacity;
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let result = super::build(&ctx);
 

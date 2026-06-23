@@ -516,6 +516,18 @@ Auto-raster behavior is configurable via `raster_behavior`: `"warn"` (default), 
 >   each sample renders as its own polyline. Requires the Phase 10g `mark_line`
 >   composite (color, detail) grouping path and ordinal-x support.
 
+> **2026-06-22 (annotation default divergence — intentional):** `mark_roc`
+> defaults to `annotate_auc=False`, `mark_pr` to `annotate_ap=False`, while the
+> figure functions `roc_chart` / `pr_chart` (and `calibration_chart`'s
+> `annotate_brier`) default to `True`. This divergence is by design: a raw
+> primitive mark does not auto-annotate, whereas a figure function is a
+> finished plot that should carry its metric. The figure builders own the
+> overlay (calling `mark_roc(annotate_auc=False)` then layering the metric label
+> themselves), so the AUC/AP/Brier value and its overlay-text formatting come
+> from a single source — the metric-kind table in `ferrum._metric_labels`
+> (`_METRIC_LABEL_SPECS`), shared by both the direct-mark `AUCLabel`/`APLabel`/
+> `BrierLabel` `__radd__` path and the figure-function explicit-field path.
+
 ---
 
 ### 3.4 Stat Transforms
@@ -720,10 +732,18 @@ Axis(title=None, *, orient=None, ticks=True, tick_count=None, tick_extra=False, 
      labels=True, label_angle=None, label_flush=True, label_overlap="parity",
      label_format=None, label_format_type=None, label_font_size=None, label_color=None,
      domain=True, domain_width=None, domain_color=None,
-     offset=None, translate=None, min_extent=None, max_extent=None,
+     offset=None, translate=None, min_band=None, max_band=None,
      title_orient=None, title_font_size=None, title_color=None, title_padding=None,
      values=None, encode=None, zindex=None)
 ```
+
+> **Vocabulary change (2026-06-22, cohesion-campaign T3.3b / D-EXTENT-1):** the
+> axis layout-band overrides were renamed `min_extent`/`max_extent` →
+> `min_band`/`max_band` so that `extent` is reserved for the data-domain sense
+> only (the layout already uses `band` internally). `min_extent`/`max_extent`
+> remain accepted as deprecated keyword aliases (emit a `DeprecationWarning`;
+> supplying both a canonical and its alias raises `TypeError`). The same rename
+> applies to `configure_axis(...)`.
 
 > **Design decision (2026-05-31, flexibility-campaign D3):** Per-channel
 > `Axis(label_format=...)` and `tick_count` are honored at layout time (the
@@ -864,10 +884,21 @@ Annotations are lightweight overlays that don't participate in scale domain calc
 | `annotate_hline(y, *, label=None, label_position="right", stroke=None, stroke_dash=None)` | Horizontal reference line | |
 | `annotate_vline(x, *, label=None, stroke=None, stroke_dash=None)` | Vertical reference line | |
 | `annotate_rect(x1, x2, y1, y2, *, fill=None, opacity=0.1, label=None)` | Shaded rectangle region | |
-| `annotate_text(x, y, text, *, dx=0, dy=0, align="center", baseline="middle", font_size=None, color=None, angle=None)` | Free text annotation | |
+| `annotate_text(x, y, text, *, dx=0, dy=0, anchor=None, align=None, baseline="middle", font_size=None, color=None, angle=None)` | Free text annotation | |
 | `annotate_arrow(x1, y1, x2, y2, *, label=None, label_side="start", stroke=None)` | Arrow with optional label | |
 | `AUCLabel(*, position="end", format=".3f", prefix="AUC = ")` | Auto-placed AUC annotation on ROC curves | |
 | `OutlierLabel(*, threshold=3.0, field=None, label_field=None, max_labels=10)` | Label high-leverage or high-residual points | |
+
+> **2026-06-22 (COMP-06):** `annotate_text` now takes the canonical `anchor=`
+> keyword in the SVG vocabulary (`"start"`/`"middle"`/`"end"`), matching
+> [`annotation.text`][]. The former `align=` keyword (`"left"`/`"center"`/
+> `"right"`) is retained as a non-breaking **deprecated alias**, mapped via
+> `{left: start, center: middle, right: end}`. When neither is supplied the
+> resolved anchor is `"middle"` (the same render as the historical
+> `align="center"` default). Supplying **both** `anchor=` and `align=` raises
+> `ValueError`. This reconciles the annotation-pair vocabulary drift: the
+> `annotate_text` (mark-Chart) and `annotation.text` (dataclass) surfaces now
+> share one anchor vocabulary.
 
 ---
 
@@ -1028,6 +1059,23 @@ Theme(
 > built-in themes are rebuilt to use the newly-plumbed keys; each is visibly
 > distinct from the others on the same chart (see
 > `tests/goldens/theme_gallery/`).
+
+> **2026-06-22 (D-THEME-1, T2.1):** The Python `Theme._KNOWN_KEYS` and color-key
+> sets are now *derived* from the Rust key manifest (`ferrum._core.theme_known_keys()`
+> / `theme_color_keys()`) so the Python and Rust accepted-key contracts cannot
+> drift. The accepted set now includes the per-level grid keys (`major_grid_*`,
+> `minor_grid_*`, `minor`) in `Theme(...)` as well (previously Python rejected
+> them though Rust accepted). The resolved-dict method is `Theme.to_spec_dict()`
+> (the older spec mention of `to_theme_inputs_dict()` is renamed). The
+> title/label → body-text fallback chain is now **complete**: in addition to the
+> four documented above it resolves `title_font_weight → font_weight` and
+> `title_font_size → font_size` (every `title_*`/`label_*` key that has a
+> body-text counterpart). There is no public `label_font_weight`/`label_font_size`
+> key — the public `font_size` key *is* the label/body font size (it routes to
+> the Rust binding's `label_font_size`, the same way `background` is the public
+> alias for `background_color`). CSS shorthand hex (`#rgb`/`#rgba`) is expanded
+> by the Rust color parser (`from_hex_str`); the prior redundant Python-side
+> expansion was removed.
 
 **Built-in themes** (`ferrum.themes`)
 
@@ -1286,9 +1334,14 @@ ferrum.validation_curve_chart(model, X, y, param, values, *,
                                 cv=5, scoring=None, log_scale="auto",
                                 ci_style="band", theme=None)
 
-ferrum.cluster_diagnostics(X, *, ks, method="kmeans", scoring="both",
+ferrum.cluster_diagnostics(model, *, ks, method="kmeans", scoring="both",
                              # scoring: "elbow" | "silhouette" | "both"
                              n_init=10, random_state=None, theme=None)
+# **2026-06-22 (T3.4, D-FIRSTPARAM-1):** the first positional parameter was
+# renamed `X` -> `model` so the whole model-diagnostic family shares one
+# canonical first-param name. Positional callers are unaffected; the legacy
+# keyword `X=` is accepted as a deprecated alias (supplying both `model=` and
+# `X=` raises `TypeError`).
 
 ferrum.decision_boundary_chart(model, X, y, *,
                                  features=(0, 1),    # column indices or names
@@ -1414,10 +1467,34 @@ Visualizers implement `fit` / `score` / `show` for drop-in compatibility with sk
 ```
 class FerrumVisualizer:
     def fit(self, X, y=None) -> self
-    def score(self, X, y) -> float        # computes metric; populates chart state
+    def score(self, X, y) -> float        # delegates to model.score; 0.0 if no model
     def show(self) -> Chart
     def __repr__(self) -> str             # summary string with key metrics
+    @property
+    def has_score(self) -> bool           # True iff score() returns a real metric
 ```
+
+> **Note (2026-06-22, cohesion campaign T4.6):** The base `score(X, y)`
+> delegates to `float(self.model.score(X, y))` whenever the wrapped model
+> exposes a `.score` method, and returns `0.0` only for genuinely no-model
+> visualizers (`model=None`: rank / parallel-coordinates / class-balance /
+> elbow). Subclasses whose score is not the estimator's own (e.g.
+> `ROCVisualizer` → `roc_auc_score`) override it. `has_score` is a derived
+> read-only property (not a hand-set class flag): it reports `True` exactly
+> when `score()` returns a real metric, mirroring the model-has-`.score`
+> guard, so the two can never drift.
+>
+> **Refinement (2026-06-23, cohesion campaign S4FIX2):** the "can never drift"
+> guarantee now holds for the two non-standard subclass shapes as well.
+> `ROCVisualizer` overrides `has_score` to mirror its own `score()` condition
+> (scoreable when the model exposes `predict_proba` or a callable `.score`), so
+> a `predict_proba`-only model — no `.score`, a valid sklearn shape — reports
+> `has_score=True` and `score()` returns the AUC. A multi-model
+> `CalibrationVisualizer` overlay (two or more positional models, or a single
+> dict-of-models) has no single well-defined metric: it now reports
+> `has_score=False` and `score()` returns the documented `0.0` no-single-score
+> fallback, rather than silently scoring only the first model. Single-model
+> calibration behavior is unchanged.
 
 **Concrete visualizers:**
 
@@ -1659,8 +1736,28 @@ Ferrum accepts the following as `data` in `Chart(data=...)` or figure-level func
 # with no user-facing benefit. This namespace will not be implemented.
 
 ferrum.color.palette(scheme, n)            # return n colors from a scheme as hex list
-ferrum.color.to_hex(color)                 # normalize color string to hex
+ferrum.color.to_hex(color, *, scale=None)  # normalize color to hex; scale="unit"|"byte"
+ferrum.color.sequential(name, n=256)       # n render-truth samples of a sequential scheme
+ferrum.color.diverging(name, n=11)         # n render-truth samples of a diverging scheme
 ferrum.color.diverging_palette(low, mid, high, n)
+
+# 2026-06-22 (T2.2, ENC-06/XNAME-02/XSIB-07/ENC-11): the palette registry in
+# crates/ferrum-core/src/render/palette.rs + .../color/continuous.rs is the
+# single source of truth. ferrum.color consumes it through the _core accessors
+# (list_palettes / palette_kind / palette_colors / palette_sample); the
+# hand-mirrored Python hex tables are gone. Surfaced behavior changes:
+#   * color.palette()/sequential()/diverging() for the 7 colorous-backed
+#     schemes (viridis, plasma, magma, inferno, cividis, blues, rdbu) now
+#     return RENDER-TRUTH colors (what actually renders), replacing the old
+#     hand-picked 7-stop approximations. The 19 other palettes are unchanged.
+#   * scheme= on Color/Fill/Stroke is validated at declaration time against the
+#     registry (a bogus name raises ValueError immediately, not at render).
+#   * to_hex(color, scale=) takes an explicit "unit"/"byte" override; the
+#     default (scale=None) heuristic is now range-based (any component > 1 means
+#     byte), so (1,0,0) and (1.0,0.0,0.0) agree. Pass scale="byte" for the old
+#     all-integers-are-bytes interpretation of ambiguous <=1 tuples.
+#   * scheme= is the canonical colormap kwarg on mark_raster/mark_contour/
+#     mark_hex/clustermap; cmap= remains a documented back-compat alias.
 
 ferrum.config.set_max_rows(n)              # raise/lower data size guard (default: None)
 ferrum.config.set_renderer(renderer)       # default renderer for .show()

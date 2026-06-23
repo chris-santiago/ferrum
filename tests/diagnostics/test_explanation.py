@@ -299,7 +299,7 @@ def test_shap_waterfall_chart_per_class_multiclass():
 
 def test_shap_chart_invalid_kind():
     source, _, _ = _ridge_source()
-    with pytest.raises(ValueError, match="kind="):
+    with pytest.raises(ValueError, match="must be one of"):
         ferrum.shap_chart(source, kind="violinplot")
 
 
@@ -611,7 +611,7 @@ def test_shap_order_features_unknown_order_raises():
     )
     with pytest.raises(ValueError, match="abs_max"):
         _shap_order_features(sv, order="abs_max", max_display=5)
-    with pytest.raises(ValueError, match="Accepted values"):
+    with pytest.raises(ValueError, match="must be one of"):
         _shap_order_features(sv, order="unknown", max_display=5)
 
 

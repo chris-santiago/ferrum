@@ -109,7 +109,7 @@ class TestDisplot:
         chart = fe.displot(iris_like, x="sepal_length", hue="species", kind="kde")
         d = json.loads(chart.to_spec().to_json())
         kde_t = next(t for t in d.get("transforms", []) if t.get("type") == "kde")
-        assert kde_t.get("groupby") == "species"
+        assert kde_t.get("groupby") == ["species"]
         # End-to-end render must not raise and must produce SVG.
         assert "<svg" in chart.to_svg()
 
@@ -125,7 +125,7 @@ class TestDisplot:
         )
         d = json.loads(chart.to_spec().to_json())
         kde_t = next(t for t in d.get("transforms", []) if t.get("type") == "kde")
-        assert kde_t.get("groupby") == "species"
+        assert kde_t.get("groupby") == ["species"]
 
     def test_mark_histogram_horizontal_orientation(self, iris_like):
         # JointChart's right-marginal pattern: bind the data column to y and

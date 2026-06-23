@@ -91,6 +91,7 @@ nav = [
     { "Color" = "api/color.md" },
     { "Config" = "api/config.md" },
     { "Axis" = "api/axis.md" },
+    { "Grid" = "api/grid.md" },
     { "Legend" = "api/legend.md" },
   ] },
   { Changelog = "changelog.md" },

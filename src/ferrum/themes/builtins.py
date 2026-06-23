@@ -57,7 +57,35 @@ Twelve pre-built ``Theme`` instances are exported here and re-exported at
 
 from __future__ import annotations
 
-from ferrum.themes import Theme
+from ferrum.themes._theme import Theme
+
+# Canonical "color-identity" key set: the keys that give a built-in theme its
+# distinct visual identity (background, text/axis/grid colors, mark color, and
+# the three palette-name keys). The four reference identities
+# (``paper_ink`` / ``slate_citrus`` / ``arctic_signal`` / ``observable``) set
+# exactly this set; the others legitimately omit some optional color keys (the
+# Rust ``ThemeInputs::default()`` fills them) and/or add structural/title keys.
+# Used by ``tests/test_theme_consistency.py`` as the documented superset of the
+# color keys a built-in may set, not as a "every theme must set all of these"
+# rule — see that test for the per-theme key contract. This is a strict subset
+# of ``ferrum._core.theme_known_keys()`` (the full accepted-key manifest).
+IDENTITY_KEYS: frozenset[str] = frozenset(
+    {
+        "background",
+        "font_color",
+        "label_color",
+        "title_color",
+        "grid_color",
+        "axis_line_color",
+        "tick_color",
+        "mark_color",
+        "color_scheme",
+        "sequential_scheme",
+        "diverging_scheme",
+        "strip_background_color",
+        "reference_line_color",
+    }
+)
 
 
 default = Theme()

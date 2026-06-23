@@ -17,6 +17,32 @@ def test(session: nox.Session) -> None:
     session.run("uv", "run", "pytest", "-n", "auto", *session.posargs, external=True)
 
 
+@nox.session
+def doctests(session: nox.Session) -> None:
+    """Run the mark-desugar docstring examples as doctests.
+
+    Scoped to the desugar modules so their Returns/Examples sections (which
+    document ``MarkDesugarResult`` attribute access) stay correct and cannot
+    silently drift back to the retired tuple-return protocol.  The public
+    ``mark_*`` mixin docstrings under ``_chart_mixins`` carry illustrative
+    examples that reference undefined estimators and are deliberately not
+    collected here.
+    """
+    session.run("uv", "sync", "--all-extras", "--all-groups", external=True)
+    session.run(
+        "uv",
+        "run",
+        "pytest",
+        "--doctest-modules",
+        "src/ferrum/_layer.py",
+        "src/ferrum/marks/composite.py",
+        "src/ferrum/marks/statistical.py",
+        "src/ferrum/marks/heavy_stat.py",
+        *session.posargs,
+        external=True,
+    )
+
+
 @nox.session(python=False)
 def cargo_test(session: nox.Session) -> None:
     """Run Rust tests with correct macOS DYLD paths."""

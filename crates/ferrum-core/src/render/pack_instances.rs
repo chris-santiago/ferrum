@@ -20,6 +20,8 @@
 
 use ferrum_scene::{Color, FillStroke, MarkBatchKind, SceneGraph, SceneNode};
 
+use super::draw::DASH_PALETTE;
+
 // ── Wire-format stride constants ────────────────────────────────────────────
 //
 // These are the single authoritative definition of the packed GPU-instance
@@ -42,20 +44,17 @@ pub const RECT_FLOATS: usize = 18;
 pub const CIRCLE_STRIDE: usize = CIRCLE_FLOATS * 4;
 /// Byte stride for one packed rect instance (18 × 4 = 72).
 pub const RECT_STRIDE: usize = RECT_FLOATS * 4;
+// Byte offsets of the X/Y-position fields within a packed instance, named for
+// the layout assertions in this module's tests. The WASM consumer and the
+// Python mirror encode these offsets by value (they do not import these
+// `pub(crate)` symbols), so the consts exist only to make the test assertions
+// self-documenting, hence `#[cfg(test)]`.
+#[cfg(test)]
 /// Byte offset of the X-position field within a packed instance (f32[0]).
-// Format-documentation const; referenced only under #[cfg(test)]. The consumer
-// (ferrum-wasm) and the Python mirror encode this offset by value, not by importing
-// this symbol (the enclosing module is pub(crate)), so it reads as dead code in a
-// normal build.
-#[allow(dead_code)]
-pub const FIELD_X_OFFSET: usize = 0;
+const FIELD_X_OFFSET: usize = 0;
+#[cfg(test)]
 /// Byte offset of the Y-position field within a packed instance (f32[1]).
-// Format-documentation const; referenced only under #[cfg(test)]. The consumer
-// (ferrum-wasm) and the Python mirror encode this offset by value, not by importing
-// this symbol (the enclosing module is pub(crate)), so it reads as dead code in a
-// normal build.
-#[allow(dead_code)]
-pub const FIELD_Y_OFFSET: usize = 4;
+const FIELD_Y_OFFSET: usize = 4;
 
 /// Minimum node count for a batch to qualify for packing.
 const PACK_THRESHOLD: usize = 1000;
@@ -297,22 +296,34 @@ fn push_color(buf: &mut Vec<u8>, color: Option<&Color>, alpha_factor: f64) {
     }
 }
 
-/// Map a stroke-dash pattern to the same palette index used by the WASM
-/// renderer: 0 = solid, 1 = dashed [6,3], 2 = dotted [2,3], 3 = dash-dot [6,3,2,3].
-fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
-    match dash {
-        None => 0.0,
-        Some(v) if v.is_empty() => 0.0,
-        Some(v) => {
-            let pattern: Vec<u64> = v.iter().map(|&x| x as u64).collect();
-            match pattern.as_slice() {
-                [6, 3] => 1.0,
-                [2, 3] => 2.0,
-                [6, 3, 2, 3] => 3.0,
-                _ => 0.0,
-            }
+/// Map a stroke-dash pattern to the palette index used by the WASM renderer.
+///
+/// Derives from [`super::draw::DASH_PALETTE`] (the single canonical source) so
+/// this direction (pattern→index) cannot drift from `resolve_stroke_dash`
+/// (index→pattern). The mapping is:
+///   - `None` or empty vec → `0` (solid)
+///   - `[6, 3]`       → `1`
+///   - `[2, 3]`       → `2`
+///   - `[6, 3, 2, 3]` → `3`
+///   - unknown pattern → `0` (solid fallback)
+///
+/// Exposed as `pub(crate)` so the `draw` module's round-trip tests can call it
+/// without a `#[cfg(test)]` re-export.
+pub(crate) fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
+    let Some(v) = dash else { return 0.0 };
+    if v.is_empty() {
+        return 0.0;
+    }
+    // Compare by truncating to u64 so fractional noise (e.g. 6.0 vs 6) is ignored,
+    // matching the original implementation's cast semantics exactly.
+    let pattern: Vec<u64> = v.iter().map(|&x| x as u64).collect();
+    for (i, palette_entry) in DASH_PALETTE.iter().enumerate() {
+        let entry_as_u64: Vec<u64> = palette_entry.iter().map(|&x| x as u64).collect();
+        if pattern == entry_as_u64 {
+            return (i + 1) as f32;
         }
     }
+    0.0
 }
 
 #[cfg(test)]

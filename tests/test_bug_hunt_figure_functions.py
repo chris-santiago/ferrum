@@ -400,7 +400,7 @@ class TestResidplotLabel:
             None,
         )
         assert smooth_t is not None, "No smooth transform found"
-        assert smooth_t.get("groupby") == "_label"
+        assert smooth_t.get("groupby") == ["_label"]
 
     def test_residplot_label_with_show_metrics(self, simple_float_df):
         """residplot(label=..., show_metrics=True) should render with metrics annotation.

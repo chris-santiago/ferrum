@@ -69,7 +69,7 @@ def _multiclass_arrays() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 def test_roc_curve_precomputed_binary_no_sklearn():
     _drop_sklearn()
-    from ferrum._diagnostics.precomputed import _PrecomputedSource
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
     y_true, y_score, _ = _binary_arrays()
     src = _PrecomputedSource(y_true, y_score)
@@ -84,7 +84,7 @@ def test_roc_curve_precomputed_binary_no_sklearn():
 
 def test_roc_curve_precomputed_multiclass_no_sklearn():
     _drop_sklearn()
-    from ferrum._diagnostics.precomputed import _PrecomputedSource
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
     y_true, y_prob, _ = _multiclass_arrays()
     src = _PrecomputedSource(y_true, y_prob)
@@ -102,7 +102,7 @@ def test_roc_curve_precomputed_multiclass_no_sklearn():
 
 def test_pr_curve_precomputed_binary_no_sklearn():
     _drop_sklearn()
-    from ferrum._diagnostics.precomputed import _PrecomputedSource
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
     y_true, y_score, _ = _binary_arrays()
     src = _PrecomputedSource(y_true, y_score)
@@ -116,7 +116,7 @@ def test_pr_curve_precomputed_binary_no_sklearn():
 
 def test_pr_curve_precomputed_multiclass_no_sklearn():
     _drop_sklearn()
-    from ferrum._diagnostics.precomputed import _PrecomputedSource
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
     y_true, y_prob, _ = _multiclass_arrays()
     src = _PrecomputedSource(y_true, y_prob)
@@ -134,7 +134,7 @@ def test_pr_curve_precomputed_multiclass_no_sklearn():
 
 def test_calibration_curve_precomputed_binary_no_sklearn():
     _drop_sklearn()
-    from ferrum._diagnostics.precomputed import _PrecomputedSource
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
     y_true, y_score, _ = _binary_arrays()
     src = _PrecomputedSource(y_true, y_score)
@@ -149,7 +149,7 @@ def test_calibration_curve_precomputed_binary_no_sklearn():
 
 def test_calibration_curve_precomputed_quantile_no_sklearn():
     _drop_sklearn()
-    from ferrum._diagnostics.precomputed import _PrecomputedSource
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
     y_true, y_score, _ = _binary_arrays()
     src = _PrecomputedSource(y_true, y_score)
@@ -169,7 +169,7 @@ def test_calibration_curve_precomputed_quantile_no_sklearn():
 
 def test_confusion_matrix_precomputed_binary_no_sklearn():
     _drop_sklearn()
-    from ferrum._diagnostics.precomputed import _PrecomputedSource
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
     y_true, _, y_hard = _binary_arrays()
     src = _PrecomputedSource(y_true, y_hard)
@@ -186,7 +186,7 @@ def test_confusion_matrix_precomputed_binary_no_sklearn():
 
 def test_confusion_matrix_precomputed_multiclass_no_sklearn():
     _drop_sklearn()
-    from ferrum._diagnostics.precomputed import _PrecomputedSource
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
     y_true, _, y_hard = _multiclass_arrays()
     src = _PrecomputedSource(y_true, y_hard)
@@ -205,7 +205,7 @@ def test_confusion_matrix_precomputed_multiclass_no_sklearn():
 
 def test_discrimination_threshold_precomputed_binary_no_sklearn():
     _drop_sklearn()
-    from ferrum._diagnostics.precomputed import _PrecomputedSource
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
     y_true, y_score, _ = _binary_arrays()
     src = _PrecomputedSource(y_true, y_score)
@@ -223,7 +223,7 @@ def test_discrimination_threshold_precomputed_binary_no_sklearn():
 def test_discrimination_threshold_cv_none_no_sklearn():
     """Explicit cv=None must not trigger sklearn import."""
     _drop_sklearn()
-    from ferrum._diagnostics.precomputed import _PrecomputedSource
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
     y_true, y_score, _ = _binary_arrays()
     src = _PrecomputedSource(y_true, y_score)
@@ -236,7 +236,7 @@ def test_discrimination_threshold_cv_none_no_sklearn():
 def test_discrimination_threshold_cv_raises():
     """cv=<int> must raise ValueError, not import sklearn."""
     _drop_sklearn()
-    from ferrum._diagnostics.precomputed import _PrecomputedSource
+    from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
     y_true, y_score, _ = _binary_arrays()
     src = _PrecomputedSource(y_true, y_score)

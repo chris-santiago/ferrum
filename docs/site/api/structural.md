@@ -1,12 +1,11 @@
 # Structural
 
-Structural view modifiers — `BreakAxis`, `Inset`, `SecondaryY`, `Grid`.
+Structural view modifiers — `BreakAxis`, `Inset`, `SecondaryY`.
 
 ::: ferrum
     options:
       members:
         - BreakAxis
-        - Grid
         - Inset
         - SecondaryY
       show_root_heading: false

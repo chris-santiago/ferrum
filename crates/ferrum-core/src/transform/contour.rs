@@ -51,6 +51,7 @@ fn default_smooth() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ContourSpec {
     #[serde(default = "default_thresholds")]
     pub thresholds: u32,
@@ -975,7 +976,7 @@ mod tests {
             bandwidth: BandwidthSpec::Scott,
             n: 16,
             extent: None,
-            groupby: None,
+            groupby: vec![],
             name: None,
         };
         let kde_out = kde_2d::apply(&kde2d_spec, &in_batch).unwrap();

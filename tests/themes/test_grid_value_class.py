@@ -201,7 +201,8 @@ def test_theme_with_grid_object_splices_per_level_keys():
 
 
 def test_theme_ingestion_full_shorthand():
-    # Use fully-expanded hex strings — Theme.to_spec_dict() expands #rgb → #rrggbb.
+    # Use fully-expanded hex strings — to_spec_dict() forwards color strings
+    # verbatim; the Rust renderer expands #rgb → #rrggbb at parse time (THEME-05).
     t = Theme(
         grid=Grid(minor=True, color="#eeeeee", minor_color="#f8f8f8", width=0.8, minor_width=0.4)
     )

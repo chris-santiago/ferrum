@@ -57,6 +57,7 @@ pub(crate) enum SwarmOrient {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SwarmSpec {
     pub category: String, // grouping field (Utf8/LargeUtf8, Float, integer, or Boolean)
     pub value: String,    // Float64

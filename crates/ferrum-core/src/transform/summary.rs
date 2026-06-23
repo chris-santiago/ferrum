@@ -20,6 +20,7 @@ pub(crate) enum ErrorFn {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SummarySpec {
     pub field: String,
     #[serde(default)]

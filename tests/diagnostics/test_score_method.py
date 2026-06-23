@@ -137,7 +137,8 @@ def test_alpha_selection_visualizer_score_does_not_raise(regression_data):
 
 
 # ---------------------------------------------------------------------------
-# Group B — score() must NOT raise NotImplementedError; must return 0.0
+# Group B — genuinely no-model visualizers (model=None). score() must NOT
+# raise; it must return the 0.0 fallback (no wrapped model exposes .score).
 # ---------------------------------------------------------------------------
 
 
@@ -146,6 +147,7 @@ def test_class_balance_visualizer_score_does_not_raise(binary_data):
     viz = ferrum.ClassBalanceVisualizer().fit(X, y)
     result = viz.score(X, y)
     assert result == 0.0
+    assert viz.has_score is False
 
 
 def test_rank1d_visualizer_score_does_not_raise(regression_data):
@@ -153,6 +155,7 @@ def test_rank1d_visualizer_score_does_not_raise(regression_data):
     viz = ferrum.Rank1DVisualizer(algorithm="variance").fit(X, y)
     result = viz.score(X, y)
     assert result == 0.0
+    assert viz.has_score is False
 
 
 def test_rank2d_visualizer_score_does_not_raise(regression_data):
@@ -160,21 +163,7 @@ def test_rank2d_visualizer_score_does_not_raise(regression_data):
     viz = ferrum.Rank2DVisualizer(algorithm="pearson").fit(X)
     result = viz.score(X, None)
     assert result == 0.0
-
-
-def test_manifold_visualizer_score_does_not_raise(clustering_data):
-    model, df = clustering_data
-    X = df.select([c for c in df.columns if c != "label"])
-    viz = ferrum.ManifoldVisualizer(model, method="pca").fit(X)
-    result = viz.score(X, None)
-    assert result == 0.0
-
-
-def test_silhouette_visualizer_score_does_not_raise(clustering_data):
-    model, df = clustering_data
-    viz = ferrum.SilhouetteVisualizer(model).fit(df)
-    result = viz.score(df, None)
-    assert result == 0.0
+    assert viz.has_score is False
 
 
 def test_elbow_visualizer_score_does_not_raise(clustering_data):
@@ -182,20 +171,12 @@ def test_elbow_visualizer_score_does_not_raise(clustering_data):
 
     _, df = clustering_data
     X = df.select([c for c in df.columns if c != "label"])
+    # ElbowVisualizer takes a model *class*, never a fitted instance, so
+    # self.model is None and score() returns the 0.0 fallback.
     viz = ferrum.ElbowVisualizer(KMeans, ks=range(2, 5)).fit(X)
     result = viz.score(X, None)
     assert result == 0.0
-
-
-def test_shap_visualizer_score_does_not_raise(binary_data):
-    import warnings
-
-    model, X, y = binary_data
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        viz = ferrum.SHAPVisualizer(model, kind="bar").fit(X, y)
-    result = viz.score(X, y)
-    assert result == 0.0
+    assert viz.has_score is False
 
 
 def test_parallel_coordinates_visualizer_score_does_not_raise(regression_data):
@@ -203,3 +184,40 @@ def test_parallel_coordinates_visualizer_score_does_not_raise(regression_data):
     viz = ferrum.ParallelCoordinatesVisualizer().fit(X, y)
     result = viz.score(X, y)
     assert result == 0.0
+    assert viz.has_score is False
+
+
+# ---------------------------------------------------------------------------
+# Group C — model-backed visualizers that previously inherited the 0.0 stub.
+# T4.6 part A promotes the delegating score() to the base, so these now
+# return the wrapped estimator's own .score (deliberate behavior change).
+# ---------------------------------------------------------------------------
+
+
+def test_manifold_visualizer_score_delegates_to_model(clustering_data):
+    model, df = clustering_data
+    X = df.select([c for c in df.columns if c != "label"])
+    viz = ferrum.ManifoldVisualizer(model, method="pca").fit(X)
+    result = viz.score(X, None)
+    assert result == pytest.approx(float(model.score(X, None)))
+    assert viz.has_score is True
+
+
+def test_silhouette_visualizer_score_delegates_to_model(clustering_data):
+    model, df = clustering_data
+    viz = ferrum.SilhouetteVisualizer(model).fit(df)
+    result = viz.score(df, None)
+    assert result == pytest.approx(float(model.score(df, None)))
+    assert viz.has_score is True
+
+
+def test_shap_visualizer_score_delegates_to_model(binary_data):
+    import warnings
+
+    model, X, y = binary_data
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        viz = ferrum.SHAPVisualizer(model, kind="bar").fit(X, y)
+    result = viz.score(X, y)
+    assert result == pytest.approx(float(model.score(X, y)))
+    assert viz.has_score is True

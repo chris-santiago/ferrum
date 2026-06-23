@@ -2,9 +2,25 @@
 
 Each desugar_<name> returns a ``MarkDesugarResult`` with ``layers`` set to a
 list of ``ferrum._layer._Layer`` instances (layered mode).
+
+Vocabulary note
+---------------
+The keyword ``extent`` is reserved for the data-domain sense (a ``[min, max]``
+pair bounding a scale or region).  The mark kwargs that were previously named
+``extent`` have been renamed:
+
+* ``mark_errorbar`` / ``mark_errorband``: ``extent`` → **``method``**
+  (the aggregation method forwarded to ``ErrorExtent``).
+* ``mark_boxplot``: ``extent`` → **``whisker_mult``**
+  (the IQR multiplier for whisker length).
+
+The old ``extent=`` spelling is accepted as a deprecated alias for one release;
+supplying both the canonical name and ``extent=`` in the same call raises a
+``TypeError``.
 """
 
 from __future__ import annotations
+import warnings
 from typing import Any, Optional
 
 from ferrum import BoxStats, ErrorExtent, LetterValue, Outliers
@@ -17,12 +33,85 @@ from ferrum.marks._mark_kwargs import (
     validate_user_mark_kwargs as _validate,
 )
 
+# Sentinel used to detect "caller did not supply this parameter" in the
+# _resolve_deprecated_extent helper.  Identity comparison against this
+# object is always reliable, unlike value comparison against floats or
+# runtime-built strings (which may not be interned).
+_MISSING = object()
+
+# Number of nested letter-value bands ``desugar_boxen`` builds.  This single
+# constant drives both the ``range`` loop that creates the ``depth_*`` layers
+# and the ``register_layer_names("boxen", ...)`` call that declares their names,
+# so the two cannot drift apart.
+_BOXEN_K_MAX = 6
+
+
+def _resolve_deprecated_extent(
+    canonical_name: str,
+    canonical_value: Any,
+    mark_kwargs: dict,
+    *,
+    real_default: Any,
+) -> Any:
+    """Resolve a renamed ``extent=`` alias to its canonical kwarg.
+
+    Parameters
+    ----------
+    canonical_name : str
+        The new canonical kwarg name (``"method"`` or ``"whisker_mult"``).
+    canonical_value : Any
+        The value supplied under the canonical name.  Pass ``_MISSING`` when
+        the caller did not supply the canonical kwarg (i.e. its parameter
+        default is ``_MISSING``).
+    mark_kwargs : dict
+        The ``**mark_kwargs`` remainder dict, consumed in-place: if
+        ``"extent"`` is found, it is popped and returned as the resolved
+        value.
+    real_default : Any
+        The true default for the canonical parameter (e.g. ``1.5`` or
+        ``"ci"``).  Returned when neither the canonical kwarg nor the alias
+        were supplied.
+
+    Returns
+    -------
+    Any
+        The resolved value: canonical kwarg wins; alias accepted when the
+        canonical kwarg is absent; both supplied raises ``TypeError``;
+        neither supplied returns ``real_default``.
+
+    Raises
+    ------
+    TypeError
+        When both the canonical kwarg and ``extent=`` are supplied.
+    """
+    alias_value = mark_kwargs.pop("extent", _MISSING)
+    canonical_supplied = canonical_value is not _MISSING
+    alias_supplied = alias_value is not _MISSING
+
+    if not alias_supplied:
+        # No alias; return canonical if given, else the real default.
+        return canonical_value if canonical_supplied else real_default
+    # Alias was supplied.
+    if canonical_supplied:
+        raise TypeError(
+            f"Cannot supply both '{canonical_name}=' and the deprecated 'extent=' alias; "
+            f"use '{canonical_name}=' only."
+        )
+    warnings.warn(
+        f"The 'extent=' keyword argument is deprecated for this mark. "
+        f"Use '{canonical_name}=' instead. "
+        "'extent' is reserved for data-domain [min, max] bounds.",
+        DeprecationWarning,
+        stacklevel=4,
+    )
+    return alias_value
+
 
 def desugar_boxplot(
     x_field: str | None,
     y_field: str | None,
     *,
-    extent: float | str = 1.5,
+    whisker_mult: float | str = _MISSING,  # type: ignore[assignment]
     outliers: bool = True,
     size: Optional[float] = None,
     color_field: Optional[str] = None,
@@ -30,7 +119,7 @@ def desugar_boxplot(
     x_sort: Any = None,
     y_sort: Any = None,
     **mark_kwargs: Any,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Box-plot composite mark desugar.
 
     Converts ``chart.mark_boxplot(...)`` into a ``BoxStats`` transform plus
@@ -66,9 +155,16 @@ def desugar_boxplot(
         Categorical (grouping) field name. Required.
     y_field : str or None
         Numeric (value) field name. Required.
-    extent : float or "min-max", default 1.5
+    whisker_mult : float or "min-max", default 1.5
         IQR multiplier for whisker length, or ``"min-max"`` to extend
-        whiskers to the data minimum/maximum.
+        whiskers to the data minimum/maximum.  Forwarded as
+        ``BoxStats.whisker_extent`` / ``Outliers.extent`` (transform field
+        names are unchanged).
+
+        .. deprecated::
+            The old spelling ``extent=`` is accepted as an alias for one
+            release.  Use ``whisker_mult=`` instead.  ``extent`` is reserved
+            for data-domain ``[min, max]`` bounds.
     outliers : bool, default True
         Whether to overlay an outlier point layer.
     size : float or None, default None
@@ -84,23 +180,28 @@ def desugar_boxplot(
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", transforms, None, None, layers)``
-        consumed by ``Chart._resolve_pending``.
+    MarkDesugarResult
+        Layered mode (``.layers`` set) consumed by ``Chart._resolve_pending``.
 
     Raises
     ------
     ValueError
         If either ``x_field`` or ``y_field`` is ``None``.
+    TypeError
+        If both ``whisker_mult=`` and the deprecated ``extent=`` alias are
+        supplied in the same call.
 
     Examples
     --------
     >>> result = desugar_boxplot("species", "sepal_length")
-    >>> result[0]
-    '__layered__'
-    >>> len(result[4])  # 6 layers: whisker, lower cap, upper cap, box, median, outlier
+    >>> len(result.layers)  # whisker, lower cap, upper cap, box, median, outlier
     6
+    >>> [layer.mark for layer in result.layers]
+    ['rule', 'tick', 'tick', 'rect', 'tick', 'point']
     """
+    whisker_mult = _resolve_deprecated_extent(
+        "whisker_mult", whisker_mult, mark_kwargs, real_default=1.5
+    )
     user_kw = _validate("boxplot", mark_kwargs)
     if x_field is None or y_field is None:
         raise ValueError("mark_boxplot() requires .encode(x=..., y=...)")
@@ -113,11 +214,18 @@ def desugar_boxplot(
     groupby, split_hue = resolve_color_groupby(cat, color_field, [cat])
 
     transforms = [
-        BoxStats(field=val, groupby=groupby, whisker_extent=_extent_to_box(extent), name="box")
+        BoxStats(
+            field=val, groupby=groupby, whisker_extent=_extent_to_box(whisker_mult), name="box"
+        )
     ]
     if outliers:
         transforms.append(
-            Outliers(field=val, groupby=groupby, extent=_extent_to_iqr_k(extent), name="outliers")
+            Outliers(
+                field=val,
+                groupby=groupby,
+                extent=_extent_to_iqr_k(whisker_mult),
+                name="outliers",
+            )
         )
 
     band = size or 0.6
@@ -137,7 +245,11 @@ def desugar_boxplot(
             d["y"] = Y(y_col, title=title) if title else y_col
             if y2_col:
                 d["y2"] = y2_col
-        if color_field:
+        # Attach the per-layer color encoding only when the hue is a distinct
+        # column from the categorical axis (split_hue). When color encodes the
+        # same field as cat, the color encoding is redundant with the axis, so
+        # it is suppressed to match the errorbar/errorband siblings.
+        if split_hue:
             d["color"] = color_field
         return d
 
@@ -211,12 +323,12 @@ def desugar_errorbar(
     x_field: str | None,
     y_field: str | None,
     *,
-    extent: str = "ci",
+    method: str = _MISSING,  # type: ignore[assignment]
     ticks: bool = True,
     color_field: Optional[str] = None,
     x_sort: Any = None,
     **mark_kwargs: Any,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Error-bar composite mark desugar.
 
     Converts ``chart.mark_errorbar(...)`` into an ``ErrorExtent`` transform
@@ -244,9 +356,15 @@ def desugar_errorbar(
         Categorical (grouping) field. Required.
     y_field : str or None
         Numeric value field. Required.
-    extent : str, default "ci"
+    method : str, default "ci"
         Aggregation method passed to ``ErrorExtent``.  One of ``"ci"``
         (95 % bootstrap CI), ``"stderr"``, ``"stdev"``, or ``"iqr"``.
+        Forwarded verbatim as ``ErrorExtent.method`` (wire field unchanged).
+
+        .. deprecated::
+            The old spelling ``extent=`` is accepted as an alias for one
+            release.  Use ``method=`` instead.  ``extent`` is reserved for
+            data-domain ``[min, max]`` bounds.
     ticks : bool, default True
         Whether to add endpoint tick marks at the top and bottom of each
         error bar.
@@ -262,22 +380,24 @@ def desugar_errorbar(
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", transforms, None, None, layers)``.
+    MarkDesugarResult
+        Layered mode (``.layers`` set).
 
     Raises
     ------
     ValueError
         If either ``x_field`` or ``y_field`` is ``None``.
+    TypeError
+        If both ``method=`` and the deprecated ``extent=`` alias are
+        supplied in the same call.
 
     Examples
     --------
     >>> result = desugar_errorbar("day", "tip")
-    >>> result[0]
-    '__layered__'
-    >>> [l.mark for l in result[4]]
+    >>> [layer.mark for layer in result.layers]
     ['rule', 'tick', 'tick']
     """
+    method = _resolve_deprecated_extent("method", method, mark_kwargs, real_default="ci")
     user_kw = _validate("errorbar", mark_kwargs)
     if x_field is None or y_field is None:
         raise ValueError("mark_errorbar() requires .encode(x=..., y=...)")
@@ -295,7 +415,7 @@ def desugar_errorbar(
             d["color"] = color_field
         return d
 
-    transforms = [ErrorExtent(field=y_field, groupby=groupby, method=extent, name="err")]
+    transforms = [ErrorExtent(field=y_field, groupby=groupby, method=method, name="err")]
     layers = [
         _Layer(
             name="rule",
@@ -343,11 +463,11 @@ def desugar_errorband(
     x_field: str | None,
     y_field: str | None,
     *,
-    extent: str = "ci",
+    method: str = _MISSING,  # type: ignore[assignment]
     borders: bool = False,
     color_field: Optional[str] = None,
     **mark_kwargs: Any,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Error-band (shaded CI ribbon) composite mark desugar.
 
     Converts ``chart.mark_errorband(...)`` into an ``ErrorExtent`` transform
@@ -373,9 +493,15 @@ def desugar_errorband(
         Continuous x field. Required.
     y_field : str or None
         Numeric value field. Required.
-    extent : str, default "ci"
+    method : str, default "ci"
         Aggregation method passed to ``ErrorExtent``.  One of ``"ci"``,
-        ``"stderr"``, ``"stdev"``, or ``"iqr"``.
+        ``"stderr"``, ``"stdev"``, or ``"iqr"``.  Forwarded verbatim as
+        ``ErrorExtent.method`` (wire field unchanged).
+
+        .. deprecated::
+            The old spelling ``extent=`` is accepted as an alias for one
+            release.  Use ``method=`` instead.  ``extent`` is reserved for
+            data-domain ``[min, max]`` bounds.
     borders : bool, default False
         Whether to draw solid border lines at the upper and lower edges of
         the ribbon.
@@ -388,22 +514,24 @@ def desugar_errorband(
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", transforms, None, None, layers)``.
+    MarkDesugarResult
+        Layered mode (``.layers`` set).
 
     Raises
     ------
     ValueError
         If either ``x_field`` or ``y_field`` is ``None``.
+    TypeError
+        If both ``method=`` and the deprecated ``extent=`` alias are
+        supplied in the same call.
 
     Examples
     --------
     >>> result = desugar_errorband("x", "y")
-    >>> result[0]
-    '__layered__'
-    >>> result[4][0].mark
+    >>> result.layers[0].mark
     'ribbon'
     """
+    method = _resolve_deprecated_extent("method", method, mark_kwargs, real_default="ci")
     user_kw = _validate("errorband", mark_kwargs)
     if x_field is None or y_field is None:
         raise ValueError("mark_errorband() requires .encode(x=..., y=...)")
@@ -423,7 +551,7 @@ def desugar_errorband(
             d["color"] = color_field
         return d
 
-    transforms = [ErrorExtent(field=y_field, groupby=groupby, method=extent, name="err")]
+    transforms = [ErrorExtent(field=y_field, groupby=groupby, method=method, name="err")]
     layers = [
         _Layer(
             name="ribbon",
@@ -473,7 +601,7 @@ def desugar_ribbon(
     opacity: float = 0.2,
     interpolate: str = "linear",
     **mark_kwargs: Any,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Primitive ribbon (shaded band) mark desugar — no transform.
 
     Emits a single ribbon layer directly.  Unlike ``desugar_errorband``,
@@ -511,8 +639,9 @@ def desugar_ribbon(
 
     Returns
     -------
-    tuple
-        5-tuple ``("__layered__", [], None, None, layers)``.
+    MarkDesugarResult
+        Layered mode with a single ribbon layer (``.layers`` set, no
+        transforms).
 
     Raises
     ------
@@ -522,7 +651,7 @@ def desugar_ribbon(
     Examples
     --------
     >>> result = desugar_ribbon("x", "lower", y2_field="upper")
-    >>> result[4][0].mark
+    >>> result.layers[0].mark
     'ribbon'
     """
     user_kw = _validate("ribbon", mark_kwargs)
@@ -572,7 +701,7 @@ def desugar_boxen(
     y_sort: Any = None,
     boxen_agg_sort: dict | None = None,
     **mark_kwargs: Any,
-) -> "MarkDesugarResult":
+) -> MarkDesugarResult:
     """Letter-value (boxen) composite mark.
 
     Desugars into a `LetterValue` transform plus N nested rect bands (one per
@@ -623,14 +752,15 @@ def desugar_boxen(
         ),
     ]
 
-    # Per-depth named outputs (lv_depth_1 … lv_depth_6) let each rect layer
-    # read its own slice — no overlap. K_MAX = 6 visible bands; for data with
-    # fewer effective depths, unused outputs are zero-row batches and render
-    # nothing.
-    K_MAX = 6
+    # Per-depth named outputs (lv_depth_1 … lv_depth_{_BOXEN_K_MAX}) let each
+    # rect layer read its own slice (no overlap). ``_BOXEN_K_MAX`` visible
+    # bands; for data with fewer effective depths, unused outputs are zero-row
+    # batches and render nothing.  The same constant derives the registry's
+    # ``depth_*`` names below, so the loop bound and the registered set cannot
+    # drift apart.
     layers: list = []
-    for k in range(1, K_MAX + 1):
-        opacity = 0.85 - (0.55 * (k - 1) / max(K_MAX - 1, 1))
+    for k in range(1, _BOXEN_K_MAX + 1):
+        opacity = 0.85 - (0.55 * (k - 1) / max(_BOXEN_K_MAX - 1, 1))
         enc = (
             {"x": "lower", "x2": "upper", "y": group_enc_y}
             if horizontal
@@ -677,18 +807,7 @@ def desugar_boxen(
 
 register_layer_names(
     "boxen",
-    frozenset(
-        {
-            "depth_1",
-            "depth_2",
-            "depth_3",
-            "depth_4",
-            "depth_5",
-            "depth_6",
-            "median",
-            "outlier",
-        }
-    ),
+    frozenset({f"depth_{k}" for k in range(1, _BOXEN_K_MAX + 1)}) | {"median", "outlier"},
 )
 
 

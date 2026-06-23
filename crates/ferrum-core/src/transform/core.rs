@@ -117,6 +117,18 @@ pub(crate) enum TransformSpec {
 ///
 /// Naming convention: wrapper is `Py<Variant>` for every entry. The
 /// historic `PyQQ` exception was renamed to `PyQq` to match `Qq`.
+///
+/// **Py-wrapper coverage (SEAM-02):** the `apply`/`spec_name` dispatchers use
+/// every entry's `Variant`/`module_ident`, but the `PyWrapper` column is only
+/// meaningful for transforms that expose a Python class. The Phase-12 data
+/// transforms are constructed exclusively through the dict-emitting
+/// `transform_*` functions (`src/ferrum/transforms.py`); their typed `Data*`
+/// pyclasses were never imported or exported, so they were removed. The eight
+/// `Data*` entries below therefore keep their `PyWrapper` name for layout
+/// symmetry but carry no live `#[pyclass]`; the Python-facing sites
+/// (registration, the `ChartSpec.transforms` getter, and `coerce_transforms`)
+/// drive off [`for_each_py_transform!`] instead, which lists only the variants
+/// that still have a Python wrapper class.
 macro_rules! for_each_transform {
     ($mac:ident) => {
         $mac! {
@@ -165,7 +177,63 @@ macro_rules! for_each_transform {
         }
     };
 }
-pub(crate) use for_each_transform;
+// `for_each_transform!` is the full 41-variant dispatch table, invoked only
+// within this module (`apply`, `spec_name`). The Python-facing sites use
+// `for_each_py_transform!` (re-exported below); there is no external consumer
+// of the full table, so it is not re-exported.
+
+/// The subset of [`for_each_transform!`] whose variants still expose a Python
+/// wrapper class (`Py<Variant>`). This is the table that drives the three
+/// Python-facing sites: module registration (`lib.rs`), the
+/// `ChartSpec.transforms` getter, and `coerce_transforms` (both `spec/chart.rs`).
+///
+/// The eight Phase-12 `Data*` transforms (`Filter`, `Calculate`, `Fold`,
+/// `Pivot`, `DataWindow`, `DataStack`, `DataBin`, `DataAggregate`) are absent
+/// here: they are constructed only via the dict-emitting `transform_*` Python
+/// functions and have no typed pyclass (SEAM-02). They still round-trip through
+/// the `transforms_json` serde path; the getter renders them as plain dicts via
+/// the `_ =>` fallback arm, mirroring the `layers`/`coord`/`position` getters.
+macro_rules! for_each_py_transform {
+    ($mac:ident) => {
+        $mac! {
+            Bin           => bin            : PyBin,
+            Bin2D         => bin_2d         : PyBin2D,
+            Kde           => kde            : PyKde,
+            Smooth        => smooth         : PySmooth,
+            Aggregate     => aggregate      : PyAggregate,
+            Summary       => summary        : PySummary,
+            Outliers      => outliers       : PyOutliers,
+            ErrorExtent   => error_extent   : PyErrorExtent,
+            BoxStats      => box_stats      : PyBoxStats,
+            Violin        => violin         : PyViolin,
+            Kde2D         => kde_2d         : PyKde2D,
+            Contour       => contour        : PyContour,
+            Qq            => qq             : PyQq,
+            Linkage       => linkage        : PyLinkage,
+            Raster        => raster         : PyRaster,
+            Hex           => hex            : PyHex,
+            Swarm         => swarm          : PySwarm,
+            Unpivot       => unpivot        : PyUnpivot,
+            Reorder       => reorder        : PyReorder,
+            ReferenceLine => reference_line : PyReferenceLine,
+            LetterValue   => letter_value   : PyLetterValue,
+            Logistic      => logistic       : PyLogistic,
+            Glm           => glm            : PyGlm,
+            Robust        => robust         : PyRobust,
+            Identity      => identity       : PyIdentity,
+            JoinAggregate => join_aggregate : PyJoinAggregate,
+            DensityData   => density_data   : PyDensityData,
+            RegressionData => regression_data : PyRegressionData,
+            LoessData     => loess_data     : PyLoessData,
+            Impute        => impute         : PyImpute,
+            Flatten       => flatten        : PyFlatten,
+            Sample        => sample         : PySample,
+            TopK          => top_k          : PyTopK,
+            TimeUnit      => timeunit       : PyTimeUnit,
+        }
+    };
+}
+pub(crate) use for_each_py_transform;
 
 impl TransformSpec {
     pub(crate) fn apply(&self, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -325,6 +393,7 @@ mod tests {
 
     use crate::transform::aggregate::{AggregateSpec, AggregateOp, AggFn};
     use crate::transform::bin::BinSpec;
+    use crate::transform::bin_mode::BinMode;
 
     fn make_one_col_batch(name: &str, values: Vec<f64>) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
@@ -350,13 +419,12 @@ mod tests {
     fn test_transform_spec_bin_round_trip() {
         let original = TransformSpec::Bin(BinSpec {
             field: "x".into(),
-            bin_count: Some(10),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 10 },
             extent: None,
             nice: true,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         });
         let json = serde_json::to_string(&original).unwrap();
@@ -384,13 +452,12 @@ mod tests {
         let pipeline = vec![
             TransformSpec::Bin(BinSpec {
                 field: "x".into(),
-                bin_count: Some(5),
-                bin_width: None,
+                mode: BinMode::Fixed { n: 5 },
                 extent: Some((1.0, 10.0)),
                 nice: false,
                 cumulative: false,
                 shared_extent: false,
-                groupby: None,
+                groupby: vec![],
                 name: None,
             }),
             TransformSpec::Aggregate(AggregateSpec {
@@ -422,13 +489,12 @@ mod tests {
         let pipeline = vec![
             TransformSpec::Bin(BinSpec {
                 field: "x".into(),
-                bin_count: Some(3),
-                bin_width: None,
+                mode: BinMode::Fixed { n: 3 },
                 extent: Some((1.0, 5.0)),
                 nice: false,
                 cumulative: false,
                 shared_extent: false,
-                groupby: None,
+                groupby: vec![],
                 name: None,
             }),
             TransformSpec::Aggregate(AggregateSpec {
@@ -452,13 +518,12 @@ mod tests {
     fn transform_spec_json_byte_identical_when_name_none() {
         let s = TransformSpec::Bin(BinSpec {
             field: "x".into(),
-            bin_count: Some(10),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 10 },
             extent: None,
             nice: true,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         });
         let json = serde_json::to_string(&s).unwrap();
@@ -468,11 +533,11 @@ mod tests {
 
     #[test]
     fn test_transform_spec_bin_2d_round_trip() {
-        use crate::transform::bin_2d::{Bin2DSpec, BinSpec2DAxis};
+        use crate::transform::bin_2d::Bin2DSpec;
         let original = TransformSpec::Bin2D(Bin2DSpec {
             x: "x".into(), y: "y".into(),
-            bins_x: BinSpec2DAxis::Fixed { n: 10 },
-            bins_y: BinSpec2DAxis::Sturges,
+            bins_x: BinMode::Fixed { n: 10 },
+            bins_y: BinMode::Sturges,
             extent_x: None, extent_y: None,
             cumulative: false, name: None,
         });
@@ -516,13 +581,12 @@ mod tests {
         let batch = make_one_col_batch("x", vec![1.0, 2.0, 3.0]);
         let spec = TransformSpec::Bin(BinSpec {
             field: "x".into(),
-            bin_count: Some(2),
-            bin_width: None,
+            mode: BinMode::Fixed { n: 2 },
             extent: Some((1.0, 3.0)),
             nice: false,
             cumulative: false,
             shared_extent: false,
-            groupby: None,
+            groupby: vec![],
             name: None,
         });
         let ctx = TransformContext::default();

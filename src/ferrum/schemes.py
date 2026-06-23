@@ -1,9 +1,18 @@
-"""Color scheme lookups — ``continuous_palette`` and the ``Gradient`` factory."""
+"""Color scheme lookups — ``continuous_palette`` and the ``Gradient`` factory.
+
+This module exposes the ``ContinuousScheme`` factory used by ``Color(scale=...)``.
+For hex-string palette lookups (``palette``/``sequential``/``diverging``) see
+:mod:`ferrum.color`, which is the single name-keyed entry point over the Rust
+palette registry.  Both consume the same registry (``ferrum._core``); there are
+no hand-mirrored color tables in Python.
+"""
 
 from __future__ import annotations
 
 from ferrum._core import ContinuousScheme as _ContinuousScheme
 from ferrum._core import Gradient as _Gradient
+from ferrum._core import list_palettes as _list_palettes
+from ferrum._core import palette_kind as _palette_kind
 
 
 def continuous_palette(name: str):
@@ -11,8 +20,10 @@ def continuous_palette(name: str):
 
     Parameters
     ----------
-    name : {"viridis", "plasma", "magma", "inferno", "cividis"}
-        Built-in colormap name.
+    name : str
+        Built-in continuous colormap name (e.g. ``"viridis"``, ``"plasma"``,
+        ``"magma"``, ``"inferno"``, ``"cividis"``, ``"blues"``, ``"rdbu"``).
+        See ``continuous_palette.list()`` for the full set.
 
     Returns
     -------
@@ -34,7 +45,12 @@ def continuous_palette(name: str):
 
 
 def _list_continuous() -> list[str]:
-    return ["viridis", "plasma", "magma", "inferno", "cividis"]
+    """Return all continuous (sequential + diverging) palette names.
+
+    Derived from the Rust palette registry so the list never drifts from the
+    schemes ``ContinuousScheme.from_name`` actually accepts.
+    """
+    return [n for n in _list_palettes() if _palette_kind(n) in ("sequential", "diverging")]
 
 
 # Attach `.list()` as a function attribute so callers can do

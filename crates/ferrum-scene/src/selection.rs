@@ -98,6 +98,33 @@ pub enum EncodingValue {
     Field { name: String },
 }
 
+impl EncodingValue {
+    /// The encoding channel this value targets.
+    ///
+    /// `EncodingValue` and [`ChannelName`] are parallel axes: each value variant
+    /// can only affect one channel (a `Color` value targets `Color`, an
+    /// `Opacity` value targets `Opacity`, …). This method makes the value the
+    /// single source of truth for that mapping so consumers dispatch on the
+    /// value alone instead of cross-checking a separately-stored channel.
+    ///
+    /// `Field` carries no concrete visual channel (it names a data field rather
+    /// than a literal value); it maps to [`ChannelName::Color`] as the
+    /// conventional default, matching the Python serializer's fallback.
+    pub fn channel(&self) -> ChannelName {
+        match self {
+            EncodingValue::Color { .. } => ChannelName::Color,
+            EncodingValue::Opacity { .. } => ChannelName::Opacity,
+            EncodingValue::Size { .. } => ChannelName::Size,
+            EncodingValue::StrokeWidth { .. } => ChannelName::StrokeWidth,
+            EncodingValue::StrokeDash { .. } => ChannelName::StrokeDash,
+            EncodingValue::StrokeOpacity { .. } => ChannelName::StrokeOpacity,
+            EncodingValue::FillOpacity { .. } => ChannelName::FillOpacity,
+            EncodingValue::Angle { .. } => ChannelName::Angle,
+            EncodingValue::Field { .. } => ChannelName::Color,
+        }
+    }
+}
+
 // ── 3.8b FieldValue ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -290,6 +317,42 @@ mod tests {
         );
         let parsed: InteractionConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, config);
+    }
+
+    /// `EncodingValue::channel()` must map every value variant to its single
+    /// target channel — the invariant that lets WASM dispatch on the value
+    /// alone instead of trusting a separately-stored `channel` field.
+    #[test]
+    fn encoding_value_channel_maps_each_variant() {
+        use crate::types::Color;
+        assert_eq!(
+            EncodingValue::Color { value: Color { r: 0, g: 0, b: 0, a: 255 } }.channel(),
+            ChannelName::Color
+        );
+        assert_eq!(EncodingValue::Opacity { value: 0.5 }.channel(), ChannelName::Opacity);
+        assert_eq!(EncodingValue::Size { value: 10.0 }.channel(), ChannelName::Size);
+        assert_eq!(
+            EncodingValue::StrokeWidth { value: 2.0 }.channel(),
+            ChannelName::StrokeWidth
+        );
+        assert_eq!(
+            EncodingValue::StrokeDash { value: vec![6.0, 3.0] }.channel(),
+            ChannelName::StrokeDash
+        );
+        assert_eq!(
+            EncodingValue::StrokeOpacity { value: 0.3 }.channel(),
+            ChannelName::StrokeOpacity
+        );
+        assert_eq!(
+            EncodingValue::FillOpacity { value: 0.7 }.channel(),
+            ChannelName::FillOpacity
+        );
+        assert_eq!(EncodingValue::Angle { value: 45.0 }.channel(), ChannelName::Angle);
+        // Field carries no literal channel; it defaults to Color.
+        assert_eq!(
+            EncodingValue::Field { name: "g".into() }.channel(),
+            ChannelName::Color
+        );
     }
 
     /// Byte-stability gate: a param-free config must omit `param_bindings`.

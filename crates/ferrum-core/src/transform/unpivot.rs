@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct UnpivotSpec {
     #[serde(default)]
     pub id_vars: Vec<String>,

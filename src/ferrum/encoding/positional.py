@@ -1,79 +1,18 @@
-"""Positional encoding channels (X, Y, X2, Y2, errors, polar)."""
+"""Positional encoding channels (X, Y, X2, Y2, errors, polar).
+
+Each channel references one named role from :mod:`ferrum.encoding._honored`;
+``_honored_kwargs`` is the single, machine-readable source of truth for which
+kwargs the channel honors (see the ``ChannelBase`` docstring for the contract).
+"""
 
 from __future__ import annotations
 
-from ferrum.encoding.base import ChannelBase
-
-
-_VALID_STACK = frozenset(("zero", "normalize", "center", "false", "null", "none"))
-
-
-def _normalize_stack(value: object, channel: str) -> str:
-    """Normalize a ``stack=`` kwarg value to a string for Rust's ``Option<String>``.
-
-    Rust's ``EncodingSpec.stack`` is ``Option<String>``; passing a Python bool
-    crashes PyO3 with ``TypeError: argument 'stack': 'bool' object is not an
-    instance of 'str'``.  This helper converts booleans and validates strings.
-
-    Parameters
-    ----------
-    value:
-        The raw ``stack=`` argument supplied by the caller.
-    channel:
-        Channel name used in ``ValueError`` messages.
-
-    Returns
-    -------
-    str
-        ``"zero"`` for ``True``; ``"false"`` for ``False``; the original string
-        when it is a recognised stack strategy.
-
-    Raises
-    ------
-    ValueError
-        When *value* is a string that is not a recognised stack strategy.
-    """
-    if value is True:
-        return "zero"
-    if value is False:
-        return "false"
-    if not isinstance(value, str):
-        raise TypeError(
-            f"{channel}(stack={value!r}): stack= must be a bool or one of "
-            "'zero', 'normalize', 'center', 'false', 'null', 'none'; "
-            f"got {type(value).__name__!r}"
-        )
-    if value.lower() not in _VALID_STACK:
-        raise ValueError(
-            f"{channel}(stack={value!r}): must be one of "
-            "'zero', 'normalize', 'center', or a falsy value ('false', 'null', 'none'); "
-            f"got {value!r}"
-        )
-    return value
-
-
-_RENDERED_HONORED = frozenset(
-    [
-        "type",
-        "bin",
-        "aggregate",
-        "scale",
-        "title",
-        # Sort — honored by scale_resolve.rs ordinal domain builder.
-        "sort",
-        # Axis dict — honored by prepare.rs AxisInput construction.
-        "axis",
-        # Stack — honored by position.rs Stack strategy selection.
-        "stack",
-        # Impute dict — honored by prepare.rs apply_impute.
-        "impute",
-        # Format string and type — honored by prepare.rs apply_tick_format.
-        "format",
-        "format_type",
-        # Legend dict — honored by prepare.rs legend_orient_override / title.
-        "legend",
-    ]
+from ferrum.encoding._honored import (
+    PRIMARY_POSITIONAL,
+    SECONDARY_EXTENT,
+    POLAR_PRIMARY,
 )
+from ferrum.encoding.base import ChannelBase
 
 
 class X(ChannelBase):
@@ -97,12 +36,6 @@ class X(ChannelBase):
     title : str, optional
         Axis title override.  When omitted the field name is used.
 
-    Notes
-    -----
-    ``axis``, ``legend``, ``sort``, ``stack``, and ``impute`` kwargs are
-    accepted and forwarded to the EncodingSpec; per-channel axis/legend
-    customization depends on Rust-side support for the channel.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -112,13 +45,8 @@ class X(ChannelBase):
     """
 
     _channel_name = "x"
-    _honored_kwargs = _RENDERED_HONORED
-
-    def _validate(self) -> None:
-        super()._validate()
-        stack = self._kwargs.get("stack")
-        if stack is not None:
-            self._kwargs["stack"] = _normalize_stack(stack, "X")
+    _honored_kwargs = PRIMARY_POSITIONAL
+    _stack_kwarg = True
 
 
 class Y(ChannelBase):
@@ -142,12 +70,6 @@ class Y(ChannelBase):
     title : str, optional
         Axis title override.  When omitted the field name is used.
 
-    Notes
-    -----
-    ``axis``, ``legend``, ``sort``, ``stack``, and ``impute`` kwargs are
-    accepted and forwarded to the EncodingSpec; per-channel axis/legend
-    customization depends on Rust-side support for the channel.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -156,13 +78,8 @@ class Y(ChannelBase):
     """
 
     _channel_name = "y"
-    _honored_kwargs = _RENDERED_HONORED
-
-    def _validate(self) -> None:
-        super()._validate()
-        stack = self._kwargs.get("stack")
-        if stack is not None:
-            self._kwargs["stack"] = _normalize_stack(stack, "Y")
+    _honored_kwargs = PRIMARY_POSITIONAL
+    _stack_kwarg = True
 
 
 class X2(ChannelBase):
@@ -178,11 +95,6 @@ class X2(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    ``bin``, ``aggregate``, ``scale``, and ``title`` kwargs are not supported —
-    a one-time warning is emitted if they are passed.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -191,7 +103,7 @@ class X2(ChannelBase):
 
     _channel_name = "x2"
 
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = SECONDARY_EXTENT
 
 
 class Y2(ChannelBase):
@@ -207,11 +119,6 @@ class Y2(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    ``bin``, ``aggregate``, ``scale``, and ``title`` kwargs are not supported —
-    a one-time warning is emitted if they are passed.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -220,7 +127,7 @@ class Y2(ChannelBase):
 
     _channel_name = "y2"
 
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = SECONDARY_EXTENT
 
 
 class XError(ChannelBase):
@@ -235,11 +142,6 @@ class XError(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    Other kwargs (beyond ``type_``) are not supported — a one-time warning
-    is emitted if they are passed.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -248,7 +150,7 @@ class XError(ChannelBase):
 
     _channel_name = "x_error"
 
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = SECONDARY_EXTENT
 
 
 class YError(ChannelBase):
@@ -263,11 +165,6 @@ class YError(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    Other kwargs (beyond ``type_``) are not supported — a one-time warning
-    is emitted if they are passed.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -276,7 +173,7 @@ class YError(ChannelBase):
 
     _channel_name = "y_error"
 
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = SECONDARY_EXTENT
 
 
 class XError2(ChannelBase):
@@ -292,11 +189,6 @@ class XError2(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    Other kwargs (beyond ``type_``) are not supported — a one-time warning
-    is emitted if they are passed.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -309,7 +201,7 @@ class XError2(ChannelBase):
 
     _channel_name = "x_error2"
 
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = SECONDARY_EXTENT
 
 
 class YError2(ChannelBase):
@@ -325,11 +217,6 @@ class YError2(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
-    Notes
-    -----
-    Other kwargs (beyond ``type_``) are not supported — a one-time warning
-    is emitted if they are passed.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -342,7 +229,7 @@ class YError2(ChannelBase):
 
     _channel_name = "y_error2"
 
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = SECONDARY_EXTENT
 
 
 class Theta(ChannelBase):
@@ -367,9 +254,6 @@ class Theta(ChannelBase):
     without it the channel is registered but the mark renders in Cartesian
     space.
 
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -378,13 +262,8 @@ class Theta(ChannelBase):
 
     _channel_name = "theta"
 
-    _honored_kwargs = frozenset(["type", "stack"])
-
-    def _validate(self) -> None:
-        super()._validate()
-        stack = self._kwargs.get("stack")
-        if stack is not None:
-            self._kwargs["stack"] = _normalize_stack(stack, "Theta")
+    _honored_kwargs = POLAR_PRIMARY
+    _stack_kwarg = True
 
 
 class Radius(ChannelBase):
@@ -417,9 +296,6 @@ class Radius(ChannelBase):
     where the previous one ended.  Pass ``position=fm.Stack()`` on
     ``mark_bar()`` as an alternative.
 
-    Other kwargs are accepted but are reserved for future use (no-op today)
-    — they trigger a one-time deprecation warning.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -434,13 +310,8 @@ class Radius(ChannelBase):
 
     _channel_name = "radius"
 
-    _honored_kwargs = frozenset(["type", "stack"])
-
-    def _validate(self) -> None:
-        super()._validate()
-        stack = self._kwargs.get("stack")
-        if stack is not None:
-            self._kwargs["stack"] = _normalize_stack(stack, "Radius")
+    _honored_kwargs = POLAR_PRIMARY
+    _stack_kwarg = True
 
 
 class Theta2(ChannelBase):
@@ -464,9 +335,6 @@ class Theta2(ChannelBase):
     Remapped to ``x2`` (when ``CoordPolar(theta="x")``) or ``y2``
     (when ``CoordPolar(theta="y")``) before the spec reaches Rust.
 
-    Other kwargs (beyond ``type_``) are not supported — a one-time warning
-    is emitted if they are passed.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -480,7 +348,7 @@ class Theta2(ChannelBase):
 
     _channel_name = "theta2"
 
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = SECONDARY_EXTENT
 
 
 class Radius2(ChannelBase):
@@ -504,9 +372,6 @@ class Radius2(ChannelBase):
     Remapped to ``y2`` (when ``CoordPolar(theta="x")``) or ``x2``
     (when ``CoordPolar(theta="y")``) before the spec reaches Rust.
 
-    Other kwargs (beyond ``type_``) are not supported — a one-time warning
-    is emitted if they are passed.
-
     Examples
     --------
     >>> import ferrum as fm
@@ -520,4 +385,4 @@ class Radius2(ChannelBase):
 
     _channel_name = "radius2"
 
-    _honored_kwargs = frozenset(["type"])
+    _honored_kwargs = SECONDARY_EXTENT

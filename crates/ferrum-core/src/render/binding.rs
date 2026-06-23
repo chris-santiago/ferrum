@@ -70,14 +70,7 @@ pub fn render_svg(
     config: Option<&Bound<'_, PyDict>>,
     chart_config: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<String> {
-    let batch = collect_single_batch(data)?;
-    let t = theme_from_dict(theme)?;
-    let c = config_from_dict(config)?;
-    let cc = chart_config_from_dict(chart_config)?;
-    let vp = Viewport {
-        width: viewport.0,
-        height: viewport.1,
-    };
+    let (batch, t, c, cc, vp) = decode_render_inputs(data, viewport, theme, config, chart_config)?;
     let result = render_svg_internal(spec, &batch, &t, vp, &c, &cc).map_err(render_err_to_py)?;
     emit_warnings(py, &result.warnings)?;
     Ok(result.bytes)
@@ -140,14 +133,7 @@ pub fn render_png<'py>(
     config: Option<&Bound<'_, PyDict>>,
     chart_config: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let batch = collect_single_batch(data)?;
-    let t = theme_from_dict(theme)?;
-    let c = config_from_dict(config)?;
-    let cc = chart_config_from_dict(chart_config)?;
-    let vp = Viewport {
-        width: viewport.0,
-        height: viewport.1,
-    };
+    let (batch, t, c, cc, vp) = decode_render_inputs(data, viewport, theme, config, chart_config)?;
     let result = render_png_internal(spec, &batch, &t, vp, &c, &cc).map_err(render_err_to_py)?;
     emit_warnings(py, &result.warnings)?;
     Ok(PyBytes::new(py, &result.bytes))
@@ -164,14 +150,7 @@ pub fn render_interactive(
     config: Option<&Bound<'_, PyDict>>,
     chart_config: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<(String, Py<PyBytes>)> {
-    let batch = collect_single_batch(data)?;
-    let t = theme_from_dict(theme)?;
-    let c = config_from_dict(config)?;
-    let cc = chart_config_from_dict(chart_config)?;
-    let vp = Viewport {
-        width: viewport.0,
-        height: viewport.1,
-    };
+    let (batch, t, c, cc, vp) = decode_render_inputs(data, viewport, theme, config, chart_config)?;
     let (json, packed_bytes) = super::render_scene_json(spec, &batch, &t, vp, &c, &cc)
         .map_err(render_err_to_py)?;
     let py_bytes = PyBytes::new(py, &packed_bytes);
@@ -198,6 +177,124 @@ fn collect_single_batch(reader: PyRecordBatchReader) -> PyResult<arrow::record_b
     }
 }
 
+/// Authoritative list of accepted theme keys — the single source of truth
+/// for the Python theme-key contract (D-THEME-1). This MUST match the
+/// `ThemeOverridesSpec` field/alias set below exactly (including the
+/// `background` alias and the per-level grid keys). The
+/// `manifest_matches_serde` test asserts this by round-tripping every key
+/// through `ThemeOverridesSpec` serde and rejecting a bogus key, so the
+/// const cannot silently drift from the struct.
+///
+/// Exposed to Python via the `theme_known_keys()` PyO3 accessor; Python
+/// derives `Theme._KNOWN_KEYS` from it rather than re-listing the keys.
+const THEME_KNOWN_KEYS: &[&str] = &[
+    // Background / padding
+    "mark_color",
+    "background_color",
+    "background",
+    "padding",
+    // Typography
+    "font_family",
+    "font_weight",
+    "font_color",
+    "font_size",
+    "title_font_family",
+    "title_font_size",
+    "title_font_weight",
+    "title_color",
+    "title_anchor",
+    "title_offset",
+    "label_font_family",
+    "label_color",
+    // Axes
+    "axis_line",
+    "axis_line_color",
+    "axis_line_width",
+    "tick_color",
+    "tick_size",
+    "tick_width",
+    // Grid — legacy single-level keys (major level, back-compat)
+    "grid",
+    "grid_color",
+    "grid_width",
+    "grid_dash",
+    "grid_opacity",
+    // Grid — per-level keys (Grid item 18)
+    "minor",
+    "major_grid_color",
+    "minor_grid_color",
+    "major_grid_width",
+    "minor_grid_width",
+    "major_grid_dash",
+    "minor_grid_dash",
+    "major_grid_opacity",
+    "minor_grid_opacity",
+    // Marks
+    "point_size",
+    "point_opacity",
+    "line_stroke_width",
+    "bar_corner_radius",
+    "area_opacity",
+    "opacity",
+    // Palette
+    "color_scheme",
+    "sequential_scheme",
+    "diverging_scheme",
+    // Strip
+    "strip_background_color",
+    "strip_text_size",
+    "strip_padding",
+    // Legend
+    "legend_orient",
+    "legend_direction",
+    "legend_title_font_size",
+    // Reference lines
+    "reference_line_color",
+    "reference_line_dash",
+    // Spacing
+    "axis_title_padding",
+    "column_padding",
+    "row_padding",
+    // Axis label culling
+    "cull_threshold",
+];
+
+/// The color-typed subset of [`THEME_KNOWN_KEYS`] — keys whose values are
+/// color strings (parsed by `parse_color_val`/`from_hex_str` on the Rust
+/// side). Exposed via `theme_color_keys()` so Python can decide whether to
+/// keep a color-key list (e.g. for CSS-shorthand expansion) without
+/// hand-maintaining a third parallel copy. Every entry MUST also appear in
+/// `THEME_KNOWN_KEYS` (asserted by `color_keys_subset_of_known`).
+const THEME_COLOR_KEYS: &[&str] = &[
+    "mark_color",
+    "background_color",
+    "background",
+    "font_color",
+    "title_color",
+    "label_color",
+    "axis_line_color",
+    "tick_color",
+    "grid_color",
+    "major_grid_color",
+    "minor_grid_color",
+    "strip_background_color",
+    "reference_line_color",
+];
+
+/// The complete set of valid Python theme keys (the contract published by
+/// `ThemeOverridesSpec`). Python derives `Theme._KNOWN_KEYS` from this.
+#[pyfunction]
+pub fn theme_known_keys() -> Vec<String> {
+    THEME_KNOWN_KEYS.iter().map(|s| s.to_string()).collect()
+}
+
+/// The color-typed subset of [`theme_known_keys`] — keys whose values are
+/// color strings.
+#[pyfunction]
+pub fn theme_color_keys() -> Vec<String> {
+    THEME_COLOR_KEYS.iter().map(|s| s.to_string()).collect()
+}
+
 /// Mirror of the ferrum-spec.md §3.13 Theme keys, derived via serde and
 /// `pyo3_serde::from_py` from the user's theme dict. Every field is
 /// `Option<_>` so missing keys leave the corresponding `ThemeInputs`
@@ -206,6 +303,10 @@ fn collect_single_batch(reader: PyRecordBatchReader) -> PyResult<arrow::record_b
 /// Unknown-key handling: `#[serde(deny_unknown_fields)]` rejects typos
 /// with a serde error listing the accepted fields — replaces the prior
 /// hand-maintained `KNOWN_THEME_KEYS` parallel list.
+///
+/// The accepted field/alias set is mirrored in the [`THEME_KNOWN_KEYS`]
+/// const (the single source of truth published to Python); the
+/// `manifest_matches_serde` test guards them against drift.
 ///
 /// Enum-valued keys (`title_anchor`, `legend_orient`, `legend_direction`)
 /// are typed as `String` here so `apply_theme_overrides` can produce the
@@ -372,32 +473,32 @@ fn apply_theme_overrides(t: &mut ThemeInputs, spec: ThemeOverridesSpec) -> PyRes
 
     // Palette
     if let Some(s) = spec.color_scheme {
-        if !super::palette::is_categorical_scheme(&s)
-            && !super::palette::is_sequential_scheme(&s)
+        if !super::color::palette::is_categorical_scheme(&s)
+            && !super::color::palette::is_sequential_scheme(&s)
         {
             return Err(PyValueError::new_err(format!(
                 "Unknown color_scheme: '{s}'. Supported categorical: {}. \
                  Supported sequential: {}.",
-                super::palette::CATEGORICAL_SCHEMES.join(", "),
-                super::palette::SEQUENTIAL_SCHEMES.join(", "),
+                super::color::palette::CATEGORICAL_SCHEMES.join(", "),
+                super::color::palette::SEQUENTIAL_SCHEMES.join(", "),
             )));
         }
         t.palette.color_scheme = s;
     }
     if let Some(s) = spec.sequential_scheme {
-        if !super::palette::is_sequential_scheme(&s) {
+        if !super::color::palette::is_sequential_scheme(&s) {
             return Err(PyValueError::new_err(format!(
                 "Unknown sequential_scheme: '{s}'. Supported: {}.",
-                super::palette::SEQUENTIAL_SCHEMES.join(", "),
+                super::color::palette::SEQUENTIAL_SCHEMES.join(", "),
             )));
         }
         t.palette.sequential_scheme = s;
     }
     if let Some(s) = spec.diverging_scheme {
-        if !super::palette::is_sequential_scheme(&s) {
+        if !super::color::palette::is_sequential_scheme(&s) {
             return Err(PyValueError::new_err(format!(
                 "Unknown diverging_scheme: '{s}'. Supported: {}.",
-                super::palette::SEQUENTIAL_SCHEMES.join(", "),
+                super::color::palette::SEQUENTIAL_SCHEMES.join(", "),
             )));
         }
         t.palette.diverging_scheme = s;
@@ -627,6 +728,181 @@ mod theme_dict_tests {
             }
         });
     }
+
+    /// A serde-compatible sample value for a theme key, by name. Keeps the
+    /// round-trip test's per-key typing in one place; the bool/numeric/list
+    /// key sets mirror the `ThemeOverridesSpec` field types exactly, so a
+    /// miscategorized key (or a struct field that changes type) fails the
+    /// `manifest_matches_serde` round-trip loudly. Every other key
+    /// deserializes as `Option<String>` (color, font family/weight, anchor,
+    /// scheme name); serde only checks the field exists here — value
+    /// validation happens later in `apply_theme_overrides`.
+    fn sample_for(py: Python<'_>, key: &str) -> Py<PyAny> {
+        const DASH_KEYS: &[&str] = &[
+            "grid_dash",
+            "major_grid_dash",
+            "minor_grid_dash",
+            "reference_line_dash",
+        ];
+        const BOOL_KEYS: &[&str] = &["axis_line", "grid", "minor"];
+        const F64_KEYS: &[&str] = &[
+            "padding",
+            "font_size",
+            "title_font_size",
+            "title_offset",
+            "axis_line_width",
+            "tick_size",
+            "tick_width",
+            "grid_width",
+            "grid_opacity",
+            "major_grid_width",
+            "minor_grid_width",
+            "major_grid_opacity",
+            "minor_grid_opacity",
+            "point_size",
+            "point_opacity",
+            "line_stroke_width",
+            "bar_corner_radius",
+            "area_opacity",
+            "opacity",
+            "strip_text_size",
+            "strip_padding",
+            "legend_title_font_size",
+            "axis_title_padding",
+            "column_padding",
+            "row_padding",
+        ];
+        if DASH_KEYS.contains(&key) {
+            vec![2.0_f64, 1.0].into_pyobject(py).unwrap().into_any().unbind()
+        } else if BOOL_KEYS.contains(&key) {
+            true.into_pyobject(py).unwrap().to_owned().into_any().unbind()
+        } else if key == "cull_threshold" {
+            7_u32.into_pyobject(py).unwrap().into_any().unbind()
+        } else if F64_KEYS.contains(&key) {
+            1.5_f64.into_pyobject(py).unwrap().into_any().unbind()
+        } else {
+            "x".into_pyobject(py).unwrap().into_any().unbind()
+        }
+    }
+
+    /// The const key manifest must not drift from `ThemeOverridesSpec`:
+    /// every `THEME_KNOWN_KEYS` entry deserializes into the struct, and a
+    /// bogus key is rejected by `deny_unknown_fields`. This is the guard
+    /// that keeps the Python-facing contract honest.
+    #[test]
+    fn manifest_matches_serde() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            // Every advertised key must deserialize successfully (individually,
+            // so a type mismatch points at the offending key).
+            for &key in THEME_KNOWN_KEYS {
+                let d = PyDict::new(py);
+                d.set_item(key, sample_for(py, key).bind(py)).unwrap();
+                let res: PyResult<ThemeOverridesSpec> =
+                    crate::pyo3_serde::from_py(d.as_any(), "theme");
+                assert!(res.is_ok(), "known key `{key}` failed to deserialize: {res:?}");
+            }
+
+            // All keys together also deserialize (no field-name collisions).
+            let all = PyDict::new(py);
+            for &key in THEME_KNOWN_KEYS {
+                all.set_item(key, sample_for(py, key).bind(py)).unwrap();
+            }
+            let res: PyResult<ThemeOverridesSpec> =
+                crate::pyo3_serde::from_py(all.as_any(), "theme");
+            assert!(res.is_ok(), "full manifest failed to deserialize: {res:?}");
+
+            // A bogus key is rejected by `deny_unknown_fields`.
+            let bogus = PyDict::new(py);
+            bogus.set_item("definitely_not_a_theme_key", "v").unwrap();
+            let res: PyResult<ThemeOverridesSpec> =
+                crate::pyo3_serde::from_py(bogus.as_any(), "theme");
+            assert!(res.is_err(), "bogus key should be rejected by deny_unknown_fields");
+        });
+    }
+
+    /// Parse the accepted-field set out of a serde `deny_unknown_fields`
+    /// error. serde_json renders the message as:
+    ///
+    /// ```text
+    /// unknown field `x`, expected one of `a`, `b`, … `z` at line 1 column 29
+    /// ```
+    ///
+    /// We slice after the `expected one of ` marker, drop the trailing
+    /// ` at line …` position suffix serde_json appends, then collect every
+    /// backtick-delimited token. Assumption: there is more than one accepted
+    /// field, so serde uses the `expected one of` wording rather than the
+    /// single-field `expected \`only\`` form — `ThemeOverridesSpec` has dozens
+    /// of fields, and `unknown_key_raises` already proves the "one of" form is
+    /// produced, so this holds for as long as the struct stays non-trivial.
+    fn accepted_fields_from_error(msg: &str) -> std::collections::BTreeSet<String> {
+        const MARKER: &str = "expected one of ";
+        let after = msg
+            .find(MARKER)
+            .map(|i| &msg[i + MARKER.len()..])
+            .unwrap_or_else(|| panic!("error missing `{MARKER}` marker: {msg}"));
+        // Strip serde_json's trailing " at line N column M" position suffix so
+        // it cannot be mistaken for a field name; backtick extraction below
+        // ignores it regardless, but trimming keeps the parse intent obvious.
+        let list = after.split(" at line ").next().unwrap_or(after);
+        // Every accepted field is wrapped in a matched pair of backticks.
+        let mut fields = std::collections::BTreeSet::new();
+        let mut rest = list;
+        while let Some(open) = rest.find('`') {
+            let tail = &rest[open + 1..];
+            let close = tail
+                .find('`')
+                .unwrap_or_else(|| panic!("unbalanced backticks in: {msg}"));
+            fields.insert(tail[..close].to_string());
+            rest = &tail[close + 1..];
+        }
+        fields
+    }
+
+    /// The reverse drift guard for D-THEME-1: a new `Option<_>` field added to
+    /// `ThemeOverridesSpec` *without* a matching `THEME_KNOWN_KEYS` entry would
+    /// deserialize fine (every field is optional) yet never be published to
+    /// Python via `theme_known_keys()`. `manifest_matches_serde` only checks
+    /// const→struct; this checks struct→const by mining the *complete* accepted
+    /// field set out of serde's `deny_unknown_fields` error and asserting it
+    /// equals `THEME_KNOWN_KEYS`. A field added with no const entry (or a const
+    /// entry removed) makes the two sets differ and fails here.
+    #[test]
+    fn serde_accepted_fields_match_manifest() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let bogus = PyDict::new(py);
+            bogus.set_item("definitely_not_a_theme_key", "v").unwrap();
+            let res: PyResult<ThemeOverridesSpec> =
+                crate::pyo3_serde::from_py(bogus.as_any(), "theme");
+            let err = res.expect_err("bogus key must be rejected by deny_unknown_fields");
+            let msg = err.value(py).to_string();
+
+            let serde_fields = accepted_fields_from_error(&msg);
+            let manifest: std::collections::BTreeSet<String> =
+                THEME_KNOWN_KEYS.iter().map(|s| s.to_string()).collect();
+
+            assert_eq!(
+                serde_fields, manifest,
+                "ThemeOverridesSpec accepted fields drifted from THEME_KNOWN_KEYS.\n\
+                 in serde but not const (struct field missing a manifest entry): {:?}\n\
+                 in const but not serde (manifest entry with no struct field): {:?}",
+                serde_fields.difference(&manifest).collect::<Vec<_>>(),
+                manifest.difference(&serde_fields).collect::<Vec<_>>(),
+            );
+        });
+    }
+
+    /// `theme_color_keys()` must be a subset of `theme_known_keys()`.
+    #[test]
+    fn color_keys_subset_of_known() {
+        for &k in THEME_COLOR_KEYS {
+            assert!(
+                THEME_KNOWN_KEYS.contains(&k),
+                "color key `{k}` is not in THEME_KNOWN_KEYS"
+            );
+        }
+    }
 }
 
 fn config_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<RenderConfig> {
@@ -670,6 +946,37 @@ fn render_err_to_py(e: RenderError) -> PyErr {
     PyValueError::new_err(e.to_string())
 }
 
+/// Shared decode preamble for the three PyO3 render entry points
+/// (`render_svg`, `render_png`, `render_interactive`).
+///
+/// Collects the Arrow record batch stream into a single batch, decodes the
+/// theme/config/chart-config dicts, and builds the [`Viewport`] from the
+/// `(width, height)` tuple. Any change to the render input contract (a new
+/// kwarg, a new batch-collection policy) needs to be made here only.
+fn decode_render_inputs(
+    data: PyRecordBatchReader,
+    viewport: (f64, f64),
+    theme: Option<&Bound<'_, PyDict>>,
+    config: Option<&Bound<'_, PyDict>>,
+    chart_config: Option<&Bound<'_, PyDict>>,
+) -> PyResult<(
+    arrow::record_batch::RecordBatch,
+    crate::layout::ThemeInputs,
+    super::config::RenderConfig,
+    super::chart_config::ChartConfig,
+    Viewport,
+)> {
+    let batch = collect_single_batch(data)?;
+    let t = theme_from_dict(theme)?;
+    let c = config_from_dict(config)?;
+    let cc = chart_config_from_dict(chart_config)?;
+    let vp = Viewport {
+        width: viewport.0,
+        height: viewport.1,
+    };
+    Ok((batch, t, c, cc, vp))
+}
+
 // ---------------------------------------------------------------------------
 // SVG compositor bindings (Task 11)
 // ---------------------------------------------------------------------------
@@ -689,6 +996,33 @@ fn parse_chrome_anchor(anchor: Option<&str>) -> PyResult<ChromeAnchor> {
             "anchor must be one of 'start'|'middle'|'end', got '{other}'"
         ))),
     }
+}
+
+/// Apply figure chrome to an already-composed SVG string.
+///
+/// This is the shared tail of all three `compose_svg_*_py` bindings:
+/// build the [`FigureChrome`] from the chrome kwargs and call
+/// [`wrap_with_chrome`](crate::render::figure_chrome::wrap_with_chrome).
+///
+/// `composed` is the raw composed SVG (no chrome yet) produced by the
+/// compositor. `title`/`subtitle`/`caption`/`left_inset`/`right_inset`/
+/// `anchor` are the same chrome kwargs accepted by every compose binding.
+///
+/// Errors from [`wrap_with_chrome`] are mapped to `PyValueError` here so
+/// callers don't need to repeat the `map_err` boilerplate.
+#[allow(clippy::too_many_arguments)]
+fn compose_and_wrap(
+    composed: String,
+    title: Option<&str>,
+    subtitle: Option<&str>,
+    caption: Option<&str>,
+    left_inset: Option<f64>,
+    right_inset: Option<f64>,
+    anchor: Option<&str>,
+) -> PyResult<String> {
+    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
+    crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 /// Build a [`FigureChrome`] from the chrome-related keyword params, applying the
@@ -780,21 +1114,11 @@ pub fn compose_svg_horizontal_py(
     right_inset: Option<f64>,
     anchor: Option<&str>,
 ) -> PyResult<String> {
-    let align_val = match align {
-        "top" => crate::render::compositor::VerticalAlign::Top,
-        "center" => crate::render::compositor::VerticalAlign::Center,
-        "bottom" => crate::render::compositor::VerticalAlign::Bottom,
-        other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "align must be one of 'top'|'center'|'bottom', got '{other}'"
-            )))
-        }
-    };
+    let align_val = crate::render::compositor::VerticalAlign::try_from(align)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
     let composed = crate::render::compositor::compose_svg_horizontal(&svgs, spacing, align_val)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
-    crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    compose_and_wrap(composed, title, subtitle, caption, left_inset, right_inset, anchor)
 }
 
 /// Compose SVG panels stacked top-to-bottom into a single vertical strip.
@@ -866,21 +1190,11 @@ pub fn compose_svg_vertical_py(
     right_inset: Option<f64>,
     anchor: Option<&str>,
 ) -> PyResult<String> {
-    let align_val = match align {
-        "left" => crate::render::compositor::HorizontalAlign::Left,
-        "center" => crate::render::compositor::HorizontalAlign::Center,
-        "right" => crate::render::compositor::HorizontalAlign::Right,
-        other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "align must be one of 'left'|'center'|'right', got '{other}'"
-            )))
-        }
-    };
+    let align_val = crate::render::compositor::HorizontalAlign::try_from(align)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
     let composed = crate::render::compositor::compose_svg_vertical(&svgs, spacing, align_val)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
-    crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    compose_and_wrap(composed, title, subtitle, caption, left_inset, right_inset, anchor)
 }
 
 /// Compose SVG panels into a rectangular grid.
@@ -986,9 +1300,7 @@ pub fn compose_svg_grid_py(
         spacing,
     )
     .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
-    crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    compose_and_wrap(composed, title, subtitle, caption, left_inset, right_inset, anchor)
 }
 
 /// Lay out a figure-level chrome title/subtitle/caption band as scene nodes.
@@ -1119,7 +1431,10 @@ fn emit_warnings(py: Python<'_>, warnings: &[super::RenderWarning]) -> PyResult<
     }
     let warnings_mod = py.import("warnings")?;
     for w in warnings {
-        let msg = format!("{w:?}");
+        // Forward the intentional Display contract (a stable user-facing
+        // sentence), not the derived Debug of the enum's internal fields
+        // (SEAM-07). See `RenderWarning`'s Display impl in `render/mod.rs`.
+        let msg = format!("{w}");
         warnings_mod.call_method1("warn", (msg,))?;
     }
     Ok(())

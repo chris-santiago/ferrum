@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import polars as pl
 import pytest
 
 from ferrum.annotation.container import Annotate
@@ -150,7 +151,6 @@ class TestAnnotationArrow:
         assert a.stroke == "#333"
         assert a.stroke_width == 1.5
         assert a.head_size == 8
-        assert a.curve == "straight"
 
     def test_frozen(self):
         a = arrow(0, 0, 1, 1)
@@ -170,12 +170,22 @@ class TestAnnotationArrow:
         assert d["y2"] == {"px": 20}
 
     def test_to_dict_custom_fields(self):
-        a = arrow(0, 0, 1, 1, stroke="red", stroke_width=2, head_size=12, curve="arc")
+        a = arrow(0, 0, 1, 1, stroke="red", stroke_width=2, head_size=12)
         d = a.to_dict()
         assert d["stroke"] == "red"
         assert d["stroke_width"] == 2
         assert d["head_size"] == 12
-        assert d["curve"] == "arc"
+
+    def test_curve_removed_raises_type_error(self):
+        """Regression (XDEAD-03): `curve` was a dead flag never read by the renderer.
+        Passing it must now raise TypeError so callers detect the dropped parameter."""
+        with pytest.raises(TypeError):
+            arrow(0, 0, 1, 1, curve="arc")  # type: ignore[call-arg]
+
+    def test_to_dict_has_no_curve_key(self):
+        """Regression (XDEAD-03): serialized arrow dict must not contain 'curve'."""
+        d = arrow(0, 0, 1, 1).to_dict()
+        assert "curve" not in d
 
 
 # ---------------------------------------------------------------------------
@@ -481,3 +491,64 @@ class TestAnnotate:
         result = ann.to_dict_list()
         types = [d["type"] for d in result]
         assert types == ["text", "arrow", "rect", "line", "span", "bracket", "callout", "image"]
+
+
+# ---------------------------------------------------------------------------
+# Wired-z painter-order regression (XDEAD-03)
+# ---------------------------------------------------------------------------
+
+
+class TestAnnotationZPainterOrder:
+    """Regression tests for the wired `z` flag on text annotations.
+
+    Before XDEAD-03 the `z` field was serialized but ignored by the renderer —
+    all annotations rendered after data marks regardless of `z` value.  After
+    the fix, `z="below_marks"` routes the annotation into the pre-marks grid
+    bucket so the text appears in the SVG before the first data mark element.
+
+    These tests FAIL on the pre-wiring renderer (where `z` was a no-op) and
+    PASS on the wired renderer, making them load-bearing regression pins.
+    """
+
+    def _scatter(self) -> "Chart":  # type: ignore[name-defined]  # noqa: F821
+        from ferrum import Chart
+
+        df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+        return Chart(df).mark_point().encode(x="x", y="y")
+
+    def test_below_marks_text_appears_before_first_circle(self):
+        """A text annotation with z="below_marks" must appear before mark elements in SVG.
+
+        Regression for XDEAD-03 "wire z": on the pre-wiring renderer all annotations
+        rendered after marks regardless of z value, so this assertion would fail.
+        """
+        ann_prim = text(norm(0.5), norm(0.5), "BELOWMARK", z="below_marks")
+        svg = (self._scatter() + ann_prim).to_svg()
+
+        assert "BELOWMARK" in svg, "sentinel text must appear in SVG"
+        assert "<circle" in svg, "scatter marks must produce circle elements"
+
+        below_pos = svg.find("BELOWMARK")
+        circle_pos = svg.index("<circle")
+        assert below_pos < circle_pos, (
+            f"z='below_marks' text must appear before first mark element in SVG "
+            f"(text at {below_pos}, mark at {circle_pos})"
+        )
+
+    def test_above_marks_text_appears_after_first_circle(self):
+        """A text annotation with z="above_marks" (default) must appear after mark elements.
+
+        This is the historical behavior and must remain unchanged.
+        """
+        ann_prim = text(norm(0.5), norm(0.5), "ABOVEMARK", z="above_marks")
+        svg = (self._scatter() + ann_prim).to_svg()
+
+        assert "ABOVEMARK" in svg, "sentinel text must appear in SVG"
+        assert "<circle" in svg, "scatter marks must produce circle elements"
+
+        above_pos = svg.find("ABOVEMARK")
+        circle_pos = svg.index("<circle")
+        assert above_pos > circle_pos, (
+            f"z='above_marks' text must appear after first mark element in SVG "
+            f"(text at {above_pos}, mark at {circle_pos})"
+        )

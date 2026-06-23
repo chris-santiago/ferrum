@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import polars as pl
 
+from ferrum._coerce import to_arrow_table
 from ferrum._overrides import _apply_overrides
 
 if TYPE_CHECKING:
@@ -159,11 +160,25 @@ def _grid_panels(charts: list, theme: Any = None):
     return c
 
 
-def _color_field_for(df: pl.DataFrame, default: str) -> str:
+def _color_field_for(df: pl.DataFrame, default: str | None) -> str | None:
     """Return ``'model'`` if a ``model`` column is present (compare-source
-    path), otherwise the supplied default.
+    path), otherwise the supplied default (which may be ``None`` for marks
+    whose single-model colour field is unset).
     """
     return "model" if "model" in df.columns else default
+
+
+def _reject_compare(compare: dict | None, *, chart: str, reason: str) -> None:
+    """Raise a clear ``ValueError`` when ``compare=`` is passed to a chart whose
+    builder cannot render a multi-model :class:`ComparedModelSource`.
+
+    Mirrors the loud rejection ``_resolve_source`` already applies on the
+    precomputed path (D-COMPARE-1): the parameter exists for signature
+    uniformity across the model-diagnostic family, but a non-``None`` value is
+    surfaced as an explicit error rather than silently dropped.
+    """
+    if compare is not None:
+        raise ValueError(f"compare= is not supported for {chart}: {reason}")
 
 
 def _dedupe_aggregated(df: pl.DataFrame, *group_keys: str) -> pl.DataFrame:
@@ -247,18 +262,88 @@ def _should_facet_by_class(df: pl.DataFrame, *, per_class: bool) -> bool:
     return per_class and df["class_label"].n_unique() > 1
 
 
+def _to_polars(data: Any) -> pl.DataFrame:
+    """Coerce any supported input to a ``polars.DataFrame``.
+
+    Backed by :func:`ferrum._coerce.to_arrow_table`, so all input types
+    accepted by ``Chart(data=...)`` are accepted here: polars, pyarrow,
+    narwhals-compatible (pandas/modin/cuDF/dask/ibis), dict, list, numpy 2D.
+
+    Returns the input unchanged when it is already a ``polars.DataFrame``.
+    """
+    if isinstance(data, pl.DataFrame):
+        return data
+    return pl.from_arrow(to_arrow_table(data))
+
+
 def _coerce_to_polars(data: Any) -> pl.DataFrame:
-    """Coerce a polars / pandas / 2D-numpy input into a polars DataFrame."""
+    """Coerce a polars / pandas / 2D-numeric input into a polars DataFrame.
+
+    A bare 2D numeric array or list-of-lists is auto-named ``col_0, col_1, ...``
+    to match the ferrum-wide :func:`ferrum._coerce.to_arrow_table` convention
+    (same prefix, same 0-based indexing) used by ``Chart(numpy_array)``: those
+    names become the parallel-coordinates axis labels when ``features=None``.
+    Every other input type (pyarrow, narwhals frames, dict, ...) delegates to
+    :func:`_to_polars` for the widened CDI-backed coercion.
+    """
     import numpy as np
 
     if isinstance(data, pl.DataFrame):
         return data
     if hasattr(data, "to_numpy") and hasattr(data, "columns"):
         return pl.from_pandas(data)
-    arr = np.asarray(data, dtype=np.float64)
-    if arr.ndim != 2:
-        raise ValueError(f"data must be a 2D array; got shape {arr.shape}")
-    return pl.DataFrame({f"f{j}": arr[:, j].tolist() for j in range(arr.shape[1])})
+    try:
+        arr = np.asarray(data, dtype=np.float64)
+    except (ValueError, TypeError):
+        return _to_polars(data)
+    if arr.ndim == 2:
+        return pl.DataFrame({f"col_{j}": arr[:, j].tolist() for j in range(arr.shape[1])})
+    return _to_polars(data)
+
+
+def _validate_choice(
+    func_name: str,
+    param: str,
+    value: Any,
+    choices: "frozenset[Any] | set[Any] | tuple[Any, ...] | list[Any]",
+) -> None:
+    """Raise ``ValueError`` when ``value`` is not in ``choices``.
+
+    Produces a canonical error message across all figure functions::
+
+        {func_name}: {param} must be one of {sorted(choices)}; got {value!r}
+
+    This replaces three inconsistent idioms that existed across the plots
+    package (``"must be one of …; got"``, ``"Unknown … . Accepted values:"``,
+    and tail-raises with ``"— expected a or b"``).
+    """
+    if value not in choices:
+        raise ValueError(
+            f"{func_name}: {param} must be one of {sorted(str(c) for c in choices)}; got {value!r}"
+        )
+
+
+def _warn_deprecated_dispatcher(old_name: str, param_name: str, replacements: str) -> None:
+    """Emit the canonical ``DeprecationWarning`` for a split dispatcher shim.
+
+    Both ``shap_chart(kind=...)`` and ``rank_chart(rank=...)`` are deprecated
+    dispatchers that warn then forward to their split siblings. This factors
+    out the duplicated warn idiom so each shim is a thin validate-then-delegate
+    wrapper; the heterogeneous per-kind dispatch stays explicit in each shim::
+
+        {old_name}({param_name}=...) is deprecated; use {replacements} instead.
+
+    ``stacklevel=3`` (this helper -> the shim -> the user) points the warning at
+    the user's call site, preserving the pre-refactor behavior where each shim
+    called ``warnings.warn(..., stacklevel=2)`` inline.
+    """
+    import warnings
+
+    warnings.warn(
+        f"{old_name}({param_name}=...) is deprecated; use {replacements} instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
 
 
 def _require(func_name: str, arg_name: str, value: Any, *, hint: str) -> Any:
@@ -268,6 +353,43 @@ def _require(func_name: str, arg_name: str, value: Any, *, hint: str) -> Any:
             f"{func_name}({arg_name}=...) is required — {hint}.",
         )
     return value
+
+
+# Sentinel distinguishing "argument omitted" from an explicit ``None`` so that a
+# deprecated keyword alias can be ``None`` and still count as supplied.
+_UNSET: Any = object()
+
+
+def _resolve_first_param(
+    canonical_value: Any,
+    alias_value: Any,
+    *,
+    canonical_name: str,
+    alias_name: str,
+    func_name: str,
+) -> Any:
+    """Resolve a renamed first positional parameter against its deprecated alias.
+
+    The single keyword-alias mechanism shared by every figure function whose
+    first positional parameter was renamed to its family-canonical name
+    (D-FIRSTPARAM-1). The canonical parameter keeps the positional slot, so
+    positional callers are unaffected; the old name is accepted as a deprecated
+    keyword whose default is :data:`_UNSET` (so an explicit ``alias=None`` is
+    still detected as "supplied").
+
+    Returns the value the function should use. Raises ``TypeError`` when both
+    the canonical and alias names are supplied, mirroring Python's own
+    "got multiple values for argument" error shape.
+    """
+    if alias_value is _UNSET:
+        return canonical_value
+    if canonical_value is not _UNSET:
+        raise TypeError(
+            f"{func_name}() got both {canonical_name}= and {alias_name}=; "
+            f"{alias_name}= is a deprecated alias for {canonical_name}=, "
+            "supply only one."
+        )
+    return alias_value
 
 
 def _finalize_chart(chart, *, mark=None, encode=None, properties=None, layers=None, theme=None):
@@ -303,7 +425,7 @@ def _resolve_source(
     The precomputed path is incompatible with ``compare=``.
     """
     import ferrum
-    from ferrum._diagnostics.source import ComparedModelSource
+    from ferrum.diagnostics.source import ComparedModelSource
 
     has_precomputed = y_true is not None or y_pred is not None
     has_model = model is not None
@@ -324,7 +446,7 @@ def _resolve_source(
             raise ValueError(
                 f"Precomputed path requires both y_true= and y_pred=; {missing}= is missing."
             )
-        from ferrum._diagnostics.precomputed import _PrecomputedSource
+        from ferrum.diagnostics._internal.precomputed import _PrecomputedSource
 
         return _PrecomputedSource(y_true, y_pred)
 
@@ -357,3 +479,72 @@ def _resolve_source(
     if isinstance(model, ferrum.ModelSource):
         return model
     return ferrum.ModelSource(model, X, y, random_state=random_state)
+
+
+# ---------------------------------------------------------------------------
+# _merge_layers — general-purpose layer composer (moved from regression.py)
+# ---------------------------------------------------------------------------
+
+
+def _merge_layers(
+    scatter_chart: "Chart",
+    fit_chart: "Chart",
+    *,
+    scatter_name: str | None = None,
+    fit_name: str | None = None,
+) -> "Chart":
+    """Compose a scatter Chart and a fit Chart into a multi-layer Chart.
+
+    Returns a new Chart with ``_layers`` = scatter-layer + fit-layers,
+    with transforms accumulated from both inputs.
+
+    Originally defined in ``plots/regression.py``; relocated here because
+    it is domain-agnostic and is imported by both ``regression.py`` and
+    ``matrix.py``.
+    """
+    from dataclasses import replace as _replace
+
+    from ferrum._layer import _Layer
+
+    s_resolved = scatter_chart._resolve_pending()
+    f_resolved = fit_chart._resolve_pending()
+
+    new = s_resolved._clone()
+    new._pending_stat_mark = None
+
+    shared_transforms: list = []
+    seen_ids: set = set()
+    for t in list(s_resolved._transforms) + list(f_resolved._transforms):
+        key = id(t)
+        if key in seen_ids:
+            continue
+        seen_ids.add(key)
+        shared_transforms.append(t)
+
+    scatter_layer = _Layer(
+        name=scatter_name,
+        mark=s_resolved._mark,
+        encoding=dict(s_resolved._encoding),
+        mark_kwargs=dict(s_resolved._mark_kwargs) if s_resolved._mark_kwargs else None,
+        position=s_resolved._position,
+    )
+
+    if f_resolved._layers is not None:
+        fit_layers = list(f_resolved._layers)
+        if fit_name and fit_layers and fit_layers[0].name is None:
+            fit_layers[0] = _replace(fit_layers[0], name=fit_name)
+    else:
+        fit_layers = [
+            _Layer(
+                name=fit_name,
+                mark=f_resolved._mark,
+                encoding=dict(f_resolved._encoding),
+                mark_kwargs=dict(f_resolved._mark_kwargs) if f_resolved._mark_kwargs else None,
+                position=f_resolved._position,
+            )
+        ]
+
+    new._mark = None
+    new._layers = [scatter_layer] + fit_layers
+    new._transforms = shared_transforms
+    return new

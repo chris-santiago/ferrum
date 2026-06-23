@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReorderSpec {
     pub by: String,
     #[serde(default = "default_drop_index")]

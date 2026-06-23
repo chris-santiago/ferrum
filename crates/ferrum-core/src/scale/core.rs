@@ -144,6 +144,48 @@ pub(crate) fn validate_continuous_pair(domain: &[f64], range: &[f64]) -> PyResul
     Ok(())
 }
 
+/// Resolved inputs shared by every affine-continuous PyO3 scale constructor
+/// (`LinearScale`, `LogScale`, `PowScale`, `SqrtScale`, `SymlogScale`).
+///
+/// Carries the user-set flags alongside the materialised `[lo, hi]` pairs so
+/// each scale's `#[new]` can construct its own data struct (which differs by
+/// the extra per-scale field) without re-implementing the shared prelude.
+pub(crate) struct ResolvedContinuous {
+    pub(crate) domain: [f64; 2],
+    pub(crate) range: [f64; 2],
+    pub(crate) range_user_set: bool,
+    pub(crate) domain_user_set: bool,
+}
+
+/// Shared prelude for the affine-continuous `#[new]` constructors.
+///
+/// Captures `range_user_set`/`domain_user_set`, unwraps `range` to the
+/// `[0, 1]` default, substitutes the per-scale `domain_sentinel` when no
+/// domain is supplied, and runs `validate_continuous_pair` only when the user
+/// set a domain (the sentinel is never validated — render-time inference
+/// replaces it before any scale computation). Per-scale validation (Log's
+/// base/sign checks, Pow's exponent, Symlog's constant) and `nice` remain in
+/// each scale because they depend on fields this helper does not know about.
+pub(crate) fn resolve_continuous(
+    domain: Option<Vec<f64>>,
+    range: Option<Vec<f64>>,
+    domain_sentinel: [f64; 2],
+) -> PyResult<ResolvedContinuous> {
+    let range_user_set = range.is_some();
+    let domain_user_set = domain.is_some();
+    let r = range.unwrap_or_else(|| vec![0.0, 1.0]);
+    let dom = domain.unwrap_or_else(|| domain_sentinel.to_vec());
+    if domain_user_set {
+        validate_continuous_pair(&dom, &r)?;
+    }
+    Ok(ResolvedContinuous {
+        domain: [dom[0], dom[1]],
+        range: [r[0], r[1]],
+        range_user_set,
+        domain_user_set,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

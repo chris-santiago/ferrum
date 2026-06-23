@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from ferrum import Chart
 
 from ferrum.encoding import X, Y
-from ferrum._overrides import _apply_overrides, register_layer_names
+from ferrum._overrides import register_layer_names
 from ferrum.plots._helpers import (
     _charts_with_endpoint_labels,
     _color_field_for,
@@ -227,6 +227,12 @@ def _roc_chart_from_source(
             metric_name="AUC",
         )
 
+    # Single annotation surface: the figure builder owns the AUC overlay
+    # (via _apply_metric_label_explicit below, formatted by _metric_labels'
+    # canonical metric-kind table). mark_roc(annotate_auc=False) keeps the
+    # mark from emitting a second, redundant text layer. The figure default
+    # (annotate_auc=True) and the mark default (annotate_auc=False) diverge
+    # by design: a raw mark does not auto-annotate; a figure function does.
     chart = ferrum.Chart(df).mark_roc(
         average=None if per_class else average,
         annotate_auc=False,
@@ -332,6 +338,11 @@ def _pr_chart_from_source(
                 )
 
     color_field = _color_field_for(df, "class")
+    # Single annotation surface (see _roc_chart_from_source): the figure
+    # builder owns the AP overlay via _apply_metric_label_explicit below;
+    # mark_pr(annotate_ap=False) suppresses the mark's own text layer. The
+    # figure default (annotate_ap=True) diverges from the mark default
+    # (annotate_ap=False) by design.
     chart = (
         ferrum.Chart(df)
         .mark_pr(
@@ -466,6 +477,10 @@ def _calibration_chart_from_source(
         )
 
     if annotate_brier:
+        # Brier overlay shares the canonical metric-kind table in
+        # _metric_labels (same single source as the ROC/PR AUC/AP overlays).
+        # mark_calibration has no annotate flag, so the figure function is the
+        # sole annotation surface here.
         chart = _apply_metric_label_explicit(
             chart,
             "brier",
@@ -757,7 +772,7 @@ def _classification_report_chart(
     ``value_fmt``.  Renders via the same rect-plus-text pattern as
     ``mark_confusion``.
     """
-    from ferrum._diagnostics.deps import require_sklearn
+    from ferrum.diagnostics._internal.deps import require_sklearn
 
     require_sklearn("ClassificationReportVisualizer")
     from sklearn.metrics import classification_report

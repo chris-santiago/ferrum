@@ -361,15 +361,15 @@ _case(
 # ---------------------------------------------------------------------------
 _case(
     "errorbar/stdev",
-    lambda: fm.Chart(_NQ).mark_errorbar(extent="stdev").encode(x="cat:N", y="val:Q"),
+    lambda: fm.Chart(_NQ).mark_errorbar(method="stdev").encode(x="cat:N", y="val:Q"),
 )
-_case("errorbar/ci", lambda: fm.Chart(_NQ).mark_errorbar(extent="ci").encode(x="cat:N", y="val:Q"))
+_case("errorbar/ci", lambda: fm.Chart(_NQ).mark_errorbar(method="ci").encode(x="cat:N", y="val:Q"))
 
 # ---------------------------------------------------------------------------
 # mark_errorband
 # ---------------------------------------------------------------------------
 _case(
-    "errorband/ci", lambda: fm.Chart(_NQ).mark_errorband(extent="ci").encode(x="cat:N", y="val:Q")
+    "errorband/ci", lambda: fm.Chart(_NQ).mark_errorband(method="ci").encode(x="cat:N", y="val:Q")
 )
 
 # ---------------------------------------------------------------------------
@@ -449,7 +449,7 @@ _case(
     "compose/bar_plus_errorbar",
     lambda: (
         fm.Chart(_NQ).mark_bar().encode(x="cat:N", y="val:Q")
-        + fm.Chart(_NQ).mark_errorbar(extent="stdev").encode(x="cat:N", y="val:Q")
+        + fm.Chart(_NQ).mark_errorbar(method="stdev").encode(x="cat:N", y="val:Q")
     ),
 )
 _case(

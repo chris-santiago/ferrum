@@ -11,9 +11,8 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::transform::numeric_util::coerce_to_float64;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DataBinSpec {
     pub field: String,
     /// Output column name. Defaults to "{field}_bin".
@@ -145,23 +144,14 @@ pub(crate) fn global_extent(
     spec: &DataBinSpec,
     batch: &RecordBatch,
 ) -> Option<(f64, f64)> {
+    // An explicit extent always wins. Otherwise return the RAW global range
+    // (NICENESS CONTRACT, XFORM-08: DataBin nices inside `apply` from the pinned
+    // range, so every panel derives identical edges from the raw extent — unlike
+    // 1-D `Bin::global_extent`, which nices the pin itself).
     if let Some(e) = spec.extent {
         return Some(e);
     }
-    let schema = batch.schema();
-    let idx = schema.index_of(&spec.field).ok()?;
-    let arr = coerce_to_float64(batch.column(idx), "data_bin", &spec.field).ok()?;
-    let (lo, hi) = (0..arr.len()).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), i| {
-        if arr.is_null(i) { return (lo, hi); }
-        let v = arr.value(i);
-        if v.is_nan() { return (lo, hi); }
-        (lo.min(v), hi.max(v))
-    });
-    if lo.is_finite() && hi.is_finite() && lo < hi {
-        Some((lo, hi))
-    } else {
-        None
-    }
+    crate::transform::numeric_util::column_extent(batch, &spec.field)
 }
 
 fn build_output(spec: &DataBinSpec, batch: &RecordBatch, bin_values: Vec<f64>) -> PyResult<RecordBatch> {
@@ -203,45 +193,10 @@ fn nice_step(raw: f64) -> f64 {
     nice_frac * 10.0_f64.powf(exp)
 }
 
-// ─── PyO3 wrapper ──────────────────────────────────────────────────────────
-
-use pyo3::prelude::*;
-use crate::transform::core::TransformSpec;
-
-#[pyclass(module = "ferrum._core", name = "DataBin")]
-#[derive(Debug, Clone)]
-pub(crate) struct PyDataBin(pub(crate) TransformSpec);
-
-#[pymethods]
-impl PyDataBin {
-    #[new]
-    #[pyo3(signature = (field, *, as_ = None, maxbins = None, step = None, nice = true, name = None))]
-    fn new(
-        field: String,
-        as_: Option<String>,
-        maxbins: Option<usize>,
-        step: Option<f64>,
-        nice: bool,
-        name: Option<String>,
-    ) -> Self {
-        PyDataBin(TransformSpec::DataBin(DataBinSpec {
-            field,
-            as_,
-            maxbins,
-            step,
-            nice,
-            name,
-            extent: None,
-        }))
-    }
-
-    fn __repr__(&self) -> String {
-        match &self.0 {
-            TransformSpec::DataBin(s) => format!("DataBin(field='{}')", s.field),
-            _ => "DataBin(?)".to_string(),
-        }
-    }
-}
+// No PyO3 wrapper: `DataBin` is constructed only via the dict-emitting
+// `transform_bin` Python function and carried through the `transforms_json`
+// serde path (SEAM-02). The removed `#[new]` performed no validation beyond
+// serde's required `field`. `DataBinSpec` above is the serde target.
 
 #[cfg(test)]
 mod tests {

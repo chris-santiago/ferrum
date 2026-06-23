@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
 
-use super::core::validate_continuous_pair;
+use super::core::resolve_continuous;
 use super::ticks::{minor_ticks_default, nice_step, nice_ticks, Tick};
 
 /// Internal data for a linear-affine scale. Shared by [`LinearScale`] and
@@ -101,8 +101,12 @@ impl LinearScaleData {
 ///     )
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct LinearScale(LinearScaleData, Option<f64>, bool, bool);
-//                     ^^^data            ^^^padding  ^^^range_user_set  ^^^domain_user_set
+pub struct LinearScale {
+    data: LinearScaleData,
+    padding: Option<f64>,
+    range_user_set: bool,
+    domain_user_set: bool,
+}
 
 impl LinearScale {
     /// Crate-internal constructor (no PyO3, no validation), for render-side use.
@@ -118,17 +122,17 @@ impl LinearScale {
         if nice {
             d = d.nice();
         }
-        LinearScale(d, None, true, true)
+        LinearScale { data: d, padding: None, range_user_set: true, domain_user_set: true }
     }
 
     /// Crate-internal scale call (no PyO3 boundary).
     pub(crate) fn scale_internal(&self, x: f64) -> f64 {
-        self.0.scale(x)
+        self.data.scale(x)
     }
 
     /// Crate-internal tick call.
     pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> {
-        self.0.ticks(count)
+        self.data.ticks(count)
     }
 
     /// Return minor ticks between the major ticks for this scale.
@@ -143,29 +147,29 @@ impl LinearScale {
     /// minor tick *density* is always controlled by the locked
     /// `DEFAULT_MINOR_SUBDIVISIONS` constant (5 sub-intervals → 4 interior
     /// minors per major gap); there is no per-call override.
-    // Wired to the render layer in Task 2 of the grid subsystem.
-    #[allow(dead_code)]
+    // Wired to the render layer via `ScaleKind::minor_tick_fractions`
+    // (`render/scale_resolve/mod.rs`, dispatched through `dispatch_continuous!`).
     pub(crate) fn minor_ticks_internal(&self) -> Vec<Tick> {
-        let majors = self.0.ticks(10);
+        let majors = self.data.ticks(10);
         minor_ticks_default(&majors, |x| x)
     }
 
     pub(crate) fn range_pair(&self) -> [f64; 2] {
-        self.0.range
+        self.data.range
     }
 
     pub(crate) fn domain_pair(&self) -> [f64; 2] {
-        self.0.domain
+        self.data.domain
     }
 
     pub(crate) fn repr_string(&self) -> String {
-        let LinearScaleData { domain, range, clamp } = &self.0;
-        let domain_s = if self.3 {
+        let LinearScaleData { domain, range, clamp } = &self.data;
+        let domain_s = if self.domain_user_set {
             format!("[{}, {}]", domain[0], domain[1])
         } else {
             "None".to_string()
         };
-        let range_s = if self.2 {
+        let range_s = if self.range_user_set {
             format!("[{}, {}]", range[0], range[1])
         } else {
             "None".to_string()
@@ -188,45 +192,49 @@ impl LinearScale {
         nice: bool,
         padding: Option<f64>,
     ) -> PyResult<Self> {
-        let range_user_set = range.is_some();
-        let domain_user_set = domain.is_some();
-        let r = range.unwrap_or_else(|| vec![0.0, 1.0]);
-        // Use sentinel [0.0, 1.0] when no domain supplied; render-time inference
+        // Sentinel [0.0, 1.0] when no domain supplied; render-time inference
         // replaces it before any scale computation occurs.
-        let dom = domain.unwrap_or_else(|| vec![0.0, 1.0]);
-        if domain_user_set {
-            validate_continuous_pair(&dom, &r)?;
-        }
+        let resolved = resolve_continuous(domain, range, [0.0, 1.0])?;
         let mut d = LinearScaleData {
-            domain: [dom[0], dom[1]],
-            range:  [r[0],  r[1]],
+            domain: resolved.domain,
+            range: resolved.range,
             clamp,
         };
-        if nice && domain_user_set {
+        if nice && resolved.domain_user_set {
             d = d.nice();
         }
-        Ok(LinearScale(d, padding, range_user_set, domain_user_set))
+        Ok(LinearScale {
+            data: d,
+            padding,
+            range_user_set: resolved.range_user_set,
+            domain_user_set: resolved.domain_user_set,
+        })
     }
 
     /// Map a single input value ``x`` to its output range coordinate.
     fn scale(&self, x: f64) -> f64 {
-        self.0.scale(x)
+        self.data.scale(x)
     }
 
     /// Invert a range coordinate ``y`` back to the domain.
     fn invert(&self, y: f64) -> f64 {
-        self.0.invert(y)
+        self.data.invert(y)
     }
 
     /// Return approximately ``count`` evenly-spaced tick values within the domain.
     #[pyo3(signature = (count = 10))]
     fn ticks(&self, count: usize) -> Vec<f64> {
-        self.0.ticks(count)
+        self.data.ticks(count)
     }
 
     /// Return a copy of this scale with domain endpoints rounded to "nice" values.
     fn nice(&self) -> Self {
-        LinearScale(self.0.clone().nice(), self.1, self.2, self.3)
+        LinearScale {
+            data: self.data.clone().nice(),
+            padding: self.padding,
+            range_user_set: self.range_user_set,
+            domain_user_set: self.domain_user_set,
+        }
     }
 
     /// Fractional inward pixel padding (themes-T4). ``None`` lets the renderer
@@ -234,26 +242,26 @@ impl LinearScale {
     /// (including 0.0) overrides the default at render time.
     #[getter]
     fn padding(&self) -> Option<f64> {
-        self.1
+        self.padding
     }
 
     /// Input domain as ``[min, max]``, or ``None`` when data-derived.
     #[getter]
     fn domain(&self) -> Option<Vec<f64>> {
-        if self.3 { Some(self.0.domain.to_vec()) } else { None }
+        if self.domain_user_set { Some(self.data.domain.to_vec()) } else { None }
     }
 
     /// Output range as ``[lo, hi]`` pixel coordinates, or ``None`` when
     /// the renderer should auto-fill from the plot-area dimensions.
     #[getter]
     fn range(&self) -> Option<Vec<f64>> {
-        if self.2 { Some(self.0.range.to_vec()) } else { None }
+        if self.range_user_set { Some(self.data.range.to_vec()) } else { None }
     }
 
     /// Whether out-of-domain inputs are clamped to the range endpoints.
     #[getter]
     fn clamp(&self) -> bool {
-        self.0.clamp
+        self.data.clamp
     }
 
     fn __repr__(&self) -> String {
@@ -321,6 +329,26 @@ mod tests {
         let n1 = s.clone().nice();
         let n2 = n1.clone().nice();
         assert_eq!(n1, n2);
+    }
+
+    /// Named-field conversion (T2.5): a user-set domain/range round-trips
+    /// through the PyO3 getters, and an unset domain reports `None` while still
+    /// carrying the [0, 1] sentinel internally for render-time inference.
+    #[test]
+    fn linear_named_fields_round_trip() {
+        let with_domain = LinearScale::new(
+            Some(vec![2.0, 8.0]), Some(vec![0.0, 100.0]), true, false, Some(0.25),
+        ).unwrap();
+        assert_eq!(with_domain.domain(), Some(vec![2.0, 8.0]));
+        assert_eq!(with_domain.range(), Some(vec![0.0, 100.0]));
+        assert!(with_domain.clamp());
+        assert_eq!(with_domain.padding(), Some(0.25));
+
+        let no_domain = LinearScale::new(None, None, false, false, None).unwrap();
+        assert_eq!(no_domain.domain(), None);
+        assert_eq!(no_domain.range(), None);
+        // Sentinel preserved internally so render-time inference can replace it.
+        assert_eq!(no_domain.domain_pair(), [0.0, 1.0]);
     }
 
     // ── Minor tick tests ─────────────────────────────────────────────────────

@@ -25,6 +25,7 @@ use std::sync::Arc;
 // ---------- Spec types ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct LinkageSpec {
     pub method: LinkageMethod,
     pub metric: DistanceMetric,

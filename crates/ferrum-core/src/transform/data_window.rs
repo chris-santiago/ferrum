@@ -13,6 +13,7 @@ use std::sync::Arc;
 use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct WindowOp {
     /// Window operation name.
     pub op: String,
@@ -28,6 +29,7 @@ pub(crate) struct WindowOp {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DataWindowSpec {
     pub ops: Vec<WindowOp>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -430,33 +432,9 @@ fn rolling_agg(vals: &[f64], op: &str) -> f64 {
     }
 }
 
-// ─── PyO3 wrapper ──────────────────────────────────────────────────────────
-
-use pyo3::prelude::*;
-use crate::transform::core::TransformSpec;
-
-#[pyclass(module = "ferrum._core", name = "DataWindow")]
-#[derive(Debug, Clone)]
-pub(crate) struct PyDataWindow(pub(crate) TransformSpec);
-
-#[pymethods]
-impl PyDataWindow {
-    #[new]
-    #[pyo3(signature = (*, name = None))]
-    fn new(name: Option<String>) -> Self {
-        PyDataWindow(TransformSpec::DataWindow(DataWindowSpec {
-            ops: Vec::new(),
-            sort: None,
-            groupby: None,
-            frame: None,
-            name,
-        }))
-    }
-
-    fn __repr__(&self) -> String {
-        "DataWindow(...)".to_string()
-    }
-}
+// No PyO3 wrapper: `DataWindow` is constructed only via the dict-emitting
+// `transform_window` Python function and carried through the `transforms_json`
+// serde path (SEAM-02). `DataWindowSpec` above is the serde target.
 
 #[cfg(test)]
 mod tests {
