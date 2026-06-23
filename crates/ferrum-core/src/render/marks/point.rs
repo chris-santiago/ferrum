@@ -1,5 +1,5 @@
 //! mark_point: render each row as a shape glyph at (scale_x(row.x), scale_y(row.y)).
-//! Phase 7: always emits <circle> using ctx.mark_style.point_size.
+//! Phase 7: always emits <circle> using ctx.mark_style.point.point_size.
 //! Phase 8a: honors per-row size/shape/opacity from ctx.scales when populated.
 
 use crate::render::color::with_opacity;
@@ -249,7 +249,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // per-row. Defaults: fill_opacity → 1.0, stroke_opacity → 1.0. The opacity
     // channel is mapped through `ctx.scales.opacity` at the call site below, so
     // the resolver's opacity output is unused here (its default is irrelevant).
-    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
 
     // Per-row stroke/angle channel values (direct passthrough — no scale transform).
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
@@ -264,7 +264,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
 
-    let default_radius = (ctx.mark_style.point_size / std::f64::consts::PI).sqrt();
+    let default_radius = (ctx.mark_style.point.point_size / std::f64::consts::PI).sqrt();
 
     // Per-row pixel offsets from position adjustment.
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
@@ -327,26 +327,26 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ctx.scales.color.as_ref(),
             color_values_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_values_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
-            ctx.mark_style.fill,
+            ctx.mark_style.paint.fill,
         );
 
         // Resolve per-row opacity (through scale if present).
         let row_opacity =
-            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.opacity);
+            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
 
         let fill = with_opacity(fill_base, row_opacity);
 
         // filled=false → hollow points.
         let (effective_fill, effective_stroke, effective_sw) =
-            if ctx.mark_style.filled == Some(false) {
-                let sw = if ctx.mark_style.stroke_width > 0.0 {
-                    ctx.mark_style.stroke_width
+            if ctx.mark_style.point.filled == Some(false) {
+                let sw = if ctx.mark_style.paint.stroke_width > 0.0 {
+                    ctx.mark_style.paint.stroke_width
                 } else {
                     1.5
                 };
                 (None, Some(fill_base), sw)
             } else {
-                (Some(fill), ctx.mark_style.stroke, ctx.mark_style.stroke_width)
+                (Some(fill), ctx.mark_style.paint.stroke, ctx.mark_style.paint.stroke_width)
             };
 
         // Resolve per-row radius from size encoding.
@@ -365,7 +365,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 Some(v) => scale.lookup(v).unwrap_or(ShapeKind::Circle),
                 None => ShapeKind::Circle,
             }
-        } else if let Some(ref shape_name) = ctx.mark_style.shape {
+        } else if let Some(ref shape_name) = ctx.mark_style.point.shape {
             shape_from_str(shape_name)
         } else {
             ShapeKind::Circle

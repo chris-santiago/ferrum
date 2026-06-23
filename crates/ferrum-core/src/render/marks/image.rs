@@ -9,7 +9,7 @@
 //! - The field named by `encoding.url` (Utf8) — holds a `data:<mime>;base64,<payload>`
 //!   URL.  Rows with nulls or malformed URLs are skipped silently.
 //! - Optional `width`, `height` columns (Float64) for per-row pixel sizing.
-//!   When absent, `mark_style.width` / `mark_style.height` are used, defaulting
+//!   When absent, `mark_style.misc.width` / `mark_style.misc.height` are used, defaulting
 //!   to 32.0 × 32.0 pixels.
 //!
 //! Each tile is center-anchored at `(px, py)` — consistent with `mark_point`.
@@ -23,7 +23,7 @@
 //! extent.
 //!
 //! Colormap resolution priority (three-step):
-//!   1. `mark_style.cmap` name (explicit kwarg on the mark)
+//!   1. `mark_style.group.cmap` name (explicit kwarg on the mark)
 //!   2. `theme.palette.sequential_scheme` (theme default)
 //!   3. Viridis fallback
 
@@ -93,11 +93,11 @@ fn build_url_tiles(ctx: &DrawCtx, url_field: &str) -> crate::render::draw::MarkB
     };
 
     // Optional per-row width/height columns (Float64). If absent, fall back
-    // to mark_style.width / mark_style.height, then to 32.0 pixels.
+    // to mark_style.misc.width / mark_style.misc.height, then to 32.0 pixels.
     let widths: Option<Vec<Option<f64>>> = col_as_f64(batch, "width").ok();
     let heights: Option<Vec<Option<f64>>> = col_as_f64(batch, "height").ok();
-    let default_w = ctx.mark_style.width.unwrap_or(32.0);
-    let default_h = ctx.mark_style.height.unwrap_or(32.0);
+    let default_w = ctx.mark_style.misc.width.unwrap_or(32.0);
+    let default_h = ctx.mark_style.misc.height.unwrap_or(32.0);
 
     let mut acc = MarkNodes::with_capacity(n);
 
@@ -233,9 +233,10 @@ fn build_raster(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         return empty();
     }
 
-    // Resolve colormap: mark_style.cmap → theme.palette.sequential_scheme → Viridis.
+    // Resolve colormap: mark_style.group.cmap → theme.palette.sequential_scheme → Viridis.
     let named = ctx
         .mark_style
+        .group
         .cmap
         .as_deref()
         .and_then(NamedContinuous::from_name)

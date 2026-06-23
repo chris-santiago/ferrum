@@ -267,7 +267,7 @@ mod tests {
 
     /// MOD-06 guard: an absent column or absent scale falls back to `default`,
     /// and a null cell falls back too — byte-identical to the prior inline
-    /// `else { ctx.mark_style.opacity }` arms.
+    /// `else { ctx.mark_style.paint.opacity }` arms.
     #[test]
     fn scaled_opacity_falls_back_to_default() {
         let scale = Some(opacity_scale());

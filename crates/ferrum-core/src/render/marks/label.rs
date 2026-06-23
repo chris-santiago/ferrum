@@ -54,7 +54,7 @@ fn candidate_offsets(w: f64, h: f64) -> [(f64, f64); 8] {
 /// Build positioned text label nodes with greedy collision avoidance.
 ///
 /// Each row emits one text label at (x, y) + a per-label (dx, dy) offset.
-/// When `mark_style.dx` **and** `mark_style.dy` are both explicitly set by the
+/// When `mark_style.text.dx` **and** `mark_style.text.dy` are both explicitly set by the
 /// caller the collision avoidance is bypassed and those fixed offsets are used
 /// for every label (manual override path).  When either or both are unset the
 /// algorithm tries a ranked list of candidate offsets for each label in row
@@ -66,7 +66,7 @@ fn candidate_offsets(w: f64, h: f64) -> [(f64, f64); 8] {
 /// `font_size * 1.2` for height — fast, approximate, and good enough for the
 /// greedy heuristic.
 ///
-/// When `mark_style.leader_line = Some(true)` a thin `SceneNode::Line` is
+/// When `mark_style.text.leader_line = Some(true)` a thin `SceneNode::Line` is
 /// drawn from the data point `(px, py)` to the placed label position.
 pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     let xf = match ctx.spec.encoding.x.as_ref().map(|e| e.field.as_str()) {
@@ -94,15 +94,15 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
 
     // When the caller explicitly provides both dx AND dy, honour them as fixed
     // offsets and skip collision avoidance entirely (manual positioning path).
-    let fixed_dx = ctx.mark_style.dx;
-    let fixed_dy = ctx.mark_style.dy;
+    let fixed_dx = ctx.mark_style.text.dx;
+    let fixed_dy = ctx.mark_style.text.dy;
     let manual_override = fixed_dx.is_some() && fixed_dy.is_some();
     let fallback_dx = fixed_dx.unwrap_or(0.0);
     let fallback_dy = fixed_dy.unwrap_or(-8.0);
 
-    let font_size = ctx.mark_style.font_size.unwrap_or(11.0);
-    let color = with_opacity(ctx.mark_style.fill, ctx.mark_style.opacity);
-    let draw_leader = ctx.mark_style.leader_line.unwrap_or(false);
+    let font_size = ctx.mark_style.text.font_size.unwrap_or(11.0);
+    let color = with_opacity(ctx.mark_style.paint.fill, ctx.mark_style.paint.opacity);
+    let draw_leader = ctx.mark_style.text.leader_line.unwrap_or(false);
 
     let n = ctx.batch.num_rows();
 
@@ -182,7 +182,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
             style: to_scene_text_style(
                 color, font_size, TextAnchor::Middle, 0.0,
                 ctx.theme.typography.font_family.as_str(),
-                ctx.mark_style.font_weight.as_deref(), None, ctx.mark_style.opacity,
+                ctx.mark_style.text.font_weight.as_deref(), None, ctx.mark_style.paint.opacity,
             ),
         };
 
@@ -190,7 +190,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
             // Emit text + leader-line as a two-node group both mapped to row i.
             // push_many gives data_indices one entry per emitted node, so
             // nodes.len() == data_indices.len() is maintained (R1 guard enforces).
-            let lc = with_opacity(ctx.mark_style.fill, ctx.mark_style.opacity * 0.5);
+            let lc = with_opacity(ctx.mark_style.paint.fill, ctx.mark_style.paint.opacity * 0.5);
             let line_node = SceneNode::Line {
                 x1: px,
                 y1: py,
@@ -199,7 +199,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
                 style: StrokeStyle {
                     color: to_scene_color(lc),
                     width: 0.75,
-                    opacity: ctx.mark_style.opacity * 0.5,
+                    opacity: ctx.mark_style.paint.opacity * 0.5,
                     stroke_opacity: 1.0,
                     dash: None,
                     stroke_cap: None,
@@ -393,7 +393,7 @@ mod tests {
         .unwrap();
 
         let mut mark_style = resolve_mark_style(None, &theme, &Mark::Label);
-        mark_style.leader_line = Some(true);
+        mark_style.text.leader_line = Some(true);
 
         let ctx = DrawCtx {
             spec: &spec,
@@ -554,7 +554,7 @@ mod tests {
         )
         .unwrap();
         let mut mark_style = resolve_mark_style(None, &theme, &Mark::Label);
-        mark_style.leader_line = Some(true);
+        mark_style.text.leader_line = Some(true);
 
         let ctx = DrawCtx {
             spec: &spec,
@@ -649,7 +649,7 @@ mod tests {
 
         // Build a MarkStyle with leader_line = Some(true).
         let mut mark_style = resolve_mark_style(None, &theme, &Mark::Label);
-        mark_style.leader_line = Some(true);
+        mark_style.text.leader_line = Some(true);
 
         let ctx = DrawCtx {
             spec: &spec,
@@ -692,7 +692,7 @@ mod tests {
         // Default resolve — leader_line stays None.
         let mark_style = resolve_mark_style(None, &theme, &Mark::Label);
         assert!(
-            mark_style.leader_line.is_none(),
+            mark_style.text.leader_line.is_none(),
             "resolve_mark_style should leave leader_line as None by default"
         );
 

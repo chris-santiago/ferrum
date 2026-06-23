@@ -4,7 +4,7 @@
 //! - Color encoding only: one area per color category. Nominal (Utf8) and
 //!   non-nominal (Int*, Float*, Bool) color columns are both supported via
 //!   `col_as_ordinal_category_str`. Color drives the fill color legend.
-//! - `mark_style.detail` only: one area per detail value, theme-default fill.
+//! - `mark_style.group.detail` only: one area per detail value, theme-default fill.
 //!   Areas are not legendable via detail.
 //! - Both color and detail: one area per (color, detail) pair.
 //! - Neither: single area over all rows.
@@ -100,7 +100,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // split into groups just like Utf8 columns do. col_as_str returns Err for
     // non-Utf8 dtypes, which silently collapsed everything into one path (the bug).
     let color_values = cf.and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
-    let detail_values = ctx.mark_style.detail.as_deref()
+    let detail_values = ctx.mark_style.group.detail.as_deref()
         .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
 
     let n_rows = xs.len();
@@ -126,14 +126,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let is_stacked = stack_bases.is_some();
 
     // Stacked areas use opaque fills so each band is visually distinct.
-    let base_opacity = if is_stacked { 1.0 } else { ctx.mark_style.opacity };
+    let base_opacity = if is_stacked { 1.0 } else { ctx.mark_style.paint.opacity };
 
     // opacity / fill_opacity channels — sampled at the first row of each group
     // via the shared resolver (FA-11). Defaults: opacity → base_opacity,
     // fill_opacity → 1.0. Area does not read stroke_opacity (default unused).
     let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (base_opacity, 1.0, 1.0));
 
-    let interpolate = ctx.mark_style.interpolate.as_deref();
+    let interpolate = ctx.mark_style.line.interpolate.as_deref();
 
     let meta = MetadataColumns::from_ctx(ctx);
 
@@ -192,19 +192,19 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         };
         let fill = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) => {
-                let base = scale.lookup(v).unwrap_or(ctx.mark_style.fill);
+                let base = scale.lookup(v).unwrap_or(ctx.mark_style.paint.fill);
                 with_opacity(base, effective_opacity)
             }
-            _ => with_opacity(ctx.mark_style.fill, effective_opacity),
+            _ => with_opacity(ctx.mark_style.paint.fill, effective_opacity),
         };
         let stroke_color = match (key.as_deref(), &ctx.scales.color) {
-            (Some(v), Some(scale)) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-            _ => ctx.mark_style.fill,
+            (Some(v), Some(scale)) => scale.lookup(v).unwrap_or(ctx.mark_style.paint.fill),
+            _ => ctx.mark_style.paint.fill,
         };
         let style = to_scene_fill_stroke_full(
             Some(fill),
-            ctx.mark_style.stroke,
-            ctx.mark_style.stroke_width,
+            ctx.mark_style.paint.stroke,
+            ctx.mark_style.paint.stroke_width,
             1.0,
             None,
             group_fill_opacity,
@@ -222,12 +222,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         });
 
         // S9: line border on top of the area fill.
-        if ctx.mark_style.line_border == Some(true) {
+        if ctx.mark_style.area.line_border == Some(true) {
             let line_cmds = build_top_line_cmds(&top, interpolate);
             let border_style = to_scene_fill_stroke(
                 None,
                 Some(stroke_color),
-                ctx.mark_style.stroke_width.max(1.0),
+                ctx.mark_style.paint.stroke_width.max(1.0),
                 1.0,
                 None,
             );
@@ -239,9 +239,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         }
 
         // S10: border lines on both top and bottom edges.
-        if ctx.mark_style.borders == Some(true) {
+        if ctx.mark_style.area.borders == Some(true) {
             let top_cmds = build_top_line_cmds(&top, interpolate);
-            let sw = ctx.mark_style.stroke_width.max(1.0);
+            let sw = ctx.mark_style.paint.stroke_width.max(1.0);
             let border_style = to_scene_fill_stroke(
                 None,
                 Some(stroke_color),

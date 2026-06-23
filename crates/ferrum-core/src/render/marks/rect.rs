@@ -79,7 +79,7 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     // fill_opacity via the shared resolver (FA-11), sampled per-row. opacity is
     // scale-mapped at the call site below; stroke_opacity is not read by rect.
-    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
@@ -109,11 +109,11 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
             ctx.scales.color.as_ref(),
             color_strings.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_numeric.as_ref().and_then(|v| v.get(i).copied().flatten()),
-            ctx.mark_style.fill,
+            ctx.mark_style.paint.fill,
         );
-        // Resolve per-row opacity through scale if present; fall back to mark_style.opacity.
+        // Resolve per-row opacity through scale if present; fall back to mark_style.paint.opacity.
         let row_opacity =
-            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.opacity);
+            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
         let fill = with_opacity(fill, row_opacity);
 
         let (_, row_fill_opacity, _) = opacity_res.at_row(i);
@@ -122,14 +122,14 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
             .as_ref()
             .and_then(|v| v[i])
             .filter(|v| *v >= 0.0 && v.is_finite())
-            .unwrap_or(ctx.mark_style.stroke_width);
+            .unwrap_or(ctx.mark_style.paint.stroke_width);
 
         // When stroke_width encoding produces a positive value but no explicit
         // stroke color exists, use the fill color as the stroke so the width is
         // visible in SVG (stroke-width is only emitted when stroke is Some).
         let effective_stroke = resolve_effective_stroke(
             row_stroke_width,
-            ctx.mark_style.stroke,
+            ctx.mark_style.paint.stroke,
             fill,
             stroke_width_values.is_some(),
         );
@@ -139,7 +139,7 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
             effective_stroke,
             row_stroke_width,
             row_opacity,
-            ctx.mark_style.stroke_dash.as_deref(),
+            ctx.mark_style.paint.stroke_dash.as_deref(),
             row_fill_opacity,
             1.0,
             0.0,
@@ -151,7 +151,7 @@ fn build_quantitative_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResu
             w,
             h,
             style,
-            corner_radius: ctx.mark_style.corner_radius,
+            corner_radius: ctx.mark_style.paint.corner_radius,
         }, i);
     }
 
@@ -192,7 +192,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     // fill_opacity via the shared resolver (FA-11), sampled per-row. opacity is
     // scale-mapped at the call sites below; stroke_opacity is not read by rect.
-    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
@@ -217,7 +217,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
         let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty_result() };
         if xs.len() != ys.len() || y2s.len() != ys.len() { return empty_result(); }
-        let box_w = (panel.w / n_categories as f64) * ctx.mark_style.band_size.unwrap_or(0.6);
+        let box_w = (panel.w / n_categories as f64) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
 
         for i in 0..xs.len() {
             let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -236,10 +236,10 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 ctx.scales.color.as_ref(),
                 color_strings.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
                 None,
-                ctx.mark_style.fill,
+                ctx.mark_style.paint.fill,
             );
             let row_opacity =
-                resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.opacity);
+                resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
             let fill = with_opacity(fill, row_opacity);
 
             let (_, row_fill_opacity, _) = opacity_res.at_row(i);
@@ -248,11 +248,11 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 .as_ref()
                 .and_then(|v| v[i])
                 .filter(|v| *v >= 0.0 && v.is_finite())
-                .unwrap_or(ctx.mark_style.stroke_width);
+                .unwrap_or(ctx.mark_style.paint.stroke_width);
 
             let effective_stroke = resolve_effective_stroke(
                 row_stroke_width,
-                ctx.mark_style.stroke,
+                ctx.mark_style.paint.stroke,
                 fill,
                 stroke_width_values.is_some(),
             );
@@ -262,7 +262,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 effective_stroke,
                 row_stroke_width,
                 row_opacity,
-                ctx.mark_style.stroke_dash.as_deref(),
+                ctx.mark_style.paint.stroke_dash.as_deref(),
                 row_fill_opacity,
                 1.0,
                 0.0,
@@ -274,7 +274,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 w: box_w,
                 h: rect_h,
                 style,
-                corner_radius: ctx.mark_style.corner_radius,
+                corner_radius: ctx.mark_style.paint.corner_radius,
             }, i);
         }
     } else if y_is_ordinal {
@@ -290,7 +290,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
         let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty_result() };
         if ys.len() != xs.len() || x2s.len() != xs.len() { return empty_result(); }
-        let box_h = (panel.h / n_categories as f64) * ctx.mark_style.band_size.unwrap_or(0.6);
+        let box_h = (panel.h / n_categories as f64) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
 
         for i in 0..ys.len() {
             let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
@@ -309,10 +309,10 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 ctx.scales.color.as_ref(),
                 color_strings.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
                 None,
-                ctx.mark_style.fill,
+                ctx.mark_style.paint.fill,
             );
             let row_opacity =
-                resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.opacity);
+                resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
             let fill = with_opacity(fill, row_opacity);
 
             let (_, row_fill_opacity, _) = opacity_res.at_row(i);
@@ -321,11 +321,11 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 .as_ref()
                 .and_then(|v| v[i])
                 .filter(|v| *v >= 0.0 && v.is_finite())
-                .unwrap_or(ctx.mark_style.stroke_width);
+                .unwrap_or(ctx.mark_style.paint.stroke_width);
 
             let effective_stroke = resolve_effective_stroke(
                 row_stroke_width,
-                ctx.mark_style.stroke,
+                ctx.mark_style.paint.stroke,
                 fill,
                 stroke_width_values.is_some(),
             );
@@ -335,7 +335,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 effective_stroke,
                 row_stroke_width,
                 row_opacity,
-                ctx.mark_style.stroke_dash.as_deref(),
+                ctx.mark_style.paint.stroke_dash.as_deref(),
                 row_fill_opacity,
                 1.0,
                 0.0,
@@ -347,7 +347,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 w: rect_w,
                 h: box_h,
                 style,
-                corner_radius: ctx.mark_style.corner_radius,
+                corner_radius: ctx.mark_style.paint.corner_radius,
             }, i);
         }
     } else {
@@ -403,7 +403,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
-    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
@@ -440,11 +440,11 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ctx.scales.color.as_ref(),
             color_strings.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_numeric.as_ref().and_then(|v| v.get(i).copied().flatten()),
-            ctx.mark_style.fill,
+            ctx.mark_style.paint.fill,
         );
         // Resolve per-row opacity (through scale if present).
         let row_opacity =
-            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.opacity);
+            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
 
         let fill = with_opacity(fill, row_opacity);
 
@@ -454,14 +454,14 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             .as_ref()
             .and_then(|v| v[i])
             .filter(|v| *v >= 0.0 && v.is_finite())
-            .unwrap_or(ctx.mark_style.stroke_width);
+            .unwrap_or(ctx.mark_style.paint.stroke_width);
 
         // When stroke_width encoding produces a positive value but no explicit
         // stroke color exists, use the fill color as the stroke so the width is
         // visible in SVG (stroke-width is only emitted when stroke is Some).
         let effective_stroke = resolve_effective_stroke(
             row_stroke_width,
-            ctx.mark_style.stroke,
+            ctx.mark_style.paint.stroke,
             fill,
             stroke_width_values.is_some(),
         );
@@ -471,7 +471,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             effective_stroke,
             row_stroke_width,
             row_opacity,
-            ctx.mark_style.stroke_dash.as_deref(),
+            ctx.mark_style.paint.stroke_dash.as_deref(),
             row_fill_opacity,
             1.0,
             0.0,
@@ -483,7 +483,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             w: cell_w,
             h: cell_h,
             style,
-            corner_radius: ctx.mark_style.corner_radius,
+            corner_radius: ctx.mark_style.paint.corner_radius,
         }, i);
 
         // Emit text annotation at cell center when text encoding is present.
@@ -493,7 +493,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             if let Some(Some(content)) = texts.get(i) {
                 if !content.is_empty() {
                     let text_color = ctx.theme.colors.font_color;
-                    let font_size = ctx.mark_style.font_size.unwrap_or(11.0);
+                    let font_size = ctx.mark_style.text.font_size.unwrap_or(11.0);
                     acc.push(SceneNode::Text {
                         x: cx,
                         y: cy,

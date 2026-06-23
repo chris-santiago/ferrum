@@ -73,16 +73,16 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         }),
     };
 
-    let anchor = match ctx.mark_style.align.as_deref() {
+    let anchor = match ctx.mark_style.text.align.as_deref() {
         Some("left") => TextAnchor::Start,
         Some("right") => TextAnchor::End,
         _ => TextAnchor::Middle,
     };
-    let dx = ctx.mark_style.dx.unwrap_or(0.0);
-    let dy = ctx.mark_style.dy.unwrap_or(0.0);
-    let base_font_size = ctx.mark_style.font_size.unwrap_or(ctx.theme.typography.label_font_size);
-    let base_angle = ctx.mark_style.angle.unwrap_or(0.0);
-    let base_opacity = ctx.mark_style.opacity;
+    let dx = ctx.mark_style.text.dx.unwrap_or(0.0);
+    let dy = ctx.mark_style.text.dy.unwrap_or(0.0);
+    let base_font_size = ctx.mark_style.text.font_size.unwrap_or(ctx.theme.typography.label_font_size);
+    let base_angle = ctx.mark_style.text.angle.unwrap_or(0.0);
+    let base_opacity = ctx.mark_style.paint.opacity;
 
     // Per-row encoding channels (same pattern as point.rs).
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
@@ -152,7 +152,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         };
 
         // S7: truncate label to `limit` characters (including the ellipsis).
-        let label = if let Some(limit) = ctx.mark_style.limit {
+        let label = if let Some(limit) = ctx.mark_style.text.limit {
             if limit > 0 && raw_label.chars().count() > limit {
                 let truncated: String = raw_label.chars().take(limit.saturating_sub(1)).collect();
                 format!("{truncated}\u{2026}") // …
@@ -195,8 +195,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 anchor,
                 row_angle,
                 &ctx.theme.typography.font_family,
-                ctx.mark_style.font_weight.as_deref(),
-                ctx.mark_style.baseline.as_deref(),
+                ctx.mark_style.text.font_weight.as_deref(),
+                ctx.mark_style.text.baseline.as_deref(),
                 row_opacity,
             ),
         }, i);

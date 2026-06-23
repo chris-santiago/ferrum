@@ -27,7 +27,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // local. Segment is a stroke-only mark (no fill / stroke_opacity columns),
     // so only the resolver's `opacity` slot is read.
     let opacity_res =
-        OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
+        OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
 
     let stroke_width_values: Option<Vec<Option<f64>>> = spec.encoding.stroke_width
         .as_ref()
@@ -71,7 +71,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let (row_opacity, _, _) = opacity_res.at_row(i);
         let row_stroke_width = stroke_width_values.as_ref()
             .and_then(|v| v.get(i).copied().flatten())
-            .unwrap_or(ctx.mark_style.stroke_width);
+            .unwrap_or(ctx.mark_style.paint.stroke_width);
 
         // Precedence (explicit constant stroke > per-row color > theme > fill)
         // lives in `resolve_stroke_color`.
@@ -83,7 +83,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             row_color,
             row_stroke_width,
             row_opacity,
-            ctx.mark_style.stroke_dash.as_deref(),
+            ctx.mark_style.paint.stroke_dash.as_deref(),
             None,
             None,
         );

@@ -48,8 +48,8 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         return MarkBuildResult::empty(MarkBatchKind::Polygon);
     };
 
-    let fill = with_opacity(ctx.mark_style.fill, ctx.mark_style.opacity);
-    let stroke = ctx.mark_style.stroke.map(|s| with_opacity(s, ctx.mark_style.opacity));
+    let fill = with_opacity(ctx.mark_style.paint.fill, ctx.mark_style.paint.opacity);
+    let stroke = ctx.mark_style.paint.stroke.map(|s| with_opacity(s, ctx.mark_style.paint.opacity));
 
     let pa = &ctx.panel.plot_area;
 
@@ -138,8 +138,8 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     let fill_style = to_scene_fill_stroke(
         Some(fill),
         stroke,
-        ctx.mark_style.stroke_width,
-        ctx.mark_style.opacity,
+        ctx.mark_style.paint.stroke_width,
+        ctx.mark_style.paint.opacity,
         None,
     );
 
@@ -147,8 +147,8 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
     let stroke_color = stroke.unwrap_or(fill);
     let stroke_style = to_scene_stroke(
         stroke_color,
-        ctx.mark_style.stroke_width.max(1.0),
-        ctx.mark_style.opacity,
+        ctx.mark_style.paint.stroke_width.max(1.0),
+        ctx.mark_style.paint.opacity,
         None,
         None,
         None,

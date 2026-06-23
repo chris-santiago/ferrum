@@ -215,8 +215,8 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
     // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique
     // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
-    // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
-    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.opacity, 1.0, 1.0));
+    // bar bakes `mark_style.paint.opacity` into the fill color and the FillStroke.
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.paint.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so that metadata is
@@ -243,14 +243,14 @@ fn build_polar(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
-            ctx.mark_style.fill,
+            ctx.mark_style.paint.fill,
         );
-        let fill_c = crate::render::draw::to_scene_color(with_opacity(fill_color, ctx.mark_style.opacity));
-        let stroke_sc = ctx.mark_style.stroke.map(crate::render::draw::to_scene_color);
+        let fill_c = crate::render::draw::to_scene_color(with_opacity(fill_color, ctx.mark_style.paint.opacity));
+        let stroke_sc = ctx.mark_style.paint.stroke.map(crate::render::draw::to_scene_color);
         let base_style = BarBaseStyle {
-            stroke_width: ctx.mark_style.stroke_width,
-            opacity: ctx.mark_style.opacity,
-            stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
+            stroke_width: ctx.mark_style.paint.stroke_width,
+            opacity: ctx.mark_style.paint.opacity,
+            stroke_dash: ctx.mark_style.paint.stroke_dash.as_deref(),
             corner_radius: 0.0,
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
@@ -325,8 +325,8 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
     // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique
     // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
-    // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
-    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.opacity, 1.0, 1.0));
+    // bar bakes `mark_style.paint.opacity` into the fill color and the FillStroke.
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.paint.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
@@ -366,17 +366,17 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
-            ctx.mark_style.fill,
+            ctx.mark_style.paint.fill,
         );
-        let fill = with_opacity(fill_color, ctx.mark_style.opacity);
+        let fill = with_opacity(fill_color, ctx.mark_style.paint.opacity);
 
-        let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
+        let stroke_sc = ctx.mark_style.paint.stroke.map(to_scene_color);
         let fill_sc = to_scene_color(fill);
         let base = BarBaseStyle {
-            stroke_width: ctx.mark_style.stroke_width,
-            opacity: ctx.mark_style.opacity,
-            stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
-            corner_radius: ctx.mark_style.corner_radius,
+            stroke_width: ctx.mark_style.paint.stroke_width,
+            opacity: ctx.mark_style.paint.opacity,
+            stroke_dash: ctx.mark_style.paint.stroke_dash.as_deref(),
+            corner_radius: ctx.mark_style.paint.corner_radius,
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
         let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, fill_opacity, stroke_opacity, i);
@@ -440,8 +440,8 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
     // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique
     // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
-    // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
-    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.opacity, 1.0, 1.0));
+    // bar bakes `mark_style.paint.opacity` into the fill color and the FillStroke.
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.paint.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
@@ -470,17 +470,17 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
-            ctx.mark_style.fill,
+            ctx.mark_style.paint.fill,
         );
-        let fill = with_opacity(fill_color, ctx.mark_style.opacity);
+        let fill = with_opacity(fill_color, ctx.mark_style.paint.opacity);
 
-        let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
+        let stroke_sc = ctx.mark_style.paint.stroke.map(to_scene_color);
         let fill_sc = to_scene_color(fill);
         let base = BarBaseStyle {
-            stroke_width: ctx.mark_style.stroke_width,
-            opacity: ctx.mark_style.opacity,
-            stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
-            corner_radius: ctx.mark_style.corner_radius,
+            stroke_width: ctx.mark_style.paint.stroke_width,
+            opacity: ctx.mark_style.paint.opacity,
+            stroke_dash: ctx.mark_style.paint.stroke_dash.as_deref(),
+            corner_radius: ctx.mark_style.paint.corner_radius,
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
         let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, fill_opacity, stroke_opacity, i);
@@ -571,8 +571,8 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
     // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique
     // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
-    // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
-    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.opacity, 1.0, 1.0));
+    // bar bakes `mark_style.paint.opacity` into the fill color and the FillStroke.
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.paint.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
@@ -606,17 +606,17 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
-            ctx.mark_style.fill,
+            ctx.mark_style.paint.fill,
         );
-        let fill = with_opacity(fill_color, ctx.mark_style.opacity);
+        let fill = with_opacity(fill_color, ctx.mark_style.paint.opacity);
 
-        let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
+        let stroke_sc = ctx.mark_style.paint.stroke.map(to_scene_color);
         let fill_sc = to_scene_color(fill);
         let base = BarBaseStyle {
-            stroke_width: ctx.mark_style.stroke_width,
-            opacity: ctx.mark_style.opacity,
-            stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
-            corner_radius: ctx.mark_style.corner_radius,
+            stroke_width: ctx.mark_style.paint.stroke_width,
+            opacity: ctx.mark_style.paint.opacity,
+            stroke_dash: ctx.mark_style.paint.stroke_dash.as_deref(),
+            corner_radius: ctx.mark_style.paint.corner_radius,
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
         let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, fill_opacity, stroke_opacity, i);
@@ -670,8 +670,8 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
     // sampled per-row. `OpacityFallback::BarLike` preserves bar's unique
     // `fill_opacity ← opacity` fallback. The resolved opacity output is unused:
-    // bar bakes `mark_style.opacity` into the fill color and the FillStroke.
-    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.opacity, 1.0, 1.0));
+    // bar bakes `mark_style.paint.opacity` into the fill color and the FillStroke.
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::BarLike, (ctx.mark_style.paint.opacity, 1.0, 1.0));
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
@@ -696,17 +696,17 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
             ctx.scales.color.as_ref(),
             row_cat(&color_values, i),
             row_num(&color_values_f64, i),
-            ctx.mark_style.fill,
+            ctx.mark_style.paint.fill,
         );
-        let fill = with_opacity(fill_color, ctx.mark_style.opacity);
+        let fill = with_opacity(fill_color, ctx.mark_style.paint.opacity);
 
-        let stroke_sc = ctx.mark_style.stroke.map(to_scene_color);
+        let stroke_sc = ctx.mark_style.paint.stroke.map(to_scene_color);
         let fill_sc = to_scene_color(fill);
         let base = BarBaseStyle {
-            stroke_width: ctx.mark_style.stroke_width,
-            opacity: ctx.mark_style.opacity,
-            stroke_dash: ctx.mark_style.stroke_dash.as_deref(),
-            corner_radius: ctx.mark_style.corner_radius,
+            stroke_width: ctx.mark_style.paint.stroke_width,
+            opacity: ctx.mark_style.paint.opacity,
+            stroke_dash: ctx.mark_style.paint.stroke_dash.as_deref(),
+            corner_radius: ctx.mark_style.paint.corner_radius,
         };
         let (_, fill_opacity, stroke_opacity) = opacity_res.at_row(i);
         let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, fill_opacity, stroke_opacity, i);

@@ -848,8 +848,8 @@ fn build_panel_mark_batches(
             descriptions: result.descriptions,
             keys,
             blend: layer.blend.unwrap_or(BlendMode::Normal),
-            stroke_cap: mark_style.stroke_cap.as_deref().and_then(draw::parse_stroke_cap),
-            stroke_join: mark_style.stroke_join.as_deref().and_then(draw::parse_stroke_join),
+            stroke_cap: mark_style.line.stroke_cap.as_deref().and_then(draw::parse_stroke_cap),
+            stroke_join: mark_style.line.stroke_join.as_deref().and_then(draw::parse_stroke_join),
             packed_instances: None,
         });
     }

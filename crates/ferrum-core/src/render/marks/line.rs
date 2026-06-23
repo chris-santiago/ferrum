@@ -9,7 +9,7 @@
 //! Grouping rules:
 //! - Color encoding only: one polyline per color category (rows of the
 //!   same color value linked in batch order). Color determines stroke.
-//! - `mark_style.detail` only: one polyline per detail value, theme-default
+//! - `mark_style.group.detail` only: one polyline per detail value, theme-default
 //!   stroke. Polylines are not legendable.
 //! - Both: one polyline per (color, detail) pair — color determines stroke,
 //!   detail subdivides each color group. Used by parallel_coordinates so
@@ -113,7 +113,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let cf = color_field(ctx, spec);
     let color_values = cf.and_then(|f| col_as_str(ctx.batch, f).ok());
-    let detail_values = ctx.mark_style.detail.as_deref()
+    let detail_values = ctx.mark_style.group.detail.as_deref()
         .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
 
     let groups = build_color_detail_groups(
@@ -123,7 +123,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         n_rows,
     );
 
-    let interpolate = ctx.mark_style.interpolate.as_deref();
+    let interpolate = ctx.mark_style.line.interpolate.as_deref();
     let use_path = interpolate.is_some() && interpolate != Some("linear");
 
     // Per-row stroke channel vectors — sampled at the first valid row of each group.
@@ -132,8 +132,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let sd_vals: Option<Vec<Option<f64>>> = spec.encoding.stroke_dash.as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     // opacity / fill_opacity / stroke_opacity resolution (shared resolver, FA-11).
-    // Defaults: opacity → mark_style.opacity, fill_opacity → 1.0, stroke_opacity → 1.0.
-    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.opacity, 1.0, 1.0));
+    // Defaults: opacity → mark_style.paint.opacity, fill_opacity → 1.0, stroke_opacity → 1.0.
+    let opacity_res = OpacityResolver::load(ctx, OpacityFallback::Standard, (ctx.mark_style.paint.opacity, 1.0, 1.0));
 
     let meta = MetadataColumns::from_ctx(ctx);
 
@@ -167,17 +167,17 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let group_stroke_width = sw_vals.as_ref()
             .and_then(|v| v.get(first).copied().flatten())
             .filter(|v| *v >= 0.0 && v.is_finite())
-            .unwrap_or(ctx.mark_style.stroke_width);
+            .unwrap_or(ctx.mark_style.paint.stroke_width);
         let dash_vec: Option<Vec<f64>> = sd_vals.as_ref()
             .and_then(|v| v.get(first).copied().flatten())
             .filter(|v| v.is_finite())
             .and_then(resolve_stroke_dash);
-        let effective_dash = dash_vec.as_deref().or(ctx.mark_style.stroke_dash.as_deref());
+        let effective_dash = dash_vec.as_deref().or(ctx.mark_style.paint.stroke_dash.as_deref());
 
         let stroke_color = match (key.as_deref(), &ctx.scales.color) {
             (Some(v), Some(scale)) =>
-                scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-            _ => ctx.mark_style.stroke.unwrap_or(ctx.mark_style.fill),
+                scale.lookup(v).unwrap_or(ctx.mark_style.paint.fill),
+            _ => ctx.mark_style.paint.stroke.unwrap_or(ctx.mark_style.paint.fill),
         };
         let stroke_color = with_opacity(stroke_color, group_opacity);
 
@@ -206,8 +206,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 group_stroke_width,
                 1.0,
                 effective_dash,
-                ctx.mark_style.stroke_cap.as_deref(),
-                ctx.mark_style.stroke_join.as_deref(),
+                ctx.mark_style.line.stroke_cap.as_deref(),
+                ctx.mark_style.line.stroke_join.as_deref(),
             );
             stroke_style.stroke_opacity = group_stroke_opacity;
             // Polyline uses `StrokeStyle`, which has no fill channel — the

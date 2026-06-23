@@ -184,16 +184,16 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
         // Skip degenerate slices that collapse to zero or negative sweep after padding.
         if angle_end <= angle_start { continue; }
 
-        // Resolve per-slice fill from color scale, fall back to mark_style.fill.
+        // Resolve per-slice fill from color scale, fall back to mark_style.paint.fill.
         let fill_base = resolve_fill_color(
             ctx.scales.color.as_ref(),
             color_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
-            ctx.mark_style.fill,
+            ctx.mark_style.paint.fill,
         );
-        // Resolve per-row opacity through scale if present; fall back to mark_style.opacity.
+        // Resolve per-row opacity through scale if present; fall back to mark_style.paint.opacity.
         let row_opacity =
-            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.opacity);
+            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
         let fill_color = with_opacity(fill_base, row_opacity);
 
         let commands = wedge_path(cx, cy, inner_radius, outer_radius, angle_start, angle_end);
@@ -201,10 +201,10 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
             commands,
             style: to_scene_fill_stroke(
                 Some(fill_color),
-                ctx.mark_style.stroke,
-                ctx.mark_style.stroke_width,
+                ctx.mark_style.paint.stroke,
+                ctx.mark_style.paint.stroke_width,
                 row_opacity,
-                ctx.mark_style.stroke_dash.as_deref(),
+                ctx.mark_style.paint.stroke_dash.as_deref(),
             ),
             closed: true,
         }, i);
@@ -315,10 +315,10 @@ fn build_nominal_theta(
             ctx.scales.color.as_ref(),
             color_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
-            ctx.mark_style.fill,
+            ctx.mark_style.paint.fill,
         );
         let row_opacity =
-            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.opacity);
+            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
         let fill_color = with_opacity(fill_base, row_opacity);
 
         let commands = wedge_path(
@@ -328,10 +328,10 @@ fn build_nominal_theta(
             commands,
             style: to_scene_fill_stroke(
                 Some(fill_color),
-                ctx.mark_style.stroke,
-                ctx.mark_style.stroke_width,
+                ctx.mark_style.paint.stroke,
+                ctx.mark_style.paint.stroke_width,
                 row_opacity,
-                ctx.mark_style.stroke_dash.as_deref(),
+                ctx.mark_style.paint.stroke_dash.as_deref(),
             ),
             closed: true,
         }, i);
@@ -436,10 +436,10 @@ fn build_annular(
             ctx.scales.color.as_ref(),
             color_str.as_ref().and_then(|v| v.get(i)).and_then(|o| o.as_deref()),
             color_f64.as_ref().and_then(|v| v.get(i).copied().flatten()),
-            ctx.mark_style.fill,
+            ctx.mark_style.paint.fill,
         );
         let row_opacity =
-            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.opacity);
+            resolve_scaled_opacity(&opacity_values, &ctx.scales.opacity, i, ctx.mark_style.paint.opacity);
         let fill_color = with_opacity(fill_base, row_opacity);
 
         let commands = wedge_path(geom.cx, geom.cy, inner_r, outer_r, angle_start, angle_end);
@@ -447,10 +447,10 @@ fn build_annular(
             commands,
             style: to_scene_fill_stroke(
                 Some(fill_color),
-                ctx.mark_style.stroke,
-                ctx.mark_style.stroke_width,
+                ctx.mark_style.paint.stroke,
+                ctx.mark_style.paint.stroke_width,
                 row_opacity,
-                ctx.mark_style.stroke_dash.as_deref(),
+                ctx.mark_style.paint.stroke_dash.as_deref(),
             ),
             closed: true,
         }, i);

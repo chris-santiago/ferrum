@@ -7,7 +7,7 @@
 //! - `color` encoding + Float64 column → quantitative; sample named cmap (default Viridis)
 //!   at `(value - vmin) / (vmax - vmin)`. One polygon per detail group; group color
 //!   taken from the first row in the group.
-//! - No `color` encoding → single fill from `mark_style.fill`.
+//! - No `color` encoding → single fill from `mark_style.paint.fill`.
 //!
 //! Used by violin (Task 25), contour-fill (Task 30), and hex (Task 28) composite marks.
 
@@ -60,7 +60,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
 
     // --- Group rows by detail column (or single group if unset) ---
-    let detail_field = ctx.mark_style.detail.as_deref();
+    let detail_field = ctx.mark_style.group.detail.as_deref();
     let groups: BTreeMap<i64, Vec<usize>> = match detail_field {
         Some(field) => {
             let arr = match ctx.batch.column_by_name(field) {
@@ -115,6 +115,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let scheme = if color_is_quantitative {
         let named = ctx
             .mark_style
+            .group
             .cmap
             .as_deref()
             .and_then(NamedContinuous::from_name)
@@ -185,24 +186,24 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let fill = if color_is_quantitative {
             if let Some(a) = color_arr.and_then(|a| a.as_any().downcast_ref::<Float64Array>()) {
                 if a.is_null(first_row) {
-                    ctx.mark_style.fill
+                    ctx.mark_style.paint.fill
                 } else {
                     let v = a.value(first_row);
                     let t = ((v - vmin) / denom).clamp(0.0, 1.0);
-                    scheme.as_ref().map(|s| s.sample(t)).unwrap_or(ctx.mark_style.fill)
+                    scheme.as_ref().map(|s| s.sample(t)).unwrap_or(ctx.mark_style.paint.fill)
                 }
             } else {
-                ctx.mark_style.fill
+                ctx.mark_style.paint.fill
             }
         } else if let (Some(values), Some(scale)) =
             (color_str_values.as_ref(), &ctx.scales.color)
         {
             match values.get(first_row).and_then(|v| v.as_deref()) {
-                Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.fill),
-                None => ctx.mark_style.fill,
+                Some(v) => scale.lookup(v).unwrap_or(ctx.mark_style.paint.fill),
+                None => ctx.mark_style.paint.fill,
             }
         } else {
-            ctx.mark_style.fill
+            ctx.mark_style.paint.fill
         };
 
         // Resolve per-group opacity through the scale if present (sampled at the
@@ -211,7 +212,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             &opacity_values,
             &ctx.scales.opacity,
             first_row,
-            ctx.mark_style.opacity,
+            ctx.mark_style.paint.opacity,
         );
 
         let fill = with_opacity(fill, group_opacity);
@@ -222,8 +223,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 rings: vec![exterior],
                 style: to_scene_fill_stroke(
                     Some(fill),
-                    ctx.mark_style.stroke,
-                    ctx.mark_style.stroke_width,
+                    ctx.mark_style.paint.stroke,
+                    ctx.mark_style.paint.stroke_width,
                     group_opacity,
                     None,
                 ),
@@ -439,7 +440,7 @@ mod tests {
 
     /// W18: When an opacity encoding is present, each polygon group must have
     /// a different alpha in its fill color. Previously opacity was always taken
-    /// from mark_style.opacity (a single value for all polygons).
+    /// from mark_style.paint.opacity (a single value for all polygons).
     #[test]
     fn w18_polygon_opacity_encoding_applied_per_group() {
         use crate::render::scale_resolve::{OpacityScale, ResolvedScales, ScaleKind};

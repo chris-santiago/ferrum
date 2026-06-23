@@ -174,17 +174,17 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let solid = key
                 .as_deref()
                 .and_then(|v| ctx.scales.color.as_ref().and_then(|s| s.lookup(v)))
-                .unwrap_or(ctx.mark_style.fill);
-            let fill = crate::render::color::with_opacity(solid, ctx.mark_style.opacity);
-            (Some(fill), ctx.mark_style.stroke)
+                .unwrap_or(ctx.mark_style.paint.fill);
+            let fill = crate::render::color::with_opacity(solid, ctx.mark_style.paint.opacity);
+            (Some(fill), ctx.mark_style.paint.stroke)
         } else {
-            let fill = crate::render::color::with_opacity(ctx.mark_style.fill, ctx.mark_style.opacity);
-            (Some(fill), ctx.mark_style.stroke)
+            let fill = crate::render::color::with_opacity(ctx.mark_style.paint.fill, ctx.mark_style.paint.opacity);
+            (Some(fill), ctx.mark_style.paint.stroke)
         };
         let style = to_scene_fill_stroke(
             fill,
             stroke,
-            ctx.mark_style.stroke_width,
+            ctx.mark_style.paint.stroke_width,
             1.0,
             None,
         );
