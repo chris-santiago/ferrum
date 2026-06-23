@@ -149,6 +149,13 @@ pub enum RenderWarning {
     /// batch, has an unsupported dtype, or the spec is otherwise malformed. The
     /// categorical domain falls back to insertion order; `reason` explains why.
     SortSpecIgnored { reason: String },
+    /// A position adjustment was requested with a grouping channel that could
+    /// not yield categories — the named `by`/color column is absent from the
+    /// data, or its dtype cannot be turned into category keys (e.g. timestamp /
+    /// duration). The marks are left un-offset rather than crashing or silently
+    /// no-op-ing. `adjustment` is the adjustment name (e.g. `"dodge"`); `reason`
+    /// explains which column failed and why.
+    PositionAdjustSkipped { adjustment: String, reason: String },
 }
 
 impl std::fmt::Display for RenderWarning {
@@ -193,6 +200,10 @@ impl std::fmt::Display for RenderWarning {
                 "sort spec could not be applied ({reason}); categories fall back \
                  to insertion order"
             ),
+            RenderWarning::PositionAdjustSkipped { adjustment, reason } => write!(
+                f,
+                "{adjustment} could not be applied ({reason}); marks were not offset"
+            ),
         }
     }
 }
@@ -229,6 +240,10 @@ mod tests {
             RenderWarning::EmptyPanel { panel_index: 1 },
             RenderWarning::ColorRangeParseFailure { entry: "#zzz".into() },
             RenderWarning::SortSpecIgnored { reason: "missing field".into() },
+            RenderWarning::PositionAdjustSkipped {
+                adjustment: "dodge".into(),
+                reason: "by-column 'grp' not found in data".into(),
+            },
         ] {
             let json = serde_json::to_string(&w).unwrap();
             let parsed: RenderWarning = serde_json::from_str(&json).unwrap();

@@ -191,6 +191,7 @@ pub fn build_scene(
             &scales,
             panel,
             theme,
+            warnings,
         )?;
 
         let plot_area = ferrum_scene::Rect {
@@ -764,6 +765,7 @@ fn build_panel_mark_batches(
     scales: &scale_resolve::ResolvedScales,
     panel: &crate::layout::PanelLayout,
     theme: &ThemeInputs,
+    warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<MarkBatch>, RenderError> {
     let mut mark_batches: Vec<MarkBatch> = Vec::new();
 
@@ -783,6 +785,7 @@ fn build_panel_mark_batches(
             scales,
             &layer.encoding,
             prep.coord_flipped,
+            warnings,
         )?;
         let layer_batch: &RecordBatch = &adjusted_owned;
 
