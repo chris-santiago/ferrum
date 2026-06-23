@@ -12,6 +12,7 @@ use std::sync::Arc;
 use crate::transform::numeric_util::clean_float64_values;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ImputeSpec {
     /// Column to impute.
     pub field: String,

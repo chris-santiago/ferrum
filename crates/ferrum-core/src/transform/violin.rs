@@ -33,6 +33,7 @@ fn default_violin_width() -> f64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ViolinSpec {
     pub field: String,
     #[serde(default)]

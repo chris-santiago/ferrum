@@ -47,6 +47,7 @@ impl Default for ResolutionSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RasterSpec {
     pub x: String,
     pub y: String,

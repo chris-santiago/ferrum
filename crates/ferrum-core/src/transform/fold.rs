@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct FoldSpec {
     /// Column names to fold (melt).
     pub fields: Vec<String>,
@@ -142,37 +143,11 @@ fn is_numeric(d: &DataType) -> bool {
     )
 }
 
-// ─── PyO3 wrapper ──────────────────────────────────────────────────────────
-
-use pyo3::prelude::*;
-use crate::transform::core::TransformSpec;
-
-#[pyclass(module = "ferrum._core", name = "DataFold")]
-#[derive(Debug, Clone)]
-pub(crate) struct PyDataFold(pub(crate) TransformSpec);
-
-#[pymethods]
-impl PyDataFold {
-    #[new]
-    #[pyo3(signature = (fields, *, as_key = "key", as_value = "value", name = None))]
-    fn new(fields: Vec<String>, as_key: &str, as_value: &str, name: Option<String>) -> PyResult<Self> {
-        if fields.is_empty() {
-            return Err(PyValueError::new_err("DataFold: fields must be non-empty"));
-        }
-        Ok(PyDataFold(TransformSpec::Fold(FoldSpec {
-            fields,
-            as_: (as_key.into(), as_value.into()),
-            name,
-        })))
-    }
-
-    fn __repr__(&self) -> String {
-        match &self.0 {
-            TransformSpec::Fold(s) => format!("DataFold(fields={:?})", s.fields),
-            _ => "DataFold(?)".to_string(),
-        }
-    }
-}
+// No PyO3 wrapper: `DataFold` is constructed only via the dict-emitting
+// `transform_fold` Python function and carried through the `transforms_json`
+// serde path (SEAM-02). The removed `#[new]` rejected empty `fields`; the dict
+// path does not pre-validate that, but `apply` below already raises
+// "data_fold: fields must be non-empty". `FoldSpec` above is the serde target.
 
 #[cfg(test)]
 mod tests {

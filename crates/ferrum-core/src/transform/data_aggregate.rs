@@ -19,6 +19,7 @@ use crate::transform::group_key::{
 use crate::transform::join_aggregate::AggSpec;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DataAggregateSpec {
     pub aggregates: Vec<AggSpec>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -175,31 +176,10 @@ fn compute_agg(col: &dyn Array, rows: &[usize], fn_: AggFn) -> f64 {
     }
 }
 
-// ─── PyO3 wrapper ──────────────────────────────────────────────────────────
-
-use pyo3::prelude::*;
-use crate::transform::core::TransformSpec;
-
-#[pyclass(module = "ferrum._core", name = "DataAggregate")]
-#[derive(Debug, Clone)]
-pub(crate) struct PyDataAggregate(pub(crate) TransformSpec);
-
-#[pymethods]
-impl PyDataAggregate {
-    #[new]
-    #[pyo3(signature = (*, groupby = None, name = None))]
-    fn new(groupby: Option<Vec<String>>, name: Option<String>) -> Self {
-        PyDataAggregate(TransformSpec::DataAggregate(DataAggregateSpec {
-            aggregates: Vec::new(),
-            groupby,
-            name,
-        }))
-    }
-
-    fn __repr__(&self) -> String {
-        "DataAggregate(...)".to_string()
-    }
-}
+// No PyO3 wrapper: `DataAggregate` is constructed only via the dict-emitting
+// `transform_aggregate` Python function and carried through the
+// `transforms_json` serde path (SEAM-02). `DataAggregateSpec` above is the
+// serde target.
 
 #[cfg(test)]
 mod tests {

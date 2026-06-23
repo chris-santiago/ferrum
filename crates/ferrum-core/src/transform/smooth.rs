@@ -36,6 +36,7 @@ pub(crate) enum SmoothOutput {
 pub(crate) fn default_smooth_output() -> SmoothOutput { SmoothOutput::Fitted }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SmoothSpec {
     pub x: String,
     pub y: String,

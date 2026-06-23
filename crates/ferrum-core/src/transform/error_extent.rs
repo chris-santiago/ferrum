@@ -24,6 +24,7 @@ fn default_seed() -> u64 { 0 }
 fn default_n_boot() -> usize { 1000 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ErrorExtentSpec {
     pub field: String,
     #[serde(default)]

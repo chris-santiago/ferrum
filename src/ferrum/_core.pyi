@@ -732,82 +732,14 @@ class Robust:
     ) -> None: ...
 
 # ---------- Data transforms (Vega-lite-style, declared missing from stub) ----------
-
-class DataAggregate:
-    def __init__(
-        self,
-        *,
-        groupby: Optional[List[str]] = None,
-        name: Optional[str] = None,
-    ) -> None: ...
-
-class DataBin:
-    def __init__(
-        self,
-        field: str,
-        *,
-        as_: Optional[str] = None,
-        maxbins: Optional[int] = None,
-        step: Optional[float] = None,
-        nice: bool = True,
-        name: Optional[str] = None,
-    ) -> None: ...
-
-class DataCalculate:
-    def __init__(
-        self,
-        expr: str,
-        as_field: str,
-        *,
-        name: Optional[str] = None,
-    ) -> None: ...
-
-class DataFilter:
-    def __init__(
-        self,
-        predicate: str,
-        *,
-        name: Optional[str] = None,
-    ) -> None: ...
-
-class DataFold:
-    def __init__(
-        self,
-        fields: List[str],
-        *,
-        as_key: str = "key",
-        as_value: str = "value",
-        name: Optional[str] = None,
-    ) -> None: ...
-
-class DataPivot:
-    def __init__(
-        self,
-        field: str,
-        value: str,
-        *,
-        groupby: Optional[List[str]] = None,
-        limit: Optional[int] = None,
-        op: str = "sum",
-        name: Optional[str] = None,
-    ) -> None: ...
-
-class DataStack:
-    def __init__(
-        self,
-        field: str,
-        groupby: List[str],
-        *,
-        offset: str = "zero",
-        name: Optional[str] = None,
-    ) -> None: ...
-
-class DataWindow:
-    def __init__(
-        self,
-        *,
-        name: Optional[str] = None,
-    ) -> None: ...
+#
+# The eight Phase-12 ``Data*`` transforms (DataAggregate / DataBin /
+# DataCalculate / DataFilter / DataFold / DataPivot / DataStack / DataWindow)
+# have no Python class. They are constructed exclusively via the dict-emitting
+# ``ferrum.transform_*`` functions (see ``ferrum/transforms.py``) and carried to
+# Rust through the ``transforms_json`` serde path (SEAM-02). The typed pyclasses
+# that used to be declared here were never imported or exported, so they were
+# removed.
 
 class DensityData:
     def __init__(

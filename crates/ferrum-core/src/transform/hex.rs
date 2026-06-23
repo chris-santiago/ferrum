@@ -34,6 +34,7 @@ fn default_aggregate() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct HexSpec {
     pub x: String,
     pub y: String,

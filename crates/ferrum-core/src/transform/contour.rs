@@ -51,6 +51,7 @@ fn default_smooth() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ContourSpec {
     #[serde(default = "default_thresholds")]
     pub thresholds: u32,

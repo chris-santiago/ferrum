@@ -22,6 +22,7 @@ pub(crate) enum BandwidthSpec {
 pub(crate) fn default_kernel() -> String { "gaussian".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct KdeSpec {
     pub field: String,
     pub bandwidth: BandwidthSpec,

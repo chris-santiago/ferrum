@@ -290,15 +290,24 @@ def _transforms_to_json_list(transforms: list) -> list:
 
 
 def _transforms_to_json_list_named(transforms: list) -> list:
-    """Like ``_transforms_to_json_list`` but handles ``_NamedTransform`` wrappers
-    and plain dicts (Phase 12 data transforms).
+    """Serialize a mixed transform list to the Rust ``TransformSpec`` wire shape.
 
-    For each ``_NamedTransform``, serializes the inner transform and injects
-    the ``name`` field.  Plain dicts are passed through as-is (they already
-    match the Rust ``TransformSpec`` serde shape).  PyO3 transform objects
-    are serialized via the ChartSpec round-trip.
-    Mixing named and unnamed in one list is valid — unnamed transforms chain,
-    named transforms fan-out without advancing ``FINAL_OUTPUT_KEY``.
+    The list may contain two kinds of entries, in any order:
+
+    * **Plain dicts** — the Phase-12 ``transform_*`` functions
+      (``transform_bin``, ``transform_aggregate``, ...) each return a dict that
+      already matches the ``#[serde(tag = "type")]`` ``TransformSpec`` shape, so
+      they pass through unchanged.  This is the *only* construction path for the
+      Phase-12 data transforms; they have no typed pyclass (SEAM-02).
+    * **Live PyO3 transform objects** — the stat transforms (``Bin``,
+      ``Aggregate``, ``Identity``, ...) produced by per-layer aggregate/bin
+      resolution and ``+`` composition.  These are serialized via a
+      ``ChartSpec`` round-trip (the only way to reach their serde shape).
+
+    Either kind may be wrapped in a :class:`_NamedTransform`, whose ``name`` is
+    injected into the serialized entry.  Mixing named and unnamed in one list is
+    valid — unnamed transforms chain, named transforms fan out without advancing
+    ``FINAL_OUTPUT_KEY``.
     """
     if not transforms:
         return []

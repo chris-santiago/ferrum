@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DataBinSpec {
     pub field: String,
     /// Output column name. Defaults to "{field}_bin".
@@ -192,45 +193,10 @@ fn nice_step(raw: f64) -> f64 {
     nice_frac * 10.0_f64.powf(exp)
 }
 
-// ─── PyO3 wrapper ──────────────────────────────────────────────────────────
-
-use pyo3::prelude::*;
-use crate::transform::core::TransformSpec;
-
-#[pyclass(module = "ferrum._core", name = "DataBin")]
-#[derive(Debug, Clone)]
-pub(crate) struct PyDataBin(pub(crate) TransformSpec);
-
-#[pymethods]
-impl PyDataBin {
-    #[new]
-    #[pyo3(signature = (field, *, as_ = None, maxbins = None, step = None, nice = true, name = None))]
-    fn new(
-        field: String,
-        as_: Option<String>,
-        maxbins: Option<usize>,
-        step: Option<f64>,
-        nice: bool,
-        name: Option<String>,
-    ) -> Self {
-        PyDataBin(TransformSpec::DataBin(DataBinSpec {
-            field,
-            as_,
-            maxbins,
-            step,
-            nice,
-            name,
-            extent: None,
-        }))
-    }
-
-    fn __repr__(&self) -> String {
-        match &self.0 {
-            TransformSpec::DataBin(s) => format!("DataBin(field='{}')", s.field),
-            _ => "DataBin(?)".to_string(),
-        }
-    }
-}
+// No PyO3 wrapper: `DataBin` is constructed only via the dict-emitting
+// `transform_bin` Python function and carried through the `transforms_json`
+// serde path (SEAM-02). The removed `#[new]` performed no validation beyond
+// serde's required `field`. `DataBinSpec` above is the serde target.
 
 #[cfg(test)]
 mod tests {

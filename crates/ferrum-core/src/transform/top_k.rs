@@ -15,6 +15,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct TopKSpec {
     /// Number of top groups to keep.
     pub n: usize,

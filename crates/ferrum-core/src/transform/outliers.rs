@@ -9,6 +9,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct OutliersSpec {
     pub field: String,
     #[serde(default)]

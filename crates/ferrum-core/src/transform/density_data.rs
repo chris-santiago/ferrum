@@ -16,6 +16,7 @@ use crate::transform::group_key::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DensityDataSpec {
     pub field: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]

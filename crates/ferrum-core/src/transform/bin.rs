@@ -68,6 +68,7 @@ pub(crate) struct BinSpec {
 /// flat `bin_count`/`bin_width`/`groupby` keys that Python and the test suite
 /// assert on. `BinMode` is never serialized directly for the 1-D `Bin`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BinWire {
     field: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]

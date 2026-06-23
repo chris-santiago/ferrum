@@ -386,20 +386,31 @@ impl ChartSpec {
     }
 
     /// Stat transforms applied before rendering, as a list of transform objects.
+    ///
+    /// Transforms with a Python wrapper class round-trip as that typed object
+    /// (`Bin`, `Kde`, `Aggregate`, ...). The dict-only Phase-12 `Data*`
+    /// transforms (constructed via `transform_*` and carried through the
+    /// `transforms_json` serde path) have no wrapper class, so they render as
+    /// plain dicts via the `_ =>` fallback — the same shape `layers`/`coord`
+    /// already use for class-less spec content (SEAM-02).
     #[getter]
     fn transforms(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        use crate::transform::core::{for_each_transform, TransformSpec};
+        use crate::transform::core::{for_each_py_transform, TransformSpec};
         let mut out: Vec<Py<PyAny>> = Vec::with_capacity(self.transforms.len());
         for t in &self.transforms {
             macro_rules! arm {
                 ($($V:ident => $m:ident : $py:ident,)*) => {
-                    match t { $(
-                        TransformSpec::$V(_) =>
-                            pyo3::Py::new(py, crate::transform::$m::$py(t.clone()))?.into_any(),
-                    )* }
+                    match t {
+                        $(
+                            TransformSpec::$V(_) =>
+                                pyo3::Py::new(py, crate::transform::$m::$py(t.clone()))?.into_any(),
+                        )*
+                        // Dict-only Phase-12 transforms: serialize to a dict.
+                        _ => crate::pyo3_serde::to_py(py, t)?,
+                    }
                 };
             }
-            out.push(for_each_transform!(arm));
+            out.push(for_each_py_transform!(arm));
         }
         Ok(out)
     }
@@ -516,10 +527,13 @@ fn coerce_layers(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Layer>> {
 
 fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::core::TransformSpec>> {
     use pyo3::types::PyList;
-    use crate::transform::core::for_each_transform;
+    use crate::transform::core::for_each_py_transform;
     let list: &Bound<'_, PyList> = obj.downcast::<PyList>()
         .map_err(|_| PyValueError::new_err("transforms must be a list"))?;
     let mut out = Vec::with_capacity(list.len());
+    // Only the wrapper-backed transforms can arrive here as typed objects; the
+    // dict-only Phase-12 `Data*` transforms take the `transforms_json` serde
+    // path instead and never reach this coercer (SEAM-02).
     'next_item: for (i, item) in list.iter().enumerate() {
         macro_rules! try_extract {
             ($($V:ident => $m:ident : $py:ident,)*) => {{
@@ -531,7 +545,7 @@ fn coerce_transforms(obj: &Bound<'_, PyAny>) -> PyResult<Vec<crate::transform::c
                 )*
             }};
         }
-        for_each_transform!(try_extract);
+        for_each_py_transform!(try_extract);
         return Err(PyValueError::new_err(format!(
             "transforms[{i}]: unrecognized transform; expected one of \
              Bin | Bin2D | Kde | Smooth | Aggregate | Summary | Outliers | \

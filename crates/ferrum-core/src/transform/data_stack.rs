@@ -15,6 +15,7 @@ use std::sync::Arc;
 use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DataStackSpec {
     /// Field to stack.
     pub field: String,
@@ -176,46 +177,11 @@ pub(crate) fn apply(spec: &DataStackSpec, batch: &RecordBatch) -> PyResult<Recor
         .map_err(|e| PyValueError::new_err(format!("data_stack: {e}")))
 }
 
-// ─── PyO3 wrapper ──────────────────────────────────────────────────────────
-
-use pyo3::prelude::*;
-use crate::transform::core::TransformSpec;
-
-#[pyclass(module = "ferrum._core", name = "DataStack")]
-#[derive(Debug, Clone)]
-pub(crate) struct PyDataStack(pub(crate) TransformSpec);
-
-#[pymethods]
-impl PyDataStack {
-    #[new]
-    #[pyo3(signature = (field, groupby, *, offset = "zero", name = None))]
-    fn new(field: String, groupby: Vec<String>, offset: &str, name: Option<String>) -> PyResult<Self> {
-        match offset {
-            "zero" | "normalize" | "center" => {}
-            _ => {
-                return Err(PyValueError::new_err(format!(
-                    "DataStack: offset={:?} is not valid. Expected one of \"zero\", \"normalize\", \"center\"",
-                    offset
-                )));
-            }
-        }
-        Ok(PyDataStack(TransformSpec::DataStack(DataStackSpec {
-            field,
-            groupby,
-            sort: None,
-            as_: default_stack_as(),
-            offset: offset.into(),
-            name,
-        })))
-    }
-
-    fn __repr__(&self) -> String {
-        match &self.0 {
-            TransformSpec::DataStack(s) => format!("DataStack(field='{}', offset='{}')", s.field, s.offset),
-            _ => "DataStack(?)".to_string(),
-        }
-    }
-}
+// No PyO3 wrapper: `DataStack` is constructed only via the dict-emitting
+// `transform_stack` Python function and carried through the `transforms_json`
+// serde path (SEAM-02). The removed `#[new]` validated `offset`; the dict path
+// validates it earlier in `transform_stack` (`_validate_stack_offset`), so the
+// parity is preserved. `DataStackSpec` above is the serde target.
 
 #[cfg(test)]
 mod tests {

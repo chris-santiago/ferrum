@@ -75,6 +75,7 @@ pub(crate) struct LetterValueSort {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct LetterValueSpec {
     pub value: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]

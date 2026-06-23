@@ -55,6 +55,7 @@ pub(crate) enum GlmLink {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct GlmSpec {
     pub x: String,
     pub y: String,

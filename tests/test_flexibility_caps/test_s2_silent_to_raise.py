@@ -11,7 +11,10 @@ SITE 2: unknown offset in transform_stack(offset=...).
     value silently fell through the match arm to zero-offset behavior.
   - transform_stack() now validates offset at the Python boundary before the
     dict ever reaches Rust. Valid offsets still work.
-  - The PyDataStack PyO3 constructor also validates offset.
+  - (Historical note: a typed ``DataStack``/``PyDataStack`` PyO3 constructor
+    used to validate offset too, but it was dead — never imported or
+    constructed — and was removed in T4.11a/SEAM-02. ``transform_stack`` is
+    now the single construction path, and it validates offset.)
 
 SITE 2 REACHABILITY FINDING (documented here):
   - fm.Stack(offset="bogus") already raises ValueError (validated in

@@ -31,14 +31,16 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scale::quantize::QuantizeScale>()?;
     m.add_class::<scale::bin_ordinal::BinOrdinalScale>()?;
     // Transform PyO3 wrappers, driven by the single-source-of-truth macro
-    // in transform/core.rs. Adding a new transform is one line there;
-    // registration happens automatically here.
+    // in transform/core.rs. Adding a new transform with a Python class is one
+    // line in `for_each_py_transform!`; registration happens automatically here.
+    // The dict-only Phase-12 `Data*` transforms are intentionally absent from
+    // that table (SEAM-02) — they expose no Python class.
     macro_rules! register_transforms {
         ($($V:ident => $mod:ident : $py:ident,)*) => {{
             $( m.add_class::<crate::transform::$mod::$py>()?; )*
         }};
     }
-    crate::transform::core::for_each_transform!(register_transforms);
+    crate::transform::core::for_each_py_transform!(register_transforms);
     // PyAggregateOp is the op-spec helper class, not a TransformSpec
     // variant — registered manually.
     m.add_class::<transform::aggregate::PyAggregateOp>()?;

@@ -29,6 +29,7 @@ impl Default for WhiskerExtent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BoxStatsSpec {
     pub field: String,
     #[serde(default)]

@@ -22,6 +22,7 @@ use crate::transform::numeric_util::{coerce_to_float64, column_extent};
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Bin2DSpec {
     pub x: String,
     pub y: String,

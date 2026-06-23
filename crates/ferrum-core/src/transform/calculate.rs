@@ -13,6 +13,7 @@ use crate::transform::expr::{Expr, ExprValue};
 use crate::transform::filter::batch_field_value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CalculateSpec {
     /// Output column name.
     pub as_field: String,
@@ -99,36 +100,12 @@ fn infer_and_build_column(results: &[ExprValue]) -> (DataType, ArrayRef) {
     }
 }
 
-// ─── PyO3 wrapper ──────────────────────────────────────────────────────────
-
-use pyo3::prelude::*;
-use crate::transform::core::TransformSpec;
-
-#[pyclass(module = "ferrum._core", name = "DataCalculate")]
-#[derive(Debug, Clone)]
-pub(crate) struct PyDataCalculate(pub(crate) TransformSpec);
-
-#[pymethods]
-impl PyDataCalculate {
-    #[new]
-    #[pyo3(signature = (expr, as_field, *, name = None))]
-    fn new(expr: String, as_field: String, name: Option<String>) -> PyResult<Self> {
-        if expr.is_empty() {
-            return Err(PyValueError::new_err("DataCalculate: expr must be non-empty"));
-        }
-        if as_field.is_empty() {
-            return Err(PyValueError::new_err("DataCalculate: as_field must be non-empty"));
-        }
-        Ok(PyDataCalculate(TransformSpec::Calculate(CalculateSpec { as_field, expr, name })))
-    }
-
-    fn __repr__(&self) -> String {
-        match &self.0 {
-            TransformSpec::Calculate(s) => format!("DataCalculate(expr='{}', as_='{}')", s.expr, s.as_field),
-            _ => "DataCalculate(?)".to_string(),
-        }
-    }
-}
+// No PyO3 wrapper: `DataCalculate` is constructed only via the dict-emitting
+// `transform_calculate` Python function and carried through the
+// `transforms_json` serde path (SEAM-02). The empty-`expr` check the removed
+// `#[new]` performed is not reachable via the dict path (which only validates
+// `as_`); the empty-`as_field` check is covered by `transform_calculate`'s
+// `_validate_as_str`. `CalculateSpec` above is the serde target.
 
 #[cfg(test)]
 mod tests {

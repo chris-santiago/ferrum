@@ -117,6 +117,18 @@ pub(crate) enum TransformSpec {
 ///
 /// Naming convention: wrapper is `Py<Variant>` for every entry. The
 /// historic `PyQQ` exception was renamed to `PyQq` to match `Qq`.
+///
+/// **Py-wrapper coverage (SEAM-02):** the `apply`/`spec_name` dispatchers use
+/// every entry's `Variant`/`module_ident`, but the `PyWrapper` column is only
+/// meaningful for transforms that expose a Python class. The Phase-12 data
+/// transforms are constructed exclusively through the dict-emitting
+/// `transform_*` functions (`src/ferrum/transforms.py`); their typed `Data*`
+/// pyclasses were never imported or exported, so they were removed. The eight
+/// `Data*` entries below therefore keep their `PyWrapper` name for layout
+/// symmetry but carry no live `#[pyclass]`; the Python-facing sites
+/// (registration, the `ChartSpec.transforms` getter, and `coerce_transforms`)
+/// drive off [`for_each_py_transform!`] instead, which lists only the variants
+/// that still have a Python wrapper class.
 macro_rules! for_each_transform {
     ($mac:ident) => {
         $mac! {
@@ -165,7 +177,63 @@ macro_rules! for_each_transform {
         }
     };
 }
-pub(crate) use for_each_transform;
+// `for_each_transform!` is the full 41-variant dispatch table, invoked only
+// within this module (`apply`, `spec_name`). The Python-facing sites use
+// `for_each_py_transform!` (re-exported below); there is no external consumer
+// of the full table, so it is not re-exported.
+
+/// The subset of [`for_each_transform!`] whose variants still expose a Python
+/// wrapper class (`Py<Variant>`). This is the table that drives the three
+/// Python-facing sites: module registration (`lib.rs`), the
+/// `ChartSpec.transforms` getter, and `coerce_transforms` (both `spec/chart.rs`).
+///
+/// The eight Phase-12 `Data*` transforms (`Filter`, `Calculate`, `Fold`,
+/// `Pivot`, `DataWindow`, `DataStack`, `DataBin`, `DataAggregate`) are absent
+/// here: they are constructed only via the dict-emitting `transform_*` Python
+/// functions and have no typed pyclass (SEAM-02). They still round-trip through
+/// the `transforms_json` serde path; the getter renders them as plain dicts via
+/// the `_ =>` fallback arm, mirroring the `layers`/`coord`/`position` getters.
+macro_rules! for_each_py_transform {
+    ($mac:ident) => {
+        $mac! {
+            Bin           => bin            : PyBin,
+            Bin2D         => bin_2d         : PyBin2D,
+            Kde           => kde            : PyKde,
+            Smooth        => smooth         : PySmooth,
+            Aggregate     => aggregate      : PyAggregate,
+            Summary       => summary        : PySummary,
+            Outliers      => outliers       : PyOutliers,
+            ErrorExtent   => error_extent   : PyErrorExtent,
+            BoxStats      => box_stats      : PyBoxStats,
+            Violin        => violin         : PyViolin,
+            Kde2D         => kde_2d         : PyKde2D,
+            Contour       => contour        : PyContour,
+            Qq            => qq             : PyQq,
+            Linkage       => linkage        : PyLinkage,
+            Raster        => raster         : PyRaster,
+            Hex           => hex            : PyHex,
+            Swarm         => swarm          : PySwarm,
+            Unpivot       => unpivot        : PyUnpivot,
+            Reorder       => reorder        : PyReorder,
+            ReferenceLine => reference_line : PyReferenceLine,
+            LetterValue   => letter_value   : PyLetterValue,
+            Logistic      => logistic       : PyLogistic,
+            Glm           => glm            : PyGlm,
+            Robust        => robust         : PyRobust,
+            Identity      => identity       : PyIdentity,
+            JoinAggregate => join_aggregate : PyJoinAggregate,
+            DensityData   => density_data   : PyDensityData,
+            RegressionData => regression_data : PyRegressionData,
+            LoessData     => loess_data     : PyLoessData,
+            Impute        => impute         : PyImpute,
+            Flatten       => flatten        : PyFlatten,
+            Sample        => sample         : PySample,
+            TopK          => top_k          : PyTopK,
+            TimeUnit      => timeunit       : PyTimeUnit,
+        }
+    };
+}
+pub(crate) use for_each_py_transform;
 
 impl TransformSpec {
     pub(crate) fn apply(&self, batch: &RecordBatch) -> PyResult<RecordBatch> {

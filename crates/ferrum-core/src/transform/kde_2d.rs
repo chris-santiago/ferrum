@@ -65,6 +65,7 @@ pub(crate) fn global_extent(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Kde2DSpec {
     pub x: String,
     pub y: String,

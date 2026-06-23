@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::transform::expr::{Expr, ExprValue};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct FilterSpec {
     pub predicate: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -133,33 +134,9 @@ pub(crate) fn batch_field_value(
     field_value(batch, &batch.schema(), field_name, row)
 }
 
-// ─── PyO3 wrapper ──────────────────────────────────────────────────────────
-
-use pyo3::prelude::*;
-use crate::transform::core::TransformSpec;
-
-#[pyclass(module = "ferrum._core", name = "DataFilter")]
-#[derive(Debug, Clone)]
-pub(crate) struct PyDataFilter(pub(crate) TransformSpec);
-
-#[pymethods]
-impl PyDataFilter {
-    #[new]
-    #[pyo3(signature = (predicate, *, name = None))]
-    fn new(predicate: String, name: Option<String>) -> PyResult<Self> {
-        if predicate.is_empty() {
-            return Err(PyValueError::new_err("DataFilter: predicate must be non-empty"));
-        }
-        Ok(PyDataFilter(TransformSpec::Filter(FilterSpec { predicate, name, param: None })))
-    }
-
-    fn __repr__(&self) -> String {
-        match &self.0 {
-            TransformSpec::Filter(s) => format!("DataFilter(predicate='{}')", s.predicate),
-            _ => "DataFilter(?)".to_string(),
-        }
-    }
-}
+// No PyO3 wrapper: `DataFilter` is constructed only via the dict-emitting
+// `transform_filter` Python function and carried through the `transforms_json`
+// serde path (SEAM-02). `FilterSpec` above is the serde target.
 
 #[cfg(test)]
 mod tests {
