@@ -86,25 +86,5 @@ def get_default_theme() -> Theme:
 
 
 def theme_context(theme: Theme) -> AbstractContextManager:
-    """Scope a theme to a ``with`` block — alias for ``set_default_theme()``.
-
-    Prefer this spelling over ``set_default_theme()`` when the intent is
-    always context-manager usage (e.g. in tests or notebook cells).
-
-    Parameters
-    ----------
-    theme : Theme
-        Theme to activate for the duration of the ``with`` block.
-
-    Returns
-    -------
-    contextlib.AbstractContextManager
-        Context manager; restores the prior default on ``__exit__``.
-
-    Examples
-    --------
-    >>> import ferrum as fm
-    >>> with fm.theme_context(fm.themes.dark):
-    ...     chart = fm.Chart(df).mark_point().encode(x="hp", y="mpg")
-    """
+    """Context-manager-spelling alias for :func:`set_default_theme`. See it for full semantics."""
     return set_default_theme(theme)

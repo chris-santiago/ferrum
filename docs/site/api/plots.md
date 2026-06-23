@@ -37,7 +37,6 @@ Figure-level helpers — `displot`, `catplot`, `lmplot`, `pairplot`, and the `*_
         - prediction_error_chart
         - rank1d_chart
         - rank2d_chart
-        - rank_chart
         - regplot
         - relplot
         - residplot
@@ -45,7 +44,6 @@ Figure-level helpers — `displot`, `catplot`, `lmplot`, `pairplot`, and the `*_
         - roc_chart
         - shap_bar_chart
         - shap_beeswarm_chart
-        - shap_chart
         - shap_waterfall_chart
         - silhouette_chart
         - validation_curve_chart

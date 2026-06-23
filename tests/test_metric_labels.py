@@ -45,11 +45,74 @@ def test_metric_label_specs_single_source():
         "ap": (_ap_step, "AP = "),
         "brier": (_brier_score, "Brier = "),
     }
+    expected_fns = {"auc": _trapezoid_auc, "ap": _ap_step, "brier": _brier_score}
     # The dataclass prefix defaults are the table's prefixes (no second copy).
     for cls, kind in ((AUCLabel, "auc"), (APLabel, "ap"), (BrierLabel, "brier")):
         assert cls().prefix == _METRIC_LABEL_SPECS[kind][1]
-        # __radd__ resolves its value function from the same table entry.
         assert cls._kind == kind
+        # __radd__ resolves its value function FROM the table: i.e. the lookup
+        # ``_METRIC_LABEL_SPECS[self._kind][0]`` returns the expected fn for this
+        # class. (Pins the resolution, not just that ``_kind`` matches a key.)
+        assert _METRIC_LABEL_SPECS[cls._kind][0] is expected_fns[kind]
+
+
+def test_metric_label_classes_registry_derived_consistent():
+    """``_METRIC_LABEL_CLASSES`` is derived from the classes and stays in lockstep
+    with ``_METRIC_LABEL_SPECS``: every spec kind has a class, every class's
+    ``_kind`` is a spec key, and the explicit-field path constructs the right
+    class per kind.
+    """
+    from ferrum._metric_labels import (
+        APLabel,
+        AUCLabel,
+        BrierLabel,
+        _METRIC_LABEL_CLASSES,
+        _METRIC_LABEL_SPECS,
+        _apply_metric_label_explicit,
+    )
+
+    # Registry is keyed by each class's own ``_kind`` (cannot desync).
+    assert _METRIC_LABEL_CLASSES == {"auc": AUCLabel, "ap": APLabel, "brier": BrierLabel}
+    # Bidirectional key agreement with the spec table.
+    assert set(_METRIC_LABEL_CLASSES) == set(_METRIC_LABEL_SPECS)
+    for kind, cls in _METRIC_LABEL_CLASSES.items():
+        assert cls._kind == kind
+
+    # The explicit-field path constructs the registry's class for each kind.
+    base = Chart(_roc_data()).encode(x="fpr", y="tpr").mark_line()
+    constructed: list[type] = []
+
+    import ferrum._metric_labels as ml
+
+    real_apply = ml._apply_metric_label
+
+    def _spy(base_chart, label_obj, **kwargs):
+        constructed.append(type(label_obj))
+        return real_apply(base_chart, label_obj, **kwargs)
+
+    ml._apply_metric_label = _spy
+    try:
+        for kind, cls in _METRIC_LABEL_CLASSES.items():
+            constructed.clear()
+            _apply_metric_label_explicit(base, kind, x_col="fpr", y_col="tpr")
+            assert constructed == [cls], (kind, constructed, cls)
+    finally:
+        ml._apply_metric_label = real_apply
+
+
+def test_metric_label_kind_is_classvar_not_a_field():
+    """``_kind`` is a ``ClassVar`` so the frozen dataclass excludes it from
+    ``fields()``/``eq``/``hash``; adding the annotation must not turn it into a
+    dataclass field.
+    """
+    import dataclasses
+
+    from ferrum._metric_labels import APLabel, AUCLabel, BrierLabel
+
+    for cls in (AUCLabel, APLabel, BrierLabel):
+        names = [f.name for f in dataclasses.fields(cls)]
+        assert names == ["position", "format", "prefix"], (cls.__name__, names)
+        assert "_kind" not in names
 
 
 def test_metric_label_explicit_rejects_unknown_kind():

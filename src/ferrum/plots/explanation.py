@@ -27,7 +27,6 @@ if TYPE_CHECKING:
     from ferrum import Chart
 
 from ferrum.encoding import X, Y
-from ferrum._overrides import _apply_overrides
 from ferrum.plots._helpers import (
     _finalize_chart,
     _reject_compare,
@@ -35,6 +34,7 @@ from ferrum.plots._helpers import (
     _resolve_source,
     _should_facet_by_class,
     _validate_choice,
+    _warn_deprecated_dispatcher,
 )
 
 
@@ -1051,13 +1051,10 @@ def shap_chart(
         "compose one chart per model instead",
     )
 
-    import warnings
-
-    warnings.warn(
-        "shap_chart(kind=...) is deprecated; use shap_beeswarm_chart / "
-        "shap_bar_chart / shap_waterfall_chart instead.",
-        DeprecationWarning,
-        stacklevel=2,
+    _warn_deprecated_dispatcher(
+        "shap_chart",
+        "kind",
+        "shap_beeswarm_chart / shap_bar_chart / shap_waterfall_chart",
     )
 
     source = _resolve_source(model, X, y, random_state=random_state)

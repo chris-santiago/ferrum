@@ -29,7 +29,6 @@ from ferrum import (
     Smooth,
 )
 from ferrum.encoding import X, Y
-from ferrum._overrides import _apply_overrides
 from ferrum.plots._helpers import (
     _color_field_for,
     _finalize_chart,
@@ -38,10 +37,8 @@ from ferrum.plots._helpers import (
     _inject_metrics_corner,
     _merge_layers,
     _overlay_metrics_corner,
-    _r2_score,
     _reject_compare,
     _resolve_source,
-    _sort_by,
     _to_polars,
     _validate_choice,
 )
@@ -258,7 +255,6 @@ def _prediction_error_chart_from_source(
       around the identity line.
     """
     import ferrum
-    import numpy as np
 
     df = source.predictions().sort("y_true")
     # The residual confidence band (``ci`` / ``reference_band``) is a

@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     from ferrum import Chart
 
 from ferrum.encoding import X, Y
-from ferrum._overrides import _apply_overrides
 from ferrum.plots._helpers import (
     _UNSET,
     _coerce_to_polars,
@@ -36,6 +35,7 @@ from ferrum.plots._helpers import (
     _resolve_first_param,
     _resolve_source,
     _validate_choice,
+    _warn_deprecated_dispatcher,
 )
 
 
@@ -157,13 +157,7 @@ def rank_chart(
         raise TypeError("rank_chart() missing required argument: 'data_or_source'")
     _validate_choice("rank_chart", "rank", rank, {"1d", "2d"})
 
-    import warnings
-
-    warnings.warn(
-        "rank_chart(rank=...) is deprecated; use rank1d_chart / rank2d_chart instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
+    _warn_deprecated_dispatcher("rank_chart", "rank", "rank1d_chart / rank2d_chart")
     if rank == "1d":
         return rank1d_chart(
             data_or_source,

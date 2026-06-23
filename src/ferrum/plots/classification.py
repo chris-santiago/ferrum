@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from ferrum import Chart
 
 from ferrum.encoding import X, Y
-from ferrum._overrides import _apply_overrides, register_layer_names
+from ferrum._overrides import register_layer_names
 from ferrum.plots._helpers import (
     _charts_with_endpoint_labels,
     _color_field_for,

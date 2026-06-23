@@ -24,7 +24,6 @@ from ferrum import (
     Jitter,
     Stack,
 )
-from ferrum._overrides import _apply_overrides
 from ferrum.plots._helpers import _finalize_chart, _to_polars, _validate_choice
 
 
@@ -749,7 +748,7 @@ def _catplot_build(
 
     # Encoding shared across all kinds.
     from ferrum.encoding import Color as _Color
-    from ferrum.encoding import X as _X, Y as _Y
+    from ferrum.encoding import X as _X
 
     # Build the encoding with x=categorical, y=value regardless of orientation.
     # CoordFlip (added below when horizontal=True) handles the visual axis swap.

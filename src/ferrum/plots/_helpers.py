@@ -323,6 +323,29 @@ def _validate_choice(
         )
 
 
+def _warn_deprecated_dispatcher(old_name: str, param_name: str, replacements: str) -> None:
+    """Emit the canonical ``DeprecationWarning`` for a split dispatcher shim.
+
+    Both ``shap_chart(kind=...)`` and ``rank_chart(rank=...)`` are deprecated
+    dispatchers that warn then forward to their split siblings. This factors
+    out the duplicated warn idiom so each shim is a thin validate-then-delegate
+    wrapper; the heterogeneous per-kind dispatch stays explicit in each shim::
+
+        {old_name}({param_name}=...) is deprecated; use {replacements} instead.
+
+    ``stacklevel=3`` (this helper -> the shim -> the user) points the warning at
+    the user's call site, preserving the pre-refactor behavior where each shim
+    called ``warnings.warn(..., stacklevel=2)`` inline.
+    """
+    import warnings
+
+    warnings.warn(
+        f"{old_name}({param_name}=...) is deprecated; use {replacements} instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
 def _require(func_name: str, arg_name: str, value: Any, *, hint: str) -> Any:
     """Raise ``ValueError`` when a required figure-function argument is ``None``."""
     if value is None:

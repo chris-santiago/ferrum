@@ -27,7 +27,6 @@ if TYPE_CHECKING:
     from ferrum import Chart, HConcatChart
 
 from ferrum.encoding import X, Y
-from ferrum._overrides import _apply_overrides
 from ferrum.plots._helpers import (
     _UNSET,
     _finalize_chart,
@@ -494,7 +493,7 @@ def _cluster_diagnostics_chart(
     else:
         # scoring="both" returns HConcatChart — mark/encode/layers overrides
         # don't apply meaningfully to compound views. Only properties= is
-        # forwarded (via _apply_overrides, which calls .properties() on the
+        # forwarded (via _finalize_chart, which calls .properties() on the
         # compound). mark=/encode=/layers= are silently ignored.
         chart = elbow | sil
     return _finalize_chart(

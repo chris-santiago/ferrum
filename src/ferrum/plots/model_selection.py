@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     from ferrum import Chart
 
 from ferrum.encoding import X, Y
-from ferrum._overrides import _apply_overrides
 from ferrum.plots._helpers import _charts_with_endpoint_labels, _dedupe_aggregated, _finalize_chart
 from ferrum.plots._helpers import _reject_compare, _resolve_source, _require
 

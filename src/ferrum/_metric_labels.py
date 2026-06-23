@@ -27,7 +27,7 @@ and the per-class dataclass ``__radd__`` methods.)
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, ClassVar, Literal, Optional
 
 import polars as pl
 
@@ -208,7 +208,7 @@ class AUCLabel:
     >>> annotated = chart + fm.AUCLabel()
     """
 
-    _kind = "auc"
+    _kind: ClassVar[str] = "auc"
     position: Literal["end", "corner"] = "end"
     format: str = ".3f"
     prefix: str = _default_prefix("auc")
@@ -247,7 +247,7 @@ class APLabel:
     >>> annotated = chart + fm.APLabel()
     """
 
-    _kind = "ap"
+    _kind: ClassVar[str] = "ap"
     position: Literal["end", "corner"] = "end"
     format: str = ".3f"
     prefix: str = _default_prefix("ap")
@@ -285,7 +285,7 @@ class BrierLabel:
     >>> annotated = chart + fm.BrierLabel()
     """
 
-    _kind = "brier"
+    _kind: ClassVar[str] = "brier"
     position: Literal["end", "corner"] = "corner"
     format: str = ".3f"
     prefix: str = _default_prefix("brier")
@@ -296,6 +296,15 @@ class BrierLabel:
         if not isinstance(base, Chart):
             return NotImplemented
         return _apply_metric_label(base, self, metric_fn=_METRIC_LABEL_SPECS[self._kind][0])
+
+
+# Registry of metric-label classes keyed by each class's own ``_kind``, so the
+# figure-function explicit-field path (:func:`_apply_metric_label_explicit`)
+# constructs the right class per kind without an if/elif ladder that could
+# desync from the classes. Derived from the classes themselves; the keys match
+# ``_METRIC_LABEL_SPECS`` (both keyed by the same ``"auc"``/``"ap"``/``"brier"``
+# strings; enforced by the single-source test).
+_METRIC_LABEL_CLASSES: dict[str, type] = {cls._kind: cls for cls in (AUCLabel, APLabel, BrierLabel)}
 
 
 @dataclass(frozen=True)
@@ -409,12 +418,9 @@ def _apply_metric_label_explicit(
     metric_fn, default_prefix = _METRIC_LABEL_SPECS[label_kind]
     pos_lit: Any = position
     prefix_str = prefix if prefix is not None else default_prefix
-    if label_kind == "auc":
-        label_obj: Any = AUCLabel(position=pos_lit, format=fmt, prefix=prefix_str)
-    elif label_kind == "ap":
-        label_obj = APLabel(position=pos_lit, format=fmt, prefix=prefix_str)
-    else:
-        label_obj = BrierLabel(position=pos_lit, format=fmt, prefix=prefix_str)
+    label_obj: Any = _METRIC_LABEL_CLASSES[label_kind](
+        position=pos_lit, format=fmt, prefix=prefix_str
+    )
     return _apply_metric_label(
         base,
         label_obj,

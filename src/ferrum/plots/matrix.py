@@ -21,7 +21,6 @@ from __future__ import annotations
 from typing import Any
 
 from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
-from ferrum._overrides import _apply_overrides
 from ferrum.plots._helpers import (
     _finalize_chart,
     _merge_layers,
