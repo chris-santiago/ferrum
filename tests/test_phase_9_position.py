@@ -336,8 +336,18 @@ class TestEligibilityMatrix:
 _CHART03_INSTANCES = [
     pytest.param(Identity(), Identity(), Dodge(), id="Identity"),
     pytest.param(Dodge(by="g", padding=0.1), Dodge(by="g", padding=0.1), Dodge(by="h"), id="Dodge"),
-    pytest.param(Jitter(axis="y", width=0.3, seed=7), Jitter(axis="y", width=0.3, seed=7), Jitter(axis="x"), id="Jitter"),
-    pytest.param(Stack(by="cat", offset="normalize", anchor="mid"), Stack(by="cat", offset="normalize", anchor="mid"), Stack(by="other"), id="Stack"),
+    pytest.param(
+        Jitter(axis="y", width=0.3, seed=7),
+        Jitter(axis="y", width=0.3, seed=7),
+        Jitter(axis="x"),
+        id="Jitter",
+    ),
+    pytest.param(
+        Stack(by="cat", offset="normalize", anchor="mid"),
+        Stack(by="cat", offset="normalize", anchor="mid"),
+        Stack(by="other"),
+        id="Stack",
+    ),
 ]
 
 

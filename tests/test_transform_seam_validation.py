@@ -72,9 +72,7 @@ _LIVE_TRANSFORM_CLASSES = [
 @pytest.mark.parametrize("name", _REMOVED_DATA_CLASSES)
 def test_dead_data_class_removed_from_core(name):
     """The dead typed ``Data*`` transform classes are no longer in ``_core``."""
-    assert not hasattr(_core, name), (
-        f"{name} should have been removed from ferrum._core (SEAM-02)"
-    )
+    assert not hasattr(_core, name), f"{name} should have been removed from ferrum._core (SEAM-02)"
 
 
 @pytest.mark.parametrize("name", _REMOVED_DATA_CLASSES)
@@ -161,9 +159,7 @@ def test_valid_transform_aggregate_still_renders():
         fm.Chart(_DF)
         .mark_bar()
         .encode(x="g:N", y="m:Q")
-        .transform(
-            fm.transform_aggregate({"field": "x", "fn": "mean", "as": "m"}, groupby=["g"])
-        )
+        .transform(fm.transform_aggregate({"field": "x", "fn": "mean", "as": "m"}, groupby=["g"]))
         .to_svg()
     )
     assert svg, "valid transform_aggregate must render"

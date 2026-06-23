@@ -457,7 +457,17 @@ def test_figure_chrome_kwargs_carries_title(base_chart):
 # COMP-03: _merge_child_scenes* empty-input returns canonical schema
 # ---------------------------------------------------------------------------
 
-_FULL_SCENE_KEYS = {"panels", "width", "height", "selections", "interaction", "title", "legend", "decorations", "background"}
+_FULL_SCENE_KEYS = {
+    "panels",
+    "width",
+    "height",
+    "selections",
+    "interaction",
+    "title",
+    "legend",
+    "decorations",
+    "background",
+}
 
 
 def test_merge_child_scenes_empty_input_returns_full_schema():

@@ -122,9 +122,7 @@ def test_categorical_annotation_band_positions_differ_for_first_and_last():
     assert x_a != x_c, (
         f"'A' and 'C' annotations share x1={x_a}; ordinal norm map must produce distinct positions."
     )
-    assert x_a < x_c, (
-        f"'A' (x1={x_a}) must be left of 'C' (x1={x_c}) in ordinal order."
-    )
+    assert x_a < x_c, f"'A' (x1={x_a}) must be left of 'C' (x1={x_c}) in ordinal order."
 
 
 # ---------------------------------------------------------------------------
