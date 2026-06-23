@@ -1823,7 +1823,7 @@ class LayerChart(_ChartLike):
 
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) via the merged multi-layer Chart."""
-        from ferrum._interactive import _render_scene
+        from ferrum._scene import _render_scene
 
         merged = self._build_merged()
         return _render_scene(merged)

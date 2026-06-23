@@ -14,6 +14,8 @@ import logging
 import pathlib
 from typing import TYPE_CHECKING, Any, Callable
 
+from ferrum._scene import ZoomRebuildable, _render_scene
+
 if TYPE_CHECKING:
     from ferrum.chart import Chart
 
@@ -138,7 +140,7 @@ class InteractiveChart:
         import json as _json
 
         # Compositions don't support zoom rebuild (no _clone / coord override).
-        if not hasattr(self._chart, "_clone"):
+        if not isinstance(self._chart, ZoomRebuildable):
             return
 
         zoom = _json.loads(change.get("new", "{}"))
@@ -297,52 +299,3 @@ class InteractiveChart:
     def __repr__(self) -> str:
         selections = getattr(self._chart, "_selections", [])
         return f"InteractiveChart(selections={len(selections)})"
-
-
-def _render_scene(chart: "Chart") -> tuple[str, bytes]:
-    """Return (scene_json, packed_bytes) for the interactive renderer.
-
-    Dispatches to ``_render_interactive()`` when the object is a
-    composition type (HConcat, VConcat, Layer, etc.), and falls through
-    to the standard Rust ``render_interactive`` for plain ``Chart``.
-    """
-    # Composition types implement _render_interactive(); plain Charts do not.
-    if hasattr(chart, "_render_interactive"):
-        return chart._render_interactive()
-
-    import json as _json
-
-    from ferrum._core import render_interactive
-
-    spec, data, viewport, theme_dict, chart_config_dict = chart._render_inputs(_auto_tooltips=True)
-    if data.num_rows == 0:
-        w, h = viewport
-        return _json.dumps(
-            {
-                "panels": [],
-                "width": w,
-                "height": h,
-                "background": None,
-                "title": [],
-                "legend": [],
-                "decorations": [],
-                "selections": [],
-                "interaction": {
-                    "zoom_enabled": True,
-                    "pan_enabled": True,
-                    "toolbar": True,
-                    "conditionals": [],
-                    "linked_panels": [],
-                    "tick_levels": [],
-                    "params": [],
-                    "param_bindings": [],
-                },
-            }
-        ), b""
-    return render_interactive(
-        spec,
-        data,
-        viewport=viewport,
-        theme=theme_dict,
-        chart_config=chart_config_dict or None,
-    )

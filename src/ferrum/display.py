@@ -7,12 +7,14 @@ import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING, Union, cast
 
+from ferrum._scene import SupportsRender
+
 if TYPE_CHECKING:
     from ferrum.chart import Chart
 
 
 def save_chart(
-    chart: object,
+    chart: SupportsRender,
     path: Union[str, Path],
     *,
     format: str | None = None,
@@ -97,7 +99,7 @@ def save_chart(
 
 
 def html_string(
-    chart_like: object,
+    chart_like: SupportsRender,
     *,
     embed_wasm: bool = True,
     toolbar: bool = True,
@@ -266,11 +268,11 @@ def save_chart_svg(svg: str, path: str, *, scale: float = 2.0) -> None:
     Path(path).write_bytes(_png_to_minimal_pdf(png_bytes))
 
 
-def _render_scene_json(chart: object) -> tuple[str, bytes]:
+def _render_scene_json(chart: SupportsRender) -> tuple[str, bytes]:
     """Render any chart-like to SceneGraph JSON + packed binary data.
 
     This is the uniform ``(scene_json, packed_data)`` producer used by every
-    HTML / JSON export path.  It delegates to :func:`ferrum._interactive._render_scene`,
+    HTML / JSON export path.  It delegates to :func:`ferrum._scene._render_scene`,
     which dispatches to a composition's ``_render_interactive()`` when present
     and otherwise drives the Rust ``render_interactive`` for a plain ``Chart``.
 
@@ -279,6 +281,6 @@ def _render_scene_json(chart: object) -> tuple[str, bytes]:
     tuple[str, bytes]
         ``(scene_json, packed_data)``.
     """
-    from ferrum._interactive import _render_scene
+    from ferrum._scene import _render_scene
 
     return _render_scene(chart)

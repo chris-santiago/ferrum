@@ -8,7 +8,7 @@ rendered child scenes into one interactive scene + packed-instance buffer.
 The composite classes import the public ``_merge_child_scenes*`` /
 ``_render_single_with_figure_chrome`` entry points from here; this module never
 imports ``composition`` at module level.  The only cross-module dependency is
-the renderer entry point (``ferrum._interactive._render_scene``) and the Rust
+the renderer entry point (``ferrum._scene._render_scene``) and the Rust
 ``figure_title_nodes`` helper, both imported function-locally to avoid an import
 cycle.
 
@@ -128,7 +128,7 @@ def _render_charts(charts: list) -> list[tuple[dict, bytes]]:
     ``_render_scene`` + ``_json.loads`` prelude is not copy-pasted.
     The caller is responsible for its own empty-input guard (COMP-03).
     """
-    from ferrum._interactive import _render_scene
+    from ferrum._scene import _render_scene
 
     return [
         (_json.loads(scene_json), packed)
@@ -656,7 +656,7 @@ def _render_single_with_figure_chrome(chart, figure_chrome: "_FigureChrome") -> 
     no title text this returns the child scene unchanged (byte-identical to
     ``_render_scene``), preserving backward compatibility.
     """
-    from ferrum._interactive import _render_scene
+    from ferrum._scene import _render_scene
 
     scene_json, packed = _render_scene(chart)
     if (

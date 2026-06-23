@@ -10,7 +10,10 @@ import copy
 import json
 import logging
 from dataclasses import replace
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
+
+if TYPE_CHECKING:
+    from ferrum._interactive import InteractiveChart
 
 from ferrum._coerce import to_arrow_table
 from ferrum._desugar import _resolve_pending_impl
@@ -2581,13 +2584,12 @@ class Chart(
                 _append_unique_by_name(new._selections, p)
         return new
 
-    def interactive(self, *, toolbar: bool = True) -> "Chart":
-        """Mark this chart as interactive.
+    def interactive(self, *, toolbar: bool = True) -> "InteractiveChart":
+        """Return an interactive rendering of this chart.
 
-        Per ``ferrum-spec.md §3.10`` (L736), interactive features (selections,
-        pan/zoom, conditional encodings) are silently ignored under SVG/PNG.
-        Returns a new ``Chart`` so chained construction patterns work today
-        and will gain real interactivity once the Phase 11 WASM renderer ships.
+        Wraps the chart in an ``InteractiveChart`` widget backed by the WASM
+        renderer, enabling selections, pan/zoom, and conditional encodings in
+        Jupyter and HTML exports.
 
         Parameters
         ----------
@@ -2597,8 +2599,8 @@ class Chart(
 
         Returns
         -------
-        Chart
-            New ``Chart`` (clone).
+        InteractiveChart
+            An interactive widget/container backed by the WASM renderer.
 
         Examples
         --------
