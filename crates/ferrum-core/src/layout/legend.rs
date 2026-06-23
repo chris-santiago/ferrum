@@ -92,6 +92,31 @@ pub struct LegendLayout {
     pub label_font_size: Option<f64>,
 }
 
+impl LegendLayout {
+    /// Base `LegendLayout` for the given placement: no entries, no title, no
+    /// colorbar, and all six styling fields (`symbol_stroke_width`, `clip_height`,
+    /// `symbol_size`, `label_color`, `label_font_size`, `colorbar`) defaulted to
+    /// their historical `None` (390). The three layout kinds build on top of this
+    /// via struct-update (`..LegendLayout::base(...)`), so the always-`None`
+    /// defaults live in one place instead of being hand-set at four construction
+    /// sites. Byte-identical: the spread fields carry the same values as before.
+    fn base(rect: Rect, orient: LegendOrient, direction: LegendDirection) -> LegendLayout {
+        LegendLayout {
+            rect,
+            orient,
+            direction,
+            entries: Vec::new(),
+            title: None,
+            colorbar: None,
+            symbol_stroke_width: None,
+            clip_height: None,
+            symbol_size: None,
+            label_color: None,
+            label_font_size: None,
+        }
+    }
+}
+
 /// Continuous-color colorbar within a LegendLayout. The bar is rendered as
 /// a vertical SVG `linearGradient` rect with tick marks + labels on its
 /// right edge. Used by `clustermap()` and any chart with a continuous color
@@ -157,12 +182,18 @@ use super::text_metrics::TextMetrics;
 
 /// Per-chart legend overrides extracted from `encoding.color.legend` dict.
 /// These are applied on top of `ThemeInputs` defaults at layout time.
+///
+/// The categorical-legend style/positioning fields live nested in
+/// [`style`](Self::style) (a [`LegendStyleOpts`]) so a new per-legend style field
+/// is added in exactly one place rather than threaded field-by-field into a
+/// parallel struct (cohesion finding LAYOUT-380). The colorbar-only / dispatch
+/// fields (`tick_count`, `gradient_*`, `values`, `legend_type`, `symbol_type`,
+/// `direction`, `tick_min_step`) stay flat here because they are consumed by the
+/// colorbar/dispatch path, not `layout_legend`'s style bundle.
 #[derive(Debug, Clone, Default)]
 pub struct LegendOverrides {
     /// Max ticks for a continuous colorbar. Subsets `tick_labels` before layout.
     pub tick_count: Option<usize>,
-    /// Font size for entry/tick labels (overrides `theme.label_font_size`).
-    pub label_font_size: Option<f64>,
     /// Pixel length (height) of the colorbar gradient bar (overrides `COLORBAR_HEIGHT`).
     pub gradient_length: Option<f64>,
     /// Pixel thickness (width) of the colorbar gradient bar (overrides `COLORBAR_WIDTH`).
@@ -176,36 +207,14 @@ pub struct LegendOverrides {
     /// Override legend symbol shape (e.g. `"circle"`, `"square"`, `"line"`).
     /// Applies to all categorical legend entries when set.
     pub symbol_type: Option<String>,
-    /// B5 unit 3: stroke width of legend symbols (px). `None` → no symbol stroke
-    /// (the historical default, byte-identical output).
-    pub symbol_stroke_width: Option<f64>,
-    /// B5 unit 3: vertical entry spacing (px) overriding `LEGEND_ENTRY_ROW_PAD`.
-    pub row_padding: Option<f64>,
-    /// B5 unit 3: horizontal entry spacing (px) for horizontal-direction legends,
-    /// overriding `LEGEND_ENTRY_ROW_PAD`.
-    pub column_padding: Option<f64>,
-    /// B5 unit 3: max legend-label pixel width. Labels wider than this are
-    /// truncated with an ellipsis (`…`) and the legend rect shrinks accordingly.
-    pub label_limit: Option<f64>,
-    /// B5 unit 3: cap the legend group's total height (px). Overflow is
-    /// hard-clipped via an SVG `clipPath` on the legend group.
-    pub clip_height: Option<f64>,
     /// B5 unit 3: minimum step between colorbar ticks (data units). Drops ticks
     /// whose labelled value is closer than this to a kept tick.
     pub tick_min_step: Option<f64>,
-    /// B5 unit 6a: legend swatch area (px²). The renderer derives the swatch
-    /// geometry from this via `radius = sqrt(area / PI)`.
-    pub symbol_size: Option<f64>,
-    /// B5 unit 6a: fill color (css hex) of the legend entry label text.
-    pub label_color: Option<String>,
-    /// B5 unit 6a: extra gap (px) between the plot area and the legend strip.
-    pub offset: Option<f64>,
-    /// B5 unit 6a: internal padding (px) between the legend box edge and its
-    /// contents (replaces `LEGEND_OUTER_PAD` for the categorical legend).
-    pub padding: Option<f64>,
-    /// B5 unit 6a: gap (px) between the legend title and the first entry row
-    /// (replaces `LEGEND_TITLE_GAP`).
-    pub title_padding: Option<f64>,
+    /// Categorical-legend style/positioning overrides (B5 unit 3 / 6a). Single
+    /// home for the fields `layout_legend` consumes via [`LegendStyleOpts`]; the
+    /// colorbar path also reads the shared `clip_height` / `label_color` /
+    /// `label_font_size` from here. See [`LegendStyleOpts`].
+    pub style: LegendStyleOpts,
 }
 
 const SYMBOL_WIDTH: f64 = 12.0;
@@ -217,6 +226,10 @@ const LEGEND_TITLE_GAP: f64 = 8.0;
 /// axis edge don't visually merge with legend text. The per-legend `offset`
 /// (B5 unit 6a) adds to this.
 const LEGEND_PLOT_GAP: f64 = 8.0;
+/// Vertical gap (px) between consecutive stacked auxiliary (size / shape) legend
+/// blocks. Promoted to the module-const block (390) from a `layout_aux_legends`
+/// local so all legend spacing constants live together.
+const AUX_BLOCK_GAP: f64 = 12.0;
 /// The ellipsis appended to a label truncated by `label_limit`.
 const LABEL_ELLIPSIS: &str = "…";
 
@@ -397,6 +410,75 @@ pub fn estimate_legend_size(
     }
 }
 
+/// Carve a legend strip off `inner` on the given `orient`, returning the
+/// `(legend_rect, plot_inner)` pair (390). Horizontal orients (Right/Left) inset
+/// by `h_gap`; vertical orients (Top/Bottom) inset by `v_offset`. The strip width
+/// (Right/Left) is capped at half the inner width; the strip height (Top/Bottom)
+/// at half the inner height — matching the categorical legend's historical clamp.
+///
+/// This is the single source for the `split_*`-based strip carve shared by the
+/// categorical [`layout_legend`] (all four orients) and the no-color-legend aux
+/// gutter in [`layout_aux_legends`] (Right/Left). The colorbar carve drifts
+/// genuinely (pin-to-edge `Rect` literals + a distinct `legend_gutter` rather than
+/// `LEGEND_PLOT_GAP`), so it keeps its own arithmetic to stay byte-identical.
+fn carve_legend_strip(
+    orient: LegendOrient,
+    inner: Rect,
+    size: LegendSize,
+    h_gap: f64,
+    v_offset: f64,
+) -> (Rect, Rect) {
+    match orient {
+        LegendOrient::Right => {
+            let w = size.width.min(inner.w * 0.5);
+            let (strip_with_gap, rest) = inner.split_right(w + h_gap);
+            // Inset the legend rect by the gap on its left side.
+            let legend_rect = Rect {
+                x: strip_with_gap.x + h_gap,
+                y: strip_with_gap.y,
+                w: strip_with_gap.w - h_gap,
+                h: strip_with_gap.h,
+            };
+            (legend_rect, rest)
+        }
+        LegendOrient::Left => {
+            let w = size.width.min(inner.w * 0.5);
+            let (strip_with_gap, rest) = inner.split_left(w + h_gap);
+            let legend_rect = Rect {
+                x: strip_with_gap.x,
+                y: strip_with_gap.y,
+                w: strip_with_gap.w - h_gap,
+                h: strip_with_gap.h,
+            };
+            (legend_rect, rest)
+        }
+        LegendOrient::Top => {
+            let h = (size.height + v_offset).min(inner.h * 0.5);
+            let (strip, rest) = inner.split_top(h);
+            // Inset the legend rect down by the offset gap from the plot edge.
+            let legend_rect = Rect {
+                x: strip.x,
+                y: strip.y + v_offset,
+                w: strip.w,
+                h: (strip.h - v_offset).max(0.0),
+            };
+            (legend_rect, rest)
+        }
+        LegendOrient::Bottom => {
+            let h = (size.height + v_offset).min(inner.h * 0.5);
+            let (strip, rest) = inner.split_bottom(h);
+            // Inset the legend rect by the offset gap on its top side.
+            let legend_rect = Rect {
+                x: strip.x,
+                y: strip.y + v_offset,
+                w: strip.w,
+                h: (strip.h - v_offset).max(0.0),
+            };
+            (legend_rect, rest)
+        }
+    }
+}
+
 /// Compute the legend rect on the given orient and the remaining inner rect for
 /// the rest of the chart. Returns `(None, inner)` for empty entries.
 /// Returns `(Some(legend_with_dropped_entries), reduced_inner)` if the legend
@@ -490,55 +572,11 @@ pub fn layout_legend(
     // per-legend `offset` (B5 unit 6a) widens this gap further.
     let legend_plot_gap = LEGEND_PLOT_GAP + extra_offset;
 
-    let (legend_rect, plot_inner) = match orient {
-        LegendOrient::Right => {
-            let w = size.width.min(inner.w * 0.5);
-            let (strip_with_gap, rest) = inner.split_right(w + legend_plot_gap);
-            // Inset the legend rect by the gap on its left side.
-            let legend_rect = crate::layout::Rect {
-                x: strip_with_gap.x + legend_plot_gap,
-                y: strip_with_gap.y,
-                w: strip_with_gap.w - legend_plot_gap,
-                h: strip_with_gap.h,
-            };
-            (legend_rect, rest)
-        }
-        LegendOrient::Left => {
-            let w = size.width.min(inner.w * 0.5);
-            let (strip_with_gap, rest) = inner.split_left(w + legend_plot_gap);
-            let legend_rect = crate::layout::Rect {
-                x: strip_with_gap.x,
-                y: strip_with_gap.y,
-                w: strip_with_gap.w - legend_plot_gap,
-                h: strip_with_gap.h,
-            };
-            (legend_rect, rest)
-        }
-        LegendOrient::Top => {
-            let h = (size.height + extra_offset).min(inner.h * 0.5);
-            let (strip, rest) = inner.split_top(h);
-            // Inset the legend rect down by the offset gap from the plot edge.
-            let legend_rect = crate::layout::Rect {
-                x: strip.x,
-                y: strip.y + extra_offset,
-                w: strip.w,
-                h: (strip.h - extra_offset).max(0.0),
-            };
-            (legend_rect, rest)
-        }
-        LegendOrient::Bottom => {
-            let h = (size.height + extra_offset).min(inner.h * 0.5);
-            let (strip, rest) = inner.split_bottom(h);
-            // Inset the legend rect by the offset gap on its top side.
-            let legend_rect = crate::layout::Rect {
-                x: strip.x,
-                y: strip.y + extra_offset,
-                w: strip.w,
-                h: (strip.h - extra_offset).max(0.0),
-            };
-            (legend_rect, rest)
-        }
-    };
+    // 390: carve the strip through the shared helper. Right/Left inset by
+    // `legend_plot_gap` (base gap + the per-legend `offset`); Top/Bottom inset by
+    // the bare `extra_offset` — the historical per-orient asymmetry, preserved.
+    let (legend_rect, plot_inner) =
+        carve_legend_strip(orient, inner, size, legend_plot_gap, extra_offset);
 
     let line_h = metrics.line_height(label_font_size);
 
@@ -668,17 +706,14 @@ pub fn layout_legend(
     };
 
     let legend = LegendLayout {
-        rect: legend_rect,
-        orient,
-        direction,
         entries: entries_laid_out,
         title: title_layout,
-        colorbar: None,
         symbol_stroke_width: opts.symbol_stroke_width,
         clip_height: opts.clip_height,
         symbol_size: opts.symbol_size,
         label_color: opts.label_color,
         label_font_size: opts.label_font_size,
+        ..LegendLayout::base(legend_rect, orient, direction)
     };
     (Some(legend), plot_inner)
 }
@@ -888,17 +923,12 @@ pub fn layout_colorbar(
     }).collect();
 
     let legend = LegendLayout {
-        rect: legend_rect,
-        orient,
-        direction: LegendDirection::Vertical,
-        entries: Vec::new(),
         title: title_layout,
         colorbar: Some(ColorbarLayout { bar_rect, stops, ticks }),
-        symbol_stroke_width: None,
         clip_height,
-        symbol_size: None,
         label_color,
         label_font_size: label_font_size_override,
+        ..LegendLayout::base(legend_rect, orient, LegendDirection::Vertical)
     };
     (Some(legend), new_inner)
 }
@@ -1057,26 +1087,24 @@ pub fn layout_aux_legends(
                 .iter()
                 .map(|i| estimate_aux_block_size(i, label_font_size, title_font_size, metrics).width)
                 .fold(0.0_f64, f64::max);
-            const LEGEND_PLOT_GAP: f64 = 8.0;
-            let (gutter_x, new_inner) = match orient {
-                LegendOrient::Right | LegendOrient::Top | LegendOrient::Bottom => {
-                    let w = max_w.min(inner_pre_legend.w * 0.5);
-                    let (_strip, rest) = inner_pre_legend.split_right(w + LEGEND_PLOT_GAP);
-                    (inner_pre_legend.x + inner_pre_legend.w - w, rest)
-                }
-                LegendOrient::Left => {
-                    let w = max_w.min(inner_pre_legend.w * 0.5);
-                    let (strip, rest) = inner_pre_legend.split_left(w + LEGEND_PLOT_GAP);
-                    (strip.x, rest)
-                }
+            // 390: aux always stacks in a side gutter — Right/Top/Bottom carve on
+            // the right, Left carves on the left — at the base `LEGEND_PLOT_GAP`
+            // (no per-legend offset on aux blocks). Route through the shared
+            // `carve_legend_strip` (the previous shadowing `const LEGEND_PLOT_GAP`
+            // equalled the module const, so this is byte-identical). The carved
+            // `legend_rect.x` is the gutter origin; `rest` is the reduced inner.
+            let carve_orient = match orient {
+                LegendOrient::Left => LegendOrient::Left,
+                LegendOrient::Right | LegendOrient::Top | LegendOrient::Bottom => LegendOrient::Right,
             };
-            (gutter_x, inner_pre_legend.y, new_inner, max_w)
+            let aux_size = LegendSize { width: max_w, height: 0.0 };
+            let (legend_rect, new_inner) =
+                carve_legend_strip(carve_orient, inner_pre_legend, aux_size, LEGEND_PLOT_GAP, 0.0);
+            (legend_rect.x, inner_pre_legend.y, new_inner, max_w)
         };
 
     let mut blocks: Vec<LegendLayout> = Vec::with_capacity(inputs.len());
     let mut max_block_w = color_w;
-    // Gap between stacked legend blocks.
-    const AUX_BLOCK_GAP: f64 = 12.0;
 
     for input in inputs {
         let size = estimate_aux_block_size(input, label_font_size, title_font_size, metrics);
@@ -1192,17 +1220,9 @@ fn layout_aux_block(
     }
 
     LegendLayout {
-        rect: block_rect,
-        orient: LegendOrient::Right,
-        direction: LegendDirection::Vertical,
         entries,
         title: title_layout,
-        colorbar: None,
-        symbol_stroke_width: None,
-        clip_height: None,
-        symbol_size: None,
-        label_color: None,
-        label_font_size: None,
+        ..LegendLayout::base(block_rect, LegendOrient::Right, LegendDirection::Vertical)
     }
 }
 
@@ -1246,6 +1266,73 @@ mod tests {
 
     fn mock(per_char_px: f64) -> MockMetrics<impl Fn(&str, f64) -> f64> {
         MockMetrics { measure: fixed_width(per_char_px), line_h_factor: 1.2 }
+    }
+
+    // ── 390: carve_legend_strip per-orient geometry ──────────────────────────
+
+    /// Right orient: the strip is carved off the right edge, the legend rect is
+    /// inset by `h_gap` on its left, and the remaining plot rect shrinks by
+    /// `size.width + h_gap`. The gap sits between the plot edge and the legend.
+    #[test]
+    fn carve_strip_right_insets_by_h_gap() {
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let size = LegendSize { width: 80.0, height: 200.0 };
+        let (legend_rect, plot) = carve_legend_strip(LegendOrient::Right, inner, size, 8.0, 0.0);
+        // Legend pinned to the right edge, inset by the gap on its left.
+        assert!((legend_rect.x - (inner.x + inner.w - 80.0)).abs() < 1e-9);
+        assert!((legend_rect.w - 80.0).abs() < 1e-9);
+        // Plot shrinks by width + gap; gap sits between plot edge and legend.
+        assert!((plot.w - (inner.w - 80.0 - 8.0)).abs() < 1e-9);
+        assert!((legend_rect.x - (plot.x + plot.w) - 8.0).abs() < 1e-9);
+    }
+
+    /// Left orient: the legend rect starts at the inner left edge (no x inset),
+    /// its width is reduced by `h_gap`, and the plot starts past the strip+gap.
+    #[test]
+    fn carve_strip_left_starts_at_edge() {
+        let inner = Rect { x: 10.0, y: 0.0, w: 600.0, h: 400.0 };
+        let size = LegendSize { width: 80.0, height: 200.0 };
+        let (legend_rect, plot) = carve_legend_strip(LegendOrient::Left, inner, size, 8.0, 0.0);
+        assert!((legend_rect.x - inner.x).abs() < 1e-9);
+        assert!((legend_rect.w - 80.0).abs() < 1e-9);
+        // Plot starts a gap past the legend's right edge.
+        assert!((plot.x - (inner.x + legend_rect.w) - 8.0).abs() < 1e-9);
+    }
+
+    /// Top/Bottom orients: the strip is carved off the top/bottom edge and the
+    /// legend rect is inset DOWN by `v_offset` (not `h_gap`).
+    #[test]
+    fn carve_strip_top_and_bottom_inset_by_v_offset() {
+        let inner = Rect { x: 0.0, y: 0.0, w: 600.0, h: 400.0 };
+        let size = LegendSize { width: 200.0, height: 40.0 };
+        let (top_rect, top_plot) = carve_legend_strip(LegendOrient::Top, inner, size, 8.0, 5.0);
+        // Top: rect inset down by v_offset; plot starts below the full strip.
+        assert!((top_rect.y - (inner.y + 5.0)).abs() < 1e-9);
+        assert!((top_plot.y - (inner.y + (size.height + 5.0))).abs() < 1e-9);
+
+        let (bot_rect, bot_plot) = carve_legend_strip(LegendOrient::Bottom, inner, size, 8.0, 5.0);
+        // Bottom: strip at the bottom, rect inset down by v_offset; plot keeps top.
+        assert!((bot_plot.y - inner.y).abs() < 1e-9);
+        assert!(bot_rect.y > bot_plot.y + bot_plot.h - 1.0);
+    }
+
+    /// `LegendLayout::base` defaults the six always-`None` styling fields so the
+    /// three layout kinds spread onto a consistent base (390).
+    #[test]
+    fn legend_layout_base_defaults_styling_fields() {
+        let base = LegendLayout::base(
+            Rect { x: 1.0, y: 2.0, w: 3.0, h: 4.0 },
+            LegendOrient::Right,
+            LegendDirection::Vertical,
+        );
+        assert!(base.entries.is_empty());
+        assert_eq!(base.title, None);
+        assert_eq!(base.colorbar, None);
+        assert_eq!(base.symbol_stroke_width, None);
+        assert_eq!(base.clip_height, None);
+        assert_eq!(base.symbol_size, None);
+        assert_eq!(base.label_color, None);
+        assert_eq!(base.label_font_size, None);
     }
 
     fn entries(n: usize, label_chars: usize) -> Vec<LegendEntry> {

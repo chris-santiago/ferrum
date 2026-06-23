@@ -584,7 +584,6 @@ fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides
     let lo = &prep.legend_overrides;
     LegendOverrides {
         tick_count:         lo.tick_count,
-        label_font_size:    lo.label_font_size,
         gradient_length:    lo.gradient_length,
         gradient_thickness: lo.gradient_thickness,
         direction:          lo.direction,
@@ -593,19 +592,24 @@ fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides
         // Per-channel `Legend(symbol_type=...)` (B5); chart-level
         // `configure_legend` fills this only when the per-channel value is absent.
         symbol_type:        lo.symbol_type.clone(),
-        // B5 unit 3 orphans (per-channel here; chart-level fills any still None).
-        symbol_stroke_width: lo.symbol_stroke_width,
-        row_padding:        lo.row_padding,
-        column_padding:     lo.column_padding,
-        label_limit:        lo.label_limit,
-        clip_height:        lo.clip_height,
         tick_min_step:      lo.tick_min_step,
-        // B5 unit 6a orphans (per-channel here; chart-level fills any still None).
-        symbol_size:        lo.symbol_size,
-        label_color:        lo.label_color.clone(),
-        offset:             lo.offset,
-        padding:            lo.padding,
-        title_padding:      lo.title_padding,
+        // 380: the 11 categorical-style fields (B5 unit 3 / 6a orphans —
+        // per-channel here; chart-level fills any still None) live nested on
+        // `style`. The colorbar path also reads the shared `clip_height` /
+        // `label_color` / `label_font_size` from here.
+        style: crate::layout::LegendStyleOpts {
+            symbol_stroke_width: lo.symbol_stroke_width,
+            row_padding:         lo.row_padding,
+            column_padding:      lo.column_padding,
+            label_limit:         lo.label_limit,
+            clip_height:         lo.clip_height,
+            padding:             lo.padding,
+            title_padding:       lo.title_padding,
+            offset:              lo.offset,
+            symbol_size:         lo.symbol_size,
+            label_color:         lo.label_color.clone(),
+            label_font_size:     lo.label_font_size,
+        },
     }
 }
 
@@ -627,42 +631,44 @@ fn apply_chart_config_to_legend_overrides(
     if overrides.symbol_type.is_none() {
         overrides.symbol_type = legend.symbol_type.clone();
     }
-    // B5 unit 3 orphans: per-channel (level 2) already in `overrides`; fill from
-    // `configure_legend` (level 3) only where still None, so per-channel wins.
-    if overrides.symbol_stroke_width.is_none() {
-        overrides.symbol_stroke_width = legend.symbol_stroke_width;
+    // B5 unit 3 orphans: per-channel (level 2) already in `overrides.style`; fill
+    // from `configure_legend` (level 3) only where still None, so per-channel wins.
+    let style = &mut overrides.style;
+    if style.symbol_stroke_width.is_none() {
+        style.symbol_stroke_width = legend.symbol_stroke_width;
     }
-    if overrides.row_padding.is_none() {
-        overrides.row_padding = legend.row_padding;
+    if style.row_padding.is_none() {
+        style.row_padding = legend.row_padding;
     }
-    if overrides.column_padding.is_none() {
-        overrides.column_padding = legend.column_padding;
+    if style.column_padding.is_none() {
+        style.column_padding = legend.column_padding;
     }
-    if overrides.label_limit.is_none() {
-        overrides.label_limit = legend.label_limit;
+    if style.label_limit.is_none() {
+        style.label_limit = legend.label_limit;
     }
-    if overrides.clip_height.is_none() {
-        overrides.clip_height = legend.clip_height;
+    if style.clip_height.is_none() {
+        style.clip_height = legend.clip_height;
     }
     if overrides.tick_min_step.is_none() {
         overrides.tick_min_step = legend.tick_min_step;
     }
-    // B5 unit 6a orphans: per-channel (level 2) already in `overrides`; fill from
-    // `configure_legend` (level 3) only where still None, so per-channel wins.
-    if overrides.symbol_size.is_none() {
-        overrides.symbol_size = legend.symbol_size;
+    // B5 unit 6a orphans: per-channel (level 2) already in `overrides.style`; fill
+    // from `configure_legend` (level 3) only where still None, so per-channel wins.
+    let style = &mut overrides.style;
+    if style.symbol_size.is_none() {
+        style.symbol_size = legend.symbol_size;
     }
-    if overrides.label_color.is_none() {
-        overrides.label_color = legend.label_color.clone();
+    if style.label_color.is_none() {
+        style.label_color = legend.label_color.clone();
     }
-    if overrides.offset.is_none() {
-        overrides.offset = legend.offset;
+    if style.offset.is_none() {
+        style.offset = legend.offset;
     }
-    if overrides.padding.is_none() {
-        overrides.padding = legend.padding;
+    if style.padding.is_none() {
+        style.padding = legend.padding;
     }
-    if overrides.title_padding.is_none() {
-        overrides.title_padding = legend.title_padding;
+    if style.title_padding.is_none() {
+        style.title_padding = legend.title_padding;
     }
 }
 
@@ -2503,7 +2509,7 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config_to_legend_overrides(&mut overrides, &config);
-        assert_eq!(overrides.symbol_stroke_width, Some(2.0));
+        assert_eq!(overrides.style.symbol_stroke_width, Some(2.0));
     }
 
     /// B5 unit 3: a per-channel orphan (here `symbol_stroke_width`) beats the
@@ -2511,16 +2517,20 @@ mod chart_config_application_tests {
     #[test]
     fn legend_orphan_per_channel_wins_over_configure() {
         let mut overrides = LegendOverrides {
-            symbol_stroke_width: Some(5.0), // per-channel (level 2)
-            row_padding: Some(18.0),
-            clip_height: Some(40.0),
+            // 380: per-channel (level 2) style fields nest on `style`.
+            style: crate::layout::LegendStyleOpts {
+                symbol_stroke_width: Some(5.0),
+                row_padding: Some(18.0),
+                clip_height: Some(40.0),
+                // B5 unit 6a orphans, per-channel.
+                symbol_size: Some(300.0),
+                label_color: Some("#ff0000".into()),
+                offset: Some(50.0),
+                padding: Some(30.0),
+                title_padding: Some(25.0),
+                ..Default::default()
+            },
             tick_min_step: Some(2.0),
-            // B5 unit 6a orphans, per-channel.
-            symbol_size: Some(300.0),
-            label_color: Some("#ff0000".into()),
-            offset: Some(50.0),
-            padding: Some(30.0),
-            title_padding: Some(25.0),
             ..Default::default()
         };
         let config = ChartConfig {
@@ -2541,15 +2551,15 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config_to_legend_overrides(&mut overrides, &config);
-        assert_eq!(overrides.symbol_stroke_width, Some(5.0), "per-channel wins");
-        assert_eq!(overrides.row_padding, Some(18.0), "per-channel wins");
-        assert_eq!(overrides.clip_height, Some(40.0), "per-channel wins");
+        assert_eq!(overrides.style.symbol_stroke_width, Some(5.0), "per-channel wins");
+        assert_eq!(overrides.style.row_padding, Some(18.0), "per-channel wins");
+        assert_eq!(overrides.style.clip_height, Some(40.0), "per-channel wins");
         assert_eq!(overrides.tick_min_step, Some(2.0), "per-channel wins");
-        assert_eq!(overrides.symbol_size, Some(300.0), "per-channel wins");
-        assert_eq!(overrides.label_color.as_deref(), Some("#ff0000"), "per-channel wins");
-        assert_eq!(overrides.offset, Some(50.0), "per-channel wins");
-        assert_eq!(overrides.padding, Some(30.0), "per-channel wins");
-        assert_eq!(overrides.title_padding, Some(25.0), "per-channel wins");
+        assert_eq!(overrides.style.symbol_size, Some(300.0), "per-channel wins");
+        assert_eq!(overrides.style.label_color.as_deref(), Some("#ff0000"), "per-channel wins");
+        assert_eq!(overrides.style.offset, Some(50.0), "per-channel wins");
+        assert_eq!(overrides.style.padding, Some(30.0), "per-channel wins");
+        assert_eq!(overrides.style.title_padding, Some(25.0), "per-channel wins");
     }
 
     /// When per-channel leaves the 6a fields `None`, `configure_legend` fills
@@ -2571,11 +2581,11 @@ mod chart_config_application_tests {
             ..Default::default()
         };
         apply_chart_config_to_legend_overrides(&mut overrides, &config);
-        assert_eq!(overrides.symbol_size, Some(300.0));
-        assert_eq!(overrides.label_color.as_deref(), Some("#0000ff"));
-        assert_eq!(overrides.offset, Some(50.0));
-        assert_eq!(overrides.padding, Some(30.0));
-        assert_eq!(overrides.title_padding, Some(25.0));
+        assert_eq!(overrides.style.symbol_size, Some(300.0));
+        assert_eq!(overrides.style.label_color.as_deref(), Some("#0000ff"));
+        assert_eq!(overrides.style.offset, Some(50.0));
+        assert_eq!(overrides.style.padding, Some(30.0));
+        assert_eq!(overrides.style.title_padding, Some(25.0));
     }
 
     #[test]

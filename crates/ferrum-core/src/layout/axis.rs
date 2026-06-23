@@ -16,6 +16,44 @@ pub enum AxisOrient {
     Right,
 }
 
+/// The channel dimension an axis belongs to: `X` (horizontal, Top/Bottom edges)
+/// or `Y` (vertical, Left/Right edges). 860: this names the x-vs-y distinction
+/// that was previously recovered ad hoc from a concrete [`AxisOrient`] via
+/// `matches!(.. Top | Bottom)`. The dimension is a property of the orient (orients
+/// never cross dimensions — validated upstream in `prepare.rs`), so
+/// [`AxisOrient::dimension`] is the single source for it and
+/// [`AxisDimension::default_orient`] the single source for each dimension's
+/// default edge. Byte-identical: the derived booleans/defaults are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AxisDimension {
+    X,
+    Y,
+}
+
+impl AxisDimension {
+    /// The default axis edge for this dimension when no `orient` override is set:
+    /// `Bottom` for x, `Left` for y (matching the historical `resolve_orient`
+    /// default).
+    pub(crate) fn default_orient(self) -> AxisOrient {
+        match self {
+            AxisDimension::X => AxisOrient::Bottom,
+            AxisDimension::Y => AxisOrient::Left,
+        }
+    }
+}
+
+impl AxisOrient {
+    /// The channel dimension this orient belongs to: Top/Bottom → X,
+    /// Left/Right → Y. The single home for the x-vs-y inference that was open-coded
+    /// as `matches!(.. Top | Bottom)` across the layout (860).
+    pub(crate) fn dimension(self) -> AxisDimension {
+        match self {
+            AxisOrient::Top | AxisOrient::Bottom => AxisDimension::X,
+            AxisOrient::Left | AxisOrient::Right => AxisDimension::Y,
+        }
+    }
+}
+
 /// Tick-label overlap strategy (B5 unit 6b: `fm.Axis(label_overlap=...)` /
 /// `configure_axis(label_overlap=...)`). Maps the Vega-style values onto the
 /// existing collision cascade (`cascade_collision_recovery`) primitives rather
@@ -232,8 +270,11 @@ impl AxisInput {
     /// the current concrete orient and the default is its dimension edge (Bottom
     /// for x, Left for y). Idempotent.
     pub(crate) fn resolve_orient(&mut self) {
-        use AxisOrient::{Bottom, Left, Top};
-        let default = if matches!(self.orient, Top | Bottom) { Bottom } else { Left };
+        // 860: the channel dimension is carried by the orient itself
+        // (`AxisOrient::dimension`); its default edge is the single source in
+        // `AxisDimension::default_orient` (Bottom for x, Left for y) — no inline
+        // `matches!(.. Top | Bottom)` discipline.
+        let default = self.orient.dimension().default_orient();
         self.orient = self.overrides.orient.unwrap_or(default);
     }
 }
@@ -348,6 +389,50 @@ impl AxisLayout {
     /// `<= 0`/absent → below (the historical default).
     pub fn draws_above_marks(&self) -> bool {
         self.zindex.is_some_and(|z| z >= 1)
+    }
+
+    /// Build an `AxisLayout` from the resolved geometry (`axis_line`, `ticks`,
+    /// `minor_ticks`, `title`, `panel_index`) plus the per-axis `input`, owning the
+    /// single copy of the four `show_*` toggles and the sixteen
+    /// `input.overrides.<field>` / `.map(rgba_array)` threads (385). Both
+    /// `layout_x_axis` and `layout_y_axis` end with one call to this instead of a
+    /// 22-field copy-paste literal, so a new per-axis override is a one-line change
+    /// here. Byte-identical: each field carries the same value as the prior literal.
+    fn from_input(
+        input: &AxisInput,
+        panel_index: usize,
+        axis_line: Rect,
+        ticks: Vec<TickLayout>,
+        minor_ticks: Vec<TickLayout>,
+        title: Option<AxisTitleLayout>,
+    ) -> AxisLayout {
+        AxisLayout {
+            orient: input.orient,
+            panel_index,
+            axis_line,
+            ticks,
+            minor_ticks,
+            title,
+            show_labels: input.show_labels,
+            show_ticks: input.show_ticks,
+            show_domain: input.show_domain,
+            show_grid: input.show_grid,
+            title_font_size: input.overrides.title_font_size,
+            title_color_rgba: input.overrides.title_color.map(rgba_array),
+            label_padding: input.overrides.label_padding,
+            label_color_rgba: input.overrides.label_color.map(rgba_array),
+            label_font_size: input.overrides.label_font_size,
+            grid_color_rgba: input.overrides.grid_color.map(rgba_array),
+            grid_dash: input.overrides.grid_dash.clone(),
+            grid_width: input.overrides.grid_width,
+            domain_color_rgba: input.overrides.domain_color.map(rgba_array),
+            domain_width: input.overrides.domain_width,
+            grid_opacity: input.overrides.grid_opacity,
+            translate: input.overrides.translate,
+            zindex: input.overrides.zindex,
+            offset: input.overrides.offset,
+            label_flush: input.overrides.label_flush,
+        }
     }
 }
 
@@ -838,33 +923,9 @@ pub fn layout_y_axis(
         }
     });
 
-    AxisLayout {
-        orient: input.orient,
-        panel_index,
-        axis_line,
-        ticks,
-        minor_ticks,
-        title,
-        show_labels: input.show_labels,
-        show_ticks: input.show_ticks,
-        show_domain: input.show_domain,
-        show_grid: input.show_grid,
-        title_font_size: input.overrides.title_font_size,
-        title_color_rgba: input.overrides.title_color.map(rgba_array),
-        label_padding: input.overrides.label_padding,
-        label_color_rgba: input.overrides.label_color.map(rgba_array),
-        label_font_size: input.overrides.label_font_size,
-        grid_color_rgba: input.overrides.grid_color.map(rgba_array),
-        grid_dash: input.overrides.grid_dash.clone(),
-        grid_width: input.overrides.grid_width,
-        domain_color_rgba: input.overrides.domain_color.map(rgba_array),
-        domain_width: input.overrides.domain_width,
-        grid_opacity: input.overrides.grid_opacity,
-        translate: input.overrides.translate,
-        zindex: input.overrides.zindex,
-        offset: input.overrides.offset,
-        label_flush: input.overrides.label_flush,
-    }
+    // 385: single construction site for the 22-field AxisLayout (shared with
+    // layout_x_axis via `AxisLayout::from_input`).
+    AxisLayout::from_input(input, panel_index, axis_line, ticks, minor_ticks, title)
 }
 
 use crate::layout::{LABEL_OVERLAP_TOLERANCE, ANGLE_CASCADE, FONT_SHRINK_FACTOR};
@@ -1442,38 +1503,110 @@ pub fn layout_x_axis(
     // projection of `v`.
     let minor_ticks = build_minor_ticks(input, (panel_area.x, panel_area.x + panel_area.w));
 
-    (AxisLayout {
-        orient: input.orient,
-        panel_index,
-        axis_line,
-        ticks,
-        minor_ticks,
-        title,
-        show_labels: input.show_labels,
-        show_ticks: input.show_ticks,
-        show_domain: input.show_domain,
-        show_grid: input.show_grid,
-        title_font_size: input.overrides.title_font_size,
-        title_color_rgba: input.overrides.title_color.map(rgba_array),
-        label_padding: input.overrides.label_padding,
-        label_color_rgba: input.overrides.label_color.map(rgba_array),
-        label_font_size: input.overrides.label_font_size,
-        grid_color_rgba: input.overrides.grid_color.map(rgba_array),
-        grid_dash: input.overrides.grid_dash.clone(),
-        grid_width: input.overrides.grid_width,
-        domain_color_rgba: input.overrides.domain_color.map(rgba_array),
-        domain_width: input.overrides.domain_width,
-        grid_opacity: input.overrides.grid_opacity,
-        translate: input.overrides.translate,
-        zindex: input.overrides.zindex,
-        offset: input.overrides.offset,
-        label_flush: input.overrides.label_flush,
-    }, warning)
+    // 385: single construction site for the 22-field AxisLayout (shared with
+    // layout_y_axis via `AxisLayout::from_input`).
+    let layout = AxisLayout::from_input(input, panel_index, axis_line, ticks, minor_ticks, title);
+    (layout, warning)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── 385: AxisLayout::from_input field parity ─────────────────────────────
+
+    /// `AxisLayout::from_input` threads every per-axis override onto the layout.
+    /// Set distinct values for the 16 override threads + the geometry/show fields
+    /// and assert each lands, so a dropped thread is caught.
+    #[test]
+    fn axis_layout_from_input_threads_all_overrides() {
+        let red = Srgba::new(255u8, 0, 0, 255);
+        let blue = Srgba::new(0u8, 0, 255, 255);
+        let green = Srgba::new(0u8, 255, 0, 255);
+        let mut input = AxisInput::new(
+            AxisOrient::Bottom,
+            Some("T".into()),
+            vec!["a".into()],
+            None,
+        );
+        input.show_labels = false;
+        input.show_ticks = false;
+        input.show_domain = false;
+        input.show_grid = false;
+        input.overrides = AxisStyleOverrides {
+            title_font_size: Some(14.0),
+            title_color: Some(red),
+            label_padding: Some(3.0),
+            label_color: Some(blue),
+            label_font_size: Some(9.0),
+            grid_color: Some(green),
+            grid_dash: Some(vec![2.0, 1.0]),
+            grid_width: Some(0.7),
+            domain_color: Some(red),
+            domain_width: Some(1.3),
+            grid_opacity: Some(0.5),
+            translate: Some(4.0),
+            zindex: Some(2),
+            offset: Some(6.0),
+            label_flush: Some(true),
+            ..AxisStyleOverrides::default()
+        };
+        let axis_line = Rect { x: 1.0, y: 2.0, w: 3.0, h: 1.0 };
+        let layout = AxisLayout::from_input(&input, 7, axis_line, vec![], vec![], None);
+
+        assert_eq!(layout.orient, AxisOrient::Bottom);
+        assert_eq!(layout.panel_index, 7);
+        assert_eq!(layout.axis_line, axis_line);
+        assert!(!layout.show_labels);
+        assert!(!layout.show_ticks);
+        assert!(!layout.show_domain);
+        assert!(!layout.show_grid);
+        assert_eq!(layout.title_font_size, Some(14.0));
+        assert_eq!(layout.title_color_rgba, Some([255, 0, 0, 255]));
+        assert_eq!(layout.label_padding, Some(3.0));
+        assert_eq!(layout.label_color_rgba, Some([0, 0, 255, 255]));
+        assert_eq!(layout.label_font_size, Some(9.0));
+        assert_eq!(layout.grid_color_rgba, Some([0, 255, 0, 255]));
+        assert_eq!(layout.grid_dash, Some(vec![2.0, 1.0]));
+        assert_eq!(layout.grid_width, Some(0.7));
+        assert_eq!(layout.domain_color_rgba, Some([255, 0, 0, 255]));
+        assert_eq!(layout.domain_width, Some(1.3));
+        assert_eq!(layout.grid_opacity, Some(0.5));
+        assert_eq!(layout.translate, Some(4.0));
+        assert_eq!(layout.zindex, Some(2));
+        assert_eq!(layout.offset, Some(6.0));
+        assert_eq!(layout.label_flush, Some(true));
+    }
+
+    /// 860: the channel dimension is derived from the orient (Top/Bottom → X,
+    /// Left/Right → Y) and each dimension's default edge is single-sourced.
+    #[test]
+    fn axis_orient_dimension_and_default_edge() {
+        assert_eq!(AxisOrient::Top.dimension(), AxisDimension::X);
+        assert_eq!(AxisOrient::Bottom.dimension(), AxisDimension::X);
+        assert_eq!(AxisOrient::Left.dimension(), AxisDimension::Y);
+        assert_eq!(AxisOrient::Right.dimension(), AxisDimension::Y);
+        assert_eq!(AxisDimension::X.default_orient(), AxisOrient::Bottom);
+        assert_eq!(AxisDimension::Y.default_orient(), AxisOrient::Left);
+    }
+
+    /// 860: `resolve_orient` defaults to the dimension edge and honors an override.
+    #[test]
+    fn axis_resolve_orient_defaults_and_override() {
+        // x axis, no override → Bottom.
+        let mut x = AxisInput::new(AxisOrient::Bottom, None, vec![], None);
+        x.resolve_orient();
+        assert_eq!(x.orient, AxisOrient::Bottom);
+        // y axis, no override → Left.
+        let mut y = AxisInput::new(AxisOrient::Left, None, vec![], None);
+        y.resolve_orient();
+        assert_eq!(y.orient, AxisOrient::Left);
+        // x axis with explicit Top override wins.
+        let mut xt = AxisInput::new(AxisOrient::Bottom, None, vec![], None);
+        xt.overrides.orient = Some(AxisOrient::Top);
+        xt.resolve_orient();
+        assert_eq!(xt.orient, AxisOrient::Top);
+    }
 
     #[test]
     fn axis_layout_round_trip() {
@@ -1560,6 +1693,61 @@ mod tests {
 
     fn mock(per_char_px: f64) -> MockMetrics<impl Fn(&str, f64) -> f64> {
         MockMetrics { measure: fixed_width(per_char_px), line_h_factor: 1.2 }
+    }
+
+    // ── 395: x-label cascade prediction (flat / wrap / rotate) ───────────────
+    // The predictor `estimate_x_label_band` walks the same cascade order the real
+    // collision recovery uses; these guard each branch's reserved band so a
+    // cascade-policy drift between the predictor and the renderer is caught. (The
+    // three encoding sites are NOT byte-safely unifiable — see the task report —
+    // so these lock the predictor's three outcomes in place instead.)
+
+    /// S0 flat: a label that fits the estimated slot reserves a single line band.
+    #[test]
+    fn estimate_x_band_flat_when_label_fits() {
+        let m = mock(10.0); // 10 px/char
+        let labels = vec!["ab".into(), "cd".into()]; // 20 px each
+        // Generous slot: 100 px → threshold 90 px ≥ 20 px → flat.
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 100.0, None, 4.0);
+        // Flat band == line_height(11) = 13.2 (no padding delta).
+        assert!((band - m.line_height(11.0)).abs() < 1e-9);
+    }
+
+    /// S1 wrap: an underscore-splittable label that won't fit flat but whose
+    /// segments fit wraps to N lines → band == max_lines * line_height.
+    #[test]
+    fn estimate_x_band_wraps_underscore_label() {
+        let m = mock(10.0);
+        // "aa_bb_cc": flat width 80; segments "aa"/"bb"/"cc" are 20 px each.
+        let labels = vec!["aa_bb_cc".into()];
+        // Slot 50 → threshold 45: flat (80) fails, segments (20) fit → 3 lines.
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, 50.0, None, 4.0);
+        assert!((band - 3.0 * m.line_height(11.0)).abs() < 1e-9, "band={band}");
+    }
+
+    /// S2/S3 rotate: a single long unsplittable label that cannot fit flat or wrap
+    /// falls to the rotate branch, reserving the full rotated extent (> flat band).
+    #[test]
+    fn estimate_x_band_rotates_long_unsplittable_label() {
+        let m = mock(10.0);
+        // 12-char label, no break points → 120 px, cannot wrap.
+        let labels = vec!["abcdefghijkl".into()];
+        let slot = 30.0; // threshold 27 < 120 → not flat, no wrap → rotate/vertical.
+        let band = estimate_x_label_band(&labels, 11.0, None, &m, slot, None, 4.0);
+        // Must exceed the flat single-line band (a rotated/vertical reservation).
+        assert!(band > m.line_height(11.0), "rotated band must exceed flat: {band}");
+    }
+
+    /// An explicit `label_angle` override bypasses the cascade and reserves the
+    /// rotated extent for that exact angle.
+    #[test]
+    fn estimate_x_band_honors_explicit_angle() {
+        let m = mock(10.0);
+        let labels = vec!["abc".into()];
+        // label_padding=None → label_pad_eff defaults to 2.0; tick_size=4.0.
+        let band = estimate_x_label_band(&labels, 11.0, Some(-45.0), &m, 100.0, None, 4.0);
+        let expected = rotated_x_label_extent(-45.0, 30.0, 11.0, m.line_height(11.0), 4.0, 2.0);
+        assert!((band - expected).abs() < 1e-9, "band={band}, expected={expected}");
     }
 
     #[test]
