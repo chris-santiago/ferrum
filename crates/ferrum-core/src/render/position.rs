@@ -1552,6 +1552,546 @@ mod tests {
         assert_stack_top_oracle(&out);
     }
 
+    // =======================================================================
+    // BUG HUNT — Step 4: position-adjustment `by`-channel widening.
+    //
+    // The campaign unified apply_stack/apply_dodge `by` resolution into the
+    // shared `resolve_group_channel`, which now accepts Int*/UInt*/Float*/Bool
+    // `by` columns (previously stack silently no-op'd on anything non-Utf8).
+    // This block probes the newly-reachable input surface for correctness and
+    // panic-safety: single-unique groups, all-null columns, 0-row batches,
+    // NaN/±inf Float64 `by`, Boolean `by`, int/float string collisions,
+    // `by` == value column, color-vs-explicit-`by` precedence, and timestamp
+    // `by` on a 0-row batch. Every assertion checks a real invariant (group
+    // counts, stacked-top sums, exactly-once warning with the right label),
+    // never `is_ok()`.
+    // =======================================================================
+
+    /// Helper: extract the y (value) column from a stack output as a Vec<f64>.
+    fn stack_tops(out: &RecordBatch, yi: usize) -> Vec<f64> {
+        let ya = out.column(yi).as_any().downcast_ref::<Float64Array>().unwrap();
+        (0..ya.len()).map(|i| ya.value(i)).collect()
+    }
+
+    /// Helper: extract the __stack_y_base__ column as a Vec<f64>.
+    fn stack_bases(out: &RecordBatch) -> Vec<f64> {
+        let idx = out.schema().index_of("__stack_y_base__").unwrap();
+        let ba = out.column(idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        (0..ba.len()).map(|i| ba.value(i)).collect()
+    }
+
+    // ── Single unique `by` value (one group) ────────────────────────────────
+
+    #[test]
+    fn bughunt_stack_single_unique_by_value_one_segment_per_bin() {
+        // A `by` column with one distinct value → one group → each x-bin has a
+        // single segment whose top == the raw value and base == 0. No warning.
+        use arrow::array::Int64Array;
+        let b = stack_batch_with_group(
+            Field::new("g", DataType::Int64, false),
+            Arc::new(Int64Array::from(vec![7_i64, 7, 7, 7])),
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+        };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty(), "single-group stack must not warn: {warnings:?}");
+        // One group, but each x-bin still has TWO rows: stack accumulates every
+        // row within a bin (not just across distinct groups). bin x=1: 10 then
+        // 20 → tops 10, 30; bin x=2: 30 then 40 → tops 30, 70.
+        assert_eq!(stack_tops(&out, 1), vec![10.0, 30.0, 30.0, 70.0]);
+        assert_eq!(stack_bases(&out), vec![0.0, 10.0, 0.0, 30.0]);
+    }
+
+    #[test]
+    fn bughunt_dodge_single_unique_by_value_is_noop_no_warning() {
+        // Dodge with one distinct `by` value → n_groups == 1 → clone, no offset,
+        // and (per the documented policy) NO warning.
+        use arrow::array::Int64Array;
+        let b = dodge_batch_with_group(
+            Field::new("g", DataType::Int64, false),
+            Arc::new(Int64Array::from(vec![7_i64, 7, 7, 7])),
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty(), "single-group dodge must not warn: {warnings:?}");
+        let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!((xa.value(0), xa.value(3)), (1.0, 2.0), "x must be unchanged");
+    }
+
+    // ── All-null `by` column (every row null → "") ──────────────────────────
+
+    #[test]
+    fn bughunt_stack_all_null_by_collapses_to_single_group() {
+        // Every row null → "" via the resolver's null→"" mapping → ONE group.
+        // Stack therefore puts one segment per bin; no panic, no warning.
+        use arrow::array::Int64Array;
+        let b = stack_batch_with_group(
+            Field::new("g", DataType::Int64, true),
+            Arc::new(Int64Array::from(vec![None, None, None, None])),
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+        };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty(), "all-null `by` must not warn: {warnings:?}");
+        // All rows in one ("") group, but each x-bin still has two rows that
+        // accumulate: bin x=1 → 10,30; bin x=2 → 30,70.
+        assert_eq!(stack_tops(&out, 1), vec![10.0, 30.0, 30.0, 70.0]);
+        assert_eq!(stack_bases(&out), vec![0.0, 10.0, 0.0, 30.0]);
+    }
+
+    #[test]
+    fn bughunt_dodge_all_null_by_is_noop_no_warning() {
+        // All-null `by` → "" → one group → dodge no-ops with no warning.
+        use arrow::array::Int64Array;
+        let b = dodge_batch_with_group(
+            Field::new("g", DataType::Int64, true),
+            Arc::new(Int64Array::from(vec![None, None, None, None])),
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty(), "all-null `by` dodge must not warn: {warnings:?}");
+        let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!((xa.value(0), xa.value(3)), (1.0, 2.0));
+    }
+
+    #[test]
+    fn bughunt_resolver_maps_every_null_row_to_empty_string() {
+        // Direct probe of resolve_group_channel: a `by` column with a mix of
+        // null and real values maps every null → "" (documented pre-RSUP-05
+        // key), and a genuine empty-string Utf8 value COLLIDES with null into
+        // the same "" group. This pins the documented collision so a future
+        // change to NULL handling is caught.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, true),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(StringArray::from(vec![Some("a"), None, Some(""), Some("a")])),
+            ],
+        )
+        .unwrap();
+        let enc = enc_xy("x", "y", Some("g"));
+        let mut warnings = Vec::new();
+        let cats = resolve_group_channel(&b, Some("g"), &enc, "dodge", &mut warnings).unwrap();
+        assert!(warnings.is_empty());
+        // null (row 1) and "" (row 2) both → "" — documented collision.
+        assert_eq!(cats, vec!["a", "", "", "a"]);
+    }
+
+    // ── Empty (0-row) RecordBatch ───────────────────────────────────────────
+
+    fn empty_xyg(g_field: Field, g_col: ArrayRef) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            g_field,
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(Vec::<f64>::new())),
+                Arc::new(Float64Array::from(Vec::<f64>::new())),
+                g_col,
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bughunt_stack_zero_row_batch_appends_base_column_no_panic() {
+        // 0-row batch: resolver returns Some(empty); stack's row loops never
+        // execute; the output must still gain a Float64 __stack_y_base__ column
+        // and a Float64-widened y column, with 0 rows. No panic, no warning.
+        use arrow::array::Int64Array;
+        let b = empty_xyg(
+            Field::new("g", DataType::Int64, false),
+            Arc::new(Int64Array::from(Vec::<i64>::new())),
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+        };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty(), "0-row stack must not warn: {warnings:?}");
+        assert_eq!(out.num_rows(), 0);
+        let base_idx = out.schema().index_of("__stack_y_base__")
+            .expect("__stack_y_base__ must be present even for 0 rows");
+        assert_eq!(out.column(base_idx).data_type(), &DataType::Float64);
+        assert_eq!(out.schema().field(1).data_type(), &DataType::Float64);
+    }
+
+    #[test]
+    fn bughunt_dodge_zero_row_batch_is_noop_no_panic() {
+        // 0-row continuous-x dodge: uniques is empty → < 2 → clone. No panic.
+        use arrow::array::Int64Array;
+        let b = empty_xyg(
+            Field::new("g", DataType::Int64, false),
+            Arc::new(Int64Array::from(Vec::<i64>::new())),
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty());
+        assert_eq!(out.num_rows(), 0);
+        assert_eq!(out.num_columns(), 3, "0-row dodge must clone unchanged");
+    }
+
+    #[test]
+    fn bughunt_stack_zero_row_timestamp_by_warns_once_no_panic() {
+        // 0-row batch with an un-categorizable (timestamp) `by`: the resolver
+        // must still warn exactly once (the dtype check precedes row access),
+        // and must not panic on the empty column.
+        use arrow::array::TimestampMillisecondArray;
+        let b = empty_xyg(
+            Field::new(
+                "g",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Arc::new(TimestampMillisecondArray::from(Vec::<i64>::new())),
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+        };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert_eq!(out.num_rows(), 0);
+        assert_eq!(warnings.len(), 1, "exactly one warning expected");
+        match &warnings[0] {
+            RenderWarning::PositionAdjustSkipped { adjustment, reason } => {
+                assert_eq!(adjustment, "stack");
+                assert!(reason.contains("cannot group categories"), "reason: {reason}");
+            }
+            other => panic!("wrong warning variant: {other:?}"),
+        }
+    }
+
+    // ── Float64 `by` with NaN / ±inf ────────────────────────────────────────
+
+    #[test]
+    fn bughunt_stack_nan_by_groups_nan_together_distinct_from_finite() {
+        // Float64 `by` = [NaN, 1.0, NaN, 1.0] over x = [1,1,2,2]. NaN floats
+        // stringify to "NaN" via float_as_ordinal_str, so the two NaN rows
+        // group together (even though NaN != NaN), distinct from the "1" group.
+        // Each bin has one NaN + one finite row → two segments stacked.
+        let b = stack_batch_with_group(
+            Field::new("g", DataType::Float64, false),
+            Arc::new(Float64Array::from(vec![f64::NAN, 1.0, f64::NAN, 1.0])),
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+        };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty(), "NaN-float `by` must categorize, not warn: {warnings:?}");
+        // Group order first-appearance: "NaN"=0, "1"=1.
+        // bin x=1: rows 0("NaN",10) then 1("1",20) → tops 10, 30.
+        // bin x=2: rows 2("NaN",30) then 3("1",40) → tops 30, 70.
+        let tops = stack_tops(&out, 1);
+        assert_eq!(tops, vec![10.0, 30.0, 30.0, 70.0]);
+        // No NaN may leak into the stacked output (the NaN is only a GROUP KEY,
+        // never a value): all tops/bases are finite.
+        assert!(tops.iter().all(|v| v.is_finite()), "no NaN in stacked tops: {tops:?}");
+        assert!(stack_bases(&out).iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn bughunt_stack_pos_neg_inf_by_are_distinct_groups() {
+        // +inf and -inf as `by` values must form two DISTINCT groups
+        // ("inf" vs "-inf"), not collapse together. x = [1,1,2,2].
+        let b = stack_batch_with_group(
+            Field::new("g", DataType::Float64, false),
+            Arc::new(Float64Array::from(vec![
+                f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY,
+            ])),
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let mut warnings = Vec::new();
+        let cats = resolve_group_channel(&b, Some("g"), &enc, "stack", &mut warnings).unwrap();
+        assert!(warnings.is_empty());
+        assert_eq!(cats, vec!["inf", "-inf", "inf", "-inf"]);
+        // Two distinct group keys, not one.
+        let distinct: std::collections::HashSet<_> = cats.iter().collect();
+        assert_eq!(distinct.len(), 2, "inf and -inf must be distinct groups");
+    }
+
+    #[test]
+    fn bughunt_dodge_nan_by_produces_finite_offsets_no_nan_in_x() {
+        // A NaN group KEY must not poison the dodge x offsets: offsets are a
+        // function of group INDEX (0,1,…), never the key value. All output x
+        // must be finite.
+        let b = dodge_batch_with_group(
+            Field::new("g", DataType::Float64, false),
+            Arc::new(Float64Array::from(vec![f64::NAN, 1.0, f64::NAN, 1.0])),
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty());
+        let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        for i in 0..4 {
+            assert!(xa.value(i).is_finite(), "x[{i}]={} must be finite", xa.value(i));
+        }
+        // Same 2-group oracle as any 2-level dodge: NaN group=0, "1" group=1.
+        assert_dodge_oracle(&out);
+    }
+
+    // ── Boolean `by` for stack ──────────────────────────────────────────────
+
+    #[test]
+    fn bughunt_stack_boolean_by_resolves_like_two_groups() {
+        // Boolean `by` stringifies to "false"/"true"; first-appearance order
+        // gives false=0, true=1. Over x=[1,1,2,2], by=[false,true,false,true]
+        // the stacked tops match the canonical [10,30,30,70] oracle.
+        use arrow::array::BooleanArray;
+        let b = stack_batch_with_group(
+            Field::new("g", DataType::Boolean, false),
+            Arc::new(BooleanArray::from(vec![false, true, false, true])),
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+        };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty(), "boolean stack must not warn: {warnings:?}");
+        assert_stack_top_oracle(&out);
+    }
+
+    // ── Mixed int / float string collision parity ───────────────────────────
+
+    #[test]
+    fn bughunt_int_one_and_float_one_stringify_identically() {
+        // An Int64 `1` and a Float64 `1.0` both categorize to "1". A single
+        // column cannot mix dtypes, but this pins that the two siblings produce
+        // the SAME group key for the "same" numeric value, so an Int64-keyed
+        // golden and a Float64-keyed golden of the same logical data stack the
+        // same way.
+        use arrow::array::Int64Array;
+        let bi = stack_batch_with_group(
+            Field::new("g", DataType::Int64, false),
+            Arc::new(Int64Array::from(vec![1_i64, 2, 1, 2])),
+        );
+        let bf = stack_batch_with_group(
+            Field::new("g", DataType::Float64, false),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0])),
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let ci = resolve_group_channel(&bi, Some("g"), &enc, "stack", &mut Vec::new()).unwrap();
+        let cf = resolve_group_channel(&bf, Some("g"), &enc, "stack", &mut Vec::new()).unwrap();
+        assert_eq!(ci, cf, "int and integer-valued float `by` must share group keys");
+        assert_eq!(ci, vec!["1", "2", "1", "2"]);
+    }
+
+    // ── Stack where `by` is the SAME column as the value column ──────────────
+
+    #[test]
+    fn bughunt_stack_by_equals_value_column_each_row_own_group() {
+        // `by` == the y (value) column. Each distinct y becomes its own group;
+        // within an x-bin the segments stack in encounter (group-index) order.
+        // The value column is rewritten to the cumulative tops in place. This
+        // must not panic and must produce coherent monotonic tops per bin.
+        let b = batch_xyg(); // x=[1,1,2,2], y=[10,20,30,40]
+        // by = "y": group keys "10","20","30","40", all distinct.
+        let enc = enc_xy("x", "y", Some("y"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("y".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+        };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty(), "by==value column must not warn: {warnings:?}");
+        // bin x=1: 10 then 20 → tops 10, 30; bin x=2: 30 then 40 → 30, 70.
+        assert_eq!(stack_tops(&out, 1), vec![10.0, 30.0, 30.0, 70.0]);
+        assert_eq!(stack_bases(&out), vec![0.0, 10.0, 0.0, 30.0]);
+    }
+
+    // ── Color vs explicit `by` precedence ───────────────────────────────────
+
+    #[test]
+    fn bughunt_stack_int_by_orders_segments_by_group_across_bins() {
+        // Prove the widened Int64 `by` genuinely controls cross-bin stacking
+        // ORDER (not just no-ops): group 0 always sits at the bottom of each
+        // bin even when its row appears LAST in that bin's source order.
+        //   bin x=1: row0 group=1 (y=10), row1 group=0 (y=20)
+        //   bin x=2: row2 group=0 (y=30), row3 group=1 (y=40)
+        // After sort-by-group: bin x=1 stacks group0 (20) then group1 (10):
+        //   row1 base=0 top=20 ; row0 base=20 top=30.
+        // bin x=2 stacks group0 (30) then group1 (40):
+        //   row2 base=0 top=30 ; row3 base=30 top=70.
+        use arrow::array::Int64Array;
+        let b = stack_batch_with_group(
+            Field::new("g", DataType::Int64, false),
+            Arc::new(Int64Array::from(vec![1_i64, 0, 0, 1])),
+        );
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+        };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty());
+        // Group first-appearance: "1"=0, "0"=1 (row0's value 1 appears first).
+        // So segment ordering is by that group index, NOT numeric value.
+        // bin x=1: row0(g="1",idx0,y10) bottom, row1(g="0",idx1,y20) on top.
+        //   row0 base=0 top=10 ; row1 base=10 top=30.
+        // bin x=2: row2(g="0",idx1,y30), row3(g="1",idx0,y40) → sort by idx:
+        //   row3(idx0,y40) bottom base=0 top=40 ; row2(idx1,y30) base=40 top=70.
+        assert_eq!(stack_tops(&out, 1), vec![10.0, 30.0, 70.0, 40.0]);
+        assert_eq!(stack_bases(&out), vec![0.0, 10.0, 40.0, 0.0]);
+    }
+
+    #[test]
+    fn bughunt_explicit_by_overrides_color_for_grouping() {
+        // When both an explicit `by` AND a color encoding are present, the
+        // explicit `by` wins (resolve_group_channel: by_field, else color).
+        // Build a batch where `by` and color would give DIFFERENT groupings and
+        // assert the stack follows `by`, not color.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("by_col", DataType::Utf8, false),
+            Field::new("color_col", DataType::Utf8, false),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 2.0, 2.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                // `by` splits each bin into two groups a/b.
+                Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+                // color would put EVERY row in one group "z" → un-stacked.
+                Arc::new(StringArray::from(vec!["z", "z", "z", "z"])),
+            ],
+        )
+        .unwrap();
+        // Encoding carries the color column; the position carries explicit `by`.
+        let enc = Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+            color: Some(EncodingSpec { field: "color_col".into(), type_: None, ..Default::default() }),
+            ..Default::default()
+        };
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("by_col".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+        };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty());
+        // Grouped by `by_col` (a/b) → canonical [10,30,30,70]. If color had won,
+        // every bin would be a single group "z" → tops would equal raw values
+        // (10,20,30,40), which we explicitly reject here.
+        let tops = stack_tops(&out, 1);
+        assert_eq!(tops, vec![10.0, 30.0, 30.0, 70.0], "explicit `by` must override color");
+        assert_ne!(tops[1], 20.0, "color must NOT have won the grouping");
+    }
+
+    #[test]
+    fn bughunt_color_used_when_no_explicit_by() {
+        // The dual: with `by: None` but a color encoding present, the resolver
+        // falls through to color. So a color-only stack groups by color.
+        let b = batch_xyg(); // color "g" = ["a","b","a","b"]
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: None,
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+        };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty());
+        assert_stack_top_oracle(&out);
+    }
+
+    // ── Normalize numeric edge: a bin summing to zero ───────────────────────
+
+    #[test]
+    fn bughunt_stack_normalize_bin_total_zero_no_div_by_zero() {
+        // A bin whose values cancel to total 0.0 (10 and -10). The `total != 0`
+        // guard must make every segment 0.0, never NaN/inf from a 0/0 division.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 1.0])),
+                Arc::new(Float64Array::from(vec![10.0, -10.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Normalize,
+            anchor: StackAnchor::Top,
+        };
+        let mut warnings = Vec::new();
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        assert!(warnings.is_empty());
+        let tops = stack_tops(&out, 1);
+        assert!(
+            tops.iter().all(|v| v.is_finite()),
+            "zero-total normalize must not yield NaN/inf, got {tops:?}"
+        );
+        assert_eq!(tops, vec![0.0, 0.0], "all segments collapse to 0 when total is 0");
+    }
+
     #[test]
     fn resolve_group_channel_same_decision_for_dodge_and_stack() {
         // Unification proof: the SHARED resolver returns the same Option-shape

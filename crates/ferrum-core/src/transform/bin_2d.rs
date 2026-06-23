@@ -70,11 +70,37 @@ pub(crate) fn global_extent(
     Some((x_lo, x_hi, y_lo, y_hi))
 }
 
+/// Reject a reversed or degenerate explicit extent on a single axis.
+///
+/// Mirrors the 1-D `Bin` extent guard (`lo < hi`, both finite): a reversed
+/// `(hi, lo)` makes the row-filter predicate `v < lo || v > hi` true for every
+/// in-range value, so all rows would be silently dropped. Erroring here keeps
+/// Bin2D consistent with the 1-D `Bin` instead of producing empty output with no
+/// warning. `None` (auto-derived extent) is always valid. The `axis` label
+/// (`"extent_x"` / `"extent_y"`) names the offending parameter in the message.
+fn validate_extent(extent: Option<(f64, f64)>, axis: &str) -> PyResult<()> {
+    if let Some((lo, hi)) = extent {
+        if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+            return Err(PyValueError::new_err(format!(
+                "Bin2D: {axis} must be (lo, hi) with lo < hi and both finite; got ({lo}, {hi})"
+            )));
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Main apply function
 // ---------------------------------------------------------------------------
 
 pub(crate) fn apply(spec: &Bin2DSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    // Reject reversed/degenerate explicit extents (S4FIX2). The constructor
+    // guards the same condition, but `apply` is also reachable via the
+    // `transforms_json` serde path (which bypasses `PyBin2D::new`), so the guard
+    // must live here too — exactly as the 1-D `Bin` validates in both places.
+    validate_extent(spec.extent_x, "extent_x")?;
+    validate_extent(spec.extent_y, "extent_y")?;
+
     let schema = batch.schema();
 
     // Validate x column.
@@ -330,6 +356,12 @@ impl PyBin2D {
             None => BinMode::Sturges,
             Some(obj) => parse_bin_axis(obj)?,
         };
+        // Reject reversed/degenerate explicit extents at construction, mirroring
+        // the 1-D `Bin` (which errors on `lo >= hi`). A reversed `extent=(hi, lo)`
+        // otherwise makes the apply-time row filter exclude every in-range value,
+        // silently dropping all rows (S4FIX2 no-silent-drop seam).
+        validate_extent(extent_x, "extent_x")?;
+        validate_extent(extent_y, "extent_y")?;
         Ok(PyBin2D(TransformSpec::Bin2D(Bin2DSpec {
             x: x.into(),
             y: y.into(),
@@ -671,6 +703,188 @@ mod tests {
             name: None,
         };
         assert_eq!(super::global_extent(&spec, &batch), None);
+    }
+
+    // ── BUG-HUNT (step4): Bin2D typed-mode wire + degenerate extents ──────────
+
+    /// Bin2D serializes `BinMode` DIRECTLY as a tagged enum (unlike 1-D Bin's
+    /// flat shim), so EVERY variant — including FreedmanDiaconis — must round-trip
+    /// without collapse. This is the contrast with the 1-D Bin FD-collapse.
+    #[test]
+    fn bughunt_bin2d_every_bin_mode_round_trips_including_fd() {
+        for (bx, by) in [
+            (BinMode::Sturges, BinMode::FreedmanDiaconis),
+            (BinMode::FreedmanDiaconis, BinMode::Fixed { n: 5 }),
+            (BinMode::Width { w: 2.0 }, BinMode::Sturges),
+            (BinMode::Fixed { n: 3 }, BinMode::Width { w: 0.25 }),
+        ] {
+            let spec = Bin2DSpec {
+                x: "x".into(),
+                y: "y".into(),
+                bins_x: bx.clone(),
+                bins_y: by.clone(),
+                extent_x: None,
+                extent_y: None,
+                cumulative: false,
+                name: None,
+            };
+            let json = serde_json::to_string(&spec).unwrap();
+            let back: Bin2DSpec = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, spec, "Bin2D modes ({bx:?},{by:?}) must round-trip; FD must NOT collapse");
+        }
+    }
+
+    /// S4FIX2 (was a latent silent-data-loss): a reversed `extent_x = (hi, lo)`
+    /// used to make the row-filter predicate `xv < x_lo || xv > x_hi` true for
+    /// EVERY in-range value, silently dropping all rows with no error. Bin2D now
+    /// validates extent ordering (`lo < hi`, both finite) at `apply`, mirroring
+    /// the 1-D `Bin`, so a reversed extent ERRORS instead of dropping rows.
+    #[test]
+    fn bin2d_reversed_extent_x_errors() {
+        pyo3::Python::initialize();
+        let batch = make_xy_batch(vec![1.0, 2.0, 3.0], vec![1.0, 2.0, 3.0]);
+        let spec = Bin2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bins_x: BinMode::Fixed { n: 2 },
+            bins_y: BinMode::Fixed { n: 2 },
+            extent_x: Some((3.0, 1.0)), // reversed: hi < lo
+            extent_y: None,
+            cumulative: false,
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("extent_x") && msg.contains("lo < hi"),
+            "reversed extent_x must error with a 1-D-consistent message; got: {msg}"
+        );
+    }
+
+    /// The reversed-extent guard applies to the y axis too: `extent_y = (hi, lo)`
+    /// errors instead of silently dropping every row.
+    #[test]
+    fn bin2d_reversed_extent_y_errors() {
+        pyo3::Python::initialize();
+        let batch = make_xy_batch(vec![1.0, 2.0, 3.0], vec![1.0, 2.0, 3.0]);
+        let spec = Bin2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bins_x: BinMode::Fixed { n: 2 },
+            bins_y: BinMode::Fixed { n: 2 },
+            extent_x: None,
+            extent_y: Some((2.0, 0.0)), // reversed: hi < lo
+            cumulative: false,
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("extent_y") && msg.contains("lo < hi"),
+            "reversed extent_y must error; got: {msg}"
+        );
+    }
+
+    /// A degenerate (zero-width) explicit extent `lo == hi` is also rejected,
+    /// matching the `lo < hi` guard.
+    #[test]
+    fn bin2d_degenerate_explicit_extent_errors() {
+        pyo3::Python::initialize();
+        let batch = make_xy_batch(vec![1.0, 2.0, 3.0], vec![1.0, 2.0, 3.0]);
+        let spec = Bin2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bins_x: BinMode::Fixed { n: 2 },
+            bins_y: BinMode::Fixed { n: 2 },
+            extent_x: Some((2.0, 2.0)), // degenerate: lo == hi
+            extent_y: None,
+            cumulative: false,
+            name: None,
+        };
+        let err = apply(&spec, &batch).unwrap_err();
+        assert!(err.to_string().contains("extent_x"), "degenerate extent_x must error: {err}");
+    }
+
+    /// Degenerate single-value x axis (all x identical, no explicit extent):
+    /// `x_min == x_max` → forced to 1 x-bin of width 1.0. Output must be finite
+    /// and every row must land in that single x-bin without a div-by-zero.
+    #[test]
+    fn bughunt_bin2d_degenerate_single_value_x_axis() {
+        let batch = make_xy_batch(vec![5.0, 5.0, 5.0], vec![0.0, 1.0, 2.0]);
+        let spec = Bin2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bins_x: BinMode::Fixed { n: 4 },
+            bins_y: BinMode::Fixed { n: 3 },
+            extent_x: None,
+            extent_y: None,
+            cumulative: false,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        let x_lo = col_f64(&out, "x_lo");
+        let x_hi = col_f64(&out, "x_hi");
+        // Every emitted cell shares one x-bin [5,6].
+        for i in 0..out.num_rows() {
+            assert!((x_lo.value(i) - 5.0).abs() < 1e-12, "x_lo should be 5.0");
+            assert!((x_hi.value(i) - 6.0).abs() < 1e-12, "x_hi should be 6.0 (width-1 degenerate bin)");
+        }
+        let counts = col_i64(&out, "count");
+        let total: i64 = (0..out.num_rows()).map(|i| counts.value(i)).sum();
+        assert_eq!(total, 3, "all 3 rows counted, got {total}");
+    }
+
+    /// Both axes degenerate (all points identical) → a single 1×1 cell with the
+    /// full count. No div-by-zero, no empty output.
+    #[test]
+    fn bughunt_bin2d_both_axes_degenerate_single_cell() {
+        let batch = make_xy_batch(vec![7.0, 7.0], vec![3.0, 3.0]);
+        let spec = Bin2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bins_x: BinMode::Sturges,
+            bins_y: BinMode::Sturges,
+            extent_x: None,
+            extent_y: None,
+            cumulative: false,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 1, "both-degenerate must yield exactly one cell");
+        let counts = col_i64(&out, "count");
+        assert_eq!(counts.value(0), 2);
+    }
+
+    /// All rows dropped by NaN → empty input branch → empty output with correct
+    /// 5-column schema, not a min/max fold over an empty vec producing inf extents.
+    #[test]
+    fn bughunt_bin2d_all_nan_rows_empty_output() {
+        let batch = make_xy_batch(vec![f64::NAN, f64::NAN], vec![1.0, 2.0]);
+        let spec = Bin2DSpec {
+            x: "x".into(),
+            y: "y".into(),
+            bins_x: BinMode::Fixed { n: 3 },
+            bins_y: BinMode::Fixed { n: 3 },
+            extent_x: None,
+            extent_y: None,
+            cumulative: false,
+            name: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.num_rows(), 0, "all-NaN must give empty output");
+        assert_eq!(out.num_columns(), 5);
+    }
+
+    /// A Bin2D wire with a degenerate `bins_x` width (0.0) deserializes (no
+    /// validation in the typed enum) and must error at apply via resolve_bin_count.
+    #[test]
+    fn bughunt_bin2d_wire_zero_width_errors_at_apply() {
+        pyo3::Python::initialize();
+        let json = r#"{"x":"x","y":"y","bins_x":{"kind":"width","w":0.0},"bins_y":{"kind":"sturges"}}"#;
+        let spec: Bin2DSpec = serde_json::from_str(json).unwrap();
+        let batch = make_xy_batch(vec![0.0, 1.0, 2.0], vec![0.0, 1.0, 2.0]);
+        let err = apply(&spec, &batch).unwrap_err();
+        assert!(err.to_string().contains("positive finite"), "zero width must error: {err}");
     }
 
     // Test 5: Empty input → empty output with correct schema.

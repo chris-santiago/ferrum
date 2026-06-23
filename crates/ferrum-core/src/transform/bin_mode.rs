@@ -174,4 +174,92 @@ mod tests {
             resolve_bin_count(&BinMode::Width { w: 0.0 }, &vals, 0.0, 1.0, "Bin2D").unwrap_err();
         assert!(err.to_string().contains("Bin2D: Width must be a positive finite number"));
     }
+
+    // ── BUG-HUNT (step4): degenerate / boundary resolve_bin_count inputs ────────
+
+    /// Width{w} must reject a NaN width — a hand-authored / JSON-`1e400`-coerced
+    /// width must error, not silently produce a bin count.
+    #[test]
+    fn bughunt_resolve_width_nan_errors() {
+        pyo3::Python::initialize();
+        let vals = vec![1.0, 2.0, 3.0];
+        let err = resolve_bin_count(&BinMode::Width { w: f64::NAN }, &vals, 0.0, 10.0, "stat_bin")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("positive finite"),
+            "NaN width must error: {err}"
+        );
+    }
+
+    /// Width{w} must reject +inf (the value a JSON `1e400` literal coerces to via
+    /// serde_json) instead of computing `ceil((hi-lo)/inf)=0 → max(1)=1`.
+    #[test]
+    fn bughunt_resolve_width_infinity_errors() {
+        pyo3::Python::initialize();
+        let vals = vec![1.0, 2.0, 3.0];
+        let err =
+            resolve_bin_count(&BinMode::Width { w: f64::INFINITY }, &vals, 0.0, 10.0, "stat_bin")
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("positive finite"),
+            "inf width must error: {err}"
+        );
+    }
+
+    /// Width{w} must reject a negative width.
+    #[test]
+    fn bughunt_resolve_width_negative_errors() {
+        pyo3::Python::initialize();
+        let vals = vec![1.0, 2.0, 3.0];
+        let err = resolve_bin_count(&BinMode::Width { w: -1.0 }, &vals, 0.0, 10.0, "stat_bin")
+            .unwrap_err();
+        assert!(err.to_string().contains("positive finite"), "neg width must error: {err}");
+    }
+
+    /// Width over a degenerate (lo==hi) range: `(hi-lo)/w = 0 → ceil → 0 → max(1)`.
+    /// The bin count must clamp to at least 1; never 0 (which would later cause a
+    /// div-by-zero in the bin-edge stride `(hi-lo)/n_bins`).
+    #[test]
+    fn bughunt_resolve_width_zero_range_clamps_to_one() {
+        pyo3::Python::initialize();
+        let vals = vec![5.0, 5.0, 5.0];
+        let n = resolve_bin_count(&BinMode::Width { w: 2.0 }, &vals, 5.0, 5.0, "stat_bin").unwrap();
+        assert_eq!(n, 1, "zero-range width must clamp to >=1 bin, got {n}");
+    }
+
+    /// Freedman-Diaconis on a degenerate all-equal slice has IQR==0, so h==0 and
+    /// the arm must fall back to Sturges rather than divide by zero.
+    #[test]
+    fn bughunt_resolve_fd_zero_iqr_falls_back_to_sturges() {
+        pyo3::Python::initialize();
+        let vals = vec![5.0; 16];
+        let n = resolve_bin_count(&BinMode::FreedmanDiaconis, &vals, 5.0, 5.0, "stat_bin").unwrap();
+        assert_eq!(n, sturges_floor(16), "FD with IQR=0 must fall back to Sturges, got {n}");
+    }
+
+    /// FD on fewer than 4 points: `iqr_sorted` returns 0 for n<4, so the arm
+    /// must fall back to Sturges and never panic on the `sorted[lo]` indexing.
+    #[test]
+    fn bughunt_resolve_fd_small_n_falls_back_without_panic() {
+        pyo3::Python::initialize();
+        for n_pts in 1..=3 {
+            let vals: Vec<f64> = (0..n_pts).map(|i| i as f64).collect();
+            let n = resolve_bin_count(&BinMode::FreedmanDiaconis, &vals, 0.0, 2.0, "stat_bin")
+                .unwrap();
+            assert_eq!(
+                n,
+                sturges_floor(n_pts),
+                "FD on n={n_pts} must fall back to Sturges"
+            );
+        }
+    }
+
+    /// Sturges over an empty value slice: `sturges_floor(0)` is defined as 1, so
+    /// the resolver must return 1 (a later div-by-n_bins is then safe).
+    #[test]
+    fn bughunt_resolve_sturges_empty_slice_returns_one() {
+        let vals: Vec<f64> = vec![];
+        let n = resolve_bin_count(&BinMode::Sturges, &vals, 0.0, 1.0, "stat_bin").unwrap();
+        assert_eq!(n, 1, "Sturges on empty slice must be 1, got {n}");
+    }
 }

@@ -64,6 +64,13 @@ class FerrumVisualizer:
         visualizers (rank / parallel-coordinates / class-balance / elbow)
         whose :meth:`score` returns the ``0.0`` fallback. Mirrors the guard
         in :meth:`score`, so the two can never drift.
+
+        Subclasses that override :meth:`score` with a different scoreability
+        condition (e.g. :class:`ROCVisualizer`, which scores from
+        ``predict_proba``) or that wrap multiple models with no single metric
+        (e.g. a multi-model overlay) override this property to keep the two in
+        lockstep — ``has_score`` is ``True`` for an instance iff its
+        :meth:`score` returns a real metric rather than the ``0.0`` fallback.
         """
         return callable(getattr(self.model, "score", None))
 

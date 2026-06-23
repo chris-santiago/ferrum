@@ -88,6 +88,17 @@ class ROCVisualizer(FerrumVisualizer):
             theme=self.theme,
         )
 
+    @property
+    def has_score(self) -> bool:
+        """True iff :meth:`score` returns a real AUC rather than the fallback.
+
+        ROC scores from class probabilities, so unlike the base class it is
+        scoreable when the model exposes ``predict_proba`` even with no
+        ``.score`` method. Mirrors the exact branch taken in :meth:`score`,
+        so the two can never drift.
+        """
+        return hasattr(self.model, "predict_proba") or callable(getattr(self.model, "score", None))
+
     def score(self, X: Any, y: Any) -> float:
         from sklearn.metrics import roc_auc_score
 
@@ -96,7 +107,9 @@ class ROCVisualizer(FerrumVisualizer):
             if proba.shape[1] == 2:
                 return float(roc_auc_score(y, proba[:, 1]))
             return float(roc_auc_score(y, proba, multi_class="ovr"))
-        return float(self.model.score(X, y))
+        if callable(getattr(self.model, "score", None)):
+            return float(self.model.score(X, y))
+        return 0.0
 
 
 class PRVisualizer(FerrumVisualizer):
@@ -185,6 +198,41 @@ class CalibrationVisualizer(FerrumVisualizer):
         self._models = models
         self.n_bins = n_bins
         self.strategy = strategy
+
+    @property
+    def _is_multi_model(self) -> bool:
+        """Whether this overlays multiple models (no single well-defined score).
+
+        True for two or more positional models, or for a single dict-of-models
+        positional argument. False for a single fitted model, where the
+        inherited single-model :meth:`score` / :meth:`has_score` apply.
+        """
+        return len(self._models) > 1 or isinstance(self._models[0], dict)
+
+    @property
+    def has_score(self) -> bool:
+        """True iff :meth:`score` returns a real metric rather than the fallback.
+
+        A multi-model overlay has no single ``.score`` to report, so
+        ``has_score`` is ``False`` and :meth:`score` returns ``0.0`` — the two
+        stay mutually consistent. A single-model calibration keeps the base
+        ``model.score`` behavior unchanged.
+        """
+        if self._is_multi_model:
+            return False
+        return super().has_score
+
+    def score(self, X: Any, y: Any) -> float:
+        """Single model's ``.score``; ``0.0`` for a multi-model overlay.
+
+        Overlaying several models has no single well-defined score, so rather
+        than silently returning only the first model's metric this returns the
+        documented ``0.0`` no-single-score fallback (consistent with
+        :attr:`has_score` being ``False``).
+        """
+        if self._is_multi_model:
+            return 0.0
+        return super().score(X, y)
 
     def fit(self, X: Any, y: Any = None) -> "CalibrationVisualizer":
         import ferrum

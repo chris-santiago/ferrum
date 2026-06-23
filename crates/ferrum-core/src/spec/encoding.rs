@@ -132,6 +132,15 @@ pub struct ContinuousScaleCommon {
 /// wire-format alignment — see design spec §11 row 16 ("Vega-Lite interop stays open
 /// without translation"). This is the only tagged enum in this module that uses
 /// `"type"`; the choice is intentional.
+///
+/// **No `deny_unknown_fields` (documented exception).** Unlike `EncodingSpec` and
+/// `ChartSpec` (which deny unknown keys so typo'd channel/top-level keys fail loud),
+/// `ScaleSpec` is an internally-tagged enum whose every continuous variant embeds
+/// `ContinuousScaleCommon` via `#[serde(flatten)]`. serde cannot enforce
+/// `deny_unknown_fields` through a flattened or internally-tagged shape, so a typo'd
+/// scale key (e.g. `clammp` for `clamp`) inside a `scale` sub-dict is tolerated and
+/// silently dropped. This is a structural serde limitation, not an oversight — adding
+/// the attribute would be a no-op (or a compile error) given the flatten.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ScaleSpec {
@@ -370,6 +379,7 @@ fn default_band_align() -> f64 {
 /// >>> enc = fm.EncodingSpec(x="sepal_length", y="sepal_width", color="species")
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct EncodingSpec {
     pub field: String,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none", default)]
@@ -384,8 +394,21 @@ pub struct EncodingSpec {
     // Honored renderer fields (D7–D13 — consumed by prepare.rs / position.rs / scale_resolve.rs):
     // Per-channel axis/legend styling. Typed against the shared style structs
     // (B5 fix) so every advertised `fm.Axis`/`fm.Legend` field that renders at
-    // chart level also renders per-channel, and unknown keys fail loud
-    // (`deny_unknown_fields`) instead of silently dropping.
+    // chart level also renders per-channel, and unknown keys on the `axis`/
+    // `legend` sub-dicts fail loud (`AxisStyleSpec`/`LegendStyleSpec` carry
+    // `deny_unknown_fields`) instead of silently dropping.
+    //
+    // No-silent-drop scope (S4FIX2): `EncodingSpec` itself, `ChartSpec`
+    // (chart.rs), the per-transform `*Spec` structs, and the `AxisStyleSpec`/
+    // `LegendStyleSpec` style structs all carry `#[serde(deny_unknown_fields)]`,
+    // so a typo'd channel / top-level / transform / axis-style key raises a serde
+    // error rather than being silently dropped. The one documented exception is
+    // `ScaleSpec` (the `scale:` field below): it is an internally-tagged enum
+    // whose every variant uses `#[serde(flatten)]` for `ContinuousScaleCommon`,
+    // and serde cannot enforce `deny_unknown_fields` through a flattened /
+    // internally-tagged shape — so unknown keys inside a `scale` sub-dict (e.g.
+    // a mistyped `clammp`) are tolerated and dropped. This is a structural serde
+    // constraint, not an oversight; see the `ScaleSpec` doc comment.
     //
     // Boxed so the (wide, ~30-field) style structs do not bloat `EncodingSpec`'s
     // monomorphized serde deserialize frame — the unboxed form overflowed the
@@ -863,6 +886,31 @@ mod tests {
         assert_eq!(json, r#"{"field":"weight","type":"quantitative"}"#);
         let parsed: EncodingSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn encoding_spec_unknown_field_is_rejected() {
+        // No-silent-drop seam (S4FIX2): a typo'd channel key (e.g. `typ` for
+        // `type`) on the EncodingSpec itself must fail loud via
+        // `deny_unknown_fields`, not be silently dropped.
+        let json = r#"{"field":"a","typ":"quantitative"}"#;
+        let err = serde_json::from_str::<EncodingSpec>(json).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field") && msg.contains("typ"),
+            "expected an unknown-field error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn encoding_spec_all_known_fields_round_trip_under_deny() {
+        // Every advertised EncodingSpec field must still deserialize after the
+        // deny was added — a known key must never be mistaken for an unknown one.
+        let json = r##"{"field":"a","type":"quantitative","scale":{"type":"linear"},"title":"T","axis":{"grid":false},"legend":{"disabled":true},"sort":"ascending","stack":"zero","condition":{},"impute":{"value":0},"scheme":"viridis","format":".2f","formatType":"number"}"##;
+        let parsed: EncodingSpec = serde_json::from_str(json).expect("known fields must deserialize");
+        assert_eq!(parsed.field, "a");
+        assert_eq!(parsed.type_, Some(DataType::Quantitative));
+        assert!(parsed.scale.is_some());
     }
 
     #[test]

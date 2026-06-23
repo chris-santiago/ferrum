@@ -1483,6 +1483,18 @@ class FerrumVisualizer:
 > read-only property (not a hand-set class flag): it reports `True` exactly
 > when `score()` returns a real metric, mirroring the model-has-`.score`
 > guard, so the two can never drift.
+>
+> **Refinement (2026-06-23, cohesion campaign S4FIX2):** the "can never drift"
+> guarantee now holds for the two non-standard subclass shapes as well.
+> `ROCVisualizer` overrides `has_score` to mirror its own `score()` condition
+> (scoreable when the model exposes `predict_proba` or a callable `.score`), so
+> a `predict_proba`-only model — no `.score`, a valid sklearn shape — reports
+> `has_score=True` and `score()` returns the AUC. A multi-model
+> `CalibrationVisualizer` overlay (two or more positional models, or a single
+> dict-of-models) has no single well-defined metric: it now reports
+> `has_score=False` and `score()` returns the documented `0.0` no-single-score
+> fallback, rather than silently scoring only the first model. Single-model
+> calibration behavior is unchanged.
 
 **Concrete visualizers:**
 

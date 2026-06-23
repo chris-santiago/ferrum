@@ -56,6 +56,12 @@ use crate::spec::encoding::EncodingSpec;
 /// >>> spec.to_json()
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+// No-silent-drop seam (S4FIX2): deny unknown top-level keys so a typo'd field
+// (e.g. `marrk` for `mark`) fed to `from_json` raises a serde error instead of
+// being silently dropped. `ChartSpec` has no `#[serde(flatten)]` field, so the
+// attribute applies cleanly. Only reachable via hand-authored JSON — ferrum's
+// own `to_json` never emits an unknown key, so every valid spec round-trips.
+#[serde(deny_unknown_fields)]
 pub struct ChartSpec {
     #[serde(default)]
     pub data: DataRef,
@@ -682,10 +688,26 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_field_silently_dropped() {
+    fn test_unknown_top_level_field_is_rejected() {
+        // No-silent-drop seam (S4FIX2): a typo'd top-level key (e.g. `marrk`
+        // for `mark`) must fail loud via `deny_unknown_fields`, not be dropped.
         let json = r#"{"mark":"point","encoding":{},"future_field":42}"#;
-        let parsed: ChartSpec = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.mark, Mark::Point);
+        let err = serde_json::from_str::<ChartSpec>(json).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field") && msg.contains("future_field"),
+            "expected an unknown-field error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_chart_spec_canonical_json_round_trips_under_deny() {
+        // Every valid ferrum-produced spec must still deserialize after the
+        // deny was added (canonical to_json → from_json is clean).
+        let spec = minimal_scatter();
+        let json = serde_json::to_string(&spec).unwrap();
+        let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, spec);
     }
 
     #[test]

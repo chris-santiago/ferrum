@@ -709,4 +709,164 @@ mod tests {
         assert_eq!(map[&order[0]], vec![0]);
         assert_eq!(map[&order[1]], vec![2]);
     }
+
+    // ── BUG-HUNT (step4): partition order, multi-col, deserializer adversarial ──
+
+    /// `group_order` is FIRST-APPEARANCE order, but `group_idx_map` is a BTreeMap
+    /// keyed by `Vec<KeyValue>` (Ord). When first-appearance order DIFFERS from
+    /// sorted order, the returned `group_order` must follow first-appearance, not
+    /// the BTreeMap's sorted iteration — otherwise downstream group columns would
+    /// be emitted in the wrong order. Insert "B" before "A" so the two orders differ.
+    #[test]
+    fn bughunt_group_order_is_first_appearance_not_sorted() {
+        pyo3::Python::initialize();
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![Field::new("g", DataType::Utf8, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec!["B", "A", "B", "A", "C"])) as ArrayRef],
+        )
+        .unwrap();
+        let (order, _, _) =
+            group_partition_multi(&batch, &["g".to_string()], "test").unwrap();
+        assert_eq!(
+            order,
+            vec![
+                vec![KeyValue::Str("B".into())],
+                vec![KeyValue::Str("A".into())],
+                vec![KeyValue::Str("C".into())],
+            ],
+            "group_order must be first-appearance (B,A,C), not sorted (A,B,C)"
+        );
+    }
+
+    /// A 3-column groupby with interleaved combos: the composite-key partition must
+    /// produce exactly the distinct tuples, in first-appearance order, with each
+    /// row routed to the correct tuple. Tests joint partitioning across 3 dims.
+    #[test]
+    fn bughunt_group_partition_multi_three_columns_joint() {
+        pyo3::Python::initialize();
+        use arrow::array::{Int64Array, StringArray};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Utf8, false),
+            Field::new("b", DataType::Int64, false),
+            Field::new("c", DataType::Utf8, false),
+        ]));
+        // 5 rows; distinct (a,b,c): (A,1,x)[rows 0,3], (A,2,x)[1], (B,1,x)[2], (A,1,y)[4]
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A", "A", "B", "A", "A"])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![1_i64, 2, 1, 1, 1])) as ArrayRef,
+                Arc::new(StringArray::from(vec!["x", "x", "x", "x", "y"])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let (order, map, dtypes) = group_partition_multi(
+            &batch,
+            &["a".to_string(), "b".to_string(), "c".to_string()],
+            "test",
+        )
+        .unwrap();
+        assert_eq!(dtypes, vec![DataType::Utf8, DataType::Int64, DataType::Utf8]);
+        assert_eq!(order.len(), 4, "expected 4 distinct triples");
+        // First-appearance: (A,1,x), (A,2,x), (B,1,x), (A,1,y)
+        let k_a1x = vec![KeyValue::Str("A".into()), KeyValue::Int(1), KeyValue::Str("x".into())];
+        assert_eq!(order[0], k_a1x);
+        assert_eq!(map[&k_a1x], vec![0, 3], "(A,1,x) must collect rows 0 and 3");
+        let k_a1y = vec![KeyValue::Str("A".into()), KeyValue::Int(1), KeyValue::Str("y".into())];
+        assert_eq!(map[&k_a1y], vec![4], "(A,1,y) must be distinct from (A,1,x)");
+    }
+
+    /// Null-skip is ANY-dimension: a row with a null in the SECOND column (first
+    /// non-null) must still be skipped entirely. Pins that the early `break` on the
+    /// first null dimension doesn't accidentally retain rows whose later dims are null.
+    #[test]
+    fn bughunt_group_partition_multi_null_in_later_dim_skips_row() {
+        pyo3::Python::initialize();
+        use arrow::array::{Int64Array, StringArray};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Utf8, false),
+            Field::new("b", DataType::Int64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["A", "A", "A"])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![Some(1_i64), None, Some(1)])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let (order, map, _) =
+            group_partition_multi(&batch, &["a".to_string(), "b".to_string()], "test").unwrap();
+        assert_eq!(order.len(), 1, "only (A,1) survives; (A,null) row is skipped");
+        assert_eq!(map[&order[0]], vec![0, 2], "rows 0 and 2 only; row 1 (b=null) excluded");
+    }
+
+    /// Float group keys: a genuine NaN value and a null must NOT collide (FA-3),
+    /// and both must be distinct from a finite key, when used as a 2-D composite.
+    #[test]
+    fn bughunt_group_partition_multi_float_nan_vs_null_distinct() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![Field::new("g", DataType::Float64, true)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Float64Array::from(vec![Some(1.0), Some(f64::NAN), None, Some(1.0)])) as ArrayRef],
+        )
+        .unwrap();
+        let (order, map, _) =
+            group_partition_multi(&batch, &["g".to_string()], "test").unwrap();
+        // null row skipped; 1.0 and NaN form two distinct groups.
+        assert_eq!(order.len(), 2, "1.0 and NaN are two groups; null is skipped");
+        let k_one = vec![KeyValue::Float(1.0_f64.to_bits())];
+        assert_eq!(map[&k_one], vec![0, 3], "the two 1.0 rows group together");
+        assert!(
+            map.keys().any(|k| matches!(k[0], KeyValue::Float(b) if f64::from_bits(b).is_nan())),
+            "a NaN-keyed group must exist, distinct from null"
+        );
+    }
+
+    /// `deserialize_groupby_vec` must REJECT a non-string array element (e.g. an
+    /// integer), not silently coerce or drop it. Groupby column names are strings.
+    #[test]
+    fn bughunt_deserialize_groupby_vec_rejects_non_string_element() {
+        #[derive(serde::Deserialize)]
+        struct W {
+            #[serde(deserialize_with = "deserialize_groupby_vec")]
+            #[allow(dead_code)]
+            groupby: Vec<String>,
+        }
+        let r: Result<W, _> = serde_json::from_str(r#"{"groupby": ["a", 7]}"#);
+        assert!(r.is_err(), "an integer array element must be rejected, not coerced");
+    }
+
+    /// `deserialize_groupby_vec` on an empty array yields `[]` (ungrouped), exactly
+    /// like null/absent — three spellings of "no grouping" must all converge.
+    #[test]
+    fn bughunt_deserialize_groupby_vec_empty_array_is_ungrouped() {
+        #[derive(serde::Deserialize)]
+        struct W {
+            #[serde(deserialize_with = "deserialize_groupby_vec")]
+            groupby: Vec<String>,
+        }
+        let w: W = serde_json::from_str(r#"{"groupby": []}"#).unwrap();
+        assert!(w.groupby.is_empty(), "empty array must mean ungrouped");
+    }
+
+    /// `materialize_groupby_col` indexes `k[gi]`; an out-of-range `gi` would panic.
+    /// Pins that materializing dim 0 of a single-dim key vec is valid and that the
+    /// null/value mix produces the right Arrow null mask for a string column.
+    #[test]
+    fn bughunt_materialize_string_col_null_mask_correct() {
+        let keys: Vec<Vec<KeyValue>> = vec![
+            vec![KeyValue::Str("A".into())],
+            vec![KeyValue::Null],
+            vec![KeyValue::Str("B".into())],
+        ];
+        let col = materialize_groupby_col(&keys, 0, &DataType::Utf8).unwrap();
+        let s = col.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(s.value(0), "A");
+        assert!(s.is_null(1), "Null key must materialize as Arrow null, not empty string");
+        assert_eq!(s.value(2), "B");
+    }
 }
