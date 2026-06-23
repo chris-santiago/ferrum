@@ -289,6 +289,185 @@ impl PreparedInputs {
     }
 }
 
+/// Which positional channel an axis-input derivation is for.
+///
+/// Carries the two pieces of behavior that differ between the x and y axis
+/// derivations so `build_axis_input` can be called once per channel instead of
+/// the per-axis block being hand-written twice (SPINE-08):
+/// - the **default orient** (`Bottom` for x, `Left` for y), used when no
+///   per-channel `Axis(orient=...)` override is present;
+/// - the **non-ordinal reverse policy** (only y reverses labels/fractions so
+///   high domain values sit at the top), threaded into `build_axis_tick_inputs`
+///   and `encoding_axis_style_overrides`' validation channel token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Channel {
+    X,
+    Y,
+}
+
+impl Channel {
+    /// The default axis side when no per-channel `Axis(orient=...)` is set.
+    fn default_orient(self) -> AxisOrient {
+        match self {
+            Channel::X => AxisOrient::Bottom,
+            Channel::Y => AxisOrient::Left,
+        }
+    }
+
+    /// Whether this channel applies the non-ordinal label/fraction reversal.
+    /// Only y reverses (the pixel range is already inverted in scale_resolve);
+    /// x never does.
+    fn reverses(self) -> bool {
+        matches!(self, Channel::Y)
+    }
+
+    /// The static channel token used for axis-orient/style validation messages.
+    fn token(self) -> &'static str {
+        match self {
+            Channel::X => "x",
+            Channel::Y => "y",
+        }
+    }
+}
+
+/// Resolve a positional axis title via the 3-way idiom shared by the spec-level
+/// encoding title and the per-channel `Axis(title=...)` override (SPINE-08):
+///   - **absent** (`None`)            → fall through to `fallback`;
+///   - **present + empty/whitespace** → explicit suppress, returns `None`;
+///   - **present + non-empty**        → use it.
+///
+/// The empty-string suppression contract comes from Python forwarding
+/// `title = ""` only when `title=None` was explicitly passed; an absent key
+/// means "use the default".
+fn resolve_axis_title(value: Option<&str>, fallback: Option<String>) -> Option<String> {
+    match value {
+        Some(s) if s.trim().is_empty() => None, // explicit suppress: don't fall back
+        Some(s) => Some(s.to_owned()),          // explicit non-empty title
+        None => fallback,                       // absent: use the default
+    }
+}
+
+/// Build one positional axis's [`AxisInput`] from its resolved scale and
+/// encoding (SPINE-08).
+///
+/// This is the single derivation the x and y axes both run; the per-channel
+/// differences (orient default + the non-ordinal-y label reversal) are carried
+/// by [`Channel`]. It performs, in order: the 3-way title resolution
+/// (spec-level title → layer-0 title → field name), the show-toggle extraction,
+/// the tick-label/projection build (threading numeric format forward, applying
+/// temporal format directly, reversing for non-ordinal y), the theme-gated
+/// minor-fraction projection, the per-channel style-override parse, the orient
+/// default, and the final `AxisInput` assembly.
+///
+/// `rendering_enc` is the layer-0 (post-CoordFlip) encoding for this channel;
+/// `spec_enc` is the user-facing spec-level encoding (its title wins). Returns
+/// the assembled `AxisInput` plus the resolved show-axis-band toggle inputs are
+/// kept on the `AxisInput` itself.
+fn build_axis_input(
+    channel: Channel,
+    rendering_enc: Option<&crate::spec::encoding::EncodingSpec>,
+    spec_enc: Option<&crate::spec::encoding::EncodingSpec>,
+    scale: &crate::render::scale_resolve::ScaleKind,
+    tick_count: usize,
+    theme: &crate::layout::ThemeInputs,
+) -> Result<AxisInput, RenderError> {
+    // Axis title resolution priority:
+    //   1. Spec-level encoding title (set by user via .encode(y=Y(..., title=...)))
+    //   2. Layer-0 encoding title (set by desugar for internal column names)
+    //   3. Field name (fallback)
+    // User-explicit titles always win; layer-level titles override the field
+    // name for diagnostic charts whose layer-0 encoding references a column
+    // with a non-semantic name (e.g. "lower_whisker" / "param_value").
+    let field_title = rendering_enc.and_then(|e| {
+        // Explicit spec-level title takes highest priority.
+        let spec_title =
+            resolve_axis_title(spec_enc.and_then(|p| p.title.as_deref()), None);
+        if let Some(spec_title) = spec_title {
+            return Some(spec_title);
+        }
+        if spec_enc.and_then(|p| p.title.as_deref()).is_some() {
+            // Spec-level title present but empty → explicit suppress, no fallback.
+            return None;
+        }
+        // Layer-0 title (desugar for diagnostic column names), then field name.
+        resolve_axis_title(e.title.as_deref(), Some(e.field.clone()))
+    });
+
+    // D7 + D12 (B5-typed): per-axis style fields from the typed `encoding.axis`
+    // style spec. The show toggles default to `true` (and title falls through to
+    // the field name) so SVG output is byte-identical when the encoding carries
+    // no axis overrides.
+    let enc_axis = rendering_enc.and_then(|e| e.axis.as_ref());
+    let show_labels = enc_axis.and_then(|a| a.labels).unwrap_or(true);
+    let show_ticks = enc_axis.and_then(|a| a.ticks).unwrap_or(true);
+    let show_domain = enc_axis.and_then(|a| a.domain).unwrap_or(true);
+    let show_grid = enc_axis.and_then(|a| a.grid).unwrap_or(true);
+    // Axis(title=...): the outer Option distinguishes "key absent" (fall through
+    // to the field-name default) from "key present but empty" (explicit suppress).
+    let title = resolve_axis_title(enc_axis.and_then(|a| a.title.as_deref()), field_title);
+
+    // D12 + D3: resolve the tick label format. A per-channel `Axis(label_format=,
+    // label_format_type=)` takes precedence over the shorthand
+    // `encoding.format`/`format_type`. Chart-level
+    // `configure_axis(label_format_raw=...)` is applied later in `render/mod.rs`
+    // only when no per-encoding override exists.
+    let (tick_format, tick_format_type) = resolve_axis_label_format(rendering_enc);
+
+    // Grid item 18: minor tick fractions from the resolved scale, projected
+    // through the same `[0,1]`-range scale that places majors. The
+    // `theme.grid.minor` gate (default `false`) is the single source of truth:
+    // when off, `minor` is empty → no minors built → default output
+    // byte-identical.
+    let minor_fractions = if theme.grid.minor {
+        scale.minor_tick_fractions()
+    } else {
+        Vec::new()
+    };
+
+    // Derive labels + scale-projected tick fractions + threaded label format
+    // through the shared `build_axis_tick_inputs` helper. Global axes use
+    // `Thread` mode (numeric format is threaded onto the override for central
+    // application; temporal is formatted directly). `channel.reverses()` carries
+    // the non-ordinal-y reversal; the theme-gated minor fractions are passed in
+    // (not reversed).
+    let (tick_labels, tick_projection, label_format_override) = build_axis_tick_inputs(
+        scale,
+        tick_count,
+        TickFormatMode::Thread {
+            format: tick_format,
+            format_type: tick_format_type.as_deref(),
+        },
+        channel.reverses(),
+        minor_fractions,
+    );
+
+    // B5: per-channel axis STYLING + positioning overrides.
+    let mut overrides = encoding_axis_style_overrides(enc_axis.map(Box::as_ref), channel.token())?;
+    // Seed the per-channel `label_format` (resolved via the temporal/numeric
+    // threading above) onto the bundle.
+    overrides.label_format = label_format_override;
+
+    // Per-channel `orient` selects the axis side; absent → the dimension default
+    // (Bottom for x, Left for y). The `orient` override input stays in the bundle
+    // so a later chart-level `configure_axis(orient=...)` fills it only when
+    // still `None` (per-channel wins), then `resolve_orient` re-syncs.
+    let orient = overrides.orient.unwrap_or(channel.default_orient());
+
+    Ok(AxisInput {
+        orient,
+        title,
+        tick_labels,
+        show_labels,
+        show_ticks,
+        show_domain,
+        show_grid,
+        tick_format: None, // already applied above
+        tick_format_type: None,
+        tick_projection,
+        overrides,
+    })
+}
+
 pub fn prepare_render_inputs(
     spec: &ChartSpec,
     batch: &RecordBatch,
@@ -302,104 +481,11 @@ pub fn prepare_render_inputs(
     // downcasts to StringArray succeed uniformly.
     let normalized = normalize_string_views(batch);
 
-    // Build the named-output map. When faceting is active, partition the input
-    // batch by the facet column(s) BEFORE running transforms so each panel gets
-    // its own data subset and transforms execute independently per panel.
-    // When there is no facet, the pipeline is unchanged (single partition = full batch).
-    let ctx = TransformContext::default();
-    let transform_outputs = if let Some(fspec) = &spec.facet {
-        // Facet-before-transform: partition → per-panel transforms → inject facet column(s) → concat.
-        //
-        // Grid mode (fspec.row is set): partition on the composite (col_val, row_val) key so each
-        // (row, col) cell is a distinct partition. Both the col field and the row field are injected
-        // back into every transform output so per-panel filtering can use either.
-        //
-        // Wrap mode (fspec.row is None): partition on fspec.field only — behavior unchanged.
-        // Each partition carries (col_val, optional_row_val) → RecordBatch.
-        // Grid mode populates the row value; wrap mode leaves it None.
-        let partitions: Vec<(FacetPartitionKey, RecordBatch)> =
-            if let Some(row_field) = &fspec.row {
-                partition_batch_by_two_fields(&normalized, &fspec.field, row_field)?
-                    .into_iter()
-                    .map(|((col_val, row_val), batch)| ((col_val, Some(row_val)), batch))
-                    .collect()
-            } else {
-                partition_batch_by_field(&normalized, &fspec.field)?
-                    .into_iter()
-                    .map(|(col_val, batch)| ((col_val, None), batch))
-                    .collect()
-            };
-
-        // Pin a shared value-axis extent from the full (pre-partition) batch for
-        // every extent-carrying transform (Kde / Bin / Violin / Kde2D / Bin2D)
-        // without an explicit extent. Otherwise each partition would use its own
-        // range, causing panels (and hue groups within panels) to render on
-        // different value scales and making positions non-comparable. By fixing
-        // the extent to the global range before partitioning, all panels and
-        // groups share the same value axis. This is the correct default for
-        // faceted density / histogram / violin / 2-D density / heatmap charts
-        // (archaeology bug #7; extended to Kde2D/Bin2D by R5).
-        let effective_transforms = fix_transform_extents_for_facet(&spec.transforms, &normalized);
-
-        let mut merged: HashMap<String, Vec<RecordBatch>> = HashMap::new();
-        for ((col_value, row_value), partition_batch) in &partitions {
-            let mut panel_outputs = apply_transforms_named(&effective_transforms, partition_batch, &ctx)
-                .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
-            // D10: per-panel imputation
-            {
-                let final_batch = panel_outputs
-                    .get(FINAL_OUTPUT_KEY)
-                    .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY");
-                let imputed = apply_impute(final_batch, spec);
-                if imputed.num_rows() != final_batch.num_rows() {
-                    panel_outputs.insert(FINAL_OUTPUT_KEY.to_string(), imputed);
-                }
-            }
-            // Re-inject the col field (and row field when in grid mode) into every
-            // output batch. Transforms like Smooth replace the batch entirely, losing
-            // any facet columns that were present on the input partition.
-            for batch in panel_outputs.values_mut() {
-                *batch = inject_facet_column(batch, &fspec.field, col_value);
-                if let (Some(row_field), Some(row_val)) = (&fspec.row, row_value) {
-                    *batch = inject_facet_column(batch, row_field, row_val);
-                }
-            }
-            for (key, batch) in panel_outputs {
-                merged.entry(key).or_default().push(batch);
-            }
-        }
-        // Concat per-key batches across all panels into a single map.
-        let mut combined: HashMap<String, RecordBatch> = HashMap::new();
-        for (key, batches) in merged {
-            if batches.len() == 1 {
-                combined.insert(key, batches.into_iter().next().unwrap());
-            } else {
-                let schema = batches[0].schema();
-                let merged_batch = arrow::compute::concat_batches(&schema, &batches)
-                    .map_err(|e| RenderError::TransformFailed(format!(
-                        "concat facet partitions for key '{key}': {e}"
-                    )))?;
-                combined.insert(key, merged_batch);
-            }
-        }
-        combined
-    } else {
-        // No facet: unchanged pipeline (single partition = full batch).
-        let mut outputs = apply_transforms_named(&spec.transforms, &normalized, &ctx)
-            .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
-        // D10: apply imputation (fill missing group×x combinations with a constant y)
-        // on the final batch, when encoding.y.impute = {"value": N} is set.
-        {
-            let final_batch = outputs
-                .get(FINAL_OUTPUT_KEY)
-                .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY");
-            let imputed = apply_impute(final_batch, spec);
-            if imputed.num_rows() != final_batch.num_rows() {
-                outputs.insert(FINAL_OUTPUT_KEY.to_string(), imputed);
-            }
-        }
-        outputs
-    };
+    // Run the Phase 5 transform pipeline, applying the facet-aware partition →
+    // per-panel transforms → inject → concat path when a facet is present and
+    // the plain single-partition path otherwise. The D10 impute step runs once
+    // inside, in both branches (SPINE-12).
+    let transform_outputs = run_transforms_with_facet(spec, &normalized)?;
     let transformed = transform_outputs
         .get(FINAL_OUTPUT_KEY)
         .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY")
@@ -407,35 +493,9 @@ pub fn prepare_render_inputs(
 
     // --- Phase 8a: per-layer inputs + CoordFlip ---
 
-    // Build per-layer prepared inputs
+    // Build per-layer prepared inputs (swapping x↔y / x2↔y2 under CoordFlip).
     let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
-
-    let layers: Vec<LayerPrepared> = {
-        let raw: Vec<LayerPrepared> = match &spec.layers {
-            None => vec![LayerPrepared::from_chart_only(spec)],
-            Some(layer_vec) => layer_vec
-                .iter()
-                .map(|l| LayerPrepared::from_chart_and_layer(spec, l))
-                .collect(),
-        };
-        if coord_flipped {
-            raw.into_iter()
-                .map(|mut lp| {
-                    let tmp = lp.encoding.x.take();
-                    lp.encoding.x = lp.encoding.y.take();
-                    lp.encoding.y = tmp;
-                    // Phase 10c-pre: x2/y2 must swap together with x/y so paired
-                    // endpoints (segment, ribbon) remain self-consistent under flip.
-                    let tmp2 = lp.encoding.x2.take();
-                    lp.encoding.x2 = lp.encoding.y2.take();
-                    lp.encoding.y2 = tmp2;
-                    lp
-                })
-                .collect()
-        } else {
-            raw
-        }
-    };
+    let layers = build_layers(spec, coord_flipped);
 
     // Validate every layer's data_source resolves to a known transform output.
     // Fail-fast here so the per-panel render loop can unconditionally `.get()`.
@@ -477,197 +537,11 @@ pub fn prepare_render_inputs(
         theme,
     )?;
 
-    // Axis title resolution priority:
-    //   1. Spec-level encoding title (set by user via .encode(y=Y(..., title=...)))
-    //   2. Layer-0 encoding title (set by desugar for internal column names)
-    //   3. Field name (fallback)
-    // User-explicit titles always win; layer-level titles override the field
-    // name for diagnostic charts whose layer-0 encoding references a column
-    // with a non-semantic name (e.g. "lower_whisker" / "param_value").
-    //
-    // Empty-string suppression contract: Python forwards `out["title"] = ""`
-    // ONLY when `title=None` is explicitly passed by the caller. An absent key
-    // means "use the field name" (default); a present empty string means
-    // "suppress entirely". We resolve here at the boundary so the rest of the
-    // pipeline naturally sees `None` and emits neither a margin nor a text node.
-    let x_field = rendering_encoding
-        .x
-        .as_ref()
-        .and_then(|e| {
-            // Explicit spec-level title takes highest priority.
-            if let Some(explicit) = spec.encoding.x.as_ref().and_then(|p| p.title.as_deref()) {
-                if explicit.trim().is_empty() {
-                    return None; // explicit suppress: title=None → ""
-                }
-                return Some(explicit.to_owned());
-            }
-            // Layer-0 title (desugar for diagnostic column names).
-            if let Some(layer_title) = e.title.as_deref() {
-                if layer_title.trim().is_empty() {
-                    return None;
-                }
-                return Some(layer_title.to_owned());
-            }
-            // Fallback: field name.
-            Some(e.field.clone())
-        });
-    let y_field = rendering_encoding
-        .y
-        .as_ref()
-        .and_then(|e| {
-            if let Some(explicit) = spec.encoding.y.as_ref().and_then(|p| p.title.as_deref()) {
-                if explicit.trim().is_empty() {
-                    return None;
-                }
-                return Some(explicit.to_owned());
-            }
-            if let Some(layer_title) = e.title.as_deref() {
-                if layer_title.trim().is_empty() {
-                    return None;
-                }
-                return Some(layer_title.to_owned());
-            }
-            Some(e.field.clone())
-        });
-    // D3 (flexibility campaign): per-channel `Axis(tick_count=N)` controls the
-    // target tick count for continuous + temporal axes (default 10). Limiting it
-    // is what de-clutters dense temporal axes (e.g. a 72-row series no longer
-    // renders 72 overlapping ticks). Read before tick generation so the count
-    // feeds every downstream tick call (labels, fractions, minors).
-    let x_tick_count = encoding_axis_tick_count(rendering_encoding.x.as_ref()).unwrap_or(10);
-    let y_tick_count = encoding_axis_tick_count(rendering_encoding.y.as_ref()).unwrap_or(10);
-
-    // D7 + D12 (B5-typed): extract per-axis style fields from the typed
-    // `encoding.axis` style spec. The show toggles default to `true` (and title
-    // falls through to the field name) so SVG output is byte-identical when the
-    // encoding carries no axis overrides.
-    let x_enc_axis = rendering_encoding.x.as_ref().and_then(|e| e.axis.as_ref());
-    let y_enc_axis = rendering_encoding.y.as_ref().and_then(|e| e.axis.as_ref());
-    let x_axis_labels = x_enc_axis.and_then(|a| a.labels).unwrap_or(true);
-    let x_axis_ticks = x_enc_axis.and_then(|a| a.ticks).unwrap_or(true);
-    let x_axis_domain = x_enc_axis.and_then(|a| a.domain).unwrap_or(true);
-    let x_axis_grid = x_enc_axis.and_then(|a| a.grid).unwrap_or(true);
-    // Axis(title=...) resolution: the outer Option distinguishes "key absent" from
-    // "key present but empty".
-    //   - None (absent)  → fall through to x_field (field-name default)
-    //   - Some("") or Some("  ") → explicit suppress; final title is None, no fallback
-    //   - Some("Custom") → use "Custom" directly, no fallback
-    let x_axis_title: Option<String> = match x_enc_axis.and_then(|a| a.title.as_deref()) {
-        Some(s) if s.trim().is_empty() => None, // explicit suppress: don't fall back
-        Some(s) => Some(s.to_owned()),           // explicit non-empty title
-        None => x_field,                         // absent: fall through to field default
-    };
-    let y_axis_labels = y_enc_axis.and_then(|a| a.labels).unwrap_or(true);
-    let y_axis_ticks = y_enc_axis.and_then(|a| a.ticks).unwrap_or(true);
-    let y_axis_domain = y_enc_axis.and_then(|a| a.domain).unwrap_or(true);
-    let y_axis_grid = y_enc_axis.and_then(|a| a.grid).unwrap_or(true);
-    // Same three-way resolution as x_axis_title above.
-    let y_axis_title: Option<String> = match y_enc_axis.and_then(|a| a.title.as_deref()) {
-        Some(s) if s.trim().is_empty() => None,
-        Some(s) => Some(s.to_owned()),
-        None => y_field,
-    };
-    // D12 + D3: resolve the tick label format. A per-channel `Axis(label_format=,
-    // label_format_type=)` (carried in `encoding.axis`) takes precedence over the
-    // shorthand `encoding.format`/`format_type`, so an explicit `Axis(...)` always
-    // wins. Chart-level `configure_axis(label_format_raw=...)` is applied later in
-    // `render/mod.rs` only when no per-encoding override exists.
-    let (x_tick_format, x_tick_format_type) = resolve_axis_label_format(rendering_encoding.x.as_ref());
-    let (y_tick_format, y_tick_format_type) = resolve_axis_label_format(rendering_encoding.y.as_ref());
-
-    // Grid item 18: minor tick fractions from the provisional scales, projected
-    // through the same `[0,1]`-range scale that places majors. Carried into the
-    // AxisInput's `TickProjection.minor` so layout can build
-    // `AxisLayout.minor_ticks`. The `theme.grid.minor` gate (default `false`) is
-    // the single source of truth: when off, `minor` is empty → no minors built →
-    // default output byte-identical. "Minor enabled" downstream is derived purely
-    // from `minor` being non-empty. Categorical/discretizing scales yield an
-    // empty vec (no continuum to subdivide), so they stay minor-free regardless.
-    let x_minor_fractions = if theme.grid.minor {
-        provisional_scales.x.minor_tick_fractions()
-    } else {
-        Vec::new()
-    };
-    let y_minor_fractions = if theme.grid.minor {
-        provisional_scales.y.minor_tick_fractions()
-    } else {
-        Vec::new()
-    };
-
-    // Derive labels + scale-projected tick fractions + threaded label format for
-    // both axes through the single `build_axis_tick_inputs` helper that the
-    // independent-axis facet path (`scene_build`) also drives, so the two paths
-    // cannot drift on the tick_labels → non-ordinal-y reverse → format → fraction
-    // projection sequence. Global axes use `Thread` mode (numeric format is
-    // threaded onto the override for central application + chart-level deferral;
-    // temporal is formatted directly). `is_y` carries the non-ordinal-y reversal;
-    // the theme-gated minor fractions are passed in (not reversed).
-    let (x_tick_labels, x_tick_projection, x_label_format_override) = build_axis_tick_inputs(
-        &provisional_scales.x,
-        x_tick_count,
-        TickFormatMode::Thread { format: x_tick_format, format_type: x_tick_format_type.as_deref() },
-        false,
-        x_minor_fractions,
-    );
-    let (y_tick_labels, y_tick_projection, y_label_format_override) = build_axis_tick_inputs(
-        &provisional_scales.y,
-        y_tick_count,
-        TickFormatMode::Thread { format: y_tick_format, format_type: y_tick_format_type.as_deref() },
-        true,
-        y_minor_fractions,
-    );
-
-    // B5: per-channel axis STYLING + positioning overrides (grid color/dash/
-    // width, label color/font-size, domain color/width, title styling,
-    // tick_values, padding, and the unit-2 orphans orient/translate/extents/
-    // grid_opacity/title_orient/zindex/tick_min_step/tick_extra).
-    let mut x_axis_style = encoding_axis_style_overrides(x_enc_axis.map(Box::as_ref), "x")?;
-    let mut y_axis_style = encoding_axis_style_overrides(y_enc_axis.map(Box::as_ref), "y")?;
-
-    // Per-channel `orient` selects the axis side; absent → the dimension default
-    // (Bottom for x, Left for y). Validated above against the channel dimension.
-    // Stored as the concrete `AxisInput.orient`; the `orient` override input stays
-    // in the bundle so a later chart-level `configure_axis(orient=...)` fills it
-    // only when still `None` (per-channel wins), then `resolve_orient` re-syncs.
-    let x_orient = x_axis_style.orient.unwrap_or(AxisOrient::Bottom);
-    let y_orient = y_axis_style.orient.unwrap_or(AxisOrient::Left);
-
-    // Seed the per-channel `label_format` (resolved via the temporal/numeric
-    // threading above) onto the bundle. `label_angle` is already on the bundle
-    // (parsed from the same `encoding.axis` spec as `x_label_angle`).
-    x_axis_style.label_format = x_label_format_override;
-    y_axis_style.label_format = y_label_format_override;
-
-    let axes = AxesInput {
-        x: AxisInput {
-            orient: x_orient,
-            title: x_axis_title,
-            tick_labels: x_tick_labels,
-            show_labels: x_axis_labels,
-            show_ticks: x_axis_ticks,
-            show_domain: x_axis_domain,
-            show_grid: x_axis_grid,
-            tick_format: None, // already applied above
-            tick_format_type: None,
-            tick_projection: x_tick_projection,
-            overrides: x_axis_style,
-        },
-        y: AxisInput {
-            orient: y_orient,
-            title: y_axis_title,
-            tick_labels: y_tick_labels,
-            show_labels: y_axis_labels,
-            show_ticks: y_axis_ticks,
-            show_domain: y_axis_domain,
-            show_grid: y_axis_grid,
-            tick_format: None,
-            tick_format_type: None,
-            tick_projection: y_tick_projection,
-            overrides: y_axis_style,
-        },
-        show_x: spec.axis_x.unwrap_or(true),
-        show_y: spec.axis_y.unwrap_or(true),
-    };
+    // Derive both axis inputs + their tick counts (SPINE-08/SPINE-12). The
+    // rendering encoding is post-CoordFlip; the spec-level encoding (whose
+    // explicit title wins) is threaded through for the title 3-way.
+    let (axes, x_tick_count, y_tick_count) =
+        build_axes(spec, &rendering_encoding, &provisional_scales, theme)?;
 
     let facet_groups = if let Some(fspec) = &spec.facet {
         if let Some(row_field) = &fspec.row {
@@ -712,6 +586,186 @@ pub fn prepare_render_inputs(
         x_tick_count,
         y_tick_count,
     })
+}
+
+/// Run the Phase 5 transform pipeline, producing the named-output map (SPINE-12).
+///
+/// When faceting is active, partition the input batch by the facet column(s)
+/// BEFORE running transforms so each panel gets its own data subset and
+/// transforms execute independently per panel; the facet column(s) are
+/// re-injected into every output and per-key batches are concatenated across
+/// panels. When there is no facet, the pipeline is the plain single-partition
+/// path (one partition = full batch). Both branches apply the D10 impute step
+/// (`apply_impute_to_final`) exactly once on `FINAL_OUTPUT_KEY`.
+fn run_transforms_with_facet(
+    spec: &ChartSpec,
+    normalized: &RecordBatch,
+) -> Result<HashMap<String, RecordBatch>, RenderError> {
+    let ctx = TransformContext::default();
+    let Some(fspec) = &spec.facet else {
+        // No facet: unchanged pipeline (single partition = full batch).
+        let mut outputs = apply_transforms_named(&spec.transforms, normalized, &ctx)
+            .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
+        apply_impute_to_final(&mut outputs, spec);
+        return Ok(outputs);
+    };
+
+    // Facet-before-transform: partition → per-panel transforms → inject facet column(s) → concat.
+    //
+    // Grid mode (fspec.row is set): partition on the composite (col_val, row_val) key so each
+    // (row, col) cell is a distinct partition. Both the col field and the row field are injected
+    // back into every transform output so per-panel filtering can use either.
+    //
+    // Wrap mode (fspec.row is None): partition on fspec.field only — behavior unchanged.
+    // Each partition carries (col_val, optional_row_val) → RecordBatch.
+    // Grid mode populates the row value; wrap mode leaves it None.
+    let partitions: Vec<(FacetPartitionKey, RecordBatch)> = if let Some(row_field) = &fspec.row {
+        partition_batch_by_two_fields(normalized, &fspec.field, row_field)?
+            .into_iter()
+            .map(|((col_val, row_val), batch)| ((col_val, Some(row_val)), batch))
+            .collect()
+    } else {
+        partition_batch_by_field(normalized, &fspec.field)?
+            .into_iter()
+            .map(|(col_val, batch)| ((col_val, None), batch))
+            .collect()
+    };
+
+    // Pin a shared value-axis extent from the full (pre-partition) batch for
+    // every extent-carrying transform (Kde / Bin / Violin / Kde2D / Bin2D)
+    // without an explicit extent. Otherwise each partition would use its own
+    // range, causing panels (and hue groups within panels) to render on
+    // different value scales and making positions non-comparable. By fixing
+    // the extent to the global range before partitioning, all panels and
+    // groups share the same value axis. This is the correct default for
+    // faceted density / histogram / violin / 2-D density / heatmap charts
+    // (archaeology bug #7; extended to Kde2D/Bin2D by R5).
+    let effective_transforms = fix_transform_extents_for_facet(&spec.transforms, normalized);
+
+    let mut merged: HashMap<String, Vec<RecordBatch>> = HashMap::new();
+    for ((col_value, row_value), partition_batch) in &partitions {
+        let mut panel_outputs = apply_transforms_named(&effective_transforms, partition_batch, &ctx)
+            .map_err(|e| RenderError::TransformFailed(e.to_string()))?;
+        // D10: per-panel imputation.
+        apply_impute_to_final(&mut panel_outputs, spec);
+        // Re-inject the col field (and row field when in grid mode) into every
+        // output batch. Transforms like Smooth replace the batch entirely, losing
+        // any facet columns that were present on the input partition.
+        for batch in panel_outputs.values_mut() {
+            *batch = inject_facet_column(batch, &fspec.field, col_value);
+            if let (Some(row_field), Some(row_val)) = (&fspec.row, row_value) {
+                *batch = inject_facet_column(batch, row_field, row_val);
+            }
+        }
+        for (key, batch) in panel_outputs {
+            merged.entry(key).or_default().push(batch);
+        }
+    }
+    // Concat per-key batches across all panels into a single map.
+    let mut combined: HashMap<String, RecordBatch> = HashMap::new();
+    for (key, batches) in merged {
+        if batches.len() == 1 {
+            combined.insert(key, batches.into_iter().next().unwrap());
+        } else {
+            let schema = batches[0].schema();
+            let merged_batch = arrow::compute::concat_batches(&schema, &batches).map_err(|e| {
+                RenderError::TransformFailed(format!("concat facet partitions for key '{key}': {e}"))
+            })?;
+            combined.insert(key, merged_batch);
+        }
+    }
+    Ok(combined)
+}
+
+/// Apply the D10 impute step in place on the pipeline's `FINAL_OUTPUT_KEY`
+/// batch, replacing it only when imputation added rows (SPINE-12).
+///
+/// This is the single call site for both the facet (per-panel) and non-facet
+/// transform branches; it formerly appeared verbatim in each.
+fn apply_impute_to_final(outputs: &mut HashMap<String, RecordBatch>, spec: &ChartSpec) {
+    let final_batch = outputs
+        .get(FINAL_OUTPUT_KEY)
+        .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY");
+    let imputed = apply_impute(final_batch, spec);
+    if imputed.num_rows() != final_batch.num_rows() {
+        outputs.insert(FINAL_OUTPUT_KEY.to_string(), imputed);
+    }
+}
+
+/// Build the per-layer prepared inputs, applying the CoordFlip x↔y / x2↔y2 swap
+/// to every layer when `coord_flipped` (SPINE-12).
+///
+/// Single-layer charts (`spec.layers == None`) produce exactly one
+/// [`LayerPrepared`] from the chart-level mark + encoding; multi-layer charts
+/// produce one per `Layer` (inheriting unset channels from chart level).
+fn build_layers(spec: &ChartSpec, coord_flipped: bool) -> Vec<LayerPrepared> {
+    let raw: Vec<LayerPrepared> = match &spec.layers {
+        None => vec![LayerPrepared::from_chart_only(spec)],
+        Some(layer_vec) => layer_vec
+            .iter()
+            .map(|l| LayerPrepared::from_chart_and_layer(spec, l))
+            .collect(),
+    };
+    if !coord_flipped {
+        return raw;
+    }
+    raw.into_iter()
+        .map(|mut lp| {
+            let tmp = lp.encoding.x.take();
+            lp.encoding.x = lp.encoding.y.take();
+            lp.encoding.y = tmp;
+            // Phase 10c-pre: x2/y2 must swap together with x/y so paired
+            // endpoints (segment, ribbon) remain self-consistent under flip.
+            let tmp2 = lp.encoding.x2.take();
+            lp.encoding.x2 = lp.encoding.y2.take();
+            lp.encoding.y2 = tmp2;
+            lp
+        })
+        .collect()
+}
+
+/// Build both positional [`AxisInput`]s and their tick counts (SPINE-08/12).
+///
+/// `rendering_encoding` is the layer-0 (post-CoordFlip) encoding; `spec`'s
+/// encoding supplies the user-facing spec-level title that wins the 3-way title
+/// resolution. The per-channel derivation runs once each through
+/// [`build_axis_input`], with [`Channel`] carrying the orient default and the
+/// non-ordinal-y reversal. Returns `(axes, x_tick_count, y_tick_count)`.
+fn build_axes(
+    spec: &ChartSpec,
+    rendering_encoding: &crate::spec::encoding::Encoding,
+    provisional_scales: &ResolvedScales,
+    theme: &crate::layout::ThemeInputs,
+) -> Result<(AxesInput, usize, usize), RenderError> {
+    // D3 (flexibility campaign): per-channel `Axis(tick_count=N)` controls the
+    // target tick count for continuous + temporal axes (default 10). Limiting it
+    // is what de-clutters dense temporal axes (e.g. a 72-row series no longer
+    // renders 72 overlapping ticks). Read before tick generation so the count
+    // feeds every downstream tick call (labels, fractions, minors).
+    let x_tick_count = encoding_axis_tick_count(rendering_encoding.x.as_ref()).unwrap_or(10);
+    let y_tick_count = encoding_axis_tick_count(rendering_encoding.y.as_ref()).unwrap_or(10);
+
+    let axes = AxesInput {
+        x: build_axis_input(
+            Channel::X,
+            rendering_encoding.x.as_ref(),
+            spec.encoding.x.as_ref(),
+            &provisional_scales.x,
+            x_tick_count,
+            theme,
+        )?,
+        y: build_axis_input(
+            Channel::Y,
+            rendering_encoding.y.as_ref(),
+            spec.encoding.y.as_ref(),
+            &provisional_scales.y,
+            y_tick_count,
+            theme,
+        )?,
+        show_x: spec.axis_x.unwrap_or(true),
+        show_y: spec.axis_y.unwrap_or(true),
+    };
+    Ok((axes, x_tick_count, y_tick_count))
 }
 
 /// D10: fill missing (group × x-value) combinations in the batch with a constant y value.
@@ -1588,6 +1642,162 @@ mod tests {
         assert_eq!(parse_label_overlap(""), None);
         // Unrecognized → bounded to the cascade default (greedy), not an error.
         assert_eq!(parse_label_overlap("nonsense"), Some(LabelOverlap::Greedy));
+    }
+
+    // --- SPINE-08: build_axis_input + resolve_axis_title -------------------------
+
+    /// The 3-way title idiom: absent → fallback; present-empty → suppress;
+    /// present-nonempty → use it (whitespace counts as empty).
+    #[test]
+    fn resolve_axis_title_three_way() {
+        assert_eq!(resolve_axis_title(None, Some("field".into())), Some("field".into()));
+        assert_eq!(resolve_axis_title(None, None), None);
+        assert_eq!(resolve_axis_title(Some(""), Some("field".into())), None);
+        assert_eq!(resolve_axis_title(Some("   "), Some("field".into())), None);
+        assert_eq!(resolve_axis_title(Some("Custom"), Some("field".into())), Some("Custom".into()));
+        // Explicit non-empty wins even with no fallback.
+        assert_eq!(resolve_axis_title(Some("Custom"), None), Some("Custom".into()));
+    }
+
+    /// `Channel` carries the orient default and the reverse policy.
+    #[test]
+    fn channel_carries_orient_default_and_reverse_policy() {
+        assert_eq!(Channel::X.default_orient(), AxisOrient::Bottom);
+        assert_eq!(Channel::Y.default_orient(), AxisOrient::Left);
+        assert!(!Channel::X.reverses());
+        assert!(Channel::Y.reverses());
+        assert_eq!(Channel::X.token(), "x");
+        assert_eq!(Channel::Y.token(), "y");
+    }
+
+    /// A continuous (Linear) scale over [0, 10]. Tick labels run "0".."10" in
+    /// domain order; the non-ordinal-y reversal flips them.
+    fn linear_scale_0_10() -> crate::render::scale_resolve::ScaleKind {
+        use crate::render::scale_resolve::ScaleKind;
+        use crate::scale::linear::LinearScale;
+        ScaleKind::Linear(LinearScale::new_internal(
+            vec![0.0, 10.0],
+            vec![0.0, 1.0],
+            false,
+            false,
+        ))
+    }
+
+    /// An ordinal scale over three categories (no continuum to reverse).
+    fn ordinal_scale_abc() -> crate::render::scale_resolve::ScaleKind {
+        use crate::render::scale_resolve::ScaleKind;
+        use crate::scale::ordinal::OrdinalScale;
+        ScaleKind::Ordinal(OrdinalScale::new_internal(
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![0.0, 1.0],
+            0.0,
+        ))
+    }
+
+    /// x and y axis inputs built from the SAME continuous scale agree on every
+    /// field EXCEPT that the non-ordinal y reverses its tick labels and
+    /// projected major fractions, and picks the Left orient default. This is the
+    /// load-bearing parity check for the SPINE-08 extraction: the y derivation is
+    /// NOT mechanically identical to x — it interleaves the reversal.
+    #[test]
+    fn build_axis_input_x_vs_y_continuous_reverse_parity() {
+        let theme = crate::layout::ThemeInputs::default();
+        let x_enc = EncodingSpec { field: "v".into(), ..Default::default() };
+        let y_enc = EncodingSpec { field: "v".into(), ..Default::default() };
+        let scale = linear_scale_0_10();
+
+        let x = build_axis_input(Channel::X, Some(&x_enc), Some(&x_enc), &scale, 10, &theme)
+            .expect("x axis input");
+        let y = build_axis_input(Channel::Y, Some(&y_enc), Some(&y_enc), &scale, 10, &theme)
+            .expect("y axis input");
+
+        // Orient defaults differ by channel.
+        assert_eq!(x.orient, AxisOrient::Bottom);
+        assert_eq!(y.orient, AxisOrient::Left);
+        // Title falls through to the field name on both.
+        assert_eq!(x.title.as_deref(), Some("v"));
+        assert_eq!(y.title.as_deref(), Some("v"));
+        // Show toggles default true on both.
+        assert!(x.show_labels && x.show_ticks && x.show_domain && x.show_grid);
+        assert!(y.show_labels && y.show_ticks && y.show_domain && y.show_grid);
+
+        // The y tick labels are the x tick labels reversed (non-ordinal-y rule).
+        assert!(!x.tick_labels.is_empty(), "continuous axis must have labels");
+        let mut x_reversed = x.tick_labels.clone();
+        x_reversed.reverse();
+        assert_eq!(y.tick_labels, x_reversed);
+
+        // The projected major fractions are likewise reversed in lockstep.
+        let x_major = x.tick_projection.as_ref().expect("x projection").major.clone();
+        let y_major = y.tick_projection.as_ref().expect("y projection").major.clone();
+        let mut x_major_reversed = x_major.clone();
+        x_major_reversed.reverse();
+        assert_eq!(y_major, x_major_reversed);
+    }
+
+    /// On an ORDINAL scale the non-ordinal-y reversal does NOT apply: y keeps the
+    /// same order as x (top-down for heatmaps / confusion matrices). The only
+    /// remaining difference is the orient default.
+    #[test]
+    fn build_axis_input_y_ordinal_does_not_reverse() {
+        let theme = crate::layout::ThemeInputs::default();
+        let enc = EncodingSpec { field: "cat".into(), ..Default::default() };
+        let scale = ordinal_scale_abc();
+
+        let x = build_axis_input(Channel::X, Some(&enc), Some(&enc), &scale, 10, &theme)
+            .expect("x axis input");
+        let y = build_axis_input(Channel::Y, Some(&enc), Some(&enc), &scale, 10, &theme)
+            .expect("y axis input");
+
+        assert_eq!(x.tick_labels, y.tick_labels, "ordinal y must not reverse");
+        assert_eq!(x.orient, AxisOrient::Bottom);
+        assert_eq!(y.orient, AxisOrient::Left);
+    }
+
+    /// Spec-level title wins over the layer-0 title, which wins over the field
+    /// name; an explicit empty spec-level title suppresses entirely.
+    #[test]
+    fn build_axis_input_title_precedence() {
+        let theme = crate::layout::ThemeInputs::default();
+        let scale = linear_scale_0_10();
+
+        // spec-level title wins over layer-0 title.
+        let rendering = EncodingSpec {
+            field: "v".into(),
+            title: Some("layer".into()),
+            ..Default::default()
+        };
+        let spec_enc = EncodingSpec {
+            field: "v".into(),
+            title: Some("spec".into()),
+            ..Default::default()
+        };
+        let a = build_axis_input(Channel::X, Some(&rendering), Some(&spec_enc), &scale, 10, &theme)
+            .expect("axis input");
+        assert_eq!(a.title.as_deref(), Some("spec"));
+
+        // explicit empty spec-level title suppresses (no fallback to field/layer).
+        let spec_suppress = EncodingSpec {
+            field: "v".into(),
+            title: Some("".into()),
+            ..Default::default()
+        };
+        let b = build_axis_input(
+            Channel::X,
+            Some(&rendering),
+            Some(&spec_suppress),
+            &scale,
+            10,
+            &theme,
+        )
+        .expect("axis input");
+        assert_eq!(b.title, None);
+
+        // absent spec-level title falls through to the layer-0 title.
+        let spec_absent = EncodingSpec { field: "v".into(), ..Default::default() };
+        let c = build_axis_input(Channel::X, Some(&rendering), Some(&spec_absent), &scale, 10, &theme)
+            .expect("axis input");
+        assert_eq!(c.title.as_deref(), Some("layer"));
     }
 
     // --- archaeology #7: generalized facet extent pin ---------------------------
