@@ -55,12 +55,9 @@ pub(crate) struct MarkNodes {
 }
 
 impl MarkNodes {
-    /// Empty accumulator.
-    // Tasks 3–6 will migrate group-mark builders that prefer `new()` over
-    // `with_capacity` when the output size is unknown upfront. Until then,
-    // suppress the dead-code lint on the unused methods individually rather than
-    // with a blanket impl allow.
-    #[allow(dead_code)]
+    /// Empty accumulator. Used by group-mark builders (e.g. `geoshape`) whose
+    /// output node count is not known upfront, so reserving capacity would not
+    /// help.
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -93,15 +90,15 @@ impl MarkNodes {
     }
 
     /// Number of accumulated nodes (equals the number of source-row indices).
-    // Tasks 3–6 may use len() for pre-loop capacity checks or assertions.
-    #[allow(dead_code)]
+    /// Test-only: production builders read the count off the finalized vectors.
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.nodes.len()
     }
 
     /// Whether no nodes have been accumulated.
-    // Tasks 3–6 may use is_empty() for guard conditions on group builders.
-    #[allow(dead_code)]
+    /// Test-only: production builders read emptiness off the finalized vectors.
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
@@ -208,12 +205,9 @@ pub(crate) fn debug_assert_nodes_metadata_aligned(
 ///
 /// This lets tests exercise the invariant on a release build without relying
 /// on `debug_assert` being compiled in. The production seam uses
-/// [`debug_assert_nodes_metadata_aligned`]; this mirrors its predicate exactly,
-/// checking all five independent channels.
-//
-// Exercised by the unit tests; the production seam uses the `debug_assert`
-// sibling. Kept as the release-testable form of the same invariant.
-#[allow(dead_code)]
+/// [`debug_assert_nodes_metadata_aligned`] (see `scene_build.rs`); this mirrors
+/// its predicate exactly, checking all five independent channels.
+#[cfg(test)]
 pub(crate) fn check_nodes_metadata_aligned(
     nodes_len: usize,
     tooltips_len: Option<usize>,

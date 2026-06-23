@@ -61,6 +61,21 @@ impl AxisOrient {
 ///
 /// `None` on [`AxisInput`] (the default) runs the unmodified cascade, so default
 /// output is byte-identical. Only an explicit value changes behavior.
+///
+/// # Wire vocabulary
+/// The wire token comes in as `chart_config::AxisStyleSpec::label_overlap: Option<String>`
+/// and is mapped to this enum by the hand-written
+/// [`parse_label_overlap`](crate::render::prepare::parse_label_overlap), whose
+/// vocabulary is `"true"` → [`ShowAll`](Self::ShowAll), `"false"`/`"greedy"` →
+/// [`Greedy`](Self::Greedy), `"parity"` → [`Parity`](Self::Parity), `"rotate"` →
+/// [`Rotate`](Self::Rotate). That parser, NOT serde, is the entry point.
+///
+/// The `Serialize`/`Deserialize` derive with `rename_all = "lowercase"` therefore
+/// uses a *different* vocabulary (`"showall"`/`"greedy"`/`"parity"`/`"rotate"`,
+/// with no `"true"`/`"false"`) and is inert today: nothing on the wire path
+/// (de)serializes this enum directly. Do not assume the serde names match the
+/// parser tokens; if a future serde wire path is added, reconcile via per-variant
+/// `#[serde(rename = "...")]` against the `parse_label_overlap` tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LabelOverlap {

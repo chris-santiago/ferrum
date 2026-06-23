@@ -530,7 +530,7 @@ mod tests {
 
     /// Default radius = sqrt(point_size / PI). With point_size=50:
     /// r = sqrt(50/PI) ~= 3.989.
-    /// Targets point.rs line 281: `let default_radius = (ctx.mark_style.point_size / PI).sqrt()`.
+    /// Targets point.rs `default_radius`: `(ctx.mark_style.point.point_size / PI).sqrt()`.
     #[test]
     fn bug_hunt_r2_default_radius_from_point_size() {
         let point_size = 50.0_f64;

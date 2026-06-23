@@ -44,20 +44,17 @@ pub const RECT_FLOATS: usize = 18;
 pub const CIRCLE_STRIDE: usize = CIRCLE_FLOATS * 4;
 /// Byte stride for one packed rect instance (18 × 4 = 72).
 pub const RECT_STRIDE: usize = RECT_FLOATS * 4;
+// Byte offsets of the X/Y-position fields within a packed instance, named for
+// the layout assertions in this module's tests. The WASM consumer and the
+// Python mirror encode these offsets by value (they do not import these
+// `pub(crate)` symbols), so the consts exist only to make the test assertions
+// self-documenting, hence `#[cfg(test)]`.
+#[cfg(test)]
 /// Byte offset of the X-position field within a packed instance (f32[0]).
-// Format-documentation const; referenced only under #[cfg(test)]. The consumer
-// (ferrum-wasm) and the Python mirror encode this offset by value, not by importing
-// this symbol (the enclosing module is pub(crate)), so it reads as dead code in a
-// normal build.
-#[allow(dead_code)]
-pub const FIELD_X_OFFSET: usize = 0;
+const FIELD_X_OFFSET: usize = 0;
+#[cfg(test)]
 /// Byte offset of the Y-position field within a packed instance (f32[1]).
-// Format-documentation const; referenced only under #[cfg(test)]. The consumer
-// (ferrum-wasm) and the Python mirror encode this offset by value, not by importing
-// this symbol (the enclosing module is pub(crate)), so it reads as dead code in a
-// normal build.
-#[allow(dead_code)]
-pub const FIELD_Y_OFFSET: usize = 4;
+const FIELD_Y_OFFSET: usize = 4;
 
 /// Minimum node count for a batch to qualify for packing.
 const PACK_THRESHOLD: usize = 1000;

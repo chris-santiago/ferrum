@@ -286,14 +286,19 @@ pub struct SqrtScale {
 
 impl SqrtScale {
     /// Crate-internal scale call (no PyO3 boundary).
-    // Wired to the render layer in Task 2 of the grid subsystem.
+    // Dead on the render path by design: `SqrtScale` is a PyO3 user-query facade
+    // (see the `scale/mod.rs` module doc). A `ScaleSpec::Sqrt` resolves to a
+    // `PowScale` (exponent 0.5) at render, so these `_internal` helpers exist only
+    // for direct Python `.scale()`/`.ticks()` queries. Kept as part of the PyO3 API
+    // surface; the allow suppresses the render-side dead-code lint.
     #[allow(dead_code)]
     pub(crate) fn scale_internal(&self, x: f64) -> f64 {
         self.data.scale(x)
     }
 
     /// Crate-internal tick call.
-    // Wired to the render layer in Task 2 of the grid subsystem.
+    // Dead on the render path by design (see `scale_internal` above): render uses
+    // `PowScale`, this serves direct Python `.ticks()` queries on the PyO3 facade.
     #[allow(dead_code)]
     pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> {
         self.data.ticks(count)

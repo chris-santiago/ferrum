@@ -4,7 +4,7 @@
 //! integration tests cannot import from the crate directly. Following the
 //! pattern established by `bug_hunt_projection.rs`, this file reproduces and
 //! pins the pure-Rust algorithmic contracts of `render/draw.rs` and its helper
-//! modules (`render/color/categorical.rs`, `render/svg.rs`, `render/format.rs`,
+//! modules (`render/color/primitive.rs`, `render/svg.rs`, `render/format.rs`,
 //! `render/annotation.rs`). Any divergence in the source from these pinned
 //! contracts will surface as a red test.
 //!
@@ -25,7 +25,7 @@ mod tests {
     //  INLINE REPRODUCTIONS — mirrors of source-code functions
     // ═══════════════════════════════════════════════════════════════════════
 
-    // ── from_hex_str (categorical.rs) ───────────────────────────────────
+    // ── from_hex_str (primitive.rs) ─────────────────────────────────────
 
     fn parse_hex(s: &str) -> Result<(u8, u8, u8, u8), String> {
         let s = s.trim();
@@ -44,7 +44,7 @@ mod tests {
         }
     }
 
-    // ── with_opacity (categorical.rs, FIXED: NaN guard) ─────────────────
+    // ── with_opacity (primitive.rs, FIXED: NaN guard) ───────────────────
 
     fn with_opacity(alpha: u8, opacity_0_1: f64) -> u8 {
         if opacity_0_1.is_nan() {
@@ -54,7 +54,7 @@ mod tests {
         }
     }
 
-    // ── fmt_svg (categorical.rs) ────────────────────────────────────────
+    // ── fmt_svg (primitive.rs) ──────────────────────────────────────────
 
     fn fmt_svg(r: u8, g: u8, b: u8, a: u8) -> String {
         if a == 0xFF {

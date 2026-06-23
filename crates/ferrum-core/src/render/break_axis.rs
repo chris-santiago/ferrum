@@ -19,8 +19,11 @@ use crate::render::draw::to_scene_stroke;
 
 /// Segments of a broken scale. Each segment covers a contiguous range of the
 /// original data domain and maps to a contiguous range of pixels.
+///
+/// Constructed by `apply_break_to_scale` and consumed by `broken_scale_map`,
+/// which `scene_build::remap_coord` calls to re-position mark coordinates onto
+/// the broken axis.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields used by broken_scale_map and future mark re-positioning
 pub struct ScaleSegment {
     /// Lower bound of the data-space range covered by this segment.
     pub data_lo: f64,
@@ -40,8 +43,8 @@ pub struct ScaleSegment {
 #[derive(Debug, Clone)]
 pub struct BreakResult {
     /// Ordered list of contiguous data segments (excluding the gaps).
-    /// Used by `broken_scale_map` to map data values to pixel positions.
-    #[allow(dead_code)] // used by broken_scale_map and for future mark re-positioning
+    /// Consumed by `broken_scale_map` to map data values to pixel positions,
+    /// which `scene_build::remap_coord` drives for break-axis mark re-positioning.
     pub segments: Vec<ScaleSegment>,
     /// Pixel midpoints of each break indicator, along the broken axis.
     pub indicator_pixels: Vec<f64>,
@@ -155,9 +158,8 @@ pub fn apply_break_to_scale(
 ///
 /// Returns `None` when `value` falls within a gap.
 ///
-/// This function is part of the public API for mark re-positioning (future
-/// scene_build integration), tested by unit tests in this module.
-#[allow(dead_code)]
+/// Consumed by `scene_build::remap_coord` to re-position mark coordinates onto
+/// the broken axis; also exercised directly by this module's unit tests.
 pub fn broken_scale_map(value: f64, result: &BreakResult) -> Option<f64> {
     for seg in &result.segments {
         let (lo, hi) = (seg.data_lo.min(seg.data_hi), seg.data_lo.max(seg.data_hi));
