@@ -4,7 +4,29 @@ All notable changes to Ferrum are documented here.
 
 ## Unreleased
 
+*No unreleased changes.*
+
+## 0.18.0
+
+*2026-06-23*
+
+This release lands the **cohesion campaign**: a 20-agent audit of the whole
+codebase surfaced 193 findings (sibling drift, duplicated logic, silent-failure
+seams, naming drift, dead code), and every one is now addressed across the Python
+declaration layer and the Rust compute/render engine. The refactors are
+overwhelmingly **byte-identical** — the full SVG/PNG golden suite is unchanged — so
+the bulk of the work is invisible at the output level. The user-visible changes
+below are correctness and no-silent-failure improvements, API-vocabulary
+unification (old spellings keep working as deprecated aliases), and one breaking
+module-path change (`ferrum._diagnostics` → `ferrum.diagnostics`).
+
+### Added
+
+- **`compare=` and `random_state` are now uniform across the model-diagnostic figure families.** `roc_chart`, `pr_chart`, `prediction_error_chart`, `residuals_chart`, and their siblings accept `compare={"name": model, ...}` for multi-model overlays and a `random_state=` for reproducible resampling, where before only one module exposed them. The 17 single-model-aggregate paths that cannot overlay raise a documented `ValueError` instead of silently ignoring `compare=`. (PLOT-01, XSIB-08)
+
 ### Fixed
+
+- **Degenerate hand-authored `Bin` JSON now errors instead of silently coercing (behavior change).** A `ChartSpec.from_json` carrying a hand-built bin spec with `bin_count: 0` or a non-finite / non-positive `bin_width` previously fell back to a self-inconsistent Sturges default; it now raises. Unreachable through the `Bin` / `transform_bin` constructors (which already validate) — only hand-authored JSON is affected. (XFORM-04)
 
 - **A mistyped data-transform key now raises instead of being silently dropped (behavior change).** The `transform_*` family (`transform_bin`, `transform_aggregate`, `transform_window`, ...) serializes to a dict that crosses into the Rust engine. Previously an unknown key on that dict — e.g. `transform_bin("x", maxbin=3)` with the `maxbins` typo, or a hand-built `{"type": "data_bin", "field": "x", "maxbin": 3}` — was dropped without warning, so the transform silently ran with defaults. Each per-transform spec now carries `#[serde(deny_unknown_fields)]`, matching the strictness the theme and per-channel paths already enforce. An unrecognized key now raises a `ValueError` that names the bad field and lists the valid ones (e.g. ``unknown field `maxbin`, expected one of `field`, `as_`, `maxbins`, `step`, `nice`, `name`, `extent` ``). Valid transforms are unchanged and render byte-identically. (SEAM-04)
 - **A mistyped encoding-channel or top-level chart key now raises instead of being silently dropped (behavior change).** Completing the no-silent-drop seam, `EncodingSpec` and `ChartSpec` now carry `#[serde(deny_unknown_fields)]`. A hand-authored spec with a typo'd channel key (e.g. `{"field": "a", "typ": "Q"}` instead of `"type"`) or a typo'd top-level key (e.g. `{"marrk": "point", ...}` instead of `"mark"`) fed to `ChartSpec.from_json` now raises a `ValueError` naming the unknown field, rather than dropping it and rendering with the value silently missing. Only reachable via hand-authored JSON — ferrum's own `to_json`/`to_spec` never emits an unknown key, so every valid chart round-trips byte-identically. The one documented exception is a `scale` sub-dict: `ScaleSpec` is an internally-tagged enum whose variants flatten `ContinuousScaleCommon`, and serde cannot enforce `deny_unknown_fields` through a flattened/internally-tagged shape, so a typo'd scale key (e.g. `clammp`) is still tolerated and dropped. This structural constraint is documented on the `ScaleSpec` doc comment. (SEAM-04)
@@ -19,6 +41,21 @@ All notable changes to Ferrum are documented here.
 - **Dodge position adjustment now accepts non-string grouping columns and signals an unresolvable grouping channel (behavior change).** `Dodge` resolves its grouping channel (the `by=` field, else the `color` encoding) through the same category-coercion the rest of the renderer uses, so an integer, float, or boolean grouping column now dodges correctly. Previously only string columns worked; a non-string `by`/color column raised an error. The two contradictory failure policies are unified: a grouping channel that cannot yield categories — a missing/typo'd named column, or an un-categorizable dtype such as a timestamp — now emits one warning (`dodge could not be applied (...); marks were not offset`) and leaves the marks un-offset, instead of either hard-crashing (non-string) or silently producing an un-dodged plot (missing column). The one remaining silent no-op is a dodge requested with no grouping channel at all (no `by` and no color), which has nothing to group by. Existing string-column charts render byte-identically. (RSUP-05)
 - **Breaking (defining-module path only):** the model-diagnostics implementation package was renamed from the private `ferrum._diagnostics` to the public `ferrum.diagnostics`. The public import surface is **unchanged** — `from ferrum import ROCVisualizer`, `import ferrum; ferrum.ModelSource`, and every other `ferrum.<Name>` spelling work exactly as before. What changes is the *defining* module path: each diagnostic class's `__module__` (and any direct submodule import such as `from ferrum._diagnostics.source import ModelSource`) now reads `ferrum.diagnostics.*` instead of `ferrum._diagnostics.*`. Code that imported a diagnostic class from the canonical `ferrum` namespace is unaffected; only code reaching into the private `ferrum._diagnostics.*` path needs to update to `ferrum.diagnostics.*`. Heavy sklearn-boundary internals moved under `ferrum.diagnostics._internal`, the `visualizers/` submodules were underscore-prefixed to match `sources/`, and the visualizer surface is otherwise identical.
 - **The deprecated dispatcher shims `shap_chart` and `rank_chart` are no longer in `__all__` (advertised-surface reduction, non-breaking for direct imports).** Both have long been deprecated dispatchers that warn and forward: `shap_chart(kind=...)` to `shap_beeswarm_chart` / `shap_bar_chart` / `shap_waterfall_chart`, and `rank_chart(rank=...)` to `rank1d_chart` / `rank2d_chart`. They are dropped from `ferrum.__all__` and `ferrum.plots.__all__` so the canonical split functions are the only advertised surface (`from ferrum.plots import *` and the API docs no longer list the two shims). The shims remain fully importable (`from ferrum import shap_chart, rank_chart`) and still warn-and-forward unchanged; their removal target is the next major release. The duplicated warn idiom shared by both shims was factored into one internal helper, leaving render output byte-identical. (PLOT-09)
+- **Color-set vocabulary unified on `scheme=`, validated at construction (behavior change).** `scheme=` is the canonical color-palette keyword on `Color` / `Fill` / `Stroke` (with `cmap`, `continuous_palette`, `sequential`, and `diverging` as deprecated aliases), and a bogus palette name now raises at construction instead of at render time. The Rust palette registry is the single source of truth: `color.palette()` / `sequential()` / `diverging()` return the true rendered colors for the colorous-backed palettes (`viridis`, `plasma`, `magma`, `inferno`, `cividis`, `blues`, `rdbu`) instead of hand-picked approximations. (ENC-06, XNAME-02, XSIB-07, ENC-11)
+- **`color.to_hex` auto-detects byte vs. unit by value range and warns on an ambiguous overshoot (behavior change).** A tuple with a component `> 1` is read as byte (`[0, 255]`), so `(1, 0, 0)` → `#ff0000`; the previous type-based heuristic is gone. A *unit* color that overshoots `1.0` from float color math (e.g. `(0.9, 0.9, 1.1)`) is still read as byte but now emits a `UserWarning` pointing at `scale="unit"` / `"byte"` to disambiguate, instead of silently producing a near-black color. Pass `scale=` explicitly to suppress. (ENC-05)
+- **`apply_stack` (stacking) now accepts non-string grouping columns and warns on an unresolvable channel — matching `Dodge` (behavior change).** An integer, float, or boolean `by` / `color` grouping column now stacks correctly (was silently un-stacked), and a missing or un-categorizable grouping channel emits one warning and leaves marks un-stacked instead of silently no-op'ing. Existing string-column charts render byte-identically. (RSUP-05)
+- **`format_type` is the canonical number/date format keyword on every channel.** `formatType` is honored as an alias on positional channels, fixing an asymmetry where text channels dropped `format_type` and positional channels dropped `formatType`. (ENC-03)
+- **`mark_text` now emits valid SVG for `baseline="top"`, `"bottom"`, and `"alphabetic"` (behavior change).** The three text-baseline parsers were unified; those spellings previously produced an invalid `dominant-baseline` attribute, which adjusts the vertical placement of text marks that used them. (RSUP-04)
+- **Annotations honor per-annotation z-ordering** (draw above or below the marks layer), and the dead `curve` flag on arrow annotations was removed. (XDEAD-03)
+- **Precomputed 1-D binary gain/lift curves now rank the negative class by `1 − p`,** consistent with the precomputed roc/pr path. (DIAG-01)
+- **Interactive (WASM) click-selection uses typed field comparison,** so a numeric selection co-selects `42` and `42.0`, consistent with conditional highlighting. Browser-only; no static-output change. (WASM-04)
+- **numpy-array figure inputs name columns `col_0`, `col_1`, …** (the ferrum-wide convention) instead of `f0`, `f1`, …. (PLOT-03)
+
+### Deprecated
+
+- **`min_extent=` / `max_extent=` → `min_band=` / `max_band=`** on `Axis`, `AxisConfig`, and `configure_axis` (axis-band sizing). The old names warn and forward; "extent" is reserved for data-domain bounds. (XNAME-01)
+- **`extent=` → `method=` (errorbar / errorband) and `whisker_mult=` (boxplot).** The overloaded `extent=` keyword is split by mark; old usage warns and forwards. (XNAME-01)
+- **`align=` → `anchor=`** on `annotate_text`, **`cmap=` / `continuous_palette=` → `scheme=`**, and **`shap_chart` / `rank_chart`** dropped from `__all__` — see the corresponding entries above. All keep working as before.
 
 ## 0.17.1
 
