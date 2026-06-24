@@ -848,6 +848,45 @@ class TestRound2Fixes:
             "cmap='plasma' should produce different raster output than default"
         )
 
+    def test_render_config_raster_scheme_flows_through_auto_raster(self):
+        """Regression (#32): RenderConfig raster_scheme/raster_cmap reach the
+        auto-raster-substituted mark_raster path in _render.py.
+
+        Field-level tests confirm that RenderConfig stores the alias correctly,
+        but do not prove _render.py reads raster_scheme and passes it to the
+        raster renderer. This test proves the end-to-end flow:
+          1. raster_threshold=0 + raster_behavior="silent" forces substitution
+             on a tiny chart without emitting a UserWarning.
+          2. raster_scheme="plasma" and its alias raster_cmap="plasma" produce
+             identical SVG output.
+          3. That SVG differs from the default (viridis), proving the value is
+             actually consumed by the raster render path.
+        """
+        df = _bivariate_df()
+
+        def _svg(**cfg):
+            c = fm.RenderConfig(raster_threshold=0, raster_behavior="silent", **cfg)
+            return (
+                fm.Chart(df)
+                .mark_point()
+                .encode(x="x:Q", y="y:Q")
+                .properties(render_config=c)
+                .to_svg(raster=True)
+            )
+
+        plasma_scheme = _svg(raster_scheme="plasma")
+        plasma_cmap = _svg(raster_cmap="plasma")
+        default_svg = _svg()
+
+        assert "<image" in plasma_scheme, "expected a rasterized <image> in the auto-raster output"
+        assert plasma_scheme == plasma_cmap, (
+            "raster_scheme and its raster_cmap alias must render identically end-to-end"
+        )
+        assert plasma_scheme != default_svg, (
+            "raster_scheme='plasma' must differ from the default viridis — "
+            "raster_scheme is not being read by _render.py if this fails"
+        )
+
     # --- Swarm horizontal -------------------------------------------------
 
     def test_swarm_horizontal_renders_without_error(self):

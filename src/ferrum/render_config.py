@@ -31,11 +31,26 @@ class RenderConfig:
         ``"error"`` raises ``ValueError`` instead of substituting.
     raster_aggregate : str, default "count"
         Aggregation function for the substituted ``mark_raster``.
-    raster_cmap : str, default "viridis"
-        Colormap for the substituted ``mark_raster``.
+    raster_scheme : str or None, default None
+        Colormap (color scheme) for the substituted ``mark_raster``.
+        ``None`` defers to the built-in ``"viridis"`` default.
+    raster_cmap : str or None, default None
+        Back-compat alias for ``raster_scheme``.  Pass at most one of the two;
+        after construction it reads back as the resolved ``raster_scheme``.
     """
 
     raster_threshold: Optional[int] = 500_000
     raster_behavior: str = "warn"
     raster_aggregate: str = "count"
-    raster_cmap: str = "viridis"
+    raster_scheme: Optional[str] = None
+    raster_cmap: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        from ferrum.marks._desugar_helpers import resolve_cmap_alias
+
+        resolved = resolve_cmap_alias(
+            scheme=self.raster_scheme, cmap=self.raster_cmap, where="RenderConfig"
+        )
+        resolved = "viridis" if resolved is None else resolved
+        object.__setattr__(self, "raster_scheme", resolved)
+        object.__setattr__(self, "raster_cmap", resolved)
