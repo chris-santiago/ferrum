@@ -306,3 +306,53 @@ class TestSchemeCmapEquivalence:
         # Identical values are allowed (no conflict).
         chart = fm.Chart(xy_df).mark_raster(scheme="plasma", cmap="plasma").encode(x="x", y="y")
         assert chart.to_spec() is not None
+
+    def test_heatmap_scheme_equals_cmap(self):
+        import polars as pl
+
+        df = pl.DataFrame({"row": ["a", "b"], "c1": [1.0, 2.0], "c2": [3.0, 4.0]})
+        a = fm.heatmap(df, scheme="rdbu")
+        b = fm.heatmap(df, cmap="rdbu")
+        assert a.to_spec().to_json() == b.to_spec().to_json()
+
+    def test_heatmap_conflicting_scheme_and_cmap_raises(self):
+        import polars as pl
+
+        df = pl.DataFrame({"row": ["a", "b"], "c1": [1.0, 2.0], "c2": [3.0, 4.0]})
+        with pytest.raises(ValueError, match="not both"):
+            fm.heatmap(df, scheme="rdbu", cmap="viridis")
+
+    def test_heatmap_same_scheme_and_cmap_ok(self):
+        import polars as pl
+
+        df = pl.DataFrame({"row": ["a", "b"], "c1": [1.0, 2.0], "c2": [3.0, 4.0]})
+        # Identical values are allowed (no conflict).
+        chart = fm.heatmap(df, scheme="rdbu", cmap="rdbu")
+        assert chart.to_spec() is not None
+
+
+# ---------------------------------------------------------------------------
+# Issue #32: RenderConfig raster_scheme/raster_cmap vocabulary
+# ---------------------------------------------------------------------------
+
+
+class TestRenderConfigRasterScheme:
+    """RenderConfig stores ``raster_scheme`` canonically; ``raster_cmap`` is a
+    construct-time back-compat alias resolved via the shared helper."""
+
+    def test_render_config_raster_scheme_equals_cmap(self):
+        assert fm.RenderConfig(raster_scheme="plasma").raster_scheme == "plasma"
+        assert fm.RenderConfig(raster_cmap="plasma").raster_scheme == "plasma"
+
+    def test_render_config_default_raster_scheme_is_viridis(self):
+        assert fm.RenderConfig().raster_scheme == "viridis"
+
+    def test_render_config_conflicting_raster_scheme_and_cmap_raises(self):
+        with pytest.raises(ValueError, match="not both"):
+            fm.RenderConfig(raster_scheme="a", raster_cmap="b")
+
+    def test_render_config_raster_cmap_reads_back_resolved(self):
+        # The back-compat alias reads back as the resolved canonical scheme (no silent None).
+        assert fm.RenderConfig(raster_cmap="plasma").raster_cmap == "plasma"
+        assert fm.RenderConfig(raster_scheme="magma").raster_cmap == "magma"
+        assert fm.RenderConfig().raster_cmap == "viridis"

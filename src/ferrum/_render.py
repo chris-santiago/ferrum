@@ -160,7 +160,7 @@ class _RenderMixin:
             "raster",
             {
                 "aggregate": cfg.raster_aggregate,
-                "cmap": cfg.raster_cmap,
+                "cmap": cfg.raster_scheme,
                 "resolution": "screen",
                 "blend": "alpha",
                 "min_count": None,

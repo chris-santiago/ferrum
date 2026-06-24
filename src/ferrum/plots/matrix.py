@@ -358,6 +358,7 @@ def heatmap(
     *,
     annot: bool = True,
     fmt: str = ".2f",
+    scheme: str | None = None,
     cmap: str | None = None,
     linewidths: float = 0.5,
     linecolor: str = "white",
@@ -391,9 +392,11 @@ def heatmap(
         Overlay cell values as text using ``mark_text``.
     fmt : str, default ".2f"
         Python format specifier applied to cell values in the annotation layer.
-    cmap : str or None, optional
+    scheme : str or None, optional
         Color scheme name (e.g. ``"blues"``, ``"viridis"``, ``"rdbu"``).
         ``None`` (default) defers to the theme's sequential scheme.
+    cmap : str or None, optional
+        Back-compat alias for ``scheme``.  Pass at most one of the two.
     linewidths : float, default 0.5
         Width of the cell border stroke in pixels.  ``0`` disables borders.
     linecolor : str, default "white"
@@ -453,6 +456,7 @@ def heatmap(
     >>> fm.heatmap(wide_df, annot=False, vmin=0, vmax=1, cmap="greens")
     """
     from ferrum._coerce import to_arrow_table
+    from ferrum.marks._desugar_helpers import resolve_cmap_alias
 
     tbl = to_arrow_table(data)
     # Identify id column (first non-numeric) and value columns (numeric).
@@ -479,7 +483,7 @@ def heatmap(
         value_cols=value_cols,
         annot=annot,
         fmt=fmt,
-        cmap=cmap,
+        cmap=resolve_cmap_alias(scheme=scheme, cmap=cmap, where="heatmap"),
         linewidths=linewidths,
         linecolor=linecolor,
         vmin=vmin,

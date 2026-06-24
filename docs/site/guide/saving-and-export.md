@@ -73,7 +73,7 @@ chart = chart.properties(render_config=config)
 chart.save("out.svg")  # auto-raster fires at 1M marks, silently
 ```
 
-[`RenderConfig`][ferrum.RenderConfig] parameters: `raster_threshold` (mark count or `None` to disable), `raster_behavior` (`"warn"`, `"silent"`, `"error"`), `raster_aggregate`, and `raster_cmap`.
+[`RenderConfig`][ferrum.RenderConfig] parameters: `raster_threshold` (mark count or `None` to disable), `raster_behavior` (`"warn"`, `"silent"`, `"error"`), `raster_aggregate`, and `raster_scheme` (the canonical colormap keyword; `raster_cmap` is a back-compat alias).
 
 ## Getting raw bytes
 
