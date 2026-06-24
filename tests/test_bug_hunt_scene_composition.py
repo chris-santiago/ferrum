@@ -103,16 +103,19 @@ def test_offset_node_polyline_type():  # BUG: _offset_node ignores polyline node
 
 
 # ===========================================================================
-# 4. _offset_node: raw type (W4 -- rect-offset + clip-id uniquification)
+# 4. _offset_node: raw type (#34 -- translate-group wrap + clip-id uniquification)
 # ===========================================================================
 
 
-def test_offset_node_raw_rect_offset():
-    """_offset_node on a raw node offsets <rect> x/y attributes by (dx, dy).
+def test_offset_node_raw_wraps_in_translate_group():
+    """_offset_node on a raw node wraps the whole fragment in a translate <g>.
 
-    The fix for W4 (COMP-07) makes _offset_node translate the baked absolute
-    <rect> coords in opaque SVG chrome defs.  Non-rect geometry (circles etc.)
-    is left untouched -- raw defs only carry clip-region rects.
+    The fix for issue #34 makes _offset_node translate an opaque SVG fragment
+    as one whole unit via a ``<g transform="translate(dx,dy)">`` wrapper
+    (mirroring how the static compositor places each child as a unit), instead
+    of per-element ``<rect>`` coordinate rewriting.  Every positioned producer
+    (inset ``<svg>``, data-anchored ``<image>``, colorbar ``<rect>`` swatch)
+    rides along inside the wrapper, so inner coords stay UNCHANGED.
     """
     node = {
         "type": "raw",
@@ -120,10 +123,12 @@ def test_offset_node_raw_rect_offset():
         "anchor": "chrome",
     }
     _offset_node(node, 100.0, 50.0)
-    # rect x/y shifted; circle coords are opaque (not <rect>) and unchanged
-    assert (
-        node["svg"]
-        == '<rect x="110.0" y="70.0" width="100" height="40"/><circle cx="10" cy="20" r="5"/>'
+    # Whole fragment wrapped; inner rect AND circle coords unchanged inside <g>.
+    assert node["svg"] == (
+        '<g transform="translate(100.0,50.0)">'
+        '<rect x="10" y="20" width="100" height="40"/>'
+        '<circle cx="10" cy="20" r="5"/>'
+        "</g>"
     )
 
 
@@ -161,10 +166,56 @@ def test_offset_node_raw_clip_none_leaves_ids_unchanged():
     node = {"type": "raw", "svg": svg, "anchor": "chrome"}
     _offset_node(node, 5.0, 3.0, clip_cell_idx=None)
     result = node["svg"]
-    # rect coords shifted but clip ids unchanged
+    # The fragment is wrapped in a translate <g>; inner coords are NOT rewritten
+    # and clip ids stay unchanged (no clip_cell_idx).
+    assert result.startswith('<g transform="translate(5.0,3.0)">')
+    assert result.endswith("</g>")
     assert 'id="ferrum-clip-0"' in result
     assert "url(#ferrum-clip-0)" in result
     assert "cell" not in result
+
+
+def test_offset_node_raw_data_anchored_image_offset():
+    """Issue #34: a data-anchored <image> raw fragment is offset as a unit.
+
+    Previously _offset_raw_svg_rects only rewrote <rect> coords, so a
+    data-anchored <image x/y> annotation (annotation.rs) stayed at child-local
+    coordinates in composed interactive output.  The translate-group wrapper now
+    offsets it like the rect case; the inner <image> x/y stay at 5,5.
+    """
+    node = {
+        "type": "raw",
+        "svg": '<image x="5" y="5" width="32" height="32" href="data:image/png;base64,AAAA"/>',
+        "anchor": "data",
+    }
+    _offset_node(node, 200.0, 80.0)
+    assert node["svg"] == (
+        '<g transform="translate(200.0,80.0)">'
+        '<image x="5" y="5" width="32" height="32" href="data:image/png;base64,AAAA"/>'
+        "</g>"
+    )
+
+
+def test_offset_node_raw_inset_svg_offset():
+    """Issue #34: an inset <svg x/y> raw fragment is offset as a unit.
+
+    Previously the inset overlay (inset.rs) carried its position on a
+    ``<svg x/y>`` wrapper that _offset_raw_svg_rects never touched, and its own
+    nested ``<rect>``s were over-shifted.  The translate-group wrapper now
+    offsets the inset as a whole; the inner <svg> and its nested rect are
+    untouched.
+    """
+    node = {
+        "type": "raw",
+        "svg": '<svg x="20" y="30" width="80" height="60"><rect x="0" y="0" width="80" height="60"/></svg>',
+        "anchor": "chrome",
+    }
+    _offset_node(node, 100.0, 40.0)
+    assert node["svg"] == (
+        '<g transform="translate(100.0,40.0)">'
+        '<svg x="20" y="30" width="80" height="60"><rect x="0" y="0" width="80" height="60"/></svg>'
+        "</g>"
+    )
 
 
 # ===========================================================================
@@ -844,15 +895,17 @@ def test_concat_chart_no_columns_single_row():
 
 
 # ===========================================================================
-# 37. _offset_node raw branch: rect-offset + clip-id uniquification (COMP-07 / W4)
+# 37. _offset_node raw branch: translate-group wrap + clip-id uniquification (#34)
 # ===========================================================================
 
 
-def test_offset_node_raw_rect_offset_and_clip_uniquify():
-    """_offset_node on a raw node offsets <rect> x/y and uniquifies clip ids.
+def test_offset_node_raw_wrap_and_clip_uniquify():
+    """_offset_node on a raw node wraps in a translate <g> and uniquifies clip ids.
 
-    Regression for COMP-07 (W4): the raw branch was absent, leaving baked
-    SVG coords un-offset and clip ids colliding across composed children.
+    Regression for issue #34: the raw branch now translates the fragment as a
+    whole (via a ``<g transform="translate(...)">`` wrapper) instead of
+    rewriting per-element coords, while still uniquifying clip ids so they do
+    not collide across composed children.  Inner coords are unchanged.
     """
     svg = (
         '<rect x="10" y="20" width="80" height="40"/>'
@@ -867,11 +920,12 @@ def test_offset_node_raw_rect_offset_and_clip_uniquify():
     _offset_node(node, 100.0, 50.0, clip_cell_idx=2)
     result = node["svg"]
 
-    # --- rect coords offset ---
-    assert 'x="110.0"' in result, f"outer rect x not shifted; got: {result}"
-    assert 'y="70.0"' in result, f"outer rect y not shifted; got: {result}"
+    # --- wrapped in translate group; inner rect coords unchanged ---
+    assert result.startswith('<g transform="translate(100.0,50.0)">')
+    assert result.endswith("</g>")
+    assert 'x="10" y="20"' in result, f"inner rect coords should be unchanged; got: {result}"
 
-    # --- clip ids uniquified ---
+    # --- clip ids uniquified (uniquify runs before the wrapper) ---
     assert 'id="cell2-ferrum-clip-0"' in result
     assert "url(#cell2-ferrum-clip-0)" in result
     assert 'id="cell2-ferrum-colorbar-0"' in result
@@ -884,8 +938,8 @@ def test_offset_node_raw_rect_offset_and_clip_uniquify():
     assert 'id="ferrum-legend-clip-0"' not in result
 
 
-def test_offset_node_raw_clip_none_preserves_ids_but_offsets_rect():
-    """With clip_cell_idx=None, rect x/y is still offset but clip ids are unchanged."""
+def test_offset_node_raw_clip_none_preserves_ids_and_wraps():
+    """With clip_cell_idx=None, the fragment is wrapped but clip ids are unchanged."""
     svg = (
         '<rect x="10" y="20" width="80" height="40"/>'
         '<clipPath id="ferrum-clip-0"><rect x="5" y="5" width="10" height="10"/></clipPath>'
@@ -895,9 +949,10 @@ def test_offset_node_raw_clip_none_preserves_ids_but_offsets_rect():
     _offset_node(node, 100.0, 50.0, clip_cell_idx=None)
     result = node["svg"]
 
-    # rect shifted
-    assert 'x="110.0"' in result
-    assert 'y="70.0"' in result
+    # wrapped in translate group; inner coords unchanged
+    assert result.startswith('<g transform="translate(100.0,50.0)">')
+    assert result.endswith("</g>")
+    assert 'x="10" y="20"' in result
     # ids preserved (no uniquification)
     assert 'id="ferrum-clip-0"' in result
     assert "url(#ferrum-clip-0)" in result
@@ -905,7 +960,7 @@ def test_offset_node_raw_clip_none_preserves_ids_but_offsets_rect():
 
 
 def test_offset_node_raw_group_nested_forward():
-    """A raw node nested inside a group gets offset+uniquified via recursive forward."""
+    """A raw node nested inside a group gets wrapped+uniquified via recursive forward."""
     inner_svg = (
         '<rect x="5" y="10" width="50" height="30"/>'
         '<clipPath id="ferrum-clip-0"/>'
@@ -922,9 +977,10 @@ def test_offset_node_raw_group_nested_forward():
     _offset_node(node, 20.0, 30.0, clip_cell_idx=1)
 
     raw_result = node["children"][0]["svg"]
-    # rect offset
-    assert 'x="25.0"' in raw_result
-    assert 'y="40.0"' in raw_result
+    # wrapped in translate group; inner rect coords unchanged
+    assert raw_result.startswith('<g transform="translate(20.0,30.0)">')
+    assert raw_result.endswith("</g>")
+    assert 'x="5" y="10"' in raw_result
     # clip id uniquified with cell_idx=1
     assert 'id="cell1-ferrum-clip-0"' in raw_result
     assert "url(#cell1-ferrum-clip-0)" in raw_result

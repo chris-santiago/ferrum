@@ -19,6 +19,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
+import ferrum.annotation as ann
 from ferrum._core import render_interactive
 from ferrum.selection import selection_point, value
 
@@ -1229,3 +1230,58 @@ class TestRawNodeNotSilentlyDropped:
             "OLD shared-map logic must collapse both ferrum-colorbar-0 fragments "
             f"to ONE namespaced id (the R5 bug); got {old_colorbar_ids!r}"
         )
+
+
+# ── Issue #34: composed interactive offsets raw nodes in right-child ──────────
+#
+# Regression for: data-anchored raw nodes (e.g. <image> annotations) on the
+# right-hand child of a horizontal concat were left at child-local coords.
+# Fixed in _scene_merge._offset_node: the raw handler wraps each fragment in
+# `<g transform="translate(dx,dy)">` so the node rides along with its panel.
+
+
+def test_composed_interactive_offsets_data_anchored_image_raw_node():
+    """Regression (issue #34): in a composed interactive render, a data-anchored
+    <image> annotation on the RIGHT concat child must be offset into that child's
+    placement via a translate-group wrapper, not left at child-local coords.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 4.0, 3.0]})
+    png = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4"
+        "2mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+    left = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    right = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q") + ann.image(
+        2.0, 3.0, png, width=24, height=24, anchor="center"
+    )
+    scene = json.loads((left | right).interactive().scene_json)
+
+    # Collect every raw node in the merged scene.
+    raws = []
+
+    def _walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "raw":
+                raws.append(node)
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                _walk(v)
+
+    _walk(scene)
+
+    image_raws = [r for r in raws if "<image" in r.get("svg", "")]
+    assert image_raws, "expected a data-anchored <image> raw node in the merged scene"
+    svg = image_raws[0]["svg"]
+    # The right child is horizontally offset, so the fragment must be wrapped in a
+    # non-zero translate group, with the inner <image> preserved.
+    assert svg.startswith('<g transform="translate('), (
+        f"image raw node was not offset-wrapped: {svg[:80]!r}"
+    )
+    inner_dx = float(svg[len('<g transform="translate(') :].split(",")[0])
+    assert inner_dx > 0.0, f"expected positive dx for the right child, got {inner_dx}"
+    assert "<image" in svg.split(">", 1)[1], (
+        "inner <image> element must be preserved inside the wrapper"
+    )

@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import copy
 import json as _json
-import re
 import struct
 from dataclasses import dataclass
 from typing import Optional
@@ -757,41 +756,6 @@ def _merge_scene_panels(
         merged["panels"].append(panel)
 
 
-def _offset_raw_svg_rects(svg: str, dx: float, dy: float) -> str:
-    """Offset ``x`` and ``y`` attribute values inside ``<rect …>`` tags in an opaque SVG string.
-
-    This is conservative: only ``<rect>`` elements carry the baked
-    absolute coordinates that need translation (legend clip defs and
-    colorbar gradient clip rects).  Arbitrary baked geometry (circles,
-    paths, etc.) is left untouched because raw chrome defs do not
-    contain offsettable geometry beyond rect clip regions.
-
-    The regex matches a single attribute occurrence within a ``<rect``
-    tag (the tag may span lines); it does not attempt to parse full SVG.
-    """
-
-    def _shift_x(m: re.Match) -> str:
-        val = float(m.group(1))
-        return f'x="{val + dx}"'
-
-    def _shift_y(m: re.Match) -> str:
-        val = float(m.group(1))
-        return f'y="{val + dy}"'
-
-    # Process only within <rect ...> tags: find each rect tag and rewrite
-    # x/y attributes inside it.
-    def _rewrite_rect(m: re.Match) -> str:
-        tag = m.group(0)
-        if dx != 0.0:
-            tag = re.sub(r'\bx="([^"]*)"', _shift_x, tag)
-        if dy != 0.0:
-            tag = re.sub(r'\by="([^"]*)"', _shift_y, tag)
-        return tag
-
-    # Match <rect followed by attributes up to the closing > or />
-    return re.sub(r"<rect\b[^>]*>", _rewrite_rect, svg)
-
-
 def _uniquify_clip_ids(svg: str, cell_idx: int) -> str:
     """Uniquify ferrum clip/colorbar/legend-clip ids in an SVG fragment.
 
@@ -885,20 +849,29 @@ def _offset_node(
         for child in node.get("children", []):
             _offset_node(child, dx, dy, clip_cell_idx=clip_cell_idx)
     elif t == "raw":
-        # Scope (W4 / COMP-07): only the `<rect x/y>`-shaped chrome defs ferrum
-        # bakes into `raw` nodes (legend clipPath defs, colorbar gradient defs)
-        # are offset here, mirroring render/compositor.rs::uniquify_clip_ids for
-        # the clip-id half. Positioned wrapper raw nodes whose coords live on
-        # `<svg x/y>` (inset.rs) or `<image x/y>` (data-anchored annotation.rs)
-        # are intentionally NOT offset here: offsetting an `<image>` annotation
-        # is a real (non-inert) composed-interactive behavior change that needs
-        # its own design + browser verification (logged as a follow-up).
+        # Offsetting a raw fragment translates it as one whole unit via a
+        # `<g transform="translate(dx,dy)">` wrapper, mirroring how the static
+        # compositor (render/compositor.rs) places each child as a unit. This
+        # makes ALL positioned raw producers offset uniformly and
+        # element-agnostically: inset `<svg x/y>` (inset.rs), data-anchored
+        # `<image x/y>` (annotation.rs), and the colorbar `<rect>` swatch all
+        # ride along inside the wrapper without per-element coordinate rewriting
+        # (fixes issue #34). The JS overlay injects each fragment into its own
+        # `<g>` parent and only namespaces `id=`/`url(#)`/`href="#"`, so the
+        # `transform` attribute passes through untouched and composes with the
+        # pan/zoom (`dataG`) or fixed (`chromeG`) parent.
+        #
+        # The legend `<clipPath>` def is a referenced def (its baked geometry is
+        # not moved by an ancestor `transform`), and it is inert in interactive
+        # anyway because WASM drops the consuming `Group.attrs`, so leaving its
+        # coords un-rewritten is a no-op. `_uniquify_clip_ids` still runs to keep
+        # clip ids disjoint across cells.
         svg = node.get("svg", "")
         if svg:
-            if dx != 0.0 or dy != 0.0:
-                svg = _offset_raw_svg_rects(svg, dx, dy)
             if clip_cell_idx is not None:
                 svg = _uniquify_clip_ids(svg, clip_cell_idx)
+            if dx != 0.0 or dy != 0.0:
+                svg = f'<g transform="translate({dx},{dy})">{svg}</g>'
             node["svg"] = svg
 
 
