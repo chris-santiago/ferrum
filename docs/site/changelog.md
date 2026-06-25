@@ -6,6 +6,19 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.18.1
+
+*2026-06-25*
+
+### Added
+
+- None
+
+### Fixed
+
+- Unify cmap-vocabulary holdouts on the canonical `scheme=` keyword. (#32)
+- Offset inset `<svg>` and data-anchored `<image>` raw nodes in composed interactive renders. (#34)
+
 ## 0.18.0
 
 *2026-06-23*
