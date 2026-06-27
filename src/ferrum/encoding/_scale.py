@@ -1,4 +1,15 @@
-"""Scale-to-dict conversion helper for encoding channels (internal)."""
+"""Scale-to-dict conversion helper for encoding channels (internal).
+
+Each ferrum ``*Scale`` pyclass (``BandScale``, ``BinOrdinalScale``,
+``DivergingScale``, ``LinearScale``, ``LogScale``, ``OrdinalScale``,
+``PointScale``, ``PowScale``, ``QuantileScale``, ``QuantizeScale``,
+``SequentialScale``, ``SqrtScale``, ``SymlogScale``, ``ThresholdScale``,
+``TimeScale``) is a Rust-backed PyO3 class that exposes
+``_to_scale_spec_dict()`` — a method that serialises the instance into the
+canonical ``ScaleSpec`` wire dict.  This module delegates to that method for
+all pyclass instances; the dict / ``Parameter`` / ``None`` paths are
+unchanged.
+"""
 
 from __future__ import annotations
 
@@ -8,21 +19,19 @@ from typing import Any
 def _scale_to_dict(scale: Any) -> Any:
     """Convert a Python Scale object to a JSON-serializable dict.
 
-    Converts all ferrum scale types (LinearScale, LogScale, TimeScale,
-    SymlogScale, OrdinalScale, PowScale, SqrtScale, BandScale, PointScale,
-    SequentialScale, DivergingScale, QuantizeScale, BinOrdinalScale) to the
-    dict shape expected by Rust's ScaleSpec serde deserialiser.
+    If ``scale`` is a ferrum ``*Scale`` pyclass instance, delegates to its
+    ``_to_scale_spec_dict()`` Rust method, which emits the canonical
+    ``ScaleSpec`` serialisation.
 
-    If ``scale`` is already a dict, ensure it has a ``type`` key (defaulting to
-    ``"linear"`` when absent) so Rust's tagged-enum deserialiser can match the
-    correct variant.  ``None`` is returned unchanged.
+    If ``scale`` is already a dict, ensures it has a ``type`` key (defaulting
+    to ``"linear"`` when absent).  When the dict's ``domain`` is a
+    :class:`~ferrum.parameter.Parameter` (a reactive scale domain), the
+    literal ``domain`` key is dropped and a sibling ``domainParam`` carrying
+    the parameter's name is emitted instead (D6 reactive rescale).  The
+    caller's dict is never mutated.  ``None`` is returned unchanged.
 
-    When the dict's ``domain`` is a :class:`~ferrum.parameter.Parameter` (a
-    reactive scale domain), the literal ``domain`` is dropped and a sibling
-    ``domainParam`` carrying the parameter's name is emitted instead (D6
-    reactive rescale).  The static renderer falls back to data-inferred domains
-    for empty selections; variable parameters supply their initial value via
-    the params section.  The caller's dict is never mutated.
+    Unknown objects are returned as-is; Rust will raise if they are not
+    serialisable.
     """
     if scale is None:
         return scale
@@ -39,141 +48,8 @@ def _scale_to_dict(scale: Any) -> Any:
             return {"type": "linear", **scale}
         return scale
 
-    # Import here to avoid circular imports at module load time.
-    try:
-        from ferrum._core import (  # type: ignore[attr-defined]
-            BandScale,
-            BinOrdinalScale,
-            DivergingScale,
-            LinearScale,
-            LogScale,
-            OrdinalScale,
-            PointScale,
-            PowScale,
-            QuantizeScale,
-            SequentialScale,
-            SqrtScale,
-            SymlogScale,
-            TimeScale,
-        )
-    except ImportError:
-        return scale  # can't convert, pass through and let Rust raise
-
-    if isinstance(scale, LogScale):
-        d: dict = {"type": "log", "base": scale.base, "clamp": scale.clamp}
-        if scale.domain:
-            d["domain"] = list(scale.domain)
-        if scale.range:
-            d["range"] = list(scale.range)
-        if (p := scale.padding) is not None:
-            d["padding"] = p
-        return d
-    if isinstance(scale, LinearScale):
-        d = {"type": "linear", "clamp": scale.clamp}
-        if scale.domain:
-            d["domain"] = list(scale.domain)
-        if scale.range:
-            d["range"] = list(scale.range)
-        if (p := scale.padding) is not None:
-            d["padding"] = p
-        return d
-    if isinstance(scale, TimeScale):
-        d = {"type": "utc" if scale.utc else "time", "clamp": scale.clamp}
-        if scale.domain:
-            d["domain"] = list(scale.domain)
-        if scale.range:
-            d["range"] = list(scale.range)
-        if (p := scale.padding) is not None:
-            d["padding"] = p
-        return d
-    if isinstance(scale, SymlogScale):
-        d = {"type": "symlog", "constant": scale.constant, "clamp": scale.clamp}
-        if scale.domain:
-            d["domain"] = list(scale.domain)
-        if scale.range:
-            d["range"] = list(scale.range)
-        if (p := scale.padding) is not None:
-            d["padding"] = p
-        return d
-    if isinstance(scale, OrdinalScale):
-        d = {"type": "ordinal", "padding": scale.padding}
-        if scale.domain:
-            d["domain"] = list(scale.domain)
-        if scale.range:
-            d["range"] = list(scale.range)
-        return d
-    if isinstance(scale, PowScale):
-        d = {"type": "pow", "exponent": scale.exponent, "clamp": scale.clamp}
-        if scale.domain:
-            d["domain"] = list(scale.domain)
-        if scale.range:
-            d["range"] = list(scale.range)
-        if (p := scale.padding) is not None:
-            d["padding"] = p
-        return d
-    if isinstance(scale, SqrtScale):
-        d = {"type": "sqrt", "exponent": scale.exponent, "clamp": scale.clamp}
-        if scale.domain:
-            d["domain"] = list(scale.domain)
-        if scale.range:
-            d["range"] = list(scale.range)
-        if (p := scale.padding) is not None:
-            d["padding"] = p
-        return d
-    if isinstance(scale, BandScale):
-        d = {
-            "type": "band",
-            "paddingInner": scale.padding_inner,
-            "paddingOuter": scale.padding_outer,
-            "align": scale.align,
-        }
-        if scale.domain:
-            d["domain"] = list(scale.domain)
-        if scale.range:
-            d["range"] = list(scale.range)
-        return d
-    if isinstance(scale, PointScale):
-        d = {
-            "type": "point",
-            "padding": scale.padding,
-            "align": scale.align,
-            "reverse": scale.reverse,
-        }
-        if scale.domain:
-            d["domain"] = list(scale.domain)
-        if scale.range:
-            d["range"] = list(scale.range)
-        return d
-    if isinstance(scale, SequentialScale):
-        d = {"type": "sequential", "reverse": scale.reverse}
-        if scale.scheme:
-            d["scheme"] = scale.scheme
-        if scale.domain:
-            d["domain"] = list(scale.domain)
-        return d
-    if isinstance(scale, DivergingScale):
-        d = {"type": "diverging"}
-        if scale.scheme:
-            d["scheme"] = scale.scheme
-        if scale.domain:
-            d["domain"] = list(scale.domain)
-        if scale.domain_mid is not None:
-            d["domainMid"] = scale.domain_mid
-        return d
-    if isinstance(scale, QuantizeScale):
-        d = {"type": "quantize"}
-        if scale.domain:
-            d["domain"] = list(scale.domain)
-        if scale.range:
-            d["range"] = list(scale.range)
-        return d
-    if isinstance(scale, BinOrdinalScale):
-        d = {"type": "bin-ordinal"}
-        if scale.bins:
-            d["bins"] = list(scale.bins)
-        if scale.scheme:
-            d["scheme"] = scale.scheme
-        return d
+    if hasattr(scale, "_to_scale_spec_dict"):
+        return scale._to_scale_spec_dict()
 
     # Unknown scale type — return as-is and let Rust surface the error.
     return scale

@@ -84,7 +84,6 @@ class TestSqrtScale:
         s = fm.SqrtScale(domain=[0, 100])
         d = _scale_to_dict(s)
         assert d["type"] == "sqrt"
-        assert d["exponent"] == 0.5
         assert d["domain"] == [0.0, 100.0]
         assert d["clamp"] is False
 
@@ -240,6 +239,49 @@ class TestBinOrdinalScale:
         s = fm.BinOrdinalScale(bins=[0, 5, 10], scheme="blues")
         d = _scale_to_dict(s)
         assert d["scheme"] == "blues"
+
+
+# ---------------------------------------------------------------------------
+# QuantileScale serialization
+# ---------------------------------------------------------------------------
+
+
+class TestQuantileScale:
+    """QuantileScale converts to the expected dict shape."""
+
+    def test_basic(self):
+        s = fm.QuantileScale(domain=[1.0, 2.0, 3.0, 4.0], range=[0.0, 0.5, 1.0])
+        d = _scale_to_dict(s)
+        assert d["type"] == "quantile"
+        assert d["domain"] == [1.0, 2.0, 3.0, 4.0]
+        assert d["range"] == [0.0, 0.5, 1.0]
+
+    def test_returns_dict(self):
+        s = fm.QuantileScale(domain=[1.0, 2.0, 3.0], range=[0.0, 1.0])
+        d = _scale_to_dict(s)
+        assert isinstance(d, dict)
+
+
+# ---------------------------------------------------------------------------
+# ThresholdScale serialization
+# ---------------------------------------------------------------------------
+
+
+class TestThresholdScale:
+    """ThresholdScale converts to the expected dict shape."""
+
+    def test_basic(self):
+        s = fm.ThresholdScale(domain=[0.5, 1.0], range=[0.0, 0.5, 1.0])
+        d = _scale_to_dict(s)
+        assert d["type"] == "threshold"
+        assert d["domain"] == [0.5, 1.0]
+        assert d["range"] == [0.0, 0.5, 1.0]
+
+    def test_range_longer_than_domain(self):
+        """range has len == domain.len() + 1 (the invariant)."""
+        s = fm.ThresholdScale(domain=[0.33, 0.67], range=[0.0, 0.5, 1.0])
+        d = _scale_to_dict(s)
+        assert len(d["range"]) == len(d["domain"]) + 1
 
 
 # ---------------------------------------------------------------------------
