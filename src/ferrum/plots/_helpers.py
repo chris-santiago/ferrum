@@ -14,6 +14,7 @@ from ferrum._overrides import _apply_overrides
 
 if TYPE_CHECKING:
     from ferrum.chart import Chart
+    from ferrum.composition import ConcatChart
 
 
 def _inject_cook_outliers(
@@ -402,6 +403,58 @@ def _finalize_chart(chart, *, mark=None, encode=None, properties=None, layers=No
     if theme is not None:
         chart = chart.theme(theme)
     return chart
+
+
+def _compose_compare(
+    source,
+    builder,
+    *,
+    builder_kwargs: dict,
+    resolve: dict[str, str],
+    columns: int | None = None,
+) -> "ConcatChart":
+    """Build one panel per model via ``builder(model_source, **builder_kwargs)``,
+    label each panel with its model name, and compose as small multiples.
+
+    The caller must have already confirmed ``isinstance(source,
+    ComparedModelSource)`` before calling this helper — it does not re-resolve
+    the source.
+
+    Parameters
+    ----------
+    source : ComparedModelSource
+        Multi-model wrapper whose ``.items()`` ``(name, source)`` pairs are iterated.
+    builder : callable
+        The chart's ``_<name>_chart_from_source`` builder; called once per model
+        as ``builder(model_source, **builder_kwargs)``.  May return a ``Chart``
+        or any ``_ChartLike`` composite (e.g. a nested ``ConcatChart`` from
+        ``pdp`` or ``residuals``).
+    builder_kwargs : dict
+        Forwarded verbatim to *builder* for every model.
+    resolve : dict[str, str]
+        Per-channel scale-sharing policy passed through to the outer
+        ``ConcatChart`` (e.g. ``{"x": "shared", "y": "shared"}`` for
+        supervised aggregates; ``{"x": "independent", "y": "independent"}``
+        for unsupervised diagnostics).
+    columns : int, optional
+        Grid columns for the outer ``ConcatChart``.  Defaults to the number of
+        models so all panels appear in a single row.
+
+    Returns
+    -------
+    ConcatChart
+        Small-multiples composition with one labeled panel per model.
+    """
+    from ferrum.composition import ConcatChart
+
+    children = []
+    for name, model_source in source.items():
+        child = builder(model_source, **builder_kwargs)
+        child = child.properties(title=name)
+        children.append(child)
+
+    n_cols = columns if columns is not None else len(children)
+    return ConcatChart(*children, columns=n_cols, resolve=resolve)
 
 
 def _resolve_source(

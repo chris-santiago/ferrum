@@ -1156,6 +1156,28 @@ with ferrum.theme_context(my_theme):
 > no-op on the rest. `parallel_coordinates_chart` and `rank_chart` do
 > not need a model — both accept a raw DataFrame / 2D array directly.
 
+> **2026-06-27 (compare= aggregate rendering, #35):** `compare=` now
+> renders **small multiples** — one panel per model, composed as a
+> `ConcatChart` — for the previously-gated aggregate diagnostics.
+> Affected families: the explanation family (`importance_chart`,
+> `shap_beeswarm_chart`, `shap_bar_chart`, `shap_waterfall_chart`,
+> `shap_chart`, `pdp_chart`); the model-selection family
+> (`learning_curve_chart`, `validation_curve_chart`, `cv_scores_chart`,
+> `alpha_selection_chart`); the regression aggregate family
+> (`cooks_distance_chart`; `residuals_chart` with a multi-panel layout;
+> `prediction_error_chart` with `ci=` or `reference_band=`, each band
+> computed per-model from that model's residuals only, never pooled);
+> and the source-based clustering charts (`pca_scree_chart`,
+> `intercluster_distance_chart`, `silhouette_chart`, `manifold_chart`)
+> with independent per-panel scales. Charts whose single-model output
+> is itself composite (`pdp_chart`, multi-panel `residuals_chart`) nest:
+> the outer `ConcatChart` children are per-model composites, each
+> carrying the model name as a figure-level title. The two sweep-based
+> clustering charts (`cluster_diagnostics`, `elbow_chart`) remain
+> excluded — they sweep one clusterer class over *k* on a feature
+> matrix and wrap no per-model `ModelSource`; algorithm/method
+> comparison is tracked in #43.
+
 Figure-level functions return `Chart` or compound view objects. They handle data reshaping, faceting, axis labeling, and legend placement automatically. All accept `theme=` and `**encode_kwargs` to override defaults.
 
 #### Distribution

@@ -24,12 +24,13 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 
 if TYPE_CHECKING:
-    from ferrum import Chart
+    from ferrum import Chart, ConcatChart
 
+from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
+    _compose_compare,
     _finalize_chart,
-    _reject_compare,
     _require,
     _resolve_source,
     _should_facet_by_class,
@@ -534,7 +535,7 @@ def importance_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """Feature-importance bar chart for an estimator.
 
     Extracts feature importances from the model via the selected method
@@ -591,8 +592,9 @@ def importance_chart(
 
     Returns
     -------
-    Chart
-        Feature-importance bar chart ranked by absolute importance.
+    Chart or ConcatChart
+        Feature-importance bar chart ranked by absolute importance, or a
+        small-multiples ``ConcatChart`` when ``compare=`` is supplied.
 
     Examples
     --------
@@ -602,21 +604,13 @@ def importance_chart(
 
     Notes
     -----
-    ``compare=`` is not supported. The ranked single-series bar layout (and
-    its per-bar value-text overlay and global x-domain) has no second
-    dimension for a model; comparing importances across models needs grouped
-    bars. Passing a non-``None`` ``compare`` raises ``ValueError``. Compose
-    one chart per model with ``|`` / ``&`` to compare models.
+    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    one panel per model (small multiples, shared x/y scales). Each panel is
+    the single-model importance chart for that model, labeled with the model
+    name. The single-model path (no ``compare=``) is unchanged.
     """
-    _reject_compare(
-        compare,
-        chart="importance_chart",
-        reason="the ranked single-series bar layout has no dimension for a "
-        "second model; compose one chart per model instead",
-    )
-    source = _resolve_source(model, X, y, random_state=random_state)
-    return _importance_chart_from_source(
-        source,
+    source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
+    builder_kwargs = dict(
         method=method,
         top_k=top_k,
         orient=orient,
@@ -630,6 +624,14 @@ def importance_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _importance_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _importance_chart_from_source(source, **builder_kwargs)
 
 
 def shap_beeswarm_chart(
@@ -649,7 +651,7 @@ def shap_beeswarm_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """SHAP beeswarm chart -- per-sample SHAP scatter colored by z-scored value.
 
     ``per_class=True`` on a multi-class classifier facets the chart by
@@ -698,8 +700,9 @@ def shap_beeswarm_chart(
 
     Returns
     -------
-    Chart
-        SHAP beeswarm chart.
+    Chart or ConcatChart
+        SHAP beeswarm chart, or a small-multiples ``ConcatChart`` when
+        ``compare=`` is supplied.
 
     Examples
     --------
@@ -709,21 +712,13 @@ def shap_beeswarm_chart(
 
     Notes
     -----
-    ``compare=`` is not supported. The beeswarm packs per-sample SHAP values
-    with a per-model feature ordering and color scale; overlaying a second
-    model's swarm in one panel is not a coherent comparison. Passing a
-    non-``None`` ``compare`` raises ``ValueError``. Compose one chart per
-    model with ``|`` / ``&`` to compare models.
+    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    one panel per model (small multiples, shared x/y scales). Each panel is
+    the single-model beeswarm chart for that model, labeled with the model
+    name. The single-model path (no ``compare=``) is unchanged.
     """
-    _reject_compare(
-        compare,
-        chart="shap_beeswarm_chart",
-        reason="the per-sample swarm and its feature ordering / color scale are "
-        "per-model; compose one chart per model instead",
-    )
-    source = _resolve_source(model, X, y, random_state=random_state)
-    return _shap_beeswarm_chart_from_source(
-        source,
+    source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
+    builder_kwargs = dict(
         max_display=max_display,
         order=order,
         background=background,
@@ -735,6 +730,14 @@ def shap_beeswarm_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _shap_beeswarm_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _shap_beeswarm_chart_from_source(source, **builder_kwargs)
 
 
 def shap_bar_chart(
@@ -753,7 +756,7 @@ def shap_bar_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """SHAP bar chart -- mean absolute SHAP per feature.
 
     ``per_class=True`` on a multi-class classifier facets the chart by
@@ -797,8 +800,9 @@ def shap_bar_chart(
 
     Returns
     -------
-    Chart
-        SHAP bar chart (features x mean |SHAP|).
+    Chart or ConcatChart
+        SHAP bar chart (features x mean |SHAP|), or a small-multiples
+        ``ConcatChart`` when ``compare=`` is supplied.
 
     Examples
     --------
@@ -808,21 +812,13 @@ def shap_bar_chart(
 
     Notes
     -----
-    ``compare=`` is not supported. The aggregated single-series bar layout
-    has no dimension for a second model; comparing mean-|SHAP| across models
-    needs grouped bars. Passing a non-``None`` ``compare`` raises
-    ``ValueError``. Compose one chart per model with ``|`` / ``&`` to compare
-    models.
+    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    one panel per model (small multiples, shared x/y scales). Each panel is
+    the single-model SHAP bar chart for that model, labeled with the model
+    name. The single-model path (no ``compare=``) is unchanged.
     """
-    _reject_compare(
-        compare,
-        chart="shap_bar_chart",
-        reason="the aggregated single-series bar layout has no dimension for a "
-        "second model; compose one chart per model instead",
-    )
-    source = _resolve_source(model, X, y, random_state=random_state)
-    return _shap_bar_chart_from_source(
-        source,
+    source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
+    builder_kwargs = dict(
         max_display=max_display,
         order=order,
         background=background,
@@ -833,6 +829,14 @@ def shap_bar_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _shap_bar_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _shap_bar_chart_from_source(source, **builder_kwargs)
 
 
 def shap_waterfall_chart(
@@ -852,7 +856,7 @@ def shap_waterfall_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """SHAP waterfall chart -- cumulative per-feature contributions for one sample.
 
     ``per_class=True`` on a multi-class classifier facets the chart by
@@ -899,8 +903,9 @@ def shap_waterfall_chart(
 
     Returns
     -------
-    Chart
-        SHAP waterfall chart for the sample at ``sample_idx``.
+    Chart or ConcatChart
+        SHAP waterfall chart for the sample at ``sample_idx``, or a
+        small-multiples ``ConcatChart`` when ``compare=`` is supplied.
 
     Examples
     --------
@@ -913,21 +918,13 @@ def shap_waterfall_chart(
 
     Notes
     -----
-    ``compare=`` is not supported. The waterfall traces one model's cumulative
-    contributions for a single sample; a second model's cumulative sum cannot
-    share the same bar stack. Passing a non-``None`` ``compare`` raises
-    ``ValueError``. Compose one chart per model with ``|`` / ``&`` to compare
-    models.
+    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    one panel per model (small multiples, shared x/y scales). Each panel is
+    the single-model waterfall chart for that model and sample, labeled with
+    the model name. The single-model path (no ``compare=``) is unchanged.
     """
-    _reject_compare(
-        compare,
-        chart="shap_waterfall_chart",
-        reason="the cumulative single-sample waterfall is per-model; compose one "
-        "chart per model instead",
-    )
-    source = _resolve_source(model, X, y, random_state=random_state)
-    return _shap_waterfall_chart_from_source(
-        source,
+    source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
+    builder_kwargs = dict(
         sample_idx=sample_idx,
         max_display=max_display,
         order=order,
@@ -939,6 +936,14 @@ def shap_waterfall_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _shap_waterfall_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _shap_waterfall_chart_from_source(source, **builder_kwargs)
 
 
 def shap_chart(
@@ -958,7 +963,7 @@ def shap_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """SHAP value chart for an estimator.
 
     Dispatches to one of three chart types based on ``kind``. The
@@ -1019,8 +1024,9 @@ def shap_chart(
 
     Returns
     -------
-    Chart
-        SHAP beeswarm, bar, or waterfall chart depending on ``kind``.
+    Chart or ConcatChart
+        SHAP beeswarm, bar, or waterfall chart depending on ``kind``, or a
+        small-multiples ``ConcatChart`` when ``compare=`` is supplied.
 
     Raises
     ------
@@ -1038,29 +1044,26 @@ def shap_chart(
 
     Notes
     -----
-    ``compare=`` is not supported for any ``kind`` (the beeswarm, bar, and
-    waterfall layouts are all single-model). Passing a non-``None`` ``compare``
-    raises ``ValueError``. Compose one chart per model with ``|`` / ``&`` to
-    compare models.
+    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    one panel per model (small multiples, shared x/y scales). The per-model
+    builder is chosen by ``kind`` exactly as the single-model path does; each
+    panel is labeled with the model name. The single-model path (no
+    ``compare=``) is unchanged.
     """
     _validate_choice("shap_chart", "kind", kind, {"beeswarm", "bar", "waterfall"})
-    _reject_compare(
-        compare,
-        chart="shap_chart",
-        reason="the beeswarm / bar / waterfall layouts are all single-model; "
-        "compose one chart per model instead",
-    )
-
     _warn_deprecated_dispatcher(
         "shap_chart",
         "kind",
         "shap_beeswarm_chart / shap_bar_chart / shap_waterfall_chart",
     )
 
-    source = _resolve_source(model, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
+
+    # Resolve builder + kwargs once so both the compare and single-model paths
+    # share the same mapping and cannot silently diverge if a parameter is added.
     if kind == "beeswarm":
-        return _shap_beeswarm_chart_from_source(
-            source,
+        builder = _shap_beeswarm_chart_from_source
+        builder_kwargs: dict = dict(
             max_display=max_display,
             order=order,
             background=background,
@@ -1070,9 +1073,9 @@ def shap_chart(
             layers=layers,
             theme=theme,
         )
-    if kind == "bar":
-        return _shap_bar_chart_from_source(
-            source,
+    elif kind == "bar":
+        builder = _shap_bar_chart_from_source
+        builder_kwargs = dict(
             max_display=max_display,
             order=order,
             background=background,
@@ -1082,11 +1085,11 @@ def shap_chart(
             layers=layers,
             theme=theme,
         )
-    if kind == "waterfall":
+    else:  # waterfall
         if sample_idx is None:
             raise ValueError("shap_chart(kind='waterfall') requires sample_idx=<int>.")
-        return _shap_waterfall_chart_from_source(
-            source,
+        builder = _shap_waterfall_chart_from_source
+        builder_kwargs = dict(
             sample_idx=sample_idx,
             max_display=max_display,
             order=order,
@@ -1097,6 +1100,15 @@ def shap_chart(
             layers=layers,
             theme=theme,
         )
+
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            builder,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return builder(source, **builder_kwargs)
 
 
 def pdp_chart(
@@ -1116,7 +1128,7 @@ def pdp_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """Partial-dependence plot (PDP) for one or more features.
 
     Renders one facet panel per feature, each showing how the model
@@ -1171,8 +1183,9 @@ def pdp_chart(
 
     Returns
     -------
-    Chart
-        Faceted PDP chart with one panel per feature.
+    Chart or ConcatChart
+        Faceted PDP chart with one panel per feature, or a small-multiples
+        ``ConcatChart`` when ``compare=`` is supplied.
 
     Raises
     ------
@@ -1187,11 +1200,13 @@ def pdp_chart(
 
     Notes
     -----
-    ``compare=`` is not supported. PDP already facets one panel per feature
-    with per-panel independent scales; a second model would need an extra
-    color or facet dimension on top. Passing a non-``None`` ``compare`` raises
-    ``ValueError``. Compose one chart per model with ``|`` / ``&`` to compare
-    models.
+    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    one panel per model (small multiples). Each panel is the single-model PDP
+    facet composite for that model (one facet per feature), labeled with the
+    model name. Each feature facet keeps its own independent x axis (PDP curves
+    for different features span unrelated x-ranges), and scale sharing across
+    models is not applied to the faceted grid. The single-model path
+    (no ``compare=``) is unchanged.
     """
     _require(
         "pdp_chart",
@@ -1199,16 +1214,11 @@ def pdp_chart(
         features,
         hint="pass a list of column names or indices",
     )
-    _reject_compare(
-        compare,
-        chart="pdp_chart",
-        reason="the per-feature facet layout has no free dimension for a second "
-        "model; compose one chart per model instead",
-    )
-    source = _resolve_source(model, X, y, random_state=random_state)
-    return _pdp_chart_from_source(
-        source,
-        list(features),
+    source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
+    # ``features`` is positional-or-keyword on the builder; route it through the
+    # shared dict as a keyword so both paths spell the kwargs exactly once.
+    builder_kwargs = dict(
+        features=list(features),
         grid_resolution=grid_resolution,
         kind=kind,
         ice_alpha=ice_alpha,
@@ -1219,3 +1229,17 @@ def pdp_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        # pdp facets per feature with intentionally INDEPENDENT x — each feature
+        # has its own units, so the outer compose must NOT union x across
+        # features. (The shared-scale union DOES propagate into this faceted
+        # child, unlike grid children, so a shared x would collapse every
+        # feature onto one axis — see test_pdp_chart_compare_keeps_independent_
+        # feature_x.) Only the partial-dependence y is comparable across models.
+        return _compose_compare(
+            source,
+            _pdp_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "independent", "y": "shared"},
+        )
+    return _pdp_chart_from_source(source, **builder_kwargs)

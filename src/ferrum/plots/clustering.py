@@ -24,11 +24,13 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 
 if TYPE_CHECKING:
-    from ferrum import Chart, HConcatChart
+    from ferrum import Chart, ConcatChart, HConcatChart
 
+from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
     _UNSET,
+    _compose_compare,
     _finalize_chart,
     _reject_compare,
     _resolve_first_param,
@@ -168,7 +170,7 @@ def _pca_scree_chart_from_variance_df(
 def _intercluster_distance_chart_from_source(
     source: Any,
     *,
-    k: int,
+    k: int | None = None,
     method: str = "mds",
     mark: dict | None = None,
     encode: dict | None = None,
@@ -184,7 +186,18 @@ def _intercluster_distance_chart_from_source(
     """
     import ferrum
 
-    df = source.intercluster_distance(k, method=method)
+    if k is None:
+        m = source.model
+        if hasattr(m, "n_clusters"):
+            k = int(m.n_clusters)
+        elif hasattr(m, "cluster_centers_"):
+            k = int(m.cluster_centers_.shape[0])
+        else:
+            raise ValueError(
+                "intercluster_distance_chart(k=...) is required when the "
+                "wrapped model exposes neither n_clusters nor cluster_centers_."
+            )
+    df = source.intercluster_distance(int(k), method=method)
     x_lo = float(df["x"].min() or 0.0)
     x_hi = float(df["x"].max() or 0.0)
     y_lo = float(df["y"].min() or 0.0)
@@ -521,7 +534,7 @@ def pca_scree_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """PCA scree chart showing explained variance per component.
 
     Plots per-component explained variance ratio as bars, with an
@@ -568,9 +581,10 @@ def pca_scree_chart(
 
     Returns
     -------
-    Chart
+    Chart or ConcatChart
         PCA scree bar chart with optional cumulative line and threshold
-        rule.
+        rule, or a small-multiples ``ConcatChart`` (one panel per model,
+        independent per-panel scales) when ``compare=`` is supplied.
 
     Examples
     --------
@@ -584,17 +598,19 @@ def pca_scree_chart(
 
     Notes
     -----
-    ``compare=`` is not supported. PCA scree is an unsupervised single-fit
-    diagnostic with no ``y`` target, so cross-model comparison is meaningless.
-    Passing a non-``None`` ``compare`` raises ``ValueError`` (D-COMPARE-1:
-    loud, documented exclusion).
+    When ``compare=`` is supplied with a fitted PCA estimator, returns a
+    :class:`~ferrum.ConcatChart` with one panel per model (small multiples,
+    independent per-panel scales). Each panel is the single-model scree chart
+    for that PCA, labeled with the model name. PCA component axes live in
+    incomparable coordinate systems across different decompositions, so scales
+    are kept independent rather than shared.
+
+    The raw-DataFrame / array path (Rust SVD) does not support ``compare=``
+    because it wraps no per-model ``ModelSource``; passing ``compare=``
+    alongside a raw array raises ``ValueError``.
+
+    The single-model path (no ``compare=``) is unchanged.
     """
-    _reject_compare(
-        compare,
-        chart="pca_scree_chart",
-        reason="PCA scree is an unsupervised single-fit diagnostic with no y "
-        "target; cross-model comparison is meaningless",
-    )
     import numpy as np
     import pyarrow as pa
 
@@ -613,6 +629,12 @@ def pca_scree_chart(
             pass
 
     if is_raw_data:
+        if compare is not None:
+            raise ValueError(
+                "pca_scree_chart: compare= requires a fitted PCA estimator; "
+                "the raw-DataFrame / array path computes Rust SVD on a single "
+                "matrix and has no per-model source to compare."
+            )
         from ferrum import _core
 
         if isinstance(model, pl.DataFrame):
@@ -637,9 +659,8 @@ def pca_scree_chart(
             theme=theme,
         )
 
-    source = _resolve_source(model, X, None, random_state=random_state)
-    return _pca_scree_chart_from_source(
-        source,
+    source = _resolve_source(model, X, None, compare=compare, random_state=random_state)
+    builder_kwargs = dict(
         n_components=n_components,
         cumulative_line=cumulative_line,
         threshold=threshold,
@@ -650,6 +671,14 @@ def pca_scree_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _pca_scree_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "independent", "y": "independent"},
+        )
+    return _pca_scree_chart_from_source(source, **builder_kwargs)
 
 
 def cluster_diagnostics(
@@ -748,18 +777,21 @@ def cluster_diagnostics(
 
     Notes
     -----
-    ``compare=`` is not supported. This sweeps one clusterer class over a range
-    of ``k`` on a single feature matrix (no ``y`` target); cross-model
-    comparison via ``compare=`` is meaningless. Passing a non-``None``
-    ``compare`` raises ``ValueError`` (D-COMPARE-1).
+    ``compare=`` is not supported for this chart. It takes the feature matrix
+    and sweeps one clusterer class over ``k`` internally; it wraps no per-model
+    ``ModelSource``, so there is no per-model output to compare. To compare
+    clusterer algorithms/methods, see GH #43. Passing a non-``None`` ``compare``
+    raises ``ValueError`` (D-COMPARE-1).
     """
     from ferrum.diagnostics._internal.deps import require_sklearn
 
     _reject_compare(
         compare,
         chart="cluster_diagnostics",
-        reason="this sweeps one clusterer class over k on an unsupervised "
-        "feature matrix; cross-model comparison is meaningless",
+        reason="this takes the feature matrix and sweeps one clusterer class "
+        "over k internally; it wraps no per-model ModelSource, so there is no "
+        "per-model output to compare. To compare clusterer algorithms/methods, "
+        "see GH #43",
     )
     model = _resolve_first_param(
         model,
@@ -801,7 +833,7 @@ def intercluster_distance_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """Intercluster distance map: 2D embedding of cluster centers.
 
     Embeds cluster centers into 2D using MDS so their pairwise distances
@@ -846,9 +878,10 @@ def intercluster_distance_chart(
 
     Returns
     -------
-    Chart
+    Chart or ConcatChart
         2D scatter chart of embedded cluster centers sized by cluster
-        population.
+        population, or a small-multiples ``ConcatChart`` (one panel per
+        model, independent per-panel scales) when ``compare=`` is supplied.
 
     Raises
     ------
@@ -864,31 +897,18 @@ def intercluster_distance_chart(
 
     Notes
     -----
-    ``compare=`` is not supported. This embeds one clusterer's centers in 2D
-    (no ``y`` target); cross-model comparison via ``compare=`` is meaningless.
-    Passing a non-``None`` ``compare`` raises ``ValueError`` (D-COMPARE-1).
+    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    one panel per model (small multiples, independent per-panel scales). Each
+    panel is the single-model distance map for that clusterer, labeled with
+    the model name. Embedding coordinate systems are not comparable across
+    different clusterers, so scales are kept independent. The ``k`` value is
+    inferred from each panel's own model when not provided explicitly.
+
+    The single-model path (no ``compare=``) is unchanged.
     """
-    _reject_compare(
-        compare,
-        chart="intercluster_distance_chart",
-        reason="this embeds one clusterer's centers in 2D with no y target; "
-        "cross-model comparison is meaningless",
-    )
-    source = _resolve_source(model, X, None, random_state=random_state)
-    if k is None:
-        if hasattr(source.model, "n_clusters"):
-            k = int(source.model.n_clusters)
-        elif hasattr(source.model, "cluster_centers_"):
-            k = int(source.model.cluster_centers_.shape[0])
-        else:
-            raise ValueError(
-                "intercluster_distance_chart(k=...) is required when the "
-                "wrapped model exposes neither n_clusters nor "
-                "cluster_centers_."
-            )
-    return _intercluster_distance_chart_from_source(
-        source,
-        k=int(k),
+    source = _resolve_source(model, X, None, compare=compare, random_state=random_state)
+    builder_kwargs = dict(
+        k=k,
         method=method,
         mark=mark,
         encode=encode,
@@ -896,6 +916,14 @@ def intercluster_distance_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _intercluster_distance_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "independent", "y": "independent"},
+        )
+    return _intercluster_distance_chart_from_source(source, **builder_kwargs)
 
 
 def silhouette_chart(
@@ -910,7 +938,7 @@ def silhouette_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """Rousseeuw silhouette plot for a fitted clusterer.
 
     Computes per-sample silhouette coefficients and renders a horizontal
@@ -947,8 +975,10 @@ def silhouette_chart(
 
     Returns
     -------
-    Chart
-        Horizontal silhouette bar chart with per-cluster color encoding.
+    Chart or ConcatChart
+        Horizontal silhouette bar chart with per-cluster color encoding,
+        or a small-multiples ``ConcatChart`` (one panel per model,
+        independent per-panel scales) when ``compare=`` is supplied.
 
     Examples
     --------
@@ -958,20 +988,16 @@ def silhouette_chart(
 
     Notes
     -----
-    ``compare=`` is not supported. The silhouette plot is an unsupervised
-    single-clusterer diagnostic (no ``y`` target); cross-model comparison via
-    ``compare=`` is meaningless. Passing a non-``None`` ``compare`` raises
-    ``ValueError`` (D-COMPARE-1).
+    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    one panel per model (small multiples, independent per-panel scales). Each
+    panel is the single-model silhouette chart for that clusterer, labeled with
+    the model name. Silhouette coefficient axes are not directly comparable
+    across clusterers with different k, so scales are kept independent.
+
+    The single-model path (no ``compare=``) is unchanged.
     """
-    _reject_compare(
-        compare,
-        chart="silhouette_chart",
-        reason="the silhouette plot is an unsupervised single-clusterer "
-        "diagnostic; cross-model comparison is meaningless",
-    )
-    source = _resolve_source(model, X, None, random_state=random_state)
-    return _silhouette_chart_from_source(
-        source,
+    source = _resolve_source(model, X, None, compare=compare, random_state=random_state)
+    builder_kwargs = dict(
         subtitle=subtitle,
         mark=mark,
         encode=encode,
@@ -979,6 +1005,14 @@ def silhouette_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _silhouette_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "independent", "y": "independent"},
+        )
+    return _silhouette_chart_from_source(source, **builder_kwargs)
 
 
 def manifold_chart(
@@ -993,7 +1027,7 @@ def manifold_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """Low-dimensional manifold-embedding scatter (UMAP / t-SNE / PCA).
 
     Projects the input data to two dimensions via the selected embedding
@@ -1029,8 +1063,10 @@ def manifold_chart(
 
     Returns
     -------
-    Chart
-        2-D scatter plot of the embedded data, colored by cluster label.
+    Chart or ConcatChart
+        2-D scatter plot of the embedded data, colored by cluster label,
+        or a small-multiples ``ConcatChart`` (one panel per model,
+        independent per-panel scales) when ``compare=`` is supplied.
 
     Examples
     --------
@@ -1040,20 +1076,16 @@ def manifold_chart(
 
     Notes
     -----
-    ``compare=`` is not supported. The manifold scatter embeds one model's data
-    in 2D (no ``y`` target); cross-model comparison via ``compare=`` is
-    meaningless. Passing a non-``None`` ``compare`` raises ``ValueError``
-    (D-COMPARE-1).
+    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    one panel per model (small multiples, independent per-panel scales). Each
+    panel is the single-model embedding scatter for that clusterer, labeled with
+    the model name. Manifold embedding coordinates are not comparable across
+    different models or random seeds, so scales are kept independent.
+
+    The single-model path (no ``compare=``) is unchanged.
     """
-    _reject_compare(
-        compare,
-        chart="manifold_chart",
-        reason="the manifold scatter embeds one model's data in 2D with no y "
-        "target; cross-model comparison is meaningless",
-    )
-    source = _resolve_source(model, X, None, random_state=random_state)
-    return _manifold_chart_from_source(
-        source,
+    source = _resolve_source(model, X, None, compare=compare, random_state=random_state)
+    builder_kwargs = dict(
         method=method,
         mark=mark,
         encode=encode,
@@ -1061,6 +1093,14 @@ def manifold_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _manifold_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "independent", "y": "independent"},
+        )
+    return _manifold_chart_from_source(source, **builder_kwargs)
 
 
 def elbow_chart(
@@ -1124,16 +1164,19 @@ def elbow_chart(
 
     Notes
     -----
-    ``compare=`` is not supported. This sweeps one clusterer class over a range
-    of ``k`` on an unsupervised feature matrix (no ``y`` target); cross-model
-    comparison via ``compare=`` is meaningless. Passing a non-``None``
-    ``compare`` raises ``ValueError`` (D-COMPARE-1).
+    ``compare=`` is not supported for this chart. It takes a clusterer class
+    and sweeps it over ``k`` on the feature matrix; it wraps no per-model
+    ``ModelSource``, so there is no per-model output to compare. To compare
+    clusterer algorithms/methods, see GH #43. Passing a non-``None`` ``compare``
+    raises ``ValueError`` (D-COMPARE-1).
     """
     _reject_compare(
         compare,
         chart="elbow_chart",
-        reason="this sweeps one clusterer class over k on an unsupervised "
-        "feature matrix; cross-model comparison is meaningless",
+        reason="this takes a clusterer class and sweeps it over k on the "
+        "feature matrix; it wraps no per-model ModelSource, so there is no "
+        "per-model output to compare. To compare clusterer algorithms/methods, "
+        "see GH #43",
     )
     scores = _elbow_scores(model, X, ks=list(ks), metric=metric, random_state=random_state)
     return _elbow_chart_from_source(

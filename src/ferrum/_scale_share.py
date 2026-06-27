@@ -64,7 +64,7 @@ def _column_unique(data, field: str) -> list:
         col = data[field]
     except (KeyError, AttributeError):
         return []
-    return list(col.unique().to_list())
+    return col.unique(maintain_order=True).to_list()
 
 
 def _classify_field(data, field: str) -> Optional[str]:
