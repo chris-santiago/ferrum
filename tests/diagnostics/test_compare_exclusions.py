@@ -16,13 +16,12 @@ its single-model-only aggregate path with a loud ``ValueError``:
 ``residuals_chart`` rejects ``compare=`` with a multi-panel ``panels`` value
 (the 4-panel QQ/scale-location/leverage grid is single-model).
 
-The remaining 17 charts across regression, model-selection, explanation, and
-clustering stay EXCLUDED because rendering a coherent multi-model comparison
-would need a second visual dimension (model-facet or grouped bars) that the
-single-model builders and their marks do not provide, because a channel
-collision would result, or because the diagnostic is unsupervised (no ``y``).
-They reject a non-``None`` ``compare`` with a loud, documented ``ValueError`` —
-never a silent drop.
+Six explanation charts (``importance_chart``, ``shap_beeswarm_chart``,
+``shap_bar_chart``, ``shap_waterfall_chart``, ``shap_chart``, ``pdp_chart``)
+render **small multiples** when ``compare=`` is passed: one panel per model,
+composed as a ``ConcatChart`` with shared x/y scales. The remaining charts
+across model-selection and clustering stay excluded and reject with
+``ValueError``.
 
 Each test also asserts the no-compare default path still works (``compare=None``
 is byte-equivalent to omitting the kwarg), and the ``compare=<dict>`` rejection
@@ -37,6 +36,7 @@ import polars as pl
 import pytest
 
 import ferrum
+from ferrum.composition import ConcatChart
 from tests.fixtures import load_dataset, load_fixture
 
 
@@ -228,52 +228,103 @@ def test_alpha_selection_chart_compare_none_default_path_works():
 # ---------------------------------------------------------------------------
 
 
-def test_importance_chart_compare_rejected():
+def test_importance_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one panel per model (base + alt)."""
     X, y, base, alt = _reg_setup()
-    with pytest.raises(ValueError, match="compare= is not supported for importance_chart"):
-        ferrum.importance_chart(base, X, y, compare={"alt": alt})
+    result = ferrum.importance_chart(base, X, y, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
 
 
 def test_importance_chart_compare_none_default_path_works():
     X, y, base, _ = _reg_setup()
-    chart = ferrum.importance_chart(base, X, y, compare=None)
-    assert "<svg" in chart.to_svg()
+    with_kwarg = ferrum.importance_chart(base, X, y, compare=None).to_svg()
+    without_kwarg = ferrum.importance_chart(base, X, y).to_svg()
+    assert with_kwarg == without_kwarg
 
 
-def test_shap_beeswarm_chart_compare_rejected():
+def test_shap_beeswarm_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one panel per model."""
     X, y, base, alt = _reg_setup()
-    with pytest.raises(ValueError, match="compare= is not supported for shap_beeswarm_chart"):
-        ferrum.shap_beeswarm_chart(base, X, y, compare={"alt": alt})
+    result = ferrum.shap_beeswarm_chart(base, X, y, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
 
 
-def test_shap_bar_chart_compare_rejected():
-    X, y, base, alt = _reg_setup()
-    with pytest.raises(ValueError, match="compare= is not supported for shap_bar_chart"):
-        ferrum.shap_bar_chart(base, X, y, compare={"alt": alt})
-
-
-def test_shap_waterfall_chart_compare_rejected():
-    X, y, base, alt = _reg_setup()
-    with pytest.raises(ValueError, match="compare= is not supported for shap_waterfall_chart"):
-        ferrum.shap_waterfall_chart(base, X, y, sample_idx=0, compare={"alt": alt})
-
-
-def test_shap_chart_compare_rejected():
-    X, y, base, alt = _reg_setup()
-    with pytest.raises(ValueError, match="compare= is not supported for shap_chart"):
-        ferrum.shap_chart(base, X, y, compare={"alt": alt})
-
-
-def test_pdp_chart_compare_rejected():
-    X, y, base, alt = _reg_setup()
-    with pytest.raises(ValueError, match="compare= is not supported for pdp_chart"):
-        ferrum.pdp_chart(base, X, y, features=["f0"], compare={"alt": alt})
-
-
-def test_pdp_chart_compare_none_default_path_works():
+def test_shap_beeswarm_chart_compare_none_byte_identical():
     X, y, base, _ = _reg_setup()
-    chart = ferrum.pdp_chart(base, X, y, features=["f0"], compare=None)
-    assert "<svg" in chart.to_svg()
+    with_kwarg = ferrum.shap_beeswarm_chart(base, X, y, compare=None).to_svg()
+    without_kwarg = ferrum.shap_beeswarm_chart(base, X, y).to_svg()
+    assert with_kwarg == without_kwarg
+
+
+def test_shap_bar_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one panel per model."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.shap_bar_chart(base, X, y, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
+
+
+def test_shap_bar_chart_compare_none_byte_identical():
+    X, y, base, _ = _reg_setup()
+    with_kwarg = ferrum.shap_bar_chart(base, X, y, compare=None).to_svg()
+    without_kwarg = ferrum.shap_bar_chart(base, X, y).to_svg()
+    assert with_kwarg == without_kwarg
+
+
+def test_shap_waterfall_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one panel per model."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.shap_waterfall_chart(base, X, y, sample_idx=0, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
+
+
+def test_shap_waterfall_chart_compare_none_byte_identical():
+    X, y, base, _ = _reg_setup()
+    with_kwarg = ferrum.shap_waterfall_chart(base, X, y, sample_idx=0, compare=None).to_svg()
+    without_kwarg = ferrum.shap_waterfall_chart(base, X, y, sample_idx=0).to_svg()
+    assert with_kwarg == without_kwarg
+
+
+def test_shap_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one panel per model (shap_chart is deprecated)."""
+    X, y, base, alt = _reg_setup()
+    with pytest.warns(DeprecationWarning):
+        result = ferrum.shap_chart(base, X, y, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
+
+
+def test_shap_chart_compare_none_byte_identical():
+    X, y, base, _ = _reg_setup()
+    with pytest.warns(DeprecationWarning):
+        with_kwarg = ferrum.shap_chart(base, X, y, compare=None).to_svg()
+    with pytest.warns(DeprecationWarning):
+        without_kwarg = ferrum.shap_chart(base, X, y).to_svg()
+    assert with_kwarg == without_kwarg
+
+
+def test_pdp_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one nested panel per model."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.pdp_chart(base, X, y, features=["f0"], compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
+
+
+def test_pdp_chart_compare_none_byte_identical():
+    X, y, base, _ = _reg_setup()
+    with_kwarg = ferrum.pdp_chart(base, X, y, features=["f0"], compare=None).to_svg()
+    without_kwarg = ferrum.pdp_chart(base, X, y, features=["f0"]).to_svg()
+    assert with_kwarg == without_kwarg
 
 
 # ---------------------------------------------------------------------------
