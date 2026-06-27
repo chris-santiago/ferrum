@@ -243,7 +243,9 @@ pub(in crate::render) fn build_from_scale_spec(
         }
         ScaleSpec::Sequential { domain, .. }
         | ScaleSpec::Diverging { domain, .. }
-        | ScaleSpec::Quantize { domain, .. } => {
+        | ScaleSpec::Quantize { domain, .. }
+        | ScaleSpec::Quantile { domain, .. }
+        | ScaleSpec::Threshold { domain, .. } => {
             let (d, r) = resolve_continuous_domain_and_range(domain, &None, None, col.as_ref(), &enc.field, pr)?;
             ScaleKind::Linear(LinearScale::new_internal(d, r, false, false))
         }

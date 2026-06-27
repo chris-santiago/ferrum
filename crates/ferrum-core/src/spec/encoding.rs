@@ -252,6 +252,18 @@ pub enum ScaleSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         range: Option<Vec<String>>,
     },
+    Quantile {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<f64>>,   // sorted sample values
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<f64>>,    // discrete numeric outputs
+    },
+    Threshold {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<f64>>,   // threshold boundaries
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<f64>>,    // discrete numeric outputs; len == domain.len() + 1
+    },
     #[serde(rename = "bin-ordinal")]
     BinOrdinal {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1276,6 +1288,37 @@ mod tests {
             }
             _ => panic!("expected Quantize variant"),
         }
+    }
+
+    #[test]
+    fn scale_spec_quantile_round_trip() {
+        let json = r#"{"type":"quantile","domain":[0,25,50,75,100],"range":[0,1,2,3]}"#;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match &parsed {
+            ScaleSpec::Quantile { domain, range } => {
+                assert_eq!(domain.as_ref().unwrap(), &vec![0.0, 25.0, 50.0, 75.0, 100.0]);
+                assert_eq!(range.as_ref().unwrap().len(), 4);
+            }
+            _ => panic!("expected Quantile variant"),
+        }
+        let re = serde_json::to_string(&parsed).unwrap();
+        assert!(re.contains(r#""type":"quantile""#), "json: {re}");
+    }
+
+    #[test]
+    fn scale_spec_threshold_round_trip() {
+        let json = r#"{"type":"threshold","domain":[0,50,100],"range":[0,1,2,3]}"#;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match &parsed {
+            ScaleSpec::Threshold { domain, range } => {
+                assert_eq!(domain.as_ref().unwrap(), &vec![0.0, 50.0, 100.0]);
+                // range.len() == domain.len() + 1
+                assert_eq!(range.as_ref().unwrap().len(), 4);
+            }
+            _ => panic!("expected Threshold variant"),
+        }
+        let re = serde_json::to_string(&parsed).unwrap();
+        assert!(re.contains(r#""type":"threshold""#), "json: {re}");
     }
 
     #[test]
