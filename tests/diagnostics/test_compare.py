@@ -437,3 +437,70 @@ def test_prediction_error_chart_compare_band_is_per_model_not_pooled():
     # than the fitted linear model. A pooled band would make these equal.
     assert good_width != pytest.approx(poor_width)
     assert poor_width > good_width
+
+
+# ---------------------------------------------------------------------------
+# Determinism regression: shared ordinal scale in importance compare= (#35)
+# ---------------------------------------------------------------------------
+
+
+def test_importance_chart_compare_svg_is_deterministic():
+    """importance_chart(model, X, y, compare=...) must produce byte-identical
+    SVG across repeated calls in the same process.
+
+    Root cause: _scale_share._column_unique formerly called
+    col.unique() without maintain_order=True.  Polars returns unique values in
+    hash order (non-deterministic across calls), making the shared categorical
+    y-axis domain non-deterministic and thus the SVG non-deterministic.
+    """
+    from sklearn.ensemble import RandomForestRegressor
+
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = df["y"]
+    model_a = RandomForestRegressor(n_estimators=10, random_state=0)
+    model_b = RandomForestRegressor(n_estimators=10, random_state=1)
+    model_a.fit(X.to_numpy(), y.to_numpy())
+    model_b.fit(X.to_numpy(), y.to_numpy())
+
+    svgs = {
+        ferrum.importance_chart(model_a, X, y, compare={"alt": model_b}).to_svg() for _ in range(3)
+    }
+    assert len(svgs) == 1, (
+        "importance_chart compare= produced non-deterministic SVG across 3 calls; "
+        "check _scale_share._column_unique for maintain_order=True"
+    )
+
+
+def test_compute_union_domain_ordinal_is_stable_across_calls():
+    """compute_union_domain over ordinal columns must return the same domain
+    every time it is called (order-preserving unique, not hash-order).
+
+    This is the unit-level guard for _scale_share._column_unique.
+    """
+    import polars as pl
+
+    from ferrum._scale_share import compute_union_domain
+
+    # Build two minimal charts whose feature column has the same values but
+    # may be encountered in different orders by the uniqueness kernel.
+    features = ["f3", "f2", "f0", "f1"]
+
+    class _FakeChart:
+        def __init__(self, data, field):
+            self._data = data
+            self._encoding = {"y": field}
+            self._layers = None
+
+    df = pl.DataFrame({"feature": features})
+    chart_a = _FakeChart(df, "feature")
+    chart_b = _FakeChart(df, "feature")
+
+    # Call many times; hash-order nondeterminism manifests within ~10 calls.
+    domains = {tuple(compute_union_domain([chart_a, chart_b], "y")["domain"]) for _ in range(20)}
+    assert len(domains) == 1, (
+        f"compute_union_domain returned multiple orderings across 20 calls: {domains}"
+    )
+    # Domain must preserve first-appearance order from the data.
+    domain = list(next(iter(domains)))
+    assert domain == features, f"Expected {features}, got {domain}"
