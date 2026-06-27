@@ -1,13 +1,8 @@
 """Scale-to-dict conversion helper for encoding channels (internal).
 
-Each ferrum ``*Scale`` pyclass (``BandScale``, ``BinOrdinalScale``,
-``DivergingScale``, ``LinearScale``, ``LogScale``, ``OrdinalScale``,
-``PointScale``, ``PowScale``, ``QuantileScale``, ``QuantizeScale``,
-``SequentialScale``, ``SqrtScale``, ``SymlogScale``, ``ThresholdScale``,
-``TimeScale``) is a Rust-backed PyO3 class that exposes
-``_to_scale_spec_dict()`` — a method that serialises the instance into the
-canonical ``ScaleSpec`` wire dict.  This module delegates to that method for
-all pyclass instances; the dict / ``Parameter`` / ``None`` paths are
+Any Rust-backed ``*Scale`` pyclass exposes ``_to_scale_spec_dict()``, which
+serialises it into the canonical ``ScaleSpec`` wire dict; this module
+delegates to that method.  The dict / ``Parameter`` / ``None`` paths are
 unchanged.
 """
 

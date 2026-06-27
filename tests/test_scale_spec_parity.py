@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 
 import polars as pl
 import pytest
@@ -50,6 +51,41 @@ _REPRESENTATIVE_INSTANCES: dict[str, object] = {
 }
 
 _ALL_SCALE_NAMES = sorted(n for n in dir(fc) if n.endswith("Scale"))
+
+# ---------------------------------------------------------------------------
+# Channel-routing constants for the minimal-chart drift helper
+# ---------------------------------------------------------------------------
+
+# These scale types only make sense on a color channel.
+_COLOR_ONLY_SCALES: frozenset[str] = frozenset(
+    {"BinOrdinalScale", "DivergingScale", "QuantizeScale", "SequentialScale"}
+)
+# These scale types require categorical (string) x data.
+_CATEGORICAL_X_SCALES: frozenset[str] = frozenset({"BandScale", "OrdinalScale", "PointScale"})
+# These scale types require datetime x data.
+_TIME_X_SCALES: frozenset[str] = frozenset({"TimeScale"})
+
+
+def _build_minimal_chart(name: str, instance: object) -> "fr.Chart":
+    """Build the smallest valid chart that uses *instance* in the right encoding channel.
+
+    Sequential/Diverging/Quantize/BinOrdinal are color-only; Band/Ordinal/Point need
+    categorical x data; Time needs datetime x data; all others go on numeric x.
+    """
+    _num = pl.DataFrame({"a": [1.0, 2.0], "b": [3.0, 4.0], "c": [0.1, 0.9]})
+    _cat = pl.DataFrame({"k": ["a", "b"], "v": [1.0, 2.0]})
+    _tmp = pl.DataFrame({"t": ["2020-01-01", "2021-01-01"], "v": [1.0, 2.0]}).with_columns(
+        pl.col("t").str.to_datetime()
+    )
+
+    if name in _COLOR_ONLY_SCALES:
+        return fr.Chart(_num).mark_point().encode(x="a", y="b", color=fr.Color("c", scale=instance))
+    if name in _CATEGORICAL_X_SCALES:
+        return fr.Chart(_cat).mark_point().encode(x=fr.X("k", scale=instance), y="v")
+    if name in _TIME_X_SCALES:
+        return fr.Chart(_tmp).mark_point().encode(x=fr.X("t", scale=instance), y="v")
+    return fr.Chart(_num).mark_point().encode(x=fr.X("a", scale=instance), y="b")
+
 
 # ---------------------------------------------------------------------------
 # Baseline fixture path
@@ -203,15 +239,29 @@ class TestScaleParity:
 
     @pytest.mark.parametrize("name", _ALL_SCALE_NAMES)
     def test_scale_to_dict_returns_typed_dict(self, name: str):
-        """_scale_to_dict(instance) returns a dict with a 'type' key for every class."""
-        if name not in _REPRESENTATIVE_INSTANCES:
-            pytest.skip(f"No representative instance for {name}")
+        """_scale_to_dict(instance) yields a typed dict that round-trips into the wire format.
+
+        For each representative instance this also builds a minimal one-channel chart and
+        asserts chart.to_json() succeeds with the scale type present in the output — a DEEP
+        check that auto-extends to any future 16th scale class added to
+        _REPRESENTATIVE_INSTANCES without needing a second edit here.
+        """
+        # test_all_scale_classes_covered already ensures every name has an entry; no skip needed.
         s = _REPRESENTATIVE_INSTANCES[name]
         d = _scale_to_dict(s)
         assert isinstance(d, dict), (
             f"_scale_to_dict({name}) returned {type(d).__name__!r}, expected dict"
         )
         assert "type" in d, f"_scale_to_dict({name}) dict missing 'type' key: {d!r}"
+
+        chart = _build_minimal_chart(name, s)
+        json_str = chart.to_json()
+        assert json_str is not None, f"chart.to_json() returned None for {name}"
+        assert f'"{d["type"]}"' in json_str, (
+            f"Scale type {d['type']!r} not found in chart.to_json() for {name}.\n"
+            f"Wire dict: {d!r}\n"
+            f"JSON: {json_str!r}"
+        )
 
 
 class TestByteIdentity:
@@ -304,7 +354,7 @@ class TestEncodeSmoke:
         assert isinstance(svg, str) and len(svg) > 0 and "<svg" in svg
 
     def test_quantile_scale_in_x_channel(self, num_df: pl.DataFrame):
-        """QuantileScale in a positional channel builds without error."""
+        """QuantileScale in a positional channel renders all data marks."""
         chart = (
             fr.Chart(num_df)
             .mark_point()
@@ -316,12 +366,13 @@ class TestEncodeSmoke:
                 y="b",
             )
         )
-        assert chart.to_json() is not None
         svg = chart.to_svg()
         assert isinstance(svg, str) and len(svg) > 0 and "<svg" in svg
+        mark_count = len(re.findall(r"<circle|<path", svg))
+        assert mark_count == 4, f"Expected 4 rendered marks, got {mark_count}"
 
     def test_threshold_scale_in_x_channel(self, num_df: pl.DataFrame):
-        """ThresholdScale in a positional channel builds without error."""
+        """ThresholdScale in a positional channel renders all data marks."""
         chart = (
             fr.Chart(num_df)
             .mark_point()
@@ -333,6 +384,76 @@ class TestEncodeSmoke:
                 y="b",
             )
         )
-        assert chart.to_json() is not None
         svg = chart.to_svg()
         assert isinstance(svg, str) and len(svg) > 0 and "<svg" in svg
+        mark_count = len(re.findall(r"<circle|<path", svg))
+        assert mark_count == 4, f"Expected 4 rendered marks, got {mark_count}"
+
+
+class TestPositionalExtent:
+    """Regression guard for the SPEC-04 positional-channel truncation fix (issue #38).
+
+    Before the fix in positional.rs, QuantileScale and ThresholdScale on x/y channels
+    were routed through the domain-as-extent arm, which collapsed the axis to domain[0..1]
+    and silently dropped data points outside that unit interval.  Only 2 of 4 marks
+    rendered.  These tests lock the corrected behavior at exactly 4/4.
+    """
+
+    @pytest.fixture()
+    def num_df(self) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "a": [1.0, 2.0, 3.0, 4.0],
+                "b": [10.0, 20.0, 30.0, 40.0],
+            }
+        )
+
+    def test_quantile_positional_all_marks_render(self, num_df: pl.DataFrame):
+        """Regression: SPEC-04 positionally routed QuantileScale through the
+        domain-as-extent arm, collapsing the axis to domain[0..1] and dropping
+        data points (caught by design review, issue #38). Before this fix the
+        count was 2/4; it must be 4/4 now.
+        """
+        chart = (
+            fr.Chart(num_df)
+            .mark_point()
+            .encode(
+                x=fr.X(
+                    "a",
+                    scale=fr.QuantileScale(domain=[1.0, 2.0, 3.0, 4.0], range=[0.0, 0.5, 1.0]),
+                ),
+                y="b",
+            )
+        )
+        svg = chart.to_svg()
+        mark_count = len(re.findall(r"<circle|<path", svg))
+        assert mark_count == 4, (
+            f"Expected 4 rendered marks (one per row), got {mark_count}. "
+            "SPEC-04 positional truncation regression: QuantileScale on x may be "
+            "routing through domain-as-extent again (issue #38)."
+        )
+
+    def test_threshold_positional_all_marks_render(self, num_df: pl.DataFrame):
+        """Regression: SPEC-04 positionally routed ThresholdScale through the
+        domain-as-extent arm, collapsing the axis to domain[0..1] and dropping
+        data points (caught by design review, issue #38). Before this fix the
+        count was 2/4; it must be 4/4 now.
+        """
+        chart = (
+            fr.Chart(num_df)
+            .mark_point()
+            .encode(
+                x=fr.X(
+                    "a",
+                    scale=fr.ThresholdScale(domain=[2.0, 3.0], range=[0.0, 0.5, 1.0]),
+                ),
+                y="b",
+            )
+        )
+        svg = chart.to_svg()
+        mark_count = len(re.findall(r"<circle|<path", svg))
+        assert mark_count == 4, (
+            f"Expected 4 rendered marks (one per row), got {mark_count}. "
+            "SPEC-04 positional truncation regression: ThresholdScale on x may be "
+            "routing through domain-as-extent again (issue #38)."
+        )
