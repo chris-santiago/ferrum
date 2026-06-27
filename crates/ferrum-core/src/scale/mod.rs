@@ -13,26 +13,33 @@
 //!   A `ScaleSpec::Band` / `ScaleSpec::Point` resolves to `ScaleKind::Ordinal` via
 //!   `OrdinalScale::new_internal`; the `BandScale`/`PointScale` layout math
 //!   (`.bandwidth()`, `.scale()`) is user-query-only.
-//! - `SequentialScale`, `DivergingScale`, `BinOrdinalScale`, and the `Quantize`
-//!   wire type all have `ScaleSpec` variants but no dedicated `ScaleKind`; the
-//!   positional resolver degrades `ScaleSpec::Sequential`, `ScaleSpec::Diverging`,
-//!   and `ScaleSpec::Quantize` to `ScaleKind::Linear`, and `ScaleSpec::BinOrdinal`
-//!   likewise to `ScaleKind::Linear`. These are primarily color scales; in a
-//!   positional channel they fall back to Linear.
-//! - `QuantileScale` and `ThresholdScale` are PyO3-only classes with **no
-//!   `ScaleSpec` counterpart at all** (the wire vocabulary has `Quantize`, not
-//!   `Quantile` or `Threshold`). They never participate in rendering through the
-//!   positional resolver. This name/representation mismatch is itself a concrete
-//!   instance of the dual-representation drift this note warns about.
+//! - `SequentialScale`, `DivergingScale`, `BinOrdinalScale`, and the `Quantize`,
+//!   `Quantile`, and `Threshold` wire types all have `ScaleSpec` variants but no
+//!   dedicated `ScaleKind`; the positional resolver degrades
+//!   `ScaleSpec::Sequential`, `ScaleSpec::Diverging`, `ScaleSpec::Quantize`,
+//!   `ScaleSpec::Quantile`, and `ScaleSpec::Threshold` to `ScaleKind::Linear`,
+//!   and `ScaleSpec::BinOrdinal` likewise to `ScaleKind::Linear`. These are
+//!   primarily color / discrete-binning scales; in a positional channel they fall
+//!   back to Linear.
 //!
 //! This means a band declared via `fr.BandScale(...)` in Python and one declared
-//! via `scale={"type": "band"}` in chart JSON take **different code paths**: the
-//! former's `layout()` / `scale_str()` math never runs during rendering. The field
-//! sets, defaults, and validation logic of the PyO3 classes and `ScaleSpec` variants
-//! can therefore drift independently without any compile-time or runtime check.
+//! via `scale={"type": "band"}` in chart JSON still take **different render code
+//! paths**: the former's `layout()` / `scale_str()` math never runs during
+//! rendering (the renderer resolves the emitted `ScaleSpec::Band`, not the
+//! pyclass).
 //!
-//! The full reconciliation (a `to_scale_spec` bridge, or demoting the compute
-//! facades to crate-internal helpers) is a tracked follow-up.
+//! **The dual-representation link is now single-sourced (SPEC-04).** Each `*Scale`
+//! pyclass exposes an inherent `to_scale_spec(&self) -> ScaleSpec` (with a
+//! `#[pymethods]` `_to_scale_spec_dict` wrapper that serializes it via
+//! `crate::spec::encoding::encode_serde_value_for_py`). The Python bridge
+//! `ferrum.encoding._scale._scale_to_dict` delegates to that wrapper instead of
+//! hand-copying fields, so the wire form is emitted from one place next to
+//! `ScaleSpec`. Extending a `ScaleSpec` variant now breaks its `to_scale_spec`
+//! builder until updated (the compile-time drift guard), and a parity test
+//! enumerates every pyclass → variant mapping (the test-time guard). The structs
+//! stay thin *builders* — they emit `ScaleSpec` rather than storing one, because
+//! their compute facades (`.bandwidth()`, `.scale()`, `.ticks()`) need resolved
+//! numeric domain/range that `ScaleSpec` does not carry.
 
 pub(crate) mod core;
 pub(crate) mod ticks;

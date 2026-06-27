@@ -1,8 +1,9 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::resolve_continuous;
+use super::core::{continuous_common, resolve_continuous, scale_spec_to_py_dict};
 use super::ticks::{minor_ticks_log, nice_ticks, Tick};
+use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
 struct LogScaleData {
@@ -229,6 +230,24 @@ impl LogScale {
             domain_s, range_s, base, if *clamp { "True" } else { "False" }
         )
     }
+
+    /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
+    /// `nice` is baked into the domain at construction, so it is always `false`
+    /// here — matching what the legacy `_scale_to_dict` omitted.
+    pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
+        ScaleSpec::Log {
+            base: self.data.base,
+            common: continuous_common(
+                self.data.domain,
+                self.domain_user_set,
+                self.data.range,
+                self.range_user_set,
+                self.data.clamp,
+                self.padding,
+            ),
+            nice: false,
+        }
+    }
 }
 
 #[pymethods]
@@ -325,6 +344,11 @@ impl LogScale {
     /// Whether out-of-domain inputs are clamped to the range endpoints.
     #[getter]
     fn clamp(&self) -> bool { self.data.clamp }
+
+    /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
+    fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scale_spec_to_py_dict(py, self.to_scale_spec())
+    }
 
     fn __repr__(&self) -> String { self.repr_string() }
 }

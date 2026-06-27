@@ -1,7 +1,8 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::validate_finite;
+use super::core::{scale_spec_to_py_dict, validate_finite};
+use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
 struct QuantizeScaleData {
@@ -52,6 +53,24 @@ impl QuantizeScaleData {
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuantizeScale(QuantizeScaleData);
 
+impl QuantizeScale {
+    /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
+    ///
+    /// `range` carries color strings (distinct from `Quantile`/`Threshold`'s
+    /// numeric range); the constructor guarantees both `domain` (length 2) and
+    /// `range` (non-empty).
+    pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
+        ScaleSpec::Quantize {
+            domain: Some(self.0.domain.to_vec()),
+            range: if self.0.range.is_empty() {
+                None
+            } else {
+                Some(self.0.range.clone())
+            },
+        }
+    }
+}
+
 #[pymethods]
 impl QuantizeScale {
     #[new]
@@ -100,6 +119,11 @@ impl QuantizeScale {
     /// Discrete output values, one per bin.
     #[getter]
     fn range(&self) -> Vec<String> { self.0.range.clone() }
+
+    /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
+    fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scale_spec_to_py_dict(py, self.to_scale_spec())
+    }
 
     fn __repr__(&self) -> String {
         format!(

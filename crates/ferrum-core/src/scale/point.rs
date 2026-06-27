@@ -1,6 +1,9 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use super::core::scale_spec_to_py_dict;
+use crate::spec::encoding::ScaleSpec;
+
 #[derive(Debug, Clone, PartialEq)]
 struct PointScaleData {
     domain: Vec<String>,
@@ -62,6 +65,26 @@ impl PointScaleData {
 pub struct PointScale {
     data: PointScaleData,
     range: Option<[f64; 2]>,
+}
+
+impl PointScale {
+    /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
+    ///
+    /// `ScaleSpec::Point` has no `range` field; the legacy `_scale_to_dict`
+    /// emitted a `range` key that the deserialiser dropped, so the user's pixel
+    /// range is intentionally not carried into the wire form.
+    pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
+        ScaleSpec::Point {
+            domain: if self.data.domain.is_empty() {
+                None
+            } else {
+                Some(self.data.domain.clone())
+            },
+            padding: self.data.padding,
+            align: self.data.align,
+            reverse: self.data.reverse,
+        }
+    }
 }
 
 #[pymethods]
@@ -136,6 +159,11 @@ impl PointScale {
     /// Whether category order is reversed.
     #[getter]
     fn reverse(&self) -> bool { self.data.reverse }
+
+    /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
+    fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scale_spec_to_py_dict(py, self.to_scale_spec())
+    }
 
     fn __repr__(&self) -> String {
         format!(

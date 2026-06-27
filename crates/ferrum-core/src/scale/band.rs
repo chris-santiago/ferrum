@@ -1,6 +1,9 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use super::core::scale_spec_to_py_dict;
+use crate::spec::encoding::ScaleSpec;
+
 #[derive(Debug, Clone, PartialEq)]
 struct BandScaleData {
     domain: Vec<String>,
@@ -64,6 +67,32 @@ impl BandScaleData {
 pub struct BandScale {
     data: BandScaleData,
     range: Option<[f64; 2]>,
+}
+
+impl BandScale {
+    /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
+    ///
+    /// Two faithful-reproduction traps from the legacy `_scale_to_dict`:
+    /// 1. It emitted `paddingInner`/`paddingOuter`/`align` but **no** top-level
+    ///    `padding`, so on deserialize `ScaleSpec::Band.padding` took its serde
+    ///    default (`default_band_padding` = 0.1) regardless of the constructor's
+    ///    `padding` shorthand. We reproduce that default here.
+    /// 2. `ScaleSpec::Band` has no `range` field; the legacy dict's `range` key
+    ///    was dropped on deserialize, so the user's pixel range is intentionally
+    ///    not carried into the wire form.
+    pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
+        ScaleSpec::Band {
+            domain: if self.data.domain.is_empty() {
+                None
+            } else {
+                Some(self.data.domain.clone())
+            },
+            padding: crate::spec::encoding::default_band_padding(),
+            padding_inner: Some(self.data.padding_inner),
+            padding_outer: Some(self.data.padding_outer),
+            align: self.data.align,
+        }
+    }
 }
 
 #[pymethods]
@@ -153,6 +182,11 @@ impl BandScale {
     /// Alignment within leftover space.
     #[getter]
     fn align(&self) -> f64 { self.data.align }
+
+    /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
+    fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scale_spec_to_py_dict(py, self.to_scale_spec())
+    }
 
     fn __repr__(&self) -> String {
         format!(

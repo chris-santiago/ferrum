@@ -252,6 +252,18 @@ pub enum ScaleSpec {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         range: Option<Vec<String>>,
     },
+    Quantile {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<f64>>,   // sorted sample values
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<f64>>,    // discrete numeric outputs
+    },
+    Threshold {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        domain: Option<Vec<f64>>,   // threshold boundaries
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<f64>>,    // discrete numeric outputs; len == domain.len() + 1
+    },
     #[serde(rename = "bin-ordinal")]
     BinOrdinal {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -309,7 +321,7 @@ fn default_symlog_constant() -> f64 {
 fn default_pow_exponent() -> f64 {
     2.0
 }
-fn default_band_padding() -> f64 {
+pub(crate) fn default_band_padding() -> f64 {
     0.1
 }
 fn default_point_padding() -> f64 {
@@ -450,7 +462,11 @@ impl EncodingSpec {
 /// The spec interface (C8) names this function for the `Option<serde_json::Value>`
 /// case; the generic `T: Serialize` bound covers that case and the typed-struct
 /// getters (scale/axis/legend) with one implementation rather than two.
-fn encode_serde_value_for_py<T: serde::Serialize>(
+///
+/// `pub(crate)` so the `crate::scale` `*Scale` pyclasses can reuse it to emit
+/// their canonical `ScaleSpec` wire dict (`_to_scale_spec_dict`) without a second
+/// serialization helper (SPEC-04).
+pub(crate) fn encode_serde_value_for_py<T: serde::Serialize>(
     py: Python,
     v: &Option<T>,
 ) -> PyResult<Option<Py<PyAny>>> {
@@ -1276,6 +1292,37 @@ mod tests {
             }
             _ => panic!("expected Quantize variant"),
         }
+    }
+
+    #[test]
+    fn scale_spec_quantile_round_trip() {
+        let json = r#"{"type":"quantile","domain":[0,25,50,75,100],"range":[0,1,2,3]}"#;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match &parsed {
+            ScaleSpec::Quantile { domain, range } => {
+                assert_eq!(domain.as_ref().unwrap(), &vec![0.0, 25.0, 50.0, 75.0, 100.0]);
+                assert_eq!(range.as_ref().unwrap().len(), 4);
+            }
+            _ => panic!("expected Quantile variant"),
+        }
+        let re = serde_json::to_string(&parsed).unwrap();
+        assert!(re.contains(r#""type":"quantile""#), "json: {re}");
+    }
+
+    #[test]
+    fn scale_spec_threshold_round_trip() {
+        let json = r#"{"type":"threshold","domain":[0,50,100],"range":[0,1,2,3]}"#;
+        let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
+        match &parsed {
+            ScaleSpec::Threshold { domain, range } => {
+                assert_eq!(domain.as_ref().unwrap(), &vec![0.0, 50.0, 100.0]);
+                // range.len() == domain.len() + 1
+                assert_eq!(range.as_ref().unwrap().len(), 4);
+            }
+            _ => panic!("expected Threshold variant"),
+        }
+        let re = serde_json::to_string(&parsed).unwrap();
+        assert!(re.contains(r#""type":"threshold""#), "json: {re}");
     }
 
     #[test]

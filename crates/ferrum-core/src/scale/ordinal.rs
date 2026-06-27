@@ -2,7 +2,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyList;
 use serde::{Deserialize, Serialize};
 
-use super::core::{validate_ordinal, validate_ordinal_domain};
+use super::core::{scale_spec_to_py_dict, validate_ordinal, validate_ordinal_domain};
+use crate::spec::encoding::ScaleSpec;
 
 /// A single element of an `OrdinalScale` range: either a pixel coordinate
 /// (number) or a color string.
@@ -238,6 +239,24 @@ impl OrdinalScale {
             domain, range.first().copied().unwrap_or(0.0), range.last().copied().unwrap_or(0.0), padding
         )
     }
+
+    /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
+    ///
+    /// `range` carries the user's original polymorphic values (numbers and/or
+    /// color strings) via `OrdinalRangeValue`, and is emitted only when present
+    /// and non-empty — mirroring the `if scale.domain/range:` guards the legacy
+    /// `_scale_to_dict` applied.
+    pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
+        ScaleSpec::Ordinal {
+            domain: if self.data.domain.is_empty() {
+                None
+            } else {
+                Some(self.data.domain.clone())
+            },
+            range: self.range_orig.as_ref().filter(|v| !v.is_empty()).cloned(),
+            padding: self.data.padding,
+        }
+    }
 }
 
 #[pymethods]
@@ -339,6 +358,11 @@ impl OrdinalScale {
     #[getter]
     fn padding(&self) -> f64 {
         self.data.padding
+    }
+
+    /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
+    fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scale_spec_to_py_dict(py, self.to_scale_spec())
     }
 
     fn __repr__(&self) -> String { self.repr_string() }

@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 
-use super::core::validate_threshold;
+use super::core::{scale_spec_to_py_dict, validate_threshold};
+use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
 struct ThresholdScaleData {
@@ -61,6 +62,17 @@ impl ThresholdScale {
             self.0.domain, self.0.range
         )
     }
+
+    /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
+    ///
+    /// `domain` is the threshold boundaries, `range` the discrete numeric outputs
+    /// (`range.len() == domain.len() + 1`, enforced by the constructor).
+    pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
+        ScaleSpec::Threshold {
+            domain: Some(self.0.domain.clone()),
+            range: Some(self.0.range.clone()),
+        }
+    }
 }
 
 #[pymethods]
@@ -92,6 +104,11 @@ impl ThresholdScale {
     /// Discrete output values, one per bin.
     #[getter]
     fn range(&self) -> Vec<f64> { self.0.range.clone() }
+
+    /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
+    fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scale_spec_to_py_dict(py, self.to_scale_spec())
+    }
 
     fn __repr__(&self) -> String { self.repr_string() }
 }

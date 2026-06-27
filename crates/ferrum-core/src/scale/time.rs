@@ -1,8 +1,9 @@
 use pyo3::prelude::*;
 
-use super::core::validate_continuous_pair;
+use super::core::{continuous_common, scale_spec_to_py_dict, validate_continuous_pair};
 use super::linear::LinearScaleData;
 use super::ticks::{calendar_ticks, minor_ticks_default, nice_calendar_interval, nice_time_interval_ms, CalendarInterval, Tick};
+use crate::spec::encoding::ScaleSpec;
 
 /// Continuous temporal scale backed by Unix epoch milliseconds.
 ///
@@ -109,6 +110,27 @@ impl TimeScale {
             "{}domain=[{}, {}], range=[{}, {}], clamp={})",
             prefix, domain[0], domain[1], range[0], range[1], if *clamp { "True" } else { "False" }
         )
+    }
+
+    /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
+    ///
+    /// `utc == true` maps to `ScaleSpec::Utc`, else `ScaleSpec::Time` — the
+    /// `"utc"`/`"time"` wire tag the legacy `_scale_to_dict` emitted. `nice` is
+    /// baked into the domain at construction, so it is always `false` here.
+    pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
+        let common = continuous_common(
+            self.data.domain,
+            self.domain_user_set,
+            self.data.range,
+            self.range_user_set,
+            self.data.clamp,
+            self.padding,
+        );
+        if self.utc {
+            ScaleSpec::Utc { common, nice: false }
+        } else {
+            ScaleSpec::Time { common, nice: false }
+        }
     }
 
     fn time_ticks(&self, count: usize) -> Vec<f64> {
@@ -268,6 +290,11 @@ impl TimeScale {
     /// Whether this is a UTC time scale (affects type serialization).
     #[getter]
     fn utc(&self) -> bool { self.utc }
+
+    /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
+    fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scale_spec_to_py_dict(py, self.to_scale_spec())
+    }
 
     fn __repr__(&self) -> String { self.repr_string() }
 }

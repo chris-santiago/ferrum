@@ -12,7 +12,46 @@
 //!   PyO3 constructor; centralised so the error messages stay uniform.
 
 use pyo3::exceptions::PyValueError;
-use pyo3::PyResult;
+use pyo3::{Py, PyAny, PyResult, Python};
+
+use crate::spec::encoding::{encode_serde_value_for_py, ContinuousScaleCommon, ScaleSpec};
+
+/// Build the `ContinuousScaleCommon` payload shared by the seven affine
+/// continuous `ScaleSpec` variants (Linear, Log, Time, Symlog, Pow, Sqrt, Utc).
+///
+/// Centralises the `domain`/`range` "emit only when user-set" guards (mirroring
+/// each pyclass's `domain()`/`range()` getter) plus the `scheme`/`domain_param`
+/// fields, which are always `None` on a freshly-constructed `*Scale` (those wire
+/// keys originate from the dict-form scale path, never from a pyclass instance).
+pub(crate) fn continuous_common(
+    domain: [f64; 2],
+    domain_user_set: bool,
+    range: [f64; 2],
+    range_user_set: bool,
+    clamp: bool,
+    padding: Option<f64>,
+) -> ContinuousScaleCommon {
+    ContinuousScaleCommon {
+        domain: domain_user_set.then(|| domain.to_vec()),
+        range: range_user_set.then(|| range.to_vec()),
+        clamp,
+        padding,
+        scheme: None,
+        domain_param: None,
+    }
+}
+
+/// Serialize a canonical `ScaleSpec` to its Python wire dict.
+///
+/// Each `*Scale` pyclass's `_to_scale_spec_dict` delegates here so the
+/// serialization path is single-sourced through the existing
+/// `encode_serde_value_for_py` helper (SPEC-04). `to_scale_spec()` always yields
+/// a value, so the `None` arm is unreachable in practice; it surfaces as an error
+/// rather than a panic to keep the pyclass boundary panic-free.
+pub(crate) fn scale_spec_to_py_dict(py: Python<'_>, spec: ScaleSpec) -> PyResult<Py<PyAny>> {
+    encode_serde_value_for_py(py, &Some(spec))?
+        .ok_or_else(|| PyValueError::new_err("scale spec failed to serialize"))
+}
 
 /// R-7 / numpy default quantile cut-points: linear interpolation between
 /// order statistics. Returns `k-1` cut points dividing the sorted sample
