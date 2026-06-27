@@ -411,23 +411,52 @@ def test_pdp_chart_compare_none_byte_identical():
 
 
 # ---------------------------------------------------------------------------
-# clustering.py — pca_scree / cluster_diagnostics / intercluster / silhouette /
-# manifold / elbow (all unsupervised — no y target)
+# clustering.py — pca_scree / intercluster / silhouette / manifold now render
+# small multiples (independent scales); cluster_diagnostics / elbow stay
+# rejected (sweep-based, no per-model ModelSource).
 # ---------------------------------------------------------------------------
 
 
-def test_pca_scree_chart_compare_rejected():
-    df = load_dataset("regression").select(_REG_FEATURES)
-    model = load_fixture("pca_4comp")
-    with pytest.raises(ValueError, match="compare= is not supported for pca_scree_chart"):
-        ferrum.pca_scree_chart(model, df, compare={"alt": model})
+def _clu_setup():
+    """Clustering fixtures: dataset + two KMeans with different k."""
+    from sklearn.cluster import KMeans
+
+    df = load_dataset("clustering")
+    X_np = df.to_numpy()
+    base = load_fixture("kmeans_3cluster")
+    alt = KMeans(n_clusters=4, random_state=0, n_init=10).fit(X_np)
+    return df, base, alt
 
 
-def test_pca_scree_chart_compare_none_default_path_works():
+def test_pca_scree_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one panel per PCA model (base + alt)."""
+    from sklearn.decomposition import PCA
+
+    df = load_dataset("regression").select(_REG_FEATURES)
+    base = load_fixture("pca_4comp")
+    alt = PCA(n_components=3).fit(df.to_numpy())
+    result = ferrum.pca_scree_chart(base, df, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
+
+
+def test_pca_scree_chart_compare_none_byte_identical():
+    """compare=None is byte-identical to omitting the kwarg."""
     df = load_dataset("regression").select(_REG_FEATURES)
     model = load_fixture("pca_4comp")
-    chart = ferrum.pca_scree_chart(model, df, compare=None)
-    assert "<svg" in chart.to_svg()
+    with_kwarg = ferrum.pca_scree_chart(model, df, compare=None).to_svg()
+    without_kwarg = ferrum.pca_scree_chart(model, df).to_svg()
+    assert with_kwarg == without_kwarg
+
+
+def test_pca_scree_chart_raw_data_compare_rejected():
+    """The raw-DataFrame/array path computes Rust SVD on a single matrix and
+    wraps no per-model source, so compare= there must raise (not silently
+    ignore the kwarg)."""
+    df = load_dataset("regression").select(_REG_FEATURES)
+    with pytest.raises(ValueError, match="compare= requires a fitted PCA estimator"):
+        ferrum.pca_scree_chart(df, compare={"alt": df})
 
 
 def test_cluster_diagnostics_compare_rejected():
@@ -442,34 +471,84 @@ def test_cluster_diagnostics_compare_none_default_path_works():
     assert "<svg" in chart.to_svg()
 
 
-def test_intercluster_distance_chart_compare_rejected():
+def test_intercluster_distance_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one panel per clusterer (base + alt)."""
+    df, base, alt = _clu_setup()
+    result = ferrum.intercluster_distance_chart(base, df, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
+
+
+def test_intercluster_distance_chart_compare_none_byte_identical():
+    """compare=None is byte-identical to omitting the kwarg."""
+    df, base, _ = _clu_setup()
+    with_kwarg = ferrum.intercluster_distance_chart(base, df, compare=None).to_svg()
+    without_kwarg = ferrum.intercluster_distance_chart(base, df).to_svg()
+    assert with_kwarg == without_kwarg
+
+
+def test_intercluster_distance_chart_compare_heterogeneous_k():
+    """Each panel must use its OWN model's k, not the base model's k.
+
+    Comparing KMeans(3) vs KMeans(5) must yield a base panel with 3 cluster
+    centers and an alt panel with 5 cluster centers.  The pre-fix code resolved
+    k once from the base model and passed it to every panel, so the alt panel
+    would have embedded only 3 centers.
+    """
+    from sklearn.cluster import KMeans
+
     df = load_dataset("clustering")
-    model = load_fixture("kmeans_3cluster")
-    with pytest.raises(
-        ValueError, match="compare= is not supported for intercluster_distance_chart"
-    ):
-        ferrum.intercluster_distance_chart(model, df, compare={"alt": model})
+    X_np = df.to_numpy()
+    base = KMeans(n_clusters=3, random_state=0, n_init=10).fit(X_np)
+    alt = KMeans(n_clusters=5, random_state=0, n_init=10).fit(X_np)
+
+    result = ferrum.intercluster_distance_chart(base, df, compare={"k5": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+
+    base_panel, alt_panel = result.charts
+    # Each panel's underlying data has one row per cluster center.
+    base_data = base_panel._data
+    alt_data = alt_panel._data
+    assert base_data is not None, "base panel has no data"
+    assert alt_data is not None, "alt panel has no data"
+    assert len(base_data) == 3, f"expected 3 rows in base panel, got {len(base_data)}"
+    assert len(alt_data) == 5, f"expected 5 rows in alt panel, got {len(alt_data)}"
 
 
-def test_silhouette_chart_compare_rejected():
-    df = load_dataset("clustering")
-    model = load_fixture("kmeans_3cluster")
-    with pytest.raises(ValueError, match="compare= is not supported for silhouette_chart"):
-        ferrum.silhouette_chart(model, df, compare={"alt": model})
+def test_silhouette_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one silhouette panel per clusterer."""
+    df, base, alt = _clu_setup()
+    result = ferrum.silhouette_chart(base, df, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
 
 
-def test_silhouette_chart_compare_none_default_path_works():
-    df = load_dataset("clustering")
-    model = load_fixture("kmeans_3cluster")
-    chart = ferrum.silhouette_chart(model, df, compare=None)
-    assert "<svg" in chart.to_svg()
+def test_silhouette_chart_compare_none_byte_identical():
+    """compare=None is byte-identical to omitting the kwarg."""
+    df, base, _ = _clu_setup()
+    with_kwarg = ferrum.silhouette_chart(base, df, compare=None).to_svg()
+    without_kwarg = ferrum.silhouette_chart(base, df).to_svg()
+    assert with_kwarg == without_kwarg
 
 
-def test_manifold_chart_compare_rejected():
-    df = load_dataset("clustering")
-    model = load_fixture("kmeans_3cluster")
-    with pytest.raises(ValueError, match="compare= is not supported for manifold_chart"):
-        ferrum.manifold_chart(model, df, method="pca", compare={"alt": model})
+def test_manifold_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one embedding panel per clusterer."""
+    df, base, alt = _clu_setup()
+    result = ferrum.manifold_chart(base, df, method="pca", compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
+
+
+def test_manifold_chart_compare_none_byte_identical():
+    """compare=None is byte-identical to omitting the kwarg."""
+    df, base, _ = _clu_setup()
+    with_kwarg = ferrum.manifold_chart(base, df, method="pca", compare=None).to_svg()
+    without_kwarg = ferrum.manifold_chart(base, df, method="pca").to_svg()
+    assert with_kwarg == without_kwarg
 
 
 def test_elbow_chart_compare_rejected():
@@ -500,6 +579,11 @@ def test_rejection_message_includes_reason():
     prefix = "compare= is not supported for cluster_diagnostics:"
     assert msg.startswith(prefix)
     assert msg[len(prefix) :].strip()
+    # Pin the refined structural reason (not the old "meaningless" wording): it
+    # must explain there is no per-model source and point at the method-sweep
+    # follow-up (#43), so a regression to the stale reason is caught.
+    assert "no per-model" in msg
+    assert "#43" in msg
 
 
 def test_compare_none_is_byte_identical_to_omitting_kwarg():
