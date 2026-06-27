@@ -6,6 +6,37 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.18.2
+
+*2026-06-27*
+
+### Added
+
+- render compare= small multiples for 4 clustering charts; refine 2 sweep-chart rejections (#35)
+- render compare= small multiples for regression charts + fix pooled-residual band (#35)
+- render compare= small multiples for 4 model-selection charts (#35)
+- render compare= small multiples for 6 explanation charts (#35)
+- add `_compose_compare` helper for multi-model small multiples (#35)
+- add Quantile/Threshold ScaleSpec wire variants (SPEC-04, #38)
+
+### Fixed
+
+- pdp compare= must use independent per-feature x, not shared (#35)
+- order-preserving ordinal scale sharing (#35)
+- positional Quantile/Threshold use data extent, not domain-as-extent (SPEC-04)
+- single-source `_scale_to_dict` via Rust delegation; fix Quantile/Threshold encode (SPEC-04)
+
+### Changed
+
+- de-duplicate compare= gate kwargs + public ComparedModelSource accessor (#35)
+- single-source the scale wire form via Rust `to_scale_spec` (SPEC-04)
+
+### Other
+
+- ferrum-spec compare= note + representative compose goldens (#35)
+- align ComparedModelSource import order in explanation.py (#35)
+- design spec + plan for compare= aggregate rendering (#35)
+
 ## 0.18.1
 
 *2026-06-25*
