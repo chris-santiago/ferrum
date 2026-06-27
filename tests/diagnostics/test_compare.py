@@ -378,3 +378,62 @@ def test_compose_compare_builder_kwargs_forwarded():
 
     assert len(received_kwargs) == 2
     assert all(kw == {"feature": "age", "n_jobs": 2} for kw in received_kwargs)
+
+
+# --- prediction_error_chart compare= band is per-model, not pooled ----
+
+
+_REG_FEATURES = ["f0", "f1", "f2", "f3", "f4"]
+
+
+def _panel_band_width(panel) -> float:
+    """The residual-band width (``q_hi - q_lo``) carried by one compose panel.
+
+    ``_pe_band_lo`` / ``_pe_band_hi`` are ``y_true + q_lo`` / ``y_true + q_hi``,
+    so their difference is the constant per-model band width — exactly the
+    residual-quantile spread this panel was built from.
+    """
+    data = panel._data
+    assert data is not None
+    assert "_pe_band_lo" in data.columns
+    assert "_pe_band_hi" in data.columns
+    return float((data["_pe_band_hi"] - data["_pe_band_lo"]).max())
+
+
+def test_prediction_error_chart_compare_band_is_per_model_not_pooled():
+    """With ``ci=`` and two models of differing residual distributions, each
+    compose panel's band is computed from that model's residuals only.
+
+    A pooled band (the latent defect) would compute one residual-quantile spread
+    over the concatenated multi-model frame and apply it to both panels, making
+    the band widths identical. Per-model routing makes them differ. The two
+    models are chosen so their residual spreads are far apart: a well-fit linear
+    model versus a mean-predicting dummy.
+    """
+    from sklearn.dummy import DummyRegressor
+    from sklearn.linear_model import LinearRegression
+
+    from ferrum.composition import ConcatChart
+
+    df = load_dataset("regression")
+    X = df.select(_REG_FEATURES)
+    y = df["y"]
+    good = LinearRegression().fit(X.to_numpy(), y.to_numpy())
+    poor = DummyRegressor(strategy="mean").fit(X.to_numpy(), y.to_numpy())
+
+    result = ferrum.prediction_error_chart(good, X, y, compare={"poor": poor}, ci=0.9)
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+
+    # Panels are ordered base ("base"=good) then compare ("poor").
+    good_panel, poor_panel = result.charts
+    assert good_panel._title.text == "base"
+    assert poor_panel._title.text == "poor"
+
+    good_width = _panel_band_width(good_panel)
+    poor_width = _panel_band_width(poor_panel)
+
+    # Per-model bands: the mean-predicting dummy has a far wider residual spread
+    # than the fitted linear model. A pooled band would make these equal.
+    assert good_width != pytest.approx(poor_width)
+    assert poor_width > good_width

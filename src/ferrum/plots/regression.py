@@ -17,7 +17,7 @@ _prediction_error_chart_from_source.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
@@ -29,20 +29,24 @@ from ferrum import (
     Robust,
     Smooth,
 )
+from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
     _color_field_for,
+    _compose_compare,
     _finalize_chart,
     _grid_panels,
     _inject_cook_outliers,
     _inject_metrics_corner,
     _merge_layers,
     _overlay_metrics_corner,
-    _reject_compare,
     _resolve_source,
     _to_polars,
     _validate_choice,
 )
+
+if TYPE_CHECKING:
+    from ferrum import ConcatChart, HConcatChart, VConcatChart
 
 
 _VALID_METHODS = frozenset({"lm", "logistic", "glm", "loess", "robust"})
@@ -258,16 +262,19 @@ def _prediction_error_chart_from_source(
     import ferrum
 
     df = source.predictions().sort("y_true")
-    # The residual confidence band (``ci`` / ``reference_band``) is a
-    # single-model aggregate computed over all rows; overlaying it on a
-    # multi-model comparison would conflate the models. Reject loudly rather
-    # than silently dropping the band (D-COMPARE-1).
+    # Internal invariant: the residual band (``ci`` / ``reference_band``) is a
+    # single-model aggregate, so this builder must be handed a single-model
+    # source when a band is requested. ``prediction_error_chart`` enforces this
+    # by routing the multi-model band case through ``_compose_compare`` (one
+    # single-model panel per model). A pooled ``model`` frame reaching here with
+    # a band set is therefore a routing bug, not user error — fail loudly rather
+    # than conflate residuals across models.
     if "model" in df.columns and (ci is not None or reference_band):
         raise ValueError(
-            "compare= is not supported with ci=/reference_band= for "
-            "prediction_error_chart: the band is a single-model aggregate. "
-            "Drop ci=/reference_band= to compare models, or compose one chart "
-            "per model instead."
+            "internal: _prediction_error_chart_from_source received a pooled "
+            "multi-model frame with ci=/reference_band= set; the multi-model "
+            "band path must be routed through _compose_compare (one single-model "
+            "panel per model) by prediction_error_chart."
         )
     if ci is not None or reference_band:
         residuals = df["y_pred"] - df["y_true"]
@@ -1001,7 +1008,7 @@ def residuals_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | HConcatChart | VConcatChart | ConcatChart":
     """Residuals diagnostic chart for a regression estimator.
 
     Plots residuals vs. fitted values. Optional Cook's distance
@@ -1049,16 +1056,18 @@ def residuals_chart(
     subtitle : str or None, default None
         Optional subtitle rendered beneath the active chart title.
     compare : dict of str -> estimator or None, default None
-        Mapping of label -> fitted estimator to overlay alongside ``model``.
-        Supported only with ``panels="single"`` (or ``None``): the
-        residuals-vs-fitted scatter then carries a ``model`` colour group with
-        one series per model. The canonical 4-panel layout (QQ, scale-location,
-        residuals-vs-leverage) plus the per-model hat-matrix leverage and
-        Cook's-distance computations are intrinsically single-model, so passing
-        ``compare=`` with a multi-panel ``panels`` value raises ``ValueError``
-        (D-COMPARE-1: loud, documented exclusion). To compare models across the
-        full diagnostic grid, build one ``residuals_chart`` per model and
-        compose them with ``|`` / ``&``.
+        Mapping of label -> fitted estimator to compare against ``model``.
+        Behavior depends on ``panels``:
+
+        - ``panels="single"`` (or ``None``): the residuals-vs-fitted scatter
+          carries a ``model`` colour group with one overlaid series per model
+          (unchanged single-panel overlay).
+        - any multi-panel value (``"auto"`` or an explicit list): returns a
+          :class:`~ferrum.ConcatChart` of small multiples, one panel per model.
+          Each panel is the full single-model diagnostic grid for that model,
+          labeled with the model name, with shared x/y scales. The per-model
+          hat-matrix leverage and Cook's-distance computations are correct by
+          construction because each panel sees one model's data only.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``; does not affect deterministic
         residuals computation.
@@ -1078,9 +1087,11 @@ def residuals_chart(
 
     Returns
     -------
-    Chart
+    Chart or composite
         Residuals-vs-fitted scatter chart with optional Cook's-distance
-        outlier overlay.
+        outlier overlay, the multi-panel diagnostic grid, or a
+        small-multiples ``ConcatChart`` (one panel per model) when
+        ``compare=`` is supplied with a multi-panel ``panels`` value.
 
     Examples
     --------
@@ -1094,18 +1105,6 @@ def residuals_chart(
 
     >>> fm.residuals_chart(y_true=y_test, y_pred=reg.predict(X_test))
     """
-    # ``compare=`` is supported only on the single-panel residuals-vs-fitted
-    # view, where a ``model`` colour group overlays both models coherently.
-    # The multi-panel grid (QQ, scale-location, residuals-vs-leverage) plus the
-    # per-model hat-matrix leverage / Cook's-distance computations are
-    # intrinsically single-model, so a multi-panel comparison is rejected loudly
-    # (D-COMPARE-1) rather than silently rendering a single-model grid.
-    if compare is not None and panels not in (None, "single"):
-        raise ValueError(
-            "compare= is only supported with panels='single' for residuals_chart: "
-            "the 4-panel QQ/scale-location/leverage grid is single-model. "
-            "Compose one chart per model instead."
-        )
     source = _resolve_source(
         model, X, y, y_true=y_true, y_pred=y_pred, random_state=random_state, compare=compare
     )
@@ -1120,6 +1119,29 @@ def residuals_chart(
         ]
     else:
         panel_list = list(panels)
+    # Multi-panel comparison renders small multiples (one full diagnostic grid
+    # per model) so each model's leverage / Cook's-distance computations stay
+    # single-model. The single-panel residuals-vs-fitted view keeps its
+    # ``model`` colour-group overlay (``panel_list is None``), so only the
+    # multi-panel + compare case routes through ``_compose_compare``.
+    if isinstance(source, ComparedModelSource) and panel_list is not None:
+        return _compose_compare(
+            source,
+            _residuals_chart_from_source,
+            builder_kwargs=dict(
+                kind=kind,
+                cook_threshold=cook_threshold,
+                panels=panel_list,
+                annotate_metrics=annotate_metrics,
+                subtitle=subtitle,
+                mark=mark,
+                encode=encode,
+                properties=properties,
+                layers=layers,
+                theme=theme,
+            ),
+            resolve={"x": "shared", "y": "shared"},
+        )
     return _residuals_chart_from_source(
         source,
         kind=kind,
@@ -1152,7 +1174,7 @@ def prediction_error_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """Actual-vs-predicted scatter for a regression estimator.
 
     Plots ``y_true`` on the y axis against ``y_pred`` on the x axis with
@@ -1187,14 +1209,16 @@ def prediction_error_chart(
         When ``True`` (and ``ci`` is ``None``), overlays a ±1 RMSE
         ribbon around the reference line.
     compare : dict of str -> estimator or None, default None
-        Mapping of label -> fitted estimator to overlay alongside ``model``.
-        On the default scatter path the chart carries a ``model`` colour group
-        with one actual-vs-predicted series per model and a shared y=x reference
-        line. ``compare=`` cannot be combined with ``ci`` / ``reference_band``:
-        the residual band is a single-model aggregate computed over all rows, so
-        that combination raises ``ValueError`` (D-COMPARE-1: loud, documented
-        exclusion). To show a per-model band, build one chart per model and
-        compose them with ``|`` / ``&``.
+        Mapping of label -> fitted estimator to compare against ``model``.
+        Behavior depends on ``ci`` / ``reference_band``:
+
+        - default scatter path (no band): the chart carries a ``model`` colour
+          group with one actual-vs-predicted series per model and a shared y=x
+          reference line (unchanged single-panel overlay).
+        - with ``ci`` or ``reference_band``: returns a
+          :class:`~ferrum.ConcatChart` of small multiples, one panel per model,
+          with shared x/y scales. Each panel's residual band is computed from
+          that model's residuals only — never pooled across models.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
@@ -1213,27 +1237,16 @@ def prediction_error_chart(
 
     Returns
     -------
-    Chart
+    Chart or ConcatChart
         Actual-vs-predicted scatter with optional reference line and
-        confidence ribbon.
+        confidence ribbon, or a small-multiples ``ConcatChart`` (one panel per
+        model) when ``compare=`` is combined with ``ci`` / ``reference_band``.
 
     Examples
     --------
     >>> import ferrum as fm
     >>> fm.prediction_error_chart(model, X_test, y_test, reference_line=True)
     """
-    # ``compare=`` is supported on the default scatter path (a ``model`` colour
-    # group overlays both series with the shared y=x reference line). The
-    # residual confidence band (``ci`` / ``reference_band``) is a single-model
-    # aggregate, so combining it with ``compare=`` is rejected loudly
-    # (D-COMPARE-1) rather than silently dropping the band.
-    if compare is not None and (ci is not None or reference_band):
-        raise ValueError(
-            "compare= is not supported with ci=/reference_band= for "
-            "prediction_error_chart: the band is a single-model aggregate. "
-            "Drop ci=/reference_band= to compare models, or compose one chart "
-            "per model instead."
-        )
     source = _resolve_source(
         model,
         X,
@@ -1243,6 +1256,27 @@ def prediction_error_chart(
         random_state=random_state,
         compare=compare,
     )
+    # The residual confidence band (``ci`` / ``reference_band``) is a
+    # single-model aggregate. Composing one panel per model gives the builder a
+    # single-model source for each panel, so every band is computed from that
+    # model's residuals only — never pooled across models. The default scatter
+    # path (no band) keeps its single-panel ``model`` colour-group overlay.
+    if isinstance(source, ComparedModelSource) and (ci is not None or reference_band):
+        return _compose_compare(
+            source,
+            _prediction_error_chart_from_source,
+            builder_kwargs=dict(
+                reference_line=reference_line,
+                ci=ci,
+                reference_band=reference_band,
+                mark=mark,
+                encode=encode,
+                properties=properties,
+                layers=layers,
+                theme=theme,
+            ),
+            resolve={"x": "shared", "y": "shared"},
+        )
     return _prediction_error_chart_from_source(
         source,
         reference_line=reference_line,
@@ -1269,7 +1303,7 @@ def cooks_distance_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """Cook's distance / residuals-vs-leverage diagnostic for a linear estimator.
 
     Renders the residuals-vs-leverage panel with optional Cook's-distance
@@ -1293,12 +1327,12 @@ def cooks_distance_chart(
         used as an absolute cutoff; ``"auto"`` applies the ``4 / n``
         rule (Hair et al.); ``None`` disables highlighting.
     compare : dict of str -> estimator or None, default None
-        Not supported. Cook's distance and leverage are derived from each
-        fitted model's own hat matrix, so a single residuals-vs-leverage
-        panel cannot overlay two models coherently. Passing a non-``None``
-        value raises ``ValueError`` (D-COMPARE-1: loud, documented
-        exclusion). To compare models, build one chart per model and compose
-        them with ``|`` / ``&``.
+        Mapping of label -> fitted estimator to compare against ``model``.
+        When supplied, returns a :class:`~ferrum.ConcatChart` of small
+        multiples, one residuals-vs-leverage panel per model, with shared x/y
+        scales. Each panel's Cook's distance and leverage are derived from that
+        model's own hat matrix only. The single-model path (no ``compare=``) is
+        unchanged.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``.
     theme : Theme or None, default None
@@ -1317,27 +1351,39 @@ def cooks_distance_chart(
 
     Returns
     -------
-    Chart
-        Residuals-vs-leverage panel with optional Cook's-distance
-        outlier overlay.
+    Chart or ConcatChart
+        Residuals-vs-leverage panel with optional Cook's-distance outlier
+        overlay, or a small-multiples ``ConcatChart`` (one panel per model)
+        when ``compare=`` is supplied.
 
     Examples
     --------
     >>> import ferrum as fm
     >>> fm.cooks_distance_chart(linear_model, X_test, y_test, threshold="auto")
     """
-    _reject_compare(
-        compare,
-        chart="cooks_distance_chart",
-        reason="Cook's distance and leverage are per-model hat-matrix quantities; "
-        "compose one chart per model instead",
-    )
     source = _resolve_source(
         model,
         X,
         y,
         random_state=random_state,
+        compare=compare,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _residuals_chart_from_source,
+            builder_kwargs=dict(
+                kind="studentized",
+                cook_threshold=threshold,
+                panels=["residuals_vs_leverage"],
+                mark=mark,
+                encode=encode,
+                properties=properties,
+                layers=layers,
+                theme=theme,
+            ),
+            resolve={"x": "shared", "y": "shared"},
+        )
     return _residuals_chart_from_source(
         source,
         kind="studentized",

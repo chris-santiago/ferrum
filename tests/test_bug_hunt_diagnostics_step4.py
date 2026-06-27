@@ -6,8 +6,10 @@ Targets the derivations the campaign introduced:
    ``callable(getattr(model, "score", None))`` guard and a ``0.0`` fallback,
    and ``has_score`` derived as a property mirroring that guard
    (``src/ferrum/diagnostics/visualizers/_base.py`` lines 57-68, 135-164).
-2. ``compare=`` / ``random_state`` uniform across the model-diagnostic family,
-   with 17 documented ``ValueError`` exclusions and a ``_reject_compare`` guard
+2. ``compare=`` / ``random_state`` uniform across the model-diagnostic family.
+   Most diagnostics now render small multiples on ``compare=``; the sweep-based
+   clustering charts (no per-model source) keep a documented ``ValueError`` via
+   the ``_reject_compare`` guard
    (``src/ferrum/plots/_helpers.py`` ``_reject_compare`` / ``_resolve_source``).
 3. First-param canonicalization via ``_resolve_first_param`` + ``_UNSET``
    (``src/ferrum/plots/_helpers.py`` lines 360-392).
@@ -291,12 +293,13 @@ def test_compare_single_model_dict_still_carries_model_column(regression):
 def test_compare_on_excluded_chart_raises_documented_valueerror(regression):
     """An EXCLUDED chart must raise ValueError, never silently drop compare=.
 
-    Exercises `_reject_compare` (`_helpers.py` 171-181) via importance_chart:
-    the message must name the chart and carry a documented reason.
+    Exercises `_reject_compare` (`_helpers.py` 171-181) via the sweep-based
+    ``cluster_diagnostics`` (no per-model source, so it stays excluded): the
+    message must name the chart and carry a documented reason.
     """
-    model, X, y = regression
-    with pytest.raises(ValueError, match="compare= is not supported for importance_chart"):
-        ferrum.importance_chart(model, X, y, compare={"alt": model})
+    _, X, _ = regression
+    with pytest.raises(ValueError, match="compare= is not supported for cluster_diagnostics"):
+        ferrum.cluster_diagnostics(X, ks=[2, 3, 4], compare={"alt": X})
 
 
 def test_compare_on_excluded_chart_message_carries_reason(regression):
@@ -304,10 +307,13 @@ def test_compare_on_excluded_chart_message_carries_reason(regression):
 
     Exercises the ``reason`` arg threaded into `_reject_compare`.
     """
-    model, X, y = regression
+    _, X, _ = regression
     with pytest.raises(ValueError) as exc:
-        ferrum.cooks_distance_chart(model, X, y, compare={"alt": model})
-    assert "compose one chart per model" in str(exc.value)
+        ferrum.cluster_diagnostics(X, ks=[2, 3, 4], compare={"alt": X})
+    msg = str(exc.value)
+    prefix = "compare= is not supported for cluster_diagnostics:"
+    assert msg.startswith(prefix)
+    assert msg[len(prefix) :].strip()
 
 
 def test_compare_non_dict_raises_typeerror(binary):
@@ -371,9 +377,9 @@ def test_compare_empty_dict_on_excluded_chart_still_rejected(regression):
     Exercises `_reject_compare` (`_helpers.py` 180): the guard tests identity
     against None, so an empty dict is rejected just like a populated one.
     """
-    model, X, y = regression
+    _, X, _ = regression
     with pytest.raises(ValueError, match="compare= is not supported"):
-        ferrum.importance_chart(model, X, y, compare={})
+        ferrum.cluster_diagnostics(X, ks=[2, 3, 4], compare={})
 
 
 def test_compare_with_precomputed_path_rejected(binary):

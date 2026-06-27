@@ -5,16 +5,19 @@ The classification family (``roc_chart``, ``pr_chart``, ``calibration_chart``,
 ...) genuinely *supports* ``compare=`` (overlaid curves); those tests live in
 ``tests/diagnostics/test_compare.py``.
 
-Two regression charts also support ``compare=`` on their scatter path, because
-their marks already accept a ``color_field`` exactly like the classification
-family: ``prediction_error_chart`` (default path, no band) and
+Two regression charts support ``compare=`` on their scatter path by overlay,
+because their marks already accept a ``color_field`` exactly like the
+classification family: ``prediction_error_chart`` (default path, no band) and
 ``residuals_chart`` (``panels="single"``). Both detect the ``model`` column on
-the resolved compare-source frame and drive a per-model colour group. Each gates
-its single-model-only aggregate path with a loud ``ValueError``:
-``prediction_error_chart`` rejects ``compare=`` combined with ``ci`` /
-``reference_band`` (the band is a single-model aggregate), and
-``residuals_chart`` rejects ``compare=`` with a multi-panel ``panels`` value
-(the 4-panel QQ/scale-location/leverage grid is single-model).
+the resolved compare-source frame and drive a per-model colour group.
+
+Their single-model-aggregate paths instead render **small multiples** (one panel
+per model, composed as a ``ConcatChart`` with shared x/y scales) rather than
+rejecting: ``prediction_error_chart`` with ``ci`` / ``reference_band`` builds one
+panel per model so each band is computed from that model's residuals only (never
+pooled), and ``residuals_chart`` with a multi-panel ``panels`` value renders one
+full diagnostic grid per model. ``cooks_distance_chart`` likewise renders one
+residuals-vs-leverage panel per model.
 
 Six explanation charts (``importance_chart``, ``shap_beeswarm_chart``,
 ``shap_bar_chart``, ``shap_waterfall_chart``, ``shap_chart``, ``pdp_chart``)
@@ -60,9 +63,10 @@ def _reg_setup():
 
 
 # ---------------------------------------------------------------------------
-# regression.py — SUPPORTED: prediction_error_chart (default path),
-# residuals_chart (panels="single").  Each gates its single-model-only
-# aggregate path with a loud ValueError.
+# regression.py — prediction_error_chart and residuals_chart overlay compare=
+# on their scatter paths; their single-model-aggregate paths
+# (ci=/reference_band=, multi-panel) and cooks_distance_chart render small
+# multiples (one ConcatChart panel per model) instead.
 # ---------------------------------------------------------------------------
 
 
@@ -93,18 +97,31 @@ def test_prediction_error_chart_compare_drives_color_field():
     assert "model" not in single_json
 
 
-def test_prediction_error_chart_compare_with_ci_rejected():
-    """The residual confidence band is a single-model aggregate; combining it
-    with compare= is rejected loudly."""
+def test_prediction_error_chart_compare_with_ci_renders_small_multiples():
+    """The residual confidence band is a single-model aggregate, so compare=
+    with ci= renders one panel per model (each band computed from that model's
+    residuals only) rather than overlaying a pooled band."""
     X, y, base, alt = _reg_setup()
-    with pytest.raises(ValueError, match="single-model aggregate"):
-        ferrum.prediction_error_chart(base, X, y, ci=0.9, compare={"alt": alt})
+    result = ferrum.prediction_error_chart(base, X, y, ci=0.9, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
 
 
-def test_prediction_error_chart_compare_with_reference_band_rejected():
+def test_prediction_error_chart_compare_with_reference_band_renders_small_multiples():
     X, y, base, alt = _reg_setup()
-    with pytest.raises(ValueError, match="single-model aggregate"):
-        ferrum.prediction_error_chart(base, X, y, reference_band=True, compare={"alt": alt})
+    result = ferrum.prediction_error_chart(base, X, y, reference_band=True, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
+
+
+def test_prediction_error_chart_compare_with_ci_none_byte_identical():
+    """compare=None on the ci= path is byte-identical to omitting the kwarg."""
+    X, y, base, _ = _reg_setup()
+    with_kwarg = ferrum.prediction_error_chart(base, X, y, ci=0.9, compare=None).to_svg()
+    without_kwarg = ferrum.prediction_error_chart(base, X, y, ci=0.9).to_svg()
+    assert with_kwarg == without_kwarg
 
 
 def test_prediction_error_chart_compare_none_default_path_works():
@@ -133,24 +150,33 @@ def test_residuals_chart_compare_default_panels_none_supported():
     assert _model_series(chart) == ["alt", "base"]
 
 
-def test_residuals_chart_compare_multipanel_rejected():
-    """The 4-panel QQ/scale-location/leverage grid is single-model; compare=
-    with a multi-panel layout is rejected loudly."""
+def test_residuals_chart_compare_multipanel_renders_small_multiples():
+    """The 4-panel QQ/scale-location/leverage grid is single-model, so compare=
+    with a multi-panel layout renders one full diagnostic grid per model
+    (nested small multiples) rather than overlaying."""
     X, y, base, alt = _reg_setup()
-    with pytest.raises(
-        ValueError, match="compare= is only supported with panels='single' for residuals_chart"
-    ):
-        ferrum.residuals_chart(base, X, y, panels="auto", compare={"alt": alt})
+    result = ferrum.residuals_chart(base, X, y, panels="auto", compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
 
 
-def test_residuals_chart_compare_explicit_panel_list_rejected():
+def test_residuals_chart_compare_explicit_panel_list_renders_small_multiples():
     X, y, base, alt = _reg_setup()
-    with pytest.raises(
-        ValueError, match="compare= is only supported with panels='single' for residuals_chart"
-    ):
-        ferrum.residuals_chart(
-            base, X, y, panels=["residuals_vs_fitted", "qq"], compare={"alt": alt}
-        )
+    result = ferrum.residuals_chart(
+        base, X, y, panels=["residuals_vs_fitted", "qq"], compare={"alt": alt}
+    )
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
+
+
+def test_residuals_chart_compare_multipanel_none_byte_identical():
+    """compare=None on the multi-panel path is byte-identical to omitting it."""
+    X, y, base, _ = _reg_setup()
+    with_kwarg = ferrum.residuals_chart(base, X, y, panels="auto", compare=None).to_svg()
+    without_kwarg = ferrum.residuals_chart(base, X, y, panels="auto").to_svg()
+    assert with_kwarg == without_kwarg
 
 
 def test_residuals_chart_compare_none_default_path_works():
@@ -159,10 +185,26 @@ def test_residuals_chart_compare_none_default_path_works():
     assert "<svg" in chart.to_svg()
 
 
-def test_cooks_distance_chart_compare_rejected():
-    X, y, base, alt = _reg_setup()
-    with pytest.raises(ValueError, match="compare= is not supported for cooks_distance_chart"):
-        ferrum.cooks_distance_chart(base, X, y, compare={"alt": alt})
+def test_cooks_distance_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one residuals-vs-leverage panel per
+    model. Cook's distance / leverage need ``coef_``, so both models are linear
+    (the RandomForest fixture has no hat matrix)."""
+    from sklearn.linear_model import Ridge
+
+    X, y, base, _ = _reg_setup()
+    alt = Ridge(alpha=0.1).fit(X.to_numpy(), y.to_numpy())
+    result = ferrum.cooks_distance_chart(base, X, y, threshold="auto", compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
+
+
+def test_cooks_distance_chart_compare_none_byte_identical():
+    """compare=None on cooks_distance_chart is byte-identical to omitting it."""
+    X, y, base, _ = _reg_setup()
+    with_kwarg = ferrum.cooks_distance_chart(base, X, y, threshold="auto", compare=None).to_svg()
+    without_kwarg = ferrum.cooks_distance_chart(base, X, y, threshold="auto").to_svg()
+    assert with_kwarg == without_kwarg
 
 
 def test_cooks_distance_chart_compare_none_default_path_works():
@@ -445,12 +487,19 @@ def test_elbow_chart_compare_rejected():
 
 
 def test_rejection_message_includes_reason():
-    """An EXCLUDED chart carries its documented reason in the rejection."""
-    X, y, base, alt = _reg_setup()
+    """An EXCLUDED chart carries its documented reason in the rejection.
+
+    ``cluster_diagnostics`` is sweep-based (no per-model source), so it keeps a
+    loud rejection; the message names the chart and carries a non-empty reason
+    after the colon.
+    """
+    df = load_dataset("clustering")
     with pytest.raises(ValueError) as exc:
-        ferrum.cooks_distance_chart(base, X, y, compare={"alt": alt})
+        ferrum.cluster_diagnostics(df, ks=[2, 3, 4], compare={"alt": df})
     msg = str(exc.value)
-    assert "compose one chart per model" in msg
+    prefix = "compare= is not supported for cluster_diagnostics:"
+    assert msg.startswith(prefix)
+    assert msg[len(prefix) :].strip()
 
 
 def test_compare_none_is_byte_identical_to_omitting_kwarg():
