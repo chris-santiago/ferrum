@@ -208,3 +208,173 @@ def test_compare_picks_up_new_base_property(monkeypatch):
     derived = _compared._collect_compared_proxied_attrs()
     assert "n_features" in derived
     assert "_n_features" in derived
+
+
+# ---------------------------------------------------------------------------
+# Task 1: _compose_compare helper (GH issue #35)
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_chart():
+    """Return a minimal renderable Chart for use in fake builders."""
+    import polars as pl
+
+    return ferrum.Chart(pl.DataFrame({"x": [1, 2], "y": [3, 4]})).mark_point().encode(x="x", y="y")
+
+
+def test_compose_compare_returns_concat_chart_with_one_panel_per_model():
+    """_compose_compare returns a ConcatChart with exactly one child per model."""
+    from ferrum.composition import ConcatChart
+    from ferrum.diagnostics.sources._compared import ComparedModelSource
+    from ferrum.plots._helpers import _compose_compare
+
+    def fake_builder(source, **kwargs):
+        return _make_fake_chart()
+
+    cms = ComparedModelSource({"alpha": None, "beta": None})
+    result = _compose_compare(
+        cms,
+        fake_builder,
+        builder_kwargs={},
+        resolve={"x": "shared", "y": "shared"},
+    )
+
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+
+
+def test_compose_compare_labels_chart_children_with_model_names():
+    """Every Chart child carries its model name as a visible title."""
+    from ferrum.composition import ConcatChart
+    from ferrum.diagnostics.sources._compared import ComparedModelSource
+    from ferrum.plots._helpers import _compose_compare
+    from ferrum.title import Title
+
+    def fake_builder(source, **kwargs):
+        return _make_fake_chart()
+
+    cms = ComparedModelSource({"alpha": None, "beta": None})
+    result = _compose_compare(
+        cms,
+        fake_builder,
+        builder_kwargs={},
+        resolve={"x": "shared", "y": "shared"},
+    )
+
+    for child, name in zip(result.charts, ["alpha", "beta"]):
+        # Chart.properties(title=name) stores a Title object on _title.
+        assert isinstance(child._title, Title)
+        assert child._title.text == name
+
+
+def test_compose_compare_labels_composite_children_with_model_names():
+    """Every composite child carries its model name as a figure-level title."""
+    from ferrum.composition import ConcatChart
+    from ferrum.diagnostics.sources._compared import ComparedModelSource
+    from ferrum.plots._helpers import _compose_compare
+
+    def composite_builder(source, **kwargs):
+        c1 = _make_fake_chart()
+        c2 = _make_fake_chart()
+        return ConcatChart(c1, c2)
+
+    cms = ComparedModelSource({"model_a": None, "model_b": None, "model_c": None})
+    result = _compose_compare(
+        cms,
+        composite_builder,
+        builder_kwargs={},
+        resolve={"x": "independent", "y": "independent"},
+        columns=2,
+    )
+
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 3
+    for child, name in zip(result.charts, ["model_a", "model_b", "model_c"]):
+        # Composite .properties(title=name) stores in _figure_title.
+        assert isinstance(child, ConcatChart)
+        assert child._figure_title == name
+
+
+def test_compose_compare_forwards_resolve_to_concat_chart():
+    """The resolve dict is passed through to the outer ConcatChart unchanged."""
+    from ferrum.composition import ConcatChart
+    from ferrum.diagnostics.sources._compared import ComparedModelSource
+    from ferrum.plots._helpers import _compose_compare
+
+    def fake_builder(source, **kwargs):
+        return _make_fake_chart()
+
+    cms = ComparedModelSource({"m1": None, "m2": None})
+    resolve = {"x": "shared", "y": "independent"}
+    result = _compose_compare(
+        cms,
+        fake_builder,
+        builder_kwargs={},
+        resolve=resolve,
+    )
+
+    assert result._resolve == resolve
+
+
+def test_compose_compare_default_columns_is_number_of_models():
+    """When columns is omitted, all panels are in a single row."""
+    from ferrum.composition import ConcatChart
+    from ferrum.diagnostics.sources._compared import ComparedModelSource
+    from ferrum.plots._helpers import _compose_compare
+
+    def fake_builder(source, **kwargs):
+        return _make_fake_chart()
+
+    cms = ComparedModelSource({"a": None, "b": None, "c": None})
+    result = _compose_compare(
+        cms,
+        fake_builder,
+        builder_kwargs={},
+        resolve={},
+    )
+
+    assert result._columns == 3
+
+
+def test_compose_compare_explicit_columns_forwarded():
+    """Explicit columns= value is passed through to the outer ConcatChart."""
+    from ferrum.composition import ConcatChart
+    from ferrum.diagnostics.sources._compared import ComparedModelSource
+    from ferrum.plots._helpers import _compose_compare
+
+    def fake_builder(source, **kwargs):
+        return _make_fake_chart()
+
+    cms = ComparedModelSource({"a": None, "b": None, "c": None, "d": None})
+    result = _compose_compare(
+        cms,
+        fake_builder,
+        builder_kwargs={},
+        resolve={},
+        columns=2,
+    )
+
+    assert result._columns == 2
+
+
+def test_compose_compare_builder_kwargs_forwarded():
+    """builder_kwargs are forwarded verbatim to the builder for every model."""
+    from ferrum.diagnostics.sources._compared import ComparedModelSource
+    from ferrum.plots._helpers import _compose_compare
+
+    received_kwargs = []
+
+    def recording_builder(source, **kwargs):
+        received_kwargs.append(dict(kwargs))
+        return _make_fake_chart()
+
+    cms = ComparedModelSource({"m1": None, "m2": None})
+    _compose_compare(
+        cms,
+        recording_builder,
+        builder_kwargs={"feature": "age", "n_jobs": 2},
+        resolve={},
+    )
+
+    assert len(received_kwargs) == 2
+    assert all(kw == {"feature": "age", "n_jobs": 2} for kw in received_kwargs)
