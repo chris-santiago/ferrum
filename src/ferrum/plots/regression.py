@@ -1064,10 +1064,12 @@ def residuals_chart(
           (unchanged single-panel overlay).
         - any multi-panel value (``"auto"`` or an explicit list): returns a
           :class:`~ferrum.ConcatChart` of small multiples, one panel per model.
-          Each panel is the full single-model diagnostic grid for that model,
-          labeled with the model name, with shared x/y scales. The per-model
-          hat-matrix leverage and Cook's-distance computations are correct by
-          construction because each panel sees one model's data only.
+          Each model renders its full multi-panel diagnostic grid as one
+          small-multiple panel, labeled with the model name. Scale sharing
+          across models is not applied to the multi-panel grid (each panel
+          carries its own faceted scales). The per-model hat-matrix leverage
+          and Cook's-distance computations are correct by construction because
+          each panel sees one model's data only.
     random_state : int or None, default None
         Seed forwarded to ``ModelSource``; does not affect deterministic
         residuals computation.
@@ -1119,31 +1121,11 @@ def residuals_chart(
         ]
     else:
         panel_list = list(panels)
-    # Multi-panel comparison renders small multiples (one full diagnostic grid
-    # per model) so each model's leverage / Cook's-distance computations stay
-    # single-model. The single-panel residuals-vs-fitted view keeps its
-    # ``model`` colour-group overlay (``panel_list is None``), so only the
-    # multi-panel + compare case routes through ``_compose_compare``.
-    if isinstance(source, ComparedModelSource) and panel_list is not None:
-        return _compose_compare(
-            source,
-            _residuals_chart_from_source,
-            builder_kwargs=dict(
-                kind=kind,
-                cook_threshold=cook_threshold,
-                panels=panel_list,
-                annotate_metrics=annotate_metrics,
-                subtitle=subtitle,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "shared", "y": "shared"},
-        )
-    return _residuals_chart_from_source(
-        source,
+    # Both the compose path and the single-model fall-through pass identical
+    # kwargs to the same builder (``panels=panel_list`` in both); only the
+    # routing condition differs. Spell the kwargs once and route both paths
+    # through it.
+    builder_kwargs = dict(
         kind=kind,
         cook_threshold=cook_threshold,
         panels=panel_list,
@@ -1155,6 +1137,19 @@ def residuals_chart(
         layers=layers,
         theme=theme,
     )
+    # Multi-panel comparison renders small multiples (one full diagnostic grid
+    # per model) so each model's leverage / Cook's-distance computations stay
+    # single-model. The single-panel residuals-vs-fitted view keeps its
+    # ``model`` colour-group overlay (``panel_list is None``), so only the
+    # multi-panel + compare case routes through ``_compose_compare``.
+    if isinstance(source, ComparedModelSource) and panel_list is not None:
+        return _compose_compare(
+            source,
+            _residuals_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _residuals_chart_from_source(source, **builder_kwargs)
 
 
 def prediction_error_chart(
@@ -1256,29 +1251,9 @@ def prediction_error_chart(
         random_state=random_state,
         compare=compare,
     )
-    # The residual confidence band (``ci`` / ``reference_band``) is a
-    # single-model aggregate. Composing one panel per model gives the builder a
-    # single-model source for each panel, so every band is computed from that
-    # model's residuals only — never pooled across models. The default scatter
-    # path (no band) keeps its single-panel ``model`` colour-group overlay.
-    if isinstance(source, ComparedModelSource) and (ci is not None or reference_band):
-        return _compose_compare(
-            source,
-            _prediction_error_chart_from_source,
-            builder_kwargs=dict(
-                reference_line=reference_line,
-                ci=ci,
-                reference_band=reference_band,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "shared", "y": "shared"},
-        )
-    return _prediction_error_chart_from_source(
-        source,
+    # Both the compose path and the single-model fall-through pass identical
+    # kwargs to the same builder; only the routing condition differs.
+    builder_kwargs = dict(
         reference_line=reference_line,
         ci=ci,
         reference_band=reference_band,
@@ -1288,6 +1263,19 @@ def prediction_error_chart(
         layers=layers,
         theme=theme,
     )
+    # The residual confidence band (``ci`` / ``reference_band``) is a
+    # single-model aggregate. Composing one panel per model gives the builder a
+    # single-model source for each panel, so every band is computed from that
+    # model's residuals only — never pooled across models. The default scatter
+    # path (no band) keeps its single-panel ``model`` colour-group overlay.
+    if isinstance(source, ComparedModelSource) and (ci is not None or reference_band):
+        return _compose_compare(
+            source,
+            _prediction_error_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _prediction_error_chart_from_source(source, **builder_kwargs)
 
 
 def cooks_distance_chart(
@@ -1368,24 +1356,7 @@ def cooks_distance_chart(
         random_state=random_state,
         compare=compare,
     )
-    if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _residuals_chart_from_source,
-            builder_kwargs=dict(
-                kind="studentized",
-                cook_threshold=threshold,
-                panels=["residuals_vs_leverage"],
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "shared", "y": "shared"},
-        )
-    return _residuals_chart_from_source(
-        source,
+    builder_kwargs = dict(
         kind="studentized",
         cook_threshold=threshold,
         panels=["residuals_vs_leverage"],
@@ -1395,3 +1366,11 @@ def cooks_distance_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _residuals_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _residuals_chart_from_source(source, **builder_kwargs)

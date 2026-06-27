@@ -423,7 +423,7 @@ def _compose_compare(
     Parameters
     ----------
     source : ComparedModelSource
-        Multi-model wrapper whose ``.model_names`` / ``._sources`` are iterated.
+        Multi-model wrapper whose ``.items()`` ``(name, source)`` pairs are iterated.
     builder : callable
         The chart's ``_<name>_chart_from_source`` builder; called once per model
         as ``builder(model_source, **builder_kwargs)``.  May return a ``Chart``
@@ -448,7 +448,7 @@ def _compose_compare(
     from ferrum.composition import ConcatChart
 
     children = []
-    for name, model_source in source._sources.items():
+    for name, model_source in source.items():
         child = builder(model_source, **builder_kwargs)
         child = child.properties(title=name)
         children.append(child)

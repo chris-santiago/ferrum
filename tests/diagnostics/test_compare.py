@@ -29,6 +29,20 @@ def test_compare_returns_compared_source():
     assert cms.model_names == ["a", "b"]
 
 
+def test_compare_items_returns_name_source_pairs_in_construction_order():
+    from ferrum.diagnostics.sources._compared import ComparedModelSource
+
+    src_a = object()
+    src_b = object()
+    src_c = object()
+    cms = ComparedModelSource({"a": src_a, "b": src_b, "c": src_c})
+    items = cms.items()
+    # Public accessor yields (name, source) pairs in registration order.
+    assert items == [("a", src_a), ("b", src_b), ("c", src_c)]
+    # Names align with the model_names property.
+    assert [name for name, _ in items] == cms.model_names
+
+
 def test_compare_dispatches_roc_with_model_column():
     X, y, m = _binary_setup()
     cms = ferrum.ModelSource.compare({"left": m, "right": m}, X, y)

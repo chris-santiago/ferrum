@@ -13,7 +13,7 @@ bookkeeping.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
@@ -24,6 +24,9 @@ from ._importance import FeatureImportanceMixin
 from ._predictions import PredictionsMixin
 from ._ranking import RankingMixin
 from ._selection import ModelSelectionMixin
+
+if TYPE_CHECKING:
+    from ferrum.diagnostics.source import ModelSource
 
 
 _DOMAIN_MIXINS = (
@@ -134,6 +137,20 @@ class ComparedModelSource:
             Model names in the order they were registered.
         """
         return list(self._sources.keys())
+
+    def items(self) -> list[tuple[str, "ModelSource"]]:
+        """Ordered ``(name, ModelSource)`` pairs for each wrapped model.
+
+        The public accessor over the wrapped sources, in registration
+        order. Chart builders iterate this to compose one panel per model
+        without reaching into the private ``_sources`` mapping.
+
+        Returns
+        -------
+        list[tuple[str, ModelSource]]
+            ``(model_name, source)`` pairs in the order they were registered.
+        """
+        return list(self._sources.items())
 
     def _dispatch(self, method: str, *args: Any, **kwargs: Any) -> pl.DataFrame:
         frames: list[pl.DataFrame] = []

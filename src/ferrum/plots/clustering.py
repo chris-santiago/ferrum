@@ -660,25 +660,7 @@ def pca_scree_chart(
         )
 
     source = _resolve_source(model, X, None, compare=compare, random_state=random_state)
-    if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _pca_scree_chart_from_source,
-            builder_kwargs=dict(
-                n_components=n_components,
-                cumulative_line=cumulative_line,
-                threshold=threshold,
-                subtitle=subtitle,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "independent", "y": "independent"},
-        )
-    return _pca_scree_chart_from_source(
-        source,
+    builder_kwargs = dict(
         n_components=n_components,
         cumulative_line=cumulative_line,
         threshold=threshold,
@@ -689,6 +671,14 @@ def pca_scree_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _pca_scree_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "independent", "y": "independent"},
+        )
+    return _pca_scree_chart_from_source(source, **builder_kwargs)
 
 
 def cluster_diagnostics(
@@ -917,23 +907,7 @@ def intercluster_distance_chart(
     The single-model path (no ``compare=``) is unchanged.
     """
     source = _resolve_source(model, X, None, compare=compare, random_state=random_state)
-    if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _intercluster_distance_chart_from_source,
-            builder_kwargs=dict(
-                k=k,
-                method=method,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "independent", "y": "independent"},
-        )
-    return _intercluster_distance_chart_from_source(
-        source,
+    builder_kwargs = dict(
         k=k,
         method=method,
         mark=mark,
@@ -942,6 +916,14 @@ def intercluster_distance_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _intercluster_distance_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "independent", "y": "independent"},
+        )
+    return _intercluster_distance_chart_from_source(source, **builder_kwargs)
 
 
 def silhouette_chart(
@@ -1015,22 +997,7 @@ def silhouette_chart(
     The single-model path (no ``compare=``) is unchanged.
     """
     source = _resolve_source(model, X, None, compare=compare, random_state=random_state)
-    if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _silhouette_chart_from_source,
-            builder_kwargs=dict(
-                subtitle=subtitle,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "independent", "y": "independent"},
-        )
-    return _silhouette_chart_from_source(
-        source,
+    builder_kwargs = dict(
         subtitle=subtitle,
         mark=mark,
         encode=encode,
@@ -1038,6 +1005,14 @@ def silhouette_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _silhouette_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "independent", "y": "independent"},
+        )
+    return _silhouette_chart_from_source(source, **builder_kwargs)
 
 
 def manifold_chart(
@@ -1110,22 +1085,7 @@ def manifold_chart(
     The single-model path (no ``compare=``) is unchanged.
     """
     source = _resolve_source(model, X, None, compare=compare, random_state=random_state)
-    if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _manifold_chart_from_source,
-            builder_kwargs=dict(
-                method=method,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "independent", "y": "independent"},
-        )
-    return _manifold_chart_from_source(
-        source,
+    builder_kwargs = dict(
         method=method,
         mark=mark,
         encode=encode,
@@ -1133,6 +1093,14 @@ def manifold_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _manifold_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "independent", "y": "independent"},
+        )
+    return _manifold_chart_from_source(source, **builder_kwargs)
 
 
 def elbow_chart(

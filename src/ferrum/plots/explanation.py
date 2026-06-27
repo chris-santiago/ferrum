@@ -610,28 +610,7 @@ def importance_chart(
     name. The single-model path (no ``compare=``) is unchanged.
     """
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
-    if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _importance_chart_from_source,
-            builder_kwargs=dict(
-                method=method,
-                top_k=top_k,
-                orient=orient,
-                error_bars=error_bars,
-                show_values=show_values,
-                subtitle=subtitle,
-                random_state=random_state,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "shared", "y": "shared"},
-        )
-    return _importance_chart_from_source(
-        source,
+    builder_kwargs = dict(
         method=method,
         top_k=top_k,
         orient=orient,
@@ -645,6 +624,14 @@ def importance_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _importance_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _importance_chart_from_source(source, **builder_kwargs)
 
 
 def shap_beeswarm_chart(
@@ -731,26 +718,7 @@ def shap_beeswarm_chart(
     name. The single-model path (no ``compare=``) is unchanged.
     """
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
-    if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _shap_beeswarm_chart_from_source,
-            builder_kwargs=dict(
-                max_display=max_display,
-                order=order,
-                background=background,
-                per_class=per_class,
-                zero_line=zero_line,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "shared", "y": "shared"},
-        )
-    return _shap_beeswarm_chart_from_source(
-        source,
+    builder_kwargs = dict(
         max_display=max_display,
         order=order,
         background=background,
@@ -762,6 +730,14 @@ def shap_beeswarm_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _shap_beeswarm_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _shap_beeswarm_chart_from_source(source, **builder_kwargs)
 
 
 def shap_bar_chart(
@@ -842,25 +818,7 @@ def shap_bar_chart(
     name. The single-model path (no ``compare=``) is unchanged.
     """
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
-    if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _shap_bar_chart_from_source,
-            builder_kwargs=dict(
-                max_display=max_display,
-                order=order,
-                background=background,
-                per_class=per_class,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "shared", "y": "shared"},
-        )
-    return _shap_bar_chart_from_source(
-        source,
+    builder_kwargs = dict(
         max_display=max_display,
         order=order,
         background=background,
@@ -871,6 +829,14 @@ def shap_bar_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _shap_bar_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _shap_bar_chart_from_source(source, **builder_kwargs)
 
 
 def shap_waterfall_chart(
@@ -958,26 +924,7 @@ def shap_waterfall_chart(
     the model name. The single-model path (no ``compare=``) is unchanged.
     """
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
-    if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _shap_waterfall_chart_from_source,
-            builder_kwargs=dict(
-                sample_idx=sample_idx,
-                max_display=max_display,
-                order=order,
-                background=background,
-                per_class=per_class,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "shared", "y": "shared"},
-        )
-    return _shap_waterfall_chart_from_source(
-        source,
+    builder_kwargs = dict(
         sample_idx=sample_idx,
         max_display=max_display,
         order=order,
@@ -989,6 +936,14 @@ def shap_waterfall_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _shap_waterfall_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _shap_waterfall_chart_from_source(source, **builder_kwargs)
 
 
 def shap_chart(
@@ -1108,7 +1063,7 @@ def shap_chart(
     # share the same mapping and cannot silently diverge if a parameter is added.
     if kind == "beeswarm":
         builder = _shap_beeswarm_chart_from_source
-        bkwargs: dict = dict(
+        builder_kwargs: dict = dict(
             max_display=max_display,
             order=order,
             background=background,
@@ -1120,7 +1075,7 @@ def shap_chart(
         )
     elif kind == "bar":
         builder = _shap_bar_chart_from_source
-        bkwargs = dict(
+        builder_kwargs = dict(
             max_display=max_display,
             order=order,
             background=background,
@@ -1134,7 +1089,7 @@ def shap_chart(
         if sample_idx is None:
             raise ValueError("shap_chart(kind='waterfall') requires sample_idx=<int>.")
         builder = _shap_waterfall_chart_from_source
-        bkwargs = dict(
+        builder_kwargs = dict(
             sample_idx=sample_idx,
             max_display=max_display,
             order=order,
@@ -1150,10 +1105,10 @@ def shap_chart(
         return _compose_compare(
             source,
             builder,
-            builder_kwargs=bkwargs,
+            builder_kwargs=builder_kwargs,
             resolve={"x": "shared", "y": "shared"},
         )
-    return builder(source, **bkwargs)
+    return builder(source, **builder_kwargs)
 
 
 def pdp_chart(
@@ -1246,10 +1201,12 @@ def pdp_chart(
     Notes
     -----
     When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
-    one panel per model (small multiples, shared x/y scales). Each panel is the
-    single-model PDP facet composite for that model (one facet per feature),
-    labeled with the model name. The single-model path (no ``compare=``) is
-    unchanged.
+    one panel per model (small multiples). Each panel is the single-model PDP
+    facet composite for that model (one facet per feature), labeled with the
+    model name. Each feature facet keeps its own independent x axis (PDP curves
+    for different features span unrelated x-ranges), and scale sharing across
+    models is not applied to the faceted grid. The single-model path
+    (no ``compare=``) is unchanged.
     """
     _require(
         "pdp_chart",
@@ -1258,27 +1215,10 @@ def pdp_chart(
         hint="pass a list of column names or indices",
     )
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
-    if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _pdp_chart_from_source,
-            builder_kwargs=dict(
-                features=list(features),
-                grid_resolution=grid_resolution,
-                kind=kind,
-                ice_alpha=ice_alpha,
-                center=center,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "shared", "y": "shared"},
-        )
-    return _pdp_chart_from_source(
-        source,
-        list(features),
+    # ``features`` is positional-or-keyword on the builder; route it through the
+    # shared dict as a keyword so both paths spell the kwargs exactly once.
+    builder_kwargs = dict(
+        features=list(features),
         grid_resolution=grid_resolution,
         kind=kind,
         ice_alpha=ice_alpha,
@@ -1289,3 +1229,11 @@ def pdp_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _pdp_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _pdp_chart_from_source(source, **builder_kwargs)

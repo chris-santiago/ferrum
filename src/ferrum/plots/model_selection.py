@@ -26,8 +26,9 @@ from ferrum.plots._helpers import (
     _compose_compare,
     _dedupe_aggregated,
     _finalize_chart,
+    _require,
+    _resolve_source,
 )
-from ferrum.plots._helpers import _require, _resolve_source
 
 
 # ---------------------------------------------------------------------------
@@ -375,26 +376,7 @@ def learning_curve_chart(
     single-model path (no ``compare=``) is unchanged.
     """
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
-    if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _learning_curve_chart_from_source,
-            builder_kwargs=dict(
-                cv=cv,
-                scoring=scoring,
-                train_sizes=train_sizes,
-                ci_style=ci_style,
-                subtitle=subtitle,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "shared", "y": "shared"},
-        )
-    return _learning_curve_chart_from_source(
-        source,
+    builder_kwargs = dict(
         cv=cv,
         scoring=scoring,
         train_sizes=train_sizes,
@@ -406,6 +388,14 @@ def learning_curve_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _learning_curve_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _learning_curve_chart_from_source(source, **builder_kwargs)
 
 
 def validation_curve_chart(
@@ -514,30 +504,11 @@ def validation_curve_chart(
         hint="pass an explicit list of values to sweep for the given param",
     )
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
-    if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _validation_curve_chart_from_source,
-            builder_kwargs=dict(
-                param=param,
-                values=values,
-                cv=cv,
-                scoring=scoring,
-                log_scale=log_scale,
-                ci_style=ci_style,
-                subtitle=subtitle,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "shared", "y": "shared"},
-        )
-    return _validation_curve_chart_from_source(
-        source,
-        param,
-        values,
+    # ``param`` / ``values`` are positional-or-keyword on the builder; route them
+    # through the shared dict as keywords so both paths spell the kwargs once.
+    builder_kwargs = dict(
+        param=param,
+        values=values,
         cv=cv,
         scoring=scoring,
         log_scale=log_scale,
@@ -549,6 +520,14 @@ def validation_curve_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _validation_curve_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _validation_curve_chart_from_source(source, **builder_kwargs)
 
 
 def cv_scores_chart(
@@ -633,25 +612,7 @@ def cv_scores_chart(
     name. The single-model path (no ``compare=``) is unchanged.
     """
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
-    if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _cv_scores_chart_from_source,
-            builder_kwargs=dict(
-                cv=cv,
-                scoring=scoring,
-                kind=kind,
-                split=split,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "shared", "y": "shared"},
-        )
-    return _cv_scores_chart_from_source(
-        source,
+    builder_kwargs = dict(
         cv=cv,
         scoring=scoring,
         kind=kind,
@@ -662,6 +623,14 @@ def cv_scores_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _cv_scores_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _cv_scores_chart_from_source(source, **builder_kwargs)
 
 
 def alpha_selection_chart(
@@ -761,27 +730,10 @@ def alpha_selection_chart(
         hint="pass an explicit list of regularization-strength values to sweep",
     )
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
-    if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _alpha_selection_chart_from_source,
-            builder_kwargs=dict(
-                alphas=alphas,
-                cv=cv,
-                scoring=scoring,
-                log_scale=log_scale,
-                highlight_best=highlight_best,
-                mark=mark,
-                encode=encode,
-                properties=properties,
-                layers=layers,
-                theme=theme,
-            ),
-            resolve={"x": "shared", "y": "shared"},
-        )
-    return _alpha_selection_chart_from_source(
-        source,
-        alphas,
+    # ``alphas`` is positional-or-keyword on the builder; route it through the
+    # shared dict as a keyword so both paths spell the kwargs exactly once.
+    builder_kwargs = dict(
+        alphas=alphas,
         cv=cv,
         scoring=scoring,
         log_scale=log_scale,
@@ -792,3 +744,11 @@ def alpha_selection_chart(
         layers=layers,
         theme=theme,
     )
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _alpha_selection_chart_from_source,
+            builder_kwargs=builder_kwargs,
+            resolve={"x": "shared", "y": "shared"},
+        )
+    return _alpha_selection_chart_from_source(source, **builder_kwargs)
