@@ -1230,10 +1230,16 @@ def pdp_chart(
         theme=theme,
     )
     if isinstance(source, ComparedModelSource):
+        # pdp facets per feature with intentionally INDEPENDENT x — each feature
+        # has its own units, so the outer compose must NOT union x across
+        # features. (The shared-scale union DOES propagate into this faceted
+        # child, unlike grid children, so a shared x would collapse every
+        # feature onto one axis — see test_pdp_chart_compare_keeps_independent_
+        # feature_x.) Only the partial-dependence y is comparable across models.
         return _compose_compare(
             source,
             _pdp_chart_from_source,
             builder_kwargs=builder_kwargs,
-            resolve={"x": "shared", "y": "shared"},
+            resolve={"x": "independent", "y": "shared"},
         )
     return _pdp_chart_from_source(source, **builder_kwargs)

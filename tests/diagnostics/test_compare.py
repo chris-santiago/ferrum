@@ -200,7 +200,7 @@ def test_compare_proxies_all_public_properties():
     """Every public BaseSource property resolves through the wrapper."""
     X, y, m = _binary_setup()
     cms = ferrum.ModelSource.compare({"a": m, "b": m}, X, y)
-    first = next(iter(cms._sources.values()))
+    first = cms.items()[0][1]
     assert list(cms.feature_names) == list(first.feature_names)
     assert cms.capabilities == first.capabilities
     assert cms.X.height == first.X.height
@@ -518,3 +518,49 @@ def test_compute_union_domain_ordinal_is_stable_across_calls():
     # Domain must preserve first-appearance order from the data.
     domain = list(next(iter(domains)))
     assert domain == features, f"Expected {features}, got {domain}"
+
+
+def test_pdp_chart_compare_keeps_independent_feature_x():
+    """pdp compose must keep each feature's own x range, NOT collapse the two
+    features onto one shared x axis.
+
+    pdp facets per feature with intentionally independent x (each feature has
+    its own units). The shared-scale union DOES propagate into pdp's faceted
+    child, so the compare gate must declare ``resolve={"x":"independent"}`` —
+    otherwise the per-feature axes collapse onto one shared range. This test is
+    the guard: the two features below have DISJOINT x ranges ([-2,2] and
+    [100,110]) with an empty gap between them. With the correct independent x,
+    no tick lands in that gap; if the gate ever reverts to a shared x, the
+    collapsed [-2,110] axis fills the gap with ticks (~40/60/80) and this
+    test fails.
+    """
+    import re
+
+    import numpy as np
+    import polars as pl
+    from sklearn.ensemble import RandomForestRegressor
+
+    rng = np.random.default_rng(0)
+    x_np = np.column_stack(
+        [
+            rng.uniform(-2, 2, 200),  # f0 in [-2, 2]
+            rng.uniform(100, 110, 200),  # f1 in [100, 110]
+        ]
+    )
+    y_np = x_np[:, 0] * 3 - (x_np[:, 1] - 105) * 2 + rng.standard_normal(200) * 0.1
+    X = pl.DataFrame({"f0": x_np[:, 0], "f1": x_np[:, 1]})
+    y = pl.Series("y", y_np)
+    base = RandomForestRegressor(n_estimators=20, random_state=0).fit(x_np, y_np)
+    alt = RandomForestRegressor(n_estimators=20, random_state=1).fit(x_np, y_np)
+
+    svg = ferrum.pdp_chart(base, X, y, features=["f0", "f1"], compare={"alt": alt}).to_svg()
+    ticks = [float(t) for t in re.findall(r">(-?\d+\.?\d*)</text>", svg)]
+    # Each feature's own range is present...
+    assert any(-2.5 < t < 2.5 for t in ticks), "f0 x-range [-2,2] missing"
+    assert any(95 < t < 115 for t in ticks), "f1 x-range [100,110] missing"
+    # ...and the gap between the two disjoint ranges is EMPTY. This is the
+    # discriminating check: a collapsed shared x ([-2,110]) places ticks
+    # (~40/60/80) in this band; independent per-feature x and the bounded
+    # partial-dependence y (|y| < ~16 here) never do.
+    gap_ticks = [t for t in ticks if 30 < t < 90]
+    assert not gap_ticks, f"x axes collapsed onto a shared range; gap ticks present: {gap_ticks}"
