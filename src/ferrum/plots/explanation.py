@@ -26,8 +26,8 @@ import polars as pl
 if TYPE_CHECKING:
     from ferrum import Chart, ConcatChart
 
-from ferrum.encoding import X, Y
 from ferrum.diagnostics.source import ComparedModelSource
+from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
     _compose_compare,
     _finalize_chart,
