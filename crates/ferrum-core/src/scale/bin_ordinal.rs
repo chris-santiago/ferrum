@@ -1,7 +1,8 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::validate_finite;
+use super::core::{scale_spec_to_py_dict, validate_finite};
+use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
 struct BinOrdinalScaleData {
@@ -48,6 +49,23 @@ impl BinOrdinalScaleData {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BinOrdinalScale(BinOrdinalScaleData);
 
+impl BinOrdinalScale {
+    /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
+    ///
+    /// `bins` is constructor-guaranteed non-empty; `scheme` is emitted only when
+    /// a non-empty string (mirroring the legacy `if scale.scheme:` guard).
+    pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
+        ScaleSpec::BinOrdinal {
+            bins: if self.0.bins.is_empty() {
+                None
+            } else {
+                Some(self.0.bins.clone())
+            },
+            scheme: self.0.scheme.as_ref().filter(|s| !s.is_empty()).cloned(),
+        }
+    }
+}
+
 #[pymethods]
 impl BinOrdinalScale {
     #[new]
@@ -93,6 +111,11 @@ impl BinOrdinalScale {
     /// Color scheme name, or ``None``.
     #[getter]
     fn scheme(&self) -> Option<String> { self.0.scheme.clone() }
+
+    /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
+    fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scale_spec_to_py_dict(py, self.to_scale_spec())
+    }
 
     fn __repr__(&self) -> String {
         format!(

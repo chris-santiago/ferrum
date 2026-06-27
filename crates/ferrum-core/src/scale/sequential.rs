@@ -1,5 +1,8 @@
 use pyo3::prelude::*;
 
+use super::core::scale_spec_to_py_dict;
+use crate::spec::encoding::ScaleSpec;
+
 /// Sequential color-mapping scale.
 ///
 /// Maps a continuous numeric domain to a named sequential color scheme.
@@ -24,6 +27,20 @@ pub struct SequentialScale {
     scheme: Option<String>,
     domain: Option<[f64; 2]>,
     reverse: bool,
+}
+
+impl SequentialScale {
+    /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
+    ///
+    /// `scheme` is emitted only when a non-empty string (mirroring the legacy
+    /// `if scale.scheme:` guard); `reverse` is always carried.
+    pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
+        ScaleSpec::Sequential {
+            scheme: self.scheme.as_ref().filter(|s| !s.is_empty()).cloned(),
+            domain: self.domain.map(|d| d.to_vec()),
+            reverse: self.reverse,
+        }
+    }
 }
 
 #[pymethods]
@@ -54,6 +71,11 @@ impl SequentialScale {
     /// Whether the color direction is reversed.
     #[getter]
     fn reverse(&self) -> bool { self.reverse }
+
+    /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
+    fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scale_spec_to_py_dict(py, self.to_scale_spec())
+    }
 
     fn __repr__(&self) -> String {
         format!(

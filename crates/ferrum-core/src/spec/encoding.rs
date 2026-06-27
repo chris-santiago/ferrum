@@ -321,7 +321,7 @@ fn default_symlog_constant() -> f64 {
 fn default_pow_exponent() -> f64 {
     2.0
 }
-fn default_band_padding() -> f64 {
+pub(crate) fn default_band_padding() -> f64 {
     0.1
 }
 fn default_point_padding() -> f64 {
@@ -462,7 +462,11 @@ impl EncodingSpec {
 /// The spec interface (C8) names this function for the `Option<serde_json::Value>`
 /// case; the generic `T: Serialize` bound covers that case and the typed-struct
 /// getters (scale/axis/legend) with one implementation rather than two.
-fn encode_serde_value_for_py<T: serde::Serialize>(
+///
+/// `pub(crate)` so the `crate::scale` `*Scale` pyclasses can reuse it to emit
+/// their canonical `ScaleSpec` wire dict (`_to_scale_spec_dict`) without a second
+/// serialization helper (SPEC-04).
+pub(crate) fn encode_serde_value_for_py<T: serde::Serialize>(
     py: Python,
     v: &Option<T>,
 ) -> PyResult<Option<Py<PyAny>>> {

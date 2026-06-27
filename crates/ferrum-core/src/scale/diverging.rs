@@ -1,5 +1,8 @@
 use pyo3::prelude::*;
 
+use super::core::scale_spec_to_py_dict;
+use crate::spec::encoding::ScaleSpec;
+
 /// Diverging color-mapping scale.
 ///
 /// Maps a continuous numeric domain with a meaningful midpoint to a
@@ -25,6 +28,20 @@ pub struct DivergingScale {
     scheme: Option<String>,
     domain: Option<[f64; 3]>,
     domain_mid: Option<f64>,
+}
+
+impl DivergingScale {
+    /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
+    ///
+    /// `scheme` is emitted only when a non-empty string; `domain_mid` is carried
+    /// whenever set (the legacy `is not None` guard, so `0.0` is preserved).
+    pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
+        ScaleSpec::Diverging {
+            scheme: self.scheme.as_ref().filter(|s| !s.is_empty()).cloned(),
+            domain: self.domain.map(|d| d.to_vec()),
+            domain_mid: self.domain_mid,
+        }
+    }
 }
 
 #[pymethods]
@@ -61,6 +78,11 @@ impl DivergingScale {
     /// Explicit midpoint for the domain, or ``None``.
     #[getter]
     fn domain_mid(&self) -> Option<f64> { self.domain_mid }
+
+    /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
+    fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scale_spec_to_py_dict(py, self.to_scale_spec())
+    }
 
     fn __repr__(&self) -> String {
         format!(

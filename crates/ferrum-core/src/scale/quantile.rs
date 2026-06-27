@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 
-use super::core::{compute_quantile_cuts, validate_quantile};
+use super::core::{compute_quantile_cuts, scale_spec_to_py_dict, validate_quantile};
+use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
 struct QuantileScaleData {
@@ -74,6 +75,18 @@ impl QuantileScale {
             self.0.domain.len(), self.0.range, self.0.quantiles
         )
     }
+
+    /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
+    ///
+    /// `domain` is the sorted sample, `range` the discrete numeric outputs. The
+    /// computed `quantiles` cut-points are deterministic from the sample, so they
+    /// are **not** transmitted (recomputed on resolution).
+    pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
+        ScaleSpec::Quantile {
+            domain: Some(self.0.domain.clone()),
+            range: Some(self.0.range.clone()),
+        }
+    }
 }
 
 #[pymethods]
@@ -117,6 +130,11 @@ impl QuantileScale {
     /// Computed quantile cut-point boundaries.
     #[getter]
     fn quantiles(&self) -> Vec<f64> { self.0.quantiles.clone() }
+
+    /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
+    fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scale_spec_to_py_dict(py, self.to_scale_spec())
+    }
 
     fn __repr__(&self) -> String { self.repr_string() }
 }

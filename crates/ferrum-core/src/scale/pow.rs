@@ -1,8 +1,9 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::resolve_continuous;
+use super::core::{continuous_common, resolve_continuous, scale_spec_to_py_dict};
 use super::ticks::{minor_ticks_default, nice_step, nice_ticks, Tick};
+use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
 struct PowScaleData {
@@ -154,6 +155,23 @@ impl PowScale {
         self.data.domain
     }
 
+    /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
+    /// The `Pow` variant carries no `nice` field (nice is baked into the domain
+    /// at construction), matching what the legacy `_scale_to_dict` emitted.
+    pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
+        ScaleSpec::Pow {
+            exponent: self.data.exponent,
+            common: continuous_common(
+                self.data.domain,
+                self.domain_user_set,
+                self.data.range,
+                self.range_user_set,
+                self.data.clamp,
+                self.padding,
+            ),
+        }
+    }
+
     fn repr_string(&self) -> String {
         let PowScaleData { domain, range, exponent, clamp } = &self.data;
         let domain_s = if self.domain_user_set {
@@ -255,6 +273,11 @@ impl PowScale {
     #[getter]
     fn clamp(&self) -> bool { self.data.clamp }
 
+    /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
+    fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scale_spec_to_py_dict(py, self.to_scale_spec())
+    }
+
     fn __repr__(&self) -> String { self.repr_string() }
 }
 
@@ -302,6 +325,26 @@ impl SqrtScale {
     #[allow(dead_code)]
     pub(crate) fn ticks_internal(&self, count: usize) -> Vec<f64> {
         self.data.ticks(count)
+    }
+
+    /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
+    ///
+    /// `ScaleSpec::Sqrt` carries no `exponent` field — the exponent is implicitly
+    /// 0.5 and is resolved as `ScaleKind::Pow(0.5)` on the render path. The legacy
+    /// `_scale_to_dict` emitted an `"exponent": 0.5` key, but the deserialiser
+    /// dropped it (the `Sqrt` variant has no such field); omitting it here yields
+    /// the identical stored `ScaleSpec`.
+    pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
+        ScaleSpec::Sqrt {
+            common: continuous_common(
+                self.data.domain,
+                self.domain_user_set,
+                self.data.range,
+                self.range_user_set,
+                self.data.clamp,
+                self.padding,
+            ),
+        }
     }
 }
 
@@ -380,6 +423,11 @@ impl SqrtScale {
     /// Whether out-of-domain inputs are clamped to the range endpoints.
     #[getter]
     fn clamp(&self) -> bool { self.data.clamp }
+
+    /// Emit this scale's canonical `ScaleSpec` as a wire dict (SPEC-04 bridge).
+    fn _to_scale_spec_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        scale_spec_to_py_dict(py, self.to_scale_spec())
+    }
 
     fn __repr__(&self) -> String {
         let PowScaleData { domain, range, clamp, .. } = &self.data;
