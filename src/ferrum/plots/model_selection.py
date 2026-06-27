@@ -17,11 +17,17 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 
 if TYPE_CHECKING:
-    from ferrum import Chart
+    from ferrum import Chart, ConcatChart
 
+from ferrum.diagnostics.source import ComparedModelSource
 from ferrum.encoding import X, Y
-from ferrum.plots._helpers import _charts_with_endpoint_labels, _dedupe_aggregated, _finalize_chart
-from ferrum.plots._helpers import _reject_compare, _resolve_source, _require
+from ferrum.plots._helpers import (
+    _charts_with_endpoint_labels,
+    _compose_compare,
+    _dedupe_aggregated,
+    _finalize_chart,
+)
+from ferrum.plots._helpers import _require, _resolve_source
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +306,7 @@ def learning_curve_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """Learning curve chart showing score vs. training set size.
 
     Plots cross-validated train and validation scores as training size
@@ -350,8 +356,9 @@ def learning_curve_chart(
 
     Returns
     -------
-    Chart
-        Learning curve with train and validation score lines plus CI.
+    Chart or ConcatChart
+        Learning curve with train and validation score lines plus CI, or a
+        small-multiples ``ConcatChart`` when ``compare=`` is supplied.
 
     Examples
     --------
@@ -361,18 +368,31 @@ def learning_curve_chart(
 
     Notes
     -----
-    ``compare=`` is not supported. The train/validation lines are already
-    colored by ``split``, leaving no color channel for a model dimension;
-    passing a non-``None`` ``compare`` raises ``ValueError``. Compose one
-    chart per model with ``|`` / ``&`` to compare models.
+    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    one panel per model (small multiples, shared x/y scales). Each panel is
+    the single-model learning curve for that model, labeled with the model
+    name. The internal train/test coloring is preserved per panel. The
+    single-model path (no ``compare=``) is unchanged.
     """
-    _reject_compare(
-        compare,
-        chart="learning_curve_chart",
-        reason="the curve is already colored by train/test split, leaving no "
-        "color channel for a model dimension; compose one chart per model instead",
-    )
-    source = _resolve_source(model, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _learning_curve_chart_from_source,
+            builder_kwargs=dict(
+                cv=cv,
+                scoring=scoring,
+                train_sizes=train_sizes,
+                ci_style=ci_style,
+                subtitle=subtitle,
+                mark=mark,
+                encode=encode,
+                properties=properties,
+                layers=layers,
+                theme=theme,
+            ),
+            resolve={"x": "shared", "y": "shared"},
+        )
     return _learning_curve_chart_from_source(
         source,
         cv=cv,
@@ -407,7 +427,7 @@ def validation_curve_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """Plot score vs. a single hyperparameter value.
 
     Sweeps one hyperparameter over a supplied value range and plots
@@ -464,8 +484,9 @@ def validation_curve_chart(
 
     Returns
     -------
-    Chart
-        Validation curve with train and validation score lines plus CI.
+    Chart or ConcatChart
+        Validation curve with train and validation score lines plus CI, or a
+        small-multiples ``ConcatChart`` when ``compare=`` is supplied.
 
     Raises
     ------
@@ -480,10 +501,11 @@ def validation_curve_chart(
 
     Notes
     -----
-    ``compare=`` is not supported. The train/validation lines are already
-    colored by ``split``, leaving no color channel for a model dimension;
-    passing a non-``None`` ``compare`` raises ``ValueError``. Compose one
-    chart per model with ``|`` / ``&`` to compare models.
+    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    one panel per model (small multiples, shared x/y scales). Each panel is
+    the single-model validation curve for that model, labeled with the model
+    name. The internal train/test coloring is preserved per panel. The
+    single-model path (no ``compare=``) is unchanged.
     """
     _require(
         "validation_curve_chart",
@@ -491,13 +513,27 @@ def validation_curve_chart(
         values,
         hint="pass an explicit list of values to sweep for the given param",
     )
-    _reject_compare(
-        compare,
-        chart="validation_curve_chart",
-        reason="the curve is already colored by train/test split, leaving no "
-        "color channel for a model dimension; compose one chart per model instead",
-    )
-    source = _resolve_source(model, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _validation_curve_chart_from_source,
+            builder_kwargs=dict(
+                param=param,
+                values=values,
+                cv=cv,
+                scoring=scoring,
+                log_scale=log_scale,
+                ci_style=ci_style,
+                subtitle=subtitle,
+                mark=mark,
+                encode=encode,
+                properties=properties,
+                layers=layers,
+                theme=theme,
+            ),
+            resolve={"x": "shared", "y": "shared"},
+        )
     return _validation_curve_chart_from_source(
         source,
         param,
@@ -531,7 +567,7 @@ def cv_scores_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """Per-fold cross-validation score distribution chart.
 
     Visualizes the distribution of scores across folds for train and/or
@@ -579,8 +615,9 @@ def cv_scores_chart(
 
     Returns
     -------
-    Chart
-        Per-fold CV score distribution chart.
+    Chart or ConcatChart
+        Per-fold CV score distribution chart, or a small-multiples
+        ``ConcatChart`` when ``compare=`` is supplied.
 
     Examples
     --------
@@ -590,19 +627,29 @@ def cv_scores_chart(
 
     Notes
     -----
-    ``compare=`` is not supported. The box/strip/bar layout is grouped by
-    train/test ``split`` for a single model; a second model needs an extra
-    grouping dimension this chart does not carry. Passing a non-``None``
-    ``compare`` raises ``ValueError``. Compose one chart per model with
-    ``|`` / ``&`` to compare models.
+    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    one panel per model (small multiples, shared x/y scales). Each panel is
+    the single-model CV score chart for that model, labeled with the model
+    name. The single-model path (no ``compare=``) is unchanged.
     """
-    _reject_compare(
-        compare,
-        chart="cv_scores_chart",
-        reason="the per-fold distribution is grouped by train/test split for a "
-        "single model; compose one chart per model instead",
-    )
-    source = _resolve_source(model, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _cv_scores_chart_from_source,
+            builder_kwargs=dict(
+                cv=cv,
+                scoring=scoring,
+                kind=kind,
+                split=split,
+                mark=mark,
+                encode=encode,
+                properties=properties,
+                layers=layers,
+                theme=theme,
+            ),
+            resolve={"x": "shared", "y": "shared"},
+        )
     return _cv_scores_chart_from_source(
         source,
         cv=cv,
@@ -634,7 +681,7 @@ def alpha_selection_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart":
+) -> "Chart | ConcatChart":
     """Regularization-strength (alpha) selection chart.
 
     Plots cross-validated mean score as a function of regularization
@@ -684,8 +731,9 @@ def alpha_selection_chart(
 
     Returns
     -------
-    Chart
-        CV-score-vs-alpha line chart with optional best-alpha rule.
+    Chart or ConcatChart
+        CV-score-vs-alpha line chart with optional best-alpha rule, or a
+        small-multiples ``ConcatChart`` when ``compare=`` is supplied.
 
     Raises
     ------
@@ -700,11 +748,11 @@ def alpha_selection_chart(
 
     Notes
     -----
-    ``compare=`` is not supported. The chart draws one CV-score curve with a
-    single best-alpha highlight; the best-alpha sentinel is per-model, so a
-    second model needs its own annotation. Passing a non-``None`` ``compare``
-    raises ``ValueError``. Compose one chart per model with ``|`` / ``&`` to
-    compare models.
+    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    one panel per model (small multiples, shared x/y scales). Each panel is
+    the single-model alpha selection chart for that model, labeled with the
+    model name, with its own best-alpha highlight. The single-model path
+    (no ``compare=``) is unchanged.
     """
     _require(
         "alpha_selection_chart",
@@ -712,13 +760,25 @@ def alpha_selection_chart(
         alphas,
         hint="pass an explicit list of regularization-strength values to sweep",
     )
-    _reject_compare(
-        compare,
-        chart="alpha_selection_chart",
-        reason="the single CV-score curve and its best-alpha highlight are "
-        "per-model; compose one chart per model instead",
-    )
-    source = _resolve_source(model, X, y, random_state=random_state)
+    source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
+    if isinstance(source, ComparedModelSource):
+        return _compose_compare(
+            source,
+            _alpha_selection_chart_from_source,
+            builder_kwargs=dict(
+                alphas=alphas,
+                cv=cv,
+                scoring=scoring,
+                log_scale=log_scale,
+                highlight_best=highlight_best,
+                mark=mark,
+                encode=encode,
+                properties=properties,
+                layers=layers,
+                theme=theme,
+            ),
+            resolve={"x": "shared", "y": "shared"},
+        )
     return _alpha_selection_chart_from_source(
         source,
         alphas,

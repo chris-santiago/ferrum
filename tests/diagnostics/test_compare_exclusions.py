@@ -19,8 +19,15 @@ its single-model-only aggregate path with a loud ``ValueError``:
 Six explanation charts (``importance_chart``, ``shap_beeswarm_chart``,
 ``shap_bar_chart``, ``shap_waterfall_chart``, ``shap_chart``, ``pdp_chart``)
 render **small multiples** when ``compare=`` is passed: one panel per model,
-composed as a ``ConcatChart`` with shared x/y scales. The remaining charts
-across model-selection and clustering stay excluded and reject with
+composed as a ``ConcatChart`` with shared x/y scales.
+
+Four model-selection charts (``learning_curve_chart``,
+``validation_curve_chart``, ``cv_scores_chart``, ``alpha_selection_chart``)
+also render **small multiples** when ``compare=`` is passed: one panel per
+model, composed as a ``ConcatChart`` with shared x/y scales. The internal
+train/test coloring is preserved per panel.
+
+The remaining charts across clustering stay excluded and reject with
 ``ValueError``.
 
 Each test also asserts the no-compare default path still works (``compare=None``
@@ -169,58 +176,92 @@ def test_cooks_distance_chart_compare_none_default_path_works():
 # ---------------------------------------------------------------------------
 
 
-def test_learning_curve_chart_compare_rejected():
+def test_learning_curve_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one panel per model (base + alt)."""
     X, y, base, alt = _reg_setup()
-    with pytest.raises(ValueError, match="compare= is not supported for learning_curve_chart"):
-        ferrum.learning_curve_chart(base, X, y, cv=3, compare={"alt": alt})
+    result = ferrum.learning_curve_chart(base, X, y, cv=3, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
 
 
-def test_learning_curve_chart_compare_none_default_path_works():
+def test_learning_curve_chart_compare_none_byte_identical():
     X, y, base, _ = _reg_setup()
-    chart = ferrum.learning_curve_chart(base, X, y, cv=3, compare=None)
-    assert "<svg" in chart.to_svg()
+    with_kwarg = ferrum.learning_curve_chart(base, X, y, cv=3, compare=None).to_svg()
+    without_kwarg = ferrum.learning_curve_chart(base, X, y, cv=3).to_svg()
+    assert with_kwarg == without_kwarg
 
 
-def test_validation_curve_chart_compare_rejected():
-    X, y, base, alt = _reg_setup()
-    with pytest.raises(ValueError, match="compare= is not supported for validation_curve_chart"):
-        ferrum.validation_curve_chart(
-            base, X, y, param="alpha", values=[0.1, 1.0, 10.0], cv=3, compare={"alt": alt}
-        )
+def test_validation_curve_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one panel per model (base + alt).
 
+    Both models must support the swept parameter; two Ridge instances satisfy
+    this (RandomForestRegressor has no ``alpha`` param).
+    """
+    from sklearn.linear_model import Ridge
 
-def test_validation_curve_chart_compare_none_default_path_works():
     X, y, base, _ = _reg_setup()
-    chart = ferrum.validation_curve_chart(
-        base, X, y, param="alpha", values=[0.1, 1.0, 10.0], cv=3, compare=None
+    alt = Ridge(alpha=0.1)
+    result = ferrum.validation_curve_chart(
+        base, X, y, param="alpha", values=[0.1, 1.0, 10.0], cv=3, compare={"alt": alt}
     )
-    assert "<svg" in chart.to_svg()
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
 
 
-def test_cv_scores_chart_compare_rejected():
-    X, y, base, alt = _reg_setup()
-    with pytest.raises(ValueError, match="compare= is not supported for cv_scores_chart"):
-        ferrum.cv_scores_chart(base, X, y, cv=3, compare={"alt": alt})
-
-
-def test_cv_scores_chart_compare_none_default_path_works():
+def test_validation_curve_chart_compare_none_byte_identical():
     X, y, base, _ = _reg_setup()
-    chart = ferrum.cv_scores_chart(base, X, y, cv=3, compare=None)
-    assert "<svg" in chart.to_svg()
+    with_kwarg = ferrum.validation_curve_chart(
+        base, X, y, param="alpha", values=[0.1, 1.0, 10.0], cv=3, compare=None
+    ).to_svg()
+    without_kwarg = ferrum.validation_curve_chart(
+        base, X, y, param="alpha", values=[0.1, 1.0, 10.0], cv=3
+    ).to_svg()
+    assert with_kwarg == without_kwarg
 
 
-def test_alpha_selection_chart_compare_rejected():
+def test_cv_scores_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one panel per model (base + alt)."""
     X, y, base, alt = _reg_setup()
-    with pytest.raises(ValueError, match="compare= is not supported for alpha_selection_chart"):
-        ferrum.alpha_selection_chart(
-            base, X, y, alphas=[0.1, 1.0, 10.0], cv=3, compare={"alt": alt}
-        )
+    result = ferrum.cv_scores_chart(base, X, y, cv=3, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
 
 
-def test_alpha_selection_chart_compare_none_default_path_works():
+def test_cv_scores_chart_compare_none_byte_identical():
     X, y, base, _ = _reg_setup()
-    chart = ferrum.alpha_selection_chart(base, X, y, alphas=[0.1, 1.0, 10.0], cv=3, compare=None)
-    assert "<svg" in chart.to_svg()
+    with_kwarg = ferrum.cv_scores_chart(base, X, y, cv=3, compare=None).to_svg()
+    without_kwarg = ferrum.cv_scores_chart(base, X, y, cv=3).to_svg()
+    assert with_kwarg == without_kwarg
+
+
+def test_alpha_selection_chart_compare_renders_small_multiples():
+    """compare= returns a ConcatChart with one panel per model (base + alt).
+
+    Both models must accept an ``alpha`` constructor parameter; two Ridge
+    instances satisfy this (RandomForestRegressor has no ``alpha`` param).
+    """
+    from sklearn.linear_model import Ridge
+
+    X, y, base, _ = _reg_setup()
+    alt = Ridge(alpha=0.1)
+    result = ferrum.alpha_selection_chart(
+        base, X, y, alphas=[0.1, 1.0, 10.0], cv=3, compare={"alt": alt}
+    )
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
+
+
+def test_alpha_selection_chart_compare_none_byte_identical():
+    X, y, base, _ = _reg_setup()
+    with_kwarg = ferrum.alpha_selection_chart(
+        base, X, y, alphas=[0.1, 1.0, 10.0], cv=3, compare=None
+    ).to_svg()
+    without_kwarg = ferrum.alpha_selection_chart(base, X, y, alphas=[0.1, 1.0, 10.0], cv=3).to_svg()
+    assert with_kwarg == without_kwarg
 
 
 # ---------------------------------------------------------------------------
