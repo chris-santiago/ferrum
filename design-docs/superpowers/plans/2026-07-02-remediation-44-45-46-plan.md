@@ -4,7 +4,7 @@
 
 ## 1. Objective
 
-Fix three pre-existing bugs — #44 cooks_distance IndexError on no-hat-matrix models, #46 shap_waterfall per_class multiclass mis-render, #45 resolve= shared-scale no-op for composite/grid compose children — per the approved design spec.
+Fix #44 (cooks_distance IndexError on no-hat-matrix models), #46 (shap_waterfall per_class multiclass mis-render), and the #45 desugar-drops-explicit-scale bug, per the approved design spec **as amended 2026-07-02**: #45's composition-sharing itself ships separately as the Phase B Rust composite-render unification (own spec/plan/branch); this plan no longer builds the Python `_scale_share` extension.
 
 ## 2. Spec references
 
@@ -23,21 +23,17 @@ Fix three pre-existing bugs — #44 cooks_distance IndexError on no-hat-matrix m
 | Test | `tests/diagnostics/test_explanation.py` | #46 discriminating per-class tests + beeswarm/bar hardening test |
 | Create | `tests/goldens/phase_10/shap_chart_waterfall_per_class.svg` | #46 new golden (PNG-inspected) |
 | Modify | `tests/diagnostics/test_goldens_phase_10.py` | #46 golden byte-equality test |
-| Modify | `src/ferrum/chart.py` | #45 part 1: scale propagation at pending-composite-mark resolution |
-| Test | `tests/test_scale_through_desugar.py` | #45 part 1 tests (new file) |
-| Modify | `src/ferrum/_scale_share.py` | #45 part 2: composite-aware union/injection (spec §6) |
-| Modify | `src/ferrum/composition.py` | #45 part 2: resolve= docstring documents non-congruent skip |
-| Test | `tests/test_composition_resolve_nonflat.py` | #45 part 2 tests (new file) |
+| Modify | `src/ferrum/chart.py` | #45 prerequisite: scale propagation at pending-composite-mark resolution |
+| Test | `tests/test_scale_through_desugar.py` | scale-through-desugar tests (new file) |
 
 ## 4. Constraints
 
 - Branch: create `fix/issues-44-46-remediation` off `main`; never commit to main directly.
-- Order: Task 1 (#44) → Tasks 2–3 (#46) → Tasks 4–5 (#45). #45 lands last against a green suite.
-- Python-only: no changes under `crates/`. #45 relies on the existing Rust explicit-domain bypass — if a Rust change appears necessary, stop and surface to the orchestrator.
+- Order: Task 1 (#44) → Tasks 2–3 (#46) → Task 4 (desugar propagation) → Task 5 (close sweep). #45's composition sharing is out of this plan's scope (Phase B).
+- Python-only: no changes under `crates/`. If a Rust change appears necessary, stop and surface to the orchestrator.
 - Test-first per task: write the regression tests, run them, confirm RED (fail with the pre-fix symptom, e.g. IndexError for #44), then implement. If tests are written after implementation for any reason, prove RED via `git stash push -- <changed source>` → test fails → `git stash pop`, **before** `git add`.
 - Byte-identity (spec §7): `per_class=False` waterfall, single-class `per_class=True`, all linear cooks paths, `residuals_chart` auto-panel degradation, flat-chart/ordinal sharing, pdp compare= independent-x, and composite marks without explicit chart-level positional scales must render identically. Existing goldens must pass un-regenerated.
 - Scale propagation rule (spec §6, exact): positional channels x/y only; attach chart-level scale when layer channel has none; merge `domain` only when layer scale lacks `domain` (never overwrite `type`/`range`); skip when layer already has a `domain`.
-- Grid sharing is per-leaf-position across congruent children only; never a flat union across a grid's own panels. Non-congruent → silent skip, documented in the resolve= docstring.
 - Any new golden SVG: run `python scripts/snapshot-goldens.py <name>` (or `regen_and_verify` from `tests/_snapshots.py`), Read the PNG, confirm correct render before committing. Orchestrator performs the Read.
 - Errors raise; no warnings-as-fallback.
 - Commits via `commit-commands:commit` skill only; `python-review-lite` gate before every commit; no Claude authorship trailers.
@@ -67,33 +63,25 @@ Fix three pre-existing bugs — #44 cooks_distance IndexError on no-hat-matrix m
 - [ ] Verify: `uv run pytest tests/diagnostics/test_goldens_phase_10.py tests/diagnostics/test_explanation.py -n auto` and confirm existing `shap_chart_waterfall_sample3.svg` golden untouched (`git status tests/goldens/`)
 - [ ] Commit (review-lite gated)
 
-### Task 4: #45 part 1 — scale survives composite-mark desugar
+### Task 4: scale survives composite-mark desugar (#45 prerequisite)
 - Consumes: propagation rule from spec §6 (repeated verbatim in Constraints)
 - [ ] RED tests in `tests/test_scale_through_desugar.py`: explicit y-domain on a box/cv_scores chart renders that domain (SVG axis-extent inspection, reuse the extent-parsing pattern from `tests/test_facet_shared_extent.py:120-163`); log-scale validation_curve layer keeps `type: log` when a domain merges in; mark-computed domain (shap `x_scale_domain`) untouched by a chart-level scale; composite mark with no chart-level scale renders byte-identically (compare SVG before/after via unscaled chart)
 - [ ] Implement propagation at pending-mark resolution in `src/ferrum/chart.py` (`_resolve_pending_stat` seam), generic across all 26 composite marks
 - [ ] Verify: `uv run pytest -n auto` (full suite — shared contract touching every composite mark)
 - [ ] Commit (review-lite gated)
 
-### Task 5: #45 part 2 — composite-aware `_scale_share`
-- Consumes: congruence + per-leaf-position contract from spec §6; Task 4 propagation (box children need it to render injected domains)
-- [ ] RED tests in `tests/test_composition_resolve_nonflat.py`: hand-built concat of two box charts with `resolve={"y":"shared"}` shares rendered y extents, without resolve= renders as today; congruent grid children share per leaf position and NOT across positions within one grid; non-congruent mix renders identically to today (no error); plus compare-path tests in `tests/diagnostics/test_compare.py`: `cv_scores_chart` compare= panels share y tick extents equal to the union for divergent-domain models; `residuals_chart` compare= grids share per position
-- [ ] Implement in `src/ferrum/_scale_share.py`: `compute_union_domain`/`inject_scale` descend congruent composites per leaf position (rebuild composites via their own copy mechanism — no `_clone`/`_layers`); skip non-congruent groups per channel; flat-chart path untouched
-- [ ] Document non-congruent skip in resolve= docstring (`src/ferrum/composition.py`)
-- [ ] Verify: `uv run pytest -n auto` (full suite — five call sites inherit through these helpers) and `uv run pytest tests/diagnostics/test_compare.py tests/test_facet_shared_extent.py -v` explicitly
-- [ ] Commit (review-lite gated)
-
-### Task 6: batch close sweep
-- [ ] Run the three pinned repro scripts from the scratchpad: #44 raises clear ValueError; #45 both panels share union ticks; #46 renders faceted per-class panels
+### Task 5: batch close sweep
+- [ ] Run the pinned repro scripts from the scratchpad: #44 raises clear ValueError; #46 renders faceted per-class panels (#45's repro stays red by design — Phase B delivers it)
 - [ ] `uv run pytest -n auto` green; `nox -s lint` clean; `uv run pytest -m slow` if any touched path has slow coverage
 - [ ] Check `design-docs/superpowers/followups/2026-05-15-code-archaeology.md` for overlapping open items; update status if any
-- [ ] Log north-star follow-ups (spec §3) as GitHub issues: resolve=/facet-sharing unification; shap base_value; `_grid_panels` >4
-- [ ] Hand back to orchestrator for verification-before-completion + finishing-a-development-branch + issue close-out
+- [ ] Log remaining follow-ups as GitHub issues: shap base_value; `_grid_panels` >4 generalization (resolve=/facet unification is Phase B, in-round — do NOT file it as a deferral)
+- [ ] Hand back to orchestrator for verification-before-completion + finishing-a-development-branch + issue close-out (#44/#46 close; #45 stays open pending Phase B)
 
 ## 6. Acceptance checks
 
 - `uv run pytest -n auto` — full suite green
 - `nox -s lint` — clean
-- Spec §9 criteria all observably met (task Verify lines cover each)
+- Spec §9 criteria for #44, #46, and the desugar-propagation slice of #45 observably met (composition-sharing criteria transfer to the Phase B spec)
 - Existing goldens pass without regeneration; new per-class waterfall golden PNG-inspected before commit
 - Each fix's regression tests demonstrated RED pre-fix
 - Issues #44/#45/#46 referenced in commits; closed after user confirmation

@@ -4,6 +4,18 @@ Batch remediation of three pre-existing bugs surfaced during #35 (compare= aggre
 diagnostics). Decisions were settled via coherent-change batch research and approved
 2026-07-02. Origin issues: GH #44, #45, #46.
 
+> **Amendment 2026-07-02 (user decision, same day):** #45's composition-layer sharing
+> is NOT delivered by the Python `_scale_share` extension described in §4/§6/§8-2,3
+> (that part of this spec is superseded and its task was dropped un-built). Instead the
+> north-star — unifying concat/grid `resolve=` with the Rust facet-sharing mechanism
+> via a Rust-side composite render path — ships this round as its own designed change
+> ("Phase B", separate spec + branch, subsumes W4/W5). What remains of #45 in THIS
+> spec: the scale-through-desugar propagation rule (§6), which fixes user-set explicit
+> scales on composite-mark charts and is prerequisite plumbing for explicit-override
+> behavior under Phase B. §3's "no unification" non-goal and the non-congruent-skip
+> decision are void; congruence semantics are re-decided in the Phase B spec. #45 stays
+> open until Phase B lands.
+
 ## 1. Scope
 
 Three independent Python-only fixes: (#44) `cooks_distance_chart` on a non-linear model
