@@ -1322,6 +1322,17 @@ ferrum.residuals_chart(model_or_source=None, X=None, y=None, *,
 # Cook's distance are unavailable (no design matrix), so the leverage
 # panel is silently dropped when `panels="auto"`. `compare=` is
 # incompatible with the precomputed path (raises `ValueError`).
+#
+# **2026-07-02 (GH #44):** the leverage drop only degrades gracefully when
+# at least one other panel survives it. If dropping `residuals_vs_leverage`
+# would empty the resolved panel list — an explicit `panels=` of just
+# `["residuals_vs_leverage"]`, or `cooks_distance_chart` (which always
+# requests that single panel) — on a non-linear estimator or a precomputed
+# source, the call raises `ValueError` naming the hat-matrix/`coef_`
+# requirement and the estimator type (when a model is available) instead of
+# returning an empty/broken chart. `compare=` inherits this: the error
+# identifies which compare= member failed. `panels="auto"` degradation is
+# unaffected — it still renders the remaining 3 panels.
 
 ferrum.importance_chart(model_or_source, X=None, y=None, *,
                          method="builtin", top_k=20, orient="horizontal",

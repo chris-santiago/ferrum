@@ -381,3 +381,79 @@ def test_cooks_distance_chart_with_auto_threshold():
     X = df.select(["f0", "f1", "f2", "f3", "f4"])
     chart = ferrum.cooks_distance_chart(model, X, df["y"], threshold="auto")
     assert "<svg" in chart.to_svg()
+
+
+# ---------------------------------------------------------------------------
+# GH #44: non-linear estimators (no coef_) have NaN leverage; a chart whose
+# only panel is residuals_vs_leverage must raise a clear ValueError instead
+# of an IndexError inside _grid_panels([]).
+# ---------------------------------------------------------------------------
+
+
+def _rf_setup():
+    from sklearn.ensemble import RandomForestRegressor
+
+    df = load_dataset("regression")
+    X = df.select(["f0", "f1", "f2", "f3", "f4"])
+    y = df["y"]
+    model = RandomForestRegressor(n_estimators=5, random_state=0).fit(X.to_numpy(), y.to_numpy())
+    return model, X, y
+
+
+def test_cooks_distance_chart_nonlinear_model_raises_value_error():
+    """A non-linear estimator (no coef_) has NaN leverage for every row, so
+    cooks_distance_chart's single panel (residuals_vs_leverage) empties.
+    This must raise ValueError naming the estimator, not IndexError."""
+    import pytest
+
+    model, X, y = _rf_setup()
+    with pytest.raises(ValueError, match="RandomForestRegressor"):
+        ferrum.cooks_distance_chart(model, X, y)
+
+
+def test_residuals_chart_explicit_leverage_only_panel_raises_value_error():
+    """Same failure mode reached via residuals_chart's explicit panels= list."""
+    import pytest
+
+    model, X, y = _rf_setup()
+    with pytest.raises(ValueError, match="coef_"):
+        ferrum.residuals_chart(model, X, y, panels=["residuals_vs_leverage"])
+
+
+def test_residuals_chart_auto_panels_nonlinear_still_renders_three_panels():
+    """panels="auto" on a non-linear model must keep its graceful degradation:
+    the leverage panel is dropped but the other three panels still render."""
+    from ferrum import ConcatChart, HConcatChart, VConcatChart
+
+    model, X, y = _rf_setup()
+    result = ferrum.residuals_chart(model, X, y, panels="auto")
+    assert isinstance(result, (VConcatChart, HConcatChart, ConcatChart))
+
+    def _count_leaves(node):
+        children = getattr(node, "charts", None)
+        if not children:
+            return 1
+        return sum(_count_leaves(c) for c in children)
+
+    assert _count_leaves(result) == 3  # auto panels minus the dropped leverage panel
+    assert "<svg" in result.to_svg()
+
+
+def test_grid_panels_empty_list_raises_value_error():
+    import pytest
+
+    from ferrum.plots._helpers import _grid_panels
+
+    with pytest.raises(ValueError, match="0"):
+        _grid_panels([])
+
+
+def test_grid_panels_too_many_charts_raises_value_error():
+    import pytest
+
+    from ferrum.plots._helpers import _grid_panels
+
+    df = load_dataset("regression")
+    charts = [ferrum.Chart(df).mark_point() for _ in range(5)]
+    with pytest.raises(ValueError, match="5"):
+        _grid_panels(charts)

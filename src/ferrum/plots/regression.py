@@ -119,11 +119,23 @@ def _residuals_chart_from_source(
     # the right x-axis encoding for that panel's coordinate system. The
     # leverage panel depends on hat-matrix quantities; for non-linear
     # estimators ModelSource.predictions emits NaN for every leverage row,
-    # in which case we silently drop the panel rather than crashing on
-    # "no usable values for field 'leverage'".
+    # in which case we drop the panel so the remaining panels still render.
+    # If the drop would leave nothing to render (leverage was the only
+    # panel requested), we raise instead (GH #44).
     panel_list = panels if isinstance(panels, list) else ["residuals_vs_fitted"]
     if "residuals_vs_leverage" in panel_list and df["leverage"].is_nan().all():
         panel_list = [p for p in panel_list if p != "residuals_vs_leverage"]
+        if not panel_list:
+            model = getattr(source, "model", None)
+            estimator_clause = f" Got {type(model).__name__!r}." if model is not None else ""
+            raise ValueError(
+                "Cook's distance and residuals-vs-leverage are hat-matrix "
+                "quantities that require a linear estimator exposing "
+                f"`coef_`.{estimator_clause} Pass a linear estimator (e.g. "
+                "LinearRegression, Ridge, Lasso), or drop "
+                "residuals_vs_leverage from panels= and use the other "
+                "diagnostic panels instead."
+            )
     charts = [
         _residuals_panel(df, name, kind=kind, cook_threshold=cook_threshold) for name in panel_list
     ]
