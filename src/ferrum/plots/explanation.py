@@ -334,7 +334,12 @@ def _shap_waterfall_chart_from_source(
     # Use the global aggregation (over all samples) to rank features —
     # matches the beeswarm / bar ordering so all three views agree on
     # which features matter for the model overall. Then project that
-    # ranking onto the single sample's rows.
+    # ranking onto the single sample's rows. Sorting by `_rank` alone
+    # (rather than `(class_label, _rank)`) already yields, for every
+    # class, an ascending-rank subsequence -- Polars' stable sort keeps
+    # same-rank rows (one per class) in their original class-encounter
+    # order, so the per-class `.over()` cumsum below sees each class's
+    # rows in the right order without an explicit class sort key.
     ranked = _shap_order_features(sv, order=order, max_display=max_display)
     rank_map = {name: i for i, name in enumerate(ranked)}
     ordered = (
@@ -345,9 +350,15 @@ def _shap_waterfall_chart_from_source(
         .sort("_rank")
         .drop("_rank")
     )
-    cumsum = ordered["shap_value"].cum_sum()
-    x0 = pl.concat([pl.Series("x0", [0.0]), cumsum.head(cumsum.len() - 1).alias("x0")])
-    x1 = cumsum.alias("x1")
+    # Each class walks its own cumulative sum, anchored at 0 (the existing
+    # no-base-value schema contract) — `.over("class_label")` scopes both
+    # the running total and its lag to that class's rows only, so
+    # per_class=True never chains one class's contributions into the next.
+    # On a single-class frame (per_class=False, or per_class=True with a
+    # single class present) this is mathematically identical to a plain
+    # cumsum, preserving byte-identity for those paths.
+    x1 = pl.col("shap_value").cum_sum().over("class_label").alias("x1")
+    x0 = pl.col("shap_value").cum_sum().shift(1).fill_null(0.0).over("class_label").alias("x0")
     plot_df = ordered.with_columns(
         [
             x0,
@@ -359,8 +370,8 @@ def _shap_waterfall_chart_from_source(
         ]
     )
 
-    x_lo = float(min(x0.min(), x1.min(), 0.0))
-    x_hi = float(max(x0.max(), x1.max(), 0.0))
+    x_lo = float(min(plot_df["x0"].min(), plot_df["x1"].min(), 0.0))
+    x_hi = float(max(plot_df["x0"].max(), plot_df["x1"].max(), 0.0))
     pad = max(abs(x_lo), abs(x_hi)) * 0.05 if (x_lo < x_hi) else 1.0
     domain = (x_lo - pad, x_hi + pad)
 
@@ -369,6 +380,8 @@ def _shap_waterfall_chart_from_source(
         max_display=max_display,
         x_scale_domain=domain,
     )
+    if _should_facet_by_class(plot_df, per_class=per_class):
+        chart = chart.facet(col="class_label")
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
     )

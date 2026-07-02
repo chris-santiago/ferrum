@@ -7,7 +7,9 @@ import polars as pl
 import pytest
 
 import ferrum
+from ferrum.composition import ConcatChart
 from tests.fixtures import load_dataset, load_fixture
+from tests._svg_extents import extents_all_equal, x_axis_extents
 
 
 @pytest.fixture(scope="module")
@@ -292,9 +294,167 @@ def test_shap_bar_chart_per_class_multiclass():
 
 
 def test_shap_waterfall_chart_per_class_multiclass():
+    """per_class=True on a multi-class classifier renders one waterfall
+    panel per class, each with its OWN cumulative walk anchored at zero --
+    not a single cumsum chained across all classes' rows (GH #46).
+    """
     source = _multiclass_source()
     chart = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=True)
-    assert "<svg" in chart.to_svg()
+    svg = chart.to_svg()
+    assert "<svg" in svg
+
+    df = chart._data
+    classes = df["class_label"].unique(maintain_order=True).to_list()
+    assert len(classes) > 1
+
+    # Faceted by class_label -- one panel per class. `.facet(col=...)`
+    # alone is wrap mode, which stores the column under `field`.
+    assert chart._facet is not None
+    assert chart._facet.field == "class_label"
+
+    n_features_per_class = df.filter(pl.col("class_label") == classes[0]).height
+    assert n_features_per_class > 0
+    # Total bars = kept features x classes; every class keeps the same
+    # globally-ranked feature set (no per-class row drop).
+    assert df.height == n_features_per_class * len(classes)
+    for cls in classes:
+        assert df.filter(pl.col("class_label") == cls).height == n_features_per_class
+
+    # Each class's cumulative walk is independent and zero-anchored: the
+    # first bar starts at 0, and each subsequent bar picks up where the
+    # previous one left off *within that class* -- this is exactly what a
+    # single cumsum chained across all classes' rows would violate for
+    # every class after the first.
+    for cls in classes:
+        panel = df.filter(pl.col("class_label") == cls)
+        x0 = panel["x0"].to_list()
+        x1 = panel["x1"].to_list()
+        shap_values = panel["shap_value"].to_list()
+        assert x0[0] == pytest.approx(0.0)
+        for i in range(len(x0)):
+            assert x1[i] == pytest.approx(x0[i] + shap_values[i])
+            if i > 0:
+                assert x0[i] == pytest.approx(x1[i - 1])
+
+    # x domain is the union across all classes' x0/x1 extents and is shared
+    # (a single explicit scale domain bound at chart level, applied
+    # uniformly across every facet panel).
+    domain = chart._pending_stat_mark.kwargs["x_scale_domain"]
+    x_lo = min(df["x0"].min(), df["x1"].min(), 0.0)
+    x_hi = max(df["x0"].max(), df["x1"].max(), 0.0)
+    assert domain[0] <= x_lo + 1e-9
+    assert domain[1] >= x_hi - 1e-9
+
+
+def test_shap_waterfall_chart_per_class_false_multiclass_unchanged():
+    """per_class=False on a multi-class source stays single-panel with a
+    plain (non-partitioned) cumulative sum -- byte-identity invariant for
+    the pre-existing path (spec section 7)."""
+    source = _multiclass_source()
+    chart = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=False)
+    assert chart._facet is None
+    df = chart._data
+    assert df["class_label"].n_unique() == 1
+
+    shap_values = df["shap_value"]
+    expected_x1 = shap_values.cum_sum()
+    expected_x0 = pl.concat([pl.Series([0.0]), expected_x1.head(expected_x1.len() - 1)])
+    assert df["x1"].to_list() == pytest.approx(expected_x1.to_list())
+    assert df["x0"].to_list() == pytest.approx(expected_x0.to_list())
+
+
+def test_shap_waterfall_chart_per_class_true_single_class_byte_identical():
+    """per_class=True on a single-class source (regression/binary) renders
+    byte-identically to per_class=False -- no facet is created because
+    _should_facet_by_class requires more than one class present."""
+    source, _, _ = _ridge_source()
+    svg_true = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=True).to_svg()
+    svg_false = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=False).to_svg()
+    assert svg_true == svg_false
+
+
+def _binary_source():
+    """An actual binary classifier (not the regression ridge fixture) --
+    binary_logistic routes SHAP through the positive-class slice as a
+    single-element class_label list (see _shap_class_labels), so this
+    exercises the single-class byte-identity path on a genuinely
+    classification-shaped source rather than a regression stand-in."""
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    return ferrum.ModelSource(model, X, df["y"], random_state=0)
+
+
+def test_shap_waterfall_chart_per_class_true_binary_byte_identical():
+    """per_class=True on a TRUE binary classifier renders byte-identically
+    to per_class=False. binary_logistic carries exactly one class_label
+    (the positive class), so _should_facet_by_class's >1-class gate never
+    opens -- distinct coverage from the regression-ridge single-class test
+    above, which never exercises a classifier's class_label collapse."""
+    source = _binary_source()
+    svg_true = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=True).to_svg()
+    svg_false = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=False).to_svg()
+    assert svg_true == svg_false
+
+
+def _multiclass_compare_sources():
+    """A second, structurally different multiclass classifier for compare=.
+
+    RandomForestClassifier exposes feature_importances_ (routes through
+    shap.TreeExplainer) rather than coef_ (LinearExplainer) -- deterministic
+    given a fixed random_state, and a genuinely different model from the
+    multiclass_logistic base so the two compare= panels are not trivially
+    identical.
+    """
+    from sklearn.ensemble import RandomForestClassifier
+
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = df["y"]
+    base = load_fixture("multiclass_logistic")
+    alt = RandomForestClassifier(n_estimators=10, max_depth=3, random_state=0)
+    alt.fit(X.to_numpy(), y.to_numpy())
+    return X, y, base, alt
+
+
+def test_shap_beeswarm_chart_per_class_compare_shares_x_within_panel():
+    """GH #46: per_class=True facets must share the shap-value x domain
+    WITHIN each compare= model panel -- a future resolve= edit that flips
+    facet x to independent (the pdp-x-collapse failure class from #35)
+    must fail this test.
+    """
+    X, y, base, alt = _multiclass_compare_sources()
+    result = ferrum.shap_beeswarm_chart(base, X, y, per_class=True, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+
+    for panel in result.charts:
+        svg = panel.to_svg()
+        extents = x_axis_extents(svg)
+        assert len(extents) == 3, (
+            f"expected one facet per class (3) in this compare= panel, found {len(extents)}"
+        )
+        assert extents_all_equal(extents), (
+            f"class facets do not share x within this model panel: {extents}"
+        )
+
+
+def test_shap_bar_chart_per_class_compare_shares_x_within_panel():
+    """GH #46: same shared-x-within-panel guarantee for shap_bar_chart."""
+    X, y, base, alt = _multiclass_compare_sources()
+    result = ferrum.shap_bar_chart(base, X, y, per_class=True, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+
+    for panel in result.charts:
+        svg = panel.to_svg()
+        extents = x_axis_extents(svg)
+        assert len(extents) == 3, (
+            f"expected one facet per class (3) in this compare= panel, found {len(extents)}"
+        )
+        assert extents_all_equal(extents), (
+            f"class facets do not share x within this model panel: {extents}"
+        )
 
 
 def test_shap_chart_invalid_kind():

@@ -1178,6 +1178,22 @@ with ferrum.theme_context(my_theme):
 > matrix and wrap no per-model `ModelSource`; algorithm/method
 > comparison is tracked in #43.
 
+> **2026-07-02 (explicit scales survive composite-mark desugar, #45):**
+> an explicit `scale=` on a chart-level positional channel (`x`/`y`) now
+> propagates onto the layers a composite mark desugars into — previously
+> it was silently dropped for every composite mark (box, violin,
+> cv_scores, letter-value, …). Rule: a layer channel with no scale
+> inherits the chart-level scale; a layer scale without a `domain` (e.g.
+> validation_curve's log x) merges in the domain only, keeping its own
+> `type`/`range`; a layer scale that already carries a `domain` (e.g.
+> SHAP's mark-computed `x_scale_domain`) always wins. Consequence for
+> `compare=`: shared-scale resolution now visibly applies to
+> composite-mark panels with flat data — e.g. `cv_scores_chart`
+> `compare=` panels render one union y-axis (the #45 report case).
+> Grid-composite children (multi-panel `residuals_chart` under
+> `compare=`) still do not share; that lands with the composite-render
+> unification (Phase B spec, 2026-07-02).
+
 Figure-level functions return `Chart` or compound view objects. They handle data reshaping, faceting, axis labeling, and legend placement automatically. All accept `theme=` and `**encode_kwargs` to override defaults.
 
 #### Distribution
@@ -1322,6 +1338,17 @@ ferrum.residuals_chart(model_or_source=None, X=None, y=None, *,
 # Cook's distance are unavailable (no design matrix), so the leverage
 # panel is silently dropped when `panels="auto"`. `compare=` is
 # incompatible with the precomputed path (raises `ValueError`).
+#
+# **2026-07-02 (GH #44):** the leverage drop only degrades gracefully when
+# at least one other panel survives it. If dropping `residuals_vs_leverage`
+# would empty the resolved panel list — an explicit `panels=` of just
+# `["residuals_vs_leverage"]`, or `cooks_distance_chart` (which always
+# requests that single panel) — on a non-linear estimator or a precomputed
+# source, the call raises `ValueError` naming the hat-matrix/`coef_`
+# requirement and the estimator type (when a model is available) instead of
+# returning an empty/broken chart. `compare=` inherits this: the error
+# identifies which compare= member failed. `panels="auto"` degradation is
+# unaffected — it still renders the remaining 3 panels.
 
 ferrum.importance_chart(model_or_source, X=None, y=None, *,
                          method="builtin", top_k=20, orient="horizontal",

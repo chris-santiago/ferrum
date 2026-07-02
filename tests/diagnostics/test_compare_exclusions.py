@@ -213,6 +213,15 @@ def test_cooks_distance_chart_compare_none_default_path_works():
     assert "<svg" in chart.to_svg()
 
 
+def test_cooks_distance_chart_compare_nonlinear_member_names_offending_model():
+    """GH #44: when a compare= member has no coef_ (NaN leverage), the
+    ValueError raised inside the per-model builder must be re-raised by
+    _compose_compare with the compare= key identifying which model failed."""
+    X, y, base, alt = _reg_setup()
+    with pytest.raises(ValueError, match="rf"):
+        ferrum.cooks_distance_chart(base, X, y, compare={"rf": alt})
+
+
 # ---------------------------------------------------------------------------
 # model_selection.py — learning / validation / cv_scores / alpha_selection
 # ---------------------------------------------------------------------------

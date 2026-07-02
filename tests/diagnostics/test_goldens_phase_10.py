@@ -299,6 +299,25 @@ def test_golden_shap_chart_waterfall():
     _check_golden(chart.to_svg(), "shap_chart_waterfall_sample3")
 
 
+def _multiclass_logistic_source():
+    """Multiclass classifier for the per-class waterfall golden (GH #46).
+
+    LogisticRegression exposes ``coef_`` so ``shap_values()`` routes
+    through ``shap.LinearExplainer`` -- deterministic across runs and
+    platforms, matching the ridge fixture's determinism rationale above.
+    """
+    model = load_fixture("multiclass_logistic")
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    return ferrum.ModelSource(model, X, df["y"], random_state=0)
+
+
+def test_golden_shap_chart_waterfall_per_class():
+    source = _multiclass_logistic_source()
+    chart = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=True)
+    _check_golden(chart.to_svg(), "shap_chart_waterfall_per_class")
+
+
 def test_golden_pdp_chart_individual_ice():
     model = load_fixture("regression_ridge")
     df = load_dataset("regression")

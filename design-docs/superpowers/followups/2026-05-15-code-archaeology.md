@@ -462,3 +462,12 @@ Fix: replaced per-element coordinate rewriting with a uniform `<g transform="tra
 Verified at three levels: 6 regression tests (5 node-level in `test_bug_hunt_scene_composition.py` + 1 public-path integration in `test_interactive_regression.py`), each proven to fail when the fix is stashed; scene-JSON before/after (`0/2 → 2/2` raw nodes wrapped in `translate(650,0)`, inner coords preserved); and a real headless-Chrome before/after where the data-anchored image annotation moves from the wrong LEFT panel to the correct RIGHT panel (live DOM confirms the nested `<g transform>` composes with the pan/zoom `dataG` matrix; no console errors).
 
 **New follow-up (open) — Option D: promote image annotations to first-class `image` scene nodes.** The data-anchored image annotation is currently a `SceneNode::Raw { <image …> }` opaque string (`annotation.rs`). Promoting it to a first-class `image` scene node (the type `_offset_node` already offsets at the leaf, and which the WASM `ImageQuad` path could render on the GPU with hit-testing) would let image annotations participate in GPU rendering + tooltips like other marks, instead of riding the SVG overlay. The inset `<svg>` is a genuine composite viewport and stays a raw fragment. Not required for #34 (the wrapper fixes both producers); a cohesion improvement to consider when the annotation / scene-node taxonomy is next touched.
+
+## 2026-07-02 — Phase A design-review deferrals (#44/#45/#46 remediation)
+
+- **DSG-1 (S2, structural hardening):** `_resolve_pending_impl` (src/ferrum/_desugar.py)
+  threads scale-through-desugar propagation at its three return branches (:686, :702,
+  :725); a future fourth desugar path could silently skip propagation. Consider a
+  single-exit refactor or a shared epilogue when this function is next touched.
+  Channel-clone/private-`_kwargs` + scale-shape normalization are scheduled in the
+  Phase B plan Task 10 (sole-ownership consolidation after `_scale_share.py` deletion).

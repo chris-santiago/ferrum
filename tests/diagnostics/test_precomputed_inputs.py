@@ -338,6 +338,14 @@ def test_residuals_chart_precomputed_leverage_dropped(regression_precomputed):
     assert "Leverage" not in svg
 
 
+def test_residuals_chart_precomputed_leverage_only_raises(regression_precomputed):
+    """Requesting ONLY the leverage panel on a precomputed source raises a clear
+    ValueError (precomputed inputs never carry leverage), not an IndexError (GH #44)."""
+    y_true, y_pred = regression_precomputed
+    with pytest.raises(ValueError, match="hat-matrix|coef_"):
+        ferrum.residuals_chart(y_true=y_true, y_pred=y_pred, panels=["residuals_vs_leverage"])
+
+
 # ---------------------------------------------------------------------------
 # ValueError — exactly-one-path validation
 # ---------------------------------------------------------------------------

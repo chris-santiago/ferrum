@@ -148,6 +148,10 @@ def _sort_by(df: pl.DataFrame, col: str) -> pl.DataFrame:
 
 def _grid_panels(charts: list, theme: Any = None):
     """Compose up to 4 panels into a grid using Phase 8a hstack/vstack."""
+    if not 1 <= len(charts) <= 4:
+        raise ValueError(
+            f"_grid_panels() requires 1-4 charts to compose into a grid; got {len(charts)}."
+        )
     if len(charts) == 1:
         c = charts[0]
     elif len(charts) == 2:
@@ -449,7 +453,10 @@ def _compose_compare(
 
     children = []
     for name, model_source in source.items():
-        child = builder(model_source, **builder_kwargs)
+        try:
+            child = builder(model_source, **builder_kwargs)
+        except ValueError as exc:
+            raise ValueError(f"compare={{{name!r}: ...}}: {exc}") from exc
         child = child.properties(title=name)
         children.append(child)
 

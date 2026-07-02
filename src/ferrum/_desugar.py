@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from ferrum._layer import _PRIMITIVE_MARKS, _Layer
 from ferrum.encoding.base import ChannelBase
+from ferrum.encoding._scale import _scale_to_dict
 from ferrum.marks.base import MarkBase
 from ferrum.marks.statistical import _build_prior_layer
 
@@ -195,6 +196,113 @@ def _apply_remap(encoding: dict, remap: dict, orig_encoding: dict | None = None)
         encoding["x2"] = X2(remap["x2"], type="Q")
     if "y2" in remap:
         encoding["y2"] = Y2(remap["y2"], type="Q")
+
+
+def _explicit_positional_scale(chart_channel: Any) -> Any:
+    """Return the raw ``scale=`` value from a chart-level positional channel.
+
+    ``chart_channel`` is a chart-level ``_encoding["x"]`` / ``_encoding["y"]``
+    value. After ``Chart.encode()`` this is always a ``ChannelBase`` instance
+    (bare strings passed to ``encode()`` are converted immediately), so a
+    non-``ChannelBase`` value never carries a scale.
+    """
+    if isinstance(chart_channel, ChannelBase):
+        return chart_channel.option("scale")
+    return None
+
+
+def _scale_domain(scale: Any) -> Any:
+    """Return the ``domain`` carried by a raw scale value, or ``None``.
+
+    *scale* is either a plain dict (e.g. ``{"type": "log"}``, as composite
+    desugars author today) or a ferrum ``*Scale`` pyclass instance (e.g.
+    ``fm.LinearScale(domain=(0, 1))``, as users pass via ``scale=``).
+    """
+    if scale is None:
+        return None
+    if isinstance(scale, dict):
+        return scale.get("domain")
+    return getattr(scale, "domain", None)
+
+
+def _merge_positional_channel_scale(layer_value: Any, chart_scale: Any, axis: str) -> Any:
+    """Return a replacement value for one layer channel with *chart_scale*
+    propagated in, or ``None`` when *layer_value* should be left untouched.
+
+    Implements the per-channel half of the scale-through-desugar propagation
+    rule (design spec §6, GH #45 prerequisite):
+
+    - no scale on the layer channel -> attach the chart-level scale wholesale;
+    - scale without a domain (e.g. validation_curve's ``{"type": "log"}``) ->
+      merge in the chart-level domain only, preserving the layer's own
+      ``type``/``range``/other keys;
+    - scale with a domain already (e.g. SHAP ``x_scale_domain``) -> leave
+      untouched, the mark-computed domain wins.
+    """
+    if isinstance(layer_value, str):
+        from ferrum.encoding import _channel_class_for
+
+        channel_cls = _channel_class_for(axis)
+        return channel_cls(layer_value, scale=chart_scale)
+
+    if not isinstance(layer_value, ChannelBase):
+        return None
+
+    layer_scale = layer_value.option("scale")
+    if layer_scale is None:
+        new_kwargs = dict(layer_value._kwargs)
+        new_kwargs["scale"] = chart_scale
+        return type(layer_value)(layer_value.field, **new_kwargs)
+
+    if _scale_domain(layer_scale) is not None:
+        return None  # mark-computed domain wins
+
+    chart_domain = _scale_domain(chart_scale)
+    if chart_domain is None:
+        return None  # nothing to merge
+
+    merged_scale = {**_scale_to_dict(layer_scale), "domain": chart_domain}
+    new_kwargs = dict(layer_value._kwargs)
+    new_kwargs["scale"] = merged_scale
+    return type(layer_value)(layer_value.field, **new_kwargs)
+
+
+def _propagate_positional_scale(chart_encoding: dict, layer_encoding: dict) -> dict:
+    """Merge chart-level explicit x/y scales into *layer_encoding*.
+
+    Composite-mark desugars rebuild each layer's encoding from scratch,
+    carrying only field names/titles (see module docstring), which silently
+    drops any explicit ``scale=`` the user set on the chart-level positional
+    channel (GH #45 prerequisite; design spec §6). x2/y2 companions share
+    their axis's scale through the layer's primary x/y channel and never
+    carry their own scale (``SECONDARY_EXTENT`` honors no ``scale`` kwarg,
+    and the Rust axis-scale resolver only ever consults the primary channel's
+    ``EncodingSpec.scale``), so only ``x``/``y`` are propagation targets.
+
+    Returns *layer_encoding* unchanged (same object) when no channel
+    qualifies, so callers can skip rebuilding the owning ``_Layer``.
+    """
+    updates: dict = {}
+    for axis in ("x", "y"):
+        if axis not in layer_encoding:
+            continue
+        chart_scale = _explicit_positional_scale(chart_encoding.get(axis))
+        if chart_scale is None:
+            continue
+        merged = _merge_positional_channel_scale(layer_encoding[axis], chart_scale, axis)
+        if merged is not None:
+            updates[axis] = merged
+    if not updates:
+        return layer_encoding
+    return {**layer_encoding, **updates}
+
+
+def _propagate_layer_scale(chart_encoding: dict, layer: _Layer) -> _Layer:
+    """Return *layer* with the chart-level x/y scale propagated onto its encoding."""
+    new_encoding = _propagate_positional_scale(chart_encoding, layer.encoding)
+    if new_encoding is layer.encoding:
+        return layer
+    return replace(layer, encoding=new_encoding)
 
 
 def cast_columns_to_float64(data, fields, *, int_only: bool = True) -> Any:
@@ -572,6 +680,10 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
         # desugar-set per-layer default).  The prior primitive layer is left
         # untouched.
         emitted = [_apply_style_to_layer(lyr, style_dict) for lyr in result.layers]
+        # Scale-through-desugar propagation (design spec §6, GH #45
+        # prerequisite): reattach any chart-level explicit x/y scale the
+        # desugar's fresh per-layer encodings would otherwise drop.
+        emitted = [_propagate_layer_scale(chart._encoding, lyr) for lyr in emitted]
         all_layers = emitted
         if _prior_layer is not None:
             all_layers = [_prior_layer] + emitted
@@ -587,6 +699,7 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
         smooth_enc = dict(chart._encoding)
         if remap:
             _apply_remap(smooth_enc, remap, orig_encoding=chart._encoding)
+        smooth_enc = _propagate_positional_scale(chart._encoding, smooth_enc)
         # Style applies to the composite's emitted smooth layer only; the prior
         # scatter layer keeps its own mark_kwargs.
         smooth_layer = _Layer(
@@ -609,4 +722,5 @@ def _resolve_pending_impl(chart: "Chart") -> "Chart":
         new._position = result.position
     if remap:
         _apply_remap(new._encoding, remap, orig_encoding=chart._encoding)
+    new._encoding = _propagate_positional_scale(chart._encoding, new._encoding)
     return new
