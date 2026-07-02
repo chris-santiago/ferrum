@@ -7,7 +7,9 @@ import polars as pl
 import pytest
 
 import ferrum
+from ferrum.composition import ConcatChart
 from tests.fixtures import load_dataset, load_fixture
+from tests._svg_extents import extents_all_equal, x_axis_extents
 
 
 @pytest.fixture(scope="module")
@@ -369,6 +371,90 @@ def test_shap_waterfall_chart_per_class_true_single_class_byte_identical():
     svg_true = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=True).to_svg()
     svg_false = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=False).to_svg()
     assert svg_true == svg_false
+
+
+def _binary_source():
+    """An actual binary classifier (not the regression ridge fixture) --
+    binary_logistic routes SHAP through the positive-class slice as a
+    single-element class_label list (see _shap_class_labels), so this
+    exercises the single-class byte-identity path on a genuinely
+    classification-shaped source rather than a regression stand-in."""
+    model = load_fixture("binary_logistic")
+    df = load_dataset("binary_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    return ferrum.ModelSource(model, X, df["y"], random_state=0)
+
+
+def test_shap_waterfall_chart_per_class_true_binary_byte_identical():
+    """per_class=True on a TRUE binary classifier renders byte-identically
+    to per_class=False. binary_logistic carries exactly one class_label
+    (the positive class), so _should_facet_by_class's >1-class gate never
+    opens -- distinct coverage from the regression-ridge single-class test
+    above, which never exercises a classifier's class_label collapse."""
+    source = _binary_source()
+    svg_true = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=True).to_svg()
+    svg_false = ferrum.shap_waterfall_chart(source, sample_idx=3, per_class=False).to_svg()
+    assert svg_true == svg_false
+
+
+def _multiclass_compare_sources():
+    """A second, structurally different multiclass classifier for compare=.
+
+    RandomForestClassifier exposes feature_importances_ (routes through
+    shap.TreeExplainer) rather than coef_ (LinearExplainer) -- deterministic
+    given a fixed random_state, and a genuinely different model from the
+    multiclass_logistic base so the two compare= panels are not trivially
+    identical.
+    """
+    from sklearn.ensemble import RandomForestClassifier
+
+    df = load_dataset("multiclass_classification")
+    X = df.select(["f0", "f1", "f2", "f3"])
+    y = df["y"]
+    base = load_fixture("multiclass_logistic")
+    alt = RandomForestClassifier(n_estimators=10, max_depth=3, random_state=0)
+    alt.fit(X.to_numpy(), y.to_numpy())
+    return X, y, base, alt
+
+
+def test_shap_beeswarm_chart_per_class_compare_shares_x_within_panel():
+    """GH #46: per_class=True facets must share the shap-value x domain
+    WITHIN each compare= model panel -- a future resolve= edit that flips
+    facet x to independent (the pdp-x-collapse failure class from #35)
+    must fail this test.
+    """
+    X, y, base, alt = _multiclass_compare_sources()
+    result = ferrum.shap_beeswarm_chart(base, X, y, per_class=True, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+
+    for panel in result.charts:
+        svg = panel.to_svg()
+        extents = x_axis_extents(svg)
+        assert len(extents) == 3, (
+            f"expected one facet per class (3) in this compare= panel, found {len(extents)}"
+        )
+        assert extents_all_equal(extents), (
+            f"class facets do not share x within this model panel: {extents}"
+        )
+
+
+def test_shap_bar_chart_per_class_compare_shares_x_within_panel():
+    """GH #46: same shared-x-within-panel guarantee for shap_bar_chart."""
+    X, y, base, alt = _multiclass_compare_sources()
+    result = ferrum.shap_bar_chart(base, X, y, per_class=True, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+
+    for panel in result.charts:
+        svg = panel.to_svg()
+        extents = x_axis_extents(svg)
+        assert len(extents) == 3, (
+            f"expected one facet per class (3) in this compare= panel, found {len(extents)}"
+        )
+        assert extents_all_equal(extents), (
+            f"class facets do not share x within this model panel: {extents}"
+        )
 
 
 def test_shap_chart_invalid_kind():
