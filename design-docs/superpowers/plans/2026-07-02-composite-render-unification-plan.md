@@ -120,6 +120,7 @@ Move all composition rendering (concat/grid/joint/clustermap/repeat/layer) onto 
 ### Task 10: Hard deletion + grep proofs
 - Consumes: all forms cut over (Tasks 6–9)
 - [ ] Delete `_scene_merge.py`, `_scale_share.py` + all imports/call sites (`_apply_resolve` collapses to tree resolve fields), `compose_svg_*` bindings, `compositor.rs`, `grid_compose.rs`, `_scene.py` schema mirror, `figure_title_nodes` binding if unconsumed
+- [ ] Consolidate the channel-rebuild idiom (Phase A design-review S2s): with `_scale_share.py::inject_scale` gone, `src/ferrum/_desugar.py:_merge_positional_channel_scale` is the sole clone-channel-with-modified-options site — introduce a `ChannelBase` option-rebuild helper (also usable by `_apply_remap`) and normalize the attached-scale shape (pyclass vs dict) while touching it
 - [ ] Grep proofs: no references to deleted symbols anywhere (spec §9)
 - [ ] Verify: `cargo test` + `maturin develop` + full `uv run pytest -n auto` + `nox -s lint`
 - [ ] Commit (both review-lite gates)
