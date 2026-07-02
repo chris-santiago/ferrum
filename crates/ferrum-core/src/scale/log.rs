@@ -14,6 +14,65 @@ struct LogScaleData {
 }
 
 impl LogScaleData {
+    /// Number of decades below the reference endpoint used as a floor when
+    /// [`sanitize_domain`](Self::sanitize_domain) replaces a zero (or
+    /// non-finite) domain endpoint. Six decades keeps the floor comfortably
+    /// below any realistic data value while staying far from `f64`
+    /// underflow.
+    const ZERO_FLOOR_DECADES: f64 = 6.0;
+
+    /// Construct a [`LogScaleData`], sanitizing the domain so it can never
+    /// store an endpoint that `ln()` cannot handle (see
+    /// [`sanitize_domain`](Self::sanitize_domain)).
+    fn new(domain: [f64; 2], range: [f64; 2], base: f64, clamp: bool) -> Self {
+        Self { domain: Self::sanitize_domain(domain), range, base, clamp }
+    }
+
+    /// Whether `x` can stand as a log-domain endpoint: nonzero and finite.
+    fn is_loggable(x: f64) -> bool {
+        x != 0.0 && x.is_finite()
+    }
+
+    /// Replace a domain endpoint that cannot be logarithmed (exactly zero,
+    /// or non-finite) with a small floor value derived from the other,
+    /// valid endpoint — the d3/vega-lite convention for a log domain that
+    /// touches zero, rather than rejecting it outright.
+    ///
+    /// This matters for auto-inferred domains: e.g. a `nice`-extended
+    /// histogram bin edge can legitimately land exactly on `0` even though
+    /// every raw data value is strictly positive (GH #49). Without this,
+    /// `ln(0) = -inf` propagates into the `as i64` exponent cast in
+    /// [`ticks`](Self::ticks) and [`minor_ticks_log`](super::ticks::minor_ticks_log),
+    /// which saturates to `i64::MIN`/`i64::MAX` and then panics on the
+    /// subsequent `i64` subtraction (debug builds) or silently produces a
+    /// bogus tick set (release builds).
+    ///
+    /// Well-formed domains — both endpoints finite, nonzero, same sign —
+    /// pass through completely unchanged; this must never alter behavior
+    /// for a valid log domain.
+    fn sanitize_domain(domain: [f64; 2]) -> [f64; 2] {
+        let [d0, d1] = domain;
+        let d0_ok = Self::is_loggable(d0);
+        let d1_ok = Self::is_loggable(d1);
+        if d0_ok && d1_ok {
+            return domain;
+        }
+        let reference = if d0_ok {
+            d0
+        } else if d1_ok {
+            d1
+        } else {
+            // Neither endpoint carries a usable sign/magnitude signal (e.g.
+            // both exactly 0, or both non-finite). Fall back to the same
+            // [1, 10] sentinel `LogScale::new` uses when no domain is
+            // supplied at all.
+            return [1.0, 10.0];
+        };
+        let sign = reference.signum();
+        let floor = sign * (reference.abs() / 10f64.powf(Self::ZERO_FLOOR_DECADES)).max(f64::MIN_POSITIVE);
+        if d0_ok { [d0, floor] } else { [floor, d1] }
+    }
+
     /// Snap a raw exponent to the nearest integer when within floating-point epsilon.
     /// Prevents `ln(1000)/ln(10) = 2.9999999999999996` from flooring to 2 instead of 3.
     fn snap_exp(raw: f64) -> f64 {
@@ -176,12 +235,7 @@ pub struct LogScale {
 impl LogScale {
     /// Rust-side constructor (no Python validation overhead).
     pub(crate) fn new_internal(domain: Vec<f64>, range: Vec<f64>, base: f64, clamp: bool, nice: bool) -> Self {
-        let mut d = LogScaleData {
-            domain: [domain[0], domain[1]],
-            range:  [range[0],  range[1]],
-            base,
-            clamp,
-        };
+        let mut d = LogScaleData::new([domain[0], domain[1]], [range[0], range[1]], base, clamp);
         if nice { d = d.nice(); }
         LogScale { data: d, padding: None, range_user_set: true, domain_user_set: true }
     }
@@ -283,12 +337,7 @@ impl LogScale {
                 ));
             }
         }
-        let mut d = LogScaleData {
-            domain: resolved.domain,
-            range: resolved.range,
-            base,
-            clamp,
-        };
+        let mut d = LogScaleData::new(resolved.domain, resolved.range, base, clamp);
         if nice && resolved.domain_user_set {
             d = d.nice();
         }
@@ -358,7 +407,7 @@ mod tests {
     use super::*;
 
     fn d(domain: [f64; 2], range: [f64; 2], base: f64, clamp: bool) -> LogScaleData {
-        LogScaleData { domain, range, base, clamp }
+        LogScaleData::new(domain, range, base, clamp)
     }
 
     #[test]
@@ -453,6 +502,81 @@ mod tests {
         assert!(y.is_finite(), "x=0 with clamp must be finite, got {y}");
         // 0 < domain[0], so the clamped result is the lower range bound.
         assert_eq!(y, 0.0);
+    }
+
+    // ── GH #49 — zero-touching domain regression ────────────────────────────
+    //
+    // Auto-inferred log domains can legitimately touch 0 (e.g. a
+    // `nice`-extended histogram bin edge), even though the constructor
+    // rejects a user-supplied domain containing 0. `sanitize_domain` clamps
+    // the zero endpoint to a small floor rather than letting `ln(0) = -inf`
+    // reach the `as i64` exponent cast in `ticks()`, which previously
+    // saturated to `i64::MIN` and panicked on the next subtraction.
+
+    #[test]
+    fn log_ticks_finite_for_positive_domain_touching_zero() {
+        let s = d([0.0, 1000.0], [0.0, 3.0], 10.0, false);
+        let t = s.ticks(10);
+        assert!(!t.is_empty(), "expected a non-empty tick set, got {t:?}");
+        assert!(t.iter().all(|v| v.is_finite()), "all ticks must be finite: {t:?}");
+        // The floored zero endpoint must not spuriously introduce a decade
+        // above the real, finite endpoint.
+        assert!(t.iter().all(|&v| v <= 1000.0 + 1e-6), "tick exceeds domain max: {t:?}");
+    }
+
+    #[test]
+    fn log_ticks_finite_for_negative_domain_touching_zero() {
+        let s = d([-1000.0, 0.0], [0.0, 3.0], 10.0, false);
+        let t = s.ticks(10);
+        assert!(!t.is_empty(), "expected a non-empty tick set, got {t:?}");
+        assert!(t.iter().all(|v| v.is_finite()), "all ticks must be finite: {t:?}");
+        assert!(t.iter().all(|&v| v >= -1000.0 - 1e-6), "tick exceeds domain min: {t:?}");
+    }
+
+    #[test]
+    fn log_scale_finite_for_positive_domain_touching_zero() {
+        let s = d([0.0, 1000.0], [0.0, 3.0], 10.0, false);
+        // Interior, in-domain samples must map to finite pixel coordinates.
+        for x in [1.0, 10.0, 500.0, 1000.0] {
+            let y = s.scale(x);
+            assert!(y.is_finite(), "scale({x}) must be finite, got {y}");
+        }
+    }
+
+    #[test]
+    fn log_scale_finite_for_negative_domain_touching_zero() {
+        let s = d([-1000.0, 0.0], [0.0, 3.0], 10.0, false);
+        for x in [-1.0, -10.0, -500.0, -1000.0] {
+            let y = s.scale(x);
+            assert!(y.is_finite(), "scale({x}) must be finite, got {y}");
+        }
+    }
+
+    #[test]
+    fn log_minor_ticks_finite_for_domain_touching_zero() {
+        // `minor_ticks_internal` reads the stored domain directly (not
+        // through `ticks()`), so it needs its own coverage: the sanitized
+        // domain must also keep `minor_ticks_log` (ticks.rs) from hitting
+        // the same `ln(0) = -inf` → `as i64` saturation.
+        let scale = LogScale::new_internal(vec![0.0, 1000.0], vec![0.0, 600.0], 10.0, false, false);
+        let minors = scale.minor_ticks_internal();
+        assert!(
+            minors.iter().all(|t| t.position.is_finite()),
+            "all minor ticks must be finite: {minors:?}",
+        );
+    }
+
+    #[test]
+    fn log_sanitize_domain_noop_for_well_formed_domains() {
+        // Existing, valid log domains must be returned byte-identical —
+        // sanitization must never alter behavior for well-formed input.
+        assert_eq!(LogScaleData::sanitize_domain([1.0, 1000.0]), [1.0, 1000.0]);
+        assert_eq!(LogScaleData::sanitize_domain([-1000.0, -1.0]), [-1000.0, -1.0]);
+    }
+
+    #[test]
+    fn log_sanitize_domain_both_zero_falls_back_to_sentinel() {
+        assert_eq!(LogScaleData::sanitize_domain([0.0, 0.0]), [1.0, 10.0]);
     }
 
     // ── Minor tick tests ─────────────────────────────────────────────────────
