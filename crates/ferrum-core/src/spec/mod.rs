@@ -13,6 +13,7 @@ pub(crate) mod data_ref;
 pub(crate) mod mark;
 pub(crate) mod encoding;
 pub(crate) mod chart;
+pub(crate) mod composite;
 pub(crate) mod parameter;
 pub mod layer;
 pub use layer::Layer;
