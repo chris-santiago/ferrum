@@ -1178,6 +1178,22 @@ with ferrum.theme_context(my_theme):
 > matrix and wrap no per-model `ModelSource`; algorithm/method
 > comparison is tracked in #43.
 
+> **2026-07-02 (explicit scales survive composite-mark desugar, #45):**
+> an explicit `scale=` on a chart-level positional channel (`x`/`y`) now
+> propagates onto the layers a composite mark desugars into — previously
+> it was silently dropped for every composite mark (box, violin,
+> cv_scores, letter-value, …). Rule: a layer channel with no scale
+> inherits the chart-level scale; a layer scale without a `domain` (e.g.
+> validation_curve's log x) merges in the domain only, keeping its own
+> `type`/`range`; a layer scale that already carries a `domain` (e.g.
+> SHAP's mark-computed `x_scale_domain`) always wins. Consequence for
+> `compare=`: shared-scale resolution now visibly applies to
+> composite-mark panels with flat data — e.g. `cv_scores_chart`
+> `compare=` panels render one union y-axis (the #45 report case).
+> Grid-composite children (multi-panel `residuals_chart` under
+> `compare=`) still do not share; that lands with the composite-render
+> unification (Phase B spec, 2026-07-02).
+
 Figure-level functions return `Chart` or compound view objects. They handle data reshaping, faceting, axis labeling, and legend placement automatically. All accept `theme=` and `**encode_kwargs` to override defaults.
 
 #### Distribution
