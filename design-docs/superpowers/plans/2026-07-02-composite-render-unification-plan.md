@@ -104,6 +104,16 @@ Move all composition rendering (concat/grid/joint/clustermap/repeat/layer) onto 
 > leaf; per-node config; composite resolve beyond x/y stays out — color/size sharing
 > remains Python-side until re-decided), then Tasks 7-9 widen the gate as forms cut
 > over, and Task 10's deletion requires the gate to be fully open.
+>
+> **Task 7 addition to 5d scope:** per-child panel labels. `_compose_compare` labels
+> children via `child.properties(title=name)`; a composite (e.g. VConcat) child's
+> label becomes a non-root figure title, which the wire forbids — so residuals
+> compare= (the #45 headline) stays gated. 5d must add a per-child label field on
+> composite nodes (strip-title-like, rendered as the panel-group header the old
+> compositor drew), after which the figure-chrome gate drops and Task 7's strict
+> xfail (`test_titled_composite_children_share_axis_position_wise`) flips. Also
+> recorded: sparse-grid holes have no wire concept (RepeatChart corner=True) —
+> resolve by Task 10 (wire support or documented permanent gate).
 
 ### Task 6: Cutover — linear forms (HConcat/VConcat)
 - Consumes: Task 5 entries; tree lowering contract spec §5

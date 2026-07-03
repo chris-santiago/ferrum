@@ -167,7 +167,7 @@ class _LoweredTree:
     ``tree`` + ``payloads`` are the positional arguments to
     ``render_composite_svg`` / ``render_composite_interactive``; ``viewport``,
     ``theme``, and ``chart_config`` are the shared per-call kwargs the entry
-    applies to every leaf.  Built by :func:`_lower_linear_composite`.
+    applies to every leaf.  Built by :func:`_lower_composite`.
     """
 
     tree: dict
@@ -210,8 +210,14 @@ def _composite_resolve_field(resolve: Optional[Dict[str, str]]) -> Optional[dict
     return out
 
 
-def _lower_linear_composite(composite, *, auto_tooltips: bool) -> Optional[_LoweredTree]:
-    """Lower an HConcat/VConcat (recursively) to a composite render-tree.
+def _lower_composite(composite, *, auto_tooltips: bool) -> Optional[_LoweredTree]:
+    """Lower a composition (recursively) to a one-call composite render-tree.
+
+    Handles every composite whose class declares a ``_composite_layout`` wire
+    kind: the linear forms (HConcat/VConcat) and the wrapping-grid ``ConcatChart``
+    (``wrap`` layout).  Layout-specific tree fields (e.g. ``ncols`` for wrap) come
+    from each node's :meth:`_CompositeBase._composite_node_fields` hook, so the
+    lowering body stays layout-agnostic rather than branching per class.
 
     Returns ``None`` — signalling the caller to keep the existing
     string-compositor / scene-merge path — when the composition cannot be
@@ -219,18 +225,23 @@ def _lower_linear_composite(composite, *, auto_tooltips: bool) -> Optional[_Lowe
     ``viewport``/``theme``/``chart_config`` to every leaf (``render/binding.rs``
     ``build_composite_leaves``), so the new path is only taken when:
 
-    - every descendant is a ``Chart`` leaf or a nested HConcat/VConcat,
+    - every descendant is a ``Chart`` leaf or a nested composite that declares a
+      ``_composite_layout`` (HConcat/VConcat/ConcatChart),
     - all leaves share identical ``viewport``/``theme``/``chart_config`` (so no
       per-child annotations, sizes, themes, or configure are lost),
     - no composite node carries composition-level configure layers (the
       composite path uses default figure-band chrome positioning),
     - every ``resolve=`` shared channel is positional x/y, and
-    - no nested composite carries figure chrome (root-only on the new path).
+    - no nested composite carries figure chrome (root-only on the new path — this
+      is what gates ``compare=`` diagnostics whose per-model panels are titled
+      *composites*, e.g. ``residuals`` (a titled ``VConcat``), back onto the old
+      path; ``compare=`` panels that are single Charts — ``cv_scores``, or a
+      faceted ``pdp`` panel — carry their title on the leaf spec and lower fine).
 
     ``auto_tooltips`` mirrors ``Chart._render_scene``: the interactive path
     prepares leaves with auto-tooltips injected, the SVG path does not.  The
     helper is deliberately generic (leaf + nested-composite lowering) so the
-    grid/wrap/overlay cutovers (Tasks 7-9) can reuse it.
+    ratio/overlay cutovers (Tasks 8-9) can reuse it.
     """
     payloads: list = []
     # (viewport, theme, chart_config) per leaf, checked for the uniformity gate.
@@ -248,7 +259,8 @@ def _lower_linear_composite(composite, *, auto_tooltips: bool) -> Optional[_Lowe
             leaf_inputs.append((viewport, theme, chart_config))
             return {"kind": "leaf", "spec": spec, "data": index}
 
-        if isinstance(node, (HConcatChart, VConcatChart)):
+        layout = getattr(node, "_composite_layout", None)
+        if layout is not None:
             if getattr(node, "_configure_layers", None):
                 return None
             if not is_root and (
@@ -268,9 +280,10 @@ def _lower_linear_composite(composite, *, auto_tooltips: bool) -> Optional[_Lowe
                 children.append(child_node)
             comp: dict = {
                 "kind": "composite",
-                "layout": node._composite_layout,
+                "layout": layout,
                 "children": children,
                 "spacing": node.spacing,
+                **node._composite_node_fields(),
             }
             if resolve:
                 comp["resolve"] = resolve
@@ -283,7 +296,7 @@ def _lower_linear_composite(composite, *, auto_tooltips: bool) -> Optional[_Lowe
                     comp["caption"] = node._figure_caption
             return comp
 
-        # LayerChart / Joint / Repeat / ClusterMap / Concat grids are not linear.
+        # LayerChart / Joint / Repeat / ClusterMap declare no _composite_layout.
         return None
 
     root = lower(composite, is_root=True)
@@ -885,6 +898,18 @@ class _CompositeBase(_ChartLike):
     # defaults are never reached for them.
     # ------------------------------------------------------------------
 
+    def _composite_node_fields(self) -> dict:
+        """Layout-specific tree fields for this node's composite-render entry.
+
+        The linear forms (HConcat/VConcat) contribute nothing beyond
+        ``layout``/``children``/``spacing``, so the base returns an empty dict.
+        :class:`ConcatChart` overrides this to emit the ``wrap`` layout's
+        ``ncols``.  Keeping the layout-specific keys behind this hook lets
+        :func:`_lower_composite` stay layout-agnostic instead of branching per
+        composite class.
+        """
+        return {}
+
     def _resolved_charts(self) -> list:
         """Return charts with shared scales injected per ``resolve``.
 
@@ -909,12 +934,13 @@ class _CompositeBase(_ChartLike):
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) for the interactive renderer.
 
-        Routes HConcat/VConcat through the one-call Rust composite entry
-        (``render_composite_interactive``) when the composition lowers cleanly
-        (see :func:`_lower_linear_composite`), otherwise falls back to the
-        per-child scene-merge path.
+        Routes HConcat/VConcat/ConcatChart through the one-call Rust composite
+        entry (``render_composite_interactive``) when the composition lowers
+        cleanly (see :func:`_lower_composite`), otherwise falls back to the
+        per-child scene-merge path (each subclass supplies its own
+        ``_render_interactive_scene_merge``).
         """
-        lowered = _lower_linear_composite(self, auto_tooltips=True)
+        lowered = _lower_composite(self, auto_tooltips=True)
         if lowered is not None:
             from ferrum._core import render_composite_interactive
 
@@ -940,12 +966,13 @@ class _CompositeBase(_ChartLike):
     def to_svg(self) -> str:
         """Render the concatenated charts to an SVG string.
 
-        Routes HConcat/VConcat through the one-call Rust composite entry
-        (``render_composite_svg``) when the composition lowers cleanly (see
-        :func:`_lower_linear_composite`), otherwise falls back to the
-        string-compositor path.
+        Routes HConcat/VConcat/ConcatChart through the one-call Rust composite
+        entry (``render_composite_svg``) when the composition lowers cleanly
+        (see :func:`_lower_composite`), otherwise falls back to the
+        string-compositor path (each subclass supplies its own
+        ``_to_svg_string_compositor``).
         """
-        lowered = _lower_linear_composite(self, auto_tooltips=False)
+        lowered = _lower_composite(self, auto_tooltips=False)
         if lowered is not None:
             from ferrum._core import render_composite_svg
 
@@ -2150,6 +2177,14 @@ class ConcatChart(_CompositeBase):
 
     __slots__ = ("_columns", "_resolve")
 
+    # ``wrap`` layout on the one-call Rust composite path: children flow
+    # left-to-right into rows of ``ncols``, the last row may be partial (no
+    # empty-cell concept — sparse holes stay on the old path).  Static +
+    # interactive dispatch and the lowering gate are inherited from
+    # ``_CompositeBase``; only the ``ncols`` field and the string/scene-merge
+    # fallbacks (used when a child cannot lower) are specialised here.
+    _composite_layout = "wrap"
+
     def __init__(
         self,
         *charts,
@@ -2171,11 +2206,20 @@ class ConcatChart(_CompositeBase):
         """Number of columns in the wrapping grid, or None for single-row."""
         return self._columns
 
-    def _render_interactive(self) -> tuple[str, bytes]:
-        """Render to (scene_json, packed_data) by merging child scenes in a grid."""
+    def _wrap_ncols(self) -> int:
+        """Resolve the effective column count for the wrapping grid (>= 1)."""
+        n_panels = len(self.charts)
+        n_cols = self._columns if self._columns is not None else n_panels
+        return max(1, min(n_cols, n_panels))
+
+    def _composite_node_fields(self) -> dict:
+        """Emit the ``wrap`` layout's ``ncols`` for the composite render-tree."""
+        return {"ncols": self._wrap_ncols()}
+
+    def _render_interactive_scene_merge(self) -> tuple[str, bytes]:
+        """Merge per-child scenes into a grid (string-merge fallback path)."""
         render_charts = [self._inject_parent_config(c) for c in self._resolved_charts()]
-        n_cols = self._columns if self._columns is not None else len(render_charts)
-        n_cols = min(n_cols, len(render_charts))
+        n_cols = min(self._wrap_ncols(), len(render_charts))
         return _merge_child_scenes_grid(
             render_charts,
             self.spacing,
@@ -2183,19 +2227,12 @@ class ConcatChart(_CompositeBase):
             figure_chrome=self._figure_chrome_kwargs(),
         )
 
-    def to_svg(self) -> str:
-        """Render the concatenated charts to an SVG string.
-
-        Returns
-        -------
-        str
-            SVG markup with charts arranged in a wrapping grid.
-        """
+    def _to_svg_string_compositor(self) -> str:
+        """Compose per-child SVGs into a wrapping grid (string-compositor fallback)."""
         from ferrum._core import compose_svg_grid
 
         n_panels = len(self.charts)
-        n_cols = self._columns if self._columns is not None else n_panels
-        n_cols = min(n_cols, n_panels)
+        n_cols = self._wrap_ncols()
         n_rows = (n_panels + n_cols - 1) // n_cols
 
         # Apply resolve (shared scales) and composition-level config before rendering

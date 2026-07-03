@@ -27,7 +27,7 @@ from ferrum.composition import (
     HConcatChart,
     VConcatChart,
     _composite_resolve_field,
-    _lower_linear_composite,
+    _lower_composite,
 )
 
 from tests._svg_extents import y_axis_extents
@@ -221,7 +221,7 @@ def test_no_resolve_concat_renders_single_svg_with_panels(small_df):
 
 def test_hconcat_lowers_to_composite_tree(small_chart, large_chart):
     """An HConcat of flat charts lowers to a two-leaf hconcat tree."""
-    lowered = _lower_linear_composite(small_chart | large_chart, auto_tooltips=False)
+    lowered = _lower_composite(small_chart | large_chart, auto_tooltips=False)
     assert lowered is not None
     assert lowered.tree["kind"] == "composite"
     assert lowered.tree["layout"] == "hconcat"
@@ -230,13 +230,13 @@ def test_hconcat_lowers_to_composite_tree(small_chart, large_chart):
 
 
 def test_vconcat_lowers_with_vconcat_layout(small_chart, large_chart):
-    lowered = _lower_linear_composite(small_chart & large_chart, auto_tooltips=False)
+    lowered = _lower_composite(small_chart & large_chart, auto_tooltips=False)
     assert lowered is not None
     assert lowered.tree["layout"] == "vconcat"
 
 
 def test_resolve_maps_onto_tree_resolve_field(small_chart, large_chart):
-    lowered = _lower_linear_composite(
+    lowered = _lower_composite(
         HConcatChart([small_chart, large_chart], resolve={"y": "shared"}),
         auto_tooltips=False,
     )
@@ -245,7 +245,7 @@ def test_resolve_maps_onto_tree_resolve_field(small_chart, large_chart):
 
 
 def test_root_chrome_lands_on_tree_root(small_chart, large_chart):
-    lowered = _lower_linear_composite(
+    lowered = _lower_composite(
         (small_chart & large_chart).properties(title="T", subtitle="S", caption="C"),
         auto_tooltips=False,
     )
@@ -258,7 +258,7 @@ def test_root_chrome_lands_on_tree_root(small_chart, large_chart):
 def test_nested_linear_composite_lowers_recursively(small_chart, large_chart):
     """(a | b) & c lowers to a nested composite tree (vconcat of hconcat + leaf)."""
     nested = (small_chart | large_chart) & small_chart
-    lowered = _lower_linear_composite(nested, auto_tooltips=False)
+    lowered = _lower_composite(nested, auto_tooltips=False)
     assert lowered is not None
     assert lowered.tree["layout"] == "vconcat"
     kinds = [c["kind"] for c in lowered.tree["children"]]
@@ -272,12 +272,12 @@ def test_heterogeneous_child_config_falls_back(small_chart, large_chart):
 
     The uniform composite entry applies one ``chart_config`` to every leaf, so
     a per-child annotation would be lost; the composition keeps the legacy
-    string-compositor path (``_lower_linear_composite`` returns ``None``), and
+    string-compositor path (``_lower_composite`` returns ``None``), and
     still renders valid SVG.
     """
     annotated = small_chart + annotate_hline(3.0)
     composite = annotated | large_chart
-    assert _lower_linear_composite(composite, auto_tooltips=False) is None
+    assert _lower_composite(composite, auto_tooltips=False) is None
     svg = composite.to_svg()
     assert svg.startswith("<svg")
 
@@ -285,7 +285,7 @@ def test_heterogeneous_child_config_falls_back(small_chart, large_chart):
 def test_configure_layer_composite_falls_back(small_chart, large_chart):
     """A composition-level configure layer keeps the old path (default chrome)."""
     composite = (small_chart | large_chart).configure_axis(label_angle=-45)
-    assert _lower_linear_composite(composite, auto_tooltips=False) is None
+    assert _lower_composite(composite, auto_tooltips=False) is None
     assert composite.to_svg().startswith("<svg")
 
 
@@ -294,7 +294,7 @@ def test_non_xy_shared_channel_falls_back(small_df):
     a = fm.Chart(small_df).mark_point().encode(x="x", y="y", color="x")
     b = fm.Chart(small_df).mark_point().encode(x="x", y="y", color="x")
     composite = HConcatChart([a, b], resolve={"color": "shared"})
-    assert _lower_linear_composite(composite, auto_tooltips=False) is None
+    assert _lower_composite(composite, auto_tooltips=False) is None
     assert composite.to_svg().startswith("<svg")
 
 
@@ -308,7 +308,7 @@ def test_hconcat_interactive_routes_through_composite_entry(small_chart, large_c
     import json
 
     composite = small_chart | large_chart
-    assert _lower_linear_composite(composite, auto_tooltips=True) is not None
+    assert _lower_composite(composite, auto_tooltips=True) is not None
     scene_json, packed = composite._render_interactive()
     scene = json.loads(scene_json)
     assert len(scene["panels"]) == 2
