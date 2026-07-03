@@ -80,6 +80,15 @@ struct LoadedScene {
     data: SceneData,
     buffers: GpuBuffers,
     scene: ferrum_scene::SceneGraph,
+    /// Interaction geometry: `scene.panels` with every panel's `layout_scale`
+    /// baked into `plot_area`/`clip`/mark-node coordinates
+    /// (`scene_load::bake_panels`) — the single source of truth every
+    /// interaction consumer (hit-test, spatial index, brush/crossfilter
+    /// reprojection, the per-panel scissor upload) reads instead of
+    /// `scene.panels` directly (D4a amendment addendum). Identity for every
+    /// panel today; only a ratio-fitted composite panel actually differs from
+    /// `scene.panels`.
+    baked_panels: Vec<ferrum_scene::Panel>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -112,6 +121,12 @@ impl WasmRenderer {
         let text_json = text_json::build_overlay_json(&data);
         let buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &data);
         let clear_color = data.background;
+        // Interaction-geometry single source of truth (D4a amendment
+        // addendum): bake every panel's `layout_scale` into its geometry
+        // once here, so hit-testing, the spatial index, and brush/crossfilter
+        // reprojection all read the same final on-screen positions the GPU
+        // frame renders — never `scene.panels` directly.
+        let baked_panels = scene_load::bake_panels(&scene);
 
         self.selections = scene.selections.clone();
         self.interaction_state = InteractionState::new(&self.selections);
@@ -119,8 +134,8 @@ impl WasmRenderer {
         self.zoom = ZoomPanState::new(scene.panels.len(), &self.interaction);
         // Build spatial index over all panels for O(log n) hit-testing.
         // Pass scene data so packed instances (>= 1000 marks) are also indexed.
-        self.spatial_index = Some(SpatialIndex::build_with_packed(&scene.panels, Some(&data)));
-        self.loaded = Some(LoadedScene { data, buffers, scene });
+        self.spatial_index = Some(SpatialIndex::build_with_packed(&baked_panels, Some(&data)));
+        self.loaded = Some(LoadedScene { data, buffers, scene, baked_panels });
 
         if let Some(ref loaded) = self.loaded {
             render::render_frame(&self.gpu, &self.pipelines, &loaded.buffers, clear_color)
@@ -217,8 +232,14 @@ impl WasmRenderer {
                 let final_data = tr.new_data.clone();
                 let final_buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &final_data);
                 let final_scene = tr.new_scene.clone();
+                let final_baked_panels = scene_load::bake_panels(&final_scene);
                 self.transition = None;
-                self.loaded = Some(LoadedScene { data: final_data, buffers: final_buffers, scene: final_scene });
+                self.loaded = Some(LoadedScene {
+                    data: final_data,
+                    buffers: final_buffers,
+                    scene: final_scene,
+                    baked_panels: final_baked_panels,
+                });
             }
         }
         Ok(())
@@ -264,9 +285,10 @@ impl WasmRenderer {
         };
 
         // Update selection state via Rust hit-test (authoritative — operates on actual scene data).
-        // Pass spatial index for O(log n) circle/rect hit-testing.
+        // Pass spatial index for O(log n) circle/rect hit-testing. Baked
+        // geometry (D4a amendment addendum) — see `LoadedScene::baked_panels`.
         self.interaction_state.handle_click_with_index(
-            &loaded.scene.panels,
+            &loaded.baked_panels,
             &self.selections,
             x as f64,
             y as f64,
@@ -397,9 +419,10 @@ impl WasmRenderer {
         let Some(loaded) = &self.loaded else { return "{}".to_string(); };
 
         // Spatial-index + scene-graph hit-test (covers both packed and
-        // non-packed batches via the R-tree built in load_scene).
+        // non-packed batches via the R-tree built in load_scene). Baked
+        // geometry (D4a amendment addendum).
         if let Some(hr) = hit_test::hit_test_nearest_with_index(
-            &loaded.scene.panels, x as f64, y as f64, &self.zoom,
+            &loaded.baked_panels, x as f64, y as f64, &self.zoom,
             self.spatial_index.as_ref(),
         ) {
             return serde_json::json!({
@@ -548,7 +571,8 @@ impl WasmRenderer {
             return Ok("{}".to_string());
         };
         conditional::apply_conditionals_and_render(
-            &loaded.scene,
+            &loaded.baked_panels,
+            &loaded.scene.interaction.conditionals,
             &loaded.data,
             &mut loaded.buffers,
             &self.interaction_state,
@@ -598,10 +622,13 @@ impl WasmRenderer {
         };
 
         // Start from the base instance buffers so crossfilter dimming composes
-        // cleanly with any declared conditionals applied below.
+        // cleanly with any declared conditionals applied below. Baked
+        // geometry throughout (D4a amendment addendum) — `src.plot_area`/
+        // `src.coord` below feed the pixel-space reprojection, so they must
+        // already be at final on-screen position for a ratio-fitted panel.
         let conditionals = &loaded.scene.interaction.conditionals;
         let updates = conditional::resolve_conditionals_with_packed(
-            &loaded.scene.panels,
+            &loaded.baked_panels,
             conditionals,
             &self.interaction_state.selections,
             &loaded.data.circle_instances,
@@ -611,13 +638,13 @@ impl WasmRenderer {
         let mut circles = updates.circle_instances;
         let mut rects = updates.rect_instances;
 
-        let source = loaded.scene.panels.get(source_panel);
+        let source = loaded.baked_panels.get(source_panel);
         for &target_panel in &filter_targets {
             if target_panel == source_panel {
                 continue;
             }
             let (Some(src), Some(tgt)) =
-                (source, loaded.scene.panels.get(target_panel))
+                (source, loaded.baked_panels.get(target_panel))
             else {
                 continue;
             };
@@ -642,7 +669,7 @@ impl WasmRenderer {
 
             let sel = SelectionState::Interval { x_range, y_range };
             conditional::apply_crossfilter_to_panel(
-                &loaded.scene.panels,
+                &loaded.baked_panels,
                 target_panel,
                 &sel,
                 conditional::CROSSFILTER_DIM_OPACITY,
@@ -709,9 +736,12 @@ impl WasmRenderer {
         let loaded = self.loaded.as_ref()?;
         let mut rendered_panel = None;
         for (panel, axis, brush) in bindings {
+            // Baked geometry (D4a amendment addendum): `src.plot_area`/
+            // `src.coord` feed `rescale_affine_cross_panel`'s pixel-space
+            // reprojection below.
             let (Some(src), Some(tgt)) = (
-                loaded.scene.panels.get(source_panel),
-                loaded.scene.panels.get(panel),
+                loaded.baked_panels.get(source_panel),
+                loaded.baked_panels.get(panel),
             ) else {
                 continue;
             };
@@ -768,12 +798,15 @@ impl WasmRenderer {
     /// Delegates to `render::upload_transform_and_render`.
     fn upload_transform_and_render(&mut self, panel_id: usize) -> Result<String, JsValue> {
         let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
+        // Baked geometry (D4a amendment addendum): the scissor/plot_area this
+        // reads must already be at final on-screen position for a
+        // ratio-fitted panel.
         render::upload_transform_and_render(
             &self.gpu,
             &self.pipelines,
             &loaded.buffers,
             &loaded.data,
-            &loaded.scene.panels,
+            &loaded.baked_panels,
             &self.interaction,
             &self.zoom.transforms,
             panel_id,

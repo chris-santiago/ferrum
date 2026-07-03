@@ -852,6 +852,61 @@ fn apply_layout_scale_to_packed_instances(
     }
 }
 
+// ── Interaction-geometry single source of truth (D4a amendment addendum) ───
+//
+// This scene loader bakes each panel's `layout_scale` into GPU mesh vertices
+// and packed instances (the block above) at load time, so the RENDERED frame
+// is always at final on-screen coordinates. But `hit_test.rs`, `lib.rs`
+// (brush/crossfilter), `spatial_index.rs`, and
+// `render.rs::upload_transform_and_render` historically read `scene.panels`
+// directly — the RAW, un-baked geometry the core emits for ratio-fitted
+// panels (native coordinates + a non-identity `layout_scale`, per
+// `composite_render.rs`'s placement contract). For every panel today
+// (identity `layout_scale`) raw and baked are numerically the same, so this
+// was invisible; a non-identity `layout_scale` panel would silently hit-test,
+// brush, and scissor against the WRONG (native, not on-screen) rectangle.
+//
+// `bake_panels` is the single place that produces the corrected geometry:
+// every one of the four consumers above now takes a `&[Panel]` that is
+// EITHER `&scene.panels` (identity case, unchanged) OR the output of this
+// function — never raw panels directly when a non-identity `layout_scale`
+// might be present. `WasmRenderer::load_scene` (`lib.rs`) computes this once
+// per scene load and stores it on `LoadedScene`, so no consumer re-derives it.
+//
+// No double-apply: this only rewrites `plot_area`/`clip`/mark-batch `nodes`.
+// Packed batches ship with already-EMPTY `nodes` (packed instance bytes are
+// cleared server-side and baked separately by
+// `apply_layout_scale_to_packed_instances` above), so transforming an empty
+// node list here is a no-op — packed geometry is baked exactly once, not
+// twice.
+/// Bake every panel's `layout_scale` into its `plot_area`, `clip`, and
+/// (non-packed) mark-batch node coordinates.
+///
+/// At identity `layout_scale` (every flat/faceted panel today, and every
+/// composite panel placed by pure translation — see `composite_render.rs`'s
+/// `place_panel`) this is a plain `Panel::clone()`, byte/pixel-identical to
+/// reading `scene.panels` directly. Only a ratio-fitted panel (non-identity
+/// `layout_scale`) is actually rewritten.
+pub fn bake_panels(scene: &SceneGraph) -> Vec<Panel> {
+    scene
+        .panels
+        .iter()
+        .map(|panel| {
+            let ls = &panel.layout_scale;
+            if ls.is_identity() {
+                return panel.clone();
+            }
+            let mut baked = panel.clone();
+            baked.plot_area = transform_rect(&panel.plot_area, ls);
+            baked.clip = transform_rect(&panel.clip, ls);
+            for batch in &mut baked.marks {
+                batch.nodes = transform_nodes(&batch.nodes, ls);
+            }
+            baked
+        })
+        .collect()
+}
+
 pub fn load_scene(scene: &SceneGraph) -> SceneData {
     load_scene_with_packed(scene, &[])
 }
@@ -6096,6 +6151,249 @@ mod tests {
             .and_then(|cmd| cmd.plot_area)
             .expect("panel 0's mark draw command should carry a plot_area");
         assert_eq!(panel0_plot_area, [0.0, 0.0, 100.0, 100.0]);
+    }
+
+    // ── Task 5c: interaction-geometry single source of truth (D4a amendment
+    // addendum) — `bake_panels` must produce the SAME baked geometry the GPU
+    // load path already bakes internally, for every consumer (hit_test.rs,
+    // lib.rs brush/crossfilter, spatial_index.rs,
+    // render.rs::upload_transform_and_render) that reads panel geometry
+    // outside the GPU mesh/instance pipeline.
+
+    #[test]
+    fn bake_panels_matches_gpu_bake_for_non_identity_and_is_noop_at_identity() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, InteractionConfig, MarkBatch, MarkBatchKind, Panel, Rect,
+            SceneGraph,
+        };
+
+        let ls = gap_fix_layout_scale();
+        let circle_style = gap_fix_fill_stroke(1.0, 0.0);
+
+        let mk_panel = |id: usize, layout_scale: LayoutScale| Panel {
+            id,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![SceneNode::Circle {
+                    cx: 3.0,
+                    cy: 4.0,
+                    r: 2.0,
+                    style: circle_style.clone(),
+                }],
+                data_indices: None,
+                tooltips: None,
+                hrefs: None,
+                descriptions: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+            layout_scale,
+        };
+
+        let scene = SceneGraph {
+            width: 200.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![mk_panel(0, LayoutScale::identity()), mk_panel(1, ls)],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let baked = bake_panels(&scene);
+        assert_eq!(baked.len(), 2);
+
+        // Panel 0 (identity): numerically untouched — the byte/pixel
+        // stability anchor for every flat/faceted (and pure-translate
+        // composite) panel today.
+        assert_eq!(baked[0].plot_area, scene.panels[0].plot_area);
+        assert_eq!(baked[0].marks[0].nodes, scene.panels[0].marks[0].nodes);
+
+        // Panel 1 (non-identity): plot_area and mark-node coordinates must
+        // match the SAME values the GPU-mesh bake path produces (pinned just
+        // above by `load_scene_bakes_non_identity_layout_scale_only_for_the_
+        // carrying_panel`: plot_area (10, -5, 200, 800), circle at
+        // (16, 27, r=8)) — one bake implementation shared by both paths, not
+        // two that could drift.
+        assert_eq!(
+            baked[1].plot_area,
+            Rect { x: 10.0, y: -5.0, w: 200.0, h: 800.0 }
+        );
+        match &baked[1].marks[0].nodes[0] {
+            SceneNode::Circle { cx, cy, r, .. } => {
+                assert!((cx - 16.0).abs() < 1e-9, "cx: got {cx}");
+                assert!((cy - 27.0).abs() < 1e-9, "cy: got {cy}");
+                assert!((r - 8.0).abs() < 1e-9, "r: got {r}");
+            }
+            other => panic!("expected Circle, got {other:?}"),
+        }
+
+        // `bake_panels` must not mutate the source scene in place.
+        assert_eq!(
+            scene.panels[1].plot_area,
+            Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }
+        );
+    }
+
+    #[test]
+    fn bake_panels_preserves_panel_count_and_order() {
+        use ferrum_scene::{CoordKind, InteractionConfig, Panel, Rect, SceneGraph};
+
+        let mk_panel = |id: usize| Panel {
+            id,
+            plot_area: Rect { x: id as f64 * 10.0, y: 0.0, w: 50.0, h: 50.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 50.0, h: 50.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
+        };
+
+        let scene = SceneGraph {
+            width: 400.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![mk_panel(0), mk_panel(1), mk_panel(2)],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let baked = bake_panels(&scene);
+        assert_eq!(baked.len(), 3);
+        for (i, panel) in baked.iter().enumerate() {
+            assert_eq!(panel.id, i, "bake_panels must preserve id/order at index {i}");
+            assert_eq!(panel.plot_area.x, i as f64 * 10.0);
+        }
+    }
+
+    // ── Task 5c gap-fix (spec-review item 3): FA-18 per-panel transform
+    // composes on baked coords, not a second layout_scale application ───────
+    //
+    // `zoom_pan::select_panel_transform` (FA-18) selects the reactive-rescale
+    // affine the render loop applies per panel at draw time, on top of the
+    // ALREADY-baked mesh/instance geometry `bake_panels`/`load_scene`
+    // produce. This test proves the composition is single-bake:
+    // `screen_pos == zoom_affine(baked_position)`, not
+    // `zoom_affine(layout_scale(baked_position))` (a double-apply bug).
+    #[test]
+    fn fa18_per_panel_transform_composes_on_baked_coords_not_double_baked() {
+        use crate::zoom_pan::{select_panel_transform, Affine2};
+        use ferrum_scene::{
+            BlendMode, CoordKind, InteractionConfig, MarkBatch, MarkBatchKind, Panel, Rect,
+            SceneGraph,
+        };
+
+        let ls = gap_fix_layout_scale(); // sx=2, sy=8, tx=10, ty=-5
+        let panel = Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![SceneNode::Circle {
+                    cx: 3.0,
+                    cy: 4.0,
+                    r: 2.0,
+                    style: gap_fix_fill_stroke(1.0, 0.0),
+                }],
+                data_indices: None,
+                tooltips: None,
+                hrefs: None,
+                descriptions: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+            layout_scale: ls,
+        };
+        let scene = SceneGraph {
+            width: 200.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![panel],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        // Bake once, as `load_scene`/`bake_panels` do at scene-load time.
+        let baked = bake_panels(&scene);
+        let baked_circle = match &baked[0].marks[0].nodes[0] {
+            SceneNode::Circle { cx, cy, .. } => (*cx, *cy),
+            other => panic!("expected Circle, got {other:?}"),
+        };
+        assert!((baked_circle.0 - 16.0).abs() < 1e-9, "got {}", baked_circle.0);
+        assert!((baked_circle.1 - 27.0).abs() < 1e-9, "got {}", baked_circle.1);
+
+        // A reactive rescale on panel 0 (matching `apply_reactive_rescale`'s
+        // output shape, e.g. an x-only domain rescale): sx=3, tx=100; sy/ty
+        // are also non-identity here to exercise both axes.
+        let transforms = vec![Affine2 { sx: 3.0, sy: 3.0, tx: 100.0, ty: 50.0 }];
+        let t = select_panel_transform(&transforms, 0);
+
+        // Correct composition: `t` applies to the ALREADY-baked position
+        // (this is what the GPU vertex shader and `hit_test`'s inverse-apply
+        // both assume) — the single source of truth this task establishes.
+        let correct_screen_pos = t.apply(baked_circle.0, baked_circle.1);
+        assert!((correct_screen_pos.0 - 148.0).abs() < 1e-9, "got {}", correct_screen_pos.0);
+        assert!((correct_screen_pos.1 - 131.0).abs() < 1e-9, "got {}", correct_screen_pos.1);
+
+        // A double-bake bug would instead apply `layout_scale` a SECOND time
+        // on the already-baked position before the zoom affine.
+        let double_baked = ls.apply(baked_circle.0, baked_circle.1);
+        let double_baked_screen_pos = t.apply(double_baked.0, double_baked.1);
+
+        assert!(
+            (correct_screen_pos.0 - double_baked_screen_pos.0).abs() > 1.0
+                || (correct_screen_pos.1 - double_baked_screen_pos.1).abs() > 1.0,
+            "fixture must be discriminating: single-bake and double-bake screen \
+             positions must differ substantially"
+        );
     }
 }
 

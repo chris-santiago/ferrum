@@ -54,7 +54,7 @@ use super::composite::{
 use super::compositor::uniquify_clip_ids;
 use super::config::RenderConfig;
 use super::figure_chrome::{title_nodes, FigureChrome};
-use super::{prepare, scene_build, RenderError};
+use super::{prepare, scene_build, RenderError, RenderWarning};
 use crate::spec::composite::{CompositeLayout, CompositeNode};
 
 /// Default pixel gap between adjacent cells, matching the composition binding's
@@ -109,6 +109,16 @@ pub(crate) enum CompositeRenderError {
         index: usize,
         source: RenderError,
     },
+    /// A `leaf` node's `data` index did not select a valid entry in the
+    /// caller's Arrow payload list — the PyO3 entry boundary check (Task 5c),
+    /// surfaced before any leaf is rendered so a malformed tree fails fast
+    /// with the offending leaf pinpointed, never a Rust-side panic.
+    LeafDataIndexOutOfBounds {
+        kind: &'static str,
+        index: usize,
+        data: usize,
+        payload_count: usize,
+    },
 }
 
 impl std::fmt::Display for CompositeRenderError {
@@ -122,6 +132,11 @@ impl std::fmt::Display for CompositeRenderError {
             Self::LeafRender { kind, index, source } => {
                 write!(f, "failed to render composite {kind} leaf #{index}: {source}")
             }
+            Self::LeafDataIndexOutOfBounds { kind, index, data, payload_count } => write!(
+                f,
+                "composite {kind} leaf #{index}: data index {data} out of bounds \
+                 ({payload_count} payload(s) provided)"
+            ),
         }
     }
 }
@@ -138,22 +153,22 @@ impl From<CompositeResolveError> for CompositeRenderError {
 // Entry point
 // ---------------------------------------------------------------------------
 
-/// Render a validated composite tree into one [`SceneGraph`].
+/// Render a validated composite tree into one [`SceneGraph`], plus every
+/// leaf's [`RenderWarning`]s aggregated in leaf pre-order.
 ///
 /// `leaves` must be the tree's leaves in pre-order (the order
 /// [`flatten_leaf_specs`] produces). Precondition: `tree` has passed
 /// [`CompositeNode::validate`] (the sole Python→Rust construction path enforces
 /// this; the PyO3 entry in Task 5c validates before calling).
 ///
-/// Not yet reachable from a `pub` root — the `render_composite_svg` /
-/// `render_composite_interactive` PyO3 entries land in Task 5c. The scoped allow
-/// clears once those roots exist; kept targeted (this one function) rather than a
-/// module blanket so every helper it reaches is lint-checked normally.
-#[allow(dead_code)] // reachable via the Task 5c PyO3 entries (render_composite_{svg,interactive})
+/// Reachable from the `render_composite_svg` / `render_composite_interactive`
+/// PyO3 entries (`render/binding.rs`) — mirrors `render_scene_json`'s tuple
+/// return (this crate's idiom for "graph + side channel" outputs) rather than
+/// introducing a bespoke output struct for a single extra field.
 pub(crate) fn render_composite_scene(
     tree: &CompositeNode,
     leaves: &[CompositeLeafInput<'_>],
-) -> Result<SceneGraph, CompositeRenderError> {
+) -> Result<(SceneGraph, Vec<RenderWarning>), CompositeRenderError> {
     let n = flatten_leaf_specs(tree).len();
     if leaves.len() != n {
         return Err(CompositeRenderError::LeafCountMismatch {
@@ -194,10 +209,11 @@ pub(crate) fn render_composite_scene(
     // fully-empty context passes `None` so non-shared leaves render byte-identical
     // to a standalone chart.
     let mut leaf_scenes: Vec<SceneGraph> = Vec::with_capacity(n);
+    let mut warnings: Vec<RenderWarning> = Vec::new();
     for (i, leaf) in leaves.iter().enumerate() {
         let ctx = &contexts[i];
         let ctx_opt = if ctx.x.is_some() || ctx.y.is_some() { Some(ctx) } else { None };
-        let mut scene = render_leaf(leaf, ctx_opt).map_err(|source| {
+        let (mut scene, leaf_warnings) = render_leaf(leaf, ctx_opt).map_err(|source| {
             CompositeRenderError::LeafRender { kind: "leaf", index: i, source }
         })?;
         // Uniquify each leaf's raw-fragment clip ids exactly once, keyed by the
@@ -206,6 +222,9 @@ pub(crate) fn render_composite_scene(
         // global panel renumber below).
         uniquify_scene_raw_clips(&mut scene, i);
         leaf_scenes.push(scene);
+        // Aggregated in leaf pre-order (the same order `leaves`/`flatten_leaf_specs`
+        // produce), matching `render_svg`'s single-scene warning contract.
+        warnings.extend(leaf_warnings);
     }
 
     // Pass 2/3 (place + merge): walk the tree, placing each leaf scene into the
@@ -225,16 +244,27 @@ pub(crate) fn render_composite_scene(
         );
     }
 
-    Ok(placed.scene)
+    Ok((placed.scene, warnings))
 }
 
 /// Render one leaf standalone (transforms → layout → scene) with an optional
 /// resolved-domain context threaded through the D4b seam. Mirrors `render_svg`'s
-/// prepare-and-layout → build-scene sequence.
+/// prepare-and-layout → build-scene sequence, returning the leaf's warnings
+/// alongside its scene rather than dropping `PipelineOutput::warnings` when
+/// its owning `po` goes out of scope (the bug this fix closes).
 fn render_leaf(
     leaf: &CompositeLeafInput<'_>,
     ctx: Option<&LeafScaleContext>,
-) -> Result<SceneGraph, RenderError> {
+) -> Result<(SceneGraph, Vec<RenderWarning>), RenderError> {
+    // `prepare_and_layout` has no viewport guard of its own — `render_svg`/
+    // `render_scene_json` each check this before calling it; a composite leaf
+    // bypasses those entries, so the check is repeated here.
+    if leaf.viewport.width <= 0.0 || leaf.viewport.height <= 0.0 {
+        return Err(RenderError::InvalidViewport {
+            width: leaf.viewport.width,
+            height: leaf.viewport.height,
+        });
+    }
     let mut po = super::prepare_and_layout(
         leaf.spec,
         leaf.batch,
@@ -243,7 +273,7 @@ fn render_leaf(
         leaf.chart_config,
         ctx,
     )?;
-    scene_build::build_scene(
+    let scene = scene_build::build_scene(
         leaf.spec,
         &po.prep,
         &po.layout,
@@ -252,7 +282,8 @@ fn render_leaf(
         &mut po.warnings,
         leaf.chart_config,
         ctx,
-    )
+    )?;
+    Ok((scene, po.warnings))
 }
 
 // ---------------------------------------------------------------------------
@@ -1150,7 +1181,7 @@ mod tests {
         let h0 = hold();
         let h1 = hold();
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let scene = render_composite_scene(&tree, &leaves).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
         assert_eq!(scene.panels.len(), 2, "two leaves → two panels");
         // Panels globally renumbered 0..N in pre-order.
         assert_eq!(scene.panels[0].id, 0);
@@ -1178,7 +1209,7 @@ mod tests {
             leaf_input(&h[1], 200.0, 150.0),
             leaf_input(&h[2], 200.0, 150.0),
         ];
-        let scene = render_composite_scene(&tree, &leaves).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
         assert_eq!(scene.panels.len(), 3);
         let ids: Vec<usize> = scene.panels.iter().map(|p| p.id).collect();
         assert_eq!(ids, vec![0, 1, 2], "panels renumbered 0..N pre-order");
@@ -1198,7 +1229,7 @@ mod tests {
         let h1 = hold();
         // Same native size so the ratio (not native disparity) drives scaling.
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let scene = render_composite_scene(&tree, &leaves).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
         assert_eq!(scene.panels.len(), 2);
         // Row 0 dominant share → identity (native). Row 1 shrunk → non-identity.
         assert!(scene.panels[0].layout_scale.is_identity(), "row0 should be native");
@@ -1218,10 +1249,10 @@ mod tests {
 
         // Baseline: same tree without chrome.
         let bare = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
-        let bare_scene = render_composite_scene(&bare, &leaves).unwrap();
+        let (bare_scene, _warnings) = render_composite_scene(&bare, &leaves).unwrap();
         let bare_y = bare_scene.panels[0].plot_area.y;
 
-        let scene = render_composite_scene(&tree, &leaves).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
         // A title band was reserved: canvas grew and panels shifted down.
         assert!(scene.height > bare_scene.height, "chrome must grow the canvas height");
         let header_h = scene.height - bare_scene.height;
@@ -1256,7 +1287,7 @@ mod tests {
             resolve.x = crate::layout::facet::ResolveMode::Shared;
         }
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let scene = render_composite_scene(&tree, &leaves).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
 
         let dom = |p: &Panel| match &p.coord {
             ferrum_scene::CoordKind::Cartesian { x_domain, .. } => *x_domain,
@@ -1339,7 +1370,7 @@ mod tests {
 
         let tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let scene = render_composite_scene(&tree, &leaves).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
 
         let raw_svgs: Vec<&str> = scene
             .legend
@@ -1452,7 +1483,7 @@ mod tests {
         let h0 = hold();
         let h1 = hold();
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let scene = render_composite_scene(&tree, &leaves).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
 
         assert_eq!(scene.panels.len(), 2);
         // Panel ids are assigned by `renumber_panels` in pre-order BEFORE
@@ -1467,6 +1498,69 @@ mod tests {
         assert_eq!(
             scene.panels[0].plot_area, scene.panels[1].plot_area,
             "overlay children share one rect; only vec order encodes z-order"
+        );
+    }
+
+    // -- D4c: packed-buffer panel indexing (render_composite_interactive seam)
+
+    /// The `render_composite_interactive` PyO3 entry (Task 5c, `binding.rs`)
+    /// wires `render_composite_scene` directly into
+    /// `pack_instances::extract_packed_bytes`. `extract_packed_bytes` derives
+    /// its packed header's `panel_idx` from `scene.panels.iter_mut().
+    /// enumerate()` — so the D4c contract ("panels numbered 0..N flat across
+    /// the whole composite scene ... packed headers written at final
+    /// positions ... no post-hoc header rewrite exists anywhere") holds
+    /// automatically PROVIDED `render_composite_scene` has already renumbered
+    /// panels into the one merged `SceneGraph` before extraction runs — which
+    /// is exactly what this test pins end to end, using a real >=1000-node
+    /// batch so packing actually triggers (a single merged-scene assertion
+    /// alone cannot distinguish "renumbered correctly" from "never packed").
+    #[test]
+    fn packed_headers_use_final_flat_panel_indices_d4c() {
+        // Leaf 0: a small (unpacked) 3-point batch. Leaf 1: 1200 points —
+        // above `pack_instances::PACK_THRESHOLD` (1000) — so its Point batch
+        // is extracted as packed binary instances.
+        let n = 1200;
+        let xs: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let ys: Vec<f64> = (0..n).map(|i| (i % 50) as f64).collect();
+        let h0 = hold();
+        let h1 = LeafHold { batch: xy_batch(&xs, &ys), ..hold() };
+
+        let tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (mut scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
+
+        assert_eq!(scene.panels.len(), 2);
+        // Panel 1 (leaf 1) is placed to the right of panel 0 by the hconcat
+        // layout — its FINAL composite-space x, not leaf 1's own native
+        // (x starting at 0) standalone position.
+        let final_panel1_x = scene.panels[1].plot_area.x;
+        assert!(
+            final_panel1_x > scene.panels[0].plot_area.x,
+            "panel 1 must be placed to the right of panel 0 in the merged scene"
+        );
+
+        let packed = crate::render::pack_instances::extract_packed_bytes(&mut scene);
+        assert!(!packed.is_empty(), "leaf 1's 1200-point batch must trigger packing");
+
+        // Header layout (pack_instances.rs): [panel_idx: u32][batch_idx: u32]
+        // [kind: u32][count: u32][flags: u32], all little-endian.
+        let panel_idx = u32::from_le_bytes(packed[0..4].try_into().unwrap());
+        let count = u32::from_le_bytes(packed[12..16].try_into().unwrap());
+        assert_eq!(
+            panel_idx, 1,
+            "packed header must name panel 1 (the FINAL flat renumbered index), \
+             not leaf 1's own leaf-local panel 0 — proving no post-hoc header \
+             patch is needed (D4c)"
+        );
+        assert_eq!(count, n as u32, "packed instance count must match the source batch size");
+
+        // The header's panel_idx indexes directly into the merged scene's
+        // panel vec at the SAME position whose plot_area was asserted above —
+        // one flat namespace by construction, not a per-leaf offset table.
+        assert_eq!(
+            scene.panels[panel_idx as usize].plot_area.x, final_panel1_x,
+            "packed header's panel_idx must resolve to the panel carrying the final placement"
         );
     }
 }

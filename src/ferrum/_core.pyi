@@ -958,6 +958,24 @@ def render_interactive(
     config: Any = None,
     chart_config: Any = None,
 ) -> Tuple[str, bytes]: ...
+def render_composite_svg(
+    tree: Any,
+    payloads: Any,
+    *,
+    viewport: Any,
+    theme: Any = None,
+    config: Any = None,
+    chart_config: Any = None,
+) -> str: ...
+def render_composite_interactive(
+    tree: Any,
+    payloads: Any,
+    *,
+    viewport: Any,
+    theme: Any = None,
+    config: Any = None,
+    chart_config: Any = None,
+) -> Tuple[str, bytes]: ...
 def silhouette_samples(x_table: Any, labels: Any, metric: str = "euclidean") -> Any: ...
 def silhouette_score(x_table: Any, labels: Any, metric: str = "euclidean") -> float: ...
 def tsne_embedding(

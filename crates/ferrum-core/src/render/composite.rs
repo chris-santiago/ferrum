@@ -201,14 +201,15 @@ pub(crate) fn resolve_composite_scales(
     Ok(out)
 }
 
-/// Collect the tree's leaf `ChartSpec`s in pre-order — the canonical leaf order
-/// the resolve pass (and Task 5's panel emission) index by. Exposed so the caller
-/// can build [`LeafResolveInput`]s in the matching order without re-deriving the
-/// traversal.
-pub(crate) fn flatten_leaf_specs(tree: &CompositeNode) -> Vec<&ChartSpec> {
-    fn walk<'a>(node: &'a CompositeNode, acc: &mut Vec<&'a ChartSpec>) {
+/// Collect the tree's leaves in pre-order as `(spec, data-index)` pairs — the
+/// canonical leaf order the resolve pass (and Task 5's panel emission) index by.
+/// The PyO3 composite entries pair each leaf's `spec` with the Arrow payload its
+/// `data` index selects; [`flatten_leaf_specs`] is the spec-only projection of
+/// this same traversal.
+pub(crate) fn flatten_leaves(tree: &CompositeNode) -> Vec<(&ChartSpec, usize)> {
+    fn walk<'a>(node: &'a CompositeNode, acc: &mut Vec<(&'a ChartSpec, usize)>) {
         match node {
-            CompositeNode::Leaf { spec, .. } => acc.push(spec),
+            CompositeNode::Leaf { spec, data } => acc.push((spec, *data)),
             CompositeNode::Composite { children, .. } => {
                 for c in children {
                     walk(c, acc);
@@ -219,6 +220,14 @@ pub(crate) fn flatten_leaf_specs(tree: &CompositeNode) -> Vec<&ChartSpec> {
     let mut acc = Vec::new();
     walk(tree, &mut acc);
     acc
+}
+
+/// Collect the tree's leaf `ChartSpec`s in pre-order — the canonical leaf order
+/// the resolve pass (and Task 5's panel emission) index by. Exposed so the caller
+/// can build [`LeafResolveInput`]s in the matching order without re-deriving the
+/// traversal. The spec-only projection of [`flatten_leaves`].
+pub(crate) fn flatten_leaf_specs(tree: &CompositeNode) -> Vec<&ChartSpec> {
+    flatten_leaves(tree).into_iter().map(|(spec, _)| spec).collect()
 }
 
 // ---------------------------------------------------------------------------

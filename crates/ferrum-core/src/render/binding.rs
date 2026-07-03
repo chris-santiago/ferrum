@@ -157,6 +157,207 @@ pub fn render_interactive(
     Ok((json, py_bytes.unbind()))
 }
 
+// ---------------------------------------------------------------------------
+// Composite render bindings (Task 5c)
+// ---------------------------------------------------------------------------
+
+/// Render a composite chart tree (`hconcat`/`vconcat`/`grid`/`wrap`/`overlay`)
+/// to a single SVG string.
+///
+/// Parameters
+/// ----------
+/// tree : dict
+///     A composite tree node: ``{"kind": "leaf", "spec": ChartSpec, "data": int}``
+///     or ``{"kind": "composite", "layout": ..., "children": [...], ...}``. See
+///     ``crate::spec::composite`` for the full wire shape.
+/// payloads : list[pyarrow.RecordBatchReader or compatible]
+///     Arrow data streams, one per leaf's ``data`` index. A leaf's ``data``
+///     field selects its batch from this list by position.
+/// viewport : tuple[float, float]
+///     ``(width, height)`` passed to every leaf's standalone render (the same
+///     contract as ``render_svg``'s ``viewport``).
+/// theme : dict, optional
+///     Sparse theme override dict, applied to every leaf. See ``render_svg``.
+/// config : dict, optional
+///     Render-config dict, applied to every leaf. See ``render_svg``.
+/// chart_config : dict, optional
+///     Per-chart configuration dict, applied to every leaf.
+///
+/// Returns
+/// -------
+/// str
+///     Complete SVG document as a UTF-8 string.
+///
+/// Raises
+/// ------
+/// ValueError
+///     If the tree is malformed (unknown node kind, missing keys, root-only
+///     chrome on a non-root node), a leaf's ``data`` index is out of bounds
+///     for *payloads*, a payload stream is empty or unreadable, or rendering
+///     any leaf fails.
+///
+/// Notes
+/// -----
+/// Byte-deterministic given the same *tree*, *payloads*, and *theme* inputs
+/// (same contract as ``render_svg``). Render warnings are forwarded to
+/// Python's ``warnings.warn``.
+#[pyfunction]
+#[pyo3(signature = (tree, payloads, *, viewport, theme = None, config = None, chart_config = None))]
+pub fn render_composite_svg(
+    py: Python<'_>,
+    tree: &Bound<'_, PyAny>,
+    payloads: Vec<PyRecordBatchReader>,
+    viewport: (f64, f64),
+    theme: Option<&Bound<'_, PyDict>>,
+    config: Option<&Bound<'_, PyDict>>,
+    chart_config: Option<&Bound<'_, PyDict>>,
+) -> PyResult<String> {
+    let node = crate::spec::composite::composite_tree_from_py(tree)?;
+    let (batches, t, c, cc, vp) =
+        decode_composite_inputs(payloads, viewport, theme, config, chart_config)?;
+    let leaves = build_composite_leaves(&node, &batches, &t, vp, &c, &cc)?;
+    let (scene, warnings) = super::composite_render::render_composite_scene(&node, &leaves)
+        .map_err(composite_render_err_to_py)?;
+    emit_warnings(py, &warnings)?;
+    Ok(super::svg_walk::walk_svg(&scene, c.embed_fonts))
+}
+
+/// Render a composite chart tree to an interactive scene (JSON + packed bytes).
+///
+/// Same tree/payload/viewport/theme/config contract as
+/// [`render_composite_svg`]; produces the WASM-consumable pair instead of an
+/// SVG string, mirroring ``render_interactive``.
+///
+/// Parameters
+/// ----------
+/// tree : dict
+///     A composite tree node (see [`render_composite_svg`]).
+/// payloads : list[pyarrow.RecordBatchReader or compatible]
+///     Arrow data streams, one per leaf's ``data`` index.
+/// viewport : tuple[float, float]
+///     ``(width, height)`` passed to every leaf's standalone render.
+/// theme : dict, optional
+///     Sparse theme override dict, applied to every leaf.
+/// config : dict, optional
+///     Render-config dict, applied to every leaf.
+/// chart_config : dict, optional
+///     Per-chart configuration dict, applied to every leaf.
+///
+/// Returns
+/// -------
+/// tuple[str, bytes]
+///     ``(scene_json, packed_bytes)`` — the merged scene's JSON plus the
+///     packed binary sidecar for large homogeneous mark batches. Panel ids in
+///     the JSON and `panel_idx` values in the packed headers share one flat
+///     0-based namespace numbered in tree pre-order (D4c): the packed headers
+///     are written directly against each leaf's already-renumbered panels, so
+///     no post-hoc header rewrite is needed.
+///
+/// Raises
+/// ------
+/// ValueError
+///     Same conditions as [`render_composite_svg`].
+#[pyfunction]
+#[pyo3(signature = (tree, payloads, *, viewport, theme = None, config = None, chart_config = None))]
+pub fn render_composite_interactive<'py>(
+    py: Python<'py>,
+    tree: &Bound<'_, PyAny>,
+    payloads: Vec<PyRecordBatchReader>,
+    viewport: (f64, f64),
+    theme: Option<&Bound<'_, PyDict>>,
+    config: Option<&Bound<'_, PyDict>>,
+    chart_config: Option<&Bound<'_, PyDict>>,
+) -> PyResult<(String, Py<PyBytes>)> {
+    let node = crate::spec::composite::composite_tree_from_py(tree)?;
+    let (batches, t, c, cc, vp) =
+        decode_composite_inputs(payloads, viewport, theme, config, chart_config)?;
+    let leaves = build_composite_leaves(&node, &batches, &t, vp, &c, &cc)?;
+    // Warning emission deferred here (unlike `render_composite_svg`): its flat
+    // sibling `render_interactive` has the identical pre-existing gap —
+    // `render_scene_json` doesn't surface `RenderWarning`s to this binding at
+    // all, so there is no established `emit_warnings` call for the interactive
+    // path to mirror. Fixing this composite entry alone would make it diverge
+    // from `render_interactive` instead of matching it. Both are tracked in
+    // GH #50 (orchestrator decision: consistency over one-sided fixing).
+    let (mut scene, _warnings) = super::composite_render::render_composite_scene(&node, &leaves)
+        .map_err(composite_render_err_to_py)?;
+    let packed_bytes = super::pack_instances::extract_packed_bytes(&mut scene);
+    let json = serde_json::to_string(&scene)
+        .map_err(|e| PyValueError::new_err(format!("composite scene serialization: {e}")))?;
+    let py_bytes = PyBytes::new(py, &packed_bytes);
+    Ok((json, py_bytes.unbind()))
+}
+
+fn composite_render_err_to_py(e: super::composite_render::CompositeRenderError) -> PyErr {
+    PyValueError::new_err(e.to_string())
+}
+
+/// Collect every payload reader into one Arrow batch each (same per-batch
+/// collection rule as [`collect_single_batch`]) and decode the shared
+/// theme/config/chart-config/viewport inputs applied to every leaf.
+fn decode_composite_inputs(
+    payloads: Vec<PyRecordBatchReader>,
+    viewport: (f64, f64),
+    theme: Option<&Bound<'_, PyDict>>,
+    config: Option<&Bound<'_, PyDict>>,
+    chart_config: Option<&Bound<'_, PyDict>>,
+) -> PyResult<(
+    Vec<arrow::record_batch::RecordBatch>,
+    crate::layout::ThemeInputs,
+    super::config::RenderConfig,
+    super::chart_config::ChartConfig,
+    Viewport,
+)> {
+    let batches = payloads
+        .into_iter()
+        .map(collect_single_batch)
+        .collect::<PyResult<Vec<_>>>()?;
+    let t = theme_from_dict(theme)?;
+    let c = config_from_dict(config)?;
+    let cc = chart_config_from_dict(chart_config)?;
+    let vp = Viewport { width: viewport.0, height: viewport.1 };
+    Ok((batches, t, c, cc, vp))
+}
+
+/// Pair each of `tree`'s leaves (in pre-order) with its selected Arrow batch,
+/// validating every `data` index against `batches`' length up front — a
+/// malformed tree fails fast with the offending leaf pinpointed
+/// (`CompositeRenderError::LeafDataIndexOutOfBounds`) rather than panicking
+/// on an out-of-bounds slice access deeper in the render core.
+fn build_composite_leaves<'a>(
+    tree: &'a crate::spec::composite::CompositeNode,
+    batches: &'a [arrow::record_batch::RecordBatch],
+    theme: &'a crate::layout::ThemeInputs,
+    viewport: Viewport,
+    config: &'a super::config::RenderConfig,
+    chart_config: &'a super::chart_config::ChartConfig,
+) -> PyResult<Vec<super::composite_render::CompositeLeafInput<'a>>> {
+    super::composite::flatten_leaves(tree)
+        .into_iter()
+        .enumerate()
+        .map(|(index, (spec, data))| {
+            let batch = batches.get(data).ok_or_else(|| {
+                composite_render_err_to_py(
+                    super::composite_render::CompositeRenderError::LeafDataIndexOutOfBounds {
+                        kind: "leaf",
+                        index,
+                        data,
+                        payload_count: batches.len(),
+                    },
+                )
+            })?;
+            Ok(super::composite_render::CompositeLeafInput {
+                spec,
+                batch,
+                theme,
+                viewport,
+                config,
+                chart_config,
+            })
+        })
+        .collect()
+}
+
 fn collect_single_batch(reader: PyRecordBatchReader) -> PyResult<arrow::record_batch::RecordBatch> {
     let iter = reader
         .into_reader()
@@ -1438,4 +1639,300 @@ fn emit_warnings(py: Python<'_>, warnings: &[super::RenderWarning]) -> PyResult<
         warnings_mod.call_method1("warn", (msg,))?;
     }
     Ok(())
+}
+
+// ── Task 5c gap-fix (spec-review item 4): LeafDataIndexOutOfBounds ─────────
+//
+// `build_composite_leaves` bounds-checks each leaf's `data` index against the
+// caller's payload list *before* any leaf renders, so a malformed tree fails
+// fast with the offending leaf pinpointed rather than panicking on an
+// out-of-bounds slice access deeper in `render_composite_scene`. No test
+// previously exercised this boundary check directly.
+#[cfg(test)]
+mod composite_leaf_bounds_tests {
+    use super::*;
+    use crate::spec::composite::CompositeNode;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::Encoding;
+    use crate::spec::mark::Mark;
+
+    /// A single-leaf composite tree whose leaf selects payload index `data`.
+    fn dummy_leaf(data: usize) -> CompositeNode {
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            params: Vec::new(),
+            chart_description: None,
+        };
+        CompositeNode::Leaf { spec: Box::new(spec), data }
+    }
+
+    #[test]
+    fn build_composite_leaves_rejects_out_of_bounds_data_index() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            // Leaf #0 asks for payload index 2, but zero payloads are supplied.
+            let tree = dummy_leaf(2);
+            let batches: Vec<arrow::record_batch::RecordBatch> = vec![];
+            let theme = ThemeInputs::default();
+            let config = RenderConfig::default();
+            let chart_config = ChartConfig::default();
+            let viewport = Viewport { width: 100.0, height: 100.0 };
+
+            let result = build_composite_leaves(
+                &tree,
+                &batches,
+                &theme,
+                viewport,
+                &config,
+                &chart_config,
+            );
+            let err = match result {
+                Ok(_) => panic!("data index 2 with 0 payloads must be rejected, not accepted"),
+                Err(e) => e,
+            };
+
+            assert!(
+                err.is_instance_of::<PyValueError>(py),
+                "must surface as PyValueError, matching composite_render_err_to_py"
+            );
+            let msg = err.value(py).to_string();
+            assert!(msg.contains("leaf #0"), "must name the offending leaf index, got: {msg}");
+            assert!(
+                msg.contains("data index 2 out of bounds"),
+                "must name the invalid data index, got: {msg}"
+            );
+            assert!(
+                msg.contains("0 payload(s) provided"),
+                "must name the actual payload count, got: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn build_composite_leaves_accepts_in_bounds_data_index() {
+        // Discriminating counterpart: the same leaf shape with an in-bounds
+        // `data` index (0, with 1 payload) must succeed, proving the bounds
+        // check above is not simply rejecting every leaf.
+        pyo3::Python::initialize();
+        Python::attach(|_py| {
+            let tree = dummy_leaf(0);
+            let batch = {
+                use arrow::array::Float64Array;
+                use arrow::datatypes::{DataType, Field, Schema};
+                use std::sync::Arc;
+                let schema = Arc::new(Schema::new(vec![Field::new(
+                    "x",
+                    DataType::Float64,
+                    false,
+                )]));
+                arrow::record_batch::RecordBatch::try_new(
+                    schema,
+                    vec![Arc::new(Float64Array::from(vec![1.0, 2.0]))],
+                )
+                .unwrap()
+            };
+            let batches = vec![batch];
+            let theme = ThemeInputs::default();
+            let config = RenderConfig::default();
+            let chart_config = ChartConfig::default();
+            let viewport = Viewport { width: 100.0, height: 100.0 };
+
+            let leaves = build_composite_leaves(
+                &tree,
+                &batches,
+                &theme,
+                viewport,
+                &config,
+                &chart_config,
+            )
+            .expect("data index 0 with 1 payload must succeed");
+            assert_eq!(leaves.len(), 1);
+        });
+    }
+}
+
+// ── Task 5c REVISE fix: composite warning threading ────────────────────────
+//
+// `render_composite_scene` used to drop every leaf's `RenderWarning`s (they
+// lived on `render_leaf`'s local `po.warnings`, which went out of scope
+// before the caller ever saw it), and `render_composite_svg`'s docstring
+// claimed warnings were "forwarded to Python's `warnings.warn`" without ever
+// calling `emit_warnings`. This test exercises the real PyO3 entry end to
+// end — a leaf whose nominal color field has more distinct categories than
+// the default palette holds — and asserts the warning actually reaches
+// Python, mirroring how `render_svg`'s own warning contract is documented
+// (this module's `Notes` sections) rather than a Rust-only unit check on
+// `render_composite_scene`.
+#[cfg(test)]
+mod composite_warning_tests {
+    use super::*;
+    use crate::spec::composite::CompositeNode;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use arrow::array::{Float64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::{RecordBatch, RecordBatchIterator};
+    use std::sync::Arc;
+
+    /// A point spec with x/y plus a nominal `color` field — the same shape
+    /// `scale_resolve::tests`'s `ColorPaletteOverflowed` fixture uses, minus
+    /// the composite wrapping.
+    fn color_overflow_spec() -> ChartSpec {
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            params: Vec::new(),
+            chart_description: None,
+        }
+    }
+
+    /// 13 rows, 13 distinct `g` categories — more than every built-in
+    /// categorical palette (the largest is 10 entries), so the default
+    /// theme's categorical color scale always overflows regardless of which
+    /// scheme resolves.
+    fn color_overflow_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let groups: Vec<String> = (0..13).map(|i| format!("g{i}")).collect();
+        let groups_str: Vec<&str> = groups.iter().map(String::as_str).collect();
+        let xs: Vec<f64> = (0..13).map(|i| i as f64).collect();
+        let ys = xs.clone();
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs)),
+                Arc::new(Float64Array::from(ys)),
+                Arc::new(StringArray::from(groups_str)),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn single_leaf_payload(batch: RecordBatch) -> PyRecordBatchReader {
+        let schema = batch.schema();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+        PyRecordBatchReader::new(Box::new(reader))
+    }
+
+    #[test]
+    fn render_composite_svg_forwards_leaf_warnings_to_python() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let tree_dict = PyDict::new(py);
+            tree_dict.set_item("kind", "leaf").unwrap();
+            tree_dict
+                .set_item("spec", Py::new(py, color_overflow_spec()).unwrap())
+                .unwrap();
+            tree_dict.set_item("data", 0usize).unwrap();
+            let tree: &pyo3::Bound<'_, pyo3::PyAny> = tree_dict.as_any();
+
+            let payloads = vec![single_leaf_payload(color_overflow_batch())];
+
+            // Python's `warnings.catch_warnings(record=True)` context manager,
+            // driven manually via `__enter__`/`__exit__` since this is plain
+            // Rust, not a `#[pyfunction]` test harness — the same idiom
+            // `test_scale_rendering.py`'s auto-raster warning tests use from
+            // the Python side (`with warnings.catch_warnings(record=True) as
+            // caught: warnings.simplefilter("always"); ...`).
+            let warnings_mod = py.import("warnings").unwrap();
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("record", true).unwrap();
+            let cw = warnings_mod
+                .call_method("catch_warnings", (), Some(&kwargs))
+                .unwrap();
+            let caught = cw.call_method0("__enter__").unwrap();
+            warnings_mod.call_method1("simplefilter", ("always",)).unwrap();
+
+            let svg = render_composite_svg(py, tree, payloads, (300.0, 200.0), None, None, None)
+                .expect("render_composite_svg should succeed for a valid single-leaf tree");
+            assert!(svg.contains("<svg"), "expected a real SVG document, got: {svg}");
+
+            let messages: Vec<String> = caught
+                .try_iter()
+                .unwrap()
+                .map(|w| {
+                    w.unwrap()
+                        .getattr("message")
+                        .unwrap()
+                        .call_method0("__str__")
+                        .unwrap()
+                        .to_string()
+                })
+                .collect();
+            cw.call_method1("__exit__", (py.None(), py.None(), py.None())).unwrap();
+
+            assert!(
+                messages.iter().any(|m| m.contains("palette")),
+                "expected a color-palette-overflow warning to surface through \
+                 render_composite_svg's emit_warnings call, got: {messages:?}"
+            );
+        });
+    }
+
+    /// Discriminating counterpart: with the deferred emission on the
+    /// interactive entry (orchestrator decision, matches `render_interactive`'s
+    /// pre-existing identical gap), the same tree must still render
+    /// successfully — the fix only threads warnings through, it must not
+    /// break the interactive path.
+    #[test]
+    fn render_composite_interactive_still_succeeds_with_leaf_warnings() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let tree_dict = PyDict::new(py);
+            tree_dict.set_item("kind", "leaf").unwrap();
+            tree_dict
+                .set_item("spec", Py::new(py, color_overflow_spec()).unwrap())
+                .unwrap();
+            tree_dict.set_item("data", 0usize).unwrap();
+            let tree: &pyo3::Bound<'_, pyo3::PyAny> = tree_dict.as_any();
+
+            let payloads = vec![single_leaf_payload(color_overflow_batch())];
+
+            let (json, _packed) = render_composite_interactive(
+                py,
+                tree,
+                payloads,
+                (300.0, 200.0),
+                None,
+                None,
+                None,
+            )
+            .expect("render_composite_interactive should succeed for a valid single-leaf tree");
+            assert!(json.contains("\"panels\""), "expected scene JSON, got: {json}");
+        });
+    }
 }

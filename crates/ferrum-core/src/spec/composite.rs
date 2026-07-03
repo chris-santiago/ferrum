@@ -32,8 +32,7 @@
 //! The tree types + validation are consumed by the composite render core
 //! ([`crate::render::composite_render`], Task 5b) and the resolve pass; the PyO3
 //! coercion ([`composite_tree_from_py`]) is consumed by the
-//! `render_composite_svg`/`render_composite_interactive` entries (Task 5c),
-//! carrying a targeted `dead_code` allow until those roots land.
+//! `render_composite_svg`/`render_composite_interactive` entries (Task 5c).
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -431,7 +430,6 @@ use pyo3::types::{PyDict, PyList};
 /// `children` internally, then validates the whole tree (spec §4) before
 /// returning, mapping any [`CompositeSpecError`] to a `ValueError` the same
 /// way `render_err_to_py` does for `RenderError` (`render/binding.rs`).
-#[allow(dead_code)] // reachable via the Task 5c PyO3 entries (render_composite_{svg,interactive})
 pub(crate) fn composite_tree_from_py(obj: &Bound<'_, PyAny>) -> PyResult<CompositeNode> {
     let node = composite_node_from_py(obj)?;
     node.validate().map_err(|e| PyValueError::new_err(e.to_string()))?;

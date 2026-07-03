@@ -22,9 +22,18 @@ pub(crate) const CROSSFILTER_DIM_OPACITY: f64 = 0.15;
 /// Called by both `handle_click` and `handle_drag` after they update the
 /// selection state. Centralising this ensures that if `SceneData` gains a
 /// field, only one site needs updating.
+///
+/// `panels` is the caller's BAKED panel geometry (`scene_load::bake_panels`),
+/// not the raw `SceneGraph::panels` — `resolve_conditionals_with_packed`
+/// reads non-packed mark node coordinates (`SceneNode::Circle`/`Rect`
+/// centers) for containment, which must be at final on-screen position for a
+/// ratio-fitted panel (D4a amendment addendum). `conditionals` is passed
+/// separately (rather than the whole `SceneGraph`) so this function never
+/// has access to the raw, un-baked panel list.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn apply_conditionals_and_render(
-    loaded_scene: &ferrum_scene::SceneGraph,
+    panels: &[Panel],
+    conditionals: &[ConditionalEncoding],
     loaded_data: &crate::scene_load::SceneData,
     loaded_buffers: &mut crate::render::GpuBuffers,
     interaction_state: &crate::selection_state::InteractionState,
@@ -32,9 +41,8 @@ pub(crate) fn apply_conditionals_and_render(
     pipelines: &crate::pipelines::RenderPipelines,
 ) -> Result<String, wasm_bindgen::JsValue> {
     // Apply conditional encodings to produce dimmed/highlighted instance colors.
-    let conditionals = &loaded_scene.interaction.conditionals;
     let updates = resolve_conditionals_with_packed(
-        &loaded_scene.panels,
+        panels,
         conditionals,
         &interaction_state.selections,
         &loaded_data.circle_instances,
