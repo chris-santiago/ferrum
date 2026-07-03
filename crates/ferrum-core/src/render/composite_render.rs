@@ -39,6 +39,17 @@
 //! non-panel node it might carry — an approximation that is unreachable in the
 //! real ratio producers (JointChart/ClusterMap marginals carry no legends),
 //! consistent with amended-D4a's documented scalar-approximation gaps.
+//!
+//! # `hole` cells (Task 8a)
+//!
+//! A `grid`/`wrap` child may be [`CompositeNode::Hole`] — a placeholder cell
+//! (JointChart's empty 2x2 corner, RepeatChart's `corner=True`). [`build_placed`]
+//! renders it as a zero-size, empty [`Placed`] subtree: it consumes no leaf scene,
+//! claims no panel ids, and carries no label. `plan_grid`/`plan_wrap` size each
+//! row/column from the *max* native extent of its cells, so a hole's zero extent
+//! never shrinks a lane that also holds a real cell — the hole's own slot is
+//! simply left empty, and ratio/spacing math for the tree's other cells is
+//! unaffected by its presence.
 
 use arrow::record_batch::RecordBatch;
 use ferrum_scene::{LayoutScale, MarkBatch, Panel, Rect, SceneGraph, SceneNode};
@@ -308,9 +319,10 @@ struct Placed {
 }
 
 /// Recursively render `node` into one placed scene. Leaf scenes are consumed from
-/// `scenes` in pre-order; `panel_base` is the running global panel-id offset,
-/// incremented as each leaf's panels are renumbered. `call_theme` styles any
-/// per-child label encountered (see [`apply_child_label`]).
+/// `scenes` in pre-order (a `Hole` consumes none — Task 8a); `panel_base` is the
+/// running global panel-id offset, incremented as each leaf's panels are
+/// renumbered. `call_theme` styles any per-child label encountered (see
+/// [`apply_child_label`]).
 fn build_placed(
     node: &CompositeNode,
     scenes: &mut std::vec::IntoIter<SceneGraph>,
@@ -327,6 +339,14 @@ fn build_placed(
             let (width, height) = (scene.width, scene.height);
             Placed { scene, width, height }
         }
+        // A hole is not a leaf: it consumes no scene from `scenes`, claims no
+        // panel ids, and carries no label/chrome — it renders as an empty
+        // (Task 8a) placed subtree. Its zero size never grows the grid/wrap
+        // row or column it occupies (`plan_grid`/`plan_wrap` take the max
+        // native extent per lane); the slot's actual size is supplied by its
+        // sibling cells in that row/column, leaving the hole's cell visually
+        // blank while ratio/spacing math for the *other* cells is unaffected.
+        CompositeNode::Hole {} => Placed { scene: empty_scene(0.0, 0.0), width: 0.0, height: 0.0 },
         CompositeNode::Composite { layout, children, spacing, row_ratios, col_ratios, ncols, nrows, .. } => {
             let child_placed: Vec<Placed> = children
                 .iter()
@@ -1120,6 +1140,29 @@ mod tests {
         assert_eq!(plan.placements[1].sx, 1.0);
     }
 
+    #[test]
+    fn plan_grid_hole_cell_does_not_affect_lane_sizing() {
+        // 2x2, row0 = [80x100, 0x0 (hole stub)], row1 = [80x100, 80x100].
+        // Column/row sizing is unaffected by the hole: it never becomes the
+        // dominant (max) extent in a lane it shares with a real cell, so this
+        // plan is identical to a plain 2x2 uniform grid without a hole.
+        let children = vec![
+            placed_stub(80.0, 100.0),
+            placed_stub(0.0, 0.0), // hole stub
+            placed_stub(80.0, 100.0),
+            placed_stub(80.0, 100.0),
+        ];
+        let plan = plan_grid(&children, 10.0, 2, 2, None, None);
+        assert_eq!(plan.width, 170.0, "80 + 10 + 80, unaffected by the hole's 0 width");
+        assert_eq!(plan.height, 210.0, "100 + 10 + 100, unaffected by the hole's 0 height");
+        for (i, p) in plan.placements.iter().enumerate() {
+            assert_eq!(p.sx, 1.0, "cell {i} should not scale");
+            assert_eq!(p.sy, 1.0, "cell {i} should not scale");
+        }
+        assert_eq!(plan.placements[2], translate(0.0, 110.0));
+        assert_eq!(plan.placements[3], translate(90.0, 110.0));
+    }
+
     // -- placement primitives -------------------------------------------------
 
     #[test]
@@ -1299,6 +1342,90 @@ mod tests {
         assert!(scene.panels[0].layout_scale.is_identity(), "row0 should be native");
         assert!(!scene.panels[1].layout_scale.is_identity(), "row1 must carry a ratio layout_scale");
         assert!((scene.panels[1].layout_scale.sy - (1.0 / 3.0)).abs() < 1e-9);
+    }
+
+    // -- hole cells (Task 8a) --------------------------------------------------
+
+    #[test]
+    fn grid_with_hole_places_three_panels_and_ratio_math_is_unaffected() {
+        // 2x2 grid: row0 = [leaf0, hole], row1 = [leaf1, leaf2]. The hole
+        // occupies the top-right corner (JointChart's empty-corner shape) and
+        // must render no panel; the other three panels land at the same rects
+        // a plain uniform 2x2 grid would produce — the hole's zero native
+        // extent never shrinks a row/column that also holds a real cell.
+        let mut tree =
+            composite(CompositeLayout::Grid, vec![leaf_node(0), CompositeNode::Hole {}, leaf_node(1), leaf_node(2)]);
+        if let CompositeNode::Composite { nrows, ncols, .. } = &mut tree {
+            *nrows = Some(2);
+            *ncols = Some(2);
+        }
+        assert!(tree.validate().is_ok(), "hole is valid under grid");
+
+        let h = [hold(), hold(), hold()];
+        let leaves = [
+            leaf_input(&h[0], 300.0, 200.0),
+            leaf_input(&h[1], 300.0, 200.0),
+            leaf_input(&h[2], 300.0, 200.0),
+        ];
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert_eq!(scene.panels.len(), 3, "hole must not emit a panel");
+
+        // No ratios and uniform native sizes → uniform grid, every placement
+        // is identity-scale pure translation (mirrors
+        // `grid_congruent_cells_have_identity_scale`).
+        for p in &scene.panels {
+            assert!(p.layout_scale.is_identity(), "uniform grid: no cell should scale");
+        }
+        // Row 1 (leaf1) sits below row 0 (leaf0) by exactly row 0's native
+        // height + spacing (200 + 10 = 210) — the hole sharing row 0 does not
+        // change row 0's height.
+        let row_offset = scene.panels[1].plot_area.y - scene.panels[0].plot_area.y;
+        assert!((row_offset - 210.0).abs() < 1e-9, "row offset: {row_offset}");
+        assert!(
+            (scene.panels[1].plot_area.x - scene.panels[0].plot_area.x).abs() < 1e-9,
+            "leaf1 shares leaf0's column"
+        );
+        // Column 1 (leaf2) sits right of column 0 (leaf1) by exactly column
+        // 0's native width + spacing (300 + 10 = 310) — the hole's own
+        // (empty) column does not change column 0's width.
+        let col_offset = scene.panels[2].plot_area.x - scene.panels[1].plot_area.x;
+        assert!((col_offset - 310.0).abs() < 1e-9, "col offset: {col_offset}");
+        assert!(
+            (scene.panels[2].plot_area.y - scene.panels[1].plot_area.y).abs() < 1e-9,
+            "leaf2 shares leaf1's row"
+        );
+    }
+
+    #[test]
+    fn wrap_with_trailing_hole_renders_real_leaves_and_skips_the_hole() {
+        // RepeatChart's `corner=True` shape: an odd leaf count padded to a
+        // rectangle with a trailing hole. 3 leaves + 1 hole at ncols=2.
+        let mut tree = composite(
+            CompositeLayout::Wrap,
+            vec![leaf_node(0), leaf_node(1), leaf_node(2), CompositeNode::Hole {}],
+        );
+        if let CompositeNode::Composite { ncols, .. } = &mut tree {
+            *ncols = Some(2);
+        }
+        assert!(tree.validate().is_ok(), "hole is valid under wrap");
+
+        let h = [hold(), hold(), hold()];
+        let leaves = [
+            leaf_input(&h[0], 300.0, 200.0),
+            leaf_input(&h[1], 300.0, 200.0),
+            leaf_input(&h[2], 300.0, 200.0),
+        ];
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert_eq!(scene.panels.len(), 3, "trailing hole must not emit a panel");
+
+        // Row 1 (leaf2, alone — its sibling slot is the hole) sits below row 0
+        // by exactly row 0's height + spacing, starting again at column 0.
+        let row_offset = scene.panels[2].plot_area.y - scene.panels[0].plot_area.y;
+        assert!((row_offset - 210.0).abs() < 1e-9, "row offset: {row_offset}");
+        assert!(
+            (scene.panels[2].plot_area.x - scene.panels[0].plot_area.x).abs() < 1e-9,
+            "leaf2 starts row 1 at column 0"
+        );
     }
 
     #[test]

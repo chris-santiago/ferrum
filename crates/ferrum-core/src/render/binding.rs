@@ -342,7 +342,10 @@ struct LeafBinding {
 /// binding). A leaf may carry optional `theme`/`viewport`/`config`/
 /// `chart_config` keys; an absent key inherits the call-level value, so a
 /// homogeneous tree (Task 6/7's) resolves every leaf to a clone of the
-/// call-level inputs — byte-identical to the pre-5d single-value path.
+/// call-level inputs — byte-identical to the pre-5d single-value path. A
+/// `hole` (Task 8a) is skipped outright — it has no `spec`/`data`, so no
+/// render inputs to resolve, and it must not appear in the returned bindings
+/// or `flatten_leaves`' count check would fail.
 ///
 /// This is a binding-layer traversal reading the render-input keys the
 /// spec-layer coercion ([`composite_tree_from_py`]) deliberately ignores; the
@@ -408,6 +411,12 @@ fn collect_leaf_bindings_walk(
             out.push(LeafBinding { theme, viewport, config, chart_config });
             Ok(())
         }
+        // A hole carries no render inputs of its own (no `spec`/`data`, so no
+        // theme/viewport/config/chart_config to resolve) and is not a leaf —
+        // it contributes nothing to `out`, keeping this walk's leaf count in
+        // lockstep with `flatten_leaves` (Task 8a; `build_composite_leaves`
+        // asserts the two counts agree).
+        "hole" => Ok(()),
         "composite" => {
             let children = dict.get_item("children")?.ok_or_else(|| {
                 PyValueError::new_err("composite node missing required key 'children'")
@@ -428,7 +437,7 @@ fn collect_leaf_bindings_walk(
             Ok(())
         }
         other => Err(PyValueError::new_err(format!(
-            "unknown composite tree node kind: '{other}'; expected 'leaf' or 'composite'"
+            "unknown composite tree node kind: '{other}'; expected 'leaf', 'composite', or 'hole'"
         ))),
     }
 }
@@ -2037,6 +2046,37 @@ mod composite_leaf_binding_tests {
             .unwrap_err();
             let msg = err.value(py).to_string();
             assert!(msg.contains("theme") && msg.contains("dict"), "msg: {msg}");
+        });
+    }
+
+    #[test]
+    fn hole_contributes_no_binding_and_keeps_leaf_count_in_sync() {
+        // A grid with a hole among its children: `collect_leaf_bindings_walk`
+        // must skip it (Task 8a) so its binding count stays in lockstep with
+        // `flatten_leaves`' leaf count (which also excludes the hole).
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let hole = PyDict::new(py);
+            hole.set_item("kind", "hole").unwrap();
+            let children =
+                PyList::new(py, [leaf_dict(py, None, None), hole, leaf_dict(py, None, None)])
+                    .unwrap();
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "grid").unwrap();
+            root.set_item("children", children).unwrap();
+            root.set_item("nrows", 1usize).unwrap();
+            root.set_item("ncols", 3usize).unwrap();
+
+            let bindings = collect_leaf_bindings(
+                root.as_any(),
+                &ThemeInputs::default(),
+                Viewport { width: 100.0, height: 100.0 },
+                &RenderConfig::default(),
+                &ChartConfig::default(),
+            )
+            .unwrap();
+            assert_eq!(bindings.len(), 2, "hole must not produce a binding");
         });
     }
 }

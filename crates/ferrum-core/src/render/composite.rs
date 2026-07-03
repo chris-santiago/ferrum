@@ -215,6 +215,9 @@ pub(crate) fn flatten_leaves(tree: &CompositeNode) -> Vec<(&ChartSpec, usize)> {
                     walk(c, acc);
                 }
             }
+            // A hole carries no spec/data — it is not a leaf and contributes
+            // nothing to the flattened leaf list (Task 8a).
+            CompositeNode::Hole {} => {}
         }
     }
     let mut acc = Vec::new();
@@ -234,11 +237,14 @@ pub(crate) fn flatten_leaf_specs(tree: &CompositeNode) -> Vec<&ChartSpec> {
 // Tree walk
 // ---------------------------------------------------------------------------
 
-/// Leaves under `node`, in pre-order.
+/// Leaves under `node`, in pre-order. A hole is not a leaf — it contributes 0
+/// (Task 8a), so it occupies an empty leaf span when a parent partitions its
+/// span among children by leaf count.
 fn leaf_count(node: &CompositeNode) -> usize {
     match node {
         CompositeNode::Leaf { .. } => 1,
         CompositeNode::Composite { children, .. } => children.iter().map(leaf_count).sum(),
+        CompositeNode::Hole {} => 0,
     }
 }
 
@@ -249,9 +255,15 @@ fn leaf_count(node: &CompositeNode) -> usize {
 /// real producers (`compare=`) always emit identical layouts, and for
 /// hand-built mixed-layout concats the safe non-congruent outcome is the
 /// documented skip, not accidental cross-layout pairing.
+///
+/// A hole is its own node kind for this purpose (Task 8a): a hole matches a
+/// hole only — never a leaf or a composite — so a hole in one congruent-grid
+/// position never pairs its "domain" (it has none) with a real leaf at the
+/// matching position in a sibling row/column.
 fn congruent(a: &CompositeNode, b: &CompositeNode) -> bool {
     match (a, b) {
         (CompositeNode::Leaf { .. }, CompositeNode::Leaf { .. }) => true,
+        (CompositeNode::Hole {}, CompositeNode::Hole {}) => true,
         (
             CompositeNode::Composite { layout: la, children: ca, .. },
             CompositeNode::Composite { layout: lb, children: cb, .. },
@@ -633,13 +645,31 @@ mod tests {
         assert!(!congruent(&leaf_node(Some("x"), None), &a));
     }
 
+    #[test]
+    fn congruence_hole_matches_hole_only() {
+        // A hole is its own node kind (Task 8a): hole-vs-hole is congruent,
+        // but hole-vs-leaf and hole-vs-composite are not.
+        assert!(congruent(&CompositeNode::Hole {}, &CompositeNode::Hole {}));
+        assert!(!congruent(&CompositeNode::Hole {}, &leaf_node(Some("x"), None)));
+        assert!(!congruent(&leaf_node(Some("x"), None), &CompositeNode::Hole {}));
+        let comp = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node(Some("x"), None), leaf_node(Some("x"), None)],
+            CompositeResolve::default(),
+        );
+        assert!(!congruent(&CompositeNode::Hole {}, &comp));
+        assert!(!congruent(&comp, &CompositeNode::Hole {}));
+    }
+
     /// Attach a per-child label to a node without altering its structure — the
-    /// Task 5d field congruence must ignore.
+    /// Task 5d field congruence must ignore. A no-op on `Hole` (it has no
+    /// label field at all).
     fn labeled(mut node: CompositeNode, text: &str) -> CompositeNode {
         match &mut node {
             CompositeNode::Leaf { label, .. } | CompositeNode::Composite { label, .. } => {
                 *label = Some(text.to_string());
             }
+            CompositeNode::Hole {} => {}
         }
         node
     }
@@ -1054,6 +1084,32 @@ mod tests {
             .map(|s| s.encoding.x.as_ref().unwrap().field.as_str())
             .collect();
         assert_eq!(fields, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn flatten_leaves_skips_holes_and_resolve_composite_scales_ignores_them() {
+        // A grid with a hole among its children: the hole contributes no
+        // (spec, data) pair to `flatten_leaves`/`flatten_leaf_specs`, and
+        // `resolve_composite_scales`'s leaf-count check only counts the real
+        // leaves — 3, not 4.
+        let tree = composite(
+            CompositeLayout::Grid,
+            vec![leaf_node(Some("a"), None), CompositeNode::Hole {}, leaf_node(Some("b"), None), leaf_node(Some("c"), None)],
+            CompositeResolve::default(),
+        );
+        let specs = flatten_leaf_specs(&tree);
+        let fields: Vec<&str> = specs
+            .iter()
+            .map(|s| s.encoding.x.as_ref().unwrap().field.as_str())
+            .collect();
+        assert_eq!(fields, vec!["a", "b", "c"], "hole must not appear in the flattened leaf list");
+
+        let l0 = owned(spec_with_x("a"), num_batch("a", &[0.0, 1.0]));
+        let l1 = owned(spec_with_x("b"), num_batch("b", &[0.0, 1.0]));
+        let l2 = owned(spec_with_x("c"), num_batch("c", &[0.0, 1.0]));
+        let inputs = [input(&l0), input(&l1), input(&l2)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        assert_eq!(ctx.len(), 3, "leaf count excludes the hole");
     }
 
     // -- helpers for the box test --------------------------------------------

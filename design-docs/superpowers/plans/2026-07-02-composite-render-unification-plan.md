@@ -131,7 +131,16 @@ Move all composition rendering (concat/grid/joint/clustermap/repeat/layer) onto 
 - [ ] Verify: full `uv run pytest -n auto`
 - [ ] Commit (python-review-lite gated)
 
-### Task 8: Cutover — ratio forms (JointChart, ClusterMapChart)
+> **Task 8 split (2026-07-03, orchestrator decision after two API-killed attempts):**
+> the grid-hole question is decided — option (b), Rust wire hole support: a hole
+> child in grid/wrap layouts (kind "hole"), skipped by layout/leaf-counting/packing,
+> covering BOTH JointChart's empty 2×2 corner and RepeatChart corner=True — this
+> also resolves the recorded Task 10 sparse blocker. **8a (rust-coder):** the hole
+> wire + layout skip + validation + PyO3 + tests. **8b (python-coder):** the
+> Joint/ClusterMap cutover per the original checklist, emitting holes for empty
+> cells.
+
+### Task 8 (split 8a/8b): Cutover — ratio forms (JointChart, ClusterMapChart)
 - Consumes: Task 3 per-panel scale; Task 6 pattern
 - [ ] Lower 2×2 ratio grids to composite tree with row/col ratios; static + interactive through composite entries (marginal axis hiding preserved)
 - [ ] Behavior tests: SVG marginal proportions match ratio; interactive scene carries per-panel scale (W5 slice)

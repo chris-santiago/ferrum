@@ -472,10 +472,13 @@ Verified at three levels: 6 regression tests (5 node-level in `test_bug_hunt_sce
   Channel-clone/private-`_kwargs` + scale-shape normalization are scheduled in the
   Phase B plan Task 10 (sole-ownership consolidation after `_scale_share.py` deletion).
 
-- **DSG-2 (S3-adjacent, Task 5d quality review):** `render/binding.rs::collect_leaf_bindings_walk`
-  duplicates the dict→kind→children tree-walk that `spec/composite.rs::composite_node_from_py`
-  owns, guarded only by a count-equality check (catches count drift, not
-  reorder-with-equal-count). Export the shared kind/children extraction helpers
+- **DSG-2 (S3-adjacent, Task 5d quality review; expanded by Task 8a):**
+  `render/binding.rs::collect_leaf_bindings_walk` duplicates the dict→kind→children
+  tree-walk that `spec/composite.rs::composite_node_from_py` owns, guarded only by a
+  count-equality check (catches count drift, not reorder-with-equal-count). Task 8a
+  raised the stakes: the walk now tracks a THIRD node kind ("hole", which contributes
+  no leaf) in lockstep by convention only — a future kind added to one walk but not
+  the other is a runtime error. Export the shared kind/children extraction helpers
   `pub(crate)` and consolidate to one walk when the binding layer is next touched.
 - **DSG-3 (chore):** `binding.rs` new code uses non-deprecated `Bound::cast`/`cast_into`
   while the rest of the crate (incl. `spec/composite.rs`) uses the deprecated

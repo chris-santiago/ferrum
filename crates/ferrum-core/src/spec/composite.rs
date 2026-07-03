@@ -17,16 +17,22 @@
 //! object, which collides with this crate's tagged-enum convention (every
 //! tagged spec enum discriminates on a field literally named `"kind"`; see
 //! `spec/mod.rs`). This module keeps the convention for the *shape*
-//! discriminant — [`CompositeNode`] tags on `"kind"` with two values,
-//! `"leaf"` and `"composite"` — and renames the *layout* selector to
-//! `"layout"` on the `Composite` variant. The design doc's contract note
+//! discriminant — [`CompositeNode`] tags on `"kind"` with three values,
+//! `"leaf"`, `"composite"`, and `"hole"` — and renames the *layout* selector
+//! to `"layout"` on the `Composite` variant. The design doc's contract note
 //! ("exact field names/types are plan-level") licenses this; flagged here
 //! for Task 4/5 and the orchestrator in case downstream Python-side dict
 //! construction assumed the literal `kind` nesting.
 //!
+//! `hole` (Task 8a) is a third, field-less shape added after the design doc
+//! was written: a placeholder cell in a `grid`/`wrap` layout that reserves
+//! its row/column slot but renders no panel/label/chrome — the wire covering
+//! for JointChart's empty 2x2 corner and RepeatChart's `corner=True`.
+//!
 //! ```text
 //! {"kind": "leaf", "spec": <ChartSpec>, "data": 0}
 //! {"kind": "composite", "layout": "grid", "children": [...], "nrows": 2, "ncols": 2, ...}
+//! {"kind": "hole"}
 //! ```
 //!
 //! The tree types + validation are consumed by the composite render core
@@ -151,7 +157,7 @@ impl CompositeResolve {
 // ---------------------------------------------------------------------------
 
 /// One node in a composite render tree (spec §6). Tagged on `"kind"` per the
-/// crate convention (`spec/mod.rs`), with two shapes:
+/// crate convention (`spec/mod.rs`), with three shapes:
 ///
 /// - `Leaf`: a single chart. `spec` is the compiled `ChartSpec`; `data` is
 ///   an index into the render call's Arrow payload list (leaves carry no
@@ -160,6 +166,9 @@ impl CompositeResolve {
 /// - `Composite`: a composition of `children`, laid out per `layout`.
 ///   `title`/`subtitle`/`caption`/`config` are root-only figure chrome
 ///   (spec §6); [`CompositeNode::validate`] rejects them on non-root nodes.
+/// - `Hole` (Task 8a): a field-less placeholder cell, valid only as a direct
+///   child of a `grid`/`wrap` `Composite` (never at the tree root). Covers
+///   JointChart's empty 2x2 corner and RepeatChart's `corner=True`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum CompositeNode {
@@ -219,36 +228,53 @@ pub enum CompositeNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         config: Option<serde_json::Value>,
     },
+    /// A placeholder cell in a `grid`/`wrap` layout — occupies its row/column
+    /// slot but renders no panel, label, or chrome (spec: JointChart's empty
+    /// 2x2 corner, RepeatChart's `corner=True`). Declared as an empty struct
+    /// variant (`{}`), not a bare unit variant, so `deny_unknown_fields`
+    /// actually rejects a stray key (a bare unit variant's Content-based
+    /// serde deserialization does not enforce it) — a hole has nothing to
+    /// render, so no `spec`/`data`/`label` key is ever valid on its wire
+    /// object. Valid only as a direct child of a `grid`/`wrap` composite
+    /// ([`CompositeNode::validate`] rejects it elsewhere, and at the tree
+    /// root); the layout pass ([`crate::render::composite_render`]) reserves
+    /// its slot from the row/column sizing contributed by its *sibling*
+    /// cells and merges no content for it.
+    Hole {},
 }
 
 impl CompositeNode {
-    /// The node kind as used in error messages: `"leaf"`, or the layout
-    /// kind (`"hconcat"`, `"vconcat"`, `"grid"`, `"wrap"`, `"overlay"`) for
-    /// a `Composite` node.
+    /// The node kind as used in error messages: `"leaf"`, `"hole"`, or the
+    /// layout kind (`"hconcat"`, `"vconcat"`, `"grid"`, `"wrap"`, `"overlay"`)
+    /// for a `Composite` node.
     pub fn kind_name(&self) -> &'static str {
         match self {
             CompositeNode::Leaf { .. } => "leaf",
             CompositeNode::Composite { layout, .. } => layout.as_str(),
+            CompositeNode::Hole {} => "hole",
         }
     }
 
     /// This node's optional per-child panel label (Task 5d), if any. Present on
-    /// either node shape; `None` when unset (the common case).
+    /// `Leaf`/`Composite`; `None` when unset (the common case) and always
+    /// `None` for `Hole` (a hole carries no fields at all).
     pub fn label(&self) -> Option<&str> {
         match self {
             CompositeNode::Leaf { label, .. } | CompositeNode::Composite { label, .. } => {
                 label.as_deref()
             }
+            CompositeNode::Hole {} => None,
         }
     }
 
     /// Validate structural invariants for the whole tree (spec §4): empty
     /// `children`, ratio arity vs. `nrows`/`ncols`, kind-specific field
     /// misuse (ratios/`ncols`/`nrows` on a layout that doesn't use them),
-    /// and root-only chrome fields (`title`/`subtitle`/`caption`) set on a
-    /// non-root node. Call once on the tree's root; recurses into every
-    /// composite descendant. No warning-fallbacks — every violation is a
-    /// typed [`CompositeSpecError`] naming the offending node's kind.
+    /// root-only chrome fields (`title`/`subtitle`/`caption`) set on a
+    /// non-root node, and `hole` children (valid only under `grid`/`wrap`,
+    /// never as the tree root). Call once on the tree's root; recurses into
+    /// every composite descendant. No warning-fallbacks — every violation is
+    /// a typed [`CompositeSpecError`] naming the offending node's kind.
     pub fn validate(&self) -> Result<(), CompositeSpecError> {
         self.validate_node(true)
     }
@@ -260,6 +286,11 @@ impl CompositeNode {
         // Composite-only structural checks so a labeled leaf root also fails.
         if is_root && self.label().is_some() {
             return Err(CompositeSpecError::LabelAtRoot { kind });
+        }
+        // A hole is a placeholder cell within a grid/wrap parent — it has no
+        // content of its own, so it can never stand alone as the tree root.
+        if is_root && matches!(self, CompositeNode::Hole {}) {
+            return Err(CompositeSpecError::HoleAtRoot);
         }
         let CompositeNode::Composite {
             layout,
@@ -275,11 +306,20 @@ impl CompositeNode {
             ..
         } = self
         else {
-            return Ok(()); // Leaf: nothing to validate structurally.
+            return Ok(()); // Leaf or Hole: nothing further to validate structurally.
         };
 
         if children.is_empty() {
             return Err(CompositeSpecError::EmptyChildren { kind });
+        }
+
+        // Holes are valid only as children of grid/wrap composites (spec: they
+        // exist to occupy an unused cell in a rectangular layout — hconcat/
+        // vconcat/overlay have no such notion of a cell to leave empty).
+        if !matches!(layout, CompositeLayout::Grid | CompositeLayout::Wrap)
+            && children.iter().any(|c| matches!(c, CompositeNode::Hole {}))
+        {
+            return Err(CompositeSpecError::HoleNotSupported { kind });
         }
 
         match layout {
@@ -410,6 +450,12 @@ pub enum CompositeSpecError {
     /// `label` was set on the root node — labels are per-child chrome (Task
     /// 5d); the root titles via `title`.
     LabelAtRoot { kind: &'static str },
+    /// A `hole` child was placed under a composite layout other than `grid`/
+    /// `wrap` — holes are grid/wrap-only placeholder cells.
+    HoleNotSupported { kind: &'static str },
+    /// A `hole` node was used as the tree root — a hole is a placeholder
+    /// cell within a grid/wrap parent and carries no content of its own.
+    HoleAtRoot,
 }
 
 impl fmt::Display for CompositeSpecError {
@@ -442,6 +488,15 @@ impl fmt::Display for CompositeSpecError {
                 f,
                 "{kind}: 'label' is a per-child field and is not valid at the root \
                  of a composite tree (the root uses 'title')"
+            ),
+            Self::HoleNotSupported { kind } => write!(
+                f,
+                "{kind}: 'hole' children are only supported on 'grid'/'wrap' nodes"
+            ),
+            Self::HoleAtRoot => write!(
+                f,
+                "'hole' is not a valid composite tree root; holes are only valid \
+                 as children of 'grid'/'wrap' nodes"
             ),
         }
     }
@@ -564,8 +619,9 @@ fn composite_node_from_py(obj: &Bound<'_, PyAny>) -> PyResult<CompositeNode> {
                 config,
             })
         }
+        "hole" => Ok(CompositeNode::Hole {}),
         other => Err(PyValueError::new_err(format!(
-            "unknown composite tree node kind: '{other}'; expected 'leaf' or 'composite'"
+            "unknown composite tree node kind: '{other}'; expected 'leaf', 'composite', or 'hole'"
         ))),
     }
 }
@@ -662,6 +718,25 @@ mod tests {
         assert!(json.contains(r#""data":3"#), "json: {json}");
         let parsed: CompositeNode = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, node);
+    }
+
+    #[test]
+    fn hole_round_trips() {
+        let node = CompositeNode::Hole {};
+        let json = serde_json::to_string(&node).unwrap();
+        assert_eq!(json, r#"{"kind":"hole"}"#, "hole is a bare tag, no fields: {json}");
+        let parsed: CompositeNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, node);
+    }
+
+    #[test]
+    fn hole_with_unknown_field_is_rejected() {
+        // Holes carry no fields — an extra key on the wire (e.g. a stray
+        // `label`) must be rejected the same way `deny_unknown_fields` rejects
+        // it on `leaf`/`composite`, not silently ignored.
+        let json = r#"{"kind":"hole","label":"nope"}"#;
+        let err = serde_json::from_str::<CompositeNode>(json).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "err: {err}");
     }
 
     #[test]
@@ -884,6 +959,50 @@ mod tests {
             let node = composite(layout, vec![leaf(0), leaf(1)]);
             assert!(node.validate().is_ok(), "minimal {layout:?} should validate");
         }
+    }
+
+    // -- hole (Task 8a) -------------------------------------------------------
+
+    #[test]
+    fn validate_rejects_hole_at_root() {
+        let err = CompositeNode::Hole {}.validate().unwrap_err();
+        assert_eq!(err, CompositeSpecError::HoleAtRoot);
+    }
+
+    #[test]
+    fn validate_rejects_hole_child_on_hconcat_vconcat_overlay() {
+        for layout in [CompositeLayout::Hconcat, CompositeLayout::Vconcat, CompositeLayout::Overlay]
+        {
+            let node = composite(layout, vec![leaf(0), CompositeNode::Hole {}]);
+            let err = node.validate().unwrap_err();
+            assert_eq!(
+                err,
+                CompositeSpecError::HoleNotSupported { kind: layout.as_str() },
+                "hole should be rejected under {layout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_hole_in_grid() {
+        let mut node = composite(
+            CompositeLayout::Grid,
+            vec![leaf(0), CompositeNode::Hole {}, leaf(1), leaf(2)],
+        );
+        if let CompositeNode::Composite { nrows, ncols, .. } = &mut node {
+            *nrows = Some(2);
+            *ncols = Some(2);
+        }
+        assert!(node.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_hole_in_wrap() {
+        let mut node = composite(CompositeLayout::Wrap, vec![leaf(0), leaf(1), CompositeNode::Hole {}]);
+        if let CompositeNode::Composite { ncols, .. } = &mut node {
+            *ncols = Some(2);
+        }
+        assert!(node.validate().is_ok(), "trailing hole should validate under wrap");
     }
 
     #[test]
@@ -1211,6 +1330,65 @@ mod tests {
             let err = composite_tree_from_py(d.as_any()).unwrap_err();
             let msg = err.value(py).to_string();
             assert!(msg.contains("hconcat") && msg.contains("empty"), "msg: {msg}");
+        });
+    }
+
+    #[test]
+    fn composite_tree_from_py_hole_child_in_grid() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let mk_leaf = |idx: usize| {
+                let d = PyDict::new(py);
+                d.set_item("kind", "leaf").unwrap();
+                d.set_item("spec", Py::new(py, dummy_chart_spec()).unwrap()).unwrap();
+                d.set_item("data", idx).unwrap();
+                d
+            };
+            let hole = PyDict::new(py);
+            hole.set_item("kind", "hole").unwrap();
+
+            let children =
+                pyo3::types::PyList::new(py, [mk_leaf(0).into_any(), hole.into_any()]).unwrap();
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "grid").unwrap();
+            root.set_item("children", children).unwrap();
+            root.set_item("nrows", 1usize).unwrap();
+            root.set_item("ncols", 2usize).unwrap();
+
+            let node = composite_tree_from_py(root.as_any()).unwrap();
+            let CompositeNode::Composite { children, .. } = node else {
+                panic!("expected Composite")
+            };
+            assert_eq!(children.len(), 2);
+            assert!(matches!(children[1], CompositeNode::Hole {}));
+        });
+    }
+
+    #[test]
+    fn composite_tree_from_py_hole_rejected_outside_grid_wrap() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let mk_leaf = |idx: usize| {
+                let d = PyDict::new(py);
+                d.set_item("kind", "leaf").unwrap();
+                d.set_item("spec", Py::new(py, dummy_chart_spec()).unwrap()).unwrap();
+                d.set_item("data", idx).unwrap();
+                d
+            };
+            let hole = PyDict::new(py);
+            hole.set_item("kind", "hole").unwrap();
+
+            let children =
+                pyo3::types::PyList::new(py, [mk_leaf(0).into_any(), hole.into_any()]).unwrap();
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "hconcat").unwrap();
+            root.set_item("children", children).unwrap();
+
+            let err = composite_tree_from_py(root.as_any()).unwrap_err();
+            let msg = err.value(py).to_string();
+            assert!(msg.contains("hole") && msg.contains("hconcat"), "msg: {msg}");
         });
     }
 }

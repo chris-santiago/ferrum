@@ -969,6 +969,11 @@ def render_interactive(
 #               # per-child (non-root) label:
 #               "label"?: str, "resolve"?: dict, "ncols"?: int, "nrows"?: int,
 #               "row_ratios"?: list, "col_ratios"?: list, "spacing"?: float}
+#   hole:      {"kind": "hole"}  # Task 8a: a field-less placeholder cell —
+#               # valid only as a direct child of a "grid"/"wrap" composite
+#               # (never at the tree root); reserves its row/column slot but
+#               # renders no panel/label/chrome. Covers JointChart's empty 2x2
+#               # corner and RepeatChart's `corner=True`.
 # `theme`/`config`/`chart_config`/`viewport` below are the call-level defaults
 # every leaf inherits unless it carries its own override.
 def render_composite_svg(
