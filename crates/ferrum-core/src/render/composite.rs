@@ -33,12 +33,9 @@
 //! (returns `None`), so it still short-circuits at the existing explicit-scale
 //! bypass — user scale wins over sharing (spec §6).
 //!
-//! Everything in this module is consumed by Task 5's composite render entry,
-//! which is not yet a reachable `pub` root — hence the scoped `dead_code` allow,
-//! matching the crate's phased-delivery precedent (`spec/composite.rs`,
-//! `scale/ticks.rs`).
-#![allow(dead_code)]
-
+//! Everything in this module is consumed by Task 5b's composite render core
+//! ([`crate::render::composite_render`]) and the D4b scale seam, which reach it
+//! from within the crate.
 use crate::render::scale_resolve::{
     distinct_positional_categories_shared, infer_spec_type, locate_field, numeric_domain_union,
 };
