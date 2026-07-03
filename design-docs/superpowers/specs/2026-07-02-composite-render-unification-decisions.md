@@ -108,3 +108,36 @@ facet model, generalized).
 - *Concatenated per-leaf buffers + manifest* — describes per-leaf boundaries the
   unified scene no longer has; consumers would still need per-leaf→flat resolution
   (same indirection, more format).
+
+---
+
+## D4a Amendment (2026-07-02, Task 3 implementation finding)
+
+D4a's WASM paragraph ("compose into the existing per-panel affine slot, zero new GPU
+machinery") was decided on incomplete research: the FA-18 slots bind ONLY mark
+mesh/instance draws; axes, grid, text, and annotation passes bind the identity
+uniform (render.rs:510/599/643 vs 539/552/568/596, verified). Slot-only composition
+would therefore scale a panel's marks but not its axes/text — tearing the panel
+apart. **Amended WASM consumption: bake the layout-scale into all geometry at scene
+load** (nodes, packed instances, plot_area), giving uniform treatment of every node
+type; zoom/pan operates on baked coordinates unchanged; render.rs/zoom_pan.rs
+untouched. The static-SVG side is unchanged from D4a (per-panel
+`<g transform="translate scale">`, identity = byte-identical no-op).
+
+Consequences accepted with the amendment: direction-independent scalar attributes
+(radius, stroke_width, corner_radius, font_size) scale by the geometric mean
+sqrt(sx·sy) — exact under uniform scale, a documented approximation under
+anisotropic scale (panel positions/extents, the substance of the W5 proportions
+goal, are exact); rotation angles are left unscaled (documented gap, unreachable
+until Tasks 5/8 emit non-identity values — Task 8's ratio-cell tests must exercise
+it). The schema field shape and serde semantics are unchanged from D4a.
+
+**Amendment addendum (Task 3 quality review):** dash-pattern lengths join the
+geometric-mean scalar set (fixed + tested in Task 3). **Known gap that Tasks 5/8 MUST
+close before emitting non-identity layout-scales:** `hit_test.rs`, `lib.rs`
+(brush/crossfilter), `spatial_index.rs`, and `render.rs::upload_transform_and_render`
+read the raw un-baked `scene.panels` `plot_area`/`coord` — these diverge from baked
+`SceneData` geometry the moment a non-identity layout-scale exists, silently breaking
+hit-testing/tooltips/brushing on ratio-fitted panels. Single-source-of-truth
+resolution (bake into the scene panels themselves, or route interaction through baked
+SceneData) is a Task 5/8 acceptance requirement.

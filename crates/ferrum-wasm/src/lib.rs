@@ -917,7 +917,7 @@ mod tests {
         use crate::scene_load::{CircleInstance, DrawKind, PackedBatchMeta, SceneData};
         use crate::spatial_index::SpatialIndex;
         use ferrum_scene::{
-            BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect,
+            BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         };
         use lyon::tessellation::VertexBuffers;
         use std::collections::HashMap;
@@ -947,6 +947,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         let mut packed_meta = HashMap::new();

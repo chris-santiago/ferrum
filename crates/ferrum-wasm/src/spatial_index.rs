@@ -384,7 +384,8 @@ fn geometry_contains(entry: &MarkEntry, x: f64, y: f64, tolerance: f64) -> bool 
 mod tests {
     use super::*;
     use ferrum_scene::{
-        BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect, SceneNode,
+        BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        SceneNode,
     };
     use rstar::PointDistance;
 
@@ -427,6 +428,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }
     }
 

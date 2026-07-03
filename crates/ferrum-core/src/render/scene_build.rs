@@ -1,7 +1,7 @@
 use arrow::record_batch::RecordBatch;
 use ferrum_scene::{
-    BindingRole, BlendMode, CoordKind, InteractionConfig, MarkBatch, Panel, ParamBinding,
-    PanelTickLevels, SceneGraph, SceneNode, TickLevel,
+    BindingRole, BlendMode, CoordKind, InteractionConfig, LayoutScale, MarkBatch, Panel,
+    ParamBinding, PanelTickLevels, SceneGraph, SceneNode, TickLevel,
 };
 use crate::spec::coord::to_scene_coord;
 
@@ -362,6 +362,7 @@ pub fn build_scene(
             axes: final_axes,
             annotations: final_annotations,
             strip_title: strip_title_nodes,
+            layout_scale: LayoutScale::identity(),
         });
     }
 

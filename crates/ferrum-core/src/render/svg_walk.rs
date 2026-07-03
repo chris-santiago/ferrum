@@ -30,6 +30,24 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
     }
 
     for panel in &scene.panels {
+        // Ratio-fitted cells (JointChart/ClusterMap marginals) carry a
+        // non-identity `layout_scale` mapping this panel's natively-computed
+        // geometry into its allocated slot in the composed scene — the same
+        // mechanism `scene_load.rs` applies for the WASM renderer (W5 fix).
+        // At identity (every flat/faceted panel today) this is a pure no-op:
+        // no wrapper is emitted, keeping byte-identical output.
+        let has_layout_scale = !panel.layout_scale.is_identity();
+        if has_layout_scale {
+            let ls = &panel.layout_scale;
+            svg.raw(&format!(
+                r#"<g transform="translate({},{}) scale({},{})">"#,
+                fmt_f(ls.tx),
+                fmt_f(ls.ty),
+                fmt_f(ls.sx),
+                fmt_f(ls.sy),
+            ));
+        }
+
         // Gridlines (behind marks)
         for node in &panel.grid {
             emit_gridline_node(&mut svg, node);
@@ -164,6 +182,10 @@ pub fn walk_svg(scene: &SceneGraph, embed_fonts: bool) -> String {
                     emit_node(&mut svg, node);
                 }
             }
+        }
+
+        if has_layout_scale {
+            svg.raw("</g>");
         }
     }
 
@@ -340,8 +362,8 @@ fn emit_text(svg: &mut SvgBuffer, x: f64, y: f64, content: &str, s: &FsText) {
 mod tests {
     use super::*;
     use ferrum_scene::{
-        BlendMode, Color, CoordKind, FillStroke, InteractionConfig, MarkBatch, MarkBatchKind,
-        Panel, Rect, SceneGraph, SceneNode, StrokeStyle,
+        BlendMode, Color, CoordKind, FillStroke, InteractionConfig, LayoutScale, MarkBatch,
+        MarkBatchKind, Panel, Rect, SceneGraph, SceneNode, StrokeStyle,
     };
 
     fn minimal_scene(annotations: Vec<SceneNode>) -> SceneGraph {
@@ -368,6 +390,7 @@ mod tests {
                 grid: vec![],
                 axes: vec![],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle {
@@ -507,6 +530,61 @@ mod tests {
             "annotation appears before mark in SVG (wrong z-order): \
              circle at byte {circle_pos}, annotation at byte {annotation_pos}"
         );
+    }
+
+    // ── per-panel `layout_scale` (ratio-fitted cells / W5 foundation) ────────
+
+    /// A scene whose only panel carries `ls` as its `layout_scale`, otherwise
+    /// identical to [`minimal_scene`]. Used to isolate the wrapper's effect
+    /// from everything else `walk_svg` emits.
+    fn scene_with_layout_scale(ls: LayoutScale) -> SceneGraph {
+        let mut scene = minimal_scene(vec![]);
+        scene.panels[0].layout_scale = ls;
+        scene
+    }
+
+    #[test]
+    fn identity_layout_scale_emits_byte_identical_svg() {
+        // The byte-stability anchor: a scene at the default (identity)
+        // `layout_scale` must render exactly like a scene with the field
+        // absent — no `<g transform>` wrapper, no other change — so every
+        // flat/faceted golden stays byte-identical.
+        let baseline = walk_svg(&minimal_scene(vec![]), false);
+        let explicit_identity = walk_svg(&scene_with_layout_scale(LayoutScale::identity()), false);
+        assert_eq!(
+            baseline, explicit_identity,
+            "explicit identity layout_scale must not change SVG output"
+        );
+        assert!(
+            !explicit_identity.contains("<g transform="),
+            "identity layout_scale must not emit a transform wrapper"
+        );
+    }
+
+    #[test]
+    fn non_identity_layout_scale_wraps_panel_in_transform_group() {
+        // A ratio-fitted cell (sx != sy, as JointChart marginals require)
+        // must wrap the panel's content in a <g transform="translate(...)
+        // scale(...)"> group carrying exactly those values.
+        let ls = LayoutScale { sx: 0.5, sy: 0.2, tx: 10.0, ty: 20.0 };
+        let svg = walk_svg(&scene_with_layout_scale(ls), false);
+        assert!(
+            svg.contains(r#"<g transform="translate(10,20) scale(0.5,0.2)">"#),
+            "expected non-uniform layout_scale transform wrapper not found\nSVG: {}",
+            &svg[..svg.len().min(800)]
+        );
+        // The mark circle must still be present (inside the wrapper).
+        assert!(svg.contains("<circle "), "mark circle missing under layout_scale wrapper");
+    }
+
+    #[test]
+    fn non_identity_layout_scale_wrapper_closes() {
+        // The transform group opened for a non-identity layout_scale must be
+        // closed with a matching </g> (paired open/close, no dangling group).
+        let ls = LayoutScale { sx: 2.0, sy: 2.0, tx: 0.0, ty: 0.0 };
+        let svg = walk_svg(&scene_with_layout_scale(ls), false);
+        let opens = svg.matches("<g transform=\"translate(0,0) scale(2,2)\">").count();
+        assert_eq!(opens, 1, "expected exactly one layout_scale wrapper open");
     }
 }
 

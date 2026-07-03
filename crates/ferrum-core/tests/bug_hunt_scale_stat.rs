@@ -4,7 +4,7 @@
 //! degenerate inputs, and structural round-trip correctness.
 
 use ferrum_scene::{
-    BlendMode, Color, CoordKind, FillStroke, FontWeight, MarkBatch, MarkBatchKind,
+    BlendMode, Color, CoordKind, FillStroke, FontWeight, LayoutScale, MarkBatch, MarkBatchKind,
     Panel, PathCmd, Rect, SceneGraph, SceneNode, TextAnchor, TextBaseline,
     TextStyle, Tick, TickLevel,
 };
@@ -51,6 +51,7 @@ fn make_panel(marks: Vec<MarkBatch>) -> Panel {
         axes: vec![],
         annotations: vec![],
         strip_title: vec![],
+        layout_scale: LayoutScale::identity(),
     }
 }
 
@@ -480,6 +481,7 @@ fn panel_with_strip_title_round_trips() {
         },
         grid: vec![], marks: vec![], axes: vec![],
         annotations: vec![], strip_title: vec![strip],
+        layout_scale: LayoutScale::identity(),
     };
     let json = serde_json::to_string(&panel).expect("serialize panel with strip_title");
     let back: Panel = serde_json::from_str(&json).expect("deserialize");
@@ -511,6 +513,7 @@ fn panel_one_pixel_plot_area_round_trips() {
             packed_instances: None,
         }],
         axes: vec![], annotations: vec![], strip_title: vec![],
+        layout_scale: LayoutScale::identity(),
     };
     let json = serde_json::to_string(&panel).expect("serialize 1x1 panel");
     let back: Panel = serde_json::from_str(&json).expect("deserialize");

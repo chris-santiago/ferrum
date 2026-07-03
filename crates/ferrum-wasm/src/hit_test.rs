@@ -606,7 +606,9 @@ mod bug_hunt_tests {
     // ── hit_test_nearest: new coverage ─────────────────────────────────────────
 
     fn make_panel_two_circles(c1: (f64, f64), c2: (f64, f64)) -> Vec<ferrum_scene::Panel> {
-        use ferrum_scene::{BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        };
         let style = FillStroke {
             fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
             stroke: None,
@@ -642,6 +644,7 @@ mod bug_hunt_tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }]
     }
 
@@ -701,7 +704,7 @@ mod bug_hunt_tests {
     #[test]
     fn bug_hunt_hit_test_nearest_panel_with_no_marks() {
         // Panel with no mark batches: nearest must return None, not panic.
-        use ferrum_scene::{CoordKind, Panel, Rect};
+        use ferrum_scene::{CoordKind, LayoutScale, Panel, Rect};
         let panels = vec![Panel {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
@@ -712,6 +715,7 @@ mod bug_hunt_tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
         let zoom = identity_zoom_n(1);
         let result = hit_test_nearest(&panels, 250.0, 250.0, &zoom);
@@ -791,7 +795,9 @@ mod bug_hunt_tests {
     #[test]
     fn bug_hunt_hit_test_multi_panel_zoom_independence() {
         // Two panels, only panel 0 zoomed. Click should use correct zoom per panel.
-        use ferrum_scene::{BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        };
         let style = FillStroke {
             fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
             stroke: None, stroke_width: 0.0, opacity: 1.0,
@@ -804,6 +810,7 @@ mod bug_hunt_tests {
                 clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
                 coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
                 grid: vec![], axes: vec![], annotations: vec![], strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle { cx: 100.0, cy: 100.0, r: 5.0, style: style.clone() }],
@@ -818,6 +825,7 @@ mod bug_hunt_tests {
                 clip: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
                 coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
                 grid: vec![], axes: vec![], annotations: vec![], strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle { cx: 350.0, cy: 100.0, r: 5.0, style: style.clone() }],
@@ -892,7 +900,7 @@ mod bug_hunt_tests {
 
     #[test]
     fn bug_hunt_tick_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
         let panel = Panel {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
@@ -903,6 +911,7 @@ mod bug_hunt_tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Tick,
@@ -946,7 +955,7 @@ mod bug_hunt_tests {
 
     #[test]
     fn bug_hunt_text_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
         let panel = Panel {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
@@ -957,6 +966,7 @@ mod bug_hunt_tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Text,
@@ -1029,7 +1039,7 @@ mod bug_hunt_tests {
 
     #[test]
     fn bug_hunt_ribbon_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
         let panel = Panel {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
@@ -1040,6 +1050,7 @@ mod bug_hunt_tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         };
         let commands = vec![
             ferrum_scene::PathCmd::MoveTo { x: 10.0, y: 10.0 },
@@ -1080,7 +1091,7 @@ mod bug_hunt_tests {
 
     #[test]
     fn bug_hunt_segment_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
         let panel = Panel {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
@@ -1091,6 +1102,7 @@ mod bug_hunt_tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Segment,
@@ -1135,7 +1147,7 @@ mod bug_hunt_tests {
 
     #[test]
     fn bug_hunt_image_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
         let panel = Panel {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
@@ -1146,6 +1158,7 @@ mod bug_hunt_tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Image,
@@ -1172,9 +1185,7 @@ mod bug_hunt_tests {
 mod tests {
     use super::*;
     use crate::zoom_pan::{Affine2, ZoomPanState};
-    use ferrum_scene::{
-        CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect,
-    };
+    use ferrum_scene::{CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -1225,6 +1236,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }]
     }
 
@@ -1259,6 +1271,7 @@ mod tests {
                 axes: vec![],
                 annotations: vec![],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             },
             Panel {
                 id: 5,  // logical id diverges from array position (1)
@@ -1284,6 +1297,7 @@ mod tests {
                 axes: vec![],
                 annotations: vec![],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             },
         ]
     }
@@ -1487,6 +1501,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Label,
@@ -1548,6 +1563,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }
     }
 

@@ -768,7 +768,7 @@ mod tests {
     #[test]
     fn r4_point_selection_shift_click_toggle() {
         use ferrum_scene::{
-            BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect,
+            BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
         };
         let specs = vec![shift_toggle_point_spec("sel")];
         let mut state = InteractionState::new(&specs);
@@ -815,6 +815,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
         let zoom = crate::zoom_pan::ZoomPanState::new(
             1,
@@ -1400,7 +1401,7 @@ mod tests {
     #[test]
     fn handle_click_with_fields_populates_field_values() {
         use ferrum_scene::{
-            BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect,
+            BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
             TooltipContent, TooltipField,
         };
         let style = FillStroke {
@@ -1451,6 +1452,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         // Point spec with fields: Some(vec!["group"]).
@@ -1519,7 +1521,7 @@ mod tests {
     #[test]
     fn click_selection_42_dot_0_coselects_42_typed() {
         use ferrum_scene::{
-            BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect,
+            BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
             TooltipContent, TooltipField,
         };
 
@@ -1583,6 +1585,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         let specs = vec![SelectionSpec::Point {
@@ -1636,7 +1639,7 @@ mod tests {
     #[test]
     fn click_selection_string_whitespace_distinct() {
         use ferrum_scene::{
-            BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect,
+            BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
             TooltipContent, TooltipField,
         };
 
@@ -1695,6 +1698,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         let specs = vec![SelectionSpec::Point {

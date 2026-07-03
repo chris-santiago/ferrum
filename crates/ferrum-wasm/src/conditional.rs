@@ -635,7 +635,7 @@ mod tests {
     // `ChannelName` is still a field on `ConditionalEncoding` (kept for wire
     // compatibility), so test fixtures construct it; the runtime apply path no
     // longer dispatches on it (WASM-05: value is the source of truth).
-    use ferrum_scene::{ChannelName, Color, FieldValue};
+    use ferrum_scene::{ChannelName, Color, FieldValue, LayoutScale};
 
     // ── D6 crossfilter: apply_crossfilter_to_panel dims only the target panel ─
 
@@ -682,6 +682,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         };
         // Panel 0 (source) mark at x=10 (inside the brush); panel 1 (target)
         // mark at x=400 (outside the re-projected interval).
@@ -767,6 +768,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
         let mut circles = vec![CircleInstance {
             center: [50.0, 50.0], radius: 5.0,
@@ -937,6 +939,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         let red = Color { r: 255, g: 0, b: 0, a: 255 };
@@ -1050,6 +1053,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         let red = Color { r: 255, g: 0, b: 0, a: 255 };
@@ -1154,6 +1158,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         // Point selection selects index 0 only.
@@ -1302,6 +1307,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         let red = Color { r: 255, g: 0, b: 0, a: 255 };
@@ -1578,6 +1584,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         let conditionals = vec![ConditionalEncoding {
@@ -1664,6 +1671,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         let conditionals = vec![ConditionalEncoding {
@@ -1991,6 +1999,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         let conditionals = vec![ConditionalEncoding {
@@ -2079,6 +2088,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         let conditionals = vec![ConditionalEncoding {
@@ -2179,6 +2189,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         let red = Color { r: 255, g: 0, b: 0, a: 255 };
@@ -2296,6 +2307,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         let conditionals = vec![ConditionalEncoding {
@@ -2414,6 +2426,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         let conditionals = vec![ConditionalEncoding {
@@ -2556,6 +2569,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         // Select data index 50 — that is the non-packed circle.
@@ -2692,6 +2706,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         // Crossfilter brush covers x in [0, 100]: packed circles at x=10,20,30
@@ -2802,6 +2817,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
 
         let red = Color { r: 255, g: 0, b: 0, a: 255 };

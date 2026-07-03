@@ -468,7 +468,13 @@ impl SceneCollector {
     /// `panel_id` is only meaningful for mark commands (`is_mark == true`); the
     /// render loop binds that panel's affine. Non-mark commands always draw
     /// with the identity transform, so callers pass `0`.
-    fn emit(&mut self, additive: bool, is_mark: bool, plot_area: Option<[f32; 4]>, panel_id: usize) {
+    fn emit(
+        &mut self,
+        additive: bool,
+        is_mark: bool,
+        plot_area: Option<[f32; 4]>,
+        panel_id: usize,
+    ) {
         let new_c = self.circles.len();
         if new_c > self.prev_c {
             self.draw_commands.push(DrawCommand {
@@ -534,6 +540,318 @@ impl SceneCollector {
     }
 }
 
+// ── `Panel::layout_scale` application (ratio-fitted cells / W5 foundation) ──
+//
+// `walk_svg` applies this same field as a `<g transform="translate(tx,ty)
+// scale(sx,sy)">` wrapper around a panel's emitted content. The WASM GPU
+// pipeline has no group-transform equivalent for baked mesh vertices and
+// instanced circles/rects, so here the transform is baked directly into each
+// panel's geometry (node coordinates before tessellation, plus the packed
+// instance sidecar) at scene-load time — before any zoom/pan state exists.
+// At identity (every flat/faceted panel today) every function below is a
+// cheap no-op check, so nothing changes for existing scenes.
+//
+// Direction-dependent extents (rect/image width & height) scale
+// independently by `sx`/`sy` — an exact match for the SVG behavior, since
+// width tracks the x-axis and height the y-axis. Direction-*independent*
+// scalars that SVG's true 2D transform would otherwise skew into an ellipse
+// or a stretched stroke (circle/arc radius, rect corner radius, stroke
+// width, dash-pattern lengths, font size) scale by the geometric mean
+// `sqrt(sx * sy)`: exact when `sx == sy` (the uniform case), a documented
+// approximation otherwise.
+// Rotation angles are left unchanged — representing a rotated shape under a
+// non-uniform scale requires a shear decomposition this schema does not
+// carry, a narrow gap in the same spirit as `SceneNode::Raw`'s existing W4
+// baked-coordinate limitation.
+
+/// The scale factor applied to direction-independent scalar magnitudes
+/// (radius, stroke width, font size) — the geometric mean of `sx`/`sy`.
+fn scalar_scale_factor(ls: &LayoutScale) -> f64 {
+    (ls.sx * ls.sy).abs().sqrt()
+}
+
+fn transform_fill_stroke(style: &FillStroke, mag: f64) -> FillStroke {
+    let mut style = style.clone();
+    style.stroke_width *= mag;
+    style.stroke_dash = style
+        .stroke_dash
+        .map(|d| d.iter().map(|v| v * mag).collect());
+    style
+}
+
+fn transform_stroke_style(style: &StrokeStyle, mag: f64) -> StrokeStyle {
+    let mut style = style.clone();
+    style.width *= mag;
+    style.dash = style.dash.map(|d| d.iter().map(|v| v * mag).collect());
+    style
+}
+
+fn transform_text_style(style: &TextStyle, mag: f64) -> TextStyle {
+    let mut style = style.clone();
+    style.font_size *= mag;
+    style
+}
+
+fn transform_path_cmd(cmd: &PathCmd, ls: &LayoutScale) -> PathCmd {
+    match *cmd {
+        PathCmd::MoveTo { x, y } => {
+            let (x, y) = ls.apply(x, y);
+            PathCmd::MoveTo { x, y }
+        }
+        PathCmd::LineTo { x, y } => {
+            let (x, y) = ls.apply(x, y);
+            PathCmd::LineTo { x, y }
+        }
+        PathCmd::QuadTo { cx, cy, x, y } => {
+            let (cx, cy) = ls.apply(cx, cy);
+            let (x, y) = ls.apply(x, y);
+            PathCmd::QuadTo { cx, cy, x, y }
+        }
+        PathCmd::CubicTo {
+            c1x,
+            c1y,
+            c2x,
+            c2y,
+            x,
+            y,
+        } => {
+            let (c1x, c1y) = ls.apply(c1x, c1y);
+            let (c2x, c2y) = ls.apply(c2x, c2y);
+            let (x, y) = ls.apply(x, y);
+            PathCmd::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            }
+        }
+        PathCmd::HLineTo { x } => PathCmd::HLineTo {
+            x: ls.sx * x + ls.tx,
+        },
+        PathCmd::VLineTo { y } => PathCmd::VLineTo {
+            y: ls.sy * y + ls.ty,
+        },
+        PathCmd::ArcTo {
+            rx,
+            ry,
+            rotation,
+            large_arc,
+            sweep,
+            x,
+            y,
+        } => {
+            let (x, y) = ls.apply(x, y);
+            PathCmd::ArcTo {
+                rx: rx * ls.sx,
+                ry: ry * ls.sy,
+                rotation,
+                large_arc,
+                sweep,
+                x,
+                y,
+            }
+        }
+        PathCmd::Close => PathCmd::Close,
+    }
+}
+
+/// Apply `ls` to every point-like coordinate (and, per the module doc above,
+/// direction-independent scalar) in a single [`SceneNode`].
+fn transform_node(node: &SceneNode, ls: &LayoutScale) -> SceneNode {
+    let mag = scalar_scale_factor(ls);
+    match node {
+        SceneNode::Rect {
+            x,
+            y,
+            w,
+            h,
+            style,
+            corner_radius,
+        } => {
+            let (x, y) = ls.apply(*x, *y);
+            SceneNode::Rect {
+                x,
+                y,
+                w: w * ls.sx,
+                h: h * ls.sy,
+                style: transform_fill_stroke(style, mag),
+                corner_radius: corner_radius * mag,
+            }
+        }
+        SceneNode::Circle { cx, cy, r, style } => {
+            let (cx, cy) = ls.apply(*cx, *cy);
+            SceneNode::Circle {
+                cx,
+                cy,
+                r: r * mag,
+                style: transform_fill_stroke(style, mag),
+            }
+        }
+        SceneNode::Line {
+            x1,
+            y1,
+            x2,
+            y2,
+            style,
+        } => {
+            let (x1, y1) = ls.apply(*x1, *y1);
+            let (x2, y2) = ls.apply(*x2, *y2);
+            SceneNode::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                style: transform_stroke_style(style, mag),
+            }
+        }
+        SceneNode::Path {
+            commands,
+            style,
+            closed,
+        } => SceneNode::Path {
+            commands: commands.iter().map(|c| transform_path_cmd(c, ls)).collect(),
+            style: transform_fill_stroke(style, mag),
+            closed: *closed,
+        },
+        SceneNode::Text {
+            x,
+            y,
+            content,
+            style,
+        } => {
+            let (x, y) = ls.apply(*x, *y);
+            SceneNode::Text {
+                x,
+                y,
+                content: content.clone(),
+                style: transform_text_style(style, mag),
+            }
+        }
+        SceneNode::Image { x, y, w, h, data } => {
+            let (x, y) = ls.apply(*x, *y);
+            SceneNode::Image {
+                x,
+                y,
+                w: w * ls.sx,
+                h: h * ls.sy,
+                data: data.clone(),
+            }
+        }
+        SceneNode::Polygon { rings, style } => SceneNode::Polygon {
+            rings: rings
+                .iter()
+                .map(|ring| {
+                    ring.iter()
+                        .map(|[x, y]| {
+                            let (x, y) = ls.apply(*x, *y);
+                            [x, y]
+                        })
+                        .collect()
+                })
+                .collect(),
+            style: transform_fill_stroke(style, mag),
+        },
+        SceneNode::Polyline { points, style } => SceneNode::Polyline {
+            points: points.iter().map(|(x, y)| ls.apply(*x, *y)).collect(),
+            style: transform_stroke_style(style, mag),
+        },
+        SceneNode::Group { attrs, children } => SceneNode::Group {
+            attrs: attrs.clone(),
+            children: children.iter().map(|c| transform_node(c, ls)).collect(),
+        },
+        // `Raw` fragments bake absolute coordinates into an opaque SVG
+        // string; rewriting them is the existing W4 gap (documented in
+        // CLAUDE.md), out of scope here — pass through unchanged.
+        SceneNode::Raw { .. } => node.clone(),
+    }
+}
+
+/// Apply `ls` to every node in `nodes`. Returns a fresh `Vec` even at
+/// identity (callers only invoke this behind an `is_identity()` guard).
+fn transform_nodes(nodes: &[SceneNode], ls: &LayoutScale) -> Vec<SceneNode> {
+    nodes.iter().map(|n| transform_node(n, ls)).collect()
+}
+
+/// Borrow `nodes` unchanged at identity (the byte/pixel-stability anchor for
+/// every flat and faceted panel today — no allocation on that hot path),
+/// or return a freshly transformed owned copy otherwise.
+fn maybe_transform_nodes<'a>(
+    nodes: &'a [SceneNode],
+    ls: &LayoutScale,
+) -> std::borrow::Cow<'a, [SceneNode]> {
+    if ls.is_identity() {
+        std::borrow::Cow::Borrowed(nodes)
+    } else {
+        std::borrow::Cow::Owned(transform_nodes(nodes, ls))
+    }
+}
+
+/// Apply `ls` to a panel's `plot_area`/`clip` rect (used for the WASM
+/// scissor rect and packed-batch metadata), matching the node-level
+/// transform above.
+fn transform_rect(rect: &ferrum_scene::Rect, ls: &LayoutScale) -> ferrum_scene::Rect {
+    let (x, y) = ls.apply(rect.x, rect.y);
+    ferrum_scene::Rect {
+        x,
+        y,
+        w: rect.w * ls.sx,
+        h: rect.h * ls.sy,
+    }
+}
+
+/// Bake each panel's `layout_scale` into its packed circle/rect instances.
+///
+/// Packed instances bypass `collect_nodes` (they are pre-populated from the
+/// binary sidecar before the scene-graph walk begins), so they need their
+/// own transform pass keyed by `batch_meta`'s `(panel_idx, batch_idx) ->
+/// instance range` mapping.
+fn apply_layout_scale_to_packed_instances(
+    scene: &SceneGraph,
+    circles: &mut [CircleInstance],
+    rects: &mut [RectInstance],
+    batch_meta: &HashMap<(u32, u32), PackedBatchMeta>,
+) {
+    for (&(panel_idx, _batch_idx), meta) in batch_meta.iter() {
+        let Some(panel) = scene.panels.get(panel_idx as usize) else {
+            continue;
+        };
+        let ls = &panel.layout_scale;
+        if ls.is_identity() {
+            continue;
+        }
+        let mag = scalar_scale_factor(ls);
+        let range = meta.instance_start..(meta.instance_start + meta.instance_count);
+        match meta.kind {
+            DrawKind::Circle => {
+                if let Some(slice) = circles.get_mut(range) {
+                    for c in slice {
+                        let (x, y) = ls.apply(c.center[0] as f64, c.center[1] as f64);
+                        c.center = [x as f32, y as f32];
+                        c.radius = (c.radius as f64 * mag) as f32;
+                        c.stroke_width = (c.stroke_width as f64 * mag) as f32;
+                    }
+                }
+            }
+            DrawKind::Rect => {
+                if let Some(slice) = rects.get_mut(range) {
+                    for r in slice {
+                        let (x, y) = ls.apply(r.position[0] as f64, r.position[1] as f64);
+                        r.position = [x as f32, y as f32];
+                        r.size = [
+                            (r.size[0] as f64 * ls.sx) as f32,
+                            (r.size[1] as f64 * ls.sy) as f32,
+                        ];
+                        r.corner_radius = (r.corner_radius as f64 * mag) as f32;
+                        r.stroke_width = (r.stroke_width as f64 * mag) as f32;
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn load_scene(scene: &SceneGraph) -> SceneData {
     load_scene_with_packed(scene, &[])
 }
@@ -545,7 +863,20 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
     // Unpack binary instance data (passed as raw bytes, not base64).
     // Draw commands for packed batches are emitted in the scene-graph walk
     // below, where the MarkBatch.blend mode is available.
-    unpack_binary_instances(packed_data, &mut collector.circles, &mut collector.rects, &mut batch_meta);
+    unpack_binary_instances(
+        packed_data,
+        &mut collector.circles,
+        &mut collector.rects,
+        &mut batch_meta,
+    );
+    // Bake each panel's `layout_scale` into its packed instances (a no-op
+    // scan at identity — every panel today).
+    apply_layout_scale_to_packed_instances(
+        scene,
+        &mut collector.circles,
+        &mut collector.rects,
+        &batch_meta,
+    );
     // Sync snapshot counters after pre-populating from packed data.
     collector.snapshot();
 
@@ -555,35 +886,69 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
     collector.collect_static(&scene.title, None, None);
 
     for (panel_idx, panel) in scene.panels.iter().enumerate() {
+        // Ratio-fitted cells (JointChart/ClusterMap marginals) carry a
+        // non-identity `layout_scale`. `walk_svg` applies it as a `<g
+        // transform>` wrapper; the GPU pipeline has no such wrapper for
+        // baked mesh/instance geometry, so it is baked into every node,
+        // rect, and packed instance for this panel instead (see the
+        // "`Panel::layout_scale` application" doc block above). At identity
+        // (every panel today) `maybe_transform_nodes`/`transform_rect` are
+        // no-ops, so nothing changes for existing scenes.
+        let ls = &panel.layout_scale;
+
         // Grid: non-mark → static mesh. Snap Line nodes to pixel centers to
         // avoid sub-pixel aliasing in the GPU rasterizer (the SVG renderer
-        // handles this natively; WASM needs explicit snapping).
-        let snapped_grid: Vec<SceneNode> = panel.grid.iter().map(|node| {
-            if let SceneNode::Line { x1, y1, x2, y2, style } = node {
-                let (sx1, sy1, sx2, sy2) = if (x1 - x2).abs() < 0.5 {
-                    // Vertical line: snap x to pixel center (round + 0.5)
-                    let snapped_x = x1.round() + 0.5;
-                    (snapped_x, *y1, snapped_x, *y2)
-                } else if (y1 - y2).abs() < 0.5 {
-                    // Horizontal line: snap y to pixel center (round + 0.5)
-                    let snapped_y = y1.round() + 0.5;
-                    (*x1, snapped_y, *x2, snapped_y)
+        // handles this natively; WASM needs explicit snapping). Snapping
+        // runs on the already layout-scaled coordinates, since it must
+        // operate in final scene-pixel space.
+        let scaled_grid = maybe_transform_nodes(&panel.grid, ls);
+        let snapped_grid: Vec<SceneNode> = scaled_grid
+            .iter()
+            .map(|node| {
+                if let SceneNode::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    style,
+                } = node
+                {
+                    let (sx1, sy1, sx2, sy2) = if (x1 - x2).abs() < 0.5 {
+                        // Vertical line: snap x to pixel center (round + 0.5)
+                        let snapped_x = x1.round() + 0.5;
+                        (snapped_x, *y1, snapped_x, *y2)
+                    } else if (y1 - y2).abs() < 0.5 {
+                        // Horizontal line: snap y to pixel center (round + 0.5)
+                        let snapped_y = y1.round() + 0.5;
+                        (*x1, snapped_y, *x2, snapped_y)
+                    } else {
+                        // Diagonal line: pass through unchanged
+                        (*x1, *y1, *x2, *y2)
+                    };
+                    SceneNode::Line {
+                        x1: sx1,
+                        y1: sy1,
+                        x2: sx2,
+                        y2: sy2,
+                        style: style.clone(),
+                    }
                 } else {
-                    // Diagonal line: pass through unchanged
-                    (*x1, *y1, *x2, *y2)
-                };
-                SceneNode::Line { x1: sx1, y1: sy1, x2: sx2, y2: sy2, style: style.clone() }
-            } else {
-                node.clone()
-            }
-        }).collect();
+                    node.clone()
+                }
+            })
+            .collect();
         collector.collect_static(&snapped_grid, None, None);
 
+        let effective_plot_area = if ls.is_identity() {
+            panel.plot_area
+        } else {
+            transform_rect(&panel.plot_area, ls)
+        };
         let panel_plot_area_arr = [
-            panel.plot_area.x as f32,
-            panel.plot_area.y as f32,
-            panel.plot_area.w as f32,
-            panel.plot_area.h as f32,
+            effective_plot_area.x as f32,
+            effective_plot_area.y as f32,
+            effective_plot_area.w as f32,
+            effective_plot_area.h as f32,
         ];
         let panel_plot_area = Some(panel_plot_area_arr);
 
@@ -596,7 +961,9 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
 
             // If this batch has packed binary instances, emit a draw command
             // from the packed metadata (the instances were already added by
-            // unpack_binary_instances above). Otherwise, collect from nodes.
+            // unpack_binary_instances above, and already layout-scaled by
+            // `apply_layout_scale_to_packed_instances`). Otherwise, collect
+            // from nodes.
             let key = (panel_idx as u32, batch_idx as u32);
             if let Some(meta) = batch_meta.get(&key) {
                 collector.draw_commands.push(DrawCommand {
@@ -610,8 +977,9 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                 });
             } else {
                 // Mark batches → mark mesh (zoom transform)
+                let scaled_nodes = maybe_transform_nodes(&batch.nodes, ls);
                 collector.collect_mark(
-                    &batch.nodes,
+                    &scaled_nodes,
                     additive,
                     panel_plot_area,
                     panel_idx,
@@ -633,11 +1001,11 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         );
 
         // Axes, strip titles: non-mark → static mesh
-        collector.collect_static(&panel.axes, None, None);
-        collector.collect_static(&panel.strip_title, None, None);
+        collector.collect_static(&maybe_transform_nodes(&panel.axes, ls), None, None);
+        collector.collect_static(&maybe_transform_nodes(&panel.strip_title, ls), None, None);
         // Annotations: route to annotation_mesh so they appear above data
         // marks in WASM (matching SVG painter order).
-        collector.collect_annotation(&panel.annotations, None, None);
+        collector.collect_annotation(&maybe_transform_nodes(&panel.annotations, ls), None, None);
     }
 
     // Legend, decorations: non-mark → static mesh
@@ -673,7 +1041,12 @@ const HAS_DATA_INDICES: u32 = 0x2;
 /// The caller must guarantee `offset + 4 <= data.len()`.
 #[inline]
 fn read_u32_le(data: &[u8], offset: usize) -> u32 {
-    let bytes: [u8; 4] = [data[offset], data[offset + 1], data[offset + 2], data[offset + 3]];
+    let bytes: [u8; 4] = [
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ];
     u32::from_le_bytes(bytes)
 }
 
@@ -715,9 +1088,13 @@ fn unpack_binary_instances(
         let (instance_byte_len, instance_start, loaded_count) = match kind {
             DrawKind::Circle => {
                 let byte_len = count * std::mem::size_of::<CircleInstance>();
-                if offset + byte_len > data.len() { break; }
+                if offset + byte_len > data.len() {
+                    break;
+                }
                 let start = circles.len();
-                if let Ok(instances) = bytemuck::try_cast_slice::<_, CircleInstance>(&data[offset..offset+byte_len]) {
+                if let Ok(instances) =
+                    bytemuck::try_cast_slice::<_, CircleInstance>(&data[offset..offset + byte_len])
+                {
                     circles.extend_from_slice(instances);
                     // Packed instance color channels are sRGB — convert to linear.
                     for ci in &mut circles[start..] {
@@ -730,9 +1107,13 @@ fn unpack_binary_instances(
             }
             DrawKind::Rect => {
                 let byte_len = count * std::mem::size_of::<RectInstance>();
-                if offset + byte_len > data.len() { break; }
+                if offset + byte_len > data.len() {
+                    break;
+                }
                 let start = rects.len();
-                if let Ok(instances) = bytemuck::try_cast_slice::<_, RectInstance>(&data[offset..offset+byte_len]) {
+                if let Ok(instances) =
+                    bytemuck::try_cast_slice::<_, RectInstance>(&data[offset..offset + byte_len])
+                {
                     rects.extend_from_slice(instances);
                     // Packed instance color channels are sRGB — convert to linear.
                     for ri in &mut rects[start..] {
@@ -749,7 +1130,9 @@ fn unpack_binary_instances(
         // Read data_indices if flagged.
         let data_indices = if flags & HAS_DATA_INDICES != 0 {
             let indices_byte_len = count * 4;
-            if offset + indices_byte_len > data.len() { break; }
+            if offset + indices_byte_len > data.len() {
+                break;
+            }
             let indices: Vec<u32> = (0..count)
                 .map(|i| read_u32_le(data, offset + i * 4))
                 .collect();
@@ -766,7 +1149,9 @@ fn unpack_binary_instances(
             // walker stops after exactly `count × num_fields` value entries rather
             // than running to buffer-end, which would over-run into subsequent
             // batches in the concatenated sidecar. (WASM-03 fix)
-            if offset > data.len() { break; }
+            if offset > data.len() {
+                break;
+            }
             let table_slice = &data[offset..];
             let table_len = PackedTooltipTable::total_byte_length(table_slice, count);
             let end = (offset + table_len).min(data.len());
@@ -780,8 +1165,10 @@ fn unpack_binary_instances(
         meta.insert(
             (panel_idx, batch_idx),
             PackedBatchMeta {
-                data_indices, tooltip_bytes,
-                kind, instance_start,
+                data_indices,
+                tooltip_bytes,
+                kind,
+                instance_start,
                 // Record the count ACTUALLY loaded, not the header `count`.
                 // On a bytemuck cast failure the `if let Ok` block is skipped
                 // so loaded_count is 0, preventing phantom instance references
@@ -819,7 +1206,14 @@ fn collect_nodes(
                     angle: style.angle as f32,
                 });
             }
-            SceneNode::Rect { x, y, w, h, style, corner_radius } => {
+            SceneNode::Rect {
+                x,
+                y,
+                w,
+                h,
+                style,
+                corner_radius,
+            } => {
                 rects.push(RectInstance {
                     position: [*x as f32, *y as f32],
                     size: [*w as f32, *h as f32],
@@ -833,25 +1227,48 @@ fn collect_nodes(
                     angle: style.angle as f32,
                 });
             }
-            SceneNode::Line { x1, y1, x2, y2, style } => {
+            SceneNode::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                style,
+            } => {
                 let mut s = style.clone();
-                if s.stroke_cap.is_none() { s.stroke_cap = batch_cap; }
-                if s.stroke_join.is_none() { s.stroke_join = batch_join; }
+                if s.stroke_cap.is_none() {
+                    s.stroke_cap = batch_cap;
+                }
+                if s.stroke_join.is_none() {
+                    s.stroke_join = batch_join;
+                }
                 tessellate::tessellate_line(*x1, *y1, *x2, *y2, &s, mesh);
             }
-            SceneNode::Path { commands, style, closed } => {
+            SceneNode::Path {
+                commands,
+                style,
+                closed,
+            } => {
                 tessellate::tessellate_path(commands, style, *closed, batch_cap, batch_join, mesh);
             }
             SceneNode::Polyline { points, style } => {
                 let mut s = style.clone();
-                if s.stroke_cap.is_none() { s.stroke_cap = batch_cap; }
-                if s.stroke_join.is_none() { s.stroke_join = batch_join; }
+                if s.stroke_cap.is_none() {
+                    s.stroke_cap = batch_cap;
+                }
+                if s.stroke_join.is_none() {
+                    s.stroke_join = batch_join;
+                }
                 tessellate::tessellate_polyline(points, &s, mesh);
             }
             SceneNode::Polygon { rings, style } => {
                 tessellate::tessellate_polygon(rings, style, mesh);
             }
-            SceneNode::Text { x, y, content, style } => {
+            SceneNode::Text {
+                x,
+                y,
+                content,
+                style,
+            } => {
                 texts.push(TextElementData {
                     x: *x,
                     y: *y,
@@ -859,22 +1276,22 @@ fn collect_nodes(
                     style: style.clone(),
                 });
             }
-            SceneNode::Image { x, y, w, h, data } => {
-                match data {
-                    ImageData::Inline { bytes, .. } => {
-                        if let Some(quad) = decode_image_quad(*x, *y, *w, *h, bytes) {
-                            images.push(quad);
-                        }
-                    }
-                    ImageData::Url { .. } => {
-                        web_sys::console::warn_1(
-                            &"ferrum: ImageData::Url not supported in WASM renderer".into(),
-                        );
+            SceneNode::Image { x, y, w, h, data } => match data {
+                ImageData::Inline { bytes, .. } => {
+                    if let Some(quad) = decode_image_quad(*x, *y, *w, *h, bytes) {
+                        images.push(quad);
                     }
                 }
-            }
+                ImageData::Url { .. } => {
+                    web_sys::console::warn_1(
+                        &"ferrum: ImageData::Url not supported in WASM renderer".into(),
+                    );
+                }
+            },
             SceneNode::Group { children, .. } => {
-                collect_nodes(children, circles, rects, mesh, texts, images, raws, batch_cap, batch_join);
+                collect_nodes(
+                    children, circles, rects, mesh, texts, images, raws, batch_cap, batch_join,
+                );
             }
             SceneNode::Raw { svg, anchor } => {
                 let anchor_str = match anchor {
@@ -992,7 +1409,11 @@ impl<'a> PackedTooltipTable<'a> {
             offset += slen;
         }
 
-        Some(PackedTooltipTable { bytes, field_names, values_start: offset })
+        Some(PackedTooltipTable {
+            bytes,
+            field_names,
+            values_start: offset,
+        })
     }
 
     /// Number of columns in this table.
@@ -1129,7 +1550,10 @@ pub fn parse_tooltip_json(tooltip_bytes: &[u8], row_idx: usize) -> String {
         .map(|(name, value)| {
             let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
             let escaped_value = value.replace('\\', "\\\\").replace('"', "\\\"");
-            format!(r#"{{"name":"{}","value":"{}"}}"#, escaped_name, escaped_value)
+            format!(
+                r#"{{"name":"{}","value":"{}"}}"#,
+                escaped_name, escaped_value
+            )
         })
         .collect();
 
@@ -1174,7 +1598,8 @@ pub(crate) fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
         None => 0.0,
         Some(v) if v.is_empty() => 0.0,
         Some(v) => {
-            let joined = v.iter()
+            let joined = v
+                .iter()
                 .map(|x| {
                     // Format without trailing ".0" for integer-valued floats so
                     // "6,3" matches rather than "6.0,3.0".
@@ -1215,7 +1640,10 @@ mod tests {
     fn srgb_to_linear_mid_grey() {
         // sRGB 0.5 ≈ linear 0.214
         let linear = srgb_to_linear(0.5);
-        assert!((linear - 0.214).abs() < 0.002, "sRGB 0.5 → linear ~0.214, got {linear}");
+        assert!(
+            (linear - 0.214).abs() < 0.002,
+            "sRGB 0.5 → linear ~0.214, got {linear}"
+        );
     }
 
     #[test]
@@ -1233,7 +1661,11 @@ mod tests {
         for i in 1..=100 {
             let s = i as f32 / 100.0;
             let l = srgb_to_linear(s);
-            assert!(l >= prev, "srgb_to_linear must be monotonic: f({s}) = {l} < f({}) = {prev}", (i - 1) as f32 / 100.0);
+            assert!(
+                l >= prev,
+                "srgb_to_linear must be monotonic: f({s}) = {l} < f({}) = {prev}",
+                (i - 1) as f32 / 100.0
+            );
             prev = l;
         }
     }
@@ -1294,7 +1726,11 @@ mod tests {
         };
         let bytes = bytemuck::bytes_of(&inst);
         // 16 floats × 4 bytes = 64 bytes
-        assert_eq!(bytes.len(), 16 * 4, "CircleInstance must be exactly 16 floats");
+        assert_eq!(
+            bytes.len(),
+            16 * 4,
+            "CircleInstance must be exactly 16 floats"
+        );
         let back: &CircleInstance = bytemuck::from_bytes(bytes);
         assert!((back.stroke_opacity - 0.6).abs() < 1e-6);
         assert!((back.stroke_dash - 3.0).abs() < 1e-6);
@@ -1317,7 +1753,11 @@ mod tests {
         };
         let bytes = bytemuck::bytes_of(&inst);
         // 18 floats × 4 bytes = 72 bytes
-        assert_eq!(bytes.len(), 18 * 4, "RectInstance must be exactly 18 floats");
+        assert_eq!(
+            bytes.len(),
+            18 * 4,
+            "RectInstance must be exactly 18 floats"
+        );
         let back: &RectInstance = bytemuck::from_bytes(bytes);
         assert!((back.stroke_opacity - 0.4).abs() < 1e-6);
         assert!((back.stroke_dash - 1.0).abs() < 1e-6);
@@ -1366,12 +1806,22 @@ mod tests {
     /// scene loader populates the new stroke fields from style.
     #[test]
     fn load_scene_populates_stroke_opacity_and_angle_for_circle() {
-        use ferrum_scene::{FillStroke, SceneNode, Panel, MarkBatch, MarkBatchKind, BlendMode};
-        use ferrum_scene::{CoordKind, Rect, SceneGraph, InteractionConfig};
+        use ferrum_scene::{BlendMode, FillStroke, MarkBatch, MarkBatchKind, Panel, SceneNode};
+        use ferrum_scene::{CoordKind, InteractionConfig, Rect, SceneGraph};
 
         let style = FillStroke {
-            fill: Some(Color { r: 255, g: 0, b: 0, a: 255 }),
-            stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
+            stroke: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke_width: 2.0,
             opacity: 1.0,
             stroke_opacity: 0.5,
@@ -1380,7 +1830,12 @@ mod tests {
             angle: 45.0,
         };
 
-        let node = SceneNode::Circle { cx: 50.0, cy: 50.0, r: 10.0, style };
+        let node = SceneNode::Circle {
+            cx: 50.0,
+            cy: 50.0,
+            r: 10.0,
+            style,
+        };
 
         let scene = SceneGraph {
             width: 100.0,
@@ -1389,10 +1844,23 @@ mod tests {
             title: vec![],
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
-                clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                plot_area: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
+                clip: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
                 coord: CoordKind::Cartesian {
-                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -1411,6 +1879,7 @@ mod tests {
                 axes: vec![],
                 annotations: vec![],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -1422,22 +1891,41 @@ mod tests {
         let data = load_scene(&scene);
         assert_eq!(data.circle_instances.len(), 1);
         let ci = &data.circle_instances[0];
-        assert!((ci.stroke_opacity - 0.5).abs() < 1e-6,
-            "stroke_opacity should be 0.5, got {}", ci.stroke_opacity);
-        assert!((ci.stroke_dash - 1.0).abs() < 1e-6,
-            "stroke_dash index should be 1 (dashed), got {}", ci.stroke_dash);
-        assert!((ci.angle - 45.0).abs() < 1e-6,
-            "angle should be 45.0, got {}", ci.angle);
+        assert!(
+            (ci.stroke_opacity - 0.5).abs() < 1e-6,
+            "stroke_opacity should be 0.5, got {}",
+            ci.stroke_opacity
+        );
+        assert!(
+            (ci.stroke_dash - 1.0).abs() < 1e-6,
+            "stroke_dash index should be 1 (dashed), got {}",
+            ci.stroke_dash
+        );
+        assert!(
+            (ci.angle - 45.0).abs() < 1e-6,
+            "angle should be 45.0, got {}",
+            ci.angle
+        );
     }
 
     #[test]
     fn load_scene_populates_stroke_opacity_and_angle_for_rect() {
-        use ferrum_scene::{FillStroke, SceneNode, Panel, MarkBatch, MarkBatchKind, BlendMode};
-        use ferrum_scene::{CoordKind, Rect, SceneGraph, InteractionConfig};
+        use ferrum_scene::{BlendMode, FillStroke, MarkBatch, MarkBatchKind, Panel, SceneNode};
+        use ferrum_scene::{CoordKind, InteractionConfig, Rect, SceneGraph};
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 128, b: 255, a: 255 }),
-            stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 128,
+                b: 255,
+                a: 255,
+            }),
+            stroke: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke_width: 1.0,
             opacity: 0.9,
             stroke_opacity: 0.75,
@@ -1447,7 +1935,12 @@ mod tests {
         };
 
         let node = SceneNode::Rect {
-            x: 10.0, y: 20.0, w: 40.0, h: 30.0, style, corner_radius: 0.0,
+            x: 10.0,
+            y: 20.0,
+            w: 40.0,
+            h: 30.0,
+            style,
+            corner_radius: 0.0,
         };
 
         let scene = SceneGraph {
@@ -1457,10 +1950,23 @@ mod tests {
             title: vec![],
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 },
-                clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 },
+                plot_area: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 100.0,
+                },
+                clip: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 200.0,
+                    h: 100.0,
+                },
                 coord: CoordKind::Cartesian {
-                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -1479,6 +1985,7 @@ mod tests {
                 axes: vec![],
                 annotations: vec![],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -1490,12 +1997,21 @@ mod tests {
         let data = load_scene(&scene);
         assert_eq!(data.rect_instances.len(), 1);
         let ri = &data.rect_instances[0];
-        assert!((ri.stroke_opacity - 0.75).abs() < 1e-6,
-            "stroke_opacity should be 0.75, got {}", ri.stroke_opacity);
-        assert!((ri.stroke_dash - 2.0).abs() < 1e-6,
-            "stroke_dash index should be 2 (dotted), got {}", ri.stroke_dash);
-        assert!((ri.angle - 30.0).abs() < 1e-6,
-            "angle should be 30.0, got {}", ri.angle);
+        assert!(
+            (ri.stroke_opacity - 0.75).abs() < 1e-6,
+            "stroke_opacity should be 0.75, got {}",
+            ri.stroke_opacity
+        );
+        assert!(
+            (ri.stroke_dash - 2.0).abs() < 1e-6,
+            "stroke_dash index should be 2 (dotted), got {}",
+            ri.stroke_dash
+        );
+        assert!(
+            (ri.angle - 30.0).abs() < 1e-6,
+            "angle should be 30.0, got {}",
+            ri.angle
+        );
     }
 
     // ── Task 6: blend mode selection ────────────────────────────────
@@ -1523,12 +2039,17 @@ mod tests {
 
     #[test]
     fn load_scene_uses_defaults_when_stroke_fields_absent() {
-        use ferrum_scene::{FillStroke, SceneNode, Panel, MarkBatch, MarkBatchKind, BlendMode};
-        use ferrum_scene::{CoordKind, Rect, SceneGraph, InteractionConfig};
+        use ferrum_scene::{BlendMode, FillStroke, MarkBatch, MarkBatchKind, Panel, SceneNode};
+        use ferrum_scene::{CoordKind, InteractionConfig, Rect, SceneGraph};
 
         // FillStroke with default stroke_opacity (1.0) and angle (0.0)
         let style = FillStroke {
-            fill: Some(Color { r: 100, g: 100, b: 100, a: 255 }),
+            fill: Some(Color {
+                r: 100,
+                g: 100,
+                b: 100,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1538,7 +2059,12 @@ mod tests {
             angle: 0.0,          // default
         };
 
-        let node = SceneNode::Circle { cx: 25.0, cy: 25.0, r: 5.0, style };
+        let node = SceneNode::Circle {
+            cx: 25.0,
+            cy: 25.0,
+            r: 5.0,
+            style,
+        };
 
         let scene = SceneGraph {
             width: 50.0,
@@ -1547,10 +2073,23 @@ mod tests {
             title: vec![],
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 0.0, y: 0.0, w: 50.0, h: 50.0 },
-                clip: Rect { x: 0.0, y: 0.0, w: 50.0, h: 50.0 },
+                plot_area: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 50.0,
+                    h: 50.0,
+                },
+                clip: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 50.0,
+                    h: 50.0,
+                },
                 coord: CoordKind::Cartesian {
-                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -1569,6 +2108,7 @@ mod tests {
                 axes: vec![],
                 annotations: vec![],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -1579,8 +2119,14 @@ mod tests {
 
         let data = load_scene(&scene);
         let ci = &data.circle_instances[0];
-        assert!((ci.stroke_opacity - 1.0).abs() < 1e-6, "default stroke_opacity is 1.0");
-        assert!((ci.stroke_dash - 0.0).abs() < 1e-6, "default stroke_dash is 0.0 (solid)");
+        assert!(
+            (ci.stroke_opacity - 1.0).abs() < 1e-6,
+            "default stroke_opacity is 1.0"
+        );
+        assert!(
+            (ci.stroke_dash - 0.0).abs() < 1e-6,
+            "default stroke_dash is 0.0 (solid)"
+        );
         assert!((ci.angle - 0.0).abs() < 1e-6, "default angle is 0.0");
     }
 
@@ -1592,8 +2138,8 @@ mod tests {
     // zero vertices, the GPU renders nothing (the "empty hex" bug).
 
     fn make_scene_with_polygons(nodes: Vec<SceneNode>) -> SceneGraph {
-        use ferrum_scene::{Panel, MarkBatch, MarkBatchKind, BlendMode};
-        use ferrum_scene::{CoordKind, Rect, InteractionConfig};
+        use ferrum_scene::{BlendMode, MarkBatch, MarkBatchKind, Panel};
+        use ferrum_scene::{CoordKind, InteractionConfig, Rect};
         SceneGraph {
             width: 500.0,
             height: 400.0,
@@ -1601,10 +2147,23 @@ mod tests {
             title: vec![],
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
-                clip: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
+                plot_area: Rect {
+                    x: 50.0,
+                    y: 10.0,
+                    w: 400.0,
+                    h: 350.0,
+                },
+                clip: Rect {
+                    x: 50.0,
+                    y: 10.0,
+                    w: 400.0,
+                    h: 350.0,
+                },
                 coord: CoordKind::Cartesian {
-                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -1623,6 +2182,7 @@ mod tests {
                 axes: vec![],
                 annotations: vec![],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -1642,7 +2202,12 @@ mod tests {
         SceneNode::Polygon {
             rings: vec![ring],
             style: FillStroke {
-                fill: Some(Color { r: 100, g: 150, b: 200, a: 255 }),
+                fill: Some(Color {
+                    r: 100,
+                    g: 150,
+                    b: 200,
+                    a: 255,
+                }),
                 stroke: None,
                 stroke_width: 0.0,
                 opacity: 1.0,
@@ -1656,9 +2221,7 @@ mod tests {
 
     #[test]
     fn polygon_tessellation_produces_nonzero_mesh() {
-        let scene = make_scene_with_polygons(vec![
-            hex_polygon(200.0, 200.0, 20.0),
-        ]);
+        let scene = make_scene_with_polygons(vec![hex_polygon(200.0, 200.0, 20.0)]);
         let data = load_scene(&scene);
         assert!(
             !data.mesh_buffers.vertices.is_empty(),
@@ -1699,15 +2262,26 @@ mod tests {
     #[test]
     fn polygon_with_hole_tessellates() {
         let exterior = vec![
-            [100.0, 100.0], [300.0, 100.0], [300.0, 300.0], [100.0, 300.0],
+            [100.0, 100.0],
+            [300.0, 100.0],
+            [300.0, 300.0],
+            [100.0, 300.0],
         ];
         let hole = vec![
-            [150.0, 150.0], [250.0, 150.0], [250.0, 250.0], [150.0, 250.0],
+            [150.0, 150.0],
+            [250.0, 150.0],
+            [250.0, 250.0],
+            [150.0, 250.0],
         ];
         let node = SceneNode::Polygon {
             rings: vec![exterior, hole],
             style: FillStroke {
-                fill: Some(Color { r: 50, g: 100, b: 150, a: 255 }),
+                fill: Some(Color {
+                    r: 50,
+                    g: 100,
+                    b: 150,
+                    a: 255,
+                }),
                 stroke: None,
                 stroke_width: 0.0,
                 opacity: 1.0,
@@ -1730,11 +2304,19 @@ mod tests {
     fn polygon_no_fill_produces_no_fill_triangles() {
         let node = SceneNode::Polygon {
             rings: vec![vec![
-                [100.0, 100.0], [200.0, 100.0], [200.0, 200.0], [100.0, 200.0],
+                [100.0, 100.0],
+                [200.0, 100.0],
+                [200.0, 200.0],
+                [100.0, 200.0],
             ]],
             style: FillStroke {
                 fill: None,
-                stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+                stroke: Some(Color {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }),
                 stroke_width: 2.0,
                 opacity: 1.0,
                 stroke_dash: None,
@@ -1767,7 +2349,10 @@ mod tests {
                 v.position
             );
             for c in &v.color {
-                assert!(c.is_finite(), "mesh vertex {i} has non-finite color component");
+                assert!(
+                    c.is_finite(),
+                    "mesh vertex {i} has non-finite color component"
+                );
             }
         }
     }
@@ -1778,7 +2363,12 @@ mod tests {
         let node = SceneNode::Polygon {
             rings: vec![vec![[100.0, 100.0], [200.0, 200.0]]],
             style: FillStroke {
-                fill: Some(Color { r: 255, g: 0, b: 0, a: 255 }),
+                fill: Some(Color {
+                    r: 255,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }),
                 stroke: None,
                 stroke_width: 0.0,
                 opacity: 1.0,
@@ -1801,8 +2391,18 @@ mod tests {
 
     fn default_fill_stroke() -> FillStroke {
         FillStroke {
-            fill: Some(Color { r: 70, g: 130, b: 180, a: 255 }),
-            stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 70,
+                g: 130,
+                b: 180,
+                a: 255,
+            }),
+            stroke: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke_width: 1.0,
             opacity: 1.0,
             stroke_dash: None,
@@ -1814,7 +2414,12 @@ mod tests {
 
     fn default_stroke_style() -> ferrum_scene::StrokeStyle {
         ferrum_scene::StrokeStyle {
-            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             width: 1.5,
             opacity: 1.0,
             dash: None,
@@ -1828,8 +2433,8 @@ mod tests {
         kind: ferrum_scene::MarkBatchKind,
         nodes: Vec<SceneNode>,
     ) -> SceneGraph {
-        use ferrum_scene::{Panel, MarkBatch, BlendMode};
-        use ferrum_scene::{CoordKind, Rect, InteractionConfig};
+        use ferrum_scene::{BlendMode, MarkBatch, Panel};
+        use ferrum_scene::{CoordKind, InteractionConfig, Rect};
         SceneGraph {
             width: 500.0,
             height: 400.0,
@@ -1837,10 +2442,23 @@ mod tests {
             title: vec![],
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
-                clip: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
+                plot_area: Rect {
+                    x: 50.0,
+                    y: 10.0,
+                    w: 400.0,
+                    h: 350.0,
+                },
+                clip: Rect {
+                    x: 50.0,
+                    y: 10.0,
+                    w: 400.0,
+                    h: 350.0,
+                },
                 coord: CoordKind::Cartesian {
-                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -1859,6 +2477,7 @@ mod tests {
                 axes: vec![],
                 annotations: vec![],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -1873,9 +2492,24 @@ mod tests {
     #[test]
     fn circle_node_produces_instance() {
         let nodes = vec![
-            SceneNode::Circle { cx: 100.0, cy: 100.0, r: 5.0, style: default_fill_stroke() },
-            SceneNode::Circle { cx: 200.0, cy: 150.0, r: 8.0, style: default_fill_stroke() },
-            SceneNode::Circle { cx: 300.0, cy: 200.0, r: 3.0, style: default_fill_stroke() },
+            SceneNode::Circle {
+                cx: 100.0,
+                cy: 100.0,
+                r: 5.0,
+                style: default_fill_stroke(),
+            },
+            SceneNode::Circle {
+                cx: 200.0,
+                cy: 150.0,
+                r: 8.0,
+                style: default_fill_stroke(),
+            },
+            SceneNode::Circle {
+                cx: 300.0,
+                cy: 200.0,
+                r: 3.0,
+                style: default_fill_stroke(),
+            },
         ];
         let scene = make_scene_with_nodes(MarkBatchKind::Point, nodes);
         let data = load_scene(&scene);
@@ -1895,7 +2529,12 @@ mod tests {
         style.angle = 30.0;
         let scene = make_scene_with_nodes(
             MarkBatchKind::Point,
-            vec![SceneNode::Circle { cx: 50.0, cy: 50.0, r: 10.0, style }],
+            vec![SceneNode::Circle {
+                cx: 50.0,
+                cy: 50.0,
+                r: 10.0,
+                style,
+            }],
         );
         let data = load_scene(&scene);
         let c = &data.circle_instances[0];
@@ -1909,12 +2548,30 @@ mod tests {
     #[test]
     fn rect_node_produces_instance() {
         let nodes = vec![
-            SceneNode::Rect { x: 60.0, y: 50.0, w: 30.0, h: 200.0,
-                              style: default_fill_stroke(), corner_radius: 0.0 },
-            SceneNode::Rect { x: 100.0, y: 80.0, w: 30.0, h: 170.0,
-                              style: default_fill_stroke(), corner_radius: 2.0 },
-            SceneNode::Rect { x: 140.0, y: 30.0, w: 30.0, h: 220.0,
-                              style: default_fill_stroke(), corner_radius: 0.0 },
+            SceneNode::Rect {
+                x: 60.0,
+                y: 50.0,
+                w: 30.0,
+                h: 200.0,
+                style: default_fill_stroke(),
+                corner_radius: 0.0,
+            },
+            SceneNode::Rect {
+                x: 100.0,
+                y: 80.0,
+                w: 30.0,
+                h: 170.0,
+                style: default_fill_stroke(),
+                corner_radius: 2.0,
+            },
+            SceneNode::Rect {
+                x: 140.0,
+                y: 30.0,
+                w: 30.0,
+                h: 220.0,
+                style: default_fill_stroke(),
+                corner_radius: 0.0,
+            },
         ];
         let scene = make_scene_with_nodes(MarkBatchKind::Bar, nodes);
         let data = load_scene(&scene);
@@ -1930,8 +2587,12 @@ mod tests {
         let scene = make_scene_with_nodes(
             MarkBatchKind::Rect,
             vec![SceneNode::Rect {
-                x: 10.0, y: 20.0, w: 80.0, h: 60.0,
-                style: default_fill_stroke(), corner_radius: 5.5,
+                x: 10.0,
+                y: 20.0,
+                w: 80.0,
+                h: 60.0,
+                style: default_fill_stroke(),
+                corner_radius: 5.5,
             }],
         );
         let data = load_scene(&scene);
@@ -1943,12 +2604,13 @@ mod tests {
 
     #[test]
     fn line_node_tessellates_to_mesh() {
-        let nodes = vec![
-            SceneNode::Line {
-                x1: 50.0, y1: 50.0, x2: 300.0, y2: 200.0,
-                style: default_stroke_style(),
-            },
-        ];
+        let nodes = vec![SceneNode::Line {
+            x1: 50.0,
+            y1: 50.0,
+            x2: 300.0,
+            y2: 200.0,
+            style: default_stroke_style(),
+        }];
         let scene = make_scene_with_nodes(MarkBatchKind::Rule, nodes);
         let data = load_scene(&scene);
         assert!(
@@ -1966,8 +2628,10 @@ mod tests {
     fn multiple_lines_all_tessellate() {
         let nodes: Vec<SceneNode> = (0..10)
             .map(|i| SceneNode::Line {
-                x1: 50.0, y1: 30.0 + i as f64 * 30.0,
-                x2: 400.0, y2: 30.0 + i as f64 * 30.0,
+                x1: 50.0,
+                y1: 30.0 + i as f64 * 30.0,
+                x2: 400.0,
+                y2: 30.0 + i as f64 * 30.0,
                 style: default_stroke_style(),
             })
             .collect();
@@ -1984,9 +2648,7 @@ mod tests {
 
     #[test]
     fn polyline_node_tessellates_to_mesh() {
-        let points = vec![
-            (50.0, 300.0), (150.0, 100.0), (250.0, 250.0), (350.0, 50.0),
-        ];
+        let points = vec![(50.0, 300.0), (150.0, 100.0), (250.0, 250.0), (350.0, 50.0)];
         let nodes = vec![SceneNode::Polyline {
             points,
             style: default_stroke_style(),
@@ -2053,9 +2715,13 @@ mod tests {
             PathCmd::MoveTo { x: 200.0, y: 200.0 },
             PathCmd::LineTo { x: 200.0, y: 100.0 },
             PathCmd::ArcTo {
-                rx: 100.0, ry: 100.0, rotation: 0.0,
-                large_arc: false, sweep: true,
-                x: 300.0, y: 200.0,
+                rx: 100.0,
+                ry: 100.0,
+                rotation: 0.0,
+                large_arc: false,
+                sweep: true,
+                x: 300.0,
+                y: 200.0,
             },
             PathCmd::Close,
         ];
@@ -2082,13 +2748,20 @@ mod tests {
         let commands = vec![
             PathCmd::MoveTo { x: 50.0, y: 200.0 },
             PathCmd::CubicTo {
-                c1x: 150.0, c1y: 50.0, c2x: 250.0, c2y: 350.0, x: 350.0, y: 200.0,
+                c1x: 150.0,
+                c1y: 50.0,
+                c2x: 250.0,
+                c2y: 350.0,
+                x: 350.0,
+                y: 200.0,
             },
         ];
         let mut style = default_fill_stroke();
         style.fill = None;
         let nodes = vec![SceneNode::Path {
-            commands, style, closed: false,
+            commands,
+            style,
+            closed: false,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Ribbon, nodes);
         let data = load_scene(&scene);
@@ -2102,28 +2775,37 @@ mod tests {
     fn multiple_arc_wedges_tessellate() {
         use ferrum_scene::PathCmd;
         // 3 pie wedges
-        let wedges: Vec<SceneNode> = (0..3).map(|i| {
-            let angle_start = i as f64 * 120.0_f64.to_radians();
-            let angle_end = (i + 1) as f64 * 120.0_f64.to_radians();
-            let cx = 200.0;
-            let cy = 200.0;
-            let r = 100.0;
-            let commands = vec![
-                PathCmd::MoveTo { x: cx, y: cy },
-                PathCmd::LineTo {
-                    x: cx + r * angle_start.cos(),
-                    y: cy + r * angle_start.sin(),
-                },
-                PathCmd::ArcTo {
-                    rx: r, ry: r, rotation: 0.0,
-                    large_arc: false, sweep: true,
-                    x: cx + r * angle_end.cos(),
-                    y: cy + r * angle_end.sin(),
-                },
-                PathCmd::Close,
-            ];
-            SceneNode::Path { commands, style: default_fill_stroke(), closed: true }
-        }).collect();
+        let wedges: Vec<SceneNode> = (0..3)
+            .map(|i| {
+                let angle_start = i as f64 * 120.0_f64.to_radians();
+                let angle_end = (i + 1) as f64 * 120.0_f64.to_radians();
+                let cx = 200.0;
+                let cy = 200.0;
+                let r = 100.0;
+                let commands = vec![
+                    PathCmd::MoveTo { x: cx, y: cy },
+                    PathCmd::LineTo {
+                        x: cx + r * angle_start.cos(),
+                        y: cy + r * angle_start.sin(),
+                    },
+                    PathCmd::ArcTo {
+                        rx: r,
+                        ry: r,
+                        rotation: 0.0,
+                        large_arc: false,
+                        sweep: true,
+                        x: cx + r * angle_end.cos(),
+                        y: cy + r * angle_end.sin(),
+                    },
+                    PathCmd::Close,
+                ];
+                SceneNode::Path {
+                    commands,
+                    style: default_fill_stroke(),
+                    closed: true,
+                }
+            })
+            .collect();
         let scene = make_scene_with_nodes(MarkBatchKind::Arc, wedges);
         let data = load_scene(&scene);
         assert!(
@@ -2137,24 +2819,43 @@ mod tests {
 
     #[test]
     fn text_node_produces_text_element() {
-        use ferrum_scene::{TextStyle, FontWeight, TextAnchor, TextBaseline};
+        use ferrum_scene::{FontWeight, TextAnchor, TextBaseline, TextStyle};
         let style = TextStyle {
             font_size: 12.0,
             font_weight: FontWeight::Normal,
             anchor: TextAnchor::Start,
             baseline: TextBaseline::Alphabetic,
             angle: 0.0,
-            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             opacity: 1.0,
             font_family: "sans-serif".to_string(),
         };
         let nodes = vec![
-            SceneNode::Text { x: 100.0, y: 50.0, content: "Hello".to_string(), style: style.clone() },
-            SceneNode::Text { x: 200.0, y: 80.0, content: "World".to_string(), style },
+            SceneNode::Text {
+                x: 100.0,
+                y: 50.0,
+                content: "Hello".to_string(),
+                style: style.clone(),
+            },
+            SceneNode::Text {
+                x: 200.0,
+                y: 80.0,
+                content: "World".to_string(),
+                style,
+            },
         ];
         let scene = make_scene_with_nodes(MarkBatchKind::Text, nodes);
         let data = load_scene(&scene);
-        assert_eq!(data.text_elements.len(), 2, "2 Text nodes → 2 text elements");
+        assert_eq!(
+            data.text_elements.len(),
+            2,
+            "2 Text nodes → 2 text elements"
+        );
         assert_eq!(data.text_elements[0].content, "Hello");
         assert!((data.text_elements[0].x - 100.0).abs() < 1e-3);
         assert_eq!(data.text_elements[1].content, "World");
@@ -2162,25 +2863,42 @@ mod tests {
 
     #[test]
     fn text_does_not_produce_mesh_or_instances() {
-        use ferrum_scene::{TextStyle, FontWeight, TextAnchor, TextBaseline};
+        use ferrum_scene::{FontWeight, TextAnchor, TextBaseline, TextStyle};
         let style = TextStyle {
             font_size: 14.0,
             font_weight: FontWeight::Bold,
             anchor: TextAnchor::Middle,
             baseline: TextBaseline::Middle,
             angle: 0.0,
-            color: Color { r: 50, g: 50, b: 50, a: 255 },
+            color: Color {
+                r: 50,
+                g: 50,
+                b: 50,
+                a: 255,
+            },
             opacity: 1.0,
             font_family: "serif".to_string(),
         };
-        let nodes = vec![
-            SceneNode::Text { x: 100.0, y: 100.0, content: "Label".to_string(), style },
-        ];
+        let nodes = vec![SceneNode::Text {
+            x: 100.0,
+            y: 100.0,
+            content: "Label".to_string(),
+            style,
+        }];
         let scene = make_scene_with_nodes(MarkBatchKind::Text, nodes);
         let data = load_scene(&scene);
-        assert!(data.circle_instances.is_empty(), "text must not produce circles");
-        assert!(data.rect_instances.is_empty(), "text must not produce rects");
-        assert!(data.mesh_buffers.vertices.is_empty(), "text must not produce mesh");
+        assert!(
+            data.circle_instances.is_empty(),
+            "text must not produce circles"
+        );
+        assert!(
+            data.rect_instances.is_empty(),
+            "text must not produce rects"
+        );
+        assert!(
+            data.mesh_buffers.vertices.is_empty(),
+            "text must not produce mesh"
+        );
     }
 
     // ── Group (recursive) ─────────────────────────────────────────────
@@ -2188,9 +2906,20 @@ mod tests {
     #[test]
     fn group_node_recurses_into_children() {
         let children = vec![
-            SceneNode::Circle { cx: 100.0, cy: 100.0, r: 5.0, style: default_fill_stroke() },
-            SceneNode::Rect { x: 200.0, y: 50.0, w: 40.0, h: 30.0,
-                              style: default_fill_stroke(), corner_radius: 0.0 },
+            SceneNode::Circle {
+                cx: 100.0,
+                cy: 100.0,
+                r: 5.0,
+                style: default_fill_stroke(),
+            },
+            SceneNode::Rect {
+                x: 200.0,
+                y: 50.0,
+                w: 40.0,
+                h: 30.0,
+                style: default_fill_stroke(),
+                corner_radius: 0.0,
+            },
         ];
         let nodes = vec![SceneNode::Group {
             attrs: vec![],
@@ -2198,27 +2927,45 @@ mod tests {
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Point, nodes);
         let data = load_scene(&scene);
-        assert_eq!(data.circle_instances.len(), 1, "group child circle must be collected");
-        assert_eq!(data.rect_instances.len(), 1, "group child rect must be collected");
+        assert_eq!(
+            data.circle_instances.len(),
+            1,
+            "group child circle must be collected"
+        );
+        assert_eq!(
+            data.rect_instances.len(),
+            1,
+            "group child rect must be collected"
+        );
     }
 
     // ── Mixed scene (all node types at once) ──────────────────────────
 
     #[test]
     fn mixed_scene_all_buffers_populated() {
-        use ferrum_scene::{Panel, MarkBatch, MarkBatchKind, BlendMode, PathCmd};
-        use ferrum_scene::{CoordKind, Rect, InteractionConfig};
-        use ferrum_scene::{TextStyle, FontWeight, TextAnchor, TextBaseline};
+        use ferrum_scene::{BlendMode, MarkBatch, MarkBatchKind, Panel, PathCmd};
+        use ferrum_scene::{CoordKind, InteractionConfig, Rect};
+        use ferrum_scene::{FontWeight, TextAnchor, TextBaseline, TextStyle};
 
         let circle = SceneNode::Circle {
-            cx: 100.0, cy: 100.0, r: 8.0, style: default_fill_stroke(),
+            cx: 100.0,
+            cy: 100.0,
+            r: 8.0,
+            style: default_fill_stroke(),
         };
         let rect = SceneNode::Rect {
-            x: 200.0, y: 50.0, w: 50.0, h: 100.0,
-            style: default_fill_stroke(), corner_radius: 0.0,
+            x: 200.0,
+            y: 50.0,
+            w: 50.0,
+            h: 100.0,
+            style: default_fill_stroke(),
+            corner_radius: 0.0,
         };
         let line = SceneNode::Line {
-            x1: 50.0, y1: 300.0, x2: 400.0, y2: 300.0,
+            x1: 50.0,
+            y1: 300.0,
+            x2: 400.0,
+            y2: 300.0,
             style: default_stroke_style(),
         };
         let path = SceneNode::Path {
@@ -2237,7 +2984,8 @@ mod tests {
             style: default_stroke_style(),
         };
         let text = SceneNode::Text {
-            x: 250.0, y: 30.0,
+            x: 250.0,
+            y: 30.0,
             content: "Title".to_string(),
             style: TextStyle {
                 font_size: 16.0,
@@ -2245,7 +2993,12 @@ mod tests {
                 anchor: TextAnchor::Middle,
                 baseline: TextBaseline::Top,
                 angle: 0.0,
-                color: Color { r: 0, g: 0, b: 0, a: 255 },
+                color: Color {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                },
                 opacity: 1.0,
                 font_family: "sans-serif".to_string(),
             },
@@ -2258,65 +3011,109 @@ mod tests {
             title: vec![text],
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
-                clip: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
+                plot_area: Rect {
+                    x: 50.0,
+                    y: 10.0,
+                    w: 400.0,
+                    h: 350.0,
+                },
+                clip: Rect {
+                    x: 50.0,
+                    y: 10.0,
+                    w: 400.0,
+                    h: 350.0,
+                },
                 coord: CoordKind::Cartesian {
-                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
                 },
                 grid: vec![],
                 marks: vec![
                     MarkBatch {
                         kind: MarkBatchKind::Point,
                         nodes: vec![circle],
-                        data_indices: None, tooltips: None, hrefs: None,
-                        descriptions: None, keys: None,
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Bar,
                         nodes: vec![rect],
-                        data_indices: None, tooltips: None, hrefs: None,
-                        descriptions: None, keys: None,
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Rule,
                         nodes: vec![line],
-                        data_indices: None, tooltips: None, hrefs: None,
-                        descriptions: None, keys: None,
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Area,
                         nodes: vec![path],
-                        data_indices: None, tooltips: None, hrefs: None,
-                        descriptions: None, keys: None,
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Polygon,
                         nodes: vec![polygon],
-                        data_indices: None, tooltips: None, hrefs: None,
-                        descriptions: None, keys: None,
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Line,
                         nodes: vec![polyline],
-                        data_indices: None, tooltips: None, hrefs: None,
-                        descriptions: None, keys: None,
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
                     },
                 ],
                 axes: vec![],
                 annotations: vec![],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -2328,8 +3125,14 @@ mod tests {
         let data = load_scene(&scene);
         assert_eq!(data.circle_instances.len(), 1, "1 circle from point batch");
         assert_eq!(data.rect_instances.len(), 1, "1 rect from bar batch");
-        assert!(!data.mesh_buffers.vertices.is_empty(), "mesh from line+path+polygon+polyline");
-        assert!(!data.mesh_buffers.indices.is_empty(), "mesh indices from tessellation");
+        assert!(
+            !data.mesh_buffers.vertices.is_empty(),
+            "mesh from line+path+polygon+polyline"
+        );
+        assert!(
+            !data.mesh_buffers.indices.is_empty(),
+            "mesh indices from tessellation"
+        );
         assert_eq!(data.text_elements.len(), 1, "1 text from title");
 
         // Verify all mesh vertices are finite
@@ -2396,11 +3199,15 @@ mod tests {
     #[test]
     fn binary_unpack_circle_round_trip() {
         let inst = CircleInstance {
-            center: [100.0, 200.0], radius: 5.0,
+            center: [100.0, 200.0],
+            radius: 5.0,
             fill_color: [1.0, 0.0, 0.0, 0.8],
             stroke_color: [0.0, 0.0, 0.0, 1.0],
-            stroke_width: 1.5, opacity: 0.8,
-            stroke_opacity: 0.6, stroke_dash: 1.0, angle: 45.0,
+            stroke_width: 1.5,
+            opacity: 0.8,
+            stroke_opacity: 0.6,
+            stroke_dash: 1.0,
+            angle: 45.0,
         };
         let packed = build_packed_circle_stream(&[inst]);
         let mut circles = Vec::new();
@@ -2424,14 +3231,28 @@ mod tests {
     fn binary_unpack_rect_round_trip() {
         let instances = vec![
             RectInstance {
-                position: [10.0, 20.0], size: [100.0, 50.0], corner_radius: 3.0,
-                fill_color: [0.0, 1.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 0.5],
-                stroke_width: 2.0, opacity: 0.9, stroke_opacity: 0.7, stroke_dash: 2.0, angle: 0.0,
+                position: [10.0, 20.0],
+                size: [100.0, 50.0],
+                corner_radius: 3.0,
+                fill_color: [0.0, 1.0, 0.0, 1.0],
+                stroke_color: [0.0, 0.0, 0.0, 0.5],
+                stroke_width: 2.0,
+                opacity: 0.9,
+                stroke_opacity: 0.7,
+                stroke_dash: 2.0,
+                angle: 0.0,
             },
             RectInstance {
-                position: [200.0, 30.0], size: [80.0, 60.0], corner_radius: 0.0,
-                fill_color: [0.0, 0.0, 1.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
-                stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 90.0,
+                position: [200.0, 30.0],
+                size: [80.0, 60.0],
+                corner_radius: 0.0,
+                fill_color: [0.0, 0.0, 1.0, 1.0],
+                stroke_color: [0.0, 0.0, 0.0, 1.0],
+                stroke_width: 1.0,
+                opacity: 1.0,
+                stroke_opacity: 1.0,
+                stroke_dash: 0.0,
+                angle: 90.0,
             },
         ];
         let packed = build_packed_rect_stream(&instances);
@@ -2458,48 +3279,84 @@ mod tests {
         assert!(circles.is_empty());
         // Valid header but truncated instance data
         let mut buf = Vec::new();
-        buf.extend_from_slice(&0u32.to_le_bytes());  // panel_idx
-        buf.extend_from_slice(&0u32.to_le_bytes());  // batch_idx
-        buf.extend_from_slice(&0u32.to_le_bytes());  // kind
+        buf.extend_from_slice(&0u32.to_le_bytes()); // panel_idx
+        buf.extend_from_slice(&0u32.to_le_bytes()); // batch_idx
+        buf.extend_from_slice(&0u32.to_le_bytes()); // kind
         buf.extend_from_slice(&100u32.to_le_bytes()); // count
-        buf.extend_from_slice(&0u32.to_le_bytes());  // flags
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
         unpack_binary_instances(&buf, &mut circles, &mut rects, &mut meta);
         assert!(circles.is_empty());
     }
 
     #[test]
     fn load_scene_with_packed_uses_binary_sidecar() {
-        use ferrum_scene::{Panel, MarkBatch, MarkBatchKind, BlendMode};
-        use ferrum_scene::{CoordKind, Rect, SceneGraph, InteractionConfig};
+        use ferrum_scene::{BlendMode, MarkBatch, MarkBatchKind, Panel};
+        use ferrum_scene::{CoordKind, InteractionConfig, Rect, SceneGraph};
 
         let instances: Vec<CircleInstance> = (0..3)
             .map(|i| CircleInstance {
-                center: [i as f32 * 100.0, 50.0], radius: 5.0,
-                fill_color: [1.0, 0.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
-                stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
+                center: [i as f32 * 100.0, 50.0],
+                radius: 5.0,
+                fill_color: [1.0, 0.0, 0.0, 1.0],
+                stroke_color: [0.0, 0.0, 0.0, 1.0],
+                stroke_width: 1.0,
+                opacity: 1.0,
+                stroke_opacity: 1.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             })
             .collect();
         let packed = build_packed_circle_stream(&instances);
 
         let scene = SceneGraph {
-            width: 400.0, height: 200.0, background: None, title: vec![],
+            width: 400.0,
+            height: 200.0,
+            background: None,
+            title: vec![],
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 },
-                clip: Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 },
-                coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+                plot_area: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 400.0,
+                    h: 200.0,
+                },
+                clip: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 400.0,
+                    h: 200.0,
+                },
+                coord: CoordKind::Cartesian {
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
+                },
                 grid: vec![],
                 marks: vec![MarkBatch {
-                    kind: MarkBatchKind::Point, nodes: vec![],
-                    data_indices: None, tooltips: None, hrefs: None,
-                    descriptions: None, keys: None,
-                    blend: BlendMode::Normal, stroke_cap: None, stroke_join: None,
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![],
+                    data_indices: None,
+                    tooltips: None,
+                    hrefs: None,
+                    descriptions: None,
+                    keys: None,
+                    blend: BlendMode::Normal,
+                    stroke_cap: None,
+                    stroke_join: None,
                     packed_instances: None,
                 }],
-                axes: vec![], annotations: vec![], strip_title: vec![],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             }],
-            legend: vec![], decorations: vec![], selections: vec![],
-            interaction: InteractionConfig::default(), chart_description: None,
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
         };
 
         let data = load_scene_with_packed(&scene, &packed);
@@ -2543,14 +3400,26 @@ mod tests {
     fn binary_unpack_with_data_indices() {
         let instances = vec![
             CircleInstance {
-                center: [10.0, 20.0], radius: 5.0,
-                fill_color: [1.0, 0.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
-                stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
+                center: [10.0, 20.0],
+                radius: 5.0,
+                fill_color: [1.0, 0.0, 0.0, 1.0],
+                stroke_color: [0.0, 0.0, 0.0, 1.0],
+                stroke_width: 1.0,
+                opacity: 1.0,
+                stroke_opacity: 1.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             },
             CircleInstance {
-                center: [30.0, 40.0], radius: 7.0,
-                fill_color: [0.0, 1.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
-                stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
+                center: [30.0, 40.0],
+                radius: 7.0,
+                fill_color: [0.0, 1.0, 0.0, 1.0],
+                stroke_color: [0.0, 0.0, 0.0, 1.0],
+                stroke_width: 1.0,
+                opacity: 1.0,
+                stroke_opacity: 1.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             },
         ];
         let trailing = build_data_indices_bytes(&[42, 99]);
@@ -2563,24 +3432,28 @@ mod tests {
 
         assert_eq!(circles.len(), 2);
         let m = meta.get(&(1, 2)).expect("meta for (1,2) should exist");
-        let indices = m.data_indices.as_ref().expect("data_indices should be Some");
+        let indices = m
+            .data_indices
+            .as_ref()
+            .expect("data_indices should be Some");
         assert_eq!(indices, &[42, 99]);
         assert!(m.tooltip_bytes.is_none());
     }
 
     #[test]
     fn binary_unpack_with_tooltips() {
-        let instances = vec![
-            CircleInstance {
-                center: [10.0, 20.0], radius: 5.0,
-                fill_color: [1.0, 0.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
-                stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
-            },
-        ];
-        let tooltip_data = build_tooltip_bytes(
-            &["x", "y"],
-            &[vec!["1.23", "4.56"]],
-        );
+        let instances = vec![CircleInstance {
+            center: [10.0, 20.0],
+            radius: 5.0,
+            fill_color: [1.0, 0.0, 0.0, 1.0],
+            stroke_color: [0.0, 0.0, 0.0, 1.0],
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        }];
+        let tooltip_data = build_tooltip_bytes(&["x", "y"], &[vec!["1.23", "4.56"]]);
         let packed = build_packed_circle_stream_ex(0, 0, &instances, HAS_TOOLTIPS, &tooltip_data);
 
         let mut circles = Vec::new();
@@ -2591,7 +3464,10 @@ mod tests {
         assert_eq!(circles.len(), 1);
         let m = meta.get(&(0, 0)).expect("meta for (0,0) should exist");
         assert!(m.data_indices.is_none());
-        let tb = m.tooltip_bytes.as_ref().expect("tooltip_bytes should be Some");
+        let tb = m
+            .tooltip_bytes
+            .as_ref()
+            .expect("tooltip_bytes should be Some");
         assert_eq!(tb, &tooltip_data, "tooltip bytes should match input");
     }
 
@@ -2599,14 +3475,26 @@ mod tests {
     fn binary_unpack_with_data_indices_and_tooltips() {
         let instances = vec![
             CircleInstance {
-                center: [10.0, 20.0], radius: 5.0,
-                fill_color: [1.0, 0.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
-                stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
+                center: [10.0, 20.0],
+                radius: 5.0,
+                fill_color: [1.0, 0.0, 0.0, 1.0],
+                stroke_color: [0.0, 0.0, 0.0, 1.0],
+                stroke_width: 1.0,
+                opacity: 1.0,
+                stroke_opacity: 1.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             },
             CircleInstance {
-                center: [30.0, 40.0], radius: 7.0,
-                fill_color: [0.0, 1.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
-                stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
+                center: [30.0, 40.0],
+                radius: 7.0,
+                fill_color: [0.0, 1.0, 0.0, 1.0],
+                stroke_color: [0.0, 0.0, 0.0, 1.0],
+                stroke_width: 1.0,
+                opacity: 1.0,
+                stroke_opacity: 1.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
             },
         ];
         let mut trailing = build_data_indices_bytes(&[10, 20]);
@@ -2617,7 +3505,11 @@ mod tests {
         trailing.extend_from_slice(&tooltip_data);
 
         let packed = build_packed_circle_stream_ex(
-            0, 0, &instances, HAS_DATA_INDICES | HAS_TOOLTIPS, &trailing,
+            0,
+            0,
+            &instances,
+            HAS_DATA_INDICES | HAS_TOOLTIPS,
+            &trailing,
         );
 
         let mut circles = Vec::new();
@@ -2646,9 +3538,15 @@ mod tests {
     fn binary_unpack_truncated_tooltip_does_not_panic() {
         // Build a well-formed header + circle instances.
         let inst = CircleInstance {
-            center: [1.0, 2.0], radius: 3.0,
-            fill_color: [1.0, 0.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
-            stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
+            center: [1.0, 2.0],
+            radius: 3.0,
+            fill_color: [1.0, 0.0, 0.0, 1.0],
+            stroke_color: [0.0, 0.0, 0.0, 1.0],
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
         };
 
         // Build a tooltip section that claims slen=9999 but the buffer ends immediately.
@@ -2656,11 +3554,9 @@ mod tests {
         let mut truncated_tooltip: Vec<u8> = Vec::new();
         truncated_tooltip.extend_from_slice(&1u32.to_le_bytes()); // num_fields = 1
         truncated_tooltip.extend_from_slice(&9999u32.to_le_bytes()); // slen = 9999 (overruns)
-        // No actual string bytes — the buffer is truncated here.
+                                                                     // No actual string bytes — the buffer is truncated here.
 
-        let packed = build_packed_circle_stream_ex(
-            0, 0, &[inst], HAS_TOOLTIPS, &truncated_tooltip,
-        );
+        let packed = build_packed_circle_stream_ex(0, 0, &[inst], HAS_TOOLTIPS, &truncated_tooltip);
 
         // This must not panic. Pre-fix: offset overruns, slice panics.
         let mut circles = Vec::new();
@@ -2669,14 +3565,19 @@ mod tests {
         unpack_binary_instances(&packed, &mut circles, &mut rects, &mut meta);
 
         // The circle was loaded before the tooltip scan; it should be present.
-        assert_eq!(circles.len(), 1, "circle must be loaded before tooltip scan");
+        assert_eq!(
+            circles.len(),
+            1,
+            "circle must be loaded before tooltip scan"
+        );
         // The meta was inserted; tooltip_bytes (if Some) must be bounded by data.len().
         if let Some(m) = meta.get(&(0, 0)) {
             if let Some(tb) = &m.tooltip_bytes {
                 assert!(
                     tb.len() <= packed.len(),
                     "tooltip_bytes len {} must not exceed buffer len {}",
-                    tb.len(), packed.len()
+                    tb.len(),
+                    packed.len()
                 );
             }
         }
@@ -2705,11 +3606,19 @@ mod tests {
     /// instances actually pushed into the circles buffer.
     #[test]
     fn binary_unpack_instance_count_matches_loaded() {
-        let instances: Vec<CircleInstance> = (0..5).map(|i| CircleInstance {
-            center: [i as f32 * 10.0, 0.0], radius: 2.0,
-            fill_color: [1.0, 0.0, 0.0, 1.0], stroke_color: [0.0, 0.0, 0.0, 1.0],
-            stroke_width: 1.0, opacity: 1.0, stroke_opacity: 1.0, stroke_dash: 0.0, angle: 0.0,
-        }).collect();
+        let instances: Vec<CircleInstance> = (0..5)
+            .map(|i| CircleInstance {
+                center: [i as f32 * 10.0, 0.0],
+                radius: 2.0,
+                fill_color: [1.0, 0.0, 0.0, 1.0],
+                stroke_color: [0.0, 0.0, 0.0, 1.0],
+                stroke_width: 1.0,
+                opacity: 1.0,
+                stroke_opacity: 1.0,
+                stroke_dash: 0.0,
+                angle: 0.0,
+            })
+            .collect();
 
         let packed = build_packed_circle_stream_ex(0, 0, &instances, 0, &[]);
         let mut circles = Vec::new();
@@ -2720,20 +3629,21 @@ mod tests {
         assert_eq!(circles.len(), 5);
         let m = meta.get(&(0, 0)).expect("meta must exist");
         assert_eq!(
-            m.instance_count, circles.len() - m.instance_start,
+            m.instance_count,
+            circles.len() - m.instance_start,
             "instance_count must equal the number of instances actually loaded"
         );
-        assert_eq!(m.instance_count, 5, "instance_count must equal header count on success");
+        assert_eq!(
+            m.instance_count, 5,
+            "instance_count must equal header count on success"
+        );
     }
 
     // ── parse_tooltip_json ──────────────────────────────────────────────
 
     #[test]
     fn parse_tooltip_json_single_row() {
-        let bytes = build_tooltip_bytes(
-            &["x", "y"],
-            &[vec!["1.23", "4.56"]],
-        );
+        let bytes = build_tooltip_bytes(&["x", "y"], &[vec!["1.23", "4.56"]]);
         let json = parse_tooltip_json(&bytes, 0);
         assert_eq!(
             json,
@@ -2756,23 +3666,14 @@ mod tests {
 
     #[test]
     fn parse_tooltip_json_last_row() {
-        let bytes = build_tooltip_bytes(
-            &["col"],
-            &[vec!["first"], vec!["second"], vec!["third"]],
-        );
+        let bytes = build_tooltip_bytes(&["col"], &[vec!["first"], vec!["second"], vec!["third"]]);
         let json = parse_tooltip_json(&bytes, 2);
-        assert_eq!(
-            json,
-            r#"{"fields":[{"name":"col","value":"third"}]}"#,
-        );
+        assert_eq!(json, r#"{"fields":[{"name":"col","value":"third"}]}"#,);
     }
 
     #[test]
     fn parse_tooltip_json_out_of_range_returns_empty() {
-        let bytes = build_tooltip_bytes(
-            &["x"],
-            &[vec!["1"]],
-        );
+        let bytes = build_tooltip_bytes(&["x"], &[vec!["1"]]);
         let json = parse_tooltip_json(&bytes, 5);
         assert_eq!(json, "{}");
     }
@@ -2814,7 +3715,12 @@ mod tests {
     // Test 10: opt_color_to_f32 produces linear values (catches double-gamma bug).
     #[test]
     fn opt_color_to_f32_produces_linear_mid_grey() {
-        let mid_grey = Color { r: 128, g: 128, b: 128, a: 255 };
+        let mid_grey = Color {
+            r: 128,
+            g: 128,
+            b: 128,
+            a: 255,
+        };
         let result = opt_color_to_f32(Some(&mid_grey), 1.0);
         // sRGB 128/255 ≈ 0.502 → linear ≈ 0.216.
         // If double-gamma were applied, the value would be ~0.0397 (way too dark).
@@ -2851,10 +3757,7 @@ mod tests {
 
     #[test]
     fn parse_tooltip_json_escapes_quotes() {
-        let bytes = build_tooltip_bytes(
-            &["label"],
-            &[vec![r#"say "hello""#]],
-        );
+        let bytes = build_tooltip_bytes(&["label"], &[vec![r#"say "hello""#]]);
         let json = parse_tooltip_json(&bytes, 0);
         assert_eq!(
             json,
@@ -2895,17 +3798,36 @@ mod tests {
 
     #[test]
     fn bug_hunt_color_to_linear_full_white() {
-        let white = Color { r: 255, g: 255, b: 255, a: 255 };
+        let white = Color {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
         let result = color_to_linear(&white, 1.0);
-        assert!((result[0] - 1.0).abs() < 1e-5, "white r must be ~1.0 linear");
-        assert!((result[1] - 1.0).abs() < 1e-5, "white g must be ~1.0 linear");
-        assert!((result[2] - 1.0).abs() < 1e-5, "white b must be ~1.0 linear");
+        assert!(
+            (result[0] - 1.0).abs() < 1e-5,
+            "white r must be ~1.0 linear"
+        );
+        assert!(
+            (result[1] - 1.0).abs() < 1e-5,
+            "white g must be ~1.0 linear"
+        );
+        assert!(
+            (result[2] - 1.0).abs() < 1e-5,
+            "white b must be ~1.0 linear"
+        );
         assert!((result[3] - 1.0).abs() < 1e-5, "white a must be ~1.0");
     }
 
     #[test]
     fn bug_hunt_color_to_linear_full_black() {
-        let black = Color { r: 0, g: 0, b: 0, a: 255 };
+        let black = Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
         let result = color_to_linear(&black, 1.0);
         assert!(result[0].abs() < 1e-7, "black r must be ~0.0 linear");
         assert!(result[1].abs() < 1e-7, "black g must be ~0.0 linear");
@@ -2914,7 +3836,12 @@ mod tests {
 
     #[test]
     fn bug_hunt_color_to_linear_opacity_scales_alpha() {
-        let color = Color { r: 128, g: 128, b: 128, a: 128 };
+        let color = Color {
+            r: 128,
+            g: 128,
+            b: 128,
+            a: 128,
+        };
         let result = color_to_linear(&color, 0.5);
         // a = (128/255) * 0.5 = ~0.251
         let expected_a = (128.0 / 255.0) * 0.5;
@@ -2950,10 +3877,7 @@ mod tests {
     #[test]
     fn bug_hunt_parse_tooltip_json_row_idx_exactly_at_count() {
         // 2 rows, requesting row 2 (out of bounds)
-        let bytes = build_tooltip_bytes(
-            &["x"],
-            &[vec!["1"], vec!["2"]],
-        );
+        let bytes = build_tooltip_bytes(&["x"], &[vec!["1"], vec!["2"]]);
         let result = parse_tooltip_json(&bytes, 2);
         assert_eq!(result, "{}", "row_idx == count must return empty JSON");
     }
@@ -2968,12 +3892,12 @@ mod tests {
     #[test]
     fn bug_hunt_parse_tooltip_json_utf8_content() {
         // Unicode content in field names and values
-        let bytes = build_tooltip_bytes(
-            &["name"],
-            &[vec!["hello world"]],
-        );
+        let bytes = build_tooltip_bytes(&["name"], &[vec!["hello world"]]);
         let result = parse_tooltip_json(&bytes, 0);
-        assert!(result.contains("hello world"), "ASCII content must appear in JSON");
+        assert!(
+            result.contains("hello world"),
+            "ASCII content must appear in JSON"
+        );
     }
 
     // ── tooltip_field_value: single-field lookup for packed legend matching ──
@@ -2983,11 +3907,7 @@ mod tests {
         // Two fields, three rows; pick the second column on each row.
         let bytes = build_tooltip_bytes(
             &["x", "cat"],
-            &[
-                vec!["1", "a"],
-                vec!["2", "b"],
-                vec!["3", "a"],
-            ],
+            &[vec!["1", "a"], vec!["2", "b"], vec!["3", "a"]],
         );
         assert_eq!(tooltip_field_value(&bytes, 0, "cat").as_deref(), Some("a"));
         assert_eq!(tooltip_field_value(&bytes, 1, "cat").as_deref(), Some("b"));
@@ -3030,11 +3950,11 @@ mod tests {
     fn bug_hunt_unpack_unknown_kind_stops_parsing() {
         // kind=99 is unknown; parser should stop at this batch.
         let mut buf = Vec::new();
-        buf.extend_from_slice(&0u32.to_le_bytes());  // panel_idx
-        buf.extend_from_slice(&0u32.to_le_bytes());  // batch_idx
+        buf.extend_from_slice(&0u32.to_le_bytes()); // panel_idx
+        buf.extend_from_slice(&0u32.to_le_bytes()); // batch_idx
         buf.extend_from_slice(&99u32.to_le_bytes()); // kind = unknown
-        buf.extend_from_slice(&1u32.to_le_bytes());  // count = 1
-        buf.extend_from_slice(&0u32.to_le_bytes());  // flags
+        buf.extend_from_slice(&1u32.to_le_bytes()); // count = 1
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flags
         let mut circles = Vec::new();
         let mut rects = Vec::new();
         let mut meta = HashMap::new();
@@ -3047,9 +3967,15 @@ mod tests {
     fn bug_hunt_load_scene_empty_scenegraph() {
         use ferrum_scene::{InteractionConfig, SceneGraph};
         let scene = SceneGraph {
-            width: 100.0, height: 100.0, background: None, title: vec![],
-            panels: vec![], legend: vec![], decorations: vec![],
-            selections: vec![], interaction: InteractionConfig::default(),
+            width: 100.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
             chart_description: None,
         };
         let data = load_scene(&scene);
@@ -3069,7 +3995,12 @@ mod tests {
         use ferrum_scene::{Color, FillStroke, SceneNode};
 
         let style = FillStroke {
-            fill: Some(Color { r: 255, g: 255, b: 255, a: 255 }),
+            fill: Some(Color {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -3110,7 +4041,12 @@ mod tests {
         use ferrum_scene::{Color, FillStroke, SceneNode};
 
         let style = FillStroke {
-            fill: Some(Color { r: 255, g: 255, b: 255, a: 255 }),
+            fill: Some(Color {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -3152,12 +4088,17 @@ mod tests {
     /// per-batch blend mode and instance ranges.
     fn make_blend_test_scene() -> SceneGraph {
         use ferrum_scene::{
-            BlendMode, CoordKind, FillStroke, InteractionConfig, MarkBatch,
-            MarkBatchKind, Panel, Rect, SceneNode,
+            BlendMode, CoordKind, FillStroke, InteractionConfig, MarkBatch, MarkBatchKind, Panel,
+            Rect, SceneNode,
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 255, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -3167,9 +4108,24 @@ mod tests {
             angle: 0.0,
         };
 
-        let circle_a = SceneNode::Circle { cx: 10.0, cy: 10.0, r: 5.0, style: style.clone() };
-        let circle_b = SceneNode::Circle { cx: 20.0, cy: 20.0, r: 5.0, style: style.clone() };
-        let circle_c = SceneNode::Circle { cx: 30.0, cy: 30.0, r: 5.0, style };
+        let circle_a = SceneNode::Circle {
+            cx: 10.0,
+            cy: 10.0,
+            r: 5.0,
+            style: style.clone(),
+        };
+        let circle_b = SceneNode::Circle {
+            cx: 20.0,
+            cy: 20.0,
+            r: 5.0,
+            style: style.clone(),
+        };
+        let circle_c = SceneNode::Circle {
+            cx: 30.0,
+            cy: 30.0,
+            r: 5.0,
+            style,
+        };
 
         SceneGraph {
             width: 100.0,
@@ -3178,10 +4134,23 @@ mod tests {
             title: vec![],
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
-                clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                plot_area: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
+                clip: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
                 coord: CoordKind::Cartesian {
-                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
                 },
                 grid: vec![],
                 marks: vec![
@@ -3215,6 +4184,7 @@ mod tests {
                 axes: vec![],
                 annotations: vec![],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -3325,12 +4295,17 @@ mod tests {
     #[test]
     fn draw_commands_rect_batch_with_blend() {
         use ferrum_scene::{
-            BlendMode, CoordKind, FillStroke, InteractionConfig, MarkBatch,
-            MarkBatchKind, Panel, Rect, SceneNode,
+            BlendMode, CoordKind, FillStroke, InteractionConfig, MarkBatch, MarkBatchKind, Panel,
+            Rect, SceneNode,
         };
 
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 0, b: 255, a: 255 }),
+            fill: Some(Color {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -3341,7 +4316,10 @@ mod tests {
         };
 
         let rect_node = SceneNode::Rect {
-            x: 10.0, y: 10.0, w: 20.0, h: 30.0,
+            x: 10.0,
+            y: 10.0,
+            w: 20.0,
+            h: 30.0,
             style,
             corner_radius: 0.0,
         };
@@ -3353,10 +4331,23 @@ mod tests {
             title: vec![],
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
-                clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+                plot_area: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
+                clip: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
                 coord: CoordKind::Cartesian {
-                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -3375,6 +4366,7 @@ mod tests {
                 axes: vec![],
                 annotations: vec![],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -3402,8 +4394,18 @@ mod tests {
         // Stroke color alpha must be raw (color.a/255 * 1.0), NOT baked with opacity.
         // The shader applies stroke_opacity and opacity independently.
         let style = FillStroke {
-            fill: Some(Color { r: 255, g: 0, b: 0, a: 255 }),
-            stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
+            stroke: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke_width: 2.0,
             opacity: 0.5,
             stroke_opacity: 0.8,
@@ -3411,7 +4413,12 @@ mod tests {
             stroke_dash: None,
             angle: 0.0,
         };
-        let node = SceneNode::Circle { cx: 50.0, cy: 50.0, r: 10.0, style };
+        let node = SceneNode::Circle {
+            cx: 50.0,
+            cy: 50.0,
+            r: 10.0,
+            style,
+        };
         let scene = make_scene_with_nodes(MarkBatchKind::Point, vec![node]);
         let data = load_scene(&scene);
         let ci = &data.circle_instances[0];
@@ -3427,8 +4434,18 @@ mod tests {
     #[test]
     fn rect_stroke_color_uses_raw_alpha_not_opacity() {
         let style = FillStroke {
-            fill: Some(Color { r: 0, g: 128, b: 255, a: 255 }),
-            stroke: Some(Color { r: 0, g: 0, b: 0, a: 200 }),
+            fill: Some(Color {
+                r: 0,
+                g: 128,
+                b: 255,
+                a: 255,
+            }),
+            stroke: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 200,
+            }),
             stroke_width: 1.0,
             opacity: 0.5,
             stroke_opacity: 0.8,
@@ -3437,7 +4454,12 @@ mod tests {
             angle: 0.0,
         };
         let node = SceneNode::Rect {
-            x: 10.0, y: 20.0, w: 40.0, h: 30.0, style, corner_radius: 0.0,
+            x: 10.0,
+            y: 20.0,
+            w: 40.0,
+            h: 30.0,
+            style,
+            corner_radius: 0.0,
         };
         let scene = make_scene_with_nodes(MarkBatchKind::Bar, vec![node]);
         let data = load_scene(&scene);
@@ -3458,13 +4480,23 @@ mod tests {
     /// scene (circles + rects + mesh nodes + text).
     #[test]
     fn test_scene_collector_produces_same_output() {
-        use ferrum_scene::{PathCmd, TextStyle, FontWeight, TextAnchor, TextBaseline};
+        use ferrum_scene::{FontWeight, PathCmd, TextAnchor, TextBaseline, TextStyle};
 
         // Build a scene with one circle batch (Normal), one rect batch (Additive),
         // and one path batch (Normal), plus a title text node.
         let circle_style = FillStroke {
-            fill: Some(Color { r: 200, g: 100, b: 50, a: 255 }),
-            stroke: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 200,
+                g: 100,
+                b: 50,
+                a: 255,
+            }),
+            stroke: Some(Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke_width: 1.5,
             opacity: 0.9,
             stroke_opacity: 0.7,
@@ -3473,7 +4505,12 @@ mod tests {
             angle: 15.0,
         };
         let rect_style = FillStroke {
-            fill: Some(Color { r: 50, g: 150, b: 200, a: 255 }),
+            fill: Some(Color {
+                r: 50,
+                g: 150,
+                b: 200,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -3482,10 +4519,19 @@ mod tests {
             stroke_dash: None,
             angle: 0.0,
         };
-        let circle_node = SceneNode::Circle { cx: 80.0, cy: 80.0, r: 12.0, style: circle_style };
+        let circle_node = SceneNode::Circle {
+            cx: 80.0,
+            cy: 80.0,
+            r: 12.0,
+            style: circle_style,
+        };
         let rect_node = SceneNode::Rect {
-            x: 50.0, y: 50.0, w: 80.0, h: 40.0,
-            style: rect_style, corner_radius: 3.0,
+            x: 50.0,
+            y: 50.0,
+            w: 80.0,
+            h: 40.0,
+            style: rect_style,
+            corner_radius: 3.0,
         };
         let path_node = SceneNode::Path {
             commands: vec![
@@ -3503,14 +4549,26 @@ mod tests {
             anchor: TextAnchor::Middle,
             baseline: TextBaseline::Alphabetic,
             angle: 0.0,
-            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             opacity: 1.0,
             font_family: "sans-serif".to_string(),
         };
-        let title_node = SceneNode::Text { x: 150.0, y: 20.0, content: "Title".to_string(), style: text_style };
+        let title_node = SceneNode::Text {
+            x: 150.0,
+            y: 20.0,
+            content: "Title".to_string(),
+            style: text_style,
+        };
 
         // Build the scene graph.
-        use ferrum_scene::{BlendMode, CoordKind, InteractionConfig, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{
+            BlendMode, CoordKind, InteractionConfig, MarkBatch, MarkBatchKind, Panel, Rect,
+        };
         let scene = SceneGraph {
             width: 300.0,
             height: 250.0,
@@ -3518,42 +4576,76 @@ mod tests {
             title: vec![title_node],
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 30.0, y: 20.0, w: 240.0, h: 200.0 },
-                clip: Rect { x: 30.0, y: 20.0, w: 240.0, h: 200.0 },
+                plot_area: Rect {
+                    x: 30.0,
+                    y: 20.0,
+                    w: 240.0,
+                    h: 200.0,
+                },
+                clip: Rect {
+                    x: 30.0,
+                    y: 20.0,
+                    w: 240.0,
+                    h: 200.0,
+                },
                 coord: CoordKind::Cartesian {
-                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
                 },
                 grid: vec![],
                 marks: vec![
                     MarkBatch {
                         kind: MarkBatchKind::Point,
                         nodes: vec![circle_node],
-                        data_indices: None, tooltips: None, hrefs: None,
-                        descriptions: None, keys: None,
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Bar,
                         nodes: vec![rect_node],
-                        data_indices: None, tooltips: None, hrefs: None,
-                        descriptions: None, keys: None,
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
                         blend: BlendMode::Additive,
-                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Area,
                         nodes: vec![path_node],
-                        data_indices: None, tooltips: None, hrefs: None,
-                        descriptions: None, keys: None,
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
                     },
                 ],
-                axes: vec![], annotations: vec![], strip_title: vec![],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             }],
-            legend: vec![], decorations: vec![], selections: vec![],
-            interaction: InteractionConfig::default(), chart_description: None,
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
         };
 
         // Load via the full load_scene path (which now uses SceneCollector internally).
@@ -3563,8 +4655,14 @@ mod tests {
         assert_eq!(data.circle_instances.len(), 1, "exactly 1 circle");
         assert_eq!(data.rect_instances.len(), 1, "exactly 1 rect");
         assert_eq!(data.text_elements.len(), 1, "exactly 1 text (title)");
-        assert!(!data.mesh_buffers.vertices.is_empty(), "path batch produces mesh vertices");
-        assert!(!data.mesh_buffers.indices.is_empty(), "path batch produces mesh indices");
+        assert!(
+            !data.mesh_buffers.vertices.is_empty(),
+            "path batch produces mesh vertices"
+        );
+        assert!(
+            !data.mesh_buffers.indices.is_empty(),
+            "path batch produces mesh indices"
+        );
 
         // Circle instance fields are correctly transferred.
         let ci = &data.circle_instances[0];
@@ -3572,8 +4670,14 @@ mod tests {
         assert!((ci.center[1] - 80.0).abs() < 1e-3, "circle cy");
         assert!((ci.radius - 12.0).abs() < 1e-3, "circle radius");
         assert!((ci.opacity - 0.9).abs() < 1e-3, "circle opacity");
-        assert!((ci.stroke_opacity - 0.7).abs() < 1e-3, "circle stroke_opacity");
-        assert!((ci.stroke_dash - 1.0).abs() < 1e-3, "circle stroke_dash index 1 (dashed)");
+        assert!(
+            (ci.stroke_opacity - 0.7).abs() < 1e-3,
+            "circle stroke_opacity"
+        );
+        assert!(
+            (ci.stroke_dash - 1.0).abs() < 1e-3,
+            "circle stroke_dash index 1 (dashed)"
+        );
         assert!((ci.angle - 15.0).abs() < 1e-3, "circle angle");
 
         // Rect instance fields are correctly transferred.
@@ -3582,10 +4686,16 @@ mod tests {
         assert!((ri.corner_radius - 3.0).abs() < 1e-3, "rect corner_radius");
 
         // Draw commands: Normal circle (is_mark, not additive), Additive rect (is_mark, additive).
-        let circle_cmds: Vec<_> = data.draw_commands.iter()
-            .filter(|c| c.kind == DrawKind::Circle && c.is_mark).collect();
-        let rect_cmds: Vec<_> = data.draw_commands.iter()
-            .filter(|c| c.kind == DrawKind::Rect && c.is_mark).collect();
+        let circle_cmds: Vec<_> = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Circle && c.is_mark)
+            .collect();
+        let rect_cmds: Vec<_> = data
+            .draw_commands
+            .iter()
+            .filter(|c| c.kind == DrawKind::Rect && c.is_mark)
+            .collect();
         assert_eq!(circle_cmds.len(), 1, "one circle draw command");
         assert!(!circle_cmds[0].additive, "circle batch is Normal blend");
         assert_eq!(rect_cmds.len(), 1, "one rect draw command");
@@ -3610,12 +4720,17 @@ mod tests {
     #[test]
     fn test_annotation_mesh_separate_from_static_mesh() {
         use ferrum_scene::{
-            BlendMode, CoordKind, InteractionConfig, MarkBatch, MarkBatchKind,
-            Panel, Rect, SceneGraph, SceneNode, StrokeStyle,
+            BlendMode, CoordKind, InteractionConfig, MarkBatch, MarkBatchKind, Panel, Rect,
+            SceneGraph, SceneNode, StrokeStyle,
         };
 
         let stroke = StrokeStyle {
-            color: Color { r: 255, g: 0, b: 0, a: 255 },
+            color: Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             width: 2.0,
             opacity: 1.0,
             dash: None,
@@ -3626,11 +4741,17 @@ mod tests {
 
         // A grid line (non-annotation) and an annotation line.
         let grid_line = SceneNode::Line {
-            x1: 50.0, y1: 0.0, x2: 50.0, y2: 400.0,
+            x1: 50.0,
+            y1: 0.0,
+            x2: 50.0,
+            y2: 400.0,
             style: stroke.clone(),
         };
         let annotation_line = SceneNode::Line {
-            x1: 0.0, y1: 200.0, x2: 500.0, y2: 200.0,
+            x1: 0.0,
+            y1: 200.0,
+            x2: 500.0,
+            y2: 200.0,
             style: stroke.clone(),
         };
 
@@ -3641,23 +4762,42 @@ mod tests {
             title: vec![],
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
-                clip: Rect { x: 50.0, y: 10.0, w: 400.0, h: 350.0 },
+                plot_area: Rect {
+                    x: 50.0,
+                    y: 10.0,
+                    w: 400.0,
+                    h: 350.0,
+                },
+                clip: Rect {
+                    x: 50.0,
+                    y: 10.0,
+                    w: 400.0,
+                    h: 350.0,
+                },
                 coord: CoordKind::Cartesian {
-                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
                 },
                 grid: vec![grid_line],
                 marks: vec![MarkBatch {
                     kind: MarkBatchKind::Rule,
                     nodes: vec![],
-                    data_indices: None, tooltips: None, hrefs: None,
-                    descriptions: None, keys: None,
+                    data_indices: None,
+                    tooltips: None,
+                    hrefs: None,
+                    descriptions: None,
+                    keys: None,
                     blend: BlendMode::Normal,
-                    stroke_cap: None, stroke_join: None, packed_instances: None,
+                    stroke_cap: None,
+                    stroke_join: None,
+                    packed_instances: None,
                 }],
                 axes: vec![],
                 annotations: vec![annotation_line],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -3718,12 +4858,13 @@ mod tests {
     /// `MarkMeshPanel` entry that spans the entire mark mesh index buffer.
     #[test]
     fn single_panel_mesh_scene_produces_one_mark_mesh_panel() {
-        let nodes = vec![
-            SceneNode::Line {
-                x1: 50.0, y1: 50.0, x2: 300.0, y2: 200.0,
-                style: default_stroke_style(),
-            },
-        ];
+        let nodes = vec![SceneNode::Line {
+            x1: 50.0,
+            y1: 50.0,
+            x2: 300.0,
+            y2: 200.0,
+            style: default_stroke_style(),
+        }];
         let scene = make_scene_with_nodes(MarkBatchKind::Rule, nodes);
         let data = load_scene(&scene);
 
@@ -3735,7 +4876,8 @@ mod tests {
         );
 
         assert_eq!(
-            data.mark_mesh_panels.len(), 1,
+            data.mark_mesh_panels.len(),
+            1,
             "one panel with mesh marks → one MarkMeshPanel entry"
         );
 
@@ -3761,11 +4903,14 @@ mod tests {
     /// cover the entire mark mesh index buffer.
     #[test]
     fn two_panel_mesh_scene_produces_two_mark_mesh_panels_covering_full_buffer() {
-        use ferrum_scene::{Panel, MarkBatch, BlendMode};
-        use ferrum_scene::{CoordKind, Rect, InteractionConfig};
+        use ferrum_scene::{BlendMode, MarkBatch, Panel};
+        use ferrum_scene::{CoordKind, InteractionConfig, Rect};
 
         let line_node = || SceneNode::Line {
-            x1: 50.0, y1: 50.0, x2: 300.0, y2: 200.0,
+            x1: 50.0,
+            y1: 50.0,
+            x2: 300.0,
+            y2: 200.0,
             style: default_stroke_style(),
         };
 
@@ -3777,39 +4922,81 @@ mod tests {
             panels: vec![
                 Panel {
                     id: 0,
-                    plot_area: Rect { x: 50.0, y: 10.0, w: 200.0, h: 150.0 },
-                    clip: Rect { x: 50.0, y: 10.0, w: 200.0, h: 150.0 },
+                    plot_area: Rect {
+                        x: 50.0,
+                        y: 10.0,
+                        w: 200.0,
+                        h: 150.0,
+                    },
+                    clip: Rect {
+                        x: 50.0,
+                        y: 10.0,
+                        w: 200.0,
+                        h: 150.0,
+                    },
                     coord: CoordKind::Cartesian {
-                        x_domain: None, y_domain: None, expand: true, clip: true,
+                        x_domain: None,
+                        y_domain: None,
+                        expand: true,
+                        clip: true,
                     },
                     grid: vec![],
                     marks: vec![MarkBatch {
                         kind: MarkBatchKind::Rule,
                         nodes: vec![line_node()],
-                        data_indices: None, tooltips: None, hrefs: None,
-                        descriptions: None, keys: None,
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
                     }],
-                    axes: vec![], annotations: vec![], strip_title: vec![],
+                    axes: vec![],
+                    annotations: vec![],
+                    strip_title: vec![],
+                    layout_scale: LayoutScale::identity(),
                 },
                 Panel {
                     id: 1,
-                    plot_area: Rect { x: 310.0, y: 10.0, w: 200.0, h: 150.0 },
-                    clip: Rect { x: 310.0, y: 10.0, w: 200.0, h: 150.0 },
+                    plot_area: Rect {
+                        x: 310.0,
+                        y: 10.0,
+                        w: 200.0,
+                        h: 150.0,
+                    },
+                    clip: Rect {
+                        x: 310.0,
+                        y: 10.0,
+                        w: 200.0,
+                        h: 150.0,
+                    },
                     coord: CoordKind::Cartesian {
-                        x_domain: None, y_domain: None, expand: true, clip: true,
+                        x_domain: None,
+                        y_domain: None,
+                        expand: true,
+                        clip: true,
                     },
                     grid: vec![],
                     marks: vec![MarkBatch {
                         kind: MarkBatchKind::Rule,
                         nodes: vec![line_node()],
-                        data_indices: None, tooltips: None, hrefs: None,
-                        descriptions: None, keys: None,
+                        data_indices: None,
+                        tooltips: None,
+                        hrefs: None,
+                        descriptions: None,
+                        keys: None,
                         blend: BlendMode::Normal,
-                        stroke_cap: None, stroke_join: None, packed_instances: None,
+                        stroke_cap: None,
+                        stroke_join: None,
+                        packed_instances: None,
                     }],
-                    axes: vec![], annotations: vec![], strip_title: vec![],
+                    axes: vec![],
+                    annotations: vec![],
+                    strip_title: vec![],
+                    layout_scale: LayoutScale::identity(),
                 },
             ],
             legend: vec![],
@@ -3822,7 +5009,8 @@ mod tests {
         let data = load_scene(&scene);
 
         assert_eq!(
-            data.mark_mesh_panels.len(), 2,
+            data.mark_mesh_panels.len(),
+            2,
             "two panels with mesh marks → two MarkMeshPanel entries"
         );
 
@@ -3831,7 +5019,8 @@ mod tests {
 
         // Ranges must be contiguous: panel 1 starts where panel 0 ends.
         assert_eq!(
-            p1.index_start, p0.index_start + p0.index_count,
+            p1.index_start,
+            p0.index_start + p0.index_count,
             "panel 1 index_start must immediately follow panel 0 range"
         );
 
@@ -3853,7 +5042,9 @@ mod tests {
     fn panel_with_no_mesh_marks_produces_no_mark_mesh_panel_entry() {
         // Circle nodes go to the instance buffer, not the mesh buffer.
         let circle_node = SceneNode::Circle {
-            cx: 100.0, cy: 100.0, r: 5.0,
+            cx: 100.0,
+            cy: 100.0,
+            r: 5.0,
             style: default_fill_stroke(),
         };
         let scene = make_scene_with_nodes(MarkBatchKind::Point, vec![circle_node]);
@@ -3884,7 +5075,8 @@ mod tests {
         // Record a zero-count range — must be dropped.
         collector.record_mark_mesh_panel(30, 30, [10.0, 200.0, 200.0, 150.0], 1);
         assert_eq!(
-            collector.mark_mesh_panels.len(), 1,
+            collector.mark_mesh_panels.len(),
+            1,
             "zero-count panel must not be appended"
         );
 
@@ -3913,12 +5105,17 @@ mod tests {
     #[test]
     fn two_panel_scene_records_distinct_panel_ids() {
         use ferrum_scene::{
-            BlendMode, CoordKind, FillStroke, InteractionConfig, MarkBatch, MarkBatchKind,
-            Panel, Rect, SceneGraph, SceneNode, StrokeStyle,
+            BlendMode, CoordKind, FillStroke, InteractionConfig, MarkBatch, MarkBatchKind, Panel,
+            Rect, SceneGraph, SceneNode, StrokeStyle,
         };
 
         let line_style = StrokeStyle {
-            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             width: 1.0,
             opacity: 1.0,
             dash: None,
@@ -3927,7 +5124,12 @@ mod tests {
             stroke_opacity: 1.0,
         };
         let circle_style = FillStroke {
-            fill: Some(Color { r: 255, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -3941,21 +5143,40 @@ mod tests {
         // instance draw command) so both per-panel tracks get populated.
         let mk_panel = |x_off: f64| Panel {
             id: 0,
-            plot_area: Rect { x: x_off, y: 0.0, w: 100.0, h: 100.0 },
-            clip: Rect { x: x_off, y: 0.0, w: 100.0, h: 100.0 },
+            plot_area: Rect {
+                x: x_off,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
+            clip: Rect {
+                x: x_off,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
             coord: CoordKind::Cartesian {
-                x_domain: None, y_domain: None, expand: true, clip: true,
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
             },
             grid: vec![],
             marks: vec![MarkBatch {
                 kind: MarkBatchKind::Line,
                 nodes: vec![
                     SceneNode::Line {
-                        x1: x_off, y1: 10.0, x2: x_off + 50.0, y2: 80.0,
+                        x1: x_off,
+                        y1: 10.0,
+                        x2: x_off + 50.0,
+                        y2: 80.0,
                         style: line_style.clone(),
                     },
                     SceneNode::Circle {
-                        cx: x_off + 25.0, cy: 50.0, r: 4.0, style: circle_style.clone(),
+                        cx: x_off + 25.0,
+                        cy: 50.0,
+                        r: 4.0,
+                        style: circle_style.clone(),
                     },
                 ],
                 data_indices: None,
@@ -3971,6 +5192,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         };
 
         let scene = SceneGraph {
@@ -3988,7 +5210,10 @@ mod tests {
 
         let data = load_scene(&scene);
 
-        assert_eq!(data.panel_count, 2, "two-panel scene must report panel_count == 2");
+        assert_eq!(
+            data.panel_count, 2,
+            "two-panel scene must report panel_count == 2"
+        );
 
         // One mesh slice per panel, carrying distinct panel_ids 0 and 1.
         assert_eq!(data.mark_mesh_panels.len(), 2, "one mesh slice per panel");
@@ -4002,8 +5227,875 @@ mod tests {
             .filter(|c| c.is_mark)
             .map(|c| c.panel_id)
             .collect();
-        assert!(mark_panel_ids.contains(&0), "a mark command must belong to panel 0");
-        assert!(mark_panel_ids.contains(&1), "a mark command must belong to panel 1");
+        assert!(
+            mark_panel_ids.contains(&0),
+            "a mark command must belong to panel 0"
+        );
+        assert!(
+            mark_panel_ids.contains(&1),
+            "a mark command must belong to panel 1"
+        );
+    }
+
+    // ── Task 3 gap-fix: non-identity `layout_scale` bake correctness ────
+    //
+    // Spec-review gap: no test previously exercised the bake path with a
+    // non-uniform (sx != sy) `LayoutScale`. All tests below use
+    // `sx = 2.0, sy = 8.0, tx = 10.0, ty = -5.0`, so the geometric-mean
+    // scalar factor `sqrt(sx*sy) = 4.0` is distinguishable from both `sx`
+    // and `sy` individually — a uniform scale (or `sx*sy == 1`) would hide
+    // bugs where the wrong factor is applied to direction-independent
+    // scalars (radius, corner_radius, stroke_width, font_size).
+
+    /// A non-identity, non-uniform `LayoutScale` shared by the gap-fix tests
+    /// below: `sx=2.0, sy=8.0, tx=10.0, ty=-5.0` → geometric mean `4.0`.
+    fn gap_fix_layout_scale() -> LayoutScale {
+        LayoutScale {
+            sx: 2.0,
+            sy: 8.0,
+            tx: 10.0,
+            ty: -5.0,
+        }
+    }
+
+    fn gap_fix_fill_stroke(stroke_width: f64, angle: f64) -> ferrum_scene::FillStroke {
+        ferrum_scene::FillStroke {
+            fill: None,
+            stroke: None,
+            stroke_width,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle,
+        }
+    }
+
+    fn gap_fix_stroke_style(width: f64) -> ferrum_scene::StrokeStyle {
+        ferrum_scene::StrokeStyle {
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            width,
+            opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+            stroke_opacity: 1.0,
+        }
+    }
+
+    fn gap_fix_text_style(font_size: f64, angle: f64) -> ferrum_scene::TextStyle {
+        ferrum_scene::TextStyle {
+            font_size,
+            font_weight: ferrum_scene::FontWeight::Normal,
+            anchor: ferrum_scene::TextAnchor::Start,
+            baseline: ferrum_scene::TextBaseline::Alphabetic,
+            angle,
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            opacity: 1.0,
+            font_family: "sans-serif".to_string(),
+        }
+    }
+
+    #[test]
+    fn scalar_scale_factor_is_geometric_mean_of_sx_sy() {
+        let ls = gap_fix_layout_scale();
+        assert!(
+            (scalar_scale_factor(&ls) - 4.0).abs() < 1e-9,
+            "got {}",
+            scalar_scale_factor(&ls)
+        );
+
+        // Uniform scale: geometric mean equals the shared factor exactly.
+        let uniform = LayoutScale {
+            sx: 3.0,
+            sy: 3.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
+        assert!((scalar_scale_factor(&uniform) - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn transform_node_rect_scales_axes_independently_and_scalar_by_geometric_mean() {
+        let ls = gap_fix_layout_scale();
+        let node = SceneNode::Rect {
+            x: 3.0,
+            y: 4.0,
+            w: 5.0,
+            h: 6.0,
+            style: gap_fix_fill_stroke(1.5, 30.0),
+            corner_radius: 2.0,
+        };
+        match transform_node(&node, &ls) {
+            SceneNode::Rect {
+                x,
+                y,
+                w,
+                h,
+                style,
+                corner_radius,
+            } => {
+                assert!((x - 16.0).abs() < 1e-9, "x: got {x}"); // 2*3+10
+                assert!((y - 27.0).abs() < 1e-9, "y: got {y}"); // 8*4-5
+                assert!((w - 10.0).abs() < 1e-9, "w: got {w}"); // 5*2 (sx)
+                assert!((h - 48.0).abs() < 1e-9, "h: got {h}"); // 6*8 (sy)
+                assert!(
+                    (corner_radius - 8.0).abs() < 1e-9,
+                    "corner_radius should scale by geometric mean 4.0, got {corner_radius}"
+                );
+                assert!(
+                    (style.stroke_width - 6.0).abs() < 1e-9,
+                    "stroke_width should scale by geometric mean 4.0, got {}",
+                    style.stroke_width
+                );
+                assert_eq!(
+                    style.angle, 30.0,
+                    "rotation angle must pass through UNCHANGED (documented gap)"
+                );
+            }
+            other => panic!("expected Rect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_node_circle_radius_uses_geometric_mean_scale() {
+        let ls = gap_fix_layout_scale();
+        let node = SceneNode::Circle {
+            cx: 3.0,
+            cy: 4.0,
+            r: 2.0,
+            style: gap_fix_fill_stroke(1.0, 0.0),
+        };
+        match transform_node(&node, &ls) {
+            SceneNode::Circle { cx, cy, r, style } => {
+                assert!((cx - 16.0).abs() < 1e-9, "cx: got {cx}");
+                assert!((cy - 27.0).abs() < 1e-9, "cy: got {cy}");
+                assert!(
+                    (r - 8.0).abs() < 1e-9,
+                    "radius should scale by sqrt(sx*sy)=4.0, got {r}"
+                );
+                assert!((style.stroke_width - 4.0).abs() < 1e-9);
+            }
+            other => panic!("expected Circle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_node_line_scales_dash_pattern_by_geometric_mean() {
+        // Regression (Task 3 quality review): dash-pattern pixel lengths must
+        // scale with the same geometric-mean factor as stroke width — the SVG
+        // walker's <g transform> scales dasharray automatically, so leaving
+        // them unscaled would misrender dashed marks on ratio-fitted panels.
+        let ls = gap_fix_layout_scale();
+        let mut style = gap_fix_stroke_style(1.0);
+        style.dash = Some(vec![4.0, 2.0]);
+        let node = SceneNode::Line { x1: 0.0, y1: 0.0, x2: 1.0, y2: 1.0, style };
+        match transform_node(&node, &ls) {
+            SceneNode::Line { style, .. } => {
+                let dash = style.dash.expect("dash must survive the bake");
+                // geometric mean of (2, 8) = 4 → [16, 8]
+                assert!((dash[0] - 16.0).abs() < 1e-9, "dash[0]: got {}", dash[0]);
+                assert!((dash[1] - 8.0).abs() < 1e-9, "dash[1]: got {}", dash[1]);
+                assert!((style.width - 4.0).abs() < 1e-9, "width must still scale");
+            }
+            other => panic!("expected Line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_fill_stroke_scales_stroke_dash_by_geometric_mean() {
+        let mut style = gap_fix_fill_stroke(1.0, 0.0);
+        style.stroke_dash = Some(vec![3.0, 1.5]);
+        let out = transform_fill_stroke(&style, 4.0);
+        let dash = out.stroke_dash.expect("stroke_dash must survive the bake");
+        assert!((dash[0] - 12.0).abs() < 1e-9, "dash[0]: got {}", dash[0]);
+        assert!((dash[1] - 6.0).abs() < 1e-9, "dash[1]: got {}", dash[1]);
+        assert!((out.stroke_width - 4.0).abs() < 1e-9, "stroke_width must still scale");
+    }
+
+    #[test]
+    fn transform_node_line_scales_endpoints_and_stroke_width() {
+        let ls = gap_fix_layout_scale();
+        let node = SceneNode::Line {
+            x1: 1.0,
+            y1: 2.0,
+            x2: 3.0,
+            y2: 4.0,
+            style: gap_fix_stroke_style(1.0),
+        };
+        match transform_node(&node, &ls) {
+            SceneNode::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                style,
+            } => {
+                assert!((x1 - 12.0).abs() < 1e-9, "x1: got {x1}");
+                assert!((y1 - 11.0).abs() < 1e-9, "y1: got {y1}");
+                assert!((x2 - 16.0).abs() < 1e-9, "x2: got {x2}");
+                assert!((y2 - 27.0).abs() < 1e-9, "y2: got {y2}");
+                assert!(
+                    (style.width - 4.0).abs() < 1e-9,
+                    "stroke width: got {}",
+                    style.width
+                );
+            }
+            other => panic!("expected Line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_node_text_scales_position_and_font_size_leaves_angle() {
+        let ls = gap_fix_layout_scale();
+        let node = SceneNode::Text {
+            x: 5.0,
+            y: 6.0,
+            content: "hi".to_string(),
+            style: gap_fix_text_style(12.0, 45.0),
+        };
+        match transform_node(&node, &ls) {
+            SceneNode::Text {
+                x,
+                y,
+                content,
+                style,
+            } => {
+                assert!((x - 20.0).abs() < 1e-9, "x: got {x}");
+                assert!((y - 43.0).abs() < 1e-9, "y: got {y}");
+                assert_eq!(content, "hi");
+                assert!(
+                    (style.font_size - 48.0).abs() < 1e-9,
+                    "font_size should scale by sqrt(sx*sy)=4.0, got {}",
+                    style.font_size
+                );
+                assert_eq!(
+                    style.angle, 45.0,
+                    "text rotation must pass through UNCHANGED (documented gap)"
+                );
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_node_image_scales_position_and_size_per_axis() {
+        let ls = gap_fix_layout_scale();
+        let node = SceneNode::Image {
+            x: 1.0,
+            y: 2.0,
+            w: 3.0,
+            h: 4.0,
+            data: ferrum_scene::ImageData::Url {
+                url: "x".to_string(),
+            },
+        };
+        match transform_node(&node, &ls) {
+            SceneNode::Image { x, y, w, h, .. } => {
+                assert!((x - 12.0).abs() < 1e-9, "x: got {x}");
+                assert!((y - 11.0).abs() < 1e-9, "y: got {y}");
+                assert!((w - 6.0).abs() < 1e-9, "w should scale by sx=2.0, got {w}");
+                assert!((h - 32.0).abs() < 1e-9, "h should scale by sy=8.0, got {h}");
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_node_polygon_scales_every_ring_point() {
+        let ls = gap_fix_layout_scale();
+        let node = SceneNode::Polygon {
+            rings: vec![vec![[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]]],
+            style: gap_fix_fill_stroke(1.0, 0.0),
+        };
+        match transform_node(&node, &ls) {
+            SceneNode::Polygon { rings, .. } => {
+                assert_eq!(rings.len(), 1);
+                let ring = &rings[0];
+                assert!((ring[0][0] - 12.0).abs() < 1e-9);
+                assert!((ring[0][1] - 3.0).abs() < 1e-9);
+                assert!((ring[1][0] - 14.0).abs() < 1e-9);
+                assert!((ring[1][1] - 11.0).abs() < 1e-9);
+                assert!((ring[2][0] - 16.0).abs() < 1e-9);
+                assert!((ring[2][1] - 19.0).abs() < 1e-9);
+            }
+            other => panic!("expected Polygon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_node_polyline_scales_points_and_stroke_width() {
+        let ls = gap_fix_layout_scale();
+        let node = SceneNode::Polyline {
+            points: vec![(1.0, 1.0), (2.0, 2.0)],
+            style: gap_fix_stroke_style(1.0),
+        };
+        match transform_node(&node, &ls) {
+            SceneNode::Polyline { points, style } => {
+                assert!((points[0].0 - 12.0).abs() < 1e-9);
+                assert!((points[0].1 - 3.0).abs() < 1e-9);
+                assert!((points[1].0 - 14.0).abs() < 1e-9);
+                assert!((points[1].1 - 11.0).abs() < 1e-9);
+                assert!((style.width - 4.0).abs() < 1e-9);
+            }
+            other => panic!("expected Polyline, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_node_path_scales_commands_and_stroke_width() {
+        let ls = gap_fix_layout_scale();
+        let node = SceneNode::Path {
+            commands: vec![
+                PathCmd::MoveTo { x: 1.0, y: 1.0 },
+                PathCmd::LineTo { x: 2.0, y: 2.0 },
+            ],
+            style: gap_fix_fill_stroke(1.0, 0.0),
+            closed: true,
+        };
+        match transform_node(&node, &ls) {
+            SceneNode::Path {
+                commands,
+                style,
+                closed,
+            } => {
+                assert!(closed);
+                assert!((style.stroke_width - 4.0).abs() < 1e-9);
+                match commands[0] {
+                    PathCmd::MoveTo { x, y } => {
+                        assert!((x - 12.0).abs() < 1e-9);
+                        assert!((y - 3.0).abs() < 1e-9);
+                    }
+                    ref other => panic!("expected MoveTo, got {other:?}"),
+                }
+                match commands[1] {
+                    PathCmd::LineTo { x, y } => {
+                        assert!((x - 14.0).abs() < 1e-9);
+                        assert!((y - 11.0).abs() < 1e-9);
+                    }
+                    ref other => panic!("expected LineTo, got {other:?}"),
+                }
+            }
+            other => panic!("expected Path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_node_group_recurses_into_children() {
+        let ls = gap_fix_layout_scale();
+        let child = SceneNode::Circle {
+            cx: 3.0,
+            cy: 4.0,
+            r: 2.0,
+            style: gap_fix_fill_stroke(1.0, 0.0),
+        };
+        let node = SceneNode::Group {
+            attrs: vec![],
+            children: vec![child],
+        };
+        match transform_node(&node, &ls) {
+            SceneNode::Group { children, .. } => {
+                assert_eq!(children.len(), 1);
+                match &children[0] {
+                    SceneNode::Circle { cx, cy, r, .. } => {
+                        assert!((cx - 16.0).abs() < 1e-9);
+                        assert!((cy - 27.0).abs() < 1e-9);
+                        assert!((r - 8.0).abs() < 1e-9);
+                    }
+                    other => panic!("expected Circle child, got {other:?}"),
+                }
+            }
+            other => panic!("expected Group, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_node_raw_passes_through_unchanged_documented_gap() {
+        let ls = gap_fix_layout_scale();
+        let node = SceneNode::Raw {
+            svg: "<rect x=\"5\" y=\"6\" width=\"1\" height=\"1\"/>".to_string(),
+            anchor: ferrum_scene::RawAnchor::Chrome,
+        };
+        let out = transform_node(&node, &ls);
+        assert_eq!(
+            out, node,
+            "Raw fragments bake absolute coordinates into an opaque SVG string; the W4 \
+             gap means they pass through the bake pass unchanged"
+        );
+    }
+
+    #[test]
+    fn transform_path_cmd_covers_all_variants_exact_coordinates() {
+        let ls = gap_fix_layout_scale();
+
+        match transform_path_cmd(&PathCmd::MoveTo { x: 1.0, y: 1.0 }, &ls) {
+            PathCmd::MoveTo { x, y } => {
+                assert!((x - 12.0).abs() < 1e-9);
+                assert!((y - 3.0).abs() < 1e-9);
+            }
+            other => panic!("expected MoveTo, got {other:?}"),
+        }
+
+        match transform_path_cmd(&PathCmd::LineTo { x: 2.0, y: 2.0 }, &ls) {
+            PathCmd::LineTo { x, y } => {
+                assert!((x - 14.0).abs() < 1e-9);
+                assert!((y - 11.0).abs() < 1e-9);
+            }
+            other => panic!("expected LineTo, got {other:?}"),
+        }
+
+        match transform_path_cmd(
+            &PathCmd::QuadTo {
+                cx: 3.0,
+                cy: 3.0,
+                x: 4.0,
+                y: 4.0,
+            },
+            &ls,
+        ) {
+            PathCmd::QuadTo { cx, cy, x, y } => {
+                assert!((cx - 16.0).abs() < 1e-9);
+                assert!((cy - 19.0).abs() < 1e-9);
+                assert!((x - 18.0).abs() < 1e-9);
+                assert!((y - 27.0).abs() < 1e-9);
+            }
+            other => panic!("expected QuadTo, got {other:?}"),
+        }
+
+        match transform_path_cmd(
+            &PathCmd::CubicTo {
+                c1x: 1.0,
+                c1y: 1.0,
+                c2x: 2.0,
+                c2y: 2.0,
+                x: 3.0,
+                y: 3.0,
+            },
+            &ls,
+        ) {
+            PathCmd::CubicTo {
+                c1x,
+                c1y,
+                c2x,
+                c2y,
+                x,
+                y,
+            } => {
+                assert!((c1x - 12.0).abs() < 1e-9);
+                assert!((c1y - 3.0).abs() < 1e-9);
+                assert!((c2x - 14.0).abs() < 1e-9);
+                assert!((c2y - 11.0).abs() < 1e-9);
+                assert!((x - 16.0).abs() < 1e-9);
+                assert!((y - 19.0).abs() < 1e-9);
+            }
+            other => panic!("expected CubicTo, got {other:?}"),
+        }
+
+        // HLineTo carries only an x-coordinate: scaled by sx/tx; sy/ty must
+        // not leak in (this is what a copy-paste bug in `ls.apply` would hide).
+        match transform_path_cmd(&PathCmd::HLineTo { x: 5.0 }, &ls) {
+            PathCmd::HLineTo { x } => assert!((x - 20.0).abs() < 1e-9, "got {x}"),
+            other => panic!("expected HLineTo, got {other:?}"),
+        }
+
+        // VLineTo carries only a y-coordinate: scaled by sy/ty; sx/tx must not leak in.
+        match transform_path_cmd(&PathCmd::VLineTo { y: 5.0 }, &ls) {
+            PathCmd::VLineTo { y } => assert!((y - 35.0).abs() < 1e-9, "got {y}"),
+            other => panic!("expected VLineTo, got {other:?}"),
+        }
+
+        match transform_path_cmd(
+            &PathCmd::ArcTo {
+                rx: 2.0,
+                ry: 3.0,
+                rotation: 15.0,
+                large_arc: false,
+                sweep: true,
+                x: 6.0,
+                y: 7.0,
+            },
+            &ls,
+        ) {
+            PathCmd::ArcTo {
+                rx,
+                ry,
+                rotation,
+                large_arc,
+                sweep,
+                x,
+                y,
+            } => {
+                assert!(
+                    (rx - 4.0).abs() < 1e-9,
+                    "rx should scale by sx=2.0, got {rx}"
+                );
+                assert!(
+                    (ry - 24.0).abs() < 1e-9,
+                    "ry should scale by sy=8.0, got {ry}"
+                );
+                assert_eq!(
+                    rotation, 15.0,
+                    "arc rotation must pass through UNCHANGED (documented gap)"
+                );
+                assert!(!large_arc);
+                assert!(sweep);
+                assert!((x - 22.0).abs() < 1e-9);
+                assert!((y - 51.0).abs() < 1e-9);
+            }
+            other => panic!("expected ArcTo, got {other:?}"),
+        }
+
+        assert_eq!(transform_path_cmd(&PathCmd::Close, &ls), PathCmd::Close);
+    }
+
+    #[test]
+    fn transform_rect_bakes_exact_plot_area_coordinates() {
+        let ls = gap_fix_layout_scale();
+        let rect = ferrum_scene::Rect {
+            x: 3.0,
+            y: 4.0,
+            w: 5.0,
+            h: 6.0,
+        };
+        let out = transform_rect(&rect, &ls);
+        assert!((out.x - 16.0).abs() < 1e-9, "x: got {}", out.x);
+        assert!((out.y - 27.0).abs() < 1e-9, "y: got {}", out.y);
+        assert!(
+            (out.w - 10.0).abs() < 1e-9,
+            "w should scale by sx=2.0, got {}",
+            out.w
+        );
+        assert!(
+            (out.h - 48.0).abs() < 1e-9,
+            "h should scale by sy=8.0, got {}",
+            out.h
+        );
+    }
+
+    #[test]
+    fn apply_layout_scale_to_packed_instances_bakes_exact_circle_and_rect_geometry() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, InteractionConfig, MarkBatch, MarkBatchKind, Panel, Rect,
+            SceneGraph,
+        };
+
+        let ls = gap_fix_layout_scale();
+
+        let scene = SceneGraph {
+            width: 100.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
+                clip: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
+                coord: CoordKind::Cartesian {
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
+                },
+                grid: vec![],
+                marks: vec![MarkBatch {
+                    kind: MarkBatchKind::Point,
+                    nodes: vec![],
+                    data_indices: None,
+                    tooltips: None,
+                    hrefs: None,
+                    descriptions: None,
+                    keys: None,
+                    blend: BlendMode::Normal,
+                    stroke_cap: None,
+                    stroke_join: None,
+                    packed_instances: None,
+                }],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+                layout_scale: ls,
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let mut circles = vec![CircleInstance {
+            center: [3.0, 4.0],
+            radius: 2.0,
+            fill_color: [0.0; 4],
+            stroke_color: [0.0; 4],
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        }];
+        let mut rects = vec![RectInstance {
+            position: [3.0, 4.0],
+            size: [5.0, 6.0],
+            corner_radius: 2.0,
+            fill_color: [0.0; 4],
+            stroke_color: [0.0; 4],
+            stroke_width: 1.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
+        }];
+
+        let mut batch_meta = HashMap::new();
+        batch_meta.insert(
+            (0u32, 0u32),
+            PackedBatchMeta {
+                kind: DrawKind::Circle,
+                instance_start: 0,
+                instance_count: 1,
+                data_indices: None,
+                tooltip_bytes: None,
+            },
+        );
+        batch_meta.insert(
+            (0u32, 1u32),
+            PackedBatchMeta {
+                kind: DrawKind::Rect,
+                instance_start: 0,
+                instance_count: 1,
+                data_indices: None,
+                tooltip_bytes: None,
+            },
+        );
+
+        apply_layout_scale_to_packed_instances(&scene, &mut circles, &mut rects, &batch_meta);
+
+        let c = &circles[0];
+        assert!(
+            (c.center[0] - 16.0).abs() < 1e-4,
+            "circle x: got {}",
+            c.center[0]
+        );
+        assert!(
+            (c.center[1] - 27.0).abs() < 1e-4,
+            "circle y: got {}",
+            c.center[1]
+        );
+        assert!(
+            (c.radius - 8.0).abs() < 1e-4,
+            "circle radius should scale by geometric mean 4.0, got {}",
+            c.radius
+        );
+        assert!(
+            (c.stroke_width - 4.0).abs() < 1e-4,
+            "circle stroke_width: got {}",
+            c.stroke_width
+        );
+
+        let r = &rects[0];
+        assert!(
+            (r.position[0] - 16.0).abs() < 1e-4,
+            "rect x: got {}",
+            r.position[0]
+        );
+        assert!(
+            (r.position[1] - 27.0).abs() < 1e-4,
+            "rect y: got {}",
+            r.position[1]
+        );
+        assert!(
+            (r.size[0] - 10.0).abs() < 1e-4,
+            "rect w should scale by sx=2.0, got {}",
+            r.size[0]
+        );
+        assert!(
+            (r.size[1] - 48.0).abs() < 1e-4,
+            "rect h should scale by sy=8.0, got {}",
+            r.size[1]
+        );
+        assert!(
+            (r.corner_radius - 8.0).abs() < 1e-4,
+            "rect corner_radius: got {}",
+            r.corner_radius
+        );
+        assert!(
+            (r.stroke_width - 4.0).abs() < 1e-4,
+            "rect stroke_width: got {}",
+            r.stroke_width
+        );
+    }
+
+    #[test]
+    fn load_scene_bakes_non_identity_layout_scale_only_for_the_carrying_panel() {
+        use ferrum_scene::{
+            BlendMode, CoordKind, InteractionConfig, MarkBatch, MarkBatchKind, Panel, Rect,
+            SceneGraph,
+        };
+
+        let ls = gap_fix_layout_scale();
+        let circle_style = gap_fix_fill_stroke(1.0, 0.0);
+
+        let mk_panel = |layout_scale: LayoutScale| Panel {
+            id: 0,
+            plot_area: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
+            clip: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 100.0,
+                h: 100.0,
+            },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![SceneNode::Circle {
+                    cx: 3.0,
+                    cy: 4.0,
+                    r: 2.0,
+                    style: circle_style.clone(),
+                }],
+                data_indices: None,
+                tooltips: None,
+                hrefs: None,
+                descriptions: None,
+                keys: None,
+                blend: BlendMode::Normal,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+            layout_scale,
+        };
+
+        let scene = SceneGraph {
+            width: 200.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![mk_panel(LayoutScale::identity()), mk_panel(ls)],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+
+        let data = load_scene(&scene);
+        assert_eq!(
+            data.circle_instances.len(),
+            2,
+            "one circle instance per panel"
+        );
+
+        // Panel 0 carries identity layout_scale: geometry must be untouched
+        // (this is the identity no-op contract the bake path must preserve).
+        let c0 = &data.circle_instances[0];
+        assert!(
+            (c0.center[0] - 3.0).abs() < 1e-4,
+            "panel 0 x must be untouched, got {}",
+            c0.center[0]
+        );
+        assert!(
+            (c0.center[1] - 4.0).abs() < 1e-4,
+            "panel 0 y must be untouched, got {}",
+            c0.center[1]
+        );
+        assert!(
+            (c0.radius - 2.0).abs() < 1e-4,
+            "panel 0 radius must be untouched, got {}",
+            c0.radius
+        );
+
+        // Panel 1 carries the non-identity layout_scale: geometry must be
+        // baked exactly, matching the same formula verified in isolation
+        // above (2*3+10, 8*4-5, radius * sqrt(2*8)).
+        let c1 = &data.circle_instances[1];
+        assert!(
+            (c1.center[0] - 16.0).abs() < 1e-4,
+            "panel 1 x: got {}",
+            c1.center[0]
+        );
+        assert!(
+            (c1.center[1] - 27.0).abs() < 1e-4,
+            "panel 1 y: got {}",
+            c1.center[1]
+        );
+        assert!(
+            (c1.radius - 8.0).abs() < 1e-4,
+            "panel 1 radius should scale by geometric mean 4.0, got {}",
+            c1.radius
+        );
+
+        // Panel 1's plot_area (carried on its mark draw command) must also
+        // be baked exactly, matching `transform_rect_bakes_exact_plot_area_coordinates`.
+        let panel1_plot_area = data
+            .draw_commands
+            .iter()
+            .find(|cmd| cmd.is_mark && cmd.panel_id == 1)
+            .and_then(|cmd| cmd.plot_area)
+            .expect("panel 1's mark draw command should carry a plot_area");
+        assert!(
+            (panel1_plot_area[0] - 10.0).abs() < 1e-4,
+            "plot_area.x: got {}",
+            panel1_plot_area[0]
+        );
+        assert!(
+            (panel1_plot_area[1] - (-5.0)).abs() < 1e-4,
+            "plot_area.y: got {}",
+            panel1_plot_area[1]
+        );
+        assert!(
+            (panel1_plot_area[2] - 200.0).abs() < 1e-4,
+            "plot_area.w should scale by sx=2.0, got {}",
+            panel1_plot_area[2]
+        );
+        assert!(
+            (panel1_plot_area[3] - 800.0).abs() < 1e-4,
+            "plot_area.h should scale by sy=8.0, got {}",
+            panel1_plot_area[3]
+        );
+
+        // Panel 0's plot_area must remain untouched (identity no-op).
+        let panel0_plot_area = data
+            .draw_commands
+            .iter()
+            .find(|cmd| cmd.is_mark && cmd.panel_id == 0)
+            .and_then(|cmd| cmd.plot_area)
+            .expect("panel 0's mark draw command should carry a plot_area");
+        assert_eq!(panel0_plot_area, [0.0, 0.0, 100.0, 100.0]);
     }
 }
 
@@ -4071,8 +6163,8 @@ mod bug_hunt_tests {
             buf
         };
         let json = parse_tooltip_json(&bytes, 0);
-        let parsed: serde_json::Value = serde_json::from_str(&json)
-            .expect("empty field name must produce valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("empty field name must produce valid JSON");
         assert_eq!(parsed["fields"][0]["name"], "");
     }
 
@@ -4091,8 +6183,8 @@ mod bug_hunt_tests {
             buf
         };
         let json = parse_tooltip_json(&bytes, 0);
-        let parsed: serde_json::Value = serde_json::from_str(&json)
-            .expect("empty value must produce valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("empty value must produce valid JSON");
         assert_eq!(parsed["fields"][0]["value"], "");
     }
 
@@ -4114,8 +6206,8 @@ mod bug_hunt_tests {
             bytes.extend_from_slice(val.as_bytes());
         }
         let json = parse_tooltip_json(&bytes, 0);
-        let parsed: serde_json::Value = serde_json::from_str(&json)
-            .expect("100 fields must produce valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("100 fields must produce valid JSON");
         let fields = parsed["fields"].as_array().expect("fields array");
         assert_eq!(fields.len(), 100);
     }
@@ -4133,8 +6225,10 @@ mod bug_hunt_tests {
     fn bug_hunt_srgb_to_linear_infinity_does_not_panic() {
         // Infinity input should not panic.
         let result = srgb_to_linear(f32::INFINITY);
-        assert!(result.is_infinite() || result.is_finite(),
-            "srgb_to_linear(inf) must not panic");
+        assert!(
+            result.is_infinite() || result.is_finite(),
+            "srgb_to_linear(inf) must not panic"
+        );
     }
 
     // ── linearize_color_channels: alpha channel untouched ──────────────
@@ -4163,8 +6257,11 @@ mod bug_hunt_tests {
     #[test]
     fn bug_hunt_opt_color_none_produces_transparent() {
         let result = opt_color_to_f32(None, 1.0);
-        assert_eq!(result, [0.0, 0.0, 0.0, 0.0],
-            "None color must produce fully transparent [0,0,0,0]");
+        assert_eq!(
+            result,
+            [0.0, 0.0, 0.0, 0.0],
+            "None color must produce fully transparent [0,0,0,0]"
+        );
     }
 
     // ── stroke_dash_index: float edge values ───────────────────────────
@@ -4195,7 +6292,12 @@ mod bug_hunt_tests {
     fn bug_hunt_collect_annotation_circle_emits_draw_command() {
         // A Circle annotation node must produce a draw command via collect_annotation.
         let style = FillStroke {
-            fill: Some(Color { r: 255, g: 0, b: 0, a: 255 }),
+            fill: Some(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -4205,25 +6307,46 @@ mod bug_hunt_tests {
             angle: 0.0,
         };
         let nodes = vec![SceneNode::Circle {
-            cx: 100.0, cy: 100.0, r: 10.0, style,
+            cx: 100.0,
+            cy: 100.0,
+            r: 10.0,
+            style,
         }];
         let mut collector = SceneCollector::new();
         collector.collect_annotation(&nodes, None, None);
-        assert_eq!(collector.circles.len(), 1, "circle annotation must be collected");
+        assert_eq!(
+            collector.circles.len(),
+            1,
+            "circle annotation must be collected"
+        );
         // Must have a draw command for the circle
-        let circle_cmds: Vec<_> = collector.draw_commands.iter()
+        let circle_cmds: Vec<_> = collector
+            .draw_commands
+            .iter()
             .filter(|c| c.kind == DrawKind::Circle)
             .collect();
-        assert_eq!(circle_cmds.len(), 1, "circle annotation must emit a draw command");
+        assert_eq!(
+            circle_cmds.len(),
+            1,
+            "circle annotation must emit a draw command"
+        );
         // The draw command must be non-mark (is_mark=false) since annotations use identity transform
-        assert!(!circle_cmds[0].is_mark, "annotation circle draw command must not be is_mark");
+        assert!(
+            !circle_cmds[0].is_mark,
+            "annotation circle draw command must not be is_mark"
+        );
     }
 
     #[test]
     fn bug_hunt_collect_annotation_line_goes_to_annotation_mesh() {
         // A Line annotation node must go to annotation_mesh, not static_mesh.
         let style = ferrum_scene::StrokeStyle {
-            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             width: 2.0,
             opacity: 1.0,
             stroke_opacity: 1.0,
@@ -4232,7 +6355,11 @@ mod bug_hunt_tests {
             stroke_join: None,
         };
         let nodes = vec![SceneNode::Line {
-            x1: 0.0, y1: 50.0, x2: 500.0, y2: 50.0, style,
+            x1: 0.0,
+            y1: 50.0,
+            x2: 500.0,
+            y2: 50.0,
+            style,
         }];
         let mut collector = SceneCollector::new();
         collector.collect_annotation(&nodes, None, None);
@@ -4254,7 +6381,12 @@ mod bug_hunt_tests {
     fn bug_hunt_collect_static_line_goes_to_static_mesh() {
         // A Line node via collect_static must go to static_mesh.
         let style = ferrum_scene::StrokeStyle {
-            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            color: Color {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             width: 1.0,
             opacity: 1.0,
             stroke_opacity: 1.0,
@@ -4263,7 +6395,11 @@ mod bug_hunt_tests {
             stroke_join: None,
         };
         let nodes = vec![SceneNode::Line {
-            x1: 0.0, y1: 100.0, x2: 500.0, y2: 100.0, style,
+            x1: 0.0,
+            y1: 100.0,
+            x2: 500.0,
+            y2: 100.0,
+            style,
         }];
         let mut collector = SceneCollector::new();
         collector.collect_static(&nodes, None, None);
@@ -4292,19 +6428,27 @@ mod bug_hunt_tests {
     fn bug_hunt_unpack_two_batches_in_single_stream() {
         // Two batches (circles then rects) concatenated in a single stream.
         let ci = CircleInstance {
-            center: [10.0, 20.0], radius: 3.0,
+            center: [10.0, 20.0],
+            radius: 3.0,
             fill_color: [1.0, 0.0, 0.0, 1.0],
-            stroke_color: [0.0; 4], stroke_width: 0.0,
-            opacity: 1.0, stroke_opacity: 1.0,
-            stroke_dash: 0.0, angle: 0.0,
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
         };
         let ri = RectInstance {
-            position: [50.0, 60.0], size: [20.0, 30.0],
+            position: [50.0, 60.0],
+            size: [20.0, 30.0],
             corner_radius: 0.0,
             fill_color: [0.0, 1.0, 0.0, 1.0],
-            stroke_color: [0.0; 4], stroke_width: 0.0,
-            opacity: 1.0, stroke_opacity: 1.0,
-            stroke_dash: 0.0, angle: 0.0,
+            stroke_color: [0.0; 4],
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_opacity: 1.0,
+            stroke_dash: 0.0,
+            angle: 0.0,
         };
 
         let mut buf = Vec::new();
@@ -4338,7 +6482,12 @@ mod bug_hunt_tests {
 
     #[test]
     fn bug_hunt_color_to_linear_zero_opacity_produces_transparent() {
-        let c = Color { r: 255, g: 128, b: 0, a: 255 };
+        let c = Color {
+            r: 255,
+            g: 128,
+            b: 0,
+            a: 255,
+        };
         let result = color_to_linear(&c, 0.0);
         assert!(
             result[3].abs() < 1e-7,
@@ -4359,10 +6508,11 @@ mod bug_hunt_tests {
     /// with anchor = "chrome".
     #[test]
     fn raw_chrome_node_collected_with_correct_anchor() {
-        use ferrum_scene::{Panel, MarkBatch, MarkBatchKind, BlendMode, RawAnchor};
-        use ferrum_scene::{CoordKind, Rect, SceneGraph, InteractionConfig};
+        use ferrum_scene::{BlendMode, MarkBatch, MarkBatchKind, Panel, RawAnchor};
+        use ferrum_scene::{CoordKind, InteractionConfig, Rect, SceneGraph};
 
-        let svg_content = r#"<linearGradient id="g"><stop offset="0" stop-color="red"/></linearGradient>"#;
+        let svg_content =
+            r#"<linearGradient id="g"><stop offset="0" stop-color="red"/></linearGradient>"#;
         let node = SceneNode::Raw {
             svg: svg_content.to_string(),
             anchor: RawAnchor::Chrome,
@@ -4375,23 +6525,42 @@ mod bug_hunt_tests {
             title: vec![],
             panels: vec![Panel {
                 id: 0,
-                plot_area: Rect { x: 50.0, y: 10.0, w: 300.0, h: 250.0 },
-                clip: Rect { x: 50.0, y: 10.0, w: 300.0, h: 250.0 },
+                plot_area: Rect {
+                    x: 50.0,
+                    y: 10.0,
+                    w: 300.0,
+                    h: 250.0,
+                },
+                clip: Rect {
+                    x: 50.0,
+                    y: 10.0,
+                    w: 300.0,
+                    h: 250.0,
+                },
                 coord: CoordKind::Cartesian {
-                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    x_domain: None,
+                    y_domain: None,
+                    expand: true,
+                    clip: true,
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
                     kind: MarkBatchKind::Point,
                     nodes: vec![],
-                    data_indices: None, tooltips: None, hrefs: None,
-                    descriptions: None, keys: None,
+                    data_indices: None,
+                    tooltips: None,
+                    hrefs: None,
+                    descriptions: None,
+                    keys: None,
                     blend: BlendMode::Normal,
-                    stroke_cap: None, stroke_join: None, packed_instances: None,
+                    stroke_cap: None,
+                    stroke_join: None,
+                    packed_instances: None,
                 }],
                 axes: vec![],
                 annotations: vec![node],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             }],
             legend: vec![],
             decorations: vec![],
@@ -4402,7 +6571,8 @@ mod bug_hunt_tests {
 
         let data = load_scene(&scene);
         assert_eq!(
-            data.raw_fragments.len(), 1,
+            data.raw_fragments.len(),
+            1,
             "SceneNode::Raw must be collected into raw_fragments, not dropped"
         );
         assert_eq!(
@@ -4418,7 +6588,7 @@ mod bug_hunt_tests {
     /// A scene with a data-anchored Raw node must yield anchor = "data".
     #[test]
     fn raw_data_node_collected_with_correct_anchor() {
-        use ferrum_scene::{RawAnchor, SceneGraph, InteractionConfig};
+        use ferrum_scene::{InteractionConfig, RawAnchor, SceneGraph};
 
         let node = SceneNode::Raw {
             svg: r#"<image href="data:image/png;base64,abc" x="0" y="0"/>"#.to_string(),
@@ -4440,7 +6610,8 @@ mod bug_hunt_tests {
 
         let data = load_scene(&scene);
         assert_eq!(
-            data.raw_fragments.len(), 1,
+            data.raw_fragments.len(),
+            1,
             "data-anchored Raw node must be collected"
         );
         assert_eq!(
@@ -4452,7 +6623,7 @@ mod bug_hunt_tests {
     /// Two Raw nodes in different scene regions are both collected.
     #[test]
     fn multiple_raw_nodes_all_collected() {
-        use ferrum_scene::{RawAnchor, SceneGraph, InteractionConfig};
+        use ferrum_scene::{InteractionConfig, RawAnchor, SceneGraph};
 
         let chrome_node = SceneNode::Raw {
             svg: "<g id='chrome-raw'/>".to_string(),
@@ -4478,10 +6649,15 @@ mod bug_hunt_tests {
 
         let data = load_scene(&scene);
         assert_eq!(
-            data.raw_fragments.len(), 2,
+            data.raw_fragments.len(),
+            2,
             "both Raw nodes must be collected"
         );
-        let anchors: Vec<&str> = data.raw_fragments.iter().map(|r| r.anchor.as_str()).collect();
+        let anchors: Vec<&str> = data
+            .raw_fragments
+            .iter()
+            .map(|r| r.anchor.as_str())
+            .collect();
         assert!(anchors.contains(&"chrome"), "must have a chrome fragment");
         assert!(anchors.contains(&"data"), "must have a data fragment");
     }
@@ -4489,7 +6665,7 @@ mod bug_hunt_tests {
     /// A Raw node nested inside a Group must also be collected (recursive walk).
     #[test]
     fn raw_node_inside_group_is_collected() {
-        use ferrum_scene::{RawAnchor, SceneGraph, InteractionConfig};
+        use ferrum_scene::{InteractionConfig, RawAnchor, SceneGraph};
 
         let raw = SceneNode::Raw {
             svg: "<rect id='nested'/>".to_string(),
@@ -4515,7 +6691,8 @@ mod bug_hunt_tests {
 
         let data = load_scene(&scene);
         assert_eq!(
-            data.raw_fragments.len(), 1,
+            data.raw_fragments.len(),
+            1,
             "Raw node nested inside Group must be collected via recursive walk"
         );
         assert_eq!(data.raw_fragments[0].anchor, "chrome");
@@ -4580,10 +6757,7 @@ mod bug_hunt_tests {
     /// `row_fields` works correctly for multiple rows.
     #[test]
     fn packed_tooltip_table_row_fields_multiple_rows() {
-        let bytes = build_tooltip_bytes(
-            &["cat"],
-            &[vec!["a"], vec!["b"], vec!["c"]],
-        );
+        let bytes = build_tooltip_bytes(&["cat"], &[vec!["a"], vec!["b"], vec!["c"]]);
         let table = PackedTooltipTable::parse(&bytes).unwrap();
         assert_eq!(table.row_fields(0).unwrap(), vec![("cat", "a")]);
         assert_eq!(table.row_fields(1).unwrap(), vec![("cat", "b")]);
@@ -4595,16 +6769,16 @@ mod bug_hunt_tests {
     fn packed_tooltip_table_row_fields_out_of_range_returns_none() {
         let bytes = build_tooltip_bytes(&["x"], &[vec!["1"]]);
         let table = PackedTooltipTable::parse(&bytes).unwrap();
-        assert!(table.row_fields(1).is_none(), "row 1 does not exist — must return None");
+        assert!(
+            table.row_fields(1).is_none(),
+            "row 1 does not exist — must return None"
+        );
     }
 
     /// `field_value` returns the correct value by column name.
     #[test]
     fn packed_tooltip_table_field_value_correct_column() {
-        let bytes = build_tooltip_bytes(
-            &["a", "b", "c"],
-            &[vec!["x", "y", "z"]],
-        );
+        let bytes = build_tooltip_bytes(&["a", "b", "c"], &[vec!["x", "y", "z"]]);
         let table = PackedTooltipTable::parse(&bytes).unwrap();
         assert_eq!(table.field_value(0, "a"), Some("x"));
         assert_eq!(table.field_value(0, "b"), Some("y"));
@@ -4633,7 +6807,11 @@ mod bug_hunt_tests {
         // 2 rows, 2 fields each → count=2
         let bytes = build_tooltip_bytes(&["cat", "val"], &[vec!["a", "1"], vec!["b", "2"]]);
         let len = PackedTooltipTable::total_byte_length(&bytes, 2);
-        assert_eq!(len, bytes.len(), "total_byte_length with count=2 must equal the full buffer length");
+        assert_eq!(
+            len,
+            bytes.len(),
+            "total_byte_length with count=2 must equal the full buffer length"
+        );
     }
 
     /// `total_byte_length` on an empty slice returns `bytes.len()` (0) without panicking.
@@ -4732,7 +6910,7 @@ mod bug_hunt_tests {
         buf.extend_from_slice(&0u32.to_le_bytes()); // kind = circle
         buf.extend_from_slice(&(b1_count as u32).to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes()); // flags = 0 (no tooltips)
-        // batch 1 instance data
+                                                    // batch 1 instance data
         buf.extend_from_slice(b1_instance_bytes);
 
         buf
@@ -4760,9 +6938,8 @@ mod bug_hunt_tests {
     fn wasm03_two_batch_packed_stream_both_batches_load_and_tooltip_slice_correct() {
         // Build minimal valid CircleInstance bytes (64 bytes each, all zeros is
         // a valid bytemuck cast since CircleInstance: Zeroable).
-        let mk_circle_bytes = |n: usize| -> Vec<u8> {
-            vec![0u8; n * std::mem::size_of::<CircleInstance>()]
-        };
+        let mk_circle_bytes =
+            |n: usize| -> Vec<u8> { vec![0u8; n * std::mem::size_of::<CircleInstance>()] };
 
         // 3 circles in batch 0, 3 tooltip rows (one per instance).
         // Tooltip table is 32 bytes (divisible by 4) so batch 1's header and
@@ -4771,11 +6948,7 @@ mod bug_hunt_tests {
         let b1_count = 2usize;
 
         let b0_tooltip_names = &["xyz"];
-        let b0_tooltip_rows: Vec<Vec<&str>> = vec![
-            vec!["abc"],
-            vec!["def"],
-            vec!["ghi"],
-        ];
+        let b0_tooltip_rows: Vec<Vec<&str>> = vec![vec!["abc"], vec!["def"], vec!["ghi"]];
 
         let packed = build_two_batch_packed(
             b0_count,
@@ -4804,15 +6977,26 @@ mod bug_hunt_tests {
 
         // Batch 0 must have loaded b0_count instances.
         let m0 = &meta[&(0, 0)];
-        assert_eq!(m0.instance_count, b0_count, "batch 0 must have {} instances", b0_count);
+        assert_eq!(
+            m0.instance_count, b0_count,
+            "batch 0 must have {} instances",
+            b0_count
+        );
 
         // Batch 1 must have loaded b1_count instances.
         let m1 = &meta[&(0, 1)];
-        assert_eq!(m1.instance_count, b1_count, "batch 1 must have {} instances", b1_count);
+        assert_eq!(
+            m1.instance_count, b1_count,
+            "batch 1 must have {} instances",
+            b1_count
+        );
 
         // Batch 0's tooltip slice must decode to the correct values (not garbled
         // by over-running into batch 1's bytes).
-        let tip0 = m0.tooltip_bytes.as_deref().expect("batch 0 must have tooltip_bytes");
+        let tip0 = m0
+            .tooltip_bytes
+            .as_deref()
+            .expect("batch 0 must have tooltip_bytes");
         assert_eq!(
             parse_tooltip_json(tip0, 0),
             r#"{"fields":[{"name":"xyz","value":"abc"}]}"#,
@@ -4836,7 +7020,10 @@ mod bug_hunt_tests {
         );
 
         // Batch 1 has no tooltips.
-        assert!(m1.tooltip_bytes.is_none(), "batch 1 must have no tooltip_bytes");
+        assert!(
+            m1.tooltip_bytes.is_none(),
+            "batch 1 must have no tooltip_bytes"
+        );
     }
 
     // ── WASM-02: DrawKind::try_from decodes the packed kind discriminant ─────

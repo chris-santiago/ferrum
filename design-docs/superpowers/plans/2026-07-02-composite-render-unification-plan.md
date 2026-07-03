@@ -79,6 +79,7 @@ Move all composition rendering (concat/grid/joint/clustermap/repeat/layer) onto 
 
 ### Task 5: Composite layout + scene passes + PyO3 entries
 - Consumes: Tasks 2–4; decisions (b) leaf seam and (c) packed indexing
+- [ ] Resolve the raw-vs-baked panel-geometry split (decisions doc D4a addendum): interaction consumers (hit_test/lib/spatial_index/render upload) must read geometry consistent with baked layout-scale panels
 - [ ] Layout pass: hconcat/vconcat/grid/wrap/overlay placement + ratio cells (absorb `grid_compose.rs` math), leaf render via the decided seam with resolved domains; scene pass: one `SceneGraph`, globally unique panel/clip ids, chrome in-scene, `Raw` nodes at final coords
 - [ ] `render_composite_svg` / `render_composite_interactive` in `binding.rs` + `lib.rs` registration (signature family per spec §6)
 - [ ] Rust unit + snapshot-level tests (scene shape, panel rects, id uniqueness)
