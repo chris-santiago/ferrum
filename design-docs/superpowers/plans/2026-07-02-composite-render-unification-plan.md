@@ -77,7 +77,15 @@ Move all composition rendering (concat/grid/joint/clustermap/repeat/layer) onto 
 - [ ] Verify: `cargo test -p ferrum-core` (DYLD prefix as in Constraints)
 - [ ] Commit (rust-review-lite gated)
 
-### Task 5: Composite layout + scene passes + PyO3 entries
+> **Task 5 split (2026-07-03, implementer-proposed, orchestrator-accepted):** 5a =
+> D4b context threading (scale pipeline, byte-identical when None, lands first);
+> 5b = layout + scene renderer core (one SceneGraph, ratio math, renumbering,
+> chrome via `figure_chrome::title_nodes` — NOT the stale `build_figure_chrome_nodes`
+> name — dead-code allow removals); 5c = PyO3 entries + WASM interaction-geometry
+> baking (D4a addendum, double-apply hazard, wasm-clippy gate). Each lands as its
+> own gated commit; the checklist items below distribute accordingly.
+
+### Task 5 (split 5a/5b/5c): Composite layout + scene passes + PyO3 entries
 - Consumes: Tasks 2–4; decisions (b) leaf seam and (c) packed indexing
 - [ ] Resolve the raw-vs-baked panel-geometry split (decisions doc D4a addendum): interaction consumers (hit_test/lib/spatial_index/render upload) must read geometry consistent with baked layout-scale panels
 - [ ] Layout pass: hconcat/vconcat/grid/wrap/overlay placement + ratio cells (absorb `grid_compose.rs` math), leaf render via the decided seam with resolved domains; scene pass: one `SceneGraph`, globally unique panel/clip ids, chrome in-scene, `Raw` nodes at final coords

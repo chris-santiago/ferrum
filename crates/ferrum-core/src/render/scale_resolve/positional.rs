@@ -21,6 +21,7 @@ use super::domain::{
     numeric_domain_union, SortContext,
 };
 use super::{column_min_max_f64, distinct_positional_categories, infer_spec_type, ScaleKind};
+use crate::render::composite::SharedDomain;
 use crate::transform::core::FINAL_OUTPUT_KEY;
 
 /// The x/y field names bound at chart level, used to resolve data-aware sort
@@ -73,6 +74,14 @@ pub(in crate::render) fn build_axis_scale(
     // non-faceted charts and `Independent`-mode channels → byte-identical
     // per-panel behavior. Ignored on the explicit `enc.scale` bypass.
     include_final: bool,
+    // Composite-shared domain for this channel (D4b). `Some` only for a
+    // composite leaf whose channel shares a domain across the tree; it seeds this
+    // leaf's extent (numeric) or category vector (ordinal) on the SAME auto path
+    // facet-shared panels use, so composite-shared axes get the auto path's
+    // padding/`nice`, never the explicit-scale bypass. `None` for every
+    // standalone (flat/facet) render → byte-identical. Consulted only after the
+    // explicit `enc.scale` bypass below, so a genuine user scale still wins.
+    shared: Option<&SharedDomain>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<ScaleKind, RenderError> {
     let located = locate_field(&enc.field, primary_batch, transform_outputs)
@@ -94,18 +103,33 @@ pub(in crate::render) fn build_axis_scale(
 
     match dtype {
         SpecDataType::Quantitative => {
-            let (min, max) = numeric_domain_union(
-                channel, &enc.field, paired_enc.map(|p| p.field.as_str()),
-                primary_batch, transform_outputs, spec, include_final,
+            let (min, max) = resolve_numeric_extent(
+                shared, channel, enc, paired_enc, primary_batch, transform_outputs, spec, include_final,
             )?;
             Ok(ScaleKind::Linear(LinearScale::new_internal(
                 vec![min, max], vec![inset.0, inset.1], false, false,
             )))
         }
         SpecDataType::Ordinal | SpecDataType::Nominal => {
-            let mut domain = distinct_positional_categories_shared(
-                located.batch, &enc.field, transform_outputs, include_final,
-            )?;
+            // Composite-shared ordinal (D4b): the seeded union vector arrives
+            // ALREADY ordered (the resolve pass's order-preserving union, D2)
+            // and is authoritative — local data-aware re-sorting is skipped,
+            // because each leaf would compute the sort aggregate from its OWN
+            // batch and different leaves could reorder the "shared" domain
+            // differently (there is no cross-leaf merged batch to sort on,
+            // unlike facet-shared's FINAL_OUTPUT_KEY). Falls back to this
+            // leaf's own categories + normal sort when no composite sharing
+            // applies.
+            let mut domain = match shared {
+                Some(SharedDomain::Ordinal(cats)) => {
+                    return Ok(ScaleKind::Ordinal(OrdinalScale::new_internal(
+                        cats.clone(), vec![pr.0, pr.1], 0.0,
+                    )));
+                }
+                _ => distinct_positional_categories_shared(
+                    located.batch, &enc.field, transform_outputs, include_final,
+                )?,
+            };
             // For data-aware sort forms (`"-y"`, `"y"`, `{field, op, order}`),
             // `apply_sort_to_domain` computes a per-category aggregate from
             // `sort_ctx.batch`.  When the channel resolves Shared (`include_final`),
@@ -136,15 +160,46 @@ pub(in crate::render) fn build_axis_scale(
             )))
         }
         SpecDataType::Temporal => {
-            let (min, max) = numeric_domain_union(
-                channel, &enc.field, paired_enc.map(|p| p.field.as_str()),
-                primary_batch, transform_outputs, spec, include_final,
+            let (min, max) = resolve_numeric_extent(
+                shared, channel, enc, paired_enc, primary_batch, transform_outputs, spec, include_final,
             )?;
             Ok(ScaleKind::Time(TimeScale::new_internal(
                 vec![min, max], vec![inset.0, inset.1], false, false,
             )))
         }
     }
+}
+
+/// Resolve a numeric/temporal axis extent: the composite shared domain (D4b) when
+/// the leaf participates in composite sharing on this channel, otherwise the
+/// leaf's own facet-union-aware auto-inferred extent. Consulted on the AUTO path
+/// only (the explicit-scale bypass returns before reaching here), so the shared
+/// extent receives the same padding/`nice` treatment as a facet-shared panel. A
+/// non-numeric `shared` (never produced for a numeric leaf by the resolve pass)
+/// falls through to the union, so this is a safe no-op when `shared` is `None`.
+#[allow(clippy::too_many_arguments)]
+fn resolve_numeric_extent(
+    shared: Option<&SharedDomain>,
+    channel: &str,
+    enc: &crate::spec::encoding::EncodingSpec,
+    paired_enc: Option<&crate::spec::encoding::EncodingSpec>,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    spec: &ChartSpec,
+    include_final: bool,
+) -> Result<(f64, f64), RenderError> {
+    if let Some(SharedDomain::Numeric { lo, hi }) = shared {
+        return Ok((*lo, *hi));
+    }
+    numeric_domain_union(
+        channel,
+        &enc.field,
+        paired_enc.map(|p| p.field.as_str()),
+        primary_batch,
+        transform_outputs,
+        spec,
+        include_final,
+    )
 }
 
 /// Y-axis pixel range is inverted ONLY for quantitative/temporal scales.

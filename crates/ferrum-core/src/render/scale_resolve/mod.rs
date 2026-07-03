@@ -47,6 +47,7 @@ pub(in crate::render) use self::domain::{
 use self::positional::{
     apply_coord_domain_overrides, build_axis_scale, PositionalFields,
 };
+use crate::render::composite::LeafScaleContext;
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -872,6 +873,11 @@ pub fn resolve_scales(
 /// axis field (e.g. boxplot's `x="group"`) is preserved on every named output
 /// produced by the composite mark's transform pipeline, so the primary batch
 /// is sufficient there.
+///
+/// Standalone (flat/facet) entry point: no composite leaf-scale context. Delegates
+/// to [`resolve_scales_with_leaf_context`] with `None`, mirroring the way
+/// [`resolve_scales`] delegates here with an empty outputs map. Byte-identical to
+/// the pre-D4b behavior for every existing caller.
 pub fn resolve_scales_with_outputs(
     spec: &ChartSpec,
     primary_batch: &RecordBatch,
@@ -880,7 +886,40 @@ pub fn resolve_scales_with_outputs(
     y_pixel_range: (f64, f64),
     theme: &ThemeInputs,
 ) -> Result<(ResolvedScales, Vec<crate::render::RenderWarning>), RenderError> {
+    resolve_scales_with_leaf_context(
+        spec,
+        primary_batch,
+        transform_outputs,
+        x_pixel_range,
+        y_pixel_range,
+        theme,
+        None,
+    )
+}
+
+/// D4b composite seam: the full scale-resolution form, threading an optional
+/// per-leaf resolved-domain context so a composite-shared leaf resolves its
+/// positional axes on the auto path (facet padding/`nice`), seeded by the shared
+/// domain. `leaf_scales` is `Some` only for a composite leaf; `None` reproduces
+/// the standalone behavior byte-for-byte. A channel carrying a genuine user
+/// `enc.scale` short-circuits at the explicit-scale bypass inside
+/// [`build_axis_scale`] before the context is consulted, so user scale still wins.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::render) fn resolve_scales_with_leaf_context(
+    spec: &ChartSpec,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    x_pixel_range: (f64, f64),
+    y_pixel_range: (f64, f64),
+    theme: &ThemeInputs,
+    leaf_scales: Option<&LeafScaleContext>,
+) -> Result<(ResolvedScales, Vec<crate::render::RenderWarning>), RenderError> {
     let mut warnings = Vec::new();
+
+    // Per-channel composite shared domains (D4b). `None` on a channel → that axis
+    // resolves exactly as it would standalone.
+    let x_shared_domain = leaf_scales.and_then(|c| c.x.as_ref());
+    let y_shared_domain = leaf_scales.and_then(|c| c.y.as_ref());
 
     // T4: per-channel "shared faceted positional scale" flag. When this chart is
     // faceted AND the channel resolves `ResolveMode::Shared` (the documented
@@ -918,7 +957,7 @@ pub fn resolve_scales_with_outputs(
             let x_enc = spec.encoding.x.as_ref().unwrap();
             let x2_enc = spec.encoding.x2.as_ref();
             let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
-            let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, &mut warnings)?;
+            let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, x_shared_domain, &mut warnings)?;
             let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
             return Ok((ResolvedScales {
                 x, y: dummy_unit_scale(y_pixel_range, false),
@@ -930,7 +969,7 @@ pub fn resolve_scales_with_outputs(
             let y2_enc = spec.encoding.y2.as_ref();
             let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
             let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
-            let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, &mut warnings)?;
+            let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, y_shared_domain, &mut warnings)?;
             let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
             return Ok((ResolvedScales {
                 x: dummy_unit_scale(x_pixel_range, true), y,
@@ -970,12 +1009,12 @@ pub fn resolve_scales_with_outputs(
         x: Some(x_enc.field.as_str()),
         y: Some(y_enc.field.as_str()),
     };
-    let mut x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, &mut warnings)?;
+    let mut x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, x_shared_domain, &mut warnings)?;
     // Stack-aware y-axis: resolve against the post-Stack batch when the
     // spec carries a matching Stack adjustment. See
     // `position::axis_batch_for_y` for the rationale.
     let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
-    let mut y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, &mut warnings)?;
+    let mut y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, y_shared_domain, &mut warnings)?;
 
     // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the
     // data domain; expand=false removes the default 5% inward padding.
