@@ -135,9 +135,11 @@ ratio-fitted cells; (2) panel ids unique across the whole scene; clip ids uniqui
 at scene build. Scene JSON remains the only contract between core and WASM; no Python
 mirror may exist after this phase.
 
-**Congruence.** Two trees are congruent iff same node kind, same child count, and
-children pairwise congruent (leaves match leaves). Facet-expanded panels inside a leaf
-do not participate in outer pairing.
+**Congruence.** Two trees are congruent iff same node kind — for composite nodes this
+includes the layout kind (hconcat/vconcat/grid/wrap/overlay; clarified 2026-07-02
+after Task 2's kind/layout field split made the wording ambiguous) — same child
+count, and children pairwise congruent (leaves match leaves). Facet-expanded panels
+inside a leaf do not participate in outer pairing.
 
 ## 7. Invariants and constraints
 

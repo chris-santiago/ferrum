@@ -23,6 +23,7 @@ pub mod compositor;
 pub(crate) mod grid_compose;
 pub(crate) mod figure_chrome;
 pub(crate) mod pack_instances;
+pub(crate) mod composite;
 pub(crate) mod scene_build;
 pub(crate) mod svg_walk;
 pub(crate) mod secondary_axis;

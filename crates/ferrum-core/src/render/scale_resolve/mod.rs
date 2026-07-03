@@ -35,6 +35,14 @@ use super::RenderError;
 pub use self::auxiliary::{build_opacity_scale, build_shape_scale, build_size_scale};
 pub use self::color::build_color_scale;
 
+// Domain-union helpers re-exported for the composite resolve pass
+// (`render::composite`), which unions per-channel domains across a composite
+// tree's leaves through the same facet mechanism (`domain` is a private
+// submodule, so the pub(in crate::render) fns need a reachable path here).
+pub(in crate::render) use self::domain::{
+    distinct_positional_categories_shared, locate_field, numeric_domain_union,
+};
+
 // Internal re-exports used by the orchestrator in this module.
 use self::positional::{
     apply_coord_domain_overrides, build_axis_scale, PositionalFields,
@@ -641,7 +649,7 @@ pub struct ResolvedScales {
 
 // ── Shared helpers used by sub-modules ──────────────────────────────────────
 
-fn infer_spec_type(
+pub(in crate::render) fn infer_spec_type(
     enc: &crate::spec::encoding::EncodingSpec,
     dtype: &ArrowDataType,
 ) -> SpecDataType {
