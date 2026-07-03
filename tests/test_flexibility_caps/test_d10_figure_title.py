@@ -341,15 +341,26 @@ def test_d10_t7_caption_on_composite_properties_does_not_raise(two_charts):
 # ---------------------------------------------------------------------------
 
 
-def test_d10_t8_figure_title_appears_before_panel_content(two_charts_with_panel_titles):
-    """The figure-level title must precede all panel body content in SVG order.
+def _text_node_y(svg: str, content: str) -> float:
+    """Return the ``y`` coordinate of the ``<text>`` node whose text is *content*."""
+    import re
 
-    EXPECTED TO FAIL (TDD RED): currently the title is per-child, so the first
-    child's title appears at its natural position inside that child's SVG, not
-    before the entire composed figure.
+    for attrs, text in re.findall(r"<text\s+([^>]*)>([^<]*)</text>", svg):
+        if text.strip() == content:
+            m = re.search(r'y="([^"]+)"', attrs)
+            if m:
+                return float(m.group(1))
+    raise AssertionError(f"no <text> node with content {content!r}")
 
-    We verify document order: the figure title text node must appear at an
-    earlier byte offset than both per-panel titles.
+
+def test_d10_t8_figure_title_appears_above_panel_content(two_charts_with_panel_titles):
+    """The figure-level title must render above all panel content.
+
+    The composite render path emits the figure chrome into one scene and shifts
+    the panels down, so the assertion is on *visual position* (the figure title's
+    y is above both per-panel titles) rather than SVG byte order — the string
+    compositor happened to prepend the chrome band, but z-order/byte-order is a
+    render mechanism, not the figure-level-placement contract this test guards.
     """
     c1, c2 = two_charts_with_panel_titles
     composed = (c1 & c2).properties(title="Figure Title")
@@ -359,17 +370,15 @@ def test_d10_t8_figure_title_appears_before_panel_content(two_charts_with_panel_
     assert "Panel A" in svg, "Panel A must be present"
     assert "Panel B" in svg, "Panel B must be present"
 
-    figure_pos = svg.index("Figure Title")
-    panel_a_pos = svg.index("Panel A")
-    panel_b_pos = svg.index("Panel B")
+    figure_y = _text_node_y(svg, "Figure Title")
+    panel_a_y = _text_node_y(svg, "Panel A")
+    panel_b_y = _text_node_y(svg, "Panel B")
 
-    assert figure_pos < panel_a_pos, (
-        f"Figure title (pos {figure_pos}) must precede Panel A title (pos {panel_a_pos}) "
-        "in SVG document order."
+    assert figure_y < panel_a_y, (
+        f"Figure title (y={figure_y}) must render above Panel A title (y={panel_a_y})."
     )
-    assert figure_pos < panel_b_pos, (
-        f"Figure title (pos {figure_pos}) must precede Panel B title (pos {panel_b_pos}) "
-        "in SVG document order."
+    assert figure_y < panel_b_y, (
+        f"Figure title (y={figure_y}) must render above Panel B title (y={panel_b_y})."
     )
 
 

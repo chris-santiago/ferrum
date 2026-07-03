@@ -94,6 +94,17 @@ Move all composition rendering (concat/grid/joint/clustermap/repeat/layer) onto 
 - [ ] Verify: `cargo test` + `maturin develop` + full `uv run pytest -n auto` (no Python consumer yet — suite must stay green untouched)
 - [ ] Commit (rust-review-lite gated)
 
+> **Task 6 finding (2026-07-03): new Task 5d required.** The 5c PyO3 entry applies
+> ONE theme/viewport/chart_config to all leaves (`build_composite_leaves` collapses
+> the per-leaf `CompositeLeafInput`). Task 6 therefore GATES the new path to
+> homogeneous linear compositions (identical leaf theme+viewport+chart_config, no
+> per-node configure layers, x/y-only shared resolve, no nested chrome) with the old
+> path retained as fallback. **Task 5d (rust-coder, before Task 7 completes):**
+> per-leaf binding inputs on both composite entries (theme/viewport/chart_config per
+> leaf; per-node config; composite resolve beyond x/y stays out — color/size sharing
+> remains Python-side until re-decided), then Tasks 7-9 widen the gate as forms cut
+> over, and Task 10's deletion requires the gate to be fully open.
+
 ### Task 6: Cutover — linear forms (HConcat/VConcat)
 - Consumes: Task 5 entries; tree lowering contract spec §5
 - [ ] `composition.py`: tree-builder helper; route `_CompositeBase` static + interactive renders for HConcat/VConcat through composite entries

@@ -1702,23 +1702,39 @@ def test_resolve_chart_config_structural_serialized():
 
 
 def test_hconcat_to_svg_produces_composed_output():
-    """End-to-end: (c1 | c2).to_svg() composes through Rust compositor."""
+    """(c1 | c2).to_svg() composes both panels into one wider SVG.
+
+    Behavior check (not mechanism): the composite render path bakes panels into
+    one scene instead of wrapping children in ``<g translate>`` groups, so
+    parity is asserted on the composed output — one SVG holding both panels'
+    distinct marks (point circles + line polyline), wider than a single chart.
+    """
+    import re
+
     df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
     c1 = Chart(df).mark_point().encode(x="a", y="b")
     c2 = Chart(df).mark_line().encode(x="a", y="b")
     svg = (c1 | c2).to_svg()
     _assert_valid_svg(svg)
-    assert svg.count('transform="translate(') >= 2
+    assert svg.count("<svg") == 1
+    assert "<circle" in svg and "<polyline" in svg
+    width = float(re.search(r'<svg[^>]*width="([^"]+)"', svg).group(1))
+    assert width > float(c1.to_svg().split('width="', 1)[1].split('"', 1)[0])
 
 
 def test_vconcat_to_svg_produces_composed_output():
-    """End-to-end: (c1 & c2).to_svg() composes through Rust compositor."""
+    """(c1 & c2).to_svg() stacks both panels into one taller SVG (behavior parity)."""
+    import re
+
     df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
     c1 = Chart(df).mark_point().encode(x="a", y="b")
     c2 = Chart(df).mark_bar().encode(x="a", y="b")
     svg = (c1 & c2).to_svg()
     _assert_valid_svg(svg)
-    assert svg.count('transform="translate(') >= 2
+    assert svg.count("<svg") == 1
+    assert "<circle" in svg and "<rect" in svg
+    height = float(re.search(r'<svg[^>]*height="([^"]+)"', svg).group(1))
+    assert height > float(c1.to_svg().split('height="', 1)[1].split('"', 1)[0])
 
 
 # ---------------------------------------------------------------------------
@@ -1745,13 +1761,23 @@ def test_vconcat_single_chart_svg_is_valid():
 
 
 def test_hconcat_many_charts_renders():
-    """HConcatChart with 5+ charts renders without NaN in output."""
+    """HConcatChart with 5+ charts renders without NaN and composes all panels.
+
+    Behavior check (not mechanism): five side-by-side panels make the composed
+    figure much wider than a single chart (the composite path bakes panels into
+    one scene rather than emitting per-child ``<g translate>`` wrappers).
+    """
+    import re
+
     df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+    single = Chart(df).mark_point().encode(x="x", y="y")
     charts = [Chart(df).mark_point().encode(x="x", y="y") for _ in range(5)]
     combined = HConcatChart(charts)
     svg = combined.to_svg()
     _assert_valid_svg(svg)
-    assert svg.count('transform="translate(') >= 5
+    single_w = float(single.to_svg().split('width="', 1)[1].split('"', 1)[0])
+    width = float(re.search(r'<svg[^>]*width="([^"]+)"', svg).group(1))
+    assert width > 4 * single_w
 
 
 def test_hconcat_no_viewbox_nan():

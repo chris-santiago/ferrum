@@ -114,20 +114,41 @@ def test_add_returns_notimplemented_for_non_chart(df):
 
 
 def test_hconcat_to_svg_produces_composed_output():
-    """End-to-end: (c1 | c2).to_svg() actually composes through the Rust compositor."""
+    """End-to-end: (c1 | c2).to_svg() composes both panels into one wider SVG.
+
+    Behavior check (not mechanism): the composite render path bakes each panel
+    into one scene rather than wrapping children in ``<g translate>`` groups, so
+    parity is asserted on the composed *output* — a single SVG holding both
+    panels' distinct marks (point circles + line polyline), wider than a single
+    chart.
+    """
+    import re
+
     df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
     c1 = Chart(df).mark_point().encode(x="a", y="b")
     c2 = Chart(df).mark_line().encode(x="a", y="b")
     svg = (c1 | c2).to_svg()
     assert svg.startswith("<svg") or svg.startswith("<?xml")
-    # Composed output should contain at least 2 <g transform="translate(...)"> wrappers
-    assert svg.count('transform="translate(') >= 2
+    assert svg.count("<svg") == 1
+    # Both panels' marks are present in the one composed scene.
+    assert "<circle" in svg
+    assert "<polyline" in svg
+    # Horizontal composition is wider than the single-chart width.
+    width = float(re.search(r'<svg[^>]*width="([^"]+)"', svg).group(1))
+    assert width > float(c1.to_svg().split('width="', 1)[1].split('"', 1)[0])
 
 
 def test_vconcat_to_svg_produces_composed_output():
+    """(c1 & c2).to_svg() stacks both panels into one taller SVG (behavior parity)."""
+    import re
+
     df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
     c1 = Chart(df).mark_point().encode(x="a", y="b")
     c2 = Chart(df).mark_bar().encode(x="a", y="b")
     svg = (c1 & c2).to_svg()
     assert svg.startswith("<svg") or svg.startswith("<?xml")
-    assert svg.count('transform="translate(') >= 2
+    assert svg.count("<svg") == 1
+    assert "<circle" in svg
+    assert "<rect" in svg
+    height = float(re.search(r'<svg[^>]*height="([^"]+)"', svg).group(1))
+    assert height > float(c1.to_svg().split('height="', 1)[1].split('"', 1)[0])
