@@ -107,8 +107,16 @@ def test_configure_on_hconcat_fans_out_to_sub_charts():
     combined = c1 | c2
     svg = combined.to_svg()
     _assert_valid_svg(svg)
-    # The composed SVG should include both sub-charts
-    assert svg.count('transform="translate(') >= 2
+    # c1's per-chart configure (label_angle=-30) must survive into the composition:
+    # the composite now lowers via per-leaf binding (Task 5d), and c1's leaf carries
+    # its own chart_config, so its x tick labels render rotated by -30 degrees.
+    # Assert an EXACT count match against c1 rendered alone, not mere presence:
+    # if c2's leaf silently inherited c1's chart_config (an absent per-leaf key
+    # falling back to the call-level default), c2's own tick labels would also
+    # rotate, doubling the count.
+    c1_alone_count = c1.to_svg().count("rotate(-30")
+    assert c1_alone_count > 0
+    assert svg.count("rotate(-30") == c1_alone_count
 
 
 def test_configure_on_vconcat_fans_out():

@@ -221,22 +221,26 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> Optional[_LoweredTree
 
     Returns ``None`` — signalling the caller to keep the existing
     string-compositor / scene-merge path — when the composition cannot be
-    rendered faithfully by the uniform composite entry.  That entry applies one
-    ``viewport``/``theme``/``chart_config`` to every leaf (``render/binding.rs``
-    ``build_composite_leaves``), so the new path is only taken when:
+    rendered faithfully by the uniform composite entry.  The new path is taken
+    when:
 
     - every descendant is a ``Chart`` leaf or a nested composite that declares a
       ``_composite_layout`` (HConcat/VConcat/ConcatChart),
-    - all leaves share identical ``viewport``/``theme``/``chart_config`` (so no
-      per-child annotations, sizes, themes, or configure are lost),
     - no composite node carries composition-level configure layers (the
       composite path uses default figure-band chrome positioning),
     - every ``resolve=`` shared channel is positional x/y, and
-    - no nested composite carries figure chrome (root-only on the new path — this
-      is what gates ``compare=`` diagnostics whose per-model panels are titled
-      *composites*, e.g. ``residuals`` (a titled ``VConcat``), back onto the old
-      path; ``compare=`` panels that are single Charts — ``cv_scores``, or a
-      faceted ``pdp`` panel — carry their title on the leaf spec and lower fine).
+    - no nested composite carries a figure *subtitle* or *caption* (those remain
+      root-only on the composite path).
+
+    A nested composite carrying only a figure *title* is no longer gated: its
+    title lowers to a per-child ``"label"`` on the tree node (Task 5d wire), so
+    ``compare=`` diagnostics whose per-model panels are titled *composites* — e.g.
+    ``residuals`` (a titled ``VConcat``) — now ride the new path and share axes
+    position-wise (GH #45).  Per-leaf ``viewport``/``theme``/``chart_config`` are
+    no longer required to be uniform: when the leaves differ, each leaf node
+    carries its own binding override (Task 5d wire; absent key = inherit the
+    call-level value).  Homogeneous trees keep the compact call-level form so
+    Task 6/7 output stays byte-identical.
 
     ``auto_tooltips`` mirrors ``Chart._render_scene``: the interactive path
     prepares leaves with auto-tooltips injected, the SVG path does not.  The
@@ -244,8 +248,10 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> Optional[_LoweredTree
     ratio/overlay cutovers (Tasks 8-9) can reuse it.
     """
     payloads: list = []
-    # (viewport, theme, chart_config) per leaf, checked for the uniformity gate.
+    # (viewport, theme, chart_config) per leaf; when the leaves differ, each
+    # leaf node (parallel list below) carries its own binding override.
     leaf_inputs: list = []
+    leaf_nodes: list = []
 
     def lower(node, is_root: bool) -> Optional[dict]:
         if _is_leaf_chart(node):
@@ -257,18 +263,18 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> Optional[_LoweredTree
             index = len(payloads)
             payloads.append(data)
             leaf_inputs.append((viewport, theme, chart_config))
-            return {"kind": "leaf", "spec": spec, "data": index}
+            leaf_node = {"kind": "leaf", "spec": spec, "data": index}
+            leaf_nodes.append(leaf_node)
+            return leaf_node
 
         layout = getattr(node, "_composite_layout", None)
         if layout is not None:
             if getattr(node, "_configure_layers", None):
                 return None
             if not is_root and (
-                node._figure_title is not None
-                or node._figure_subtitle is not None
-                or node._figure_caption is not None
+                node._figure_subtitle is not None or node._figure_caption is not None
             ):
-                return None  # nested figure chrome is root-only on the composite path
+                return None  # non-root subtitle/caption stay root-only (labels are title-only)
             resolve = _composite_resolve_field(getattr(node, "_resolve", None))
             if resolve is None:
                 return None
@@ -294,6 +300,11 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> Optional[_LoweredTree
                     comp["subtitle"] = node._figure_subtitle
                 if node._figure_caption is not None:
                     comp["caption"] = node._figure_caption
+            elif node._figure_title is not None:
+                # A non-root composite's figure title lowers to a per-child panel
+                # label (Task 5d wire), so titled composite compare= panels share
+                # axes position-wise instead of gating to the old path (GH #45).
+                comp["label"] = node._figure_title
             return comp
 
         # LayerChart / Joint / Repeat / ClusterMap declare no _composite_layout.
@@ -305,7 +316,21 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> Optional[_LoweredTree
 
     first = leaf_inputs[0]
     if any(other != first for other in leaf_inputs[1:]):
-        return None  # heterogeneous per-leaf inputs the uniform entry cannot preserve
+        # Heterogeneous per-leaf inputs: attach each leaf's own binding override
+        # so the uniform entry renders every leaf faithfully (Task 5d wire; a
+        # leaf's absent key would otherwise inherit the call-level default).  The
+        # call-level default is the first leaf's inputs — every leaf overrides it.
+        for node, (viewport, theme, chart_config) in zip(leaf_nodes, leaf_inputs):
+            node["viewport"] = viewport
+            node["theme"] = theme
+            # Written unconditionally: an empty dict is a valid "no configure"
+            # override (matches _resolve_chart_config's empty-dict return for a
+            # leaf with no configure/annotations/structural).  Gating on
+            # truthiness here would leave the key absent, which means "inherit
+            # the call-level default" -- silently reusing leaf 0's chart_config
+            # on every unconfigured sibling (annotation bleed, mis-rotated axis
+            # labels on the wrong panel).
+            node["chart_config"] = chart_config
 
     viewport, theme, chart_config = first
     return _LoweredTree(

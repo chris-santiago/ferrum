@@ -18,6 +18,8 @@ the same parsing the facet-shared-extent tests use).
 
 from __future__ import annotations
 
+import re
+
 import polars as pl
 import pytest
 
@@ -267,19 +269,80 @@ def test_nested_linear_composite_lowers_recursively(small_chart, large_chart):
     assert len(lowered.payloads) == 3
 
 
-def test_heterogeneous_child_config_falls_back(small_chart, large_chart):
-    """A child with its own annotation cannot cross the uniform entry -> old path.
+def _vertical_gridline_x_positions(svg: str) -> list[float]:
+    """X positions of every vertical panel gridline (``x1 == x2``, gridline stroke).
 
-    The uniform composite entry applies one ``chart_config`` to every leaf, so
-    a per-child annotation would be lost; the composition keeps the legacy
-    string-compositor path (``_lower_composite`` returns ``None``), and
-    still renders valid SVG.
+    Each panel draws its own column of vertical gridlines spanning the full
+    plot height, clustered around that panel's own x-range with a wide gap to
+    the next panel's cluster. Used by ``_panel_boundary_x`` to locate the
+    HConcat panel boundary without hardcoding pixel geometry.
+    """
+    xs = []
+    for m in re.finditer(r'<line\s+([^>]*)stroke="#d6d3d1"[^>]*/>', svg):
+        attrs = m.group(1)
+        x1 = float(re.search(r'x1="([^"]+)"', attrs).group(1))
+        x2 = float(re.search(r'x2="([^"]+)"', attrs).group(1))
+        if x1 == x2:
+            xs.append(x1)
+    return xs
+
+
+def _panel_boundary_x(svg: str) -> float:
+    """Midpoint of the widest gap between clustered vertical-gridline x positions.
+
+    For a two-panel side-by-side HConcat, this is the x boundary between the
+    left and right panel's plot areas: everything left of it belongs to the
+    left child, everything at or right of it belongs to the right child.
+    """
+    xs = sorted(set(_vertical_gridline_x_positions(svg)))
+    assert len(xs) >= 2, "expected vertical gridlines from at least two panels"
+    gaps = [(xs[i + 1] - xs[i], i) for i in range(len(xs) - 1)]
+    gap, i = max(gaps)
+    return (xs[i] + xs[i + 1]) / 2
+
+
+def test_heterogeneous_child_config_lowers_with_per_leaf_binding(small_chart, large_chart):
+    """A child with its own annotation now lowers via per-leaf binding (Task 5d).
+
+    The composite entry no longer requires a single ``chart_config`` for every
+    leaf: a leaf whose ``chart_config`` differs carries its own override on the
+    tree node, and a leaf with none carries an explicit empty override rather
+    than an absent key -- an absent key would mean "inherit the call-level
+    default" (leaf 0's config), silently bleeding leaf 0's annotation onto
+    every unconfigured sibling.
     """
     annotated = small_chart + annotate_hline(3.0)
     composite = annotated | large_chart
-    assert _lower_composite(composite, auto_tooltips=False) is None
-    svg = composite.to_svg()
-    assert svg.startswith("<svg")
+
+    lowered = _lower_composite(composite, auto_tooltips=False)
+    assert lowered is not None
+    # The annotated leaf carries a per-leaf chart_config with the annotation;
+    # the plain leaf carries an explicit empty override, not an absent key.
+    annotated_leaf, plain_leaf = lowered.tree["children"]
+    assert annotated_leaf["chart_config"]["annotations"], "annotation dropped from leaf binding"
+    assert plain_leaf["chart_config"] == {}, "plain leaf must carry an explicit empty override"
+
+    # The annotation renders overall: the composite gains the hline vs. an
+    # un-annotated pair.
+    with_anno = composite.to_svg()
+    without_anno = (small_chart | large_chart).to_svg()
+    assert with_anno.startswith("<svg")
+    assert with_anno.count("<line") > without_anno.count("<line")
+
+    # Discriminating check: the annotation line renders only in the annotated
+    # (left) leaf's panel region, never in the plain (right) sibling's panel --
+    # this is what would silently break if the plain leaf inherited leaf 0's
+    # chart_config instead of its own empty override.
+    boundary = _panel_boundary_x(with_anno)
+    annotation_lines = re.findall(r'<line\s+([^>]*)stroke="#333333"[^>]*/>', with_anno)
+    assert annotation_lines, "expected the hline annotation to render at least one <line>"
+    for attrs in annotation_lines:
+        x1 = float(re.search(r'x1="([^"]+)"', attrs).group(1))
+        x2 = float(re.search(r'x2="([^"]+)"', attrs).group(1))
+        assert x1 < boundary and x2 <= boundary, (
+            f"annotation line ({x1}, {x2}) bled into the plain sibling's panel "
+            f"(boundary={boundary})"
+        )
 
 
 def test_configure_layer_composite_falls_back(small_chart, large_chart):

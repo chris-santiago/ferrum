@@ -15,22 +15,20 @@ What is RED-provable vs parity here
 - **Parity** — ``cv_scores_chart(compare=)`` panels are single ``Chart``s, so
   they already shared via the old ConcatChart ``_apply_resolve`` injection.  The
   test locks that the *new* wrap path keeps the shared-y union.
-- **RED→GREEN (blocked)** — position-wise sharing across *composite* children
-  is the GH #45 target.  ``residuals`` compare panels are titled *composites*
-  (each a ``VConcat`` with ``child.properties(title=name)``), and the composite
-  wire forbids a title on non-root nodes (spec §6; ``render_composite_svg`` raises
-  ``ValueError: '<layout>': 'title' is only valid at the root``).  Until the Rust
-  wire gains a per-child panel-label field, such children stay gated to the old
-  (non-sharing) path, so the position-wise sharing test is ``xfail``.
+- **GREEN (GH #45)** — position-wise sharing across *composite* children.
+  ``residuals`` compare panels are titled *composites* (each a ``VConcat`` with
+  ``child.properties(title=name)``).  The composite wire now lowers a non-root
+  composite's figure title to a per-child ``"label"`` (Task 5d), so such children
+  ride the new path and pair position-wise: the same grid position shares its axis
+  across models while distinct positions keep distinct domains.
   (``pdp`` compare panels, by contrast, are single *faceted Charts* whose title
-  lands on the leaf spec, so pdp cuts over cleanly with ``x: independent``.)
+  lands on the leaf spec, so pdp cuts over with ``x: independent``.)
 """
 
 from __future__ import annotations
 
 import numpy as np
 import polars as pl
-import pytest
 
 import ferrum as fm
 from ferrum.composition import ConcatChart, VConcatChart, _lower_composite
@@ -78,6 +76,38 @@ def _high_value_tick_bands(svg: str, *, value_threshold: float = 50.0, gap: floa
         if cur - prev > gap:
             bands += 1
     return bands
+
+
+def _bottom_row_x_bands(
+    svg: str, *, gap: float = 80.0, min_entries: int = 6
+) -> list[tuple[float, float]]:
+    """Return per-panel (lo, hi) x-tick extents for the bottom-most axis row.
+
+    The residuals compare= grid stacks two 2x2 model panels side by side, so its
+    bottom diagnostic row carries several panels whose x-domains do NOT reset
+    monotonically (a low-domain leverage panel sits left of a higher-domain
+    scale-location panel), which the shared value-reset splitter in
+    ``_svg_extents`` cannot separate.  Here the panels are split by an x-gap
+    instead — layout-agnostic and robust to non-monotone cross-panel domains.
+    Bands are returned left-to-right.
+    """
+    from collections import defaultdict
+
+    rows: dict[int, list[tuple[float, float]]] = defaultdict(list)
+    for x, y, val in numeric_text_entries(svg):
+        rows[round(y)].append((x, val))
+    candidates = [(y, ents) for y, ents in rows.items() if len(ents) >= min_entries]
+    if not candidates:
+        return []
+    _, axis_row = max(candidates, key=lambda r: r[0])
+    axis_row.sort()
+    bands: list[list[float]] = [[axis_row[0][1]]]
+    for (prev_x, _), (cur_x, cur_v) in zip(axis_row, axis_row[1:]):
+        if cur_x - prev_x > gap:
+            bands.append([cur_v])
+        else:
+            bands[-1].append(cur_v)
+    return [(min(b), max(b)) for b in bands]
 
 
 def _regression_models():
@@ -233,15 +263,34 @@ def test_pdp_compare_lowers_but_keeps_independent_feature_x():
     assert not [t for t in ticks if 30 < t < 90], "per-feature x axes collapsed onto a shared range"
 
 
-def test_residuals_compare_stays_on_old_path_unchanged():
-    """residuals compare panels are titled composites → gated to the old path
-    (no regression); position-wise sharing is the xfail below.
+def test_residuals_compare_lowers_and_shares_position_wise():
+    """GH #45 headline: residuals compare panels are titled composites (each a
+    2x2 diagnostic grid).  Their figure title now lowers to a per-child label
+    (Task 5d), so the composition rides the new path and pairs position-wise —
+    each grid position shares its x-axis across the two models, while distinct
+    positions keep distinct x-domains (no global collapse).
     """
     base, alt, X, y = _regression_models()
     chart = fm.residuals_chart(base, X, y, compare={"alt": alt})
-    assert _lower_composite(chart, auto_tooltips=False) is None
+
+    # (a) the titled-composite compare= tree now lowers to the Rust composite path.
+    lowered = _lower_composite(chart, auto_tooltips=False)
+    assert lowered is not None
+    labels = {c.get("label") for c in lowered.tree["children"]}
+    assert labels == {"base", "alt"}, f"per-model labels not on the tree: {labels}"
+
     svg = chart.to_svg()
-    assert "base" in svg and "alt" in svg  # model labels preserved on the old path
+    # (b) the per-model labels render in the SVG.
+    assert "base" in svg and "alt" in svg
+
+    # (c) position-wise sharing evidence.  The bottom diagnostic row is
+    # [base-left, base-right, alt-left, alt-right]; the same grid position
+    # shares its x-domain across models, but the two positions differ.
+    bands = _bottom_row_x_bands(svg)
+    assert len(bands) == 4, f"expected 4 bottom-row panels, got {bands}"
+    assert bands[0] == bands[2], f"left-column x-domain not shared across models: {bands}"
+    assert bands[1] == bands[3], f"right-column x-domain not shared across models: {bands}"
+    assert bands[0] != bands[1], f"distinct grid positions collapsed onto one x-domain: {bands}"
 
 
 def test_untitled_composite_children_share_axis_position_wise():
@@ -262,15 +311,6 @@ def test_untitled_composite_children_share_axis_position_wise():
     assert _high_value_tick_bands(concat.to_svg()) >= 2
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GH #45: position-wise sharing across titled composite compare= children "
-        "needs a Rust per-child panel-label field. The composite wire forbids "
-        "non-root titles (spec §6), so residuals/pdp compare panels gate to the "
-        "old (non-sharing) path. Flip to a passing test when that Rust field lands."
-    ),
-)
 def test_titled_composite_children_share_axis_position_wise():
     """RED→GREEN target: two titled composite panels with disjoint x-domains,
     concatenated with ``resolve={'x': 'shared'}``, must pair position-wise so the
