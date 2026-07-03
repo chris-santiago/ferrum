@@ -97,6 +97,16 @@ pub struct FigureChrome<'a> {
     pub right_inset: f64,
     /// Horizontal alignment of all three chrome lines.
     pub anchor: ChromeAnchor,
+    /// Title font size (px) override. `None` uses [`FIGURE_TITLE_FONT_SIZE`]
+    /// (the figure-level chrome default). Set by a per-child composite label
+    /// (Task 5d) that must match its owning call's theme rather than the
+    /// figure-chrome constant — see `composite_render::apply_child_label`.
+    /// Subtitle/caption sizes have no override slot: only the title-only band
+    /// per-child labels use needs one.
+    pub title_font_size: Option<f64>,
+    /// Title color override. `None` uses [`FIGURE_TITLE_COLOR`]. Same
+    /// per-child-label use case as `title_font_size`.
+    pub title_color: Option<Color>,
 }
 
 impl Default for FigureChrome<'_> {
@@ -108,6 +118,8 @@ impl Default for FigureChrome<'_> {
             left_inset: DEFAULT_CHROME_INSET,
             right_inset: DEFAULT_CHROME_INSET,
             anchor: ChromeAnchor::Start,
+            title_font_size: None,
+            title_color: None,
         }
     }
 }
@@ -140,6 +152,7 @@ impl FigureChrome<'_> {
         let header_h = compute_header_height(self);
         let footer_h = compute_footer_height(self);
         let (x, text_anchor) = self.resolve_anchor(panel_w);
+        let title_font_size = self.title_font_size.unwrap_or(FIGURE_TITLE_FONT_SIZE);
 
         let mut lines = Vec::new();
 
@@ -150,9 +163,10 @@ impl FigureChrome<'_> {
                 role: ChromeRole::Title,
                 content: title,
                 x,
-                y: TITLE_TOP_PAD + FIGURE_TITLE_FONT_SIZE,
+                y: TITLE_TOP_PAD + title_font_size,
                 text_anchor,
-                font_size: FIGURE_TITLE_FONT_SIZE,
+                font_size: title_font_size,
+                color_override: self.title_color,
             });
         }
         if let Some(subtitle) = self.subtitle {
@@ -160,7 +174,7 @@ impl FigureChrome<'_> {
             // alone, it occupies the first header line.
             let y = if self.title.is_some() {
                 TITLE_TOP_PAD
-                    + FIGURE_TITLE_FONT_SIZE
+                    + title_font_size
                     + TITLE_SUBTITLE_GAP
                     + FIGURE_SUBTITLE_FONT_SIZE
             } else {
@@ -173,6 +187,7 @@ impl FigureChrome<'_> {
                 y,
                 text_anchor,
                 font_size: FIGURE_SUBTITLE_FONT_SIZE,
+                color_override: None,
             });
         }
 
@@ -186,6 +201,7 @@ impl FigureChrome<'_> {
                 y: panels_bottom_y + CAPTION_TOP_PAD + FIGURE_CAPTION_FONT_SIZE,
                 text_anchor,
                 font_size: FIGURE_CAPTION_FONT_SIZE,
+                color_override: None,
             });
         }
 
@@ -256,6 +272,10 @@ struct ChromeLine<'a> {
     y: f64,
     text_anchor: &'static str,
     font_size: f64,
+    /// Per-instance color override, consulted in place of [`ChromeRole::style`]'s
+    /// default when set. Only the title line ever carries one (per-child
+    /// composite labels, Task 5d); subtitle/caption always pass `None`.
+    color_override: Option<Color>,
 }
 
 /// Fully-resolved chrome geometry: the reserved band heights plus every
@@ -391,7 +411,7 @@ fn compute_header_height(chrome: &FigureChrome<'_>) -> f64 {
     }
     let mut h = TITLE_TOP_PAD;
     if chrome.title.is_some() {
-        h += FIGURE_TITLE_FONT_SIZE;
+        h += chrome.title_font_size.unwrap_or(FIGURE_TITLE_FONT_SIZE);
     }
     if chrome.subtitle.is_some() {
         if chrome.title.is_some() {
@@ -430,7 +450,8 @@ fn chrome_fill_hex(color: Color) -> String {
 /// attribute entirely, reproducing the previous emitter's byte sequence.
 fn emit_chrome_text(out: &mut String, line: &ChromeLine<'_>) {
     let style = line.role.style();
-    let fill = chrome_fill_hex(style.color);
+    let color = line.color_override.unwrap_or(style.color);
+    let fill = chrome_fill_hex(color);
     let weight_attr = match style.weight {
         ChromeWeight::Bold600 => " font-weight=\"600\"",
         ChromeWeight::Normal => "",
@@ -468,7 +489,7 @@ fn chrome_text_style(line: &ChromeLine<'_>) -> TextStyle {
         },
         baseline: TextBaseline::Alphabetic,
         angle: 0.0,
-        color: style.color,
+        color: line.color_override.unwrap_or(style.color),
         opacity: 1.0,
         font_family: FIGURE_FONT_FAMILY.to_string(),
     }
@@ -926,6 +947,7 @@ mod tests {
             y: 0.0,
             text_anchor: "start",
             font_size: FIGURE_TITLE_FONT_SIZE,
+            color_override: None,
         };
         let ts = chrome_text_style(&line);
         assert_eq!(ts.font_weight, FontWeight::Custom("600".to_string()));
@@ -958,6 +980,56 @@ mod tests {
                 }
                 other => panic!("expected Text, got {other:?}"),
             }
+        }
+    }
+
+    /// A title-only chrome with `title_font_size`/`title_color` overrides must
+    /// emit the override values, not the [`FIGURE_TITLE_FONT_SIZE`]/
+    /// [`FIGURE_TITLE_COLOR`] constants — the per-child composite label
+    /// (Task 5d) uses this override to match its owning call's theme. Also
+    /// pins that the reserved header band height grows with the overridden
+    /// font size (not a fixed 16px assumption), so a themed label never
+    /// clips against its child's content.
+    #[test]
+    fn title_nodes_honor_font_size_and_color_overrides() {
+        let custom_color = Color { r: 0x11, g: 0x22, b: 0x33, a: 0xff };
+        let default_chrome = FigureChrome { title: Some("T"), ..Default::default() };
+        let overridden = FigureChrome {
+            title: Some("T"),
+            title_font_size: Some(30.0),
+            title_color: Some(custom_color),
+            ..Default::default()
+        };
+
+        let (default_nodes, default_header_h, _) = title_nodes(default_chrome, 200.0, 100.0);
+        let (nodes, header_h, _) = title_nodes(overridden, 200.0, 100.0);
+
+        match &nodes[0] {
+            SceneNode::Text { style, .. } => {
+                assert_eq!(style.font_size, 30.0);
+                assert_eq!(style.color, custom_color);
+                // Weight/family are not part of this override (matches the
+                // brief's two-field mirror of scene_build's title styling).
+                assert_eq!(style.font_weight, FontWeight::Custom("600".to_string()));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+        assert_ne!(
+            style_font_size(&default_nodes[0]),
+            30.0,
+            "sanity: default constant must differ from the override under test"
+        );
+        assert!(
+            header_h > default_header_h,
+            "a larger themed title_font_size must reserve more header height: \
+             default={default_header_h} overridden={header_h}"
+        );
+    }
+
+    fn style_font_size(node: &SceneNode) -> f64 {
+        match node {
+            SceneNode::Text { style, .. } => style.font_size,
+            other => panic!("expected Text, got {other:?}"),
         }
     }
 }

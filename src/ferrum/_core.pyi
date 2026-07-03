@@ -958,6 +958,19 @@ def render_interactive(
     config: Any = None,
     chart_config: Any = None,
 ) -> Tuple[str, bytes]: ...
+# `tree` is a nested-dict composite tree (see crate::spec::composite):
+#   leaf:      {"kind": "leaf", "spec": ChartSpec, "data": int,
+#               # optional Task 5d per-leaf binding overrides (absent = inherit
+#               # the call-level value); optional per-child label:
+#               "theme"?: dict, "viewport"?: tuple[float, float],
+#               "config"?: dict, "chart_config"?: dict, "label"?: str}
+#   composite: {"kind": "composite", "layout": str, "children": [...],
+#               # root-only chrome: "title"/"subtitle"/"caption"/"config";
+#               # per-child (non-root) label:
+#               "label"?: str, "resolve"?: dict, "ncols"?: int, "nrows"?: int,
+#               "row_ratios"?: list, "col_ratios"?: list, "spacing"?: float}
+# `theme`/`config`/`chart_config`/`viewport` below are the call-level defaults
+# every leaf inherits unless it carries its own override.
 def render_composite_svg(
     tree: Any,
     payloads: Any,

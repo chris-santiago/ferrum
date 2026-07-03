@@ -209,7 +209,7 @@ pub(crate) fn resolve_composite_scales(
 pub(crate) fn flatten_leaves(tree: &CompositeNode) -> Vec<(&ChartSpec, usize)> {
     fn walk<'a>(node: &'a CompositeNode, acc: &mut Vec<(&'a ChartSpec, usize)>) {
         match node {
-            CompositeNode::Leaf { spec, data } => acc.push((spec, *data)),
+            CompositeNode::Leaf { spec, data, .. } => acc.push((spec, *data)),
             CompositeNode::Composite { children, .. } => {
                 for c in children {
                     walk(c, acc);
@@ -541,7 +541,7 @@ mod tests {
         if let Some(fy) = field_y {
             e.y = Some(enc(fy));
         }
-        CompositeNode::Leaf { spec: Box::new(spec_with(e)), data: 0 }
+        CompositeNode::Leaf { spec: Box::new(spec_with(e)), data: 0, label: None }
     }
 
     fn composite(
@@ -552,6 +552,7 @@ mod tests {
         CompositeNode::Composite {
             layout,
             children,
+            label: None,
             resolve,
             spacing: None,
             row_ratios: None,
@@ -630,6 +631,61 @@ mod tests {
 
         // Leaf vs composite → not congruent.
         assert!(!congruent(&leaf_node(Some("x"), None), &a));
+    }
+
+    /// Attach a per-child label to a node without altering its structure — the
+    /// Task 5d field congruence must ignore.
+    fn labeled(mut node: CompositeNode, text: &str) -> CompositeNode {
+        match &mut node {
+            CompositeNode::Leaf { label, .. } | CompositeNode::Composite { label, .. } => {
+                *label = Some(text.to_string());
+            }
+        }
+        node
+    }
+
+    #[test]
+    fn congruence_ignores_per_child_labels() {
+        // Per-child labels are decoration, never a structural discriminator, so
+        // two otherwise-identical children with DIFFERENT labels must still be
+        // congruent — a label must NOT re-trigger the non-congruent sharing skip
+        // (Task 5d: labels must not affect `congruent`).
+        let base = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node(Some("x"), None), leaf_node(Some("x"), None)],
+            CompositeResolve::default(),
+        );
+        let a = labeled(base.clone(), "Model A");
+        let b = labeled(base.clone(), "Model B");
+        assert!(congruent(&a, &b), "differently-labeled congruent children must still pair");
+        assert!(congruent(&base, &a), "labeled vs unlabeled must be congruent");
+        // Labeled leaf vs unlabeled leaf are congruent too.
+        assert!(congruent(
+            &labeled(leaf_node(Some("x"), None), "L"),
+            &leaf_node(Some("x"), None),
+        ));
+    }
+
+    #[test]
+    fn shared_resolve_still_unions_labeled_congruent_children() {
+        // The #45 residuals shape: labeled compare children sharing an axis must
+        // still union their domains. The labels (attached to each congruent
+        // child) must not divert resolution to the per-child independent skip.
+        let l0 = owned(spec_with_x("v"), num_batch("v", &[0.0, 10.0]));
+        let l1 = owned(spec_with_x("v"), num_batch("v", &[5.0, 30.0]));
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![
+                labeled(leaf_node(Some("v"), None), "Model A"),
+                labeled(leaf_node(Some("v"), None), "Model B"),
+            ],
+            shared_x(),
+        );
+        let inputs = [input(&l0), input(&l1)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let expect = Some(SharedDomain::Numeric { lo: 0.0, hi: 30.0 });
+        assert_eq!(ctx[0].x, expect, "labeled child 0 must still receive the shared union");
+        assert_eq!(ctx[1].x, expect, "labeled child 1 must still receive the shared union");
     }
 
     // -- flat children --------------------------------------------------------
@@ -1011,7 +1067,7 @@ mod tests {
     /// A leaf spec whose chart-level y is the raw "value" column and whose single
     /// layer reads the "upper" whisker column from the named output "box".
     fn box_leaf_node() -> CompositeNode {
-        CompositeNode::Leaf { spec: Box::new(box_leaf_spec()), data: 0 }
+        CompositeNode::Leaf { spec: Box::new(box_leaf_spec()), data: 0, label: None }
     }
 
     fn box_leaf_spec() -> ChartSpec {

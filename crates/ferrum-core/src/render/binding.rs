@@ -215,8 +215,9 @@ pub fn render_composite_svg(
     let node = crate::spec::composite::composite_tree_from_py(tree)?;
     let (batches, t, c, cc, vp) =
         decode_composite_inputs(payloads, viewport, theme, config, chart_config)?;
-    let leaves = build_composite_leaves(&node, &batches, &t, vp, &c, &cc)?;
-    let (scene, warnings) = super::composite_render::render_composite_scene(&node, &leaves)
+    let bindings = collect_leaf_bindings(tree, &t, vp, &c, &cc)?;
+    let leaves = build_composite_leaves(&node, &batches, &bindings)?;
+    let (scene, warnings) = super::composite_render::render_composite_scene(&node, &leaves, &t)
         .map_err(composite_render_err_to_py)?;
     emit_warnings(py, &warnings)?;
     Ok(super::svg_walk::walk_svg(&scene, c.embed_fonts))
@@ -271,7 +272,8 @@ pub fn render_composite_interactive<'py>(
     let node = crate::spec::composite::composite_tree_from_py(tree)?;
     let (batches, t, c, cc, vp) =
         decode_composite_inputs(payloads, viewport, theme, config, chart_config)?;
-    let leaves = build_composite_leaves(&node, &batches, &t, vp, &c, &cc)?;
+    let bindings = collect_leaf_bindings(tree, &t, vp, &c, &cc)?;
+    let leaves = build_composite_leaves(&node, &batches, &bindings)?;
     // Warning emission deferred here (unlike `render_composite_svg`): its flat
     // sibling `render_interactive` has the identical pre-existing gap —
     // `render_scene_json` doesn't surface `RenderWarning`s to this binding at
@@ -279,7 +281,7 @@ pub fn render_composite_interactive<'py>(
     // path to mirror. Fixing this composite entry alone would make it diverge
     // from `render_interactive` instead of matching it. Both are tracked in
     // GH #50 (orchestrator decision: consistency over one-sided fixing).
-    let (mut scene, _warnings) = super::composite_render::render_composite_scene(&node, &leaves)
+    let (mut scene, _warnings) = super::composite_render::render_composite_scene(&node, &leaves, &t)
         .map_err(composite_render_err_to_py)?;
     let packed_bytes = super::pack_instances::extract_packed_bytes(&mut scene);
     let json = serde_json::to_string(&scene)
@@ -319,21 +321,158 @@ fn decode_composite_inputs(
     Ok((batches, t, c, cc, vp))
 }
 
-/// Pair each of `tree`'s leaves (in pre-order) with its selected Arrow batch,
-/// validating every `data` index against `batches`' length up front — a
-/// malformed tree fails fast with the offending leaf pinpointed
-/// (`CompositeRenderError::LeafDataIndexOutOfBounds`) rather than panicking
-/// on an out-of-bounds slice access deeper in the render core.
+/// Fully-resolved per-leaf render inputs for one composite leaf (Task 5d).
+///
+/// Each leaf either carries its own binding override — decoded exactly like a
+/// standalone `render_svg` call (built from defaults) — or inherits the
+/// call-level value (a clone). Owned so [`CompositeLeafInput`] can borrow it
+/// for the leaf's lifetime; the collection lives in the PyO3 entry alongside
+/// the tree and batches.
+#[derive(Debug)]
+struct LeafBinding {
+    theme: crate::layout::ThemeInputs,
+    viewport: Viewport,
+    config: super::config::RenderConfig,
+    chart_config: super::chart_config::ChartConfig,
+}
+
+/// Walk the Python composite tree in leaf pre-order (the same order
+/// [`super::composite::flatten_leaves`] produces for the already-coerced
+/// [`CompositeNode`]) and resolve each leaf's render inputs (Task 5d per-leaf
+/// binding). A leaf may carry optional `theme`/`viewport`/`config`/
+/// `chart_config` keys; an absent key inherits the call-level value, so a
+/// homogeneous tree (Task 6/7's) resolves every leaf to a clone of the
+/// call-level inputs — byte-identical to the pre-5d single-value path.
+///
+/// This is a binding-layer traversal reading the render-input keys the
+/// spec-layer coercion ([`composite_tree_from_py`]) deliberately ignores; the
+/// two walks read disjoint key sets of the same dicts. The tree has already
+/// passed `composite_tree_from_py` (structure validated) before this runs, so
+/// the shape checks here are defensive; `build_composite_leaves` additionally
+/// asserts the leaf/binding counts agree, catching any traversal drift.
+fn collect_leaf_bindings(
+    tree: &Bound<'_, PyAny>,
+    call_theme: &crate::layout::ThemeInputs,
+    call_viewport: Viewport,
+    call_config: &super::config::RenderConfig,
+    call_chart_config: &super::chart_config::ChartConfig,
+) -> PyResult<Vec<LeafBinding>> {
+    let mut out = Vec::new();
+    collect_leaf_bindings_walk(
+        tree,
+        call_theme,
+        call_viewport,
+        call_config,
+        call_chart_config,
+        &mut out,
+    )?;
+    Ok(out)
+}
+
+fn collect_leaf_bindings_walk(
+    node: &Bound<'_, PyAny>,
+    call_theme: &crate::layout::ThemeInputs,
+    call_viewport: Viewport,
+    call_config: &super::config::RenderConfig,
+    call_chart_config: &super::chart_config::ChartConfig,
+    out: &mut Vec<LeafBinding>,
+) -> PyResult<()> {
+    let dict: &Bound<'_, PyDict> = node
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("composite tree node must be a dict"))?;
+    let kind: String = dict
+        .get_item("kind")?
+        .ok_or_else(|| PyValueError::new_err("composite tree node missing required key 'kind'"))?
+        .extract()?;
+    match kind.as_str() {
+        "leaf" => {
+            let theme = match leaf_override_dict(dict, "theme")? {
+                Some(d) => theme_from_dict(Some(&d))?,
+                None => call_theme.clone(),
+            };
+            let viewport = match dict.get_item("viewport")? {
+                Some(v) if !v.is_none() => {
+                    let (w, h): (f64, f64) = v.extract()?;
+                    Viewport { width: w, height: h }
+                }
+                _ => call_viewport,
+            };
+            let config = match leaf_override_dict(dict, "config")? {
+                Some(d) => config_from_dict(Some(&d))?,
+                None => call_config.clone(),
+            };
+            let chart_config = match leaf_override_dict(dict, "chart_config")? {
+                Some(d) => chart_config_from_dict(Some(&d))?,
+                None => call_chart_config.clone(),
+            };
+            out.push(LeafBinding { theme, viewport, config, chart_config });
+            Ok(())
+        }
+        "composite" => {
+            let children = dict.get_item("children")?.ok_or_else(|| {
+                PyValueError::new_err("composite node missing required key 'children'")
+            })?;
+            let list = children
+                .cast::<pyo3::types::PyList>()
+                .map_err(|_| PyValueError::new_err("composite node: 'children' must be a list"))?;
+            for item in list.iter() {
+                collect_leaf_bindings_walk(
+                    &item,
+                    call_theme,
+                    call_viewport,
+                    call_config,
+                    call_chart_config,
+                    out,
+                )?;
+            }
+            Ok(())
+        }
+        other => Err(PyValueError::new_err(format!(
+            "unknown composite tree node kind: '{other}'; expected 'leaf' or 'composite'"
+        ))),
+    }
+}
+
+/// Fetch an optional per-leaf override dict (`theme`/`config`/`chart_config`),
+/// treating a present-but-`None` value as absent, and rejecting a non-dict
+/// value with a typed error naming the key.
+fn leaf_override_dict<'py>(
+    dict: &Bound<'py, PyDict>,
+    key: &str,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    match dict.get_item(key)? {
+        None => Ok(None),
+        Some(v) if v.is_none() => Ok(None),
+        Some(v) => Ok(Some(v.cast_into::<PyDict>().map_err(|_| {
+            PyValueError::new_err(format!("composite leaf '{key}' override must be a dict"))
+        })?)),
+    }
+}
+
+/// Pair each of `tree`'s leaves (in pre-order) with its selected Arrow batch
+/// and resolved per-leaf [`LeafBinding`], validating every `data` index against
+/// `batches`' length up front — a malformed tree fails fast with the offending
+/// leaf pinpointed (`CompositeRenderError::LeafDataIndexOutOfBounds`) rather
+/// than panicking on an out-of-bounds slice access deeper in the render core.
+///
+/// `bindings` must be in the same leaf pre-order (as produced by
+/// [`collect_leaf_bindings`]); the count-equality check guards against any
+/// drift between the two traversals of the tree.
 fn build_composite_leaves<'a>(
     tree: &'a crate::spec::composite::CompositeNode,
     batches: &'a [arrow::record_batch::RecordBatch],
-    theme: &'a crate::layout::ThemeInputs,
-    viewport: Viewport,
-    config: &'a super::config::RenderConfig,
-    chart_config: &'a super::chart_config::ChartConfig,
+    bindings: &'a [LeafBinding],
 ) -> PyResult<Vec<super::composite_render::CompositeLeafInput<'a>>> {
-    super::composite::flatten_leaves(tree)
-        .into_iter()
+    let flat = super::composite::flatten_leaves(tree);
+    if flat.len() != bindings.len() {
+        return Err(PyValueError::new_err(format!(
+            "internal error: composite tree has {} leaves but {} per-leaf \
+             binding(s) were collected",
+            flat.len(),
+            bindings.len()
+        )));
+    }
+    flat.into_iter()
         .enumerate()
         .map(|(index, (spec, data))| {
             let batch = batches.get(data).ok_or_else(|| {
@@ -346,13 +485,14 @@ fn build_composite_leaves<'a>(
                     },
                 )
             })?;
+            let b = &bindings[index];
             Ok(super::composite_render::CompositeLeafInput {
                 spec,
                 batch,
-                theme,
-                viewport,
-                config,
-                chart_config,
+                theme: &b.theme,
+                viewport: b.viewport,
+                config: &b.config,
+                chart_config: &b.chart_config,
             })
         })
         .collect()
@@ -1243,6 +1383,7 @@ fn build_chrome<'a>(
         left_inset: left_inset.unwrap_or(DEFAULT_CHROME_INSET),
         right_inset: right_inset.unwrap_or(DEFAULT_CHROME_INSET),
         anchor: parse_chrome_anchor(anchor)?,
+        ..Default::default()
     })
 }
 
@@ -1676,7 +1817,21 @@ mod composite_leaf_bounds_tests {
             params: Vec::new(),
             chart_description: None,
         };
-        CompositeNode::Leaf { spec: Box::new(spec), data }
+        CompositeNode::Leaf { spec: Box::new(spec), data, label: None }
+    }
+
+    /// One inherited-from-call-level [`LeafBinding`] per leaf — the homogeneous
+    /// (pre-5d) shape the bounds tests exercise. Length must match the tree's
+    /// leaf count (these single-leaf trees need exactly one).
+    fn inherited_bindings(n: usize) -> Vec<LeafBinding> {
+        (0..n)
+            .map(|_| LeafBinding {
+                theme: ThemeInputs::default(),
+                viewport: Viewport { width: 100.0, height: 100.0 },
+                config: RenderConfig::default(),
+                chart_config: ChartConfig::default(),
+            })
+            .collect()
     }
 
     #[test]
@@ -1686,19 +1841,9 @@ mod composite_leaf_bounds_tests {
             // Leaf #0 asks for payload index 2, but zero payloads are supplied.
             let tree = dummy_leaf(2);
             let batches: Vec<arrow::record_batch::RecordBatch> = vec![];
-            let theme = ThemeInputs::default();
-            let config = RenderConfig::default();
-            let chart_config = ChartConfig::default();
-            let viewport = Viewport { width: 100.0, height: 100.0 };
+            let bindings = inherited_bindings(1);
 
-            let result = build_composite_leaves(
-                &tree,
-                &batches,
-                &theme,
-                viewport,
-                &config,
-                &chart_config,
-            );
+            let result = build_composite_leaves(&tree, &batches, &bindings);
             let err = match result {
                 Ok(_) => panic!("data index 2 with 0 payloads must be rejected, not accepted"),
                 Err(e) => e,
@@ -1745,21 +1890,153 @@ mod composite_leaf_bounds_tests {
                 .unwrap()
             };
             let batches = vec![batch];
-            let theme = ThemeInputs::default();
-            let config = RenderConfig::default();
-            let chart_config = ChartConfig::default();
-            let viewport = Viewport { width: 100.0, height: 100.0 };
+            let bindings = inherited_bindings(1);
 
-            let leaves = build_composite_leaves(
-                &tree,
-                &batches,
-                &theme,
-                viewport,
-                &config,
-                &chart_config,
-            )
-            .expect("data index 0 with 1 payload must succeed");
+            let leaves = build_composite_leaves(&tree, &batches, &bindings)
+                .expect("data index 0 with 1 payload must succeed");
             assert_eq!(leaves.len(), 1);
+        });
+    }
+}
+
+// ── Task 5d: per-leaf binding wire (collect_leaf_bindings) ─────────────────
+//
+// Each composite leaf may carry its own `theme`/`viewport`/`config`/
+// `chart_config` override; an absent key inherits the call-level value. These
+// tests exercise the binding-layer tree walk directly (it reads only the
+// render-input keys the spec coercion ignores, so the leaves need no `spec`).
+#[cfg(test)]
+mod composite_leaf_binding_tests {
+    use super::*;
+    use pyo3::types::{PyDict, PyList};
+
+    /// A minimal leaf dict for the binding walk (no `spec`/`data` needed — the
+    /// walk reads only render-input keys), optionally carrying a `theme` and/or
+    /// `viewport` override.
+    fn leaf_dict<'py>(
+        py: Python<'py>,
+        theme: Option<&Bound<'py, PyDict>>,
+        viewport: Option<(f64, f64)>,
+    ) -> Bound<'py, PyDict> {
+        let d = PyDict::new(py);
+        d.set_item("kind", "leaf").unwrap();
+        if let Some(t) = theme {
+            d.set_item("theme", t).unwrap();
+        }
+        if let Some(vp) = viewport {
+            d.set_item("viewport", vp).unwrap();
+        }
+        d
+    }
+
+    #[test]
+    fn per_leaf_theme_and_viewport_override_or_inherit() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            // Leaf 0 inherits every call-level value; leaf 1 overrides its theme
+            // (point_size) and viewport.
+            let theme1 = PyDict::new(py);
+            theme1.set_item("point_size", 42.0).unwrap();
+
+            let children = PyList::new(
+                py,
+                [
+                    leaf_dict(py, None, None),
+                    leaf_dict(py, Some(&theme1), Some((400.0, 250.0))),
+                ],
+            )
+            .unwrap();
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "hconcat").unwrap();
+            root.set_item("children", children).unwrap();
+
+            let call_theme = ThemeInputs::default();
+            let call_vp = Viewport { width: 100.0, height: 100.0 };
+            let call_config = RenderConfig::default();
+            let call_cc = ChartConfig::default();
+
+            let bindings = collect_leaf_bindings(
+                root.as_any(),
+                &call_theme,
+                call_vp,
+                &call_config,
+                &call_cc,
+            )
+            .unwrap();
+            assert_eq!(bindings.len(), 2, "one binding per leaf, in pre-order");
+
+            // Leaf 0 inherits the call-level defaults verbatim.
+            assert_eq!(bindings[0].theme.sizes.point_size, call_theme.sizes.point_size);
+            assert_eq!(bindings[0].viewport, call_vp);
+
+            // Leaf 1's overrides applied — and DISTINCT from the inherited leaf,
+            // proving the wire carries per-leaf values, not one collapsed value.
+            assert_eq!(bindings[1].theme.sizes.point_size, 42.0);
+            assert_eq!(bindings[1].viewport, Viewport { width: 400.0, height: 250.0 });
+            assert_ne!(
+                bindings[1].theme.sizes.point_size,
+                bindings[0].theme.sizes.point_size,
+                "per-leaf theme override must not leak into the inherited leaf"
+            );
+        });
+    }
+
+    #[test]
+    fn absent_overrides_inherit_call_level_for_every_leaf() {
+        // Back-compat: a homogeneous tree (no per-leaf keys) resolves every leaf
+        // to the call-level value — the pre-5d single-value behavior.
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let children =
+                PyList::new(py, [leaf_dict(py, None, None), leaf_dict(py, None, None)]).unwrap();
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "vconcat").unwrap();
+            root.set_item("children", children).unwrap();
+
+            let mut call_theme = ThemeInputs::default();
+            call_theme.sizes.point_size = 77.0;
+            let call_vp = Viewport { width: 321.0, height: 123.0 };
+
+            let bindings = collect_leaf_bindings(
+                root.as_any(),
+                &call_theme,
+                call_vp,
+                &RenderConfig::default(),
+                &ChartConfig::default(),
+            )
+            .unwrap();
+            assert_eq!(bindings.len(), 2);
+            for b in &bindings {
+                assert_eq!(b.theme.sizes.point_size, 77.0, "inherit call-level theme");
+                assert_eq!(b.viewport, call_vp, "inherit call-level viewport");
+            }
+        });
+    }
+
+    #[test]
+    fn non_dict_theme_override_is_typed_error() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let bad = leaf_dict(py, None, None);
+            bad.set_item("theme", "not a dict").unwrap();
+            let children = PyList::new(py, [bad]).unwrap();
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "hconcat").unwrap();
+            root.set_item("children", children).unwrap();
+
+            let err = collect_leaf_bindings(
+                root.as_any(),
+                &ThemeInputs::default(),
+                Viewport { width: 100.0, height: 100.0 },
+                &RenderConfig::default(),
+                &ChartConfig::default(),
+            )
+            .unwrap_err();
+            let msg = err.value(py).to_string();
+            assert!(msg.contains("theme") && msg.contains("dict"), "msg: {msg}");
         });
     }
 }

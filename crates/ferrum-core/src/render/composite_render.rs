@@ -161,6 +161,15 @@ impl From<CompositeResolveError> for CompositeRenderError {
 /// [`CompositeNode::validate`] (the sole Python→Rust construction path enforces
 /// this; the PyO3 entry in Task 5c validates before calling).
 ///
+/// `call_theme` is the theme passed to the *render call itself* (the value the
+/// PyO3 entry decodes before resolving any per-leaf override, `binding.rs`'s
+/// `t` in `decode_composite_inputs`) — distinct from any individual leaf's
+/// (possibly overridden) `CompositeLeafInput::theme`. It styles per-child
+/// composite labels ([`apply_child_label`]) only: a label belongs to the
+/// composition, not to any one (possibly heterogeneous) leaf theme, so it
+/// always follows the call-level theme even when leaves render under
+/// different per-leaf themes.
+///
 /// Reachable from the `render_composite_svg` / `render_composite_interactive`
 /// PyO3 entries (`render/binding.rs`) — mirrors `render_scene_json`'s tuple
 /// return (this crate's idiom for "graph + side channel" outputs) rather than
@@ -168,6 +177,7 @@ impl From<CompositeResolveError> for CompositeRenderError {
 pub(crate) fn render_composite_scene(
     tree: &CompositeNode,
     leaves: &[CompositeLeafInput<'_>],
+    call_theme: &ThemeInputs,
 ) -> Result<(SceneGraph, Vec<RenderWarning>), CompositeRenderError> {
     let n = flatten_leaf_specs(tree).len();
     if leaves.len() != n {
@@ -232,7 +242,7 @@ pub(crate) fn render_composite_scene(
     // consumed (D4c).
     let mut scenes = leaf_scenes.into_iter();
     let mut panel_base = 0usize;
-    let mut placed = build_placed(tree, &mut scenes, &mut panel_base);
+    let mut placed = build_placed(tree, &mut scenes, &mut panel_base, call_theme);
 
     // Root figure chrome (title/subtitle/caption) — validated root-only.
     if let CompositeNode::Composite { title, subtitle, caption, .. } = tree {
@@ -299,13 +309,15 @@ struct Placed {
 
 /// Recursively render `node` into one placed scene. Leaf scenes are consumed from
 /// `scenes` in pre-order; `panel_base` is the running global panel-id offset,
-/// incremented as each leaf's panels are renumbered.
+/// incremented as each leaf's panels are renumbered. `call_theme` styles any
+/// per-child label encountered (see [`apply_child_label`]).
 fn build_placed(
     node: &CompositeNode,
     scenes: &mut std::vec::IntoIter<SceneGraph>,
     panel_base: &mut usize,
+    call_theme: &ThemeInputs,
 ) -> Placed {
-    match node {
+    let mut placed = match node {
         CompositeNode::Leaf { .. } => {
             let mut scene = scenes
                 .next()
@@ -318,7 +330,7 @@ fn build_placed(
         CompositeNode::Composite { layout, children, spacing, row_ratios, col_ratios, ncols, nrows, .. } => {
             let child_placed: Vec<Placed> = children
                 .iter()
-                .map(|c| build_placed(c, scenes, panel_base))
+                .map(|c| build_placed(c, scenes, panel_base, call_theme))
                 .collect();
             let spacing = spacing.unwrap_or(DEFAULT_SPACING);
             let plan = plan_layout(
@@ -332,7 +344,45 @@ fn build_placed(
             );
             merge_children(child_placed, plan)
         }
+    };
+    // Per-child panel label (Task 5d): a title-only chrome band reserved above
+    // this node's content at its top-left, so it moves with the child when the
+    // parent places it. Mirrors the old path, where a titled composite compare
+    // child was rendered standalone via `child.to_svg()` and wrapped with its
+    // own figure-title chrome. Root labels are rejected by validation, so this
+    // only ever fires on a non-root child.
+    if let Some(label) = node.label() {
+        apply_child_label(&mut placed, label, call_theme);
     }
+    placed
+}
+
+/// Reserve a title-only chrome band above `placed`'s content for a per-child
+/// label, shifting the child down and growing its bbox height. Reuses the
+/// figure-chrome header band so a labeled child matches the old standalone
+/// `child.to_svg()` title placement exactly.
+///
+/// Styled from `theme` — the call-level theme, not any per-leaf override
+/// (composite labels belong to the composition, and per-leaf themes may be
+/// heterogeneous across a tree's leaves, so there is no single "the" leaf
+/// theme to pick). Mirrors the two field reads `scene_build::build_title`
+/// (composite_render.rs's single-chart counterpart) uses for title styling —
+/// `theme.typography.title_font_size` / `theme.colors.title_color` — rather
+/// than reusing its full derivation, which also resolves a per-chart
+/// `ChartSpec::title` override that composite labels have no equivalent of.
+fn apply_child_label(placed: &mut Placed, label: &str, theme: &ThemeInputs) {
+    let chrome = FigureChrome {
+        title: Some(label),
+        title_font_size: Some(theme.typography.title_font_size),
+        title_color: Some(super::draw::to_scene_color(theme.colors.title_color)),
+        ..Default::default()
+    };
+    apply_chrome_band(&mut placed.scene, chrome);
+    // Only `height` grows: `apply_chrome_band` reserves a HEADER band (shifts
+    // content down, grows `scene.height`); it never changes `scene.width`, so
+    // re-reading `placed.scene.width` back into `placed.width` here would
+    // always be a no-op assignment of the value already held.
+    placed.height = placed.scene.height;
 }
 
 /// The computed placement of a composite node's children plus the node's bbox.
@@ -840,8 +890,20 @@ fn inject_root_chrome(
     caption: Option<&str>,
 ) {
     let chrome = FigureChrome { title, subtitle, caption, ..Default::default() };
+    apply_chrome_band(scene, chrome);
+}
+
+/// Reserve a figure-chrome band (title/subtitle header above, caption footer
+/// below) around `scene`'s content: shift every panel and non-panel node down
+/// by the header height, inject the chrome text nodes (already in outer-canvas
+/// space), and grow the canvas height by both band heights. The scene-native
+/// counterpart of `figure_chrome::wrap_with_chrome`. No-op (returns `(0.0,
+/// 0.0)`) when the chrome is empty. Shared by the root chrome
+/// ([`inject_root_chrome`]) and the per-child label ([`apply_child_label`]) so
+/// both place their bands identically.
+fn apply_chrome_band(scene: &mut SceneGraph, chrome: FigureChrome<'_>) -> (f64, f64) {
     if chrome.is_empty() {
-        return;
+        return (0.0, 0.0);
     }
     let panel_w = scene.width;
     let panel_h = scene.height;
@@ -859,6 +921,7 @@ fn inject_root_chrome(
 
     scene.title.extend(nodes);
     scene.height = panel_h + header_h + footer_h;
+    (header_h, footer_h)
 }
 
 // ---------------------------------------------------------------------------
@@ -921,13 +984,14 @@ mod tests {
     }
 
     fn leaf_node(data: usize) -> CompositeNode {
-        CompositeNode::Leaf { spec: Box::new(scatter_spec()), data }
+        CompositeNode::Leaf { spec: Box::new(scatter_spec()), data, label: None }
     }
 
     fn composite(layout: CompositeLayout, children: Vec<CompositeNode>) -> CompositeNode {
         CompositeNode::Composite {
             layout,
             children,
+            label: None,
             resolve: CompositeResolve::default(),
             spacing: None,
             row_ratios: None,
@@ -1171,7 +1235,7 @@ mod tests {
         let tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
         let h = hold();
         let leaves = [leaf_input(&h, 300.0, 200.0)]; // only 1, tree has 2
-        let err = render_composite_scene(&tree, &leaves).unwrap_err();
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap_err();
         assert!(matches!(err, CompositeRenderError::LeafCountMismatch { expected: 2, got: 1 }));
     }
 
@@ -1181,7 +1245,7 @@ mod tests {
         let h0 = hold();
         let h1 = hold();
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         assert_eq!(scene.panels.len(), 2, "two leaves → two panels");
         // Panels globally renumbered 0..N in pre-order.
         assert_eq!(scene.panels[0].id, 0);
@@ -1209,7 +1273,7 @@ mod tests {
             leaf_input(&h[1], 200.0, 150.0),
             leaf_input(&h[2], 200.0, 150.0),
         ];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         assert_eq!(scene.panels.len(), 3);
         let ids: Vec<usize> = scene.panels.iter().map(|p| p.id).collect();
         assert_eq!(ids, vec![0, 1, 2], "panels renumbered 0..N pre-order");
@@ -1229,7 +1293,7 @@ mod tests {
         let h1 = hold();
         // Same native size so the ratio (not native disparity) drives scaling.
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         assert_eq!(scene.panels.len(), 2);
         // Row 0 dominant share → identity (native). Row 1 shrunk → non-identity.
         assert!(scene.panels[0].layout_scale.is_identity(), "row0 should be native");
@@ -1249,10 +1313,10 @@ mod tests {
 
         // Baseline: same tree without chrome.
         let bare = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
-        let (bare_scene, _warnings) = render_composite_scene(&bare, &leaves).unwrap();
+        let (bare_scene, _warnings) = render_composite_scene(&bare, &leaves, &ThemeInputs::default()).unwrap();
         let bare_y = bare_scene.panels[0].plot_area.y;
 
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         // A title band was reserved: canvas grew and panels shifted down.
         assert!(scene.height > bare_scene.height, "chrome must grow the canvas height");
         let header_h = scene.height - bare_scene.height;
@@ -1287,7 +1351,7 @@ mod tests {
             resolve.x = crate::layout::facet::ResolveMode::Shared;
         }
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
         let dom = |p: &Panel| match &p.coord {
             ferrum_scene::CoordKind::Cartesian { x_domain, .. } => *x_domain,
@@ -1370,7 +1434,7 @@ mod tests {
 
         let tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
         let raw_svgs: Vec<&str> = scene
             .legend
@@ -1454,7 +1518,7 @@ mod tests {
             resolve.x = crate::layout::facet::ResolveMode::Shared;
         }
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let err = render_composite_scene(&tree, &leaves).unwrap_err();
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap_err();
         match err {
             CompositeRenderError::LeafRender { kind, index, ref source } => {
                 assert_eq!(kind, "leaf");
@@ -1483,7 +1547,7 @@ mod tests {
         let h0 = hold();
         let h1 = hold();
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
         assert_eq!(scene.panels.len(), 2);
         // Panel ids are assigned by `renumber_panels` in pre-order BEFORE
@@ -1528,7 +1592,7 @@ mod tests {
 
         let tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
-        let (mut scene, _warnings) = render_composite_scene(&tree, &leaves).unwrap();
+        let (mut scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
         assert_eq!(scene.panels.len(), 2);
         // Panel 1 (leaf 1) is placed to the right of panel 0 by the hconcat
@@ -1561,6 +1625,214 @@ mod tests {
         assert_eq!(
             scene.panels[panel_idx as usize].plot_area.x, final_panel1_x,
             "packed header's panel_idx must resolve to the panel carrying the final placement"
+        );
+    }
+
+    // -- Task 5d: per-leaf binding + per-child labels -------------------------
+
+    /// Radius of the first `Circle` mark node in a panel (point marks render as
+    /// circles; `point_size` maps to `sqrt(point_size/PI)`, so a per-leaf
+    /// `point_size` override is observable here).
+    fn first_circle_radius(panel: &Panel) -> f64 {
+        for batch in &panel.marks {
+            for node in &batch.nodes {
+                if let SceneNode::Circle { r, .. } = node {
+                    return *r;
+                }
+            }
+        }
+        panic!("panel has no circle mark node");
+    }
+
+    #[test]
+    fn per_leaf_theme_applied_distinctly_per_leaf() {
+        // Two hconcat leaves rendered under two DIFFERENT themes must carry the
+        // distinct per-leaf styling end to end — proving the composite core
+        // threads each leaf's own `CompositeLeafInput::theme`, never a single
+        // collapsed value. `point_size` -> circle radius is the observable.
+        let mut theme0 = ThemeInputs::default();
+        theme0.sizes.point_size = 12.0;
+        let mut theme1 = ThemeInputs::default();
+        theme1.sizes.point_size = 300.0;
+        let h0 = LeafHold { theme: theme0, ..hold() };
+        let h1 = LeafHold { theme: theme1, ..hold() };
+
+        let tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        let r0 = first_circle_radius(&scene.panels[0]);
+        let r1 = first_circle_radius(&scene.panels[1]);
+        assert!(r0 > 0.0 && r1 > 0.0, "both leaves must render circle marks");
+        assert!(
+            (r0 - r1).abs() > 1e-6,
+            "distinct per-leaf point_size must yield distinct radii: r0={r0} r1={r1}"
+        );
+        // Discriminator: leaf 1's larger point_size must render the larger radius,
+        // proving the mapping applied per leaf (not one shared theme).
+        assert!(r1 > r0, "larger per-leaf point_size must render the larger radius");
+    }
+
+    /// A labeled leaf node — a per-child label attached to an otherwise-standard
+    /// scatter leaf.
+    fn labeled_leaf(data: usize, label: &str) -> CompositeNode {
+        CompositeNode::Leaf {
+            spec: Box::new(scatter_spec()),
+            data,
+            label: Some(label.to_string()),
+        }
+    }
+
+    /// The `(x, y, content)` of the first title text node whose content equals
+    /// `want`, if present.
+    fn find_label(scene: &SceneGraph, want: &str) -> Option<(f64, f64)> {
+        scene.title.iter().find_map(|n| match n {
+            SceneNode::Text { x, y, content, .. } if content == want => Some((*x, *y)),
+            _ => None,
+        })
+    }
+
+    /// The `(font_size, color)` of the first title text node whose content
+    /// equals `want`, if present.
+    fn find_label_style(scene: &SceneGraph, want: &str) -> Option<(f64, ferrum_scene::Color)> {
+        scene.title.iter().find_map(|n| match n {
+            SceneNode::Text { content, style, .. } if content == want => {
+                Some((style.font_size, style.color))
+            }
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn child_labels_emit_at_child_origin_under_wrap() {
+        use crate::render::figure_chrome::DEFAULT_CHROME_INSET;
+        // Two labeled leaves in a 2-col wrap flow into one row: child 0 at the
+        // left origin, child 1 offset to its right. Each label is a bold header
+        // band at its child's top-left, so it moves with the child's placement.
+        let mut tree = composite(
+            CompositeLayout::Wrap,
+            vec![labeled_leaf(0, "Model A"), labeled_leaf(1, "Model B")],
+        );
+        if let CompositeNode::Composite { ncols, .. } = &mut tree {
+            *ncols = Some(2);
+        }
+        let h0 = hold();
+        let h1 = hold();
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+
+        // Baseline without labels: panels sit at their native top (~no header).
+        let bare = composite(CompositeLayout::Wrap, vec![leaf_node(0), leaf_node(1)]);
+        let bare = {
+            let mut b = bare;
+            if let CompositeNode::Composite { ncols, .. } = &mut b { *ncols = Some(2); }
+            b
+        };
+        let (bare_scene, _) = render_composite_scene(&bare, &leaves, &ThemeInputs::default()).unwrap();
+
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        let (ax, _ay) = find_label(&scene, "Model A").expect("child 0 label present");
+        let (bx, _by) = find_label(&scene, "Model B").expect("child 1 label present");
+        // Child 0 is at placement tx=0, so its label sits at the default inset.
+        assert!(
+            (ax - DEFAULT_CHROME_INSET).abs() < 1e-6,
+            "child 0 label must sit at the child origin inset, got x={ax}"
+        );
+        // Child 1 is placed to the right; its label is offset by that placement.
+        assert!(bx > ax, "child 1 label must be offset right of child 0: ax={ax} bx={bx}");
+
+        // The label reserves headroom: panels shift DOWN vs. the unlabeled tree.
+        assert!(
+            scene.panels[0].plot_area.y > bare_scene.panels[0].plot_area.y + 1.0,
+            "labeled panel must shift down by the reserved label band"
+        );
+    }
+
+    #[test]
+    fn child_labels_offset_down_with_row_under_grid() {
+        // A 2-row x 1-col grid of labeled leaves: the second row's label must be
+        // offset DOWN by the first row's placement, proving the label travels
+        // with the child under grid placement (not baked at a fixed canvas y).
+        let mut tree = composite(
+            CompositeLayout::Grid,
+            vec![labeled_leaf(0, "Top"), labeled_leaf(1, "Bottom")],
+        );
+        if let CompositeNode::Composite { nrows, ncols, .. } = &mut tree {
+            *nrows = Some(2);
+            *ncols = Some(1);
+        }
+        let h0 = hold();
+        let h1 = hold();
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        let (_tx, top_y) = find_label(&scene, "Top").expect("row 0 label present");
+        let (_bx, bot_y) = find_label(&scene, "Bottom").expect("row 1 label present");
+        assert!(
+            bot_y > top_y + 100.0,
+            "row 1 label must be offset far below row 0's (row placement): top={top_y} bottom={bot_y}"
+        );
+    }
+
+    /// Under the DEFAULT theme, a child label must emit the DEFAULT
+    /// `ThemeInputs`'s own title styling (`typography.title_font_size` /
+    /// `colors.title_color`) — NOT the unrelated `figure_chrome::
+    /// FIGURE_TITLE_FONT_SIZE` constant (16px). This is the byte-for-byte old
+    /// path: `_compose_compare` (`plots/_helpers.py`) labels a composite child
+    /// via `child.properties(title=name)`, i.e. the PER-CHART title pipeline
+    /// (`scene_build::build_title`, which reads these same two theme fields),
+    /// never the figure-level chrome constants — Task 5d's own report
+    /// mischaracterized this as matching `child.to_svg()`'s figure-chrome
+    /// wrap. `title_font_size` (13px, `DEFAULT_TITLE_FONT_SIZE`) genuinely
+    /// differs from `FIGURE_TITLE_FONT_SIZE` (16px); `title_color` happens to
+    /// also be `#1f2937` by coincidence of both defaults sharing the same
+    /// "ferrum dark text" hex. Comparing against `ThemeInputs::default()`
+    /// directly (not a hardcoded literal) keeps this test honest if either
+    /// default ever changes.
+    #[test]
+    fn child_label_matches_call_level_theme_defaults() {
+        let tree = composite(CompositeLayout::Hconcat, vec![labeled_leaf(0, "Model A")]);
+        let h0 = hold();
+        let leaves = [leaf_input(&h0, 300.0, 200.0)];
+        let default_theme = ThemeInputs::default();
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &default_theme).unwrap();
+
+        let (font_size, color) =
+            find_label_style(&scene, "Model A").expect("labeled leaf's label must be present");
+        assert_eq!(font_size, default_theme.typography.title_font_size);
+        assert_eq!(color, crate::render::draw::to_scene_color(default_theme.colors.title_color));
+    }
+
+    /// The finding this test closes: `apply_child_label` used to style every
+    /// label from `FigureChrome::default()` (the hardcoded figure-chrome
+    /// constants) regardless of the theme passed to the render call, so a
+    /// custom theme's title styling silently never reached composite labels.
+    /// A labeled leaf rendered under a NON-default theme (distinct
+    /// `title_font_size` + `title_color`) must reflect BOTH overridden values
+    /// on the label's text node.
+    #[test]
+    fn child_label_reflects_call_level_theme_font_size_and_color() {
+        let mut theme = ThemeInputs::default();
+        theme.typography.title_font_size = 30.0;
+        theme.colors.title_color = palette::Srgba::new(0x11, 0x22, 0x33, 0xFF);
+
+        let tree = composite(CompositeLayout::Hconcat, vec![labeled_leaf(0, "Model A")]);
+        let h0 = hold();
+        let leaves = [leaf_input(&h0, 300.0, 200.0)];
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &theme).unwrap();
+
+        let (font_size, color) =
+            find_label_style(&scene, "Model A").expect("labeled leaf's label must be present");
+        assert_eq!(font_size, 30.0, "label must use the call-level theme's title_font_size");
+        assert_eq!(
+            color,
+            ferrum_scene::Color { r: 0x11, g: 0x22, b: 0x33, a: 0xff },
+            "label must use the call-level theme's title_color"
+        );
+        assert_ne!(
+            font_size, 16.0,
+            "sanity: the themed value must differ from the figure-chrome constant"
         );
     }
 }

@@ -170,10 +170,20 @@ pub enum CompositeNode {
         /// through `Box<T>` so the wire shape is unaffected.
         spec: Box<ChartSpec>,
         data: usize,
+        /// Optional per-child panel label (spec §6, Task 5d). Rendered as a
+        /// bold header band at the child's placement origin. Valid on any
+        /// non-root node; rejected at the root (the root uses `title`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
     },
     Composite {
         layout: CompositeLayout,
         children: Vec<CompositeNode>,
+        /// Optional per-child panel label (spec §6, Task 5d). Rendered as a
+        /// bold header band at the child's placement origin. Valid on any
+        /// non-root node; rejected at the root (the root uses `title`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
         /// Per-channel scale resolution. Omitted (or both channels
         /// `independent`) is skipped from canonical JSON.
         #[serde(default, skip_serializing_if = "CompositeResolve::is_default")]
@@ -222,6 +232,16 @@ impl CompositeNode {
         }
     }
 
+    /// This node's optional per-child panel label (Task 5d), if any. Present on
+    /// either node shape; `None` when unset (the common case).
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            CompositeNode::Leaf { label, .. } | CompositeNode::Composite { label, .. } => {
+                label.as_deref()
+            }
+        }
+    }
+
     /// Validate structural invariants for the whole tree (spec §4): empty
     /// `children`, ratio arity vs. `nrows`/`ncols`, kind-specific field
     /// misuse (ratios/`ncols`/`nrows` on a layout that doesn't use them),
@@ -235,6 +255,12 @@ impl CompositeNode {
 
     fn validate_node(&self, is_root: bool) -> Result<(), CompositeSpecError> {
         let kind = self.kind_name();
+        // Per-child labels are root-forbidden (the root titles via `title`);
+        // valid on any node below the root. Checked for both shapes before the
+        // Composite-only structural checks so a labeled leaf root also fails.
+        if is_root && self.label().is_some() {
+            return Err(CompositeSpecError::LabelAtRoot { kind });
+        }
         let CompositeNode::Composite {
             layout,
             children,
@@ -381,6 +407,9 @@ pub enum CompositeSpecError {
     /// `title`/`subtitle`/`caption` was set on a non-root node (spec §6:
     /// these fields are root-only figure chrome).
     RootOnlyField { kind: &'static str, field: &'static str },
+    /// `label` was set on the root node — labels are per-child chrome (Task
+    /// 5d); the root titles via `title`.
+    LabelAtRoot { kind: &'static str },
 }
 
 impl fmt::Display for CompositeSpecError {
@@ -408,6 +437,11 @@ impl fmt::Display for CompositeSpecError {
             Self::RootOnlyField { kind, field } => write!(
                 f,
                 "{kind}: '{field}' is only valid at the root of a composite tree"
+            ),
+            Self::LabelAtRoot { kind } => write!(
+                f,
+                "{kind}: 'label' is a per-child field and is not valid at the root \
+                 of a composite tree (the root uses 'title')"
             ),
         }
     }
@@ -452,7 +486,8 @@ fn composite_node_from_py(obj: &Bound<'_, PyAny>) -> PyResult<CompositeNode> {
                 .get_item("data")?
                 .ok_or_else(|| PyValueError::new_err("leaf node missing required key 'data'"))?
                 .extract()?;
-            Ok(CompositeNode::Leaf { spec: Box::new(spec), data })
+            let label = opt_string(dict, "label")?;
+            Ok(CompositeNode::Leaf { spec: Box::new(spec), data, label })
         }
         "composite" => {
             let layout_str = require_str(dict, "layout")?;
@@ -511,10 +546,12 @@ fn composite_node_from_py(obj: &Bound<'_, PyAny>) -> PyResult<CompositeNode> {
                 Some(v) => Some(v.extract()?),
                 None => None,
             };
+            let label = opt_string(dict, "label")?;
 
             Ok(CompositeNode::Composite {
                 layout,
                 children,
+                label,
                 resolve,
                 spacing,
                 row_ratios,
@@ -552,6 +589,15 @@ fn opt_item<'py>(dict: &Bound<'py, PyDict>, key: &str) -> PyResult<Option<Bound<
     }
 }
 
+/// Extract an optional string field, treating an absent-or-`None` value as
+/// `None` (same present-but-`None` handling as [`opt_item`]).
+fn opt_string(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
+    match opt_item(dict, key)? {
+        Some(v) => Ok(Some(v.extract()?)),
+        None => Ok(None),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -585,13 +631,14 @@ mod tests {
     }
 
     fn leaf(data: usize) -> CompositeNode {
-        CompositeNode::Leaf { spec: Box::new(dummy_chart_spec()), data }
+        CompositeNode::Leaf { spec: Box::new(dummy_chart_spec()), data, label: None }
     }
 
     fn composite(layout: CompositeLayout, children: Vec<CompositeNode>) -> CompositeNode {
         CompositeNode::Composite {
             layout,
             children,
+            label: None,
             resolve: CompositeResolve::default(),
             spacing: None,
             row_ratios: None,
@@ -874,6 +921,113 @@ mod tests {
         assert!(root.validate().is_ok());
     }
 
+    // -- per-child labels (Task 5d) -----------------------------------------
+
+    #[test]
+    fn validate_rejects_label_on_composite_root() {
+        let mut root = composite(CompositeLayout::Hconcat, vec![leaf(0), leaf(1)]);
+        if let CompositeNode::Composite { label, .. } = &mut root {
+            *label = Some("root label".into());
+        }
+        let err = root.validate().unwrap_err();
+        assert_eq!(err, CompositeSpecError::LabelAtRoot { kind: "hconcat" });
+    }
+
+    #[test]
+    fn validate_rejects_label_on_leaf_root() {
+        // A bare leaf used as the tree root may not carry a label either.
+        let mut root = leaf(0);
+        if let CompositeNode::Leaf { label, .. } = &mut root {
+            *label = Some("leaf root".into());
+        }
+        let err = root.validate().unwrap_err();
+        assert_eq!(err, CompositeSpecError::LabelAtRoot { kind: "leaf" });
+    }
+
+    #[test]
+    fn validate_accepts_label_on_non_root_children() {
+        // Labels are valid anywhere below the root — on both leaf and composite
+        // children.
+        let mut inner = composite(CompositeLayout::Vconcat, vec![leaf(0), leaf(1)]);
+        if let CompositeNode::Composite { label, .. } = &mut inner {
+            *label = Some("composite child".into());
+        }
+        let mut labeled_leaf = leaf(2);
+        if let CompositeNode::Leaf { label, .. } = &mut labeled_leaf {
+            *label = Some("leaf child".into());
+        }
+        let mut root = composite(CompositeLayout::Wrap, vec![inner, labeled_leaf]);
+        if let CompositeNode::Composite { ncols, .. } = &mut root {
+            *ncols = Some(2);
+        }
+        assert!(root.validate().is_ok(), "labels valid on non-root children");
+    }
+
+    #[test]
+    fn label_round_trips_in_json_and_is_omitted_when_absent() {
+        // Present label survives a serde round trip; absent label is skipped
+        // from canonical JSON (so Task 6/7 label-less trees stay byte-identical).
+        let mut node = composite(CompositeLayout::Hconcat, vec![leaf(0), leaf(1)]);
+        if let CompositeNode::Composite { children, .. } = &mut node {
+            if let CompositeNode::Leaf { label, .. } = &mut children[0] {
+                *label = Some("A".into());
+            }
+        }
+        let json = serde_json::to_string(&node).unwrap();
+        assert!(json.contains(r#""label":"A""#), "labeled child must serialize: {json}");
+        // The unlabeled sibling + the root must NOT emit a label key.
+        assert_eq!(json.matches("label").count(), 1, "only the one label present: {json}");
+        let parsed: CompositeNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, node);
+    }
+
+    #[test]
+    fn composite_tree_from_py_reads_child_label() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let child = PyDict::new(py);
+            child.set_item("kind", "leaf").unwrap();
+            child.set_item("spec", Py::new(py, dummy_chart_spec()).unwrap()).unwrap();
+            child.set_item("data", 0usize).unwrap();
+            child.set_item("label", "Model A").unwrap();
+
+            let children = pyo3::types::PyList::new(py, [child]).unwrap();
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "hconcat").unwrap();
+            root.set_item("children", children).unwrap();
+
+            let node = composite_tree_from_py(root.as_any()).unwrap();
+            let CompositeNode::Composite { children, label, .. } = node else {
+                panic!("expected Composite")
+            };
+            assert_eq!(label, None, "root carries no label");
+            assert_eq!(children[0].label(), Some("Model A"), "child label read from dict");
+        });
+    }
+
+    #[test]
+    fn composite_tree_from_py_rejects_label_at_root() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let child = PyDict::new(py);
+            child.set_item("kind", "leaf").unwrap();
+            child.set_item("spec", Py::new(py, dummy_chart_spec()).unwrap()).unwrap();
+            child.set_item("data", 0usize).unwrap();
+
+            let children = pyo3::types::PyList::new(py, [child]).unwrap();
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "hconcat").unwrap();
+            root.set_item("children", children).unwrap();
+            root.set_item("label", "not allowed here").unwrap();
+
+            let err = composite_tree_from_py(root.as_any()).unwrap_err();
+            let msg = err.value(py).to_string();
+            assert!(msg.contains("label") && msg.contains("root"), "msg: {msg}");
+        });
+    }
+
     // -- PyO3 coercion --------------------------------------------------
 
     #[test]
@@ -886,7 +1040,7 @@ mod tests {
             d.set_item("data", 2usize).unwrap();
             let node = composite_tree_from_py(d.as_any()).unwrap();
             match node {
-                CompositeNode::Leaf { spec, data } => {
+                CompositeNode::Leaf { spec, data, .. } => {
                     assert_eq!(data, 2);
                     assert_eq!(*spec, dummy_chart_spec());
                 }
