@@ -240,19 +240,30 @@ pub enum CompositeNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         config: Option<serde_json::Value>,
     },
-    /// A placeholder cell in a `grid`/`wrap` layout — occupies its row/column
-    /// slot but renders no panel, label, or chrome (spec: JointChart's empty
-    /// 2x2 corner, RepeatChart's `corner=True`). Declared as an empty struct
-    /// variant (`{}`), not a bare unit variant, so `deny_unknown_fields`
-    /// actually rejects a stray key (a bare unit variant's Content-based
-    /// serde deserialization does not enforce it) — a hole has nothing to
-    /// render, so no `spec`/`data`/`label` key is ever valid on its wire
-    /// object. Valid only as a direct child of a `grid`/`wrap` composite
-    /// ([`CompositeNode::validate`] rejects it elsewhere, and at the tree
-    /// root); the layout pass ([`crate::render::composite_render`]) reserves
-    /// its slot from the row/column sizing contributed by its *sibling*
-    /// cells and merges no content for it.
-    Hole {},
+    /// A placeholder cell — occupies a row/column slot but renders no panel
+    /// or label (spec: JointChart's empty 2x2 corner, RepeatChart's
+    /// `corner=True`). Valid only as a direct child of a `grid`/`wrap`
+    /// composite, or (Task 10-rust) a direct child of `hconcat`/`vconcat`
+    /// when both `width` and `height` are present ([`CompositeNode::validate`]
+    /// rejects it elsewhere — `overlay`, and any layout at the tree root).
+    ///
+    /// - Under `grid`/`wrap`: `width`/`height` are ignored (cell math governs
+    ///   the slot's size from its sibling cells; the layout pass
+    ///   ([`crate::render::composite_render`]) reserves the slot and merges
+    ///   no content for it) — both fields absent is the common case.
+    /// - Under `hconcat`/`vconcat`: `width`/`height` (both required) reserve
+    ///   exactly that much blank space in the flow, mirroring the legacy
+    ///   string-compositor's placement of an empty-data child's blank SVG at
+    ///   its own viewport size.
+    Hole {
+        /// Linear-layout-only sized-hole width (px). `None` under grid/wrap
+        /// (ignored there); required alongside `height` under hconcat/vconcat.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<f64>,
+        /// Linear-layout-only sized-hole height (px). See `width`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<f64>,
+    },
 }
 
 impl CompositeNode {
@@ -263,7 +274,7 @@ impl CompositeNode {
         match self {
             CompositeNode::Leaf { .. } => "leaf",
             CompositeNode::Composite { layout, .. } => layout.as_str(),
-            CompositeNode::Hole {} => "hole",
+            CompositeNode::Hole { .. } => "hole",
         }
     }
 
@@ -275,7 +286,7 @@ impl CompositeNode {
             CompositeNode::Leaf { label, .. } | CompositeNode::Composite { label, .. } => {
                 label.as_deref()
             }
-            CompositeNode::Hole {} => None,
+            CompositeNode::Hole { .. } => None,
         }
     }
 
@@ -299,9 +310,10 @@ impl CompositeNode {
         if is_root && self.label().is_some() {
             return Err(CompositeSpecError::LabelAtRoot { kind });
         }
-        // A hole is a placeholder cell within a grid/wrap parent — it has no
-        // content of its own, so it can never stand alone as the tree root.
-        if is_root && matches!(self, CompositeNode::Hole {}) {
+        // A hole is a placeholder cell within a grid/wrap/linear parent — it
+        // has no content of its own, so it can never stand alone as the tree
+        // root.
+        if is_root && matches!(self, CompositeNode::Hole { .. }) {
             return Err(CompositeSpecError::HoleAtRoot);
         }
         let CompositeNode::Composite {
@@ -325,13 +337,25 @@ impl CompositeNode {
             return Err(CompositeSpecError::EmptyChildren { kind });
         }
 
-        // Holes are valid only as children of grid/wrap composites (spec: they
-        // exist to occupy an unused cell in a rectangular layout — hconcat/
-        // vconcat/overlay have no such notion of a cell to leave empty).
-        if !matches!(layout, CompositeLayout::Grid | CompositeLayout::Wrap)
-            && children.iter().any(|c| matches!(c, CompositeNode::Hole {}))
-        {
-            return Err(CompositeSpecError::HoleNotSupported { kind });
+        // Holes are valid as children of grid/wrap composites (spec: they
+        // occupy an unused cell in a rectangular layout; `width`/`height` are
+        // ignored there — cell math governs the slot) and, as of Task
+        // 10-rust, as children of hconcat/vconcat when they carry BOTH
+        // `width` and `height` (a sizeless hole under a linear layout has no
+        // cell math to size it from, so it is rejected). Overlay never
+        // supports holes, sized or not — an overlay has no notion of a cell
+        // to leave empty.
+        if !matches!(layout, CompositeLayout::Grid | CompositeLayout::Wrap) {
+            for child in children {
+                let CompositeNode::Hole { width, height } = child else { continue };
+                if matches!(layout, CompositeLayout::Hconcat | CompositeLayout::Vconcat) {
+                    if width.is_none() || height.is_none() {
+                        return Err(CompositeSpecError::HoleSizeRequired { kind });
+                    }
+                } else {
+                    return Err(CompositeSpecError::HoleNotSupported { kind });
+                }
+            }
         }
 
         match layout {
@@ -463,8 +487,13 @@ pub enum CompositeSpecError {
     /// 5d); the root titles via `title`.
     LabelAtRoot { kind: &'static str },
     /// A `hole` child was placed under a composite layout other than `grid`/
-    /// `wrap` — holes are grid/wrap-only placeholder cells.
+    /// `wrap`/`hconcat`/`vconcat` — holes are unsupported there (e.g. `overlay`
+    /// has no notion of a cell to leave empty).
     HoleNotSupported { kind: &'static str },
+    /// A `hole` child under `hconcat`/`vconcat` omitted `width` and/or
+    /// `height` — a linear layout has no cell math to size a hole from, so
+    /// both are required there (grid/wrap holes have no such requirement).
+    HoleSizeRequired { kind: &'static str },
     /// A `hole` node was used as the tree root — a hole is a placeholder
     /// cell within a grid/wrap parent and carries no content of its own.
     HoleAtRoot,
@@ -503,7 +532,11 @@ impl fmt::Display for CompositeSpecError {
             ),
             Self::HoleNotSupported { kind } => write!(
                 f,
-                "{kind}: 'hole' children are only supported on 'grid'/'wrap' nodes"
+                "{kind}: 'hole' children are only supported on 'grid'/'wrap'/'hconcat'/'vconcat' nodes"
+            ),
+            Self::HoleSizeRequired { kind } => write!(
+                f,
+                "{kind}: a 'hole' under 'hconcat'/'vconcat' requires both 'width' and 'height'"
             ),
             Self::HoleAtRoot => write!(
                 f,
@@ -631,7 +664,17 @@ fn composite_node_from_py(obj: &Bound<'_, PyAny>) -> PyResult<CompositeNode> {
                 config,
             })
         }
-        "hole" => Ok(CompositeNode::Hole {}),
+        "hole" => {
+            let width: Option<f64> = match opt_item(dict, "width")? {
+                Some(v) => Some(v.extract()?),
+                None => None,
+            };
+            let height: Option<f64> = match opt_item(dict, "height")? {
+                Some(v) => Some(v.extract()?),
+                None => None,
+            };
+            Ok(CompositeNode::Hole { width, height })
+        }
         other => Err(PyValueError::new_err(format!(
             "unknown composite tree node kind: '{other}'; expected 'leaf', 'composite', or 'hole'"
         ))),
@@ -734,18 +777,31 @@ mod tests {
 
     #[test]
     fn hole_round_trips() {
-        let node = CompositeNode::Hole {};
+        let node = CompositeNode::Hole { width: None, height: None };
         let json = serde_json::to_string(&node).unwrap();
-        assert_eq!(json, r#"{"kind":"hole"}"#, "hole is a bare tag, no fields: {json}");
+        assert_eq!(
+            json,
+            r#"{"kind":"hole"}"#,
+            "unsized hole omits both fields, same wire shape as before sized holes: {json}"
+        );
+        let parsed: CompositeNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, node);
+    }
+
+    #[test]
+    fn sized_hole_round_trips() {
+        let node = CompositeNode::Hole { width: Some(40.0), height: Some(30.0) };
+        let json = serde_json::to_string(&node).unwrap();
+        assert_eq!(json, r#"{"kind":"hole","width":40.0,"height":30.0}"#, "json: {json}");
         let parsed: CompositeNode = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, node);
     }
 
     #[test]
     fn hole_with_unknown_field_is_rejected() {
-        // Holes carry no fields — an extra key on the wire (e.g. a stray
-        // `label`) must be rejected the same way `deny_unknown_fields` rejects
-        // it on `leaf`/`composite`, not silently ignored.
+        // An extra key beyond `kind`/`width`/`height` on the wire (e.g. a
+        // stray `label`) must be rejected the same way `deny_unknown_fields`
+        // rejects it on `leaf`/`composite`, not silently ignored.
         let json = r#"{"kind":"hole","label":"nope"}"#;
         let err = serde_json::from_str::<CompositeNode>(json).unwrap_err();
         assert!(err.to_string().contains("unknown field"), "err: {err}");
@@ -1030,21 +1086,75 @@ mod tests {
 
     #[test]
     fn validate_rejects_hole_at_root() {
-        let err = CompositeNode::Hole {}.validate().unwrap_err();
+        let err = CompositeNode::Hole { width: None, height: None }.validate().unwrap_err();
         assert_eq!(err, CompositeSpecError::HoleAtRoot);
     }
 
     #[test]
-    fn validate_rejects_hole_child_on_hconcat_vconcat_overlay() {
-        for layout in [CompositeLayout::Hconcat, CompositeLayout::Vconcat, CompositeLayout::Overlay]
-        {
-            let node = composite(layout, vec![leaf(0), CompositeNode::Hole {}]);
+    fn validate_rejects_sizeless_hole_child_on_overlay() {
+        // Overlay never supports holes, sized or not.
+        let node = composite(
+            CompositeLayout::Overlay,
+            vec![leaf(0), CompositeNode::Hole { width: None, height: None }],
+        );
+        let err = node.validate().unwrap_err();
+        assert_eq!(err, CompositeSpecError::HoleNotSupported { kind: "overlay" });
+    }
+
+    #[test]
+    fn validate_rejects_sized_hole_child_on_overlay() {
+        // Even a fully-sized hole is illegal under overlay (Task 10-rust: only
+        // hconcat/vconcat gained sized-hole support).
+        let node = composite(
+            CompositeLayout::Overlay,
+            vec![leaf(0), CompositeNode::Hole { width: Some(10.0), height: Some(10.0) }],
+        );
+        let err = node.validate().unwrap_err();
+        assert_eq!(err, CompositeSpecError::HoleNotSupported { kind: "overlay" });
+    }
+
+    #[test]
+    fn validate_rejects_sizeless_hole_child_on_hconcat_vconcat() {
+        for layout in [CompositeLayout::Hconcat, CompositeLayout::Vconcat] {
+            let node = composite(layout, vec![leaf(0), CompositeNode::Hole { width: None, height: None }]);
             let err = node.validate().unwrap_err();
             assert_eq!(
                 err,
-                CompositeSpecError::HoleNotSupported { kind: layout.as_str() },
-                "hole should be rejected under {layout:?}"
+                CompositeSpecError::HoleSizeRequired { kind: layout.as_str() },
+                "sizeless hole should be rejected under {layout:?}"
             );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_partially_sized_hole_child_on_hconcat_vconcat() {
+        for layout in [CompositeLayout::Hconcat, CompositeLayout::Vconcat] {
+            let width_only =
+                composite(layout, vec![leaf(0), CompositeNode::Hole { width: Some(10.0), height: None }]);
+            assert_eq!(
+                width_only.validate().unwrap_err(),
+                CompositeSpecError::HoleSizeRequired { kind: layout.as_str() },
+                "width-only hole should be rejected under {layout:?}"
+            );
+
+            let height_only =
+                composite(layout, vec![leaf(0), CompositeNode::Hole { width: None, height: Some(10.0) }]);
+            assert_eq!(
+                height_only.validate().unwrap_err(),
+                CompositeSpecError::HoleSizeRequired { kind: layout.as_str() },
+                "height-only hole should be rejected under {layout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_fully_sized_hole_child_on_hconcat_vconcat() {
+        for layout in [CompositeLayout::Hconcat, CompositeLayout::Vconcat] {
+            let node = composite(
+                layout,
+                vec![leaf(0), CompositeNode::Hole { width: Some(40.0), height: Some(30.0) }, leaf(1)],
+            );
+            assert!(node.validate().is_ok(), "fully-sized hole should validate under {layout:?}");
         }
     }
 
@@ -1052,7 +1162,28 @@ mod tests {
     fn validate_accepts_hole_in_grid() {
         let mut node = composite(
             CompositeLayout::Grid,
-            vec![leaf(0), CompositeNode::Hole {}, leaf(1), leaf(2)],
+            vec![leaf(0), CompositeNode::Hole { width: None, height: None }, leaf(1), leaf(2)],
+        );
+        if let CompositeNode::Composite { nrows, ncols, .. } = &mut node {
+            *nrows = Some(2);
+            *ncols = Some(2);
+        }
+        assert!(node.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_sized_fields_ignored_under_grid() {
+        // Task 10-rust: grid/wrap holes accept width/height on the wire (no
+        // validation error) but the fields have no effect on cell math — the
+        // layout pass ignores them there, tested in composite_render.rs.
+        let mut node = composite(
+            CompositeLayout::Grid,
+            vec![
+                leaf(0),
+                CompositeNode::Hole { width: Some(999.0), height: Some(999.0) },
+                leaf(1),
+                leaf(2),
+            ],
         );
         if let CompositeNode::Composite { nrows, ncols, .. } = &mut node {
             *nrows = Some(2);
@@ -1063,7 +1194,10 @@ mod tests {
 
     #[test]
     fn validate_accepts_hole_in_wrap() {
-        let mut node = composite(CompositeLayout::Wrap, vec![leaf(0), leaf(1), CompositeNode::Hole {}]);
+        let mut node = composite(
+            CompositeLayout::Wrap,
+            vec![leaf(0), leaf(1), CompositeNode::Hole { width: None, height: None }],
+        );
         if let CompositeNode::Composite { ncols, .. } = &mut node {
             *ncols = Some(2);
         }
@@ -1426,12 +1560,12 @@ mod tests {
                 panic!("expected Composite")
             };
             assert_eq!(children.len(), 2);
-            assert!(matches!(children[1], CompositeNode::Hole {}));
+            assert!(matches!(children[1], CompositeNode::Hole { .. }));
         });
     }
 
     #[test]
-    fn composite_tree_from_py_hole_rejected_outside_grid_wrap() {
+    fn composite_tree_from_py_sizeless_hole_rejected_under_hconcat() {
         pyo3::Python::initialize();
         Python::attach(|py| {
             let mk_leaf = |idx: usize| {
@@ -1454,6 +1588,66 @@ mod tests {
             let err = composite_tree_from_py(root.as_any()).unwrap_err();
             let msg = err.value(py).to_string();
             assert!(msg.contains("hole") && msg.contains("hconcat"), "msg: {msg}");
+        });
+    }
+
+    #[test]
+    fn composite_tree_from_py_sized_hole_accepted_under_hconcat() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let mk_leaf = |idx: usize| {
+                let d = PyDict::new(py);
+                d.set_item("kind", "leaf").unwrap();
+                d.set_item("spec", Py::new(py, dummy_chart_spec()).unwrap()).unwrap();
+                d.set_item("data", idx).unwrap();
+                d
+            };
+            let hole = PyDict::new(py);
+            hole.set_item("kind", "hole").unwrap();
+            hole.set_item("width", 40.0f64).unwrap();
+            hole.set_item("height", 30.0f64).unwrap();
+
+            let children =
+                pyo3::types::PyList::new(py, [mk_leaf(0).into_any(), hole.into_any()]).unwrap();
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "hconcat").unwrap();
+            root.set_item("children", children).unwrap();
+
+            let node = composite_tree_from_py(root.as_any()).unwrap();
+            let CompositeNode::Composite { children, .. } = node else {
+                panic!("expected Composite")
+            };
+            assert_eq!(children[1], CompositeNode::Hole { width: Some(40.0), height: Some(30.0) });
+        });
+    }
+
+    #[test]
+    fn composite_tree_from_py_hole_rejected_under_overlay() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let mk_leaf = |idx: usize| {
+                let d = PyDict::new(py);
+                d.set_item("kind", "leaf").unwrap();
+                d.set_item("spec", Py::new(py, dummy_chart_spec()).unwrap()).unwrap();
+                d.set_item("data", idx).unwrap();
+                d
+            };
+            let hole = PyDict::new(py);
+            hole.set_item("kind", "hole").unwrap();
+            hole.set_item("width", 40.0f64).unwrap();
+            hole.set_item("height", 30.0f64).unwrap();
+
+            let children =
+                pyo3::types::PyList::new(py, [mk_leaf(0).into_any(), hole.into_any()]).unwrap();
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "overlay").unwrap();
+            root.set_item("children", children).unwrap();
+
+            let err = composite_tree_from_py(root.as_any()).unwrap_err();
+            let msg = err.value(py).to_string();
+            assert!(msg.contains("hole") && msg.contains("overlay"), "msg: {msg}");
         });
     }
 }

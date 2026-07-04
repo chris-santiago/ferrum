@@ -40,7 +40,7 @@
 //! real ratio producers (JointChart/ClusterMap marginals carry no legends),
 //! consistent with amended-D4a's documented scalar-approximation gaps.
 //!
-//! # `hole` cells (Task 8a)
+//! # `hole` cells (Task 8a, sized holes Task 10-rust)
 //!
 //! A `grid`/`wrap` child may be [`CompositeNode::Hole`] — a placeholder cell
 //! (JointChart's empty 2x2 corner, RepeatChart's `corner=True`). [`build_placed`]
@@ -50,6 +50,18 @@
 //! never shrinks a lane that also holds a real cell — the hole's own slot is
 //! simply left empty, and ratio/spacing math for the tree's other cells is
 //! unaffected by its presence.
+//!
+//! A `hole` directly under `hconcat`/`vconcat` may additionally carry `width`/
+//! `height` (spec §4, validated: both-or-neither under a linear layout — see
+//! [`crate::spec::composite::CompositeSpecError::HoleSizeRequired`]). Faithful
+//! to the legacy string-compositor's behavior for an empty-data child (a blank
+//! SVG at the child's own viewport size, siblings unaffected), [`build_placed`]
+//! reserves exactly that `width`x`height` of blank space in the flow when its
+//! immediate parent is `hconcat`/`vconcat` — no panel, no leaf binding, no
+//! chrome, normal spacing on both sides (the same placement math any other
+//! child gets). Grid/wrap holes ignore these fields (cell math already governs
+//! their slot, per the paragraph above); the size only takes effect under a
+//! linear parent.
 
 use arrow::record_batch::RecordBatch;
 use ferrum_scene::{LayoutScale, MarkBatch, Panel, Rect, SceneGraph, SceneNode};
@@ -64,7 +76,7 @@ use super::composite::{
 };
 use super::compositor::uniquify_clip_ids;
 use super::config::RenderConfig;
-use super::figure_chrome::{title_nodes, FigureChrome};
+use super::figure_chrome::{title_nodes, ChromeAnchor, FigureChrome, DEFAULT_CHROME_INSET};
 use super::{prepare, scene_build, RenderError, RenderWarning};
 use crate::spec::composite::{CompositeLayout, CompositeNode};
 
@@ -130,6 +142,12 @@ pub(crate) enum CompositeRenderError {
         data: usize,
         payload_count: usize,
     },
+    /// The composite tree root's `config` slot (spec §6 root-only figure
+    /// chrome) failed to parse as `{"left_inset": f64?, "right_inset": f64?,
+    /// "anchor": str?}` — an unrecognized key, wrong-typed value, or an
+    /// `anchor` outside `start`/`middle`/`end`. No warn-fallback: a malformed
+    /// root `config` is a typed error naming the tree's root kind.
+    RootChromeConfigInvalid { kind: &'static str, message: String },
 }
 
 impl std::fmt::Display for CompositeRenderError {
@@ -148,6 +166,9 @@ impl std::fmt::Display for CompositeRenderError {
                 "composite {kind} leaf #{index}: data index {data} out of bounds \
                  ({payload_count} payload(s) provided)"
             ),
+            Self::RootChromeConfigInvalid { kind, message } => {
+                write!(f, "{kind}: invalid root 'config': {message}")
+            }
         }
     }
 }
@@ -253,15 +274,20 @@ pub(crate) fn render_composite_scene(
     // consumed (D4c).
     let mut scenes = leaf_scenes.into_iter();
     let mut panel_base = 0usize;
-    let mut placed = build_placed(tree, &mut scenes, &mut panel_base, call_theme);
+    let mut placed = build_placed(tree, &mut scenes, &mut panel_base, call_theme, None);
 
-    // Root figure chrome (title/subtitle/caption) — validated root-only.
-    if let CompositeNode::Composite { title, subtitle, caption, .. } = tree {
+    // Root figure chrome (title/subtitle/caption/config) — validated root-only.
+    if let CompositeNode::Composite { title, subtitle, caption, config, .. } = tree {
+        let (left_inset, right_inset, anchor) =
+            resolve_root_chrome_config(config.as_ref(), tree.kind_name())?;
         inject_root_chrome(
             &mut placed.scene,
             title.as_deref(),
             subtitle.as_deref(),
             caption.as_deref(),
+            left_inset,
+            right_inset,
+            anchor,
         );
     }
 
@@ -322,12 +348,17 @@ struct Placed {
 /// `scenes` in pre-order (a `Hole` consumes none — Task 8a); `panel_base` is the
 /// running global panel-id offset, incremented as each leaf's panels are
 /// renumbered. `call_theme` styles any per-child label encountered (see
-/// [`apply_child_label`]).
+/// [`apply_child_label`]). `parent_layout` is `node`'s immediate parent's
+/// layout kind (`None` at the tree root — a hole can never be the root, so
+/// this only matters for the `Hole` arm below); it is how a sized hole
+/// (Task 10-rust) knows whether its parent is a linear (`hconcat`/`vconcat`)
+/// layout, the only layout kind where its `width`/`height` take effect.
 fn build_placed(
     node: &CompositeNode,
     scenes: &mut std::vec::IntoIter<SceneGraph>,
     panel_base: &mut usize,
     call_theme: &ThemeInputs,
+    parent_layout: Option<CompositeLayout>,
 ) -> Placed {
     let mut placed = match node {
         CompositeNode::Leaf { .. } => {
@@ -341,16 +372,32 @@ fn build_placed(
         }
         // A hole is not a leaf: it consumes no scene from `scenes`, claims no
         // panel ids, and carries no label/chrome — it renders as an empty
-        // (Task 8a) placed subtree. Its zero size never grows the grid/wrap
-        // row or column it occupies (`plan_grid`/`plan_wrap` take the max
-        // native extent per lane); the slot's actual size is supplied by its
-        // sibling cells in that row/column, leaving the hole's cell visually
-        // blank while ratio/spacing math for the *other* cells is unaffected.
-        CompositeNode::Hole {} => Placed { scene: empty_scene(0.0, 0.0), width: 0.0, height: 0.0 },
+        // placed subtree (Task 8a). Under grid/wrap its size is always zero:
+        // `plan_grid`/`plan_wrap` size each row/column from the *max* native
+        // extent per lane, so the slot's actual size is supplied by its
+        // sibling cells there, leaving the hole's own cell visually blank
+        // while ratio/spacing math for the *other* cells is unaffected — any
+        // `width`/`height` on a grid/wrap hole is validated-legal but has no
+        // effect (spec). Under a linear (hconcat/vconcat) parent, `validate`
+        // guarantees both are present, and they size this placed subtree
+        // directly — `plan_linear` then reserves exactly that much blank
+        // space in the flow like any other child (Task 10-rust).
+        CompositeNode::Hole { width, height } => {
+            let linear = matches!(
+                parent_layout,
+                Some(CompositeLayout::Hconcat) | Some(CompositeLayout::Vconcat)
+            );
+            let (w, h) = if linear {
+                (width.unwrap_or(0.0), height.unwrap_or(0.0))
+            } else {
+                (0.0, 0.0)
+            };
+            Placed { scene: empty_scene(w, h), width: w, height: h }
+        }
         CompositeNode::Composite { layout, children, spacing, row_ratios, col_ratios, ncols, nrows, .. } => {
             let child_placed: Vec<Placed> = children
                 .iter()
-                .map(|c| build_placed(c, scenes, panel_base, call_theme))
+                .map(|c| build_placed(c, scenes, panel_base, call_theme, Some(*layout)))
                 .collect();
             let spacing = spacing.unwrap_or(DEFAULT_SPACING);
             let plan = plan_layout(
@@ -902,15 +949,70 @@ fn uniquify_node_raw_clips(node: &mut SceneNode, cell_idx: usize) {
 /// panel and non-panel node down by the header band height, injects the chrome
 /// text nodes (already in outer-canvas space), and grows the canvas by both band
 /// heights — the scene-native counterpart of `figure_chrome::wrap_with_chrome`.
-/// No-op when all three are `None`.
+/// No-op when title/subtitle/caption are all `None` (an inset/anchor override
+/// with no chrome text still emits nothing, matching the legacy compositor).
+#[allow(clippy::too_many_arguments)]
 fn inject_root_chrome(
     scene: &mut SceneGraph,
     title: Option<&str>,
     subtitle: Option<&str>,
     caption: Option<&str>,
+    left_inset: f64,
+    right_inset: f64,
+    anchor: ChromeAnchor,
 ) {
-    let chrome = FigureChrome { title, subtitle, caption, ..Default::default() };
+    let chrome =
+        FigureChrome { title, subtitle, caption, left_inset, right_inset, anchor, ..Default::default() };
     apply_chrome_band(scene, chrome);
+}
+
+/// Chrome config parsed from a composite tree root's `config` slot (spec §6,
+/// Task 10-rust): `{"left_inset": f64?, "right_inset": f64?, "anchor": str?}`
+/// — exactly the shape `_chrome.py::chrome_kwargs()` produces for the legacy
+/// `compose_svg_*` entries, so `configure_padding(left=/right=)` and
+/// `configure_title(anchor=)` reach the composite entry the same way they
+/// reach the legacy path. `deny_unknown_fields` mirrors
+/// [`crate::spec::composite::CompositeNode`]'s wire convention: a stray key is
+/// a typed error, not a silent ignore.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RootChromeConfig {
+    #[serde(default)]
+    left_inset: Option<f64>,
+    #[serde(default)]
+    right_inset: Option<f64>,
+    #[serde(default)]
+    anchor: Option<String>,
+}
+
+/// Resolve `(left_inset, right_inset, anchor)` from the root's opaque `config`
+/// `serde_json::Value` (absent keys, or an absent `config` entirely, keep the
+/// same Rust default the legacy `compose_svg_*` bindings apply on omission —
+/// [`DEFAULT_CHROME_INSET`] / [`ChromeAnchor::Start`]). `kind` is the tree
+/// root's kind name (always a layout kind — `config` is root-only, and only
+/// `Composite` nodes carry it), used to pinpoint a malformed `config` in the
+/// returned error.
+fn resolve_root_chrome_config(
+    config: Option<&serde_json::Value>,
+    kind: &'static str,
+) -> Result<(f64, f64, ChromeAnchor), CompositeRenderError> {
+    let parsed: RootChromeConfig = match config {
+        None => RootChromeConfig { left_inset: None, right_inset: None, anchor: None },
+        Some(value) => serde_json::from_value(value.clone()).map_err(|source| {
+            CompositeRenderError::RootChromeConfigInvalid { kind, message: source.to_string() }
+        })?,
+    };
+    let anchor = match parsed.anchor.as_deref() {
+        None => ChromeAnchor::Start,
+        Some(s) => s.parse::<ChromeAnchor>().map_err(|source| {
+            CompositeRenderError::RootChromeConfigInvalid { kind, message: source.to_string() }
+        })?,
+    };
+    Ok((
+        parsed.left_inset.unwrap_or(DEFAULT_CHROME_INSET),
+        parsed.right_inset.unwrap_or(DEFAULT_CHROME_INSET),
+        anchor,
+    ))
 }
 
 /// Reserve a figure-chrome band (title/subtitle header above, caption footer
@@ -1353,8 +1455,15 @@ mod tests {
         // must render no panel; the other three panels land at the same rects
         // a plain uniform 2x2 grid would produce — the hole's zero native
         // extent never shrinks a row/column that also holds a real cell.
-        let mut tree =
-            composite(CompositeLayout::Grid, vec![leaf_node(0), CompositeNode::Hole {}, leaf_node(1), leaf_node(2)]);
+        let mut tree = composite(
+            CompositeLayout::Grid,
+            vec![
+                leaf_node(0),
+                CompositeNode::Hole { width: None, height: None },
+                leaf_node(1),
+                leaf_node(2),
+            ],
+        );
         if let CompositeNode::Composite { nrows, ncols, .. } = &mut tree {
             *nrows = Some(2);
             *ncols = Some(2);
@@ -1402,7 +1511,12 @@ mod tests {
         // rectangle with a trailing hole. 3 leaves + 1 hole at ncols=2.
         let mut tree = composite(
             CompositeLayout::Wrap,
-            vec![leaf_node(0), leaf_node(1), leaf_node(2), CompositeNode::Hole {}],
+            vec![
+                leaf_node(0),
+                leaf_node(1),
+                leaf_node(2),
+                CompositeNode::Hole { width: None, height: None },
+            ],
         );
         if let CompositeNode::Composite { ncols, .. } = &mut tree {
             *ncols = Some(2);
@@ -1457,6 +1571,223 @@ mod tests {
             scene.title.iter().any(|n| matches!(n, SceneNode::Text { content, .. } if content == "Figure title")),
             "figure title text node must be present",
         );
+    }
+
+    // -- root chrome `config` slot (Task 10-rust sub-task 1) --------------------
+
+    /// Locate the title text node's `(x, style.anchor)` — the discriminator for
+    /// every `config`-driven placement test below (mirrors
+    /// `figure_chrome.rs`'s `title_nodes_*_anchor_uses_*` idiom, at the
+    /// composite-scene level instead of calling `title_nodes` directly).
+    fn title_node_x_anchor(scene: &SceneGraph) -> (f64, ferrum_scene::TextAnchor) {
+        scene
+            .title
+            .iter()
+            .find_map(|n| match n {
+                SceneNode::Text { x, style, content, .. } if content == "T" => Some((*x, style.anchor)),
+                _ => None,
+            })
+            .expect("title text node must be present")
+    }
+
+    fn hconcat_two_leaves_titled() -> CompositeNode {
+        let mut tree = composite(CompositeLayout::Hconcat, vec![leaf_node(0), leaf_node(1)]);
+        if let CompositeNode::Composite { title, .. } = &mut tree {
+            *title = Some("T".into());
+        }
+        tree
+    }
+
+    #[test]
+    fn root_config_absent_uses_default_inset_and_start_anchor() {
+        // No `config` at all: same default the legacy `compose_svg_*` bindings
+        // apply on omission (`DEFAULT_CHROME_INSET`, `ChromeAnchor::Start`).
+        let tree = hconcat_two_leaves_titled();
+        let h0 = hold();
+        let h1 = hold();
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (x, anchor) = title_node_x_anchor(&scene);
+        assert_eq!(x, DEFAULT_CHROME_INSET);
+        assert_eq!(anchor, ferrum_scene::TextAnchor::Start);
+    }
+
+    #[test]
+    fn root_config_left_inset_shifts_start_anchored_chrome() {
+        let mut tree = hconcat_two_leaves_titled();
+        if let CompositeNode::Composite { config, .. } = &mut tree {
+            *config = Some(serde_json::json!({"left_inset": 60.0}));
+        }
+        let h0 = hold();
+        let h1 = hold();
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (x, anchor) = title_node_x_anchor(&scene);
+        assert_eq!(x, 60.0, "custom left_inset must reposition the start-anchored chrome");
+        assert_eq!(anchor, ferrum_scene::TextAnchor::Start);
+    }
+
+    #[test]
+    fn root_config_middle_anchor_centers_chrome() {
+        let mut tree = hconcat_two_leaves_titled();
+        if let CompositeNode::Composite { config, .. } = &mut tree {
+            *config = Some(serde_json::json!({"anchor": "middle"}));
+        }
+        let h0 = hold();
+        let h1 = hold();
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (x, anchor) = title_node_x_anchor(&scene);
+        assert_eq!(x, scene.width / 2.0, "middle anchor must center on the composed width");
+        assert_eq!(anchor, ferrum_scene::TextAnchor::Middle);
+    }
+
+    #[test]
+    fn root_config_end_anchor_uses_right_inset() {
+        let mut tree = hconcat_two_leaves_titled();
+        if let CompositeNode::Composite { config, .. } = &mut tree {
+            *config = Some(serde_json::json!({"anchor": "end", "right_inset": 40.0}));
+        }
+        let h0 = hold();
+        let h1 = hold();
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        let (x, anchor) = title_node_x_anchor(&scene);
+        assert_eq!(x, scene.width - 40.0, "end anchor must use the custom right_inset");
+        assert_eq!(anchor, ferrum_scene::TextAnchor::End);
+    }
+
+    #[test]
+    fn root_config_unknown_key_is_typed_error_naming_root_kind() {
+        let mut tree = hconcat_two_leaves_titled();
+        if let CompositeNode::Composite { config, .. } = &mut tree {
+            *config = Some(serde_json::json!({"bogus": 1}));
+        }
+        let h0 = hold();
+        let h1 = hold();
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap_err();
+        match err {
+            CompositeRenderError::RootChromeConfigInvalid { kind, message } => {
+                assert_eq!(kind, "hconcat");
+                assert!(message.contains("bogus"), "message: {message}");
+            }
+            other => panic!("expected RootChromeConfigInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn root_config_invalid_anchor_is_typed_error() {
+        let mut tree = hconcat_two_leaves_titled();
+        if let CompositeNode::Composite { config, .. } = &mut tree {
+            *config = Some(serde_json::json!({"anchor": "diagonal"}));
+        }
+        let h0 = hold();
+        let h1 = hold();
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let err = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap_err();
+        match err {
+            CompositeRenderError::RootChromeConfigInvalid { kind, message } => {
+                assert_eq!(kind, "hconcat");
+                assert!(
+                    message.contains("start") && message.contains("middle") && message.contains("end"),
+                    "message: {message}"
+                );
+            }
+            other => panic!("expected RootChromeConfigInvalid, got {other:?}"),
+        }
+    }
+
+    // -- sized holes under hconcat/vconcat (Task 10-rust sub-task 2) -------------
+
+    #[test]
+    fn sized_hole_under_hconcat_reserves_blank_space_and_emits_no_panel() {
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![
+                leaf_node(0),
+                CompositeNode::Hole { width: Some(50.0), height: Some(150.0) },
+                leaf_node(1),
+            ],
+        );
+        assert!(tree.validate().is_ok(), "fully-sized hole is valid under hconcat");
+
+        let h0 = hold();
+        let h1 = hold();
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert_eq!(scene.panels.len(), 2, "hole must not emit a panel");
+
+        // leaf0 (300 wide) + spacing (10) + hole (50 wide) + spacing (10) = 370.
+        let x_offset = scene.panels[1].plot_area.x - scene.panels[0].plot_area.x;
+        assert!((x_offset - 370.0).abs() < 1e-9, "x offset: {x_offset}");
+        assert!(
+            (scene.panels[1].plot_area.y - scene.panels[0].plot_area.y).abs() < 1e-9,
+            "hconcat: leaves share the same row"
+        );
+    }
+
+    #[test]
+    fn sized_hole_under_vconcat_reserves_blank_space_and_emits_no_panel() {
+        let tree = composite(
+            CompositeLayout::Vconcat,
+            vec![
+                leaf_node(0),
+                CompositeNode::Hole { width: Some(150.0), height: Some(50.0) },
+                leaf_node(1),
+            ],
+        );
+        assert!(tree.validate().is_ok(), "fully-sized hole is valid under vconcat");
+
+        let h0 = hold();
+        let h1 = hold();
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert_eq!(scene.panels.len(), 2, "hole must not emit a panel");
+
+        // leaf0 (200 tall) + spacing (10) + hole (50 tall) + spacing (10) = 270.
+        let y_offset = scene.panels[1].plot_area.y - scene.panels[0].plot_area.y;
+        assert!((y_offset - 270.0).abs() < 1e-9, "y offset: {y_offset}");
+        assert!(
+            (scene.panels[1].plot_area.x - scene.panels[0].plot_area.x).abs() < 1e-9,
+            "vconcat: leaves share the same column"
+        );
+    }
+
+    #[test]
+    fn grid_hole_size_fields_are_ignored_by_cell_math() {
+        // Same shape as `grid_with_hole_places_three_panels_and_ratio_math_is_unaffected`
+        // but the hole now carries (huge, wrong) `width`/`height` — the layout
+        // pass must produce byte-identical offsets, proving grid/wrap holes
+        // ignore the size fields (cell math governs, unaffected by Task 10-rust).
+        let mut tree = composite(
+            CompositeLayout::Grid,
+            vec![
+                leaf_node(0),
+                CompositeNode::Hole { width: Some(9999.0), height: Some(9999.0) },
+                leaf_node(1),
+                leaf_node(2),
+            ],
+        );
+        if let CompositeNode::Composite { nrows, ncols, .. } = &mut tree {
+            *nrows = Some(2);
+            *ncols = Some(2);
+        }
+        assert!(tree.validate().is_ok(), "sized hole is valid under grid (fields ignored)");
+
+        let h = [hold(), hold(), hold()];
+        let leaves = [
+            leaf_input(&h[0], 300.0, 200.0),
+            leaf_input(&h[1], 300.0, 200.0),
+            leaf_input(&h[2], 300.0, 200.0),
+        ];
+        let (scene, _warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert_eq!(scene.panels.len(), 3, "hole must not emit a panel");
+
+        let row_offset = scene.panels[1].plot_area.y - scene.panels[0].plot_area.y;
+        assert!((row_offset - 210.0).abs() < 1e-9, "row offset unaffected by hole size: {row_offset}");
+        let col_offset = scene.panels[2].plot_area.x - scene.panels[1].plot_area.x;
+        assert!((col_offset - 310.0).abs() < 1e-9, "col offset unaffected by hole size: {col_offset}");
     }
 
     #[test]

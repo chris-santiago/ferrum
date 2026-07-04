@@ -1335,16 +1335,14 @@ use crate::render::figure_chrome::{ChromeAnchor, FigureChrome, DEFAULT_CHROME_IN
 
 /// Parse the user-facing chrome-anchor string into a [`ChromeAnchor`].
 ///
-/// `None` and `"start"` both map to the default left alignment. Any other
-/// string is rejected with a `ValueError` naming the valid set.
+/// `None` maps to the default left alignment; any other string is delegated
+/// to [`ChromeAnchor`]'s `FromStr` impl and rejected with a `ValueError`
+/// naming the valid set on failure (shared with the composite tree's root
+/// `config` slot parser, `render/composite_render.rs`).
 fn parse_chrome_anchor(anchor: Option<&str>) -> PyResult<ChromeAnchor> {
     match anchor {
-        None | Some("start") => Ok(ChromeAnchor::Start),
-        Some("middle") => Ok(ChromeAnchor::Middle),
-        Some("end") => Ok(ChromeAnchor::End),
-        Some(other) => Err(PyValueError::new_err(format!(
-            "anchor must be one of 'start'|'middle'|'end', got '{other}'"
-        ))),
+        None => Ok(ChromeAnchor::Start),
+        Some(s) => s.parse::<ChromeAnchor>().map_err(|e| PyValueError::new_err(e.to_string())),
     }
 }
 

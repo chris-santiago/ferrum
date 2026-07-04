@@ -251,7 +251,7 @@ pub(crate) fn flatten_leaves(tree: &CompositeNode) -> Vec<(&ChartSpec, usize)> {
             }
             // A hole carries no spec/data — it is not a leaf and contributes
             // nothing to the flattened leaf list (Task 8a).
-            CompositeNode::Hole {} => {}
+            CompositeNode::Hole { .. } => {}
         }
     }
     let mut acc = Vec::new();
@@ -278,7 +278,7 @@ fn leaf_count(node: &CompositeNode) -> usize {
     match node {
         CompositeNode::Leaf { .. } => 1,
         CompositeNode::Composite { children, .. } => children.iter().map(leaf_count).sum(),
-        CompositeNode::Hole {} => 0,
+        CompositeNode::Hole { .. } => 0,
     }
 }
 
@@ -297,7 +297,7 @@ fn leaf_count(node: &CompositeNode) -> usize {
 fn congruent(a: &CompositeNode, b: &CompositeNode) -> bool {
     match (a, b) {
         (CompositeNode::Leaf { .. }, CompositeNode::Leaf { .. }) => true,
-        (CompositeNode::Hole {}, CompositeNode::Hole {}) => true,
+        (CompositeNode::Hole { .. }, CompositeNode::Hole { .. }) => true,
         (
             CompositeNode::Composite { layout: la, children: ca, .. },
             CompositeNode::Composite { layout: lb, children: cb, .. },
@@ -780,16 +780,17 @@ mod tests {
     fn congruence_hole_matches_hole_only() {
         // A hole is its own node kind (Task 8a): hole-vs-hole is congruent,
         // but hole-vs-leaf and hole-vs-composite are not.
-        assert!(congruent(&CompositeNode::Hole {}, &CompositeNode::Hole {}));
-        assert!(!congruent(&CompositeNode::Hole {}, &leaf_node(Some("x"), None)));
-        assert!(!congruent(&leaf_node(Some("x"), None), &CompositeNode::Hole {}));
+        let hole = || CompositeNode::Hole { width: None, height: None };
+        assert!(congruent(&hole(), &hole()));
+        assert!(!congruent(&hole(), &leaf_node(Some("x"), None)));
+        assert!(!congruent(&leaf_node(Some("x"), None), &hole()));
         let comp = composite(
             CompositeLayout::Hconcat,
             vec![leaf_node(Some("x"), None), leaf_node(Some("x"), None)],
             CompositeResolve::default(),
         );
-        assert!(!congruent(&CompositeNode::Hole {}, &comp));
-        assert!(!congruent(&comp, &CompositeNode::Hole {}));
+        assert!(!congruent(&hole(), &comp));
+        assert!(!congruent(&comp, &hole()));
     }
 
     /// Attach a per-child label to a node without altering its structure — the
@@ -800,7 +801,7 @@ mod tests {
             CompositeNode::Leaf { label, .. } | CompositeNode::Composite { label, .. } => {
                 *label = Some(text.to_string());
             }
-            CompositeNode::Hole {} => {}
+            CompositeNode::Hole { .. } => {}
         }
         node
     }
@@ -1368,7 +1369,12 @@ mod tests {
         // leaves — 3, not 4.
         let tree = composite(
             CompositeLayout::Grid,
-            vec![leaf_node(Some("a"), None), CompositeNode::Hole {}, leaf_node(Some("b"), None), leaf_node(Some("c"), None)],
+            vec![
+                leaf_node(Some("a"), None),
+                CompositeNode::Hole { width: None, height: None },
+                leaf_node(Some("b"), None),
+                leaf_node(Some("c"), None),
+            ],
             CompositeResolve::default(),
         );
         let specs = flatten_leaf_specs(&tree);

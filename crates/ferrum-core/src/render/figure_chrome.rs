@@ -17,6 +17,8 @@
 //! consistent with per-chart titles even when no theme dict is passed to the PyO3
 //! compositor binding (which operates at the SVG string level, post-render).
 
+use std::fmt;
+
 use super::color::fmt_svg;
 use super::svg::{escape_text, fmt_f};
 use super::compositor::{parse_svg_root, write_svg_open, CompositorError};
@@ -62,8 +64,10 @@ const CAPTION_BOTTOM_PAD: f64 = 4.0;
 
 /// Horizontal alignment for figure-level chrome text (title, subtitle, caption).
 ///
-/// Governs all three chrome lines uniformly. The binding parses the user-facing
-/// anchor string once into this typed enum.
+/// Governs all three chrome lines uniformly. Every caller (the PyO3
+/// `compose_svg_*` bindings, `render/binding.rs`; the composite tree's root
+/// `config` slot, `render/composite_render.rs`) parses the user-facing anchor
+/// string once via [`FromStr`](std::str::FromStr) into this typed enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChromeAnchor {
     /// Flush-left: `x = left_inset`, `text-anchor="start"`.
@@ -73,6 +77,33 @@ pub enum ChromeAnchor {
     Middle,
     /// Flush-right: `x = panel_w - right_inset`, `text-anchor="end"`.
     End,
+}
+
+/// Error returned by [`ChromeAnchor::from_str`](std::str::FromStr::from_str)
+/// for an unrecognized anchor string. Mirrors
+/// [`crate::spec::composite::ParseCompositeLayoutError`]'s shape.
+#[derive(Debug)]
+pub struct ParseChromeAnchorError(pub String);
+
+impl fmt::Display for ParseChromeAnchorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "anchor must be one of 'start'|'middle'|'end', got '{}'", self.0)
+    }
+}
+
+impl std::error::Error for ParseChromeAnchorError {}
+
+impl std::str::FromStr for ChromeAnchor {
+    type Err = ParseChromeAnchorError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "start" => Ok(ChromeAnchor::Start),
+            "middle" => Ok(ChromeAnchor::Middle),
+            "end" => Ok(ChromeAnchor::End),
+            other => Err(ParseChromeAnchorError(other.to_string())),
+        }
+    }
 }
 
 /// Chrome parameters for a figure-level band.
