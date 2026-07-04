@@ -26,12 +26,19 @@ use super::{column_min_max_f64, distinct_values_in_order, shared_categorical_bat
 /// warnings; the `Vec` is returned to match `build_color_scale`/`build_shape_scale`
 /// so `build_auxiliary_scales` can use `warnings.extend(...)` uniformly for all
 /// four channels.
+///
+/// `composite_domain` is the 10-pre-b composite seam: `Some` only for a composite
+/// leaf whose parent shares `size`. Its [`SharedDomain::Numeric`] extent (unioned
+/// across the composition's leaves) replaces the per-leaf `[min, max]` so every
+/// leaf's marks and legend normalize through the same domain. `None` (every
+/// standalone and faceted caller) reproduces the pre-10-pre-b path byte-for-byte.
 pub fn build_size_scale(
     encoding: &crate::spec::encoding::Encoding,
     batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     facet_shared: bool,
     theme: &ThemeInputs,
+    composite_domain: Option<&crate::render::composite::SharedDomain>,
 ) -> Result<(Option<SizeScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(size_enc) = &encoding.size else {
         return Ok((None, Vec::new()));
@@ -50,6 +57,13 @@ pub fn build_size_scale(
         union_panel_with_global_extent((min, max), &size_enc.field, transform_outputs)
     } else {
         (min, max)
+    };
+    // 10-pre-b: a composite shared size domain (unioned across the composition's
+    // leaves) overrides the per-leaf extent. The union already subsumes this
+    // leaf's own extent, so overriding is correct.
+    let (min, max) = match composite_domain {
+        Some(crate::render::composite::SharedDomain::Numeric { lo, hi }) => (*lo, *hi),
+        _ => (min, max),
     };
     let (lo, hi) = if let Some(crate::spec::encoding::ScaleSpec::Linear { common, .. })
         = &size_enc.scale

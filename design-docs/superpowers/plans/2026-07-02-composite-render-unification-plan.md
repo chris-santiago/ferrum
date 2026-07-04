@@ -167,6 +167,17 @@ Move all composition rendering (concat/grid/joint/clustermap/repeat/layer) onto 
 > fallback paths alive — Task 10 must either widen those gates away or surface the
 > ledger-statement-7 tension ("_scene_merge/_scale_share/compose_svg_* no longer
 > exist") to the user for an explicit scope decision. Do not silently keep remnants.
+>
+> **USER DECISION (2026-07-04): FULL-LITERAL.** Task 10 splits: **10-pre-b
+> (rust-coder):** non-positional (color/size) channel support in the composite
+> resolve pass + the D4b seam, so non-x/y shared resolve rides the tree. **10-pre-a
+> (python-coder, consumes 10-pre-b):** drop the non-x/y gate; lower empty-data
+> leaves as holes (faithful — the legacy placeholder is visually blank); recursive
+> lowering for non-leaf grid cells; verify + drop the configure-layers gate (per-leaf
+> chart_config); port LayerChart's two inline _scale_share calls (its interactive
+> stays legacy-merged by the one-panel contract, but merged-Chart rendering is the
+> FLAT path — it needs no composite machinery, just the two-line domain union,
+> ported). **10 proper:** the deletion sweep with grep proofs, statement 7 literal.
 
 ### Task 10: Hard deletion + grep proofs
 - Consumes: all forms cut over (Tasks 6–9)

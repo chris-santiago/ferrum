@@ -37,7 +37,8 @@
 //! ([`crate::render::composite_render`]) and the D4b scale seam, which reach it
 //! from within the crate.
 use crate::render::scale_resolve::{
-    distinct_positional_categories_shared, infer_spec_type, locate_field, numeric_domain_union,
+    distinct_positional_categories_shared, distinct_values_in_order, infer_spec_type, locate_field,
+    numeric_domain_union, numeric_extent,
 };
 use crate::render::RenderError;
 use crate::spec::chart::ChartSpec;
@@ -66,21 +67,30 @@ pub(crate) enum SharedDomain {
     Ordinal(Vec<String>),
 }
 
-/// The resolved shared domains for one leaf's positional channels. `None` on a
-/// channel means "no composite sharing applies" — the leaf resolves that channel
-/// exactly as it would standalone (its own data, its own explicit scale, or its
-/// own internal facet resolution).
+/// The resolved shared domains for one leaf's shared channels (positional x/y
+/// plus non-positional color/size). `None` on a channel means "no composite
+/// sharing applies" — the leaf resolves that channel exactly as it would
+/// standalone (its own data, its own explicit scale, or its own internal facet
+/// resolution).
+///
+/// For `color`, a [`SharedDomain::Numeric`] is a continuous (colorbar) extent and
+/// a [`SharedDomain::Ordinal`] is the categorical (swatch) domain; for `size`,
+/// only [`SharedDomain::Numeric`] is produced.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct LeafScaleContext {
     pub(crate) x: Option<SharedDomain>,
     pub(crate) y: Option<SharedDomain>,
+    pub(crate) color: Option<SharedDomain>,
+    pub(crate) size: Option<SharedDomain>,
 }
 
 impl LeafScaleContext {
-    fn set(&mut self, axis: Axis, domain: SharedDomain) {
-        match axis {
-            Axis::X => self.x = Some(domain),
-            Axis::Y => self.y = Some(domain),
+    fn set(&mut self, channel: Channel, domain: SharedDomain) {
+        match channel {
+            Channel::X => self.x = Some(domain),
+            Channel::Y => self.y = Some(domain),
+            Channel::Color => self.color = Some(domain),
+            Channel::Size => self.size = Some(domain),
         }
     }
 }
@@ -152,23 +162,40 @@ impl std::error::Error for CompositeResolveError {}
 // Entry point
 // ---------------------------------------------------------------------------
 
-/// Positional channel selector, local to the resolve pass.
+/// Shared-channel selector, local to the resolve pass. Positional `x`/`y` union
+/// through the facet mechanism; non-positional `color`/`size` union through the
+/// simpler per-column extent/category helpers (10-pre-b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Axis {
+enum Channel {
     X,
     Y,
+    Color,
+    Size,
 }
 
-impl Axis {
+impl Channel {
     fn as_str(self) -> &'static str {
         match self {
-            Axis::X => "x",
-            Axis::Y => "y",
+            Channel::X => "x",
+            Channel::Y => "y",
+            Channel::Color => "color",
+            Channel::Size => "size",
         }
     }
 }
 
-/// Resolve shared positional domains across a composite tree.
+/// Read the resolve mode for `channel` off a composite node's [`CompositeResolve`].
+fn resolve_mode(resolve: &crate::spec::composite::CompositeResolve, channel: Channel) -> ResolveMode {
+    match channel {
+        Channel::X => resolve.x,
+        Channel::Y => resolve.y,
+        Channel::Color => resolve.color,
+        Channel::Size => resolve.size,
+    }
+}
+
+/// Resolve shared domains across a composite tree, for both positional (x/y) and
+/// non-positional (color/size) channels.
 ///
 /// `leaves` must be the tree's leaves in pre-order (left-to-right depth-first),
 /// the same order [`flatten_leaf_specs`] produces — leaf *i* in the returned
@@ -195,8 +222,8 @@ pub(crate) fn resolve_composite_scales(
     }
     let mut out = vec![LeafScaleContext::default(); n];
     let span: Vec<usize> = (0..n).collect();
-    for axis in [Axis::X, Axis::Y] {
-        resolve_channel(tree, &span, axis, leaves, &mut out)?;
+    for channel in [Channel::X, Channel::Y, Channel::Color, Channel::Size] {
+        resolve_channel(tree, &span, channel, leaves, &mut out)?;
     }
     Ok(out)
 }
@@ -280,7 +307,7 @@ fn congruent(a: &CompositeNode, b: &CompositeNode) -> bool {
 fn resolve_channel(
     node: &CompositeNode,
     leaf_span: &[usize],
-    axis: Axis,
+    channel: Channel,
     leaves: &[LeafResolveInput<'_>],
     out: &mut [LeafScaleContext],
 ) -> Result<(), CompositeResolveError> {
@@ -297,10 +324,7 @@ fn resolve_channel(
         cursor += lc;
     }
 
-    let shared = match axis {
-        Axis::X => resolve.x == ResolveMode::Shared,
-        Axis::Y => resolve.y == ResolveMode::Shared,
-    };
+    let shared = resolve_mode(resolve, channel) == ResolveMode::Shared;
 
     let congruent_children = children.iter().all(|c| congruent(&children[0], c));
 
@@ -310,14 +334,14 @@ fn resolve_channel(
         let leaves_per_child = leaf_count(&children[0]);
         for pos in 0..leaves_per_child {
             let group: Vec<usize> = subspans.iter().map(|s| s[pos]).collect();
-            resolve_group(&group, axis, leaves, out)?;
+            resolve_group(&group, channel, leaves, out)?;
         }
         Ok(())
     } else {
         // Independent node, or a non-congruent Shared node (skip sharing for the
         // group): fall back to per-child resolution so inner Shared nodes work.
         for (child, span) in children.iter().zip(&subspans) {
-            resolve_channel(child, span, axis, leaves, out)?;
+            resolve_channel(child, span, channel, leaves, out)?;
         }
         Ok(())
     }
@@ -329,13 +353,13 @@ fn resolve_channel(
 /// union and the assignment, preserving their standalone resolution.
 fn resolve_group(
     group: &[usize],
-    axis: Axis,
+    channel: Channel,
     leaves: &[LeafResolveInput<'_>],
     out: &mut [LeafScaleContext],
 ) -> Result<(), CompositeResolveError> {
     let mut domains: Vec<(usize, SharedDomain)> = Vec::with_capacity(group.len());
     for &idx in group {
-        if let Some(d) = leaf_channel_domain(&leaves[idx], axis)? {
+        if let Some(d) = leaf_channel_domain(&leaves[idx], channel)? {
             domains.push((idx, d));
         }
     }
@@ -379,13 +403,27 @@ fn resolve_group(
     };
 
     for (idx, _) in &domains {
-        out[*idx].set(axis, unified.clone());
+        out[*idx].set(channel, unified.clone());
     }
     Ok(())
 }
 
-/// Compute one leaf's standalone domain for `axis`, or `None` if the leaf does
-/// not participate in composite sharing on that channel.
+/// Compute one leaf's standalone domain for `channel`, or `None` if the leaf does
+/// not participate in composite sharing on that channel. Dispatches to the
+/// positional or non-positional resolver.
+fn leaf_channel_domain(
+    leaf: &LeafResolveInput<'_>,
+    channel: Channel,
+) -> Result<Option<SharedDomain>, CompositeResolveError> {
+    match channel {
+        Channel::X | Channel::Y => leaf_positional_domain(leaf, channel),
+        Channel::Color => leaf_color_domain(leaf),
+        Channel::Size => leaf_size_domain(leaf),
+    }
+}
+
+/// One leaf's standalone positional (`x`/`y`) domain, or `None` if it does not
+/// participate in sharing on that channel.
 ///
 /// Non-participation (returns `None`):
 /// - the channel has no encoding on this leaf;
@@ -399,13 +437,14 @@ fn resolve_group(
 /// extent), and box/strip whisker fields are picked up via the layer union
 /// inside [`numeric_domain_union`] (spec §6 D3 — shared domains derive from
 /// transform-output batches).
-fn leaf_channel_domain(
+fn leaf_positional_domain(
     leaf: &LeafResolveInput<'_>,
-    axis: Axis,
+    channel: Channel,
 ) -> Result<Option<SharedDomain>, CompositeResolveError> {
-    let enc = match axis {
-        Axis::X => leaf.encoding.x.as_ref(),
-        Axis::Y => leaf.encoding.y.as_ref(),
+    let enc = match channel {
+        Channel::X => leaf.encoding.x.as_ref(),
+        Channel::Y => leaf.encoding.y.as_ref(),
+        _ => unreachable!("leaf_positional_domain called with non-positional channel"),
     };
     let Some(enc) = enc else { return Ok(None) };
 
@@ -419,9 +458,10 @@ fn leaf_channel_domain(
     // only the child's outer scales. A channel the leaf resolves `Independent`
     // internally has no single outer scale, so it does not participate.
     if let Some(fspec) = leaf.spec.facet.as_ref() {
-        let mode = match axis {
-            Axis::X => fspec.resolve.x,
-            Axis::Y => fspec.resolve.y,
+        let mode = match channel {
+            Channel::X => fspec.resolve.x,
+            Channel::Y => fspec.resolve.y,
+            _ => unreachable!(),
         };
         if mode == ResolveMode::Independent {
             return Ok(None);
@@ -430,21 +470,22 @@ fn leaf_channel_domain(
 
     let located = locate_field(&enc.field, leaf.final_batch, leaf.transform_outputs)
         .ok_or_else(|| CompositeResolveError::UnknownField {
-            channel: axis.as_str(),
+            channel: channel.as_str(),
             field: enc.field.clone(),
         })?;
     let dtype = infer_spec_type(enc, located.col.data_type());
 
-    let paired = match axis {
-        Axis::X => leaf.encoding.x2.as_ref(),
-        Axis::Y => leaf.encoding.y2.as_ref(),
+    let paired = match channel {
+        Channel::X => leaf.encoding.x2.as_ref(),
+        Channel::Y => leaf.encoding.y2.as_ref(),
+        _ => None,
     }
     .map(|e| e.field.as_str());
 
     match dtype {
         SpecDataType::Quantitative | SpecDataType::Temporal => {
             let (lo, hi) = numeric_domain_union(
-                axis.as_str(),
+                channel.as_str(),
                 &enc.field,
                 paired,
                 leaf.final_batch,
@@ -453,7 +494,7 @@ fn leaf_channel_domain(
                 false,
             )
             .map_err(|source| CompositeResolveError::DomainResolve {
-                channel: axis.as_str(),
+                channel: channel.as_str(),
                 field: enc.field.clone(),
                 source,
             })?;
@@ -467,13 +508,86 @@ fn leaf_channel_domain(
                 false,
             )
             .map_err(|source| CompositeResolveError::DomainResolve {
-                channel: axis.as_str(),
+                channel: channel.as_str(),
                 field: enc.field.clone(),
                 source,
             })?;
             Ok(Some(SharedDomain::Ordinal(cats)))
         }
     }
+}
+
+/// One leaf's standalone color domain, or `None` if it does not participate.
+///
+/// Mirrors [`crate::render::scale_resolve::build_color_scale`]'s continuous-vs-
+/// categorical determination so the resolved [`SharedDomain`] variant always
+/// matches the scale the leaf render will build:
+/// - continuous (`Quantitative`/`Temporal`, unless the mark forces categorical)
+///   → [`SharedDomain::Numeric`] extent of the color column;
+/// - categorical → [`SharedDomain::Ordinal`] first-appearance category vector.
+///
+/// Returns `None` when color is unencoded or carries an explicit user
+/// `enc.scale` (user scale wins — the leaf render short-circuits on it, so the
+/// resolve pass must exclude it to stay consistent). Color has no independent
+/// facet option (`FacetResolve` only covers x/y), so faceted leaves participate.
+fn leaf_color_domain(
+    leaf: &LeafResolveInput<'_>,
+) -> Result<Option<SharedDomain>, CompositeResolveError> {
+    let Some(enc) = leaf.encoding.color.as_ref() else { return Ok(None) };
+    if enc.scale.is_some() {
+        return Ok(None);
+    }
+
+    let located = locate_field(&enc.field, leaf.final_batch, leaf.transform_outputs)
+        .ok_or_else(|| CompositeResolveError::UnknownField {
+            channel: Channel::Color.as_str(),
+            field: enc.field.clone(),
+        })?;
+
+    // FA-5: area marks always group color discretely — treat any dtype as
+    // categorical, exactly as `build_color_scale`'s `force_categorical` does, so
+    // the shared domain lands on the categorical scale the area leaf builds.
+    let force_categorical = matches!(leaf.spec.mark, crate::spec::mark::Mark::Area);
+    let dtype = infer_spec_type(enc, located.col.data_type());
+    let is_continuous = !force_categorical
+        && matches!(dtype, SpecDataType::Quantitative | SpecDataType::Temporal)
+        && crate::render::arrow_cast::is_numeric(located.col.data_type());
+
+    if is_continuous {
+        Ok(Some(numeric_extent_domain(located.col)))
+    } else {
+        let cats = distinct_values_in_order(located.batch, &enc.field).map_err(|source| {
+            CompositeResolveError::DomainResolve {
+                channel: Channel::Color.as_str(),
+                field: enc.field.clone(),
+                source,
+            }
+        })?;
+        Ok(Some(SharedDomain::Ordinal(cats)))
+    }
+}
+
+/// One leaf's standalone size domain, or `None` if size is unencoded.
+///
+/// Size is always a numeric extent (`build_size_scale` derives `[min, max]` from
+/// the column). An explicit user size `scale` only pins the pixel *range*, never
+/// the data domain, so it does not exclude the leaf from domain sharing.
+fn leaf_size_domain(
+    leaf: &LeafResolveInput<'_>,
+) -> Result<Option<SharedDomain>, CompositeResolveError> {
+    let Some(enc) = leaf.encoding.size.as_ref() else { return Ok(None) };
+    let located = locate_field(&enc.field, leaf.final_batch, leaf.transform_outputs)
+        .ok_or_else(|| CompositeResolveError::UnknownField {
+            channel: Channel::Size.as_str(),
+            field: enc.field.clone(),
+        })?;
+    Ok(Some(numeric_extent_domain(located.col)))
+}
+
+/// A [`SharedDomain::Numeric`] over a located Arrow column's finite extent.
+fn numeric_extent_domain(col: &dyn arrow::array::Array) -> SharedDomain {
+    let (lo, hi) = numeric_extent(col);
+    SharedDomain::Numeric { lo, hi }
 }
 
 // ---------------------------------------------------------------------------
@@ -579,10 +693,20 @@ mod tests {
     }
 
     fn shared_x() -> CompositeResolve {
-        CompositeResolve { x: ResolveMode::Shared, y: ResolveMode::Independent }
+        CompositeResolve { x: ResolveMode::Shared, ..CompositeResolve::default() }
     }
     fn shared_both() -> CompositeResolve {
-        CompositeResolve { x: ResolveMode::Shared, y: ResolveMode::Shared }
+        CompositeResolve {
+            x: ResolveMode::Shared,
+            y: ResolveMode::Shared,
+            ..CompositeResolve::default()
+        }
+    }
+    fn shared_color() -> CompositeResolve {
+        CompositeResolve { color: ResolveMode::Shared, ..CompositeResolve::default() }
+    }
+    fn shared_size() -> CompositeResolve {
+        CompositeResolve { size: ResolveMode::Shared, ..CompositeResolve::default() }
     }
 
     /// Hold owned per-leaf pieces so borrows in `LeafResolveInput` stay valid.
@@ -843,6 +967,149 @@ mod tests {
         let expect = Some(SharedDomain::Ordinal(vec!["b".into(), "a".into(), "c".into()]));
         assert_eq!(ctx[0].x, expect);
         assert_eq!(ctx[1].x, expect);
+    }
+
+    // -- color / size sharing (10-pre-b) --------------------------------------
+
+    fn spec_with_color(field: &str) -> ChartSpec {
+        let mut e = Encoding::default();
+        e.color = Some(enc(field));
+        spec_with(e)
+    }
+    fn leaf_node_color(field: &str) -> CompositeNode {
+        CompositeNode::Leaf { spec: Box::new(spec_with_color(field)), data: 0, label: None }
+    }
+    fn spec_with_size(field: &str) -> ChartSpec {
+        let mut e = Encoding::default();
+        e.size = Some(enc(field));
+        spec_with(e)
+    }
+    fn leaf_node_size(field: &str) -> CompositeNode {
+        CompositeNode::Leaf { spec: Box::new(spec_with_size(field)), data: 0, label: None }
+    }
+
+    #[test]
+    fn shared_color_unions_continuous_extents() {
+        let l0 = owned(spec_with_color("c"), num_batch("c", &[0.0, 10.0]));
+        let l1 = owned(spec_with_color("c"), num_batch("c", &[5.0, 30.0]));
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node_color("c"), leaf_node_color("c")],
+            shared_color(),
+        );
+        let inputs = [input(&l0), input(&l1)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let expect = Some(SharedDomain::Numeric { lo: 0.0, hi: 30.0 });
+        assert_eq!(ctx[0].color, expect);
+        assert_eq!(ctx[1].color, expect);
+        // Other channels untouched.
+        assert_eq!(ctx[0].x, None);
+        assert_eq!(ctx[0].size, None);
+    }
+
+    #[test]
+    fn shared_color_unions_categorical_order_preserving() {
+        let l0 = owned(spec_with_color("g"), cat_batch("g", &["b", "a"]));
+        let l1 = owned(spec_with_color("g"), cat_batch("g", &["a", "c"]));
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node_color("g"), leaf_node_color("g")],
+            shared_color(),
+        );
+        let inputs = [input(&l0), input(&l1)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        // First-appearance order across the group: b, a (leaf0), then c (new in leaf1).
+        let expect = Some(SharedDomain::Ordinal(vec!["b".into(), "a".into(), "c".into()]));
+        assert_eq!(ctx[0].color, expect);
+        assert_eq!(ctx[1].color, expect);
+    }
+
+    #[test]
+    fn shared_size_unions_extents() {
+        let l0 = owned(spec_with_size("s"), num_batch("s", &[2.0, 4.0]));
+        let l1 = owned(spec_with_size("s"), num_batch("s", &[1.0, 9.0]));
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node_size("s"), leaf_node_size("s")],
+            shared_size(),
+        );
+        let inputs = [input(&l0), input(&l1)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let expect = Some(SharedDomain::Numeric { lo: 1.0, hi: 9.0 });
+        assert_eq!(ctx[0].size, expect);
+        assert_eq!(ctx[1].size, expect);
+    }
+
+    #[test]
+    fn independent_color_size_is_noop() {
+        let l0 = owned(spec_with_color("c"), num_batch("c", &[0.0, 10.0]));
+        let l1 = owned(spec_with_color("c"), num_batch("c", &[5.0, 30.0]));
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node_color("c"), leaf_node_color("c")],
+            CompositeResolve::default(), // all independent
+        );
+        let inputs = [input(&l0), input(&l1)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        assert_eq!(ctx[0].color, None);
+        assert_eq!(ctx[1].color, None);
+    }
+
+    #[test]
+    fn explicit_color_scale_leaf_excluded_from_sharing() {
+        use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
+        // Leaf 1 pins an explicit linear color scale → excluded from sharing.
+        let mut e1 = Encoding::default();
+        let mut c1 = enc("c");
+        c1.scale = Some(ScaleSpec::Linear {
+            common: ContinuousScaleCommon {
+                domain: None,
+                range: None,
+                clamp: false,
+                padding: None,
+                scheme: None,
+                domain_param: None,
+            },
+            nice: false,
+            zero: false,
+        });
+        e1.color = Some(c1);
+        let s1 = spec_with(e1);
+        let l0 = owned(spec_with_color("c"), num_batch("c", &[0.0, 10.0]));
+        let l1 = LeafOwned {
+            encoding: s1.encoding.clone(),
+            outputs: outputs(&num_batch("c", &[5.0, 30.0])),
+            batch: num_batch("c", &[5.0, 30.0]),
+            spec: s1,
+        };
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node_color("c"), leaf_node_color("c")],
+            shared_color(),
+        );
+        let inputs = [input(&l0), input(&l1)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        // Leaf 0 participates → shares only its own extent [0, 10].
+        assert_eq!(ctx[0].color, Some(SharedDomain::Numeric { lo: 0.0, hi: 10.0 }));
+        // Leaf 1's explicit color scale wins → no shared context injected.
+        assert_eq!(ctx[1].color, None);
+    }
+
+    #[test]
+    fn shared_color_mixed_continuous_categorical_group_skips() {
+        // One leaf's color is numeric (continuous), the sibling's is categorical:
+        // no meaningful union — the group's color sharing is skipped, both stay None.
+        let l0 = owned(spec_with_color("c"), num_batch("c", &[0.0, 10.0]));
+        let l1 = owned(spec_with_color("c"), cat_batch("c", &["a", "b"]));
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node_color("c"), leaf_node_color("c")],
+            shared_color(),
+        );
+        let inputs = [input(&l0), input(&l1)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        assert_eq!(ctx[0].color, None);
+        assert_eq!(ctx[1].color, None);
     }
 
     // -- box-transform (stat-extent union via layer fields) -------------------

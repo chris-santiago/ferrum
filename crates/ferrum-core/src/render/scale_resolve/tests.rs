@@ -273,7 +273,7 @@ fn size_scale_defaults_to_theme_point_size_range() {
     let batch = make_batch_q_q_n_n_q();
     let theme = ThemeInputs::default();
     let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
-    let (scale, warns) = build_size_scale(&make_spec_with_size().encoding, &batch, &outputs, false, &theme)
+    let (scale, warns) = build_size_scale(&make_spec_with_size().encoding, &batch, &outputs, false, &theme, None)
         .unwrap();
     assert!(warns.is_empty());
     let scale = scale.unwrap();
@@ -4198,6 +4198,7 @@ fn d4b_shared_numeric_seeds_auto_path_with_padding() {
     let ctx = LeafScaleContext {
         x: Some(SharedDomain::Numeric { lo: 0.0, hi: 1000.0 }),
         y: None,
+        ..Default::default()
     };
     let (shared, _) =
         resolve_scales_with_leaf_context(&spec, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
@@ -4246,6 +4247,7 @@ fn d4b_shared_ordinal_seeds_category_vector() {
             "z".into(), "a".into(), "b".into(), "c".into(), "d".into(),
         ])),
         y: None,
+        ..Default::default()
     };
     let (shared, _) =
         resolve_scales_with_leaf_context(&spec, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
@@ -4280,6 +4282,7 @@ fn d4b_shared_ordinal_ignores_local_data_aware_sort() {
             "z".into(), "a".into(), "b".into(), "c".into(), "d".into(),
         ])),
         y: None,
+        ..Default::default()
     };
     let (shared, _) =
         resolve_scales_with_leaf_context(&spec, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
@@ -4342,6 +4345,7 @@ fn d4b_user_scale_wins_over_shared() {
     let ctx = LeafScaleContext {
         x: Some(SharedDomain::Numeric { lo: -100.0, hi: 100.0 }),
         y: None,
+        ..Default::default()
     };
     let (scales, _) =
         resolve_scales_with_leaf_context(&spec, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
@@ -4355,4 +4359,83 @@ fn d4b_user_scale_wins_over_shared() {
     let (rlo, rhi) = scales.x.pixel_range();
     assert!((rlo - 0.0).abs() < 1e-9 && (rhi - 100.0).abs() < 1e-9,
         "user explicit domain bypasses padding: pixel_range [{rlo},{rhi}] (expected (0, 100))");
+}
+
+/// 10-pre-b seam test: a `LeafScaleContext.color` categorical union threaded
+/// through `resolve_scales_with_leaf_context` must SEED the built
+/// `ColorScale`'s domain — proving the composite_domain parameter actually
+/// reaches `build_color_scale` (a signature-order slip in the seam would pass
+/// every unit test on the union logic alone).
+#[test]
+fn d10preb_shared_categorical_color_seeds_domain_through_seam() {
+    use crate::render::composite::{LeafScaleContext, SharedDomain};
+    use std::collections::HashMap;
+
+    let spec = make_spec_with_color();
+    let batch = make_batch_q_q_n(); // species ∈ {a, b, c}
+    let theme = ThemeInputs::default();
+    let empty: HashMap<String, RecordBatch> = HashMap::new();
+    let pr = (0.0, 100.0);
+
+    // Baseline: the leaf's own categories.
+    let (base, _) =
+        resolve_scales_with_outputs(&spec, &batch, &empty, pr, pr, &theme).unwrap();
+    match base.color.expect("baseline color scale") {
+        ColorScale::Categorical { domain, .. } => assert_eq!(domain, vec!["a", "b", "c"]),
+        other => panic!("expected Categorical, got {other:?}"),
+    }
+
+    // Shared union carries categories this leaf's data lacks, in union order.
+    let ctx = LeafScaleContext {
+        color: Some(SharedDomain::Ordinal(vec![
+            "z".into(), "a".into(), "b".into(), "c".into(), "d".into(),
+        ])),
+        ..Default::default()
+    };
+    let (shared, _) =
+        resolve_scales_with_leaf_context(&spec, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
+    match shared.color.expect("shared color scale") {
+        ColorScale::Categorical { domain, .. } => assert_eq!(
+            domain,
+            vec!["z", "a", "b", "c", "d"],
+            "shared categorical color union must seed the palette domain verbatim",
+        ),
+        other => panic!("expected Categorical, got {other:?}"),
+    }
+}
+
+/// 10-pre-b seam test: a `LeafScaleContext.size` numeric extent threaded
+/// through the full resolve must override the built `SizeScale`'s data
+/// domain (pixel range untouched — size sharing is domain-only).
+#[test]
+fn d10preb_shared_size_extent_seeds_scale_through_seam() {
+    use crate::render::composite::{LeafScaleContext, SharedDomain};
+    use std::collections::HashMap;
+
+    let spec = make_spec_with_size();
+    let batch = make_batch_q_q_n_n_q();
+    let theme = ThemeInputs::default();
+    let empty: HashMap<String, RecordBatch> = HashMap::new();
+    let pr = (0.0, 100.0);
+
+    let (base, _) =
+        resolve_scales_with_outputs(&spec, &batch, &empty, pr, pr, &theme).unwrap();
+    let base_size = base.size.expect("baseline size scale");
+    let (blo, bhi) = base_size.inner.data_domain().unwrap();
+
+    let ctx = LeafScaleContext {
+        size: Some(SharedDomain::Numeric { lo: -50.0, hi: 500.0 }),
+        ..Default::default()
+    };
+    let (shared, _) =
+        resolve_scales_with_leaf_context(&spec, &batch, &empty, pr, pr, &theme, Some(&ctx)).unwrap();
+    let shared_size = shared.size.expect("shared size scale");
+    let (lo, hi) = shared_size.inner.data_domain().unwrap();
+    assert!(
+        (lo - -50.0).abs() < 1e-9 && (hi - 500.0).abs() < 1e-9,
+        "shared size extent must override the leaf's own [{blo},{bhi}], got [{lo},{hi}]",
+    );
+    // Pixel range (the [min_px, max_px] band) stays theme-driven, not shared.
+    assert_eq!(shared_size.min_px(), base_size.min_px());
+    assert_eq!(shared_size.max_px(), base_size.max_px());
 }

@@ -685,7 +685,11 @@ pub(super) use super::arrow_cast::min_max_f64 as column_min_max_f64;
 
 /// Compute (min, max) for a numeric Arrow column, skipping NaN/null values.
 /// Returns (0.0, 1.0) when no finite values are present.
-fn numeric_extent(col: &dyn arrow::array::Array) -> (f64, f64) {
+///
+/// `pub(in crate::render)` so the composite resolve pass (`render::composite`)
+/// can compute a leaf's shared color/size extent through the same primitive the
+/// facet-shared continuous-color path uses (10-pre-b).
+pub(in crate::render) fn numeric_extent(col: &dyn arrow::array::Array) -> (f64, f64) {
     super::arrow_cast::finite_min_max_f64(col).unwrap_or((0.0, 1.0))
 }
 
@@ -747,7 +751,13 @@ pub(super) fn union_panel_with_global_extent(
     (p_lo.min(g_lo), p_hi.max(g_hi))
 }
 
-fn distinct_values_in_order(
+/// First-appearance-order distinct string values of `field` (nulls dropped),
+/// the categorical-domain primitive shared by the color/shape scale builders.
+///
+/// `pub(in crate::render)` so the composite resolve pass (`render::composite`)
+/// can union a leaf's shared categorical color domain through the same primitive
+/// the categorical color path uses (10-pre-b).
+pub(in crate::render) fn distinct_values_in_order(
     batch: &RecordBatch,
     field: &str,
 ) -> Result<Vec<String>, RenderError> {
@@ -802,12 +812,19 @@ fn facet_aux_shared(spec: &ChartSpec) -> bool {
 /// Computes `force_cat` and `aux_shared` internally from `spec` so the three
 /// dispatch sites in `resolve_scales_with_outputs` share one definition. Warning
 /// push order is: `color_warns` (via `extend`), then `shape_warn` (via `push`).
+///
+/// `leaf_scales` is the 10-pre-b composite seam: `Some` only for a composite leaf
+/// whose parent shares `color`/`size`. It seeds the color/size auto path with the
+/// domain unioned across the composite's leaves, exactly as `leaf_scales`
+/// (x/y) seeds the positional axes. `None` for standalone (flat/facet) renders
+/// reproduces the pre-10-pre-b behavior byte-for-byte.
 #[allow(clippy::type_complexity)]
 fn build_auxiliary_scales(
     spec: &ChartSpec,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     theme: &ThemeInputs,
+    leaf_scales: Option<&LeafScaleContext>,
     warnings: &mut Vec<crate::render::RenderWarning>,
 ) -> Result<(Option<ColorScale>, Option<SizeScale>, Option<ShapeScale>, Option<OpacityScale>), RenderError> {
     // FA-5: area marks always group color discretely; force categorical.
@@ -816,9 +833,12 @@ fn build_auxiliary_scales(
     // color, size, opacity) union the global FINAL_OUTPUT_KEY batch so per-panel
     // marks normalize through the same domain as the global legend/colorbar.
     let aux_shared = facet_aux_shared(spec);
-    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared)?;
+    // 10-pre-b: composite shared color/size domains (None → standalone path).
+    let color_domain = leaf_scales.and_then(|c| c.color.as_ref());
+    let size_domain = leaf_scales.and_then(|c| c.size.as_ref());
+    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared, color_domain)?;
     warnings.extend(color_warns);
-    let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+    let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, size_domain)?;
     warnings.extend(size_warns);
     let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
     warnings.extend(shape_warns);
@@ -958,7 +978,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
             let x2_enc = spec.encoding.x2.as_ref();
             let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
             let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, x_shared_domain, &mut warnings)?;
-            let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
+            let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
             return Ok((ResolvedScales {
                 x, y: dummy_unit_scale(y_pixel_range, false),
                 color, size, shape, opacity, x2: None, y2: None,
@@ -970,7 +990,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
             let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
             let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
             let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, y_shared_domain, &mut warnings)?;
-            let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
+            let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
             return Ok((ResolvedScales {
                 x: dummy_unit_scale(x_pixel_range, true), y,
                 color, size, shape, opacity, x2: None, y2: None,
@@ -1027,7 +1047,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
     // it accepts transform_outputs because composite-mark color fields may
     // live in a named output rather than primary.) FA-5 (force_cat) and T3
     // (aux_shared) logic lives in `build_auxiliary_scales`.
-    let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
+    let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
 
     let x2_field_name = x2_enc.map(|e| e.field.clone());
     let y2_field_name = y2_enc.map(|e| e.field.clone());

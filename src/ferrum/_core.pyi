@@ -969,6 +969,8 @@ def render_interactive(
 #               # per-child (non-root) label:
 #               "label"?: str, "resolve"?: dict, "ncols"?: int, "nrows"?: int,
 #               "row_ratios"?: list, "col_ratios"?: list, "spacing"?: float}
+#               # resolve maps channel -> "shared"/"independent"; supported
+#               # channels are "x", "y", "color", "size" (10-pre-b).
 #   hole:      {"kind": "hole"}  # Task 8a: a field-less placeholder cell —
 #               # valid only as a direct child of a "grid"/"wrap" composite
 #               # (never at the tree root); reserves its row/column slot but

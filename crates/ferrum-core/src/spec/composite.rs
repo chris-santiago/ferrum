@@ -128,6 +128,13 @@ pub struct CompositeResolve {
     pub x: ResolveMode,
     #[serde(default = "default_independent")]
     pub y: ResolveMode,
+    /// Color scale sharing (10-pre-b). Continuous color unions a `[lo, hi]`
+    /// extent; categorical color unions an order-preserving category vector.
+    #[serde(default = "default_independent")]
+    pub color: ResolveMode,
+    /// Size scale sharing (10-pre-b): unions the numeric `[min, max]` extent.
+    #[serde(default = "default_independent")]
+    pub size: ResolveMode,
 }
 
 fn default_independent() -> ResolveMode {
@@ -139,16 +146,21 @@ impl Default for CompositeResolve {
         CompositeResolve {
             x: ResolveMode::Independent,
             y: ResolveMode::Independent,
+            color: ResolveMode::Independent,
+            size: ResolveMode::Independent,
         }
     }
 }
 
 impl CompositeResolve {
-    /// `true` when both channels are `Independent` — the
+    /// `true` when every channel is `Independent` — the
     /// `skip_serializing_if` predicate that keeps the common (independent)
     /// case out of canonical JSON, mirroring `FacetResolve::is_all_shared`.
     pub fn is_default(r: &CompositeResolve) -> bool {
-        r.x == ResolveMode::Independent && r.y == ResolveMode::Independent
+        r.x == ResolveMode::Independent
+            && r.y == ResolveMode::Independent
+            && r.color == ResolveMode::Independent
+            && r.size == ResolveMode::Independent
     }
 }
 
@@ -791,11 +803,64 @@ mod tests {
         }
         let json = serde_json::to_string(&node).unwrap();
         assert!(
-            json.contains(r#""resolve":{"x":"shared","y":"independent"}"#),
+            json.contains(
+                r#""resolve":{"x":"shared","y":"independent","color":"independent","size":"independent"}"#
+            ),
             "json: {json}"
         );
         let parsed: CompositeNode = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, node);
+    }
+
+    #[test]
+    fn resolve_color_size_round_trip_and_default_omission() {
+        // color/size default to independent and are omitted from canonical JSON
+        // when the whole resolve is default; a shared color/size request survives
+        // a serde round trip.
+        let default_node = composite(CompositeLayout::Hconcat, vec![leaf(0)]);
+        let default_json = serde_json::to_string(&default_node).unwrap();
+        assert!(!default_json.contains("resolve"), "default resolve omitted: {default_json}");
+
+        let mut node = composite(CompositeLayout::Hconcat, vec![leaf(0)]);
+        if let CompositeNode::Composite { resolve, .. } = &mut node {
+            resolve.color = ResolveMode::Shared;
+            resolve.size = ResolveMode::Shared;
+        }
+        let json = serde_json::to_string(&node).unwrap();
+        assert!(json.contains(r#""color":"shared""#), "json: {json}");
+        assert!(json.contains(r#""size":"shared""#), "json: {json}");
+        let parsed: CompositeNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, node);
+    }
+
+    #[test]
+    fn composite_tree_from_py_reads_color_size_resolve() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let leaf_a = PyDict::new(py);
+            leaf_a.set_item("kind", "leaf").unwrap();
+            leaf_a.set_item("spec", Py::new(py, dummy_chart_spec()).unwrap()).unwrap();
+            leaf_a.set_item("data", 0usize).unwrap();
+
+            let children = pyo3::types::PyList::new(py, [leaf_a]).unwrap();
+
+            let resolve = PyDict::new(py);
+            resolve.set_item("color", "shared").unwrap();
+            resolve.set_item("size", "shared").unwrap();
+
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "vconcat").unwrap();
+            root.set_item("children", children).unwrap();
+            root.set_item("resolve", resolve).unwrap();
+
+            let node = composite_tree_from_py(root.as_any()).unwrap();
+            let CompositeNode::Composite { resolve, .. } = node else { panic!("expected Composite") };
+            assert_eq!(resolve.color, ResolveMode::Shared);
+            assert_eq!(resolve.size, ResolveMode::Shared);
+            assert_eq!(resolve.x, ResolveMode::Independent);
+            assert_eq!(resolve.y, ResolveMode::Independent);
+        });
     }
 
     #[test]
