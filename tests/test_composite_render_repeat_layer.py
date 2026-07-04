@@ -25,6 +25,7 @@ that one-panel contract in scene JSON. See ``LayerChart._render_interactive``.
 from __future__ import annotations
 
 import json
+import re
 
 import polars as pl
 import pytest
@@ -143,21 +144,37 @@ def test_repeat_resolve_shared_unifies_y_extent(repeat_df):
     assert extents[0].hi >= 300.0
 
 
-def test_repeat_non_xy_shared_channel_falls_back_to_legacy(repeat_df):
-    """resolve with a shared non-positional channel keeps the legacy Python path."""
+def test_repeat_resolve_shared_color_lowers_via_composite_path(repeat_df):
+    """resolve={"color": "shared"} now lowers via the composite path (Task 10-pre-a).
+
+    ``_composite_resolve_field`` passes ``color``/``size`` through to the Rust
+    composite resolve pass (10-pre-b) instead of forcing the whole tree to the
+    legacy ``_scale_share`` injection path. RED before this task (any non-x/y
+    shared channel returned ``None``); GREEN after.
+    """
     chart = RepeatChart(
         _template(repeat_df), row=["a", "b"], column=["a", "b"], resolve={"color": "shared"}
     )
-    assert chart._composite_tree(auto_tooltips=False) is None
+    lowered = chart._composite_tree(auto_tooltips=False)
+    assert lowered is not None
+    assert lowered.tree["resolve"] == {"color": "shared"}
     assert chart.to_svg().startswith("<svg")
 
 
-def test_repeat_configure_layer_falls_back_to_legacy(repeat_df):
-    """A composition-level configure layer keeps the old string-compositor path."""
+def test_repeat_configure_layer_lowers_via_composite_path(repeat_df):
+    """A composition-level configure layer now lowers via the composite path.
+
+    Task 10-pre-a sub-task 4: composition-level configure is pushed onto each
+    panel via ``_inject_parent_config`` before lowering (mirrors JointChart/
+    ClusterMapChart, which never needed a separate gate), so the standalone
+    ``_configure_layers`` check is no longer needed here either.
+    """
     chart = RepeatChart(_template(repeat_df), row=["a", "b"], column=["a", "b"]).configure_axis(
         label_angle=-45
     )
-    assert chart._composite_tree(auto_tooltips=False) is None
+    lowered = chart._composite_tree(auto_tooltips=False)
+    assert lowered is not None
+    assert lowered.chart_config["axis"]["label_angle"] == -45
     assert chart.to_svg().startswith("<svg")
 
 
@@ -301,21 +318,61 @@ def test_layer_resolve_shared_x_only_still_overlays(layer_df):
     assert lowered.tree["resolve"] == {"x": "shared", "y": "shared"}
 
 
-def test_layer_non_xy_shared_channel_falls_back_to_legacy(layer_df):
-    """resolve with a shared non-positional channel keeps the legacy merge path."""
-    scatter = fm.Chart(layer_df).mark_point().encode(x="x", y="y", color="x")
-    line = fm.Chart(layer_df).mark_line().encode(x="x", y="y", color="x")
-    lc = LayerChart(scatter, line, resolve={"color": "shared"})
-    assert lc._composite_tree(auto_tooltips=False) is None
-    assert lc.to_svg().startswith("<svg")
+def test_layer_resolve_shared_color_unions_categorical_domain():
+    """resolve={"color": "shared"} unions the categorical color domain across layers.
+
+    Task 10-pre-a sub-task 1: ``_composite_resolve_field`` now passes ``color``/
+    ``size`` through to the Rust composite resolve pass (10-pre-b). RED before
+    this task (any non-x/y shared channel forced the whole overlay to
+    ``_build_merged``'s legacy ``_scale_share`` injection); GREEN after.
+
+    Unlike HConcat/VConcat/grid forms, an overlay ALWAYS shares x/y (the tree's
+    ``resolve`` unconditionally forces both). The standalone color-only case
+    for non-overlay forms is covered by ``test_composite_render_linear.py``'s
+    ``test_hconcat_resolve_shared_color_alone_unions_domain``.
+    """
+    bottom_df = pl.DataFrame({"x": [1.0, 2.0], "y": [1.0, 2.0], "cat": ["a", "b"]})
+    top_df = pl.DataFrame({"x": [3.0, 4.0], "y": [3.0, 4.0], "cat": ["c", "d"]})
+    bottom = fm.Chart(bottom_df).mark_point().encode(x="x", y="y", color="cat")
+    top = fm.Chart(top_df).mark_point().encode(x="x", y="y", color="cat")
+    lc = LayerChart(bottom, top, resolve={"color": "shared"})
+
+    lowered = lc._composite_tree(auto_tooltips=False)
+    assert lowered is not None
+    assert lowered.tree["resolve"] == {"color": "shared", "x": "shared", "y": "shared"}
+
+    svg = lc.to_svg()
+    # Exclude legend swatch circles (fixed r="4" marker radius, distinct from a
+    # mark_point data circle's data-driven radius).
+    fills = [
+        fill
+        for attrs, fill in re.findall(r'<circle\s+([^>]*)fill="([^"]+)"', svg)
+        if 'r="4"' not in attrs
+    ]
+    assert len(fills) == 4, f"expected one point per layer per row, got {fills}"
+    bottom_fills, top_fills = fills[:2], fills[2:]
+    assert bottom_fills[0] != top_fills[0], (
+        f"'a' and 'c' must get different colors under a shared union domain: {fills}"
+    )
+    assert bottom_fills[1] != top_fills[1], (
+        f"'b' and 'd' must get different colors under a shared union domain: {fills}"
+    )
 
 
-def test_layer_configure_layer_falls_back_to_legacy(layer_df):
-    """A composition-level configure layer keeps the old merge-based path."""
+def test_layer_configure_layer_lowers_via_composite_path(layer_df):
+    """A composition-level configure layer now lowers via the composite path.
+
+    Task 10-pre-a sub-task 4: LayerChart already calls ``_inject_parent_config``
+    on every layer unconditionally, so the standalone ``_configure_layers``
+    gate that used to precede it was redundant -- dropping it lets the
+    configure land in each leaf's ``chart_config`` and lower normally.
+    """
     scatter = fm.Chart(layer_df).mark_point().encode(x="x", y="y")
     line = fm.Chart(layer_df).mark_line().encode(x="x", y="y")
     lc = LayerChart(scatter, line).configure_axis(label_angle=-45)
-    assert lc._composite_tree(auto_tooltips=False) is None
+    lowered = lc._composite_tree(auto_tooltips=False)
+    assert lowered is not None
+    assert lowered.chart_config["axis"]["label_angle"] == -45
     assert lc.to_svg().startswith("<svg")
 
 

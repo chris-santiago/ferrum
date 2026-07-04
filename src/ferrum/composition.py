@@ -57,6 +57,23 @@ def _copy_configure_layers(src: "_ChartLike", dst: "_ChartLike") -> None:
         dst._configure_layers = list(config)
 
 
+def _composite_chrome_kwargs(node) -> dict:
+    """Return *node*'s figure-chrome positioning overrides (padding/anchor).
+
+    Wraps ``chrome_kwargs(merge_configure_layers(node._configure_layers))`` --
+    the same resolution the legacy ``_to_svg_string_compositor``/
+    ``_render_interactive_scene_merge`` paths use for the composed figure's
+    title/caption band position. A non-empty result means *node*'s
+    composition-level configure sets ``configure_padding(left=/right=)`` or
+    ``configure_title(anchor=)``, which the composite render entry's root
+    chrome injection does not yet consume (it always applies the Rust
+    default inset/anchor) -- see :func:`_lower_any`'s ``_composite_layout``
+    gate, the one composite-level configure case still deferred to the
+    legacy path.
+    """
+    return chrome_kwargs(merge_configure_layers(getattr(node, "_configure_layers", None)))
+
+
 def _shallow_copy_composite(src) -> object:
     """Shallow copy for ``_ChartLike`` subclasses that mix ``__slots__`` and ``__dict__``.
 
@@ -146,8 +163,6 @@ def _apply_resolve(charts: list, resolve: Optional[Dict[str, str]]) -> list:
     """
     if not resolve:
         return charts
-    from ferrum._scale_share import compute_union_domain, inject_scale
-
     shared = [ch for ch, mode in resolve.items() if mode == "shared"]
     if not shared:
         return charts
@@ -158,6 +173,124 @@ def _apply_resolve(charts: list, resolve: Optional[Dict[str, str]]) -> list:
             continue
         result = [inject_scale(c, channel, sd) for c in result]
     return result
+
+
+def compute_union_domain(charts, channel: str) -> Optional[dict]:
+    """Compute a ferrum scale dict spanning *channel* across *charts*.
+
+    Walks every layer of every chart, collects ``(field, data)`` pairs,
+    detects the scale type from the first binding's dtype, then either
+    unions numeric min/max (linear) or unique values (ordinal).  Time
+    domains use the same numeric union path but emit ``type="time"``.
+
+    Shared by :func:`_apply_resolve` (HConcat/VConcat/ConcatChart's legacy
+    ``resolve=``/``share_scale`` path), :meth:`_ChartLike.share_scale`,
+    :meth:`RepeatChart._apply_resolve`, and :meth:`LayerChart._build_merged`
+    — every legacy (non-x/y-composite) scale-sharing call site.
+
+    Parameters
+    ----------
+    charts : iterable of Chart
+        Charts whose channel will share a domain.
+    channel : str
+        Encoding channel name (``"x"``, ``"y"``, ``"color"``, ...).
+
+    Returns
+    -------
+    dict or None
+        ``{"type": "linear" | "ordinal" | "time", "domain": [...]}``
+        suitable for passing as ``scale=`` on an encoding channel.
+        Returns ``None`` when no chart binds the channel, no data is
+        available, or the dtype is unsupported.
+    """
+    from ferrum._render_prepare import (
+        _chart_bindings,
+        _classify_field,
+        _column_minmax,
+        _column_unique,
+    )
+
+    bindings: list = []
+    for chart in charts:
+        data = getattr(chart, "_data", None)
+        if data is None:
+            continue
+        for field in _chart_bindings(chart, channel):
+            if field is not None:
+                bindings.append((field, data))
+    if not bindings:
+        return None
+
+    first_field, first_data = bindings[0]
+    scale_type = _classify_field(first_data, first_field)
+    if scale_type is None:
+        return None
+
+    if scale_type in ("linear", "time"):
+        lo, hi = float("inf"), float("-inf")
+        for field, data in bindings:
+            extent = _column_minmax(data, field)
+            if extent is None:
+                continue
+            lo = min(lo, extent[0])
+            hi = max(hi, extent[1])
+        if lo == float("inf"):
+            return None
+        return {"type": scale_type, "domain": [lo, hi]}
+
+    # ordinal: union of unique values, preserving first-appearance order
+    seen: list = []
+    seen_set: set = set()
+    for field, data in bindings:
+        for v in _column_unique(data, field):
+            if v not in seen_set:
+                seen_set.add(v)
+                seen.append(v)
+    if not seen:
+        return None
+    return {"type": "ordinal", "domain": seen}
+
+
+def inject_scale(chart, channel: str, scale_dict: dict):
+    """Return a clone of *chart* with ``scale=scale_dict`` set on *channel*.
+
+    For layered charts each layer's encoding is updated independently.
+    Channels not currently bound on the chart (or on a particular layer)
+    are left untouched — no implicit binding is added.
+    """
+    from ferrum._layer import _Layer
+    from ferrum.encoding.base import ChannelBase
+    from ferrum.chart import _channel_class_for
+
+    def _set_on(value):
+        if isinstance(value, ChannelBase):
+            new_kwargs = dict(value._kwargs)
+            new_kwargs["scale"] = scale_dict
+            return type(value)(value.field, **new_kwargs)
+        cls = _channel_class_for(channel)
+        if cls is None:
+            return value
+        return cls(value, scale=scale_dict)
+
+    new = chart._clone()
+    if new._layers:
+        new._layers = [
+            _Layer(
+                mark=layer.mark,
+                encoding={
+                    k: (_set_on(v) if k == channel else v) for k, v in layer.encoding.items()
+                },
+                transforms=layer.transforms,
+                mark_kwargs=layer.mark_kwargs,
+                data_source=layer.data_source,
+                position=layer.position,
+            )
+            for layer in new._layers
+        ]
+    else:
+        if channel in new._encoding:
+            new._encoding[channel] = _set_on(new._encoding[channel])
+    return new
 
 
 @dataclass
@@ -187,23 +320,26 @@ def _is_leaf_chart(node) -> bool:
     return not isinstance(node, _ChartLike) and hasattr(node, "_render_inputs")
 
 
+_COMPOSITE_RESOLVE_CHANNELS = ("x", "y", "color", "size")
+
+
 def _composite_resolve_field(resolve: Optional[Dict[str, str]]) -> Optional[dict]:
     """Map a composition ``resolve=`` dict onto a composite node's resolve field.
 
-    The Rust composite resolve pass spans only the positional ``x``/``y``
-    channels, so a ``"shared"`` request on any other channel (``color``,
-    ``size``, …) is not representable there.  Returns:
+    The Rust composite resolve pass spans the positional ``x``/``y`` channels
+    plus ``color``/``size`` (10-pre-b); a ``"shared"`` request on any other
+    channel (``shape``, ``opacity``, …) is not representable there. Returns:
 
     - ``{}`` when there is nothing to share,
-    - ``{"x": mode, ...}`` restricted to x/y when shareable,
-    - ``None`` when a non-x/y channel is marked ``"shared"`` (the caller then
-      keeps the old ``_scale_share`` injection path).
+    - ``{"x": mode, ...}`` restricted to the supported channels when shareable,
+    - ``None`` when an unsupported channel is marked ``"shared"`` (the caller
+      then keeps the legacy per-chart :func:`inject_scale` union-domain path).
     """
     if not resolve:
         return {}
     out: dict = {}
     for channel, mode in resolve.items():
-        if channel in ("x", "y"):
+        if channel in _COMPOSITE_RESOLVE_CHANNELS:
             out[channel] = mode
         elif mode == "shared":
             return None
@@ -213,39 +349,22 @@ def _composite_resolve_field(resolve: Optional[Dict[str, str]]) -> Optional[dict
 def _lower_composite(composite, *, auto_tooltips: bool) -> Optional[_LoweredTree]:
     """Lower a composition (recursively) to a one-call composite render-tree.
 
-    Handles every composite whose class declares a ``_composite_layout`` wire
-    kind: the linear forms (HConcat/VConcat) and the wrapping-grid ``ConcatChart``
-    (``wrap`` layout).  Layout-specific tree fields (e.g. ``ncols`` for wrap) come
-    from each node's :meth:`_CompositeBase._composite_node_fields` hook, so the
-    lowering body stays layout-agnostic rather than branching per class.
+    Entry point for every composite whose class declares a ``_composite_layout``
+    wire kind: the linear forms (HConcat/VConcat) and the wrapping-grid
+    ``ConcatChart`` (``wrap`` layout). The recursive walk itself lives in
+    :func:`_lower_any`, shared with :func:`_build_grid_tree`'s grid cells, so a
+    JointChart/RepeatChart/ClusterMapChart/LayerChart nested anywhere in the
+    tree — as an HConcat/VConcat child, a grid cell, or arbitrarily deeper —
+    lowers to a nested ``CompositeNode::Composite`` instead of forcing the
+    whole tree to the legacy string-compositor / scene-merge path.
 
-    Returns ``None`` — signalling the caller to keep the existing
-    string-compositor / scene-merge path — when the composition cannot be
-    rendered faithfully by the uniform composite entry.  The new path is taken
-    when:
-
-    - every descendant is a ``Chart`` leaf or a nested composite that declares a
-      ``_composite_layout`` (HConcat/VConcat/ConcatChart),
-    - no composite node carries composition-level configure layers (the
-      composite path uses default figure-band chrome positioning),
-    - every ``resolve=`` shared channel is positional x/y, and
-    - no nested composite carries a figure *subtitle* or *caption* (those remain
-      root-only on the composite path).
-
-    A nested composite carrying only a figure *title* is no longer gated: its
-    title lowers to a per-child ``"label"`` on the tree node (Task 5d wire), so
-    ``compare=`` diagnostics whose per-model panels are titled *composites* — e.g.
-    ``residuals`` (a titled ``VConcat``) — now ride the new path and share axes
-    position-wise (GH #45).  Per-leaf ``viewport``/``theme``/``chart_config`` are
-    no longer required to be uniform: when the leaves differ, each leaf node
-    carries its own binding override (Task 5d wire; absent key = inherit the
-    call-level value).  Homogeneous trees keep the compact call-level form so
-    Task 6/7 output stays byte-identical.
+    Returns ``None`` when the composition cannot be rendered faithfully by the
+    uniform composite entry (see :func:`_lower_any` for the specific gates:
+    non-root subtitle/caption, an unsupported shared-resolve channel, or —
+    absent hole support — an empty-data descendant of a non-grid/wrap layout).
 
     ``auto_tooltips`` mirrors ``Chart._render_scene``: the interactive path
-    prepares leaves with auto-tooltips injected, the SVG path does not.  The
-    helper is deliberately generic (leaf + nested-composite lowering) so the
-    ratio/overlay cutovers (Tasks 8-9) can reuse it.
+    prepares leaves with auto-tooltips injected, the SVG path does not.
     """
     payloads: list = []
     # (viewport, theme, chart_config) per leaf; when the leaves differ, each
@@ -253,60 +372,14 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> Optional[_LoweredTree
     leaf_inputs: list = []
     leaf_nodes: list = []
 
-    def lower(node, is_root: bool) -> Optional[dict]:
-        if _is_leaf_chart(node):
-            return _lower_leaf_node(
-                node,
-                auto_tooltips=auto_tooltips,
-                payloads=payloads,
-                leaf_inputs=leaf_inputs,
-                leaf_nodes=leaf_nodes,
-            )
-
-        layout = getattr(node, "_composite_layout", None)
-        if layout is not None:
-            if getattr(node, "_configure_layers", None):
-                return None
-            if not is_root and (
-                node._figure_subtitle is not None or node._figure_caption is not None
-            ):
-                return None  # non-root subtitle/caption stay root-only (labels are title-only)
-            resolve = _composite_resolve_field(getattr(node, "_resolve", None))
-            if resolve is None:
-                return None
-            children: list = []
-            for child in node.charts:
-                child_node = lower(child, is_root=False)
-                if child_node is None:
-                    return None
-                children.append(child_node)
-            comp: dict = {
-                "kind": "composite",
-                "layout": layout,
-                "children": children,
-                "spacing": node.spacing,
-                **node._composite_node_fields(),
-            }
-            if resolve:
-                comp["resolve"] = resolve
-            if is_root:
-                if node._figure_title is not None:
-                    comp["title"] = node._figure_title
-                if node._figure_subtitle is not None:
-                    comp["subtitle"] = node._figure_subtitle
-                if node._figure_caption is not None:
-                    comp["caption"] = node._figure_caption
-            elif node._figure_title is not None:
-                # A non-root composite's figure title lowers to a per-child panel
-                # label (Task 5d wire), so titled composite compare= panels share
-                # axes position-wise instead of gating to the old path (GH #45).
-                comp["label"] = node._figure_title
-            return comp
-
-        # LayerChart / Joint / Repeat / ClusterMap declare no _composite_layout.
-        return None
-
-    root = lower(composite, is_root=True)
+    root = _lower_any(
+        composite,
+        is_root=True,
+        auto_tooltips=auto_tooltips,
+        payloads=payloads,
+        leaf_inputs=leaf_inputs,
+        leaf_nodes=leaf_nodes,
+    )
     if root is None or not leaf_inputs:
         return None
 
@@ -318,6 +391,163 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> Optional[_LoweredTree
         theme=theme,
         chart_config=chart_config or None,
     )
+
+
+def _lower_any(
+    node,
+    *,
+    is_root: bool,
+    auto_tooltips: bool,
+    payloads: list,
+    leaf_inputs: list,
+    leaf_nodes: list,
+    allow_hole: bool = False,
+) -> Optional[dict]:
+    """Lower one node — a leaf ``Chart`` or any composite class — to its wire dict.
+
+    The single recursive entry point shared by every composite form's tree
+    lowering: :func:`_lower_composite` (HConcat/VConcat/ConcatChart children)
+    and :func:`_build_grid_tree` (JointChart/ClusterMapChart/RepeatChart grid
+    cells). Every form appends into the SAME caller-owned accumulator lists
+    (``payloads``/``leaf_inputs``/``leaf_nodes``) so payload indices stay
+    globally unique across arbitrary nesting depth — a ``LayerChart`` inside
+    an ``HConcatChart`` inside a ``JointChart`` marginal, for instance — and
+    only the true tree root finalizes the call-level ``viewport``/``theme``/
+    ``chart_config`` default via :func:`_apply_leaf_binding_overrides`.
+
+    ``allow_hole`` mirrors the parent layout's hole support (holes are valid
+    only under ``grid``/``wrap`` — spec/Task 8a): an empty-data leaf lowers to
+    a ``{"kind": "hole"}`` cell when the parent allows it, otherwise declines
+    (nesting is all-or-nothing, so the caller falls back to its legacy path
+    for the whole tree rather than splicing in a partially-lowered subtree).
+
+    Returns ``None`` when *node* cannot lower faithfully: a non-root figure
+    *subtitle*/*caption* (those stay root-only), a ``resolve=`` request for a
+    channel the Rust composite resolve pass doesn't support (see
+    :func:`_composite_resolve_field`), a node type this function does not
+    recognize, or — absent hole support — an empty-data leaf.
+    """
+    if _is_leaf_chart(node):
+        return _lower_leaf_node(
+            node,
+            auto_tooltips=auto_tooltips,
+            payloads=payloads,
+            leaf_inputs=leaf_inputs,
+            leaf_nodes=leaf_nodes,
+            allow_hole=allow_hole,
+        )
+
+    if isinstance(node, (JointChart, ClusterMapChart, RepeatChart, LayerChart)):
+        sub = node._composite_tree(auto_tooltips=auto_tooltips, is_root=is_root)
+        if sub is None:
+            return None
+        return _splice_lowered_subtree(
+            sub, payloads=payloads, leaf_inputs=leaf_inputs, leaf_nodes=leaf_nodes
+        )
+
+    layout = getattr(node, "_composite_layout", None)
+    if layout is None:
+        return None  # unrecognized node kind -- caller falls back to legacy
+
+    if not is_root and (node._figure_subtitle is not None or node._figure_caption is not None):
+        return None  # non-root subtitle/caption stay root-only (labels are title-only)
+    if _composite_chrome_kwargs(node):
+        # The composite tree's root chrome (inject_root_chrome) only ever sets
+        # title/subtitle/caption TEXT at the Rust default inset/anchor; it does
+        # not yet consume a per-composite left_inset/right_inset/anchor
+        # override the way the legacy `compose_svg_*`/`_merge_child_scenes*`
+        # entries do. Pushing composite-level configure into each child via
+        # `_inject_parent_config` (below) is correct for per-leaf settings
+        # (axis/grid/legend/color -- the JointChart/ClusterMapChart precedent)
+        # but cannot reproduce a figure-chrome positioning override, so this
+        # specific case stays on the legacy path until the composite render
+        # entry grows that support.
+        return None
+    resolve = _composite_resolve_field(getattr(node, "_resolve", None))
+    if resolve is None:
+        return None
+    child_allow_hole = layout in ("grid", "wrap")
+    children: list = []
+    for child in node.charts:
+        child = node._inject_parent_config(child)
+        child_node = _lower_any(
+            child,
+            is_root=False,
+            auto_tooltips=auto_tooltips,
+            payloads=payloads,
+            leaf_inputs=leaf_inputs,
+            leaf_nodes=leaf_nodes,
+            allow_hole=child_allow_hole,
+        )
+        if child_node is None:
+            return None
+        children.append(child_node)
+    comp: dict = {
+        "kind": "composite",
+        "layout": layout,
+        "children": children,
+        "spacing": node.spacing,
+        **node._composite_node_fields(),
+    }
+    if resolve:
+        comp["resolve"] = resolve
+    if is_root:
+        if node._figure_title is not None:
+            comp["title"] = node._figure_title
+        if node._figure_subtitle is not None:
+            comp["subtitle"] = node._figure_subtitle
+        if node._figure_caption is not None:
+            comp["caption"] = node._figure_caption
+    elif node._figure_title is not None:
+        # A non-root composite's figure title lowers to a per-child panel
+        # label (Task 5d wire), so titled composite compare= panels share
+        # axes position-wise instead of gating to the old path (GH #45).
+        comp["label"] = node._figure_title
+    return comp
+
+
+def _splice_lowered_subtree(
+    sub: "_LoweredTree",
+    *,
+    payloads: list,
+    leaf_inputs: list,
+    leaf_nodes: list,
+) -> dict:
+    """Merge an already-lowered nested composite's tree into the parent's lists.
+
+    ``sub`` was produced by a form's own ``_composite_tree()`` (JointChart,
+    ClusterMapChart, RepeatChart, or LayerChart) called as a non-root node —
+    it only knows its own local payload indices and its own call-level
+    ``(viewport, theme, chart_config)`` default. Splicing it into an outer
+    tree means every one of its leaves needs an EXPLICIT per-leaf binding
+    override (the outer root's eventual default may differ from the
+    sub-tree's), so every leaf here has its override written unconditionally
+    — mirroring :func:`_apply_leaf_binding_overrides`'s "no silent inherit"
+    rule. Returns *sub*'s (mutated in place) tree dict for the caller to use
+    as the child node.
+    """
+    offset = len(payloads)
+    payloads.extend(sub.payloads)
+
+    def walk(n: dict) -> None:
+        kind = n.get("kind")
+        if kind == "leaf":
+            n["data"] += offset
+            viewport = n.get("viewport", sub.viewport)
+            theme = n.get("theme", sub.theme)
+            chart_config = n.get("chart_config", sub.chart_config or {})
+            n["viewport"] = viewport
+            n["theme"] = theme
+            n["chart_config"] = chart_config
+            leaf_inputs.append((viewport, theme, chart_config))
+            leaf_nodes.append(n)
+        elif kind == "composite":
+            for child in n["children"]:
+                walk(child)
+        # "hole": no leaf data to splice.
+
+    walk(sub.tree)
+    return sub.tree
 
 
 def _apply_leaf_binding_overrides(leaf_nodes: list, leaf_inputs: list) -> tuple:
@@ -366,20 +596,22 @@ def _lower_leaf_node(
     payloads: list,
     leaf_inputs: list,
     leaf_nodes: list,
+    allow_hole: bool = False,
 ) -> Optional[dict]:
     """Lower one leaf chart to its wire node, appending to the parallel lists.
 
-    The single source of truth for leaf lowering, shared by
-    :func:`_lower_composite` and :func:`_build_grid_tree` — the empty-data
-    guard here (``None`` = defer the whole tree to the legacy path) previously
-    lived in two hand-copied blocks, and its omission from one of them was a
-    real regression (Task 8b gap 1). Returns the ``{"kind": "leaf", ...}``
-    node, or ``None`` when the leaf's data is empty.
+    The single source of truth for leaf lowering, shared (via :func:`_lower_any`)
+    by every composite form. An empty-data leaf (``num_rows == 0``) lowers to a
+    ``{"kind": "hole"}`` placeholder when *allow_hole* is set (the parent layout
+    is ``grid``/``wrap``, where holes are valid — spec/Task 8a); otherwise it
+    returns ``None`` to defer the whole tree to the legacy path, since the Rust
+    composite entry cannot lay out a zero-row leaf and ``hconcat``/``vconcat``/
+    ``overlay`` layouts have no hole placeholder to substitute.
     """
-    spec, data, viewport, theme, chart_config = chart._render_inputs(
-        _auto_tooltips=auto_tooltips
-    )
+    spec, data, viewport, theme, chart_config = chart._render_inputs(_auto_tooltips=auto_tooltips)
     if data.num_rows == 0:
+        if allow_hole:
+            return {"kind": "hole"}
         return None  # per-child empty-data handling stays on the legacy path
     index = len(payloads)
     payloads.append(data)
@@ -402,28 +634,34 @@ def _build_grid_tree(
     subtitle: Optional[str],
     caption: Optional[str],
     resolve: Optional[dict] = None,
+    is_root: bool = True,
 ) -> Optional[_LoweredTree]:
-    """Lower a row-major grid of leaf charts (with optional holes) to a tree.
+    """Lower a row-major grid of chart cells (with optional holes) to a tree.
 
     Used by :class:`JointChart`, :class:`ClusterMapChart`, and
     :class:`RepeatChart` — grid composites whose fixed panel slots (and, for
     Joint/ClusterMap's single-marginal corner or Repeat's ``corner=True``
     upper triangle / wrapped trailing cells, one or more unused cells) don't
     fit :func:`_lower_composite`'s generic ``node.charts`` walk. Every entry in
-    *cells* is either a plain leaf ``Chart`` or ``None`` (lowered to a
-    ``{"kind": "hole"}`` placeholder cell, which the Rust grid layout reserves a
-    slot for but draws nothing into — see the Task 8a hole wire). Holes are
-    valid at any grid position, not only the 2×2 corner.
-    ``title``/``subtitle``/``caption`` are always attached at the tree root: a
-    1x1 grid wrapping a single chart is a valid composite tree (spec §6), so
-    this same builder — and the same
-    ``render_composite_svg``/``render_composite_interactive`` entries — cover
-    every marginal-count / grid-shape case uniformly, with no separate
-    single-chart bypass.
+    *cells* is either a leaf ``Chart``, a nested composite (lowered recursively
+    via :func:`_lower_any` — a ``LayerChart`` or ``HConcatChart`` used as a
+    JointChart marginal, for instance), or ``None`` (a ``{"kind": "hole"}``
+    placeholder cell, which the Rust grid layout reserves a slot for but draws
+    nothing into — see the Task 8a hole wire). Holes are valid at any grid
+    position, not only the 2×2 corner; an empty-data cell also lowers to a hole
+    (grid layouts support them) rather than deferring the whole tree.
+
+    ``title``/``subtitle``/``caption`` attach at the tree root when *is_root*
+    (a 1x1 grid wrapping a single chart is a valid composite tree — spec §6 —
+    so this same builder covers every marginal-count / grid-shape case
+    uniformly, with no separate single-chart bypass); when this grid is itself
+    a nested cell (*is_root* is ``False``), *title* lowers to a per-child
+    ``"label"`` instead, and a *subtitle*/*caption* on a nested grid declines
+    (those stay root-only).
 
     Parameters
     ----------
-    cells : list of Chart or None
+    cells : list of Chart, composite, or None
         Row-major grid cells; ``len(cells)`` must equal ``nrows * ncols``.
     nrows, ncols : int
         Grid dimensions.
@@ -434,21 +672,26 @@ def _build_grid_tree(
     auto_tooltips : bool
         Forwarded to each leaf's ``_render_inputs`` (interactive vs. static).
     title, subtitle, caption : str, optional
-        Root-only figure chrome.
+        Figure chrome — root-only unless *is_root* is ``False``.
     resolve : dict, optional
         Composite resolve field (e.g. ``{"x": "shared"}``) attached to the grid
         node so the Rust resolve pass unions the shared channel's domain across
         every cell. ``None`` or empty leaves each cell with independent scales.
+    is_root : bool, default True
+        Whether this grid is the tree root (root-only chrome keys) or a nested
+        cell within an outer composite (subtitle/caption unsupported; title
+        becomes a per-child ``"label"``).
 
     Returns
     -------
     _LoweredTree or None
-        ``None`` when any non-hole cell's data is empty (``num_rows == 0``),
-        mirroring :func:`_lower_composite`'s ``lower()`` leaf guard — the
-        Rust composite-render entry cannot lay out a zero-row leaf, so the
-        whole tree defers to the caller's legacy per-child render path
-        instead (which already handles empty-data charts leaf-by-leaf).
+        ``None`` when a nested (non-root) *subtitle*/*caption* is set, or when
+        any cell declines to lower (e.g. a nested composite's own gate fails) —
+        signalling the caller to fall back to the legacy per-child render path.
     """
+    if not is_root and (subtitle is not None or caption is not None):
+        return None  # non-root subtitle/caption stay root-only (labels are title-only)
+
     payloads: list = []
     leaf_inputs: list = []
     leaf_nodes: list = []
@@ -457,16 +700,27 @@ def _build_grid_tree(
         if cell is None:
             children.append({"kind": "hole"})
             continue
-        node = _lower_leaf_node(
+        node = _lower_any(
             cell,
+            is_root=False,
             auto_tooltips=auto_tooltips,
             payloads=payloads,
             leaf_inputs=leaf_inputs,
             leaf_nodes=leaf_nodes,
+            allow_hole=True,  # grid layout supports holes
         )
         if node is None:
             return None
         children.append(node)
+
+    if not leaf_nodes:
+        # Every cell lowered to a hole (e.g. every panel's data is empty --
+        # pairplot/jointplot on a zero-row DataFrame): there is nothing left to
+        # place at all, so this defers to the legacy path exactly like the
+        # pre-Task-10-pre-a "any empty leaf declines the whole tree" behavior,
+        # rather than handing the Rust entry (or _apply_leaf_binding_overrides
+        # below) a leaf-less tree.
+        return None
 
     tree: dict = {
         "kind": "composite",
@@ -482,12 +736,15 @@ def _build_grid_tree(
         tree["col_ratios"] = col_ratios
     if resolve:
         tree["resolve"] = resolve
-    if title is not None:
-        tree["title"] = title
-    if subtitle is not None:
-        tree["subtitle"] = subtitle
-    if caption is not None:
-        tree["caption"] = caption
+    if is_root:
+        if title is not None:
+            tree["title"] = title
+        if subtitle is not None:
+            tree["subtitle"] = subtitle
+        if caption is not None:
+            tree["caption"] = caption
+    elif title is not None:
+        tree["label"] = title
 
     viewport, theme, chart_config = _apply_leaf_binding_overrides(leaf_nodes, leaf_inputs)
     return _LoweredTree(
@@ -785,8 +1042,6 @@ class _ChartLike(ConfigureMixin):
         shared = [ch for ch, mode in channels.items() if mode == "shared"]
         if not shared:
             return self
-        from ferrum._scale_share import compute_union_domain, inject_scale
-
         member_charts = self.charts
         scale_dicts = {}
         for channel in shared:
@@ -1381,7 +1636,9 @@ class JointChart(_CompositeBase):
         self._carry_figure_chrome(new)
         return new
 
-    def _composite_tree(self, *, auto_tooltips: bool) -> Optional[_LoweredTree]:
+    def _composite_tree(
+        self, *, auto_tooltips: bool, is_root: bool = True
+    ) -> Optional[_LoweredTree]:
         """Lower this JointChart to a 2×2 ratio/hole composite grid tree.
 
         Row-major cell layout — mirrors the pre-cutover ``to_svg``/
@@ -1404,25 +1661,40 @@ class JointChart(_CompositeBase):
         the marginal-only axis is illegible at marginal size) — applied here so
         both the static and interactive paths share the exact same behavior
         (pre-cutover, only ``to_svg`` hid marginal axes; the interactive path
-        did not).
+        did not). ``.axis()`` is a plain-``Chart`` method, so a marginal stays
+        gated to a leaf chart; the *center* panel carries no such constraint
+        and lowers through :func:`_build_grid_tree`'s generic cell handling
+        (:func:`_lower_any`), so a nested composite (e.g. a ``LayerChart``
+        overlaying a trend line on the center scatter) lowers recursively
+        instead of forcing the whole tree to the legacy path.
+
+        ``is_root`` is ``False`` when this JointChart is itself a cell nested
+        inside another composite: the figure title then lowers to a per-child
+        ``"label"`` and a subtitle/caption declines (root-only chrome).
 
         Returns
         -------
         _LoweredTree or None
-            ``None`` when center/top/right is not a plain leaf ``Chart``
-            (e.g. a nested composition), signalling the caller to fall back to
-            the legacy per-child render path.
+            ``None`` when a marginal (*top*/*right*) is not a plain leaf
+            ``Chart`` (``axis(show=False)`` requires one), when *center*
+            (or a nested composite reachable from it) declines to lower, or
+            when a figure-chrome positioning override is set (see
+            :func:`_composite_chrome_kwargs`) — signalling the caller to fall
+            back to the legacy per-child render path.
         """
+        if _composite_chrome_kwargs(self):
+            return None
         center = self._inject_parent_config(self.center)
         top = self._inject_parent_config(self.top) if self.top is not None else None
         right = self._inject_parent_config(self.right) if self.right is not None else None
         if top is not None:
+            if not _is_leaf_chart(top):
+                return None  # marginal axis-hiding requires a plain Chart
             top = top.axis(show=False)
         if right is not None:
+            if not _is_leaf_chart(right):
+                return None
             right = right.axis(show=False)
-
-        if any(not _is_leaf_chart(c) for c in (center, top, right) if c is not None):
-            return None
 
         marginal_share = 1.0 / (self.ratio + 1)
         center_share = self.ratio / (self.ratio + 1)
@@ -1460,6 +1732,7 @@ class JointChart(_CompositeBase):
             title=self._figure_title,
             subtitle=self._figure_subtitle,
             caption=self._figure_caption,
+            is_root=is_root,
         )
 
     def _render_interactive(self) -> tuple[str, bytes]:
@@ -1756,8 +2029,6 @@ class RepeatChart(_CompositeBase):
         """
         if not self.resolve:
             return panels
-        from ferrum._scale_share import compute_union_domain, inject_scale
-
         shared = [ch for ch, mode in self.resolve.items() if mode == "shared"]
         if not shared:
             return panels
@@ -1931,19 +2202,29 @@ class RepeatChart(_CompositeBase):
         self._carry_figure_chrome(result)
         return result
 
-    def _composite_tree(self, *, auto_tooltips: bool) -> Optional[_LoweredTree]:
+    def _composite_tree(
+        self, *, auto_tooltips: bool, is_root: bool = True
+    ) -> Optional[_LoweredTree]:
         """Lower this repeat grid to a composite grid/hole tree.
 
         The materialized panels form a row-major grid: a 2-D repeat is a dense
         ``len(row) × len(column)`` grid (with ``corner=True`` filling the upper
         triangle with ``{"kind": "hole"}`` cells); a 1-D repeat wraps by
         ``columns`` into ``nrows × ncols`` with trailing holes. Every present
-        cell lowers to a leaf; the shared :func:`_build_grid_tree` builder emits
-        the tree consumed by ``render_composite_svg`` /
-        ``render_composite_interactive``.
+        cell lowers via the shared :func:`_build_grid_tree` builder (its
+        :func:`_lower_any` cell dispatch), which emits the tree consumed by
+        ``render_composite_svg`` / ``render_composite_interactive``. Composition-
+        level configure layers are pushed onto each panel via
+        :meth:`_ChartLike._inject_parent_config` before lowering, so most
+        composite-level configure (axis/grid/legend/color) needs no separate
+        gate here (mirrors :class:`JointChart`/:class:`ClusterMapChart`) --
+        except a figure-chrome positioning override (``configure_padding``/
+        ``configure_title(anchor=)``), which the composite render entry's root
+        chrome injection does not yet consume (see :func:`_composite_chrome_kwargs`).
 
         ``resolve=`` sharing rides the tree's resolve field (the Rust resolve
-        pass unions x/y domains across cells) rather than the per-panel
+        pass unions domains across cells for the supported channels — see
+        :func:`_composite_resolve_field`) rather than the per-panel
         ``_apply_resolve`` injection the legacy path uses. Panels are therefore
         materialized *without* ``_apply_resolve``.
 
@@ -1951,28 +2232,22 @@ class RepeatChart(_CompositeBase):
         -------
         _LoweredTree or None
             ``None`` — deferring to the legacy per-child render path — when
-            composition-level configure layers are set (their figure-chrome
-            positioning stays on the legacy compositor, mirroring
-            :func:`_lower_composite`'s ``_configure_layers`` gate), when
-            ``resolve=`` marks a non-x/y channel ``"shared"`` (the Rust resolve
-            pass spans only x/y), when any materialized panel is not a plain
-            leaf ``Chart``, or when any panel's data is empty.
+            ``resolve=`` marks an unsupported channel ``"shared"``, or when a
+            figure-chrome positioning override is set (see above).
         """
-        if getattr(self, "_configure_layers", None):
+        if _composite_chrome_kwargs(self):
             return None
         resolve_field = _composite_resolve_field(self.resolve)
         if resolve_field is None:
             return None
 
         # Materialize raw panels (no _apply_resolve: the tree resolve field
-        # drives x/y sharing via the Rust resolve pass).
+        # drives sharing via the Rust resolve pass).
         panels = [
             (row_field, col_field, self._make_panel(row_field, col_field))
             for row_field, col_field in self._panel_coordinates()
         ]
         charts = [self._inject_parent_config(chart) for _, _, chart in panels]
-        if any(not _is_leaf_chart(c) for c in charts):
-            return None
 
         cells: List[Optional[object]]
         if self.row is not None and self.column is not None:
@@ -2000,6 +2275,7 @@ class RepeatChart(_CompositeBase):
             subtitle=self._figure_subtitle,
             caption=self._figure_caption,
             resolve=resolve_field or None,
+            is_root=is_root,
         )
 
     def _render_interactive(self) -> tuple[str, bytes]:
@@ -2301,7 +2577,9 @@ class ClusterMapChart(_CompositeBase):
         )
         return heatmap, col_dendro, row_dendro
 
-    def _composite_tree(self, *, auto_tooltips: bool) -> Optional[_LoweredTree]:
+    def _composite_tree(
+        self, *, auto_tooltips: bool, is_root: bool = True
+    ) -> Optional[_LoweredTree]:
         """Lower this ClusterMapChart to a 2×2 ratio/hole composite grid tree.
 
         Row-major cell layout mirrors the pre-cutover panel positions exactly:
@@ -2314,17 +2592,26 @@ class ClusterMapChart(_CompositeBase):
         - no dendrogram: a dense 1×1 grid — see :meth:`JointChart._composite_tree`
           for why a single-cell tree needs no separate bypass.
 
+        Each cell (``heatmap``/``row_dendrogram``/``col_dendrogram``) lowers via
+        :func:`_build_grid_tree`'s generic cell dispatch (:func:`_lower_any`),
+        so a nested composite dendrogram (e.g. a ``LayerChart`` combining the
+        dendrogram with a threshold annotation) lowers recursively rather than
+        forcing the whole tree to the legacy path. ``heatmap`` itself must
+        still be a plain ``Chart`` in practice — :meth:`_pre_resized_dendrograms`
+        reads its declared ``_width``/``_height`` before this method runs, so a
+        composite heatmap fails there regardless of this method's own gates.
+
         Returns
         -------
         _LoweredTree or None
-            ``None`` when heatmap/row_dendrogram/col_dendrogram is not a plain
-            leaf ``Chart``, signalling the caller to fall back to the legacy
-            per-child render path.
+            ``None`` when a cell (or a nested composite reachable from it)
+            declines to lower, or when a figure-chrome positioning override is
+            set (see :func:`_composite_chrome_kwargs`) — signalling the caller
+            to fall back to the legacy per-child render path.
         """
-        heatmap, col_dendro, row_dendro = self._pre_resized_dendrograms()
-
-        if any(not _is_leaf_chart(c) for c in (heatmap, col_dendro, row_dendro) if c is not None):
+        if _composite_chrome_kwargs(self):
             return None
+        heatmap, col_dendro, row_dendro = self._pre_resized_dendrograms()
 
         d = self.dendrogram_ratio
         h = 1.0 - d
@@ -2362,6 +2649,7 @@ class ClusterMapChart(_CompositeBase):
             title=self._figure_title,
             subtitle=self._figure_subtitle,
             caption=self._figure_caption,
+            is_root=is_root,
         )
 
     def _render_interactive(self) -> tuple[str, bytes]:
@@ -2563,7 +2851,9 @@ class LayerChart(_ChartLike):
         """List of Chart : All member charts in layer order (bottom to top)."""
         return list(self._charts)
 
-    def _composite_tree(self, *, auto_tooltips: bool) -> Optional[_LoweredTree]:
+    def _composite_tree(
+        self, *, auto_tooltips: bool, is_root: bool = True
+    ) -> Optional[_LoweredTree]:
         """Lower this overlay to a composite overlay tree.
 
         Every layer becomes a leaf sharing one panel rect (the Rust overlay
@@ -2571,28 +2861,32 @@ class LayerChart(_ChartLike):
         at the bottom, the last on top. x/y are always shared (union domain),
         matching the legacy ``+``-merge which unconditionally unions the
         positional scales; the overlay is therefore meaningless without it.
+        ``resolve=`` on other supported channels (``color``/``size``) rides the
+        same tree resolve field (see :func:`_composite_resolve_field`).
 
-        The ``title`` becomes a composite *figure* title (root chrome, the same
-        treatment every other composite form gives titles), rather than the
-        chart-level title the legacy ``_build_merged`` path applies via
-        ``.properties(title=...)``.
+        Composition-level configure layers are pushed onto each layer via
+        :meth:`_ChartLike._inject_parent_config` before lowering, so they need
+        no separate gate here (mirrors :class:`JointChart`/:class:`ClusterMapChart`).
+
+        The ``title`` becomes a composite *figure* title (root chrome) when
+        this ``LayerChart`` is the tree root, or a per-child ``"label"`` when
+        it is nested inside another composite — the same treatment every other
+        composite form's title gets, rather than the chart-level title the
+        legacy ``_build_merged`` path applies via ``.properties(title=...)``.
 
         Returns
         -------
         _LoweredTree or None
             ``None`` — deferring to :meth:`_build_merged` (legacy) — when
-            composition-level configure layers are set, when ``resolve=`` marks
-            a non-x/y channel ``"shared"`` (the Rust resolve pass spans only
-            x/y; other channel sharing stays on the Python ``_scale_share``
-            path), when any layer is not a plain leaf ``Chart``, or when any
-            layer's data is empty.
+            ``resolve=`` marks an unsupported channel ``"shared"``, when any
+            layer is not a plain leaf ``Chart``, or when any layer's data is
+            empty (an overlay has no hole placeholder to substitute).
         """
-        if getattr(self, "_configure_layers", None):
+        resolve_field = _composite_resolve_field(self._resolve)
+        if resolve_field is None:
             return None
-        if self._resolve:
-            for channel, mode in self._resolve.items():
-                if channel not in ("x", "y") and mode == "shared":
-                    return None
+        resolve_field["x"] = "shared"
+        resolve_field["y"] = "shared"
 
         layers = [self._inject_parent_config(c) for c in self._charts]
         if any(not _is_leaf_chart(c) for c in layers):
@@ -2619,10 +2913,13 @@ class LayerChart(_ChartLike):
             "layout": "overlay",
             "children": children,
             "spacing": 0.0,
-            "resolve": {"x": "shared", "y": "shared"},
+            "resolve": resolve_field,
         }
         if self._title is not None:
-            tree["title"] = self._title
+            if is_root:
+                tree["title"] = self._title
+            else:
+                tree["label"] = self._title
 
         viewport, theme, chart_config = _apply_leaf_binding_overrides(leaf_nodes, leaf_inputs)
         return _LoweredTree(
@@ -2705,8 +3002,6 @@ class LayerChart(_ChartLike):
         if self._resolve:
             shared = [ch for ch, mode in self._resolve.items() if mode == "shared"]
             if shared:
-                from ferrum._scale_share import compute_union_domain, inject_scale
-
                 for channel in shared:
                     sd = compute_union_domain(self._charts, channel)
                     if sd is not None:

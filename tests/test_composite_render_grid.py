@@ -300,7 +300,7 @@ def test_untitled_composite_children_share_axis_position_wise():
     extends to the union, so the high-value tick band appears in both panels
     (two spatially-separated bands). If Rust-side congruence pairing for
     multi-leaf composite children regresses, this test catches it green-side
-    (the titled variant below stays xfail until the per-child label lands)."""
+    (the titled variant below covers the per-child label case)."""
     concat = ConcatChart(
         _titled_vconcat(0.0, 1.0),
         _titled_vconcat(100.0, 110.0),
@@ -324,3 +324,90 @@ def test_titled_composite_children_share_axis_position_wise():
         resolve={"x": "shared"},
     )
     assert _high_value_tick_bands(concat.to_svg()) >= 2
+
+
+# ---------------------------------------------------------------------------
+# Task 10-pre-a sub-task 3: non-leaf grid/wrap children lower recursively.
+#
+# Before this task, a ConcatChart/HConcat/VConcat child that was itself a
+# JointChart/ClusterMapChart/RepeatChart/LayerChart (composite kinds that
+# declare no ``_composite_layout``) forced the WHOLE tree to decline (return
+# ``None``) and fall back to the legacy per-child render path -- even though
+# every one of those kinds already lowers to its own composite wire node via
+# its own ``_composite_tree()``. ``_lower_any`` now recurses into them,
+# splicing their lowered subtree into the parent's payload/leaf-input lists
+# (:func:`ferrum.composition._splice_lowered_subtree`) instead of bailing.
+# ---------------------------------------------------------------------------
+
+
+def test_layerchart_child_of_wrap_grid_lowers_recursively():
+    """A ``LayerChart`` (overlay) nested inside a ConcatChart wrap grid lowers.
+
+    RED before Task 10-pre-a (``LayerChart`` has no ``_composite_layout``, so
+    ``_lower_composite``'s child walk declined the whole tree); GREEN after.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [1.0, 2.0, 3.0, 4.0]})
+    scatter = fm.Chart(df).mark_point().encode(x="x", y="y")
+    line = fm.Chart(df).mark_line().encode(x="x", y="y")
+    overlay = fm.LayerChart(scatter, line)
+    plain = fm.Chart(df).mark_bar().encode(x="x", y="y")
+
+    concat = ConcatChart(overlay, plain, columns=2)
+    lowered = _lower_composite(concat, auto_tooltips=False)
+    assert lowered is not None
+    overlay_node, plain_node = lowered.tree["children"]
+    assert overlay_node["kind"] == "composite" and overlay_node["layout"] == "overlay"
+    assert plain_node["kind"] == "leaf"
+    # Payload indices stay globally unique across the spliced nested subtree:
+    # the overlay's 2 leaves (indices 0, 1) plus the plain sibling (index 2).
+    assert len(lowered.payloads) == 3
+    assert plain_node["data"] == 2
+
+    svg = concat.to_svg()
+    assert svg.startswith("<svg")
+    assert svg.count("<circle") > 0
+    assert svg.count("<rect") > 0  # the bar mark
+
+
+def test_joint_chart_child_of_hconcat_lowers_recursively():
+    """A ``JointChart`` (grid/ratio composite) nested inside an HConcat lowers.
+
+    RED before Task 10-pre-a; GREEN after -- proves the recursion generalizes
+    beyond one level (HConcat -> JointChart -> its own 2-cell grid tree).
+    """
+    from ferrum.composition import HConcatChart
+
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [4.0, 3.0, 2.0, 1.0]})
+    center = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    top = fm.Chart(df).mark_histogram().encode(x="x:Q")
+    joint = fm.JointChart(center, top=top)
+    other = fm.Chart(df).mark_bar().encode(x="x", y="y")
+
+    composite = HConcatChart([joint, other])
+    lowered = _lower_composite(composite, auto_tooltips=False)
+    assert lowered is not None
+    joint_node, other_node = lowered.tree["children"]
+    assert joint_node["kind"] == "composite" and joint_node["layout"] == "grid"
+    assert other_node["kind"] == "leaf"
+    assert len(lowered.payloads) == 3  # joint's 2 leaves + the plain sibling
+
+    svg = composite.to_svg()
+    assert svg.startswith("<svg")
+
+
+def test_nested_composite_title_becomes_label_not_root_chrome():
+    """A titled nested composite's title lowers to a per-child ``"label"``,
+    never the tree-root ``"title"`` (root-only chrome stays root-only)."""
+    from ferrum.composition import HConcatChart
+
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [4.0, 3.0, 2.0, 1.0]})
+    center = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
+    joint = fm.JointChart(center).properties(title="Joint Panel")
+    other = fm.Chart(df).mark_bar().encode(x="x", y="y")
+
+    composite = HConcatChart([joint, other])
+    lowered = _lower_composite(composite, auto_tooltips=False)
+    assert lowered is not None
+    joint_node, _ = lowered.tree["children"]
+    assert joint_node.get("label") == "Joint Panel"
+    assert "title" not in joint_node

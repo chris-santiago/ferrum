@@ -178,6 +178,30 @@ Move all composition rendering (concat/grid/joint/clustermap/repeat/layer) onto 
 > stays legacy-merged by the one-panel contract, but merged-Chart rendering is the
 > FLAT path — it needs no composite machinery, just the two-line domain union,
 > ported). **10 proper:** the deletion sweep with grep proofs, statement 7 literal.
+>
+> **10-pre-a FINDINGS (2026-07-04).** (1) A Rust `ctx_opt` gate bug (composite_render.rs
+> checked only x/y before threading the resolved context) was found by 10-pre-a and
+> fixed inline by the orchestrator via `LeafScaleContext::is_empty()`; color/size-only
+> sharing now works end-to-end (regression test
+> `test_hconcat_resolve_shared_color_alone_unions_domain`). (2) One narrow gate
+> remains after 10-pre-a: composite-level `configure_padding(left=/right=)` /
+> `configure_title(anchor=)` (`_composite_chrome_kwargs`) — a genuine composite-render-entry
+> gap, since `inject_root_chrome` (composite_render.rs) never reads a per-composite
+> chrome override on either path. **Task 10 proper must close it BEFORE the deletion
+> sweep** by wiring the composite tree's reserved root-only `config` slot (currently
+> dead on the Rust side) into `inject_root_chrome`'s FigureChrome, then dropping the
+> `_composite_chrome_kwargs` gate; `tests/test_flexibility_caps/test_d10_figure_title.py`
+> (t16/17/18/22/23/24) is the behavioral coverage. Empty-data holes exist only on
+> grid/wrap wire layouts; hconcat/vconcat/overlay still decline empty leaves to
+> legacy — Task 10 must close this before deletion, faithful to legacy's blank
+> rendering (extend hole support to hconcat/vconcat on the wire — `build_placed`'s
+> zero-footprint arm already exists — and for overlay skip empty children at
+> lowering, since an empty layer draws no marks; an all-empty tree keeps the
+> existing decline-to-`None` guard, which after deletion becomes a typed error, not
+> a silent fallback). Also: the ported `compute_union_domain`/`inject_scale` call
+> sites (`share_scale`, `RepeatChart._apply_resolve`, `LayerChart._build_merged`)
+> are the FLAT-path domain union and REMAIN after the sweep — Task 10's grep proofs
+> target `_scale_share`/`_scene_merge`/`compose_svg_*` symbols, not these.
 
 ### Task 10: Hard deletion + grep proofs
 - Consumes: all forms cut over (Tasks 6–9)

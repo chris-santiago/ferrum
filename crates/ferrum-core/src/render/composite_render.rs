@@ -233,7 +233,7 @@ pub(crate) fn render_composite_scene(
     let mut warnings: Vec<RenderWarning> = Vec::new();
     for (i, leaf) in leaves.iter().enumerate() {
         let ctx = &contexts[i];
-        let ctx_opt = if ctx.x.is_some() || ctx.y.is_some() { Some(ctx) } else { None };
+        let ctx_opt = (!ctx.is_empty()).then_some(ctx);
         let (mut scene, leaf_warnings) = render_leaf(leaf, ctx_opt).map_err(|source| {
             CompositeRenderError::LeafRender { kind: "leaf", index: i, source }
         })?;

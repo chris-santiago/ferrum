@@ -345,20 +345,110 @@ def test_heterogeneous_child_config_lowers_with_per_leaf_binding(small_chart, la
         )
 
 
-def test_configure_layer_composite_falls_back(small_chart, large_chart):
-    """A composition-level configure layer keeps the old path (default chrome)."""
+def test_configure_layer_composite_lowers_via_composite_path(small_chart, large_chart):
+    """A composition-level configure layer now lowers via the composite path.
+
+    Task 10-pre-a sub-task 4: ``_lower_any`` pushes the composite's
+    ``_configure_layers`` onto every child via ``_inject_parent_config`` before
+    lowering (the mechanism JointChart/ClusterMapChart already relied on), so
+    each leaf's own ``chart_config`` carries the composite-level configure --
+    no separate gate/fallback is needed. RED before this task (the gate
+    unconditionally returned ``None``); GREEN after.
+    """
     composite = (small_chart | large_chart).configure_axis(label_angle=-45)
-    assert _lower_composite(composite, auto_tooltips=False) is None
-    assert composite.to_svg().startswith("<svg")
+    lowered = _lower_composite(composite, auto_tooltips=False)
+    assert lowered is not None
+    # Both children get the SAME composite-level configure injected, so their
+    # chart_configs are identical and the uniform-tree optimization keeps the
+    # override on the call-level default rather than duplicating it per leaf
+    # (see _apply_leaf_binding_overrides).
+    assert lowered.chart_config["axis"]["label_angle"] == -45
+
+    svg = composite.to_svg()
+    assert svg.startswith("<svg")
 
 
-def test_non_xy_shared_channel_falls_back(small_df):
-    """resolve with a shared non-positional channel stays on the injection path."""
-    a = fm.Chart(small_df).mark_point().encode(x="x", y="y", color="x")
-    b = fm.Chart(small_df).mark_point().encode(x="x", y="y", color="x")
-    composite = HConcatChart([a, b], resolve={"color": "shared"})
-    assert _lower_composite(composite, auto_tooltips=False) is None
-    assert composite.to_svg().startswith("<svg")
+def _point_fill_colors(svg: str) -> list[str]:
+    """Return the ``fill`` of every DATA-point ``<circle>``, excluding legend swatches.
+
+    Legend category swatches also render as ``<circle>`` elements but at the
+    legend's fixed marker radius (``r="4"``), distinct from a mark_point data
+    circle's data-driven radius -- excluding them keeps this a pure per-point
+    color check.
+    """
+    return [
+        fill
+        for attrs, fill in re.findall(r'<circle\s+([^>]*)fill="([^"]+)"', svg)
+        if 'r="4"' not in attrs
+    ]
+
+
+def test_hconcat_resolve_shared_color_unions_categorical_domain(small_df, large_df):
+    """resolve={"color": "shared", ...} unions the categorical color domain.
+
+    Task 10-pre-a sub-task 1: ``_composite_resolve_field`` now passes ``color``/
+    ``size`` through to the Rust composite resolve pass (10-pre-b) instead of
+    forcing the whole tree to the legacy ``_scale_share`` injection path. RED
+    before this task (any non-x/y shared channel returned ``None``, forcing
+    ``_lower_composite`` to decline); GREEN after.
+
+    Two children whose ``color``-encoded column has disjoint category sets:
+    with color shared, the SAME category string gets the SAME fill color in
+    both panels' rendered points (a discriminating check -- independent
+    per-panel categorical domains would coincidentally reuse the same palette
+    index-0/1 colors for each panel's own 2 categories, so plain color-set
+    equality would not distinguish shared from independent; requiring the
+    first point of each panel to match, and the second of each panel to
+    match, pins the actual union mapping).
+    """
+    left_df = small_df.with_columns(pl.Series("cat", ["a", "b", "a", "b"]))
+    right_df = large_df.with_columns(pl.Series("cat", ["c", "d", "c", "d"]))
+    left = fm.Chart(left_df).mark_point().encode(x="x", y="y", color="cat")
+    right = fm.Chart(right_df).mark_point().encode(x="x", y="y", color="cat")
+    # x is ALSO shared here; the standalone color-only case is covered by
+    # test_hconcat_resolve_shared_color_alone_unions_domain below.
+    composite = HConcatChart([left, right], resolve={"color": "shared", "x": "shared"})
+
+    lowered = _lower_composite(composite, auto_tooltips=False)
+    assert lowered is not None, "color-shared resolve must lower via the composite path"
+    assert lowered.tree["resolve"] == {"color": "shared", "x": "shared"}
+
+    svg = composite.to_svg()
+    fills = _point_fill_colors(svg)
+    assert len(fills) == 8, f"expected 4 points per panel, got {fills}"
+    left_fills, right_fills = fills[:4], fills[4:]
+    # "a"/"c" are both the first category encountered in their own panel;
+    # under a shared (union-ordered) domain they land on DIFFERENT palette
+    # entries (a=index0, c=index2), unlike an independent per-panel domain
+    # where both would collapse onto local index0.
+    assert left_fills[0] != right_fills[0], (
+        f"'a' and 'c' must get different colors under a shared union domain: {fills}"
+    )
+    assert left_fills[1] != right_fills[1], (
+        f"'b' and 'd' must get different colors under a shared union domain: {fills}"
+    )
+
+
+def test_hconcat_resolve_shared_color_alone_unions_domain(small_df, large_df):
+    """Standalone (no x/y sharing) color-shared resolve unions the domain.
+
+    Regression: composite_render.rs's per-leaf ctx gate originally checked
+    only x/y presence before threading the resolved LeafScaleContext into a
+    leaf's render, so a color/size-ONLY shared resolve was silently discarded
+    (discovered while widening the Python gate in Task 10-pre-a; fixed via
+    LeafScaleContext::is_empty). The sibling test above covers the combined
+    positional+color case.
+    """
+    left_df = small_df.with_columns(pl.Series("cat", ["a", "b", "a", "b"]))
+    right_df = large_df.with_columns(pl.Series("cat", ["c", "d", "c", "d"]))
+    left = fm.Chart(left_df).mark_point().encode(x="x", y="y", color="cat")
+    right = fm.Chart(right_df).mark_point().encode(x="x", y="y", color="cat")
+    composite = HConcatChart([left, right], resolve={"color": "shared"})
+
+    svg = composite.to_svg()
+    fills = _point_fill_colors(svg)
+    left_fills, right_fills = fills[:4], fills[4:]
+    assert left_fills[0] != right_fills[0]
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +473,7 @@ def test_hconcat_interactive_routes_through_composite_entry(small_chart, large_c
 # ---------------------------------------------------------------------------
 
 
-def test_composite_resolve_field_positional_only():
+def test_composite_resolve_field_positional_and_color_size():
     assert _composite_resolve_field(None) == {}
     assert _composite_resolve_field({}) == {}
     assert _composite_resolve_field({"x": "shared"}) == {"x": "shared"}
@@ -391,10 +481,14 @@ def test_composite_resolve_field_positional_only():
         "x": "shared",
         "y": "independent",
     }
-    # A shared non-positional channel is not representable on the composite path.
-    assert _composite_resolve_field({"color": "shared"}) is None
-    # An independent non-positional channel is the default -> nothing to share.
-    assert _composite_resolve_field({"color": "independent"}) == {}
+    # color/size are supported (10-pre-b Rust support + Task 10-pre-a gate drop).
+    assert _composite_resolve_field({"color": "shared"}) == {"color": "shared"}
+    assert _composite_resolve_field({"size": "shared"}) == {"size": "shared"}
+    assert _composite_resolve_field({"color": "independent"}) == {"color": "independent"}
+    # A shared channel outside {x, y, color, size} is still not representable.
+    assert _composite_resolve_field({"shape": "shared"}) is None
+    # An independent unsupported channel is the default -> nothing to share.
+    assert _composite_resolve_field({"shape": "independent"}) == {}
 
 
 # ---------------------------------------------------------------------------

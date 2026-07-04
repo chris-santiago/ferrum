@@ -85,6 +85,13 @@ pub(crate) struct LeafScaleContext {
 }
 
 impl LeafScaleContext {
+    /// True when no channel carries a shared domain — the leaf renders exactly
+    /// as it would standalone. Compares against `Default` so a future channel
+    /// slot is covered automatically.
+    pub(crate) fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
     fn set(&mut self, channel: Channel, domain: SharedDomain) {
         match channel {
             Channel::X => self.x = Some(domain),
