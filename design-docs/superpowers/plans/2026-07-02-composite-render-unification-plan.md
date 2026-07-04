@@ -156,6 +156,18 @@ Move all composition rendering (concat/grid/joint/clustermap/repeat/layer) onto 
 - [ ] Verify: full `uv run pytest -n auto`
 - [ ] Commit (python-review-lite gated)
 
+> **Task 10 pre-flight findings (2026-07-04):** the deletion must reconcile with the
+> retained legacy consumers: (a) LayerChart's interactive path stays on the legacy
+> merged-Chart route (one-panel interactive contract, Task 9 fix) and conditionally
+> calls `_scale_share.compute_union_domain`/`inject_scale` when `resolve=` has a
+> shared channel — port those two calls inline (or verify unreachable) before
+> deleting `_scale_share.py`; it does NOT touch `_scene_merge.py`. (b) The remaining
+> Python-side gates (configure layers — possibly droppable now that 5d's per-leaf
+> chart_config exists; non-x/y shared resolve; empty-data leaves) keep legacy
+> fallback paths alive — Task 10 must either widen those gates away or surface the
+> ledger-statement-7 tension ("_scene_merge/_scale_share/compose_svg_* no longer
+> exist") to the user for an explicit scope decision. Do not silently keep remnants.
+
 ### Task 10: Hard deletion + grep proofs
 - Consumes: all forms cut over (Tasks 6–9)
 - [ ] Delete `_scene_merge.py`, `_scale_share.py` + all imports/call sites (`_apply_resolve` collapses to tree resolve fields), `compose_svg_*` bindings, `compositor.rs`, `grid_compose.rs`, `_scene.py` schema mirror, `figure_title_nodes` binding if unconsumed

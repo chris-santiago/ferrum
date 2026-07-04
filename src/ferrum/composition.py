@@ -401,20 +401,25 @@ def _build_grid_tree(
     title: Optional[str],
     subtitle: Optional[str],
     caption: Optional[str],
+    resolve: Optional[dict] = None,
 ) -> Optional[_LoweredTree]:
     """Lower a row-major grid of leaf charts (with optional holes) to a tree.
 
-    Used by :class:`JointChart` and :class:`ClusterMapChart` — asymmetric
-    composites whose fixed panel slots (and, when only one marginal/dendrogram
-    is present, an unused corner) don't fit :func:`_lower_composite`'s generic
-    ``node.charts`` walk. Every entry in *cells* is either a plain leaf
-    ``Chart`` or ``None`` (lowered to a ``{"kind": "hole"}`` placeholder cell —
-    only valid when both row-count and col-count are 2, i.e. the full
-    both-marginals/both-dendrograms shape). ``title``/``subtitle``/``caption``
-    are always attached at the tree root: a 1x1 grid wrapping a single chart is
-    a valid composite tree (spec §6), so this same builder — and the same
+    Used by :class:`JointChart`, :class:`ClusterMapChart`, and
+    :class:`RepeatChart` — grid composites whose fixed panel slots (and, for
+    Joint/ClusterMap's single-marginal corner or Repeat's ``corner=True``
+    upper triangle / wrapped trailing cells, one or more unused cells) don't
+    fit :func:`_lower_composite`'s generic ``node.charts`` walk. Every entry in
+    *cells* is either a plain leaf ``Chart`` or ``None`` (lowered to a
+    ``{"kind": "hole"}`` placeholder cell, which the Rust grid layout reserves a
+    slot for but draws nothing into — see the Task 8a hole wire). Holes are
+    valid at any grid position, not only the 2×2 corner.
+    ``title``/``subtitle``/``caption`` are always attached at the tree root: a
+    1x1 grid wrapping a single chart is a valid composite tree (spec §6), so
+    this same builder — and the same
     ``render_composite_svg``/``render_composite_interactive`` entries — cover
-    every marginal-count case uniformly, with no separate single-chart bypass.
+    every marginal-count / grid-shape case uniformly, with no separate
+    single-chart bypass.
 
     Parameters
     ----------
@@ -430,6 +435,10 @@ def _build_grid_tree(
         Forwarded to each leaf's ``_render_inputs`` (interactive vs. static).
     title, subtitle, caption : str, optional
         Root-only figure chrome.
+    resolve : dict, optional
+        Composite resolve field (e.g. ``{"x": "shared"}``) attached to the grid
+        node so the Rust resolve pass unions the shared channel's domain across
+        every cell. ``None`` or empty leaves each cell with independent scales.
 
     Returns
     -------
@@ -446,8 +455,6 @@ def _build_grid_tree(
     children: list = []
     for cell in cells:
         if cell is None:
-            # Docstring precondition: holes only occur in the full 2x2 shape.
-            assert nrows == 2 and ncols == 2, "hole cells require a 2x2 grid"
             children.append({"kind": "hole"})
             continue
         node = _lower_leaf_node(
@@ -473,6 +480,8 @@ def _build_grid_tree(
         tree["row_ratios"] = row_ratios
     if col_ratios is not None:
         tree["col_ratios"] = col_ratios
+    if resolve:
+        tree["resolve"] = resolve
     if title is not None:
         tree["title"] = title
     if subtitle is not None:
@@ -1922,7 +1931,98 @@ class RepeatChart(_CompositeBase):
         self._carry_figure_chrome(result)
         return result
 
+    def _composite_tree(self, *, auto_tooltips: bool) -> Optional[_LoweredTree]:
+        """Lower this repeat grid to a composite grid/hole tree.
+
+        The materialized panels form a row-major grid: a 2-D repeat is a dense
+        ``len(row) × len(column)`` grid (with ``corner=True`` filling the upper
+        triangle with ``{"kind": "hole"}`` cells); a 1-D repeat wraps by
+        ``columns`` into ``nrows × ncols`` with trailing holes. Every present
+        cell lowers to a leaf; the shared :func:`_build_grid_tree` builder emits
+        the tree consumed by ``render_composite_svg`` /
+        ``render_composite_interactive``.
+
+        ``resolve=`` sharing rides the tree's resolve field (the Rust resolve
+        pass unions x/y domains across cells) rather than the per-panel
+        ``_apply_resolve`` injection the legacy path uses. Panels are therefore
+        materialized *without* ``_apply_resolve``.
+
+        Returns
+        -------
+        _LoweredTree or None
+            ``None`` — deferring to the legacy per-child render path — when
+            composition-level configure layers are set (their figure-chrome
+            positioning stays on the legacy compositor, mirroring
+            :func:`_lower_composite`'s ``_configure_layers`` gate), when
+            ``resolve=`` marks a non-x/y channel ``"shared"`` (the Rust resolve
+            pass spans only x/y), when any materialized panel is not a plain
+            leaf ``Chart``, or when any panel's data is empty.
+        """
+        if getattr(self, "_configure_layers", None):
+            return None
+        resolve_field = _composite_resolve_field(self.resolve)
+        if resolve_field is None:
+            return None
+
+        # Materialize raw panels (no _apply_resolve: the tree resolve field
+        # drives x/y sharing via the Rust resolve pass).
+        panels = [
+            (row_field, col_field, self._make_panel(row_field, col_field))
+            for row_field, col_field in self._panel_coordinates()
+        ]
+        charts = [self._inject_parent_config(chart) for _, _, chart in panels]
+        if any(not _is_leaf_chart(c) for c in charts):
+            return None
+
+        cells: List[Optional[object]]
+        if self.row is not None and self.column is not None:
+            nrows, ncols = len(self.row), len(self.column)
+            cells = [None] * (nrows * ncols)
+            for (row_field, col_field, _), chart in zip(panels, charts):
+                ri = self.row.index(row_field)
+                ci = self.column.index(col_field)
+                cells[ri * ncols + ci] = chart
+        else:
+            ncols, nrows = self._wrap_dimensions(len(charts))
+            cells = [None] * (nrows * ncols)
+            for idx, chart in enumerate(charts):
+                cells[idx] = chart
+
+        return _build_grid_tree(
+            cells,
+            nrows=nrows,
+            ncols=ncols,
+            row_ratios=None,
+            col_ratios=None,
+            spacing=self.spacing,
+            auto_tooltips=auto_tooltips,
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
+            resolve=resolve_field or None,
+        )
+
     def _render_interactive(self) -> tuple[str, bytes]:
+        """Render to (scene_json, packed_data) via the composite grid entry.
+
+        Routes through ``render_composite_interactive`` when the grid lowers
+        cleanly (see :meth:`_composite_tree`), otherwise falls back to
+        :meth:`_render_interactive_legacy`.
+        """
+        lowered = self._composite_tree(auto_tooltips=True)
+        if lowered is not None:
+            from ferrum._core import render_composite_interactive
+
+            return render_composite_interactive(
+                lowered.tree,
+                lowered.payloads,
+                viewport=lowered.viewport,
+                theme=lowered.theme,
+                chart_config=lowered.chart_config,
+            )
+        return self._render_interactive_legacy()
+
+    def _render_interactive_legacy(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) by expanding panels and merging scenes."""
         panels = [(r, c, self._inject_parent_config(chart)) for r, c, chart in self.expand()]
 
@@ -1954,6 +2054,10 @@ class RepeatChart(_CompositeBase):
     def to_svg(self) -> str:
         """Render the repeated grid to an SVG string.
 
+        Routes through ``render_composite_svg`` when the grid lowers cleanly
+        (see :meth:`_composite_tree`), otherwise falls back to
+        :meth:`_to_svg_legacy`.
+
         Returns
         -------
         str
@@ -1968,6 +2072,21 @@ class RepeatChart(_CompositeBase):
         ``columns`` opens additional columns.  When ``columns`` is unset
         the 1-D layout is a single row (column-only) or column (row-only).
         """
+        lowered = self._composite_tree(auto_tooltips=False)
+        if lowered is not None:
+            from ferrum._core import render_composite_svg
+
+            return render_composite_svg(
+                lowered.tree,
+                lowered.payloads,
+                viewport=lowered.viewport,
+                theme=lowered.theme,
+                chart_config=lowered.chart_config,
+            )
+        return self._to_svg_legacy()
+
+    def _to_svg_legacy(self) -> str:
+        """Compose per-panel SVGs via the Rust string grid compositor (fallback)."""
         from ferrum._core import compose_svg_grid
 
         panels = [(r, c, self._inject_parent_config(chart)) for r, c, chart in self.expand()]
@@ -2444,7 +2563,95 @@ class LayerChart(_ChartLike):
         """List of Chart : All member charts in layer order (bottom to top)."""
         return list(self._charts)
 
+    def _composite_tree(self, *, auto_tooltips: bool) -> Optional[_LoweredTree]:
+        """Lower this overlay to a composite overlay tree.
+
+        Every layer becomes a leaf sharing one panel rect (the Rust overlay
+        layout from Task 5b); z-order is layer order — the first chart is drawn
+        at the bottom, the last on top. x/y are always shared (union domain),
+        matching the legacy ``+``-merge which unconditionally unions the
+        positional scales; the overlay is therefore meaningless without it.
+
+        The ``title`` becomes a composite *figure* title (root chrome, the same
+        treatment every other composite form gives titles), rather than the
+        chart-level title the legacy ``_build_merged`` path applies via
+        ``.properties(title=...)``.
+
+        Returns
+        -------
+        _LoweredTree or None
+            ``None`` — deferring to :meth:`_build_merged` (legacy) — when
+            composition-level configure layers are set, when ``resolve=`` marks
+            a non-x/y channel ``"shared"`` (the Rust resolve pass spans only
+            x/y; other channel sharing stays on the Python ``_scale_share``
+            path), when any layer is not a plain leaf ``Chart``, or when any
+            layer's data is empty.
+        """
+        if getattr(self, "_configure_layers", None):
+            return None
+        if self._resolve:
+            for channel, mode in self._resolve.items():
+                if channel not in ("x", "y") and mode == "shared":
+                    return None
+
+        layers = [self._inject_parent_config(c) for c in self._charts]
+        if any(not _is_leaf_chart(c) for c in layers):
+            return None
+
+        payloads: list = []
+        leaf_inputs: list = []
+        leaf_nodes: list = []
+        children: list = []
+        for layer in layers:
+            node = _lower_leaf_node(
+                layer,
+                auto_tooltips=auto_tooltips,
+                payloads=payloads,
+                leaf_inputs=leaf_inputs,
+                leaf_nodes=leaf_nodes,
+            )
+            if node is None:
+                return None
+            children.append(node)
+
+        tree: dict = {
+            "kind": "composite",
+            "layout": "overlay",
+            "children": children,
+            "spacing": 0.0,
+            "resolve": {"x": "shared", "y": "shared"},
+        }
+        if self._title is not None:
+            tree["title"] = self._title
+
+        viewport, theme, chart_config = _apply_leaf_binding_overrides(leaf_nodes, leaf_inputs)
+        return _LoweredTree(
+            tree=tree,
+            payloads=payloads,
+            viewport=viewport,
+            theme=theme,
+            chart_config=chart_config or None,
+        )
+
     def _render_interactive(self) -> tuple[str, bytes]:
+        """Render to (scene_json, packed_data) via the merged single-panel Chart.
+
+        Unlike :meth:`to_svg`, this ALWAYS routes through
+        :meth:`_render_interactive_legacy` and never through the composite
+        overlay tree (see :meth:`_composite_tree`). The interactive contract
+        requires LayerChart to produce EXACTLY ONE scene panel: selections,
+        hit-testing, and the WASM interaction runtime all assume every layer
+        of a ``LayerChart`` shares a single panel. The overlay tree gives each
+        layer its own panel that merely shares one *rect* — visually
+        identical to the merged single-panel chart in static SVG (no
+        panel-identity concept there), but a distinct panel in scene JSON,
+        which breaks the one-panel contract. So the static path (``to_svg``)
+        keeps the Task 9 overlay-tree cutover; the interactive path stays on
+        the legacy merged-chart route.
+        """
+        return self._render_interactive_legacy()
+
+    def _render_interactive_legacy(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) via the merged multi-layer Chart."""
         from ferrum._scene import _render_scene
 
@@ -2454,14 +2661,34 @@ class LayerChart(_ChartLike):
     def to_svg(self) -> str:
         """Render the layered charts to an SVG string.
 
-        Merges all layers using the ``Chart + Chart`` operator which
-        handles domain union, data merging, and transform routing, then
-        renders the resulting multi-layer chart to SVG.
+        Routes through ``render_composite_svg`` when the overlay lowers cleanly
+        (see :meth:`_composite_tree`), otherwise falls back to
+        :meth:`_to_svg_legacy`.
 
         Returns
         -------
         str
             SVG markup with all layers rendered in a single plot area.
+        """
+        lowered = self._composite_tree(auto_tooltips=False)
+        if lowered is not None:
+            from ferrum._core import render_composite_svg
+
+            return render_composite_svg(
+                lowered.tree,
+                lowered.payloads,
+                viewport=lowered.viewport,
+                theme=lowered.theme,
+                chart_config=lowered.chart_config,
+            )
+        return self._to_svg_legacy()
+
+    def _to_svg_legacy(self) -> str:
+        """Merge layers via the ``Chart + Chart`` operator and render (fallback).
+
+        Merges all layers using the ``Chart + Chart`` operator which handles
+        domain union, data merging, and transform routing, then renders the
+        resulting multi-layer chart to SVG.
         """
         merged = self._build_merged()
         return merged.to_svg()
