@@ -255,17 +255,13 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> Optional[_LoweredTree
 
     def lower(node, is_root: bool) -> Optional[dict]:
         if _is_leaf_chart(node):
-            spec, data, viewport, theme, chart_config = node._render_inputs(
-                _auto_tooltips=auto_tooltips
+            return _lower_leaf_node(
+                node,
+                auto_tooltips=auto_tooltips,
+                payloads=payloads,
+                leaf_inputs=leaf_inputs,
+                leaf_nodes=leaf_nodes,
             )
-            if data.num_rows == 0:
-                return None  # per-child empty-data handling stays on the old path
-            index = len(payloads)
-            payloads.append(data)
-            leaf_inputs.append((viewport, theme, chart_config))
-            leaf_node = {"kind": "leaf", "spec": spec, "data": index}
-            leaf_nodes.append(leaf_node)
-            return leaf_node
 
         layout = getattr(node, "_composite_layout", None)
         if layout is not None:
@@ -314,12 +310,41 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> Optional[_LoweredTree
     if root is None or not leaf_inputs:
         return None
 
+    viewport, theme, chart_config = _apply_leaf_binding_overrides(leaf_nodes, leaf_inputs)
+    return _LoweredTree(
+        tree=root,
+        payloads=payloads,
+        viewport=viewport,
+        theme=theme,
+        chart_config=chart_config or None,
+    )
+
+
+def _apply_leaf_binding_overrides(leaf_nodes: list, leaf_inputs: list) -> tuple:
+    """Attach a per-leaf binding override to each node when leaf inputs differ.
+
+    Shared by :func:`_lower_composite` and :func:`_build_grid_tree`: the first
+    leaf's ``(viewport, theme, chart_config)`` becomes the call-level default
+    passed to ``render_composite_svg``/``render_composite_interactive``; when any
+    other leaf differs, every leaf node gets its own ``viewport``/``theme``/
+    ``chart_config`` key (Task 5d wire) so no leaf silently inherits a sibling's
+    binding.  Homogeneous trees keep the compact call-level form.
+
+    Parameters
+    ----------
+    leaf_nodes : list of dict
+        The tree's leaf node dicts, in the same order as *leaf_inputs*.
+    leaf_inputs : list of tuple
+        Each leaf's ``(viewport, theme, chart_config)`` from ``_render_inputs``.
+
+    Returns
+    -------
+    tuple
+        The call-level default ``(viewport, theme, chart_config)`` — the first
+        leaf's inputs.
+    """
     first = leaf_inputs[0]
     if any(other != first for other in leaf_inputs[1:]):
-        # Heterogeneous per-leaf inputs: attach each leaf's own binding override
-        # so the uniform entry renders every leaf faithfully (Task 5d wire; a
-        # leaf's absent key would otherwise inherit the call-level default).  The
-        # call-level default is the first leaf's inputs — every leaf overrides it.
         for node, (viewport, theme, chart_config) in zip(leaf_nodes, leaf_inputs):
             node["viewport"] = viewport
             node["theme"] = theme
@@ -331,10 +356,133 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> Optional[_LoweredTree
             # on every unconfigured sibling (annotation bleed, mis-rotated axis
             # labels on the wrong panel).
             node["chart_config"] = chart_config
+    return first
 
-    viewport, theme, chart_config = first
+
+def _lower_leaf_node(
+    chart,
+    *,
+    auto_tooltips: bool,
+    payloads: list,
+    leaf_inputs: list,
+    leaf_nodes: list,
+) -> Optional[dict]:
+    """Lower one leaf chart to its wire node, appending to the parallel lists.
+
+    The single source of truth for leaf lowering, shared by
+    :func:`_lower_composite` and :func:`_build_grid_tree` — the empty-data
+    guard here (``None`` = defer the whole tree to the legacy path) previously
+    lived in two hand-copied blocks, and its omission from one of them was a
+    real regression (Task 8b gap 1). Returns the ``{"kind": "leaf", ...}``
+    node, or ``None`` when the leaf's data is empty.
+    """
+    spec, data, viewport, theme, chart_config = chart._render_inputs(
+        _auto_tooltips=auto_tooltips
+    )
+    if data.num_rows == 0:
+        return None  # per-child empty-data handling stays on the legacy path
+    index = len(payloads)
+    payloads.append(data)
+    leaf_inputs.append((viewport, theme, chart_config))
+    leaf_node = {"kind": "leaf", "spec": spec, "data": index}
+    leaf_nodes.append(leaf_node)
+    return leaf_node
+
+
+def _build_grid_tree(
+    cells: List[Optional[object]],
+    *,
+    nrows: int,
+    ncols: int,
+    row_ratios: Optional[List[float]],
+    col_ratios: Optional[List[float]],
+    spacing: float,
+    auto_tooltips: bool,
+    title: Optional[str],
+    subtitle: Optional[str],
+    caption: Optional[str],
+) -> Optional[_LoweredTree]:
+    """Lower a row-major grid of leaf charts (with optional holes) to a tree.
+
+    Used by :class:`JointChart` and :class:`ClusterMapChart` — asymmetric
+    composites whose fixed panel slots (and, when only one marginal/dendrogram
+    is present, an unused corner) don't fit :func:`_lower_composite`'s generic
+    ``node.charts`` walk. Every entry in *cells* is either a plain leaf
+    ``Chart`` or ``None`` (lowered to a ``{"kind": "hole"}`` placeholder cell —
+    only valid when both row-count and col-count are 2, i.e. the full
+    both-marginals/both-dendrograms shape). ``title``/``subtitle``/``caption``
+    are always attached at the tree root: a 1x1 grid wrapping a single chart is
+    a valid composite tree (spec §6), so this same builder — and the same
+    ``render_composite_svg``/``render_composite_interactive`` entries — cover
+    every marginal-count case uniformly, with no separate single-chart bypass.
+
+    Parameters
+    ----------
+    cells : list of Chart or None
+        Row-major grid cells; ``len(cells)`` must equal ``nrows * ncols``.
+    nrows, ncols : int
+        Grid dimensions.
+    row_ratios, col_ratios : list of float, optional
+        Relative row/column sizes (``None`` for a uniform single row/column).
+    spacing : float
+        Pixel gap between adjacent cells.
+    auto_tooltips : bool
+        Forwarded to each leaf's ``_render_inputs`` (interactive vs. static).
+    title, subtitle, caption : str, optional
+        Root-only figure chrome.
+
+    Returns
+    -------
+    _LoweredTree or None
+        ``None`` when any non-hole cell's data is empty (``num_rows == 0``),
+        mirroring :func:`_lower_composite`'s ``lower()`` leaf guard — the
+        Rust composite-render entry cannot lay out a zero-row leaf, so the
+        whole tree defers to the caller's legacy per-child render path
+        instead (which already handles empty-data charts leaf-by-leaf).
+    """
+    payloads: list = []
+    leaf_inputs: list = []
+    leaf_nodes: list = []
+    children: list = []
+    for cell in cells:
+        if cell is None:
+            # Docstring precondition: holes only occur in the full 2x2 shape.
+            assert nrows == 2 and ncols == 2, "hole cells require a 2x2 grid"
+            children.append({"kind": "hole"})
+            continue
+        node = _lower_leaf_node(
+            cell,
+            auto_tooltips=auto_tooltips,
+            payloads=payloads,
+            leaf_inputs=leaf_inputs,
+            leaf_nodes=leaf_nodes,
+        )
+        if node is None:
+            return None
+        children.append(node)
+
+    tree: dict = {
+        "kind": "composite",
+        "layout": "grid",
+        "children": children,
+        "nrows": nrows,
+        "ncols": ncols,
+        "spacing": spacing,
+    }
+    if row_ratios is not None:
+        tree["row_ratios"] = row_ratios
+    if col_ratios is not None:
+        tree["col_ratios"] = col_ratios
+    if title is not None:
+        tree["title"] = title
+    if subtitle is not None:
+        tree["subtitle"] = subtitle
+    if caption is not None:
+        tree["caption"] = caption
+
+    viewport, theme, chart_config = _apply_leaf_binding_overrides(leaf_nodes, leaf_inputs)
     return _LoweredTree(
-        tree=root,
+        tree=tree,
         payloads=payloads,
         viewport=viewport,
         theme=theme,
@@ -1224,10 +1372,111 @@ class JointChart(_CompositeBase):
         self._carry_figure_chrome(new)
         return new
 
-    def _render_interactive(self) -> tuple[str, bytes]:
-        """Render to (scene_json, packed_data) by merging child scenes in a 2x2 grid.
+    def _composite_tree(self, *, auto_tooltips: bool) -> Optional[_LoweredTree]:
+        """Lower this JointChart to a 2×2 ratio/hole composite grid tree.
 
-        Grid layout mirrors the SVG path (``to_svg``):
+        Row-major cell layout — mirrors the pre-cutover ``to_svg``/
+        ``_render_interactive`` panel positions exactly:
+
+        - both marginals: ``[top, HOLE, center, right]`` on a 2×2 grid, with
+          ``row_ratios=[marginal_share, center_share]`` and
+          ``col_ratios=[center_share, marginal_share]`` (the empty top-right
+          corner becomes a ``{"kind": "hole"}`` cell rather than a wasted,
+          unconditionally-reserved column — see Task 8a).
+        - one marginal: a dense 2×1 or 1×2 grid (no hole needed).
+        - no marginals: a dense 1×1 grid — a single-cell composite tree is
+          valid (spec §6), so this one builder and the shared
+          ``render_composite_svg``/``render_composite_interactive`` entries
+          cover every marginal-count case, carrying figure chrome at the root
+          uniformly instead of a separate single-chart bypass.
+
+        Marginals suppress their own axis decoration via ``axis(show=False)``
+        before lowering (the data axis is redundant against the centre panel;
+        the marginal-only axis is illegible at marginal size) — applied here so
+        both the static and interactive paths share the exact same behavior
+        (pre-cutover, only ``to_svg`` hid marginal axes; the interactive path
+        did not).
+
+        Returns
+        -------
+        _LoweredTree or None
+            ``None`` when center/top/right is not a plain leaf ``Chart``
+            (e.g. a nested composition), signalling the caller to fall back to
+            the legacy per-child render path.
+        """
+        center = self._inject_parent_config(self.center)
+        top = self._inject_parent_config(self.top) if self.top is not None else None
+        right = self._inject_parent_config(self.right) if self.right is not None else None
+        if top is not None:
+            top = top.axis(show=False)
+        if right is not None:
+            right = right.axis(show=False)
+
+        if any(not _is_leaf_chart(c) for c in (center, top, right) if c is not None):
+            return None
+
+        marginal_share = 1.0 / (self.ratio + 1)
+        center_share = self.ratio / (self.ratio + 1)
+
+        cells: List[Optional[object]]
+        if top is not None and right is not None:
+            cells = [top, None, center, right]
+            nrows, ncols = 2, 2
+            row_ratios: Optional[List[float]] = [marginal_share, center_share]
+            col_ratios: Optional[List[float]] = [center_share, marginal_share]
+        elif top is not None:
+            cells = [top, center]
+            nrows, ncols = 2, 1
+            row_ratios = [marginal_share, center_share]
+            col_ratios = None
+        elif right is not None:
+            cells = [center, right]
+            nrows, ncols = 1, 2
+            row_ratios = None
+            col_ratios = [center_share, marginal_share]
+        else:
+            cells = [center]
+            nrows, ncols = 1, 1
+            row_ratios = None
+            col_ratios = None
+
+        return _build_grid_tree(
+            cells,
+            nrows=nrows,
+            ncols=ncols,
+            row_ratios=row_ratios,
+            col_ratios=col_ratios,
+            spacing=self.spacing,
+            auto_tooltips=auto_tooltips,
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
+        )
+
+    def _render_interactive(self) -> tuple[str, bytes]:
+        """Render to (scene_json, packed_data) via the composite grid entry.
+
+        Routes through ``render_composite_interactive`` when every panel is a
+        plain leaf ``Chart`` (see :meth:`_composite_tree`), otherwise falls
+        back to :meth:`_render_interactive_legacy`.
+        """
+        lowered = self._composite_tree(auto_tooltips=True)
+        if lowered is not None:
+            from ferrum._core import render_composite_interactive
+
+            return render_composite_interactive(
+                lowered.tree,
+                lowered.payloads,
+                viewport=lowered.viewport,
+                theme=lowered.theme,
+                chart_config=lowered.chart_config,
+            )
+        return self._render_interactive_legacy()
+
+    def _render_interactive_legacy(self) -> tuple[str, bytes]:
+        """Merge per-child scenes in a 2x2 grid (fallback for non-leaf children).
+
+        Grid layout mirrors the SVG path (``_to_svg_legacy``):
           - top marginal  at (row=0, col=0)
           - center        at (row=1, col=0)
           - right marginal at (row=1, col=1)
@@ -1264,20 +1513,32 @@ class JointChart(_CompositeBase):
     def to_svg(self) -> str:
         """Render the joint chart to an SVG string.
 
+        Routes through ``render_composite_svg`` when every panel is a plain
+        leaf ``Chart`` (see :meth:`_composite_tree`), otherwise falls back to
+        :meth:`_to_svg_legacy`.
+
         Returns
         -------
         str
             SVG markup with the 2 × 2 grid layout.
         """
+        lowered = self._composite_tree(auto_tooltips=False)
+        if lowered is not None:
+            from ferrum._core import render_composite_svg
+
+            return render_composite_svg(
+                lowered.tree,
+                lowered.payloads,
+                viewport=lowered.viewport,
+                theme=lowered.theme,
+                chart_config=lowered.chart_config,
+            )
+        return self._to_svg_legacy()
+
+    def _to_svg_legacy(self) -> str:
+        """Compose per-child SVGs via the string compositor (fallback path)."""
         from ferrum._core import compose_svg_grid
 
-        # F20: the Rust grid compositor now honors row_ratios/col_ratios via
-        # viewBox-scaled per-panel wrappers, so marginals can be passed at
-        # their native size and the compositor handles proportional sizing.
-        # The marginals still suppress their own axis decoration — the
-        # data axis is redundant against the centre panel and the marginal-
-        # only axis (count/density on a thin strip) is illegible at marginal
-        # size.
         center = self._inject_parent_config(self.center)
         top = self._inject_parent_config(self.top) if self.top is not None else None
         right = self._inject_parent_config(self.right) if self.right is not None else None
@@ -1880,10 +2141,134 @@ class ClusterMapChart(_CompositeBase):
         self._carry_figure_chrome(new)
         return new
 
-    def _render_interactive(self) -> tuple[str, bytes]:
-        """Render to (scene_json, packed_data) by merging child scenes in a 2x2 grid.
+    def _pre_resized_dendrograms(self) -> tuple[object, Optional[object], Optional[object]]:
+        """Return ``(heatmap, col_dendro, row_dendro)`` with dendrograms pre-sized.
 
-        Grid layout mirrors the SVG path (``to_svg``):
+        Dendrograms are resized to their final target dimensions — derived from
+        the heatmap's own declared size and ``dendrogram_ratio`` — *before*
+        lowering to a leaf spec, rather than relying on the composite grid's
+        post-hoc ``layout_scale`` fit. A dendrogram's branch positions are
+        computed against its own declared viewport at spec-compile time, so a
+        non-uniform post-render stretch would distort branch geometry and
+        squash tick labels/strokes non-uniformly; JointChart's marginals (plain
+        histograms/KDE/etc.) have no such topology constraint and so
+        legitimately rely on the grid's genuine ratio scaling instead.
+
+        With this pre-sizing, each column/row's native extent already exactly
+        equals its ratio-derived slot size, so the composite grid's fit-factor
+        computation degenerates to identity scale (pure translation) for every
+        cell — matching the pre-cutover ``to_svg`` behavior exactly.
+        """
+        heatmap = self._inject_parent_config(self.heatmap)
+        d = self.dendrogram_ratio
+        h = 1.0 - d
+        hm_w = heatmap._width or 600.0
+        hm_h = heatmap._height or 400.0
+        dendro_w = hm_w * d / h
+        dendro_h = hm_h * d / h
+        # Dendrograms have no meaningful axes (only the tree structure
+        # matters). clustermap() already calls .axis(show=False) on each
+        # dendrogram chart at construction time, so no axis-hiding call is
+        # needed here (unlike JointChart's marginals).
+        col_dendro = (
+            self._inject_parent_config(self.col_dendrogram).properties(width=hm_w, height=dendro_h)
+            if self.col_dendrogram is not None
+            else None
+        )
+        row_dendro = (
+            self._inject_parent_config(self.row_dendrogram).properties(width=dendro_w, height=hm_h)
+            if self.row_dendrogram is not None
+            else None
+        )
+        return heatmap, col_dendro, row_dendro
+
+    def _composite_tree(self, *, auto_tooltips: bool) -> Optional[_LoweredTree]:
+        """Lower this ClusterMapChart to a 2×2 ratio/hole composite grid tree.
+
+        Row-major cell layout mirrors the pre-cutover panel positions exactly:
+
+        - both dendrograms: ``[HOLE, col_dendro, row_dendro, heatmap]`` on a
+          2×2 grid, ``row_ratios=col_ratios=[d, h]`` where ``d`` is
+          ``dendrogram_ratio`` and ``h = 1 - d`` — the empty top-left corner
+          becomes a ``{"kind": "hole"}`` cell.
+        - one dendrogram: a dense 2×1 or 1×2 grid (no hole).
+        - no dendrogram: a dense 1×1 grid — see :meth:`JointChart._composite_tree`
+          for why a single-cell tree needs no separate bypass.
+
+        Returns
+        -------
+        _LoweredTree or None
+            ``None`` when heatmap/row_dendrogram/col_dendrogram is not a plain
+            leaf ``Chart``, signalling the caller to fall back to the legacy
+            per-child render path.
+        """
+        heatmap, col_dendro, row_dendro = self._pre_resized_dendrograms()
+
+        if any(not _is_leaf_chart(c) for c in (heatmap, col_dendro, row_dendro) if c is not None):
+            return None
+
+        d = self.dendrogram_ratio
+        h = 1.0 - d
+
+        cells: List[Optional[object]]
+        if col_dendro is not None and row_dendro is not None:
+            cells = [None, col_dendro, row_dendro, heatmap]
+            nrows, ncols = 2, 2
+            row_ratios: Optional[List[float]] = [d, h]
+            col_ratios: Optional[List[float]] = [d, h]
+        elif col_dendro is not None:
+            cells = [col_dendro, heatmap]
+            nrows, ncols = 2, 1
+            row_ratios = [d, h]
+            col_ratios = None
+        elif row_dendro is not None:
+            cells = [row_dendro, heatmap]
+            nrows, ncols = 1, 2
+            row_ratios = None
+            col_ratios = [d, h]
+        else:
+            cells = [heatmap]
+            nrows, ncols = 1, 1
+            row_ratios = None
+            col_ratios = None
+
+        return _build_grid_tree(
+            cells,
+            nrows=nrows,
+            ncols=ncols,
+            row_ratios=row_ratios,
+            col_ratios=col_ratios,
+            spacing=self.spacing,
+            auto_tooltips=auto_tooltips,
+            title=self._figure_title,
+            subtitle=self._figure_subtitle,
+            caption=self._figure_caption,
+        )
+
+    def _render_interactive(self) -> tuple[str, bytes]:
+        """Render to (scene_json, packed_data) via the composite grid entry.
+
+        Routes through ``render_composite_interactive`` when every panel is a
+        plain leaf ``Chart`` (see :meth:`_composite_tree`), otherwise falls
+        back to :meth:`_render_interactive_legacy`.
+        """
+        lowered = self._composite_tree(auto_tooltips=True)
+        if lowered is not None:
+            from ferrum._core import render_composite_interactive
+
+            return render_composite_interactive(
+                lowered.tree,
+                lowered.payloads,
+                viewport=lowered.viewport,
+                theme=lowered.theme,
+                chart_config=lowered.chart_config,
+            )
+        return self._render_interactive_legacy()
+
+    def _render_interactive_legacy(self) -> tuple[str, bytes]:
+        """Merge per-child scenes in a 2x2 grid (fallback for non-leaf children).
+
+        Grid layout mirrors the SVG path (``_to_svg_legacy``):
           - col_dendrogram at (row=0, col=1) -- above heatmap
           - row_dendrogram at (row=1, col=0) -- left of heatmap
           - heatmap        at (row=1, col=1) -- main content
@@ -1931,40 +2316,35 @@ class ClusterMapChart(_CompositeBase):
     def to_svg(self) -> str:
         """Render the cluster map to an SVG string.
 
+        Routes through ``render_composite_svg`` when every panel is a plain
+        leaf ``Chart`` (see :meth:`_composite_tree`), otherwise falls back to
+        :meth:`_to_svg_legacy`.
+
         Returns
         -------
         str
             SVG markup with the 2 × 2 grid layout.
         """
+        lowered = self._composite_tree(auto_tooltips=False)
+        if lowered is not None:
+            from ferrum._core import render_composite_svg
+
+            return render_composite_svg(
+                lowered.tree,
+                lowered.payloads,
+                viewport=lowered.viewport,
+                theme=lowered.theme,
+                chart_config=lowered.chart_config,
+            )
+        return self._to_svg_legacy()
+
+    def _to_svg_legacy(self) -> str:
+        """Compose per-child SVGs via the string compositor (fallback path)."""
         from ferrum._core import compose_svg_grid
 
-        heatmap = self._inject_parent_config(self.heatmap)
+        heatmap, col_dendro, row_dendro = self._pre_resized_dendrograms()
         d = self.dendrogram_ratio
         h = 1.0 - d
-        # Pre-resize each component so the heatmap fills (h × h) of the grid
-        # and dendrograms occupy the remaining (d) on the row/col axis they
-        # sit beside. Post-F20 the compositor honors row_ratios/col_ratios,
-        # but we still pre-resize because the dendrogram tree topology depends
-        # on the panel viewport at SVG-emit time — letting the compositor
-        # rescale after-the-fact would distort branch positions.
-        hm_w = heatmap._width or 600.0
-        hm_h = heatmap._height or 400.0
-        dendro_w = hm_w * d / h
-        dendro_h = hm_h * d / h
-        # Dendrograms have no meaningful axes (only the tree structure
-        # matters). clustermap() already calls .axis(show=False) on each
-        # dendrogram chart at construction time, so spec-level suppression
-        # is in effect here — no post-render SVG mangling needed.
-        col_dendro = (
-            self._inject_parent_config(self.col_dendrogram).properties(width=hm_w, height=dendro_h)
-            if self.col_dendrogram is not None
-            else None
-        )
-        row_dendro = (
-            self._inject_parent_config(self.row_dendrogram).properties(width=dendro_w, height=hm_h)
-            if self.row_dendrogram is not None
-            else None
-        )
         col_svg = col_dendro.to_svg() if col_dendro is not None else None
         row_svg = row_dendro.to_svg() if row_dendro is not None else None
         panels = [None, col_svg, row_svg, heatmap.to_svg()]
