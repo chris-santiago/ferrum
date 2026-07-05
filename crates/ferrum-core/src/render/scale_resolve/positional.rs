@@ -20,8 +20,9 @@ use super::domain::{
     apply_sort_to_domain, distinct_positional_categories_shared, locate_field,
     numeric_domain_union, SortContext,
 };
-use super::{column_min_max_f64, distinct_positional_categories, infer_spec_type, ScaleKind};
-use crate::render::composite::SharedDomain;
+use super::{
+    column_min_max_f64, distinct_positional_categories, infer_spec_type, ScaleKind, SharedDomain,
+};
 use crate::transform::core::FINAL_OUTPUT_KEY;
 
 /// The x/y field names bound at chart level, used to resolve data-aware sort

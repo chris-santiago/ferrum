@@ -492,8 +492,15 @@ The Phase B (#45 composite-render-unification) verification close ran both
 design reviewers over the whole branch. Rust verdict PASS, Python verdict
 CONCERNS (S3s remediated in-branch: share_scale unified onto resolve=,
 stale `.spec` docstrings fixed, LayerChart explicit-independent typed error;
-see the close commits). The S2-and-below findings below are logged for the
-next touch of each subsystem. Full reports: `.claude/output/phase-b-close/`.
+see the close commits). ~~The S2-and-below findings below are logged for the
+next touch of each subsystem.~~ **ALL RESOLVED 2026-07-05** on
+`fix/72h-findings-burndown` (user directive: fix everything now) — plus GH #50
+(interactive warning emission) fixed outright, the temporal `_column_minmax`
+bug fixed (not deferred to #52), the polars `ColumnNotFoundError` catch gap
+closed, and shap_bar aligned to the global-feature-set principle. Remaining
+open by explicit user scoping: #51 (upstream wgpu), #52 (secondary-axis
+subsystem), #53 (Joint/ClusterMap native resolve=). Full reports:
+`.claude/output/phase-b-close/` + `.claude/output/72h-review/`.
 
 | Sev | Area | Item |
 |---|---|---|

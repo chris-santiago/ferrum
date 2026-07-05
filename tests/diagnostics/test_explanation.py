@@ -293,6 +293,53 @@ def test_shap_bar_chart_per_class_multiclass():
     assert "<svg" in chart.to_svg()
 
 
+def test_shap_bar_chart_per_class_uses_global_feature_set():
+    """RED-proof: a class-blind ``head()`` over ``(class_label, feature)``
+    pairs can hand different feature sets to different class panels when
+    one class's magnitudes dominate the global sort tail. ``shap_bar``
+    must instead rank features globally once (matching beeswarm/waterfall)
+    and project the SAME top-``max_display`` set onto every class.
+
+    Class A's shap magnitudes are large across all 5 features; class B's
+    are small everywhere except f3/f4. A class-blind top-6 (max_display=3
+    * 2 classes) over the flattened (class, feature) pairs picks
+    {A: f0,f1,f2,f3; B: f3,f4} -- disagreeing feature sets, and dropping
+    f0/f1/f2 entirely from B's panel. The global mean(|shap_value|) per
+    feature across BOTH classes ranks f0/f1/f2 highest (50.5/45.45/40.4
+    vs f3/f4's 30/22.5), so the fixed selection must give every class
+    panel exactly {f0, f1, f2}.
+    """
+    from ferrum.plots.explanation import _shap_bar_chart_from_source
+
+    sv = pl.DataFrame(
+        {
+            "class_label": ["A", "A", "A", "A", "A", "B", "B", "B", "B", "B"],
+            "feature": ["f0", "f1", "f2", "f3", "f4", "f0", "f1", "f2", "f3", "f4"],
+            "shap_value": [100.0, 90.0, 80.0, 10.0, 5.0, 1.0, 0.9, 0.8, 50.0, 40.0],
+        }
+    )
+
+    class _FakeSource:
+        def shap_values(self, background=None):
+            return sv
+
+    chart = _shap_bar_chart_from_source(_FakeSource(), max_display=3, per_class=True)
+    df = chart._data
+    classes = df["class_label"].unique(maintain_order=True).to_list()
+    assert len(classes) == 2
+
+    per_class_features = {
+        cls: set(df.filter(pl.col("class_label") == cls)["feature"].to_list()) for cls in classes
+    }
+    feature_sets = list(per_class_features.values())
+    assert feature_sets[0] == feature_sets[1], (
+        f"class panels disagree on feature set: {per_class_features}"
+    )
+    assert feature_sets[0] == {"f0", "f1", "f2"}, (
+        f"expected the globally-ranked top-3 feature set, got: {per_class_features}"
+    )
+
+
 def test_shap_waterfall_chart_per_class_multiclass():
     """per_class=True on a multi-class classifier renders one waterfall
     panel per class, each with its OWN cumulative walk anchored at zero --

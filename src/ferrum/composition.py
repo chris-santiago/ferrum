@@ -114,6 +114,24 @@ def _validate_share_modes(channels: Dict[str, str]) -> None:
             raise ValueError(f"share_scale: {ch}={mode!r}; expected 'shared' or 'independent'")
 
 
+def _unsupported_resolve_error(kind: str) -> ValueError:
+    """Return the ``ValueError`` for a form with no ``resolve=`` field to share.
+
+    Shared by :meth:`_ChartLike.share_scale`'s ``hasattr`` guard and
+    :class:`JointChart`/:class:`ClusterMapChart`'s ``_rebuild_with_charts``
+    (reached only if a caller passes an explicit ``resolve=`` override
+    directly rather than through ``share_scale``, which already raises via
+    the ``hasattr`` guard before getting there) so the message text is
+    identical from both call sites.
+    """
+    return ValueError(
+        f"{kind}: share_scale requires a resolve= field, which {kind} does not carry "
+        "(its panel alignment is fixed layout geometry, not a resolve= channel); "
+        "construct a composition that supports resolve= (HConcat/VConcat/Concat/"
+        "Repeat/Layer) instead"
+    )
+
+
 # Sentinel distinguishing "no override requested" from an explicit
 # ``resolve=None`` in ``_rebuild_with_charts(fn, resolve=...)`` overrides --
 # see ``_ChartLike.share_scale``, the only caller that passes ``resolve=``.
@@ -335,6 +353,88 @@ def _composite_resolve_field(resolve: Optional[Dict[str, str]], *, kind: str) ->
     return out
 
 
+@dataclass(frozen=True)
+class _RootChrome:
+    """Root-only figure chrome bundled for one composite-tree node.
+
+    Groups the ``title``/``subtitle``/``caption``/``config`` figure-chrome
+    values together with ``is_root`` (is *this* node the tree root?) and
+    ``kind`` (the composition class name, for error messages) because the
+    five are always constructed together from the same ``self`` at each call
+    site and only ever consumed together by :func:`_composite_node`: a nested
+    (non-root) composite rejects an explicit subtitle/caption/config and
+    lowers its title to a per-child ``"label"`` instead of the root-only
+    ``"title"`` key. Bundling them into one small, frozen value object
+    collapses :func:`_build_grid_tree`'s former 12-parameter signature (used
+    identically by :class:`JointChart`, :class:`RepeatChart`, and
+    :class:`ClusterMapChart`) down to one ``chrome`` argument.
+    """
+
+    kind: str
+    is_root: bool = True
+    title: Optional[str] = None
+    subtitle: Optional[str] = None
+    caption: Optional[str] = None
+    config: Optional[dict] = None
+
+
+def _composite_node(
+    layout: str,
+    children: list,
+    *,
+    spacing: float,
+    is_root: bool,
+    resolve: Optional[dict] = None,
+    title: Optional[str] = None,
+    subtitle: Optional[str] = None,
+    caption: Optional[str] = None,
+    config: Optional[dict] = None,
+    **extra_fields,
+) -> dict:
+    """Build one ``{"kind": "composite", ...}`` wire node.
+
+    The single constructor for every composite-tree node, shared by
+    :func:`_lower_any` (hconcat/vconcat/wrap), :func:`_build_grid_tree`
+    (grid), and :meth:`LayerChart._composite_tree` (overlay) — previously
+    each site hand-assembled this dict independently and re-implemented the
+    same root-chrome-vs-label rule.
+
+    *layout* is the wire ``layout`` kind (``"hconcat"``, ``"grid"``,
+    ``"overlay"``, ...); ``**extra_fields`` are layout-specific keys merged
+    onto the node (e.g. the wrap layout's ``ncols``, the grid layout's
+    ``nrows``/``ncols``/``row_ratios``/``col_ratios``).
+
+    The chrome rule: at the tree root (``is_root``), *title*/*subtitle*/
+    *caption*/*config* attach directly when given. When nested
+    (``is_root=False``), *subtitle*/*caption*/*config* are simply not
+    offered here (callers already reject a non-root subtitle/caption before
+    calling this), and a non-``None`` *title* lowers to a per-child
+    ``"label"`` instead of the root-only ``"title"`` key.
+
+    Returns
+    -------
+    dict
+        The assembled composite node, ready to nest as a child or become the
+        tree root.
+    """
+    node: dict = {"kind": "composite", "layout": layout, "children": children, "spacing": spacing}
+    node.update(extra_fields)
+    if resolve:
+        node["resolve"] = resolve
+    if is_root:
+        if title is not None:
+            node["title"] = title
+        if subtitle is not None:
+            node["subtitle"] = subtitle
+        if caption is not None:
+            node["caption"] = caption
+        if config:
+            node["config"] = config
+    elif title is not None:
+        node["label"] = title
+    return node
+
+
 def _lower_composite(composite, *, auto_tooltips: bool) -> _LoweredTree:
     """Lower a composition (recursively) to a one-call composite render-tree.
 
@@ -375,8 +475,9 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> _LoweredTree:
         leaf_nodes=leaf_nodes,
     )
     if not leaf_inputs:
-        layout = getattr(composite, "_composite_layout", type(composite).__name__)
-        raise ValueError(f"{layout}: every child's data is empty; nothing to render")
+        raise ValueError(
+            f"{type(composite).__name__}: every child's data is empty; nothing to render"
+        )
 
     viewport, theme, chart_config = _apply_leaf_binding_overrides(leaf_nodes, leaf_inputs)
     return _LoweredTree(
@@ -424,9 +525,11 @@ def _lower_any(
         *caption* (those stay root-only chrome), a ``resolve=`` request for a
         channel the Rust composite resolve pass doesn't support (see
         :func:`_composite_resolve_field`), or a node type this function does
-        not recognize. Named with the composition's wire ``layout`` (or class
-        name for an unrecognized node) per the no-fallback contract (Task 10;
-        no legacy render path remains to defer to).
+        not recognize. Every message names the composition's *class*
+        (``type(node).__name__``) rather than its wire ``layout`` string, so
+        the text always matches what a caller typed (``HConcatChart``, not
+        ``hconcat``) per the no-fallback contract (Task 10; no legacy render
+        path remains to defer to).
     """
     if _is_leaf_chart(node):
         leaf = _lower_leaf_node(
@@ -451,13 +554,14 @@ def _lower_any(
         raise ValueError(
             f"composition: unrecognized node kind {type(node).__name__!r} in a composite tree"
         )
+    kind = type(node).__name__
 
     if not is_root and (node._figure_subtitle is not None or node._figure_caption is not None):
         raise ValueError(
-            f"{layout}: figure subtitle/caption are root-only chrome and cannot be set on "
+            f"{kind}: figure subtitle/caption are root-only chrome and cannot be set on "
             "a composite nested inside another composition"
         )
-    resolve = _composite_resolve_field(getattr(node, "_resolve", None), kind=layout)
+    resolve = _composite_resolve_field(getattr(node, "_resolve", None), kind=kind)
     children: list = []
     for child in node.charts:
         child = node._inject_parent_config(child)
@@ -470,31 +574,22 @@ def _lower_any(
             leaf_nodes=leaf_nodes,
         )
         children.append(child_node)
-    comp: dict = {
-        "kind": "composite",
-        "layout": layout,
-        "children": children,
-        "spacing": node.spacing,
+    # A non-root composite's figure title lowers to a per-child panel label
+    # (Task 5d wire), so titled composite compare= panels share axes
+    # position-wise instead of gating to the old path (GH #45); see
+    # _composite_node's chrome rule.
+    return _composite_node(
+        layout,
+        children,
+        spacing=node.spacing,
+        resolve=resolve,
+        is_root=is_root,
+        title=node._figure_title,
+        subtitle=node._figure_subtitle,
+        caption=node._figure_caption,
+        config=(_composite_chrome_kwargs(node) if is_root else None),
         **node._composite_node_fields(),
-    }
-    if resolve:
-        comp["resolve"] = resolve
-    if is_root:
-        if node._figure_title is not None:
-            comp["title"] = node._figure_title
-        if node._figure_subtitle is not None:
-            comp["subtitle"] = node._figure_subtitle
-        if node._figure_caption is not None:
-            comp["caption"] = node._figure_caption
-        chrome_config = _composite_chrome_kwargs(node)
-        if chrome_config:
-            comp["config"] = chrome_config
-    elif node._figure_title is not None:
-        # A non-root composite's figure title lowers to a per-child panel
-        # label (Task 5d wire), so titled composite compare= panels share
-        # axes position-wise instead of gating to the old path (GH #45).
-        comp["label"] = node._figure_title
-    return comp
+    )
 
 
 def _splice_lowered_subtree(
@@ -621,16 +716,12 @@ def _build_grid_tree(
     *,
     nrows: int,
     ncols: int,
-    row_ratios: Optional[List[float]],
-    col_ratios: Optional[List[float]],
+    row_ratios: Optional[List[float]] = None,
+    col_ratios: Optional[List[float]] = None,
     spacing: float,
     auto_tooltips: bool,
-    title: Optional[str],
-    subtitle: Optional[str],
-    caption: Optional[str],
     resolve: Optional[dict] = None,
-    is_root: bool = True,
-    config: Optional[dict] = None,
+    chrome: _RootChrome,
 ) -> _LoweredTree:
     """Lower a row-major grid of chart cells (with optional holes) to a tree.
 
@@ -647,13 +738,15 @@ def _build_grid_tree(
     position, not only the 2×2 corner; an empty-data cell also lowers to a hole
     (grid layouts support them) rather than raising.
 
-    ``title``/``subtitle``/``caption``/``config`` attach at the tree root when
-    *is_root* (a 1x1 grid wrapping a single chart is a valid composite tree —
-    spec §6 — so this same builder covers every marginal-count / grid-shape
-    case uniformly, with no separate single-chart bypass); when this grid is
-    itself a nested cell (*is_root* is ``False``), *title* lowers to a
-    per-child ``"label"`` instead, and a *subtitle*/*caption*/*config* on a
-    nested grid is rejected (those stay root-only chrome).
+    *chrome* (see :class:`_RootChrome`) bundles the root-only
+    title/subtitle/caption/config values with ``is_root`` and the calling
+    class's name (for error messages) into one value object — a 1x1 grid
+    wrapping a single chart is a valid composite tree (spec §6), so this same
+    builder covers every marginal-count / grid-shape case uniformly, with no
+    separate single-chart bypass. When this grid is itself a nested cell
+    (``chrome.is_root`` is ``False``), *title* lowers to a per-child
+    ``"label"`` instead, and a *subtitle*/*caption*/*config* on a nested grid
+    is rejected (those stay root-only chrome).
 
     Parameters
     ----------
@@ -667,20 +760,13 @@ def _build_grid_tree(
         Pixel gap between adjacent cells.
     auto_tooltips : bool
         Forwarded to each leaf's ``_render_inputs`` (interactive vs. static).
-    title, subtitle, caption : str, optional
-        Figure chrome — root-only unless *is_root* is ``False``.
     resolve : dict, optional
         Composite resolve field (e.g. ``{"x": "shared"}``) attached to the grid
         node so the Rust resolve pass unions the shared channel's domain across
         every cell. ``None`` or empty leaves each cell with independent scales.
-    is_root : bool, default True
-        Whether this grid is the tree root (root-only chrome keys) or a nested
-        cell within an outer composite (subtitle/caption/config unsupported;
-        title becomes a per-child ``"label"``).
-    config : dict, optional
-        Root-only chrome positioning override (see
-        :func:`_composite_chrome_kwargs`); attached to the wire ``config`` key
-        only when *is_root* and non-empty.
+    chrome : _RootChrome
+        Root-only figure chrome (title/subtitle/caption/config), whether this
+        grid is the tree root, and the calling class's name for error text.
 
     Returns
     -------
@@ -691,11 +777,12 @@ def _build_grid_tree(
     ValueError
         When a nested (non-root) *subtitle*/*caption* is set, or when every
         cell is empty (an all-holes grid has no leaf to size cells from —
-        see Task 10-python sub-task 3).
+        see Task 10-python sub-task 3). Both messages name ``chrome.kind``
+        (the calling class, e.g. ``"JointChart"``).
     """
-    if not is_root and (subtitle is not None or caption is not None):
+    if not chrome.is_root and (chrome.subtitle is not None or chrome.caption is not None):
         raise ValueError(
-            "grid: figure subtitle/caption are root-only chrome and cannot be set on "
+            f"{chrome.kind}: figure subtitle/caption are root-only chrome and cannot be set on "
             "a composite nested inside another composition"
         )
 
@@ -724,33 +811,27 @@ def _build_grid_tree(
         # 10-rust) -- a leafless grid cannot be faithfully sized without a
         # Rust change, so this is a loud, typed failure rather than a
         # silently wrong-size render.
-        raise ValueError(f"grid ({nrows}x{ncols}): every panel's data is empty; nothing to render")
+        raise ValueError(
+            f"{chrome.kind} ({nrows}x{ncols}): every panel's data is empty; nothing to render"
+        )
 
-    tree: dict = {
-        "kind": "composite",
-        "layout": "grid",
-        "children": children,
-        "nrows": nrows,
-        "ncols": ncols,
-        "spacing": spacing,
-    }
+    extra_fields: dict = {"nrows": nrows, "ncols": ncols}
     if row_ratios is not None:
-        tree["row_ratios"] = row_ratios
+        extra_fields["row_ratios"] = row_ratios
     if col_ratios is not None:
-        tree["col_ratios"] = col_ratios
-    if resolve:
-        tree["resolve"] = resolve
-    if is_root:
-        if title is not None:
-            tree["title"] = title
-        if subtitle is not None:
-            tree["subtitle"] = subtitle
-        if caption is not None:
-            tree["caption"] = caption
-        if config:
-            tree["config"] = config
-    elif title is not None:
-        tree["label"] = title
+        extra_fields["col_ratios"] = col_ratios
+    tree = _composite_node(
+        "grid",
+        children,
+        spacing=spacing,
+        resolve=resolve,
+        is_root=chrome.is_root,
+        title=chrome.title,
+        subtitle=chrome.subtitle,
+        caption=chrome.caption,
+        config=chrome.config,
+        **extra_fields,
+    )
 
     viewport, theme, chart_config = _apply_leaf_binding_overrides(leaf_nodes, leaf_inputs)
     return _LoweredTree(
@@ -1065,12 +1146,7 @@ class _ChartLike(ConfigureMixin):
         if not channels:
             return self
         if not hasattr(self, "_resolve"):
-            raise ValueError(
-                f"{type(self).__name__}: share_scale requires a resolve= field, which "
-                f"{type(self).__name__} does not carry (its panel alignment is fixed "
-                "layout geometry, not a resolve= channel); construct a composition "
-                "that supports resolve= (HConcat/VConcat/Concat/Repeat/Layer) instead"
-            )
+            raise _unsupported_resolve_error(type(self).__name__)
         merged = {**(self._resolve or {}), **channels}
         result = self._rebuild_with_charts(lambda c: c, resolve=merged)
         _copy_configure_layers(self, result)
@@ -1557,7 +1633,14 @@ class JointChart(_CompositeBase):
         self._carry_figure_chrome(result)
         return result
 
-    def _rebuild_with_charts(self, fn):
+    def _rebuild_with_charts(self, fn, *, resolve=_RESOLVE_UNCHANGED):
+        if resolve is not _RESOLVE_UNCHANGED:
+            # Unreachable via the public share_scale() sugar (its hasattr
+            # guard raises the same error before ever reaching here, since
+            # JointChart carries no _resolve/resolve field) -- kept as a
+            # defensive typed error for any direct caller, for signature
+            # uniformity with the other _rebuild_with_charts forms.
+            raise _unsupported_resolve_error(type(self).__name__)
         new = JointChart(
             fn(self.center),
             top=(fn(self.top) if self.top is not None else None),
@@ -1665,11 +1748,14 @@ class JointChart(_CompositeBase):
             col_ratios=col_ratios,
             spacing=self.spacing,
             auto_tooltips=auto_tooltips,
-            title=self._figure_title,
-            subtitle=self._figure_subtitle,
-            caption=self._figure_caption,
-            is_root=is_root,
-            config=_composite_chrome_kwargs(self),
+            chrome=_RootChrome(
+                kind=type(self).__name__,
+                is_root=is_root,
+                title=self._figure_title,
+                subtitle=self._figure_subtitle,
+                caption=self._figure_caption,
+                config=_composite_chrome_kwargs(self),
+            ),
         )
 
     def _render_interactive(self) -> tuple[str, bytes]:
@@ -1804,6 +1890,20 @@ class RepeatChart(_CompositeBase):
     def charts(self) -> list:
         """List of Chart : Template plus diagonal (when set), in init order."""
         return [c for c in (self.template, self.diagonal) if c is not None]
+
+    @property
+    def _resolve(self) -> Optional[dict]:
+        """Alias for ``self.resolve`` (the public constructor attribute).
+
+        ``RepeatChart`` exposes its resolve field as the public ``resolve``
+        attribute (unlike the other forms' private ``_resolve``) so it can
+        appear in :attr:`spec`. This read-only alias lets the base
+        :meth:`_ChartLike.share_scale`'s ``hasattr(self, "_resolve")`` gate
+        and merge logic (``{**(self._resolve or {}), **channels}``) work for
+        ``RepeatChart`` unchanged, so :meth:`share_scale` needs no bespoke
+        override.
+        """
+        return self.resolve
 
     @property
     def spec(self) -> dict:
@@ -1978,7 +2078,7 @@ class RepeatChart(_CompositeBase):
             return layer_field
         raise ValueError(f"unknown Repeat placeholder axis '{placeholder_axis}'")
 
-    def _rebuild_with_charts(self, fn):
+    def _rebuild_with_charts(self, fn, *, resolve=_RESOLVE_UNCHANGED):
         new = RepeatChart(
             fn(self.template),
             row=self.row,
@@ -1988,7 +2088,7 @@ class RepeatChart(_CompositeBase):
             corner=self.corner,
             spacing=self.spacing,
             columns=self.columns,
-            resolve=self.resolve,
+            resolve=(self.resolve if resolve is _RESOLVE_UNCHANGED else resolve),
         )
         self._carry_figure_chrome(new)
         return new
@@ -1996,15 +2096,18 @@ class RepeatChart(_CompositeBase):
     def share_scale(self, **channels):
         """Share scales across this repeat's panels by merging into ``resolve=``.
 
-        Equivalent to constructing the chart with ``resolve={...}`` set —
-        both paths store the identical ``resolve`` dict, which
-        :meth:`_composite_tree` lowers onto the composite tree's resolve
-        field at render time (:meth:`to_svg` / :meth:`_render_interactive`);
-        the Rust resolve pass then unions the shared channel's domain across
-        every panel (including each layer of layered panels).
-        :meth:`expand` does NOT apply ``resolve=`` — it returns panels
-        un-injected regardless of this setting.  Passing the same channel
-        twice with different modes takes the call's value.
+        Pure sugar for :meth:`_ChartLike.share_scale` — ``RepeatChart``
+        exposes its resolve field as the public ``resolve`` attribute (see
+        the ``_resolve`` alias property), so the base implementation's merge
+        logic and ``_rebuild_with_charts(lambda c: c, resolve=merged)`` call
+        work unchanged.  Both paths store the identical ``resolve`` dict,
+        which :meth:`_composite_tree` lowers onto the composite tree's
+        resolve field at render time (:meth:`to_svg` /
+        :meth:`_render_interactive`); the Rust resolve pass then unions the
+        shared channel's domain across every panel (including each layer of
+        layered panels). :meth:`expand` does NOT apply ``resolve=`` — it
+        returns panels un-injected regardless of this setting.  Passing the
+        same channel twice with different modes takes the call's value.
 
         Parameters
         ----------
@@ -2016,23 +2119,7 @@ class RepeatChart(_CompositeBase):
         RepeatChart
             A new ``RepeatChart`` with the merged ``resolve=`` config.
         """
-        _validate_share_modes(channels)
-        merged = dict(self.resolve or {})
-        merged.update(channels)
-        result = RepeatChart(
-            self.template,
-            row=self.row,
-            column=self.column,
-            layer=self.layer,
-            diagonal=self.diagonal,
-            corner=self.corner,
-            spacing=self.spacing,
-            columns=self.columns,
-            resolve=merged or None,
-        )
-        _copy_configure_layers(self, result)
-        self._carry_figure_chrome(result)
-        return result
+        return super().share_scale(**channels)
 
     def _composite_tree(self, *, auto_tooltips: bool, is_root: bool = True) -> _LoweredTree:
         """Lower this repeat grid to a composite grid/hole tree.
@@ -2088,12 +2175,15 @@ class RepeatChart(_CompositeBase):
             col_ratios=None,
             spacing=self.spacing,
             auto_tooltips=auto_tooltips,
-            title=self._figure_title,
-            subtitle=self._figure_subtitle,
-            caption=self._figure_caption,
             resolve=resolve_field or None,
-            is_root=is_root,
-            config=_composite_chrome_kwargs(self),
+            chrome=_RootChrome(
+                kind=type(self).__name__,
+                is_root=is_root,
+                title=self._figure_title,
+                subtitle=self._figure_subtitle,
+                caption=self._figure_caption,
+                config=_composite_chrome_kwargs(self),
+            ),
         )
 
     def _render_interactive(self) -> tuple[str, bytes]:
@@ -2257,7 +2347,14 @@ class ClusterMapChart(_CompositeBase):
         self._carry_figure_chrome(result)
         return result
 
-    def _rebuild_with_charts(self, fn):
+    def _rebuild_with_charts(self, fn, *, resolve=_RESOLVE_UNCHANGED):
+        if resolve is not _RESOLVE_UNCHANGED:
+            # Unreachable via the public share_scale() sugar (its hasattr
+            # guard raises the same error before ever reaching here, since
+            # ClusterMapChart carries no _resolve/resolve field) -- kept as a
+            # defensive typed error for any direct caller, for signature
+            # uniformity with the other _rebuild_with_charts forms.
+            raise _unsupported_resolve_error(type(self).__name__)
         new = ClusterMapChart(
             fn(self.heatmap),
             row_dendrogram=(fn(self.row_dendrogram) if self.row_dendrogram is not None else None),
@@ -2370,11 +2467,14 @@ class ClusterMapChart(_CompositeBase):
             col_ratios=col_ratios,
             spacing=self.spacing,
             auto_tooltips=auto_tooltips,
-            title=self._figure_title,
-            subtitle=self._figure_subtitle,
-            caption=self._figure_caption,
-            is_root=is_root,
-            config=_composite_chrome_kwargs(self),
+            chrome=_RootChrome(
+                kind=type(self).__name__,
+                is_root=is_root,
+                title=self._figure_title,
+                subtitle=self._figure_subtitle,
+                caption=self._figure_caption,
+                config=_composite_chrome_kwargs(self),
+            ),
         )
 
     def _render_interactive(self) -> tuple[str, bytes]:
@@ -2580,18 +2680,14 @@ class LayerChart(_ChartLike):
         if not children:
             raise ValueError("LayerChart: every layer's data is empty; nothing to render")
 
-        tree: dict = {
-            "kind": "composite",
-            "layout": "overlay",
-            "children": children,
-            "spacing": 0.0,
-            "resolve": resolve_field,
-        }
-        if self._title is not None:
-            if is_root:
-                tree["title"] = self._title
-            else:
-                tree["label"] = self._title
+        tree = _composite_node(
+            "overlay",
+            children,
+            spacing=0.0,
+            resolve=resolve_field,
+            is_root=is_root,
+            title=self._title,
+        )
 
         viewport, theme, chart_config = _apply_leaf_binding_overrides(leaf_nodes, leaf_inputs)
         return _LoweredTree(

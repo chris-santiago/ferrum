@@ -1090,7 +1090,7 @@ fn prepare_and_layout(
     // D4b composite seam: the resolved shared-domain context for this leaf,
     // forwarded into the provisional scale pass. `None` for every standalone
     // (flat/facet) render → byte-identical output.
-    leaf_scales: Option<&composite::LeafScaleContext>,
+    leaf_scales: Option<&scale_resolve::LeafScaleContext>,
 ) -> Result<PipelineOutput, RenderError> {
     let mut prep = prepare::prepare_render_inputs(spec, batch, theme, leaf_scales)?;
     let mut warnings = prep.warnings.clone();
@@ -1269,6 +1269,16 @@ pub fn render_png(
     Ok(RenderOutput { bytes, layout: svg_out.layout, warnings: svg_out.warnings })
 }
 
+/// Render a chart to the interactive scene wire pair (JSON + packed bytes).
+///
+/// Returns `(json, packed_bytes, warnings)`. The `warnings` were silently
+/// dropped from this fn's return until GH #50: they were computed (via
+/// `prepare_and_layout` / `build_scene`, same as [`render_svg`]/[`render_png`])
+/// but never left the function, so `render_interactive`'s PyO3 binding had no
+/// warnings to forward to Python — an asymmetry with `render_svg`/`render_png`,
+/// which both surface warnings through [`RenderOutput`]. Returning them here
+/// closes that gap; the caller now calls `emit_warnings` the same way the
+/// other two entries do.
 pub fn render_scene_json(
     spec: &ChartSpec,
     batch: &RecordBatch,
@@ -1276,7 +1286,7 @@ pub fn render_scene_json(
     viewport: Viewport,
     config: &config::RenderConfig,
     chart_config: &ChartConfig,
-) -> Result<(String, Vec<u8>), RenderError> {
+) -> Result<(String, Vec<u8>, Vec<RenderWarning>), RenderError> {
     if viewport.width <= 0.0 || viewport.height <= 0.0 {
         return Err(RenderError::InvalidViewport {
             width: viewport.width,
@@ -1303,7 +1313,7 @@ pub fn render_scene_json(
 
     let json = serde_json::to_string(&scene)
         .map_err(|e| RenderError::LayoutFailed(format!("scene serialization: {e}")))?;
-    Ok((json, packed_bytes))
+    Ok((json, packed_bytes, warnings))
 }
 
 pub(crate) fn filter_batch_by_facet(

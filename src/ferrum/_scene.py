@@ -93,9 +93,15 @@ def _empty_scene_json(viewport: tuple[float, float]) -> tuple[str, bytes]:
 
     The ideal fix is to let Rust ``render_interactive`` return a valid empty
     ``SceneGraph`` for a zero-row batch so Python never mirrors the schema; that
-    is a cross-language change tracked as a follow-up.  This helper closes the
-    immediate defect — the schema is now mirrored in one named, documented place
-    rather than an anonymous inline literal.
+    remains a cross-language follow-up (a trivial Rust entry producing an
+    empty ``SceneGraph`` does not exist today).  Until then, this mirror is
+    pinned by a discriminating schema-parity test
+    (``tests/test_scene_production.py::test_empty_scene_json_schema_parity_with_real_render``)
+    that renders real (non-empty, and separately param-bound) charts through
+    the actual Rust ``render_interactive`` entry and asserts this dict's
+    top-level and ``interaction`` key sets match exactly — so a Rust-side
+    ``SceneGraph``/``InteractionConfig`` field rename or addition fails that
+    test loudly instead of silently drifting from this hand-mirror.
 
     Parameters
     ----------

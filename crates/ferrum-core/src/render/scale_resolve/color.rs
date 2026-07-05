@@ -10,11 +10,10 @@ use crate::spec::encoding::DataType as SpecDataType;
 
 use crate::render::color::Color;
 use crate::render::color::palette;
-use crate::render::composite::SharedDomain;
 use crate::render::RenderError;
 
 use super::domain::{apply_sort_to_domain, locate_field, SortContext};
-use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_categorical_batch, union_panel_with_global_extent, ColorScale};
+use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_categorical_batch, union_panel_with_global_extent, ColorScale, SharedDomain};
 
 /// Resolve the color encoding into a `ColorScale`.
 ///

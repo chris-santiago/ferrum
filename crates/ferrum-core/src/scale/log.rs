@@ -337,6 +337,13 @@ impl LogScale {
                 ));
             }
         }
+        // `LogScaleData::new` re-runs `sanitize_domain` unconditionally, but a
+        // user-set domain was already rejected above if it touched zero or
+        // crossed sign — so for `domain_user_set` this is a no-op pass-through
+        // (locked by `log_sanitize_domain_noop_for_well_formed_domains`), not a
+        // second, looser validation. The floor/fallback behavior it performs
+        // only actually fires for an *auto-inferred* domain, which reaches
+        // this constructor unvalidated (there is no user input to reject).
         let mut d = LogScaleData::new(resolved.domain, resolved.range, base, clamp);
         if nice && resolved.domain_user_set {
             d = d.nice();

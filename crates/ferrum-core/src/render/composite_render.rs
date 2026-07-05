@@ -72,8 +72,8 @@ use crate::spec::chart::ChartSpec;
 use super::chart_config::ChartConfig;
 use super::composite::{
     flatten_leaf_specs, resolve_composite_scales, CompositeResolveError, LeafResolveInput,
-    LeafScaleContext,
 };
+use super::scale_resolve::LeafScaleContext;
 use super::svg::uniquify_clip_ids;
 use super::config::RenderConfig;
 use super::figure_chrome::{title_nodes, ChromeAnchor, FigureChrome, DEFAULT_CHROME_INSET};
@@ -639,6 +639,7 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan) -> Placed {
     let mut merged = empty_scene(plan.width, plan.height);
     let mut zoom = true;
     let mut pan = true;
+    let mut toolbar = true;
 
     for (child, t) in children.into_iter().zip(plan.placements) {
         let mut scene = child.scene;
@@ -679,14 +680,27 @@ fn merge_children(children: Vec<Placed>, plan: LayoutPlan) -> Placed {
         }
         zoom = zoom && ci.zoom_enabled;
         pan = pan && ci.pan_enabled;
+        // Fold `toolbar` by the same AND-rule as `zoom_enabled`/`pan_enabled`
+        // (burndown item 3 — it used to stay hardcoded `true` on `merged`
+        // regardless of what any child carried). Every leaf resolves
+        // `toolbar: true` by default (the single-chart default, `empty_scene`
+        // below), so an all-defaults composition is unaffected; a leaf that
+        // explicitly disabled its toolbar now turns the merged composite's
+        // toolbar off too, instead of being silently overridden back on.
+        toolbar = toolbar && ci.toolbar;
     }
 
     merged.interaction.zoom_enabled = zoom;
     merged.interaction.pan_enabled = pan;
+    merged.interaction.toolbar = toolbar;
     Placed { scene: merged, width: plan.width, height: plan.height }
 }
 
-/// A fresh empty merge target sized to `(w, h)`.
+/// A fresh empty merge target sized to `(w, h)`, carrying the single-chart
+/// interaction defaults (`zoom_enabled`/`pan_enabled`/`toolbar` all `true`).
+/// [`merge_children`] ANDs each child's flags into these, so an all-defaults
+/// composition is unaffected while any child that disabled a flag flips it
+/// off on the merged scene too.
 fn empty_scene(w: f64, h: f64) -> SceneGraph {
     use ferrum_scene::InteractionConfig;
     SceneGraph {
@@ -1162,6 +1176,33 @@ mod tests {
 
     fn placed_stub(w: f64, h: f64) -> Placed {
         Placed { scene: empty_scene(w, h), width: w, height: h }
+    }
+
+    #[test]
+    fn merge_children_all_defaults_keep_toolbar_enabled() {
+        // Baseline: every leaf resolves the single-chart default
+        // (toolbar/zoom/pan all `true`), so an all-defaults composition's
+        // merged toolbar must stay `true` — the fold must not accidentally
+        // flip the common case off.
+        let children = vec![placed_stub(100.0, 50.0), placed_stub(80.0, 60.0)];
+        let plan = plan_linear(&children, 10.0, true);
+        let merged = merge_children(children, plan);
+        assert!(merged.scene.interaction.toolbar);
+    }
+
+    #[test]
+    fn merge_children_folds_toolbar_like_zoom_and_pan() {
+        // Discriminating counterpart: a child with `toolbar: false` must
+        // disable the merged composite's toolbar too, the same AND-fold
+        // `zoom_enabled`/`pan_enabled` already get — not silently overridden
+        // back to the `empty_scene` default (burndown item 3).
+        let a = placed_stub(100.0, 50.0);
+        let mut b = placed_stub(80.0, 60.0);
+        b.scene.interaction.toolbar = false;
+        let children = vec![a, b];
+        let plan = plan_linear(&children, 10.0, true);
+        let merged = merge_children(children, plan);
+        assert!(!merged.scene.interaction.toolbar);
     }
 
     #[test]

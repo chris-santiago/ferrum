@@ -4179,7 +4179,7 @@ fn qq_spec() -> ChartSpec {
 
 #[test]
 fn d4b_shared_numeric_seeds_auto_path_with_padding() {
-    use crate::render::composite::{LeafScaleContext, SharedDomain};
+    use crate::render::scale_resolve::{LeafScaleContext, SharedDomain};
     use std::collections::HashMap;
 
     let batch = make_batch_q_q_n(); // x ∈ [1, 6]
@@ -4224,7 +4224,7 @@ fn d4b_shared_numeric_seeds_auto_path_with_padding() {
 
 #[test]
 fn d4b_shared_ordinal_seeds_category_vector() {
-    use crate::render::composite::{LeafScaleContext, SharedDomain};
+    use crate::render::scale_resolve::{LeafScaleContext, SharedDomain};
     use crate::spec::encoding::EncodingSpec;
     use std::collections::HashMap;
 
@@ -4257,7 +4257,7 @@ fn d4b_shared_ordinal_seeds_category_vector() {
 
 #[test]
 fn d4b_shared_ordinal_ignores_local_data_aware_sort() {
-    use crate::render::composite::{LeafScaleContext, SharedDomain};
+    use crate::render::scale_resolve::{LeafScaleContext, SharedDomain};
     use crate::spec::encoding::EncodingSpec;
     use std::collections::HashMap;
 
@@ -4313,7 +4313,7 @@ fn d4b_none_context_is_byte_identical_noop() {
 
 #[test]
 fn d4b_user_scale_wins_over_shared() {
-    use crate::render::composite::{LeafScaleContext, SharedDomain};
+    use crate::render::scale_resolve::{LeafScaleContext, SharedDomain};
     use crate::spec::encoding::{ContinuousScaleCommon, EncodingSpec, ScaleSpec};
     use std::collections::HashMap;
 
@@ -4368,7 +4368,7 @@ fn d4b_user_scale_wins_over_shared() {
 /// every unit test on the union logic alone).
 #[test]
 fn d10preb_shared_categorical_color_seeds_domain_through_seam() {
-    use crate::render::composite::{LeafScaleContext, SharedDomain};
+    use crate::render::scale_resolve::{LeafScaleContext, SharedDomain};
     use std::collections::HashMap;
 
     let spec = make_spec_with_color();
@@ -4409,7 +4409,7 @@ fn d10preb_shared_categorical_color_seeds_domain_through_seam() {
 /// domain (pixel range untouched — size sharing is domain-only).
 #[test]
 fn d10preb_shared_size_extent_seeds_scale_through_seam() {
-    use crate::render::composite::{LeafScaleContext, SharedDomain};
+    use crate::render::scale_resolve::{LeafScaleContext, SharedDomain};
     use std::collections::HashMap;
 
     let spec = make_spec_with_size();

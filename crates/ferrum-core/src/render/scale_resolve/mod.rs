@@ -8,6 +8,7 @@ mod auxiliary;
 mod color;
 mod domain;
 mod positional;
+mod seam;
 #[cfg(test)]
 mod tests;
 
@@ -43,11 +44,15 @@ pub(in crate::render) use self::domain::{
     distinct_positional_categories_shared, locate_field, numeric_domain_union,
 };
 
+// Seam vocabulary shared with `render::composite`'s resolve pass — see
+// `seam.rs` for why these live here rather than in `composite` (dependency
+// must point one way: composite → scale_resolve).
+pub(in crate::render) use self::seam::{Channel, LeafScaleContext, SharedDomain};
+
 // Internal re-exports used by the orchestrator in this module.
 use self::positional::{
     apply_coord_domain_overrides, build_axis_scale, PositionalFields,
 };
-use crate::render::composite::LeafScaleContext;
 
 // ── Types ───────────────────────────────────────────────────────────────────
 

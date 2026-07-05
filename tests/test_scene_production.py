@@ -13,6 +13,13 @@ These tests pin the behavior-sensitive half of the render-surface consolidation:
   ``_empty_scene_json`` helper, byte-identical to the prior literal.
 - REND-12: ``Chart.interactive()`` returns an ``InteractiveChart`` (matching the
   corrected return annotation).
+- Burndown P1 item 1: ``_empty_scene_json`` hand-mirrors the Rust
+  ``SceneGraph``/``InteractionConfig`` empty-scene shape (2026-07-05 python-design
+  review carry-forward). ``test_empty_scene_json_schema_parity_with_real_render``
+  closes the "no silent mirror left unpinned" gap: it renders real charts through
+  the actual Rust ``render_interactive`` entry and asserts the mirror's top-level
+  and ``interaction`` key sets match exactly, so a Rust-side schema rename/addition
+  fails this test loudly instead of drifting silently from the hand-mirror.
 
 Everything here is behavior-preserving: the scene-json output is unchanged.
 """
@@ -164,6 +171,49 @@ def test_render_scene_zero_row_uses_empty_scene_helper():
     # The literal must match the helper for this chart's resolved viewport.
     expected_json, _ = _empty_scene_json((parsed["width"], parsed["height"]))
     assert scene_json == expected_json
+
+
+def test_empty_scene_json_schema_parity_with_real_render():
+    """Regression: Burndown P1 item 1 — _empty_scene_json's shape matches a real render.
+
+    ``_empty_scene_json`` hand-mirrors the Rust ``SceneGraph``/``InteractionConfig``
+    empty-scene shape rather than asking Rust to produce it (see that helper's
+    docstring for why the cross-language fix is a separate follow-up). This test
+    is the "no silent mirror left unpinned" discriminating check: it renders two
+    REAL (non-empty) charts through the actual Rust ``render_interactive`` entry
+    and compares their key sets against the mirror's, so a Rust-side field
+    rename/addition to ``SceneGraph`` or ``InteractionConfig`` fails here loudly
+    instead of drifting silently from the hand-maintained literal.
+
+    Two renders are needed because ``InteractionConfig``'s ``params`` /
+    ``param_bindings`` fields are ``skip_serializing_if`` empty: a param-free
+    chart's real ``interaction`` block omits them entirely, so only a
+    legend-bound-selection chart (which populates both) exercises the full
+    ``interaction`` key set the mirror declares.
+    """
+    empty_scene_json, _ = _empty_scene_json((400.0, 300.0))
+    empty_top_level_keys = set(json.loads(empty_scene_json))
+    empty_interaction_keys = set(json.loads(empty_scene_json)["interaction"])
+
+    # A param-free real chart: top-level keys must match exactly.
+    plain = _point_chart()
+    plain_scene, _ = _render_scene(plain)
+    plain_parsed = json.loads(plain_scene)
+    assert set(plain_parsed) == empty_top_level_keys
+    # A param-free chart's interaction block omits params/param_bindings
+    # (skip_serializing_if empty), so it must be a SUBSET of the mirror's
+    # declared keys, not a schema drift (an extra unknown key would fail this).
+    assert set(plain_parsed["interaction"]) <= empty_interaction_keys
+
+    # A legend-bound-selection chart populates params/param_bindings, giving
+    # full parity coverage of the interaction block's key set.
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "cat": ["a", "b", "a"]})
+    legend_sel = fm.selection_point(name="leg", bind="legend", encodings=["color"])
+    bound = fm.Chart(df).mark_point().encode(x="x", y="y", color="cat").add_selection(legend_sel)
+    bound_scene, _ = _render_scene(bound)
+    bound_parsed = json.loads(bound_scene)
+    assert set(bound_parsed) == empty_top_level_keys
+    assert set(bound_parsed["interaction"]) == empty_interaction_keys
 
 
 # ---------------------------------------------------------------------------

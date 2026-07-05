@@ -10,7 +10,7 @@ use crate::scale::linear::LinearScale;
 use crate::render::RenderError;
 
 use super::domain::{apply_sort_to_domain, SortContext};
-use super::{column_min_max_f64, distinct_values_in_order, shared_categorical_batch, union_panel_with_global_extent, OpacityScale, ScaleKind, ShapeKind, ShapeScale, SizeScale, SHAPE_PALETTE};
+use super::{column_min_max_f64, distinct_values_in_order, shared_categorical_batch, union_panel_with_global_extent, OpacityScale, ScaleKind, ShapeKind, ShapeScale, SharedDomain, SizeScale, SHAPE_PALETTE};
 
 /// Build a SizeScale if `encoding.size` is present.
 ///
@@ -38,7 +38,7 @@ pub fn build_size_scale(
     transform_outputs: &HashMap<String, RecordBatch>,
     facet_shared: bool,
     theme: &ThemeInputs,
-    composite_domain: Option<&crate::render::composite::SharedDomain>,
+    composite_domain: Option<&SharedDomain>,
 ) -> Result<(Option<SizeScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(size_enc) = &encoding.size else {
         return Ok((None, Vec::new()));
@@ -62,7 +62,7 @@ pub fn build_size_scale(
     // leaves) overrides the per-leaf extent. The union already subsumes this
     // leaf's own extent, so overriding is correct.
     let (min, max) = match composite_domain {
-        Some(crate::render::composite::SharedDomain::Numeric { lo, hi }) => (*lo, *hi),
+        Some(SharedDomain::Numeric { lo, hi }) => (*lo, *hi),
         _ => (min, max),
     };
     let (lo, hi) = if let Some(crate::spec::encoding::ScaleSpec::Linear { common, .. })
