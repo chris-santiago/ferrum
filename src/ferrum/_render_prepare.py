@@ -3,15 +3,20 @@
 This module holds the self-contained pre-render transforms that the render
 mixin invokes but that are not part of render dispatch itself: the
 ``Axis(label_map=...)`` column-value remap engine and the ordinal-domain /
-annotation category-coordinate resolver.  They are pure helpers driven only by
-``_RenderMixin._resolve_chart_config`` / ``_render_inputs`` in
-``ferrum._render``.
+annotation category-coordinate resolver.  Most of these are pure helpers
+driven by ``_RenderMixin._resolve_chart_config`` / ``_render_inputs`` in
+``ferrum._render``; the per-channel field/column introspection helpers
+(``_chart_bindings``, ``_column_minmax``, ``_column_unique``,
+``_classify_field``) are also reused by ``ferrum.composition``'s cross-chart
+union-domain computation (``compute_union_domain``/``inject_scale``), since
+both are "which field is bound to this channel, and what does its data look
+like" questions on the same chart shapes.
 """
 
 from __future__ import annotations
 
 import warnings
-from typing import Any
+from typing import Any, Iterable
 
 from ferrum.encoding.base import ChannelBase
 
@@ -110,6 +115,82 @@ def _apply_label_maps(
     return df
 
 
+def _extract_field_name(ch: Any) -> str | None:
+    """Return the field name bound to an encoding value, or ``None``.
+
+    Encoding values are either bare strings (``encode(x="hp")``) or
+    ``ChannelBase`` instances (``encode(x=X("hp", scale=...))``).
+    """
+    if isinstance(ch, str):
+        return ch
+    field = getattr(ch, "field", None)
+    return field if isinstance(field, str) else None
+
+
+def _chart_bindings(chart: Any, channel: str) -> Iterable[str | None]:
+    """Yield every field name bound to *channel* across *chart*'s layers.
+
+    Layered charts (``Chart + Chart`` composites) keep per-layer encoding
+    dicts on ``_layers``; unlayered charts keep a single ``_encoding`` dict at
+    the top level. Shared by :func:`_extract_ordinal_domain` (single-chart
+    ordinal-domain lookup) and ``ferrum.composition``'s cross-chart
+    union-domain computation.
+    """
+    layers = getattr(chart, "_layers", None)
+    if layers:
+        for layer in layers:
+            yield _extract_field_name(layer.encoding.get(channel))
+        return
+    encoding = getattr(chart, "_encoding", {}) or {}
+    yield _extract_field_name(encoding.get(channel))
+
+
+def _column_minmax(data, field: str) -> tuple | None:
+    """Return ``(min, max)`` of *field* in *data* as floats, or ``None``."""
+    try:
+        col = data[field]
+    except (KeyError, AttributeError):
+        return None
+    lo, hi = col.min(), col.max()
+    if lo is None or hi is None:
+        return None
+    return (float(lo), float(hi))
+
+
+def _column_unique(data, field: str) -> list:
+    """Return the unique values of *field* in *data* as a list, preserving
+    appearance order."""
+    try:
+        col = data[field]
+    except (KeyError, AttributeError):
+        return []
+    return col.unique(maintain_order=True).to_list()
+
+
+def _classify_field(data, field: str) -> str | None:
+    """Return ``"linear"``, ``"ordinal"``, or ``"time"`` for *field*'s dtype.
+
+    Returns ``None`` for unknown dtypes — the caller skips sharing on that
+    channel rather than guessing a scale type.
+    """
+    try:
+        col = data[field]
+    except (KeyError, AttributeError):
+        return None
+    dtype = col.dtype
+    # Lazy import polars to avoid hard-coupling this module to polars
+    # initialization order; ferrum already requires polars at runtime.
+    import polars as pl
+
+    if dtype.is_numeric():
+        return "linear"
+    if dtype in (pl.Datetime, pl.Date, pl.Time):
+        return "time"
+    if dtype in (pl.Utf8, pl.Categorical):
+        return "ordinal"
+    return None
+
+
 def _build_ordinal_norm_map(domain: list) -> dict[str, float]:
     """Build a category → norm-center mapping for an ordinal domain list.
 
@@ -161,7 +242,6 @@ def _extract_ordinal_domain(chart: Any, channel: str) -> list:
         Unique values in first-appearance order.
     """
     import polars as pl
-    from ferrum._scale_share import _chart_bindings
 
     data = getattr(chart, "_data", None)
     if data is None or not isinstance(data, pl.DataFrame):

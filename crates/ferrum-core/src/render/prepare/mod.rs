@@ -473,10 +473,20 @@ fn build_axis_input(
     })
 }
 
+/// Prepare a single leaf's render inputs (transforms, per-layer encodings,
+/// provisional scales/axes, legends).
+///
+/// `leaf_scales` is the D4b composite seam: `Some` only for a composite leaf,
+/// threading a resolved-domain context into the provisional scale pass so the
+/// leaf's provisional axes (and thus tick labels) resolve on the same auto path,
+/// seeded by the shared domain, that the per-panel final pass will use. `None`
+/// for every standalone (flat/facet) render reproduces the pre-D4b behavior
+/// byte-for-byte.
 pub fn prepare_render_inputs(
     spec: &ChartSpec,
     batch: &RecordBatch,
     theme: &crate::layout::ThemeInputs,
+    leaf_scales: Option<&crate::render::composite::LeafScaleContext>,
 ) -> Result<PreparedInputs, RenderError> {
     if batch.num_rows() == 0 {
         return Err(RenderError::EmptyBatch);
@@ -533,13 +543,14 @@ pub fn prepare_render_inputs(
         ..spec.clone()
     };
 
-    let (provisional_scales, scale_warnings) = crate::render::scale_resolve::resolve_scales_with_outputs(
+    let (provisional_scales, scale_warnings) = crate::render::scale_resolve::resolve_scales_with_leaf_context(
         &rendering_spec,
         &transformed,
         &transform_outputs,
         (0.0, 1.0),
         (0.0, 1.0),
         theme,
+        leaf_scales,
     )?;
 
     // Derive both axis inputs + their tick counts (SPINE-08/SPINE-12). The
@@ -2616,7 +2627,7 @@ mod tests {
     fn prepare_returns_axes_and_groups_and_legend() {
         let spec = spec_color_facet();
         let batch = batch3();
-        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         assert_eq!(prep.axes.x.title.as_deref(), Some("x"));
         assert_eq!(prep.axes.y.title.as_deref(), Some("y"));
         assert!(!prep.axes.x.tick_labels.is_empty());
@@ -2676,7 +2687,7 @@ mod tests {
     }
 
     fn prep(spec: &ChartSpec, batch: &RecordBatch) -> PreparedInputs {
-        prepare_render_inputs(spec, batch, &crate::layout::ThemeInputs::default()).unwrap()
+        prepare_render_inputs(spec, batch, &crate::layout::ThemeInputs::default(), None).unwrap()
     }
 
     #[test]
@@ -2814,7 +2825,7 @@ mod tests {
         let mut spec = spec_color_facet();
         spec.encoding.color = None;
         spec.facet = None;
-        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap_err();
+        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap_err();
         assert!(matches!(err, RenderError::EmptyBatch));
     }
 
@@ -2865,7 +2876,7 @@ mod tests {
     fn prepare_single_layer_produces_one_layer_prepared() {
         let spec = single_layer_spec();
         let batch = price_weight_batch();
-        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         assert_eq!(prepared.layers.len(), 1);
         assert_eq!(prepared.layers[0].mark, Mark::Point);
         assert!(!prepared.coord_flipped);
@@ -2904,7 +2915,7 @@ mod tests {
             },
         ]);
         let batch = price_weight_batch();
-        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         assert_eq!(prepared.layers.len(), 2);
         assert_eq!(prepared.layers[0].mark, Mark::Point);
         assert_eq!(prepared.layers[1].mark, Mark::Line);
@@ -2965,7 +2976,7 @@ mod tests {
         pyo3::Python::initialize();
         let spec = spec_with_one_bin(None);
         let batch = price_weight_batch();
-        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         // __final__ is always present.
         assert!(
             prep.transform_outputs.contains_key("__final__"),
@@ -2994,7 +3005,7 @@ mod tests {
         pyo3::Python::initialize();
         let spec = spec_with_one_bin(Some("box".into()));
         let batch = price_weight_batch();
-        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        let prep = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         assert!(prep.transform_outputs.contains_key("box"));
         assert!(prep.transform_outputs.contains_key("__final__"));
         // Under fan-out semantics, named transforms run on the ORIGINAL input
@@ -3046,7 +3057,7 @@ mod tests {
             position: None, blend: None, name: None,
         }]);
         let batch = price_weight_batch();
-        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap_err();
+        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("missing"), "error must name the bogus key: {msg}");
         // Available keys list must mention either the named transform or the sentinel.
@@ -3062,7 +3073,7 @@ mod tests {
         let mut spec = single_layer_spec(); // x="price", y="weight"
         spec.coord = Some(CoordKind::Flip);
         let batch = price_weight_batch();
-        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+        let prepared = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         assert!(prepared.coord_flipped);
         // After flip: x should have "weight", y should have "price"
         assert_eq!(
@@ -3106,7 +3117,7 @@ mod tests {
         ));
         let batch = price_weight_batch();
         let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         assert_eq!(prep.axes.x.overrides.label_format.as_deref(), Some(",.0f"));
     }
 
@@ -3122,7 +3133,7 @@ mod tests {
         ));
         let batch = price_weight_batch();
         let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         let gx = prep.axes.x.overrides.grid_color.expect("per-channel grid_color must reach x AxisInput");
         assert_eq!([gx.red, gx.green, gx.blue], [0xcc, 0xcc, 0xcc]);
         let lx = prep.axes.x.overrides.label_color.expect("per-channel label_color must reach x AxisInput");
@@ -3142,7 +3153,7 @@ mod tests {
         spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "orient": "top" })));
         let batch = price_weight_batch();
         let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         assert_eq!(prep.axes.x.orient, AxisOrient::Top);
         // y untouched (default Left).
         assert_eq!(prep.axes.y.orient, AxisOrient::Left);
@@ -3155,7 +3166,7 @@ mod tests {
         let mut spec = single_layer_spec();
         spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "orient": "left" })));
         let batch = price_weight_batch();
-        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default())
+        let err = prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None)
             .expect_err("x orient='left' must fail loud");
         match err {
             crate::render::RenderError::InvalidAxisOrient { channel, orient } => {
@@ -3182,7 +3193,7 @@ mod tests {
         ));
         let batch = price_weight_batch();
         let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         assert_eq!(prep.axes.x.overrides.translate, Some(12.0));
         assert_eq!(prep.axes.x.overrides.min_band, Some(70.0));
         assert_eq!(prep.axes.x.overrides.max_band, Some(120.0));
@@ -3198,13 +3209,13 @@ mod tests {
         let mut spec = single_layer_spec();
         let batch = price_weight_batch();
         let baseline =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         let base_count = baseline.axes.x.tick_labels.len();
 
         // Pick a min_step larger than the natural tick spacing to force thinning.
         spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "tick_min_step": 1e9 })));
         let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         // The adjustment runs in prepare_and_layout; invoke it directly here.
         let tc = prep.x_tick_count;
         adjust_axis_ticks(&mut prep.axes.x, &prep.provisional_scales.x, tc, false);
@@ -3241,7 +3252,7 @@ mod tests {
         let mut spec = single_layer_spec();
         spec.encoding.x = Some(enc_with_axis("price", serde_json::json!({ "tick_extra": true })));
         let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         let before = prep.axes.x.tick_labels.len();
         let tc = prep.x_tick_count;
         adjust_axis_ticks(&mut prep.axes.x, &prep.provisional_scales.x, tc, false);
@@ -3267,7 +3278,7 @@ mod tests {
             Some(enc_with_axis("price", serde_json::json!({ "grid_width": 4.0 })));
         let batch = price_weight_batch();
         let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         assert_eq!(prep.axes.x.overrides.grid_width, Some(4.0), "per-channel value set in prep");
         // Chart-level configure_axis(grid_width=1.0) must NOT overwrite per-channel.
         let cfg = crate::render::chart_config::AxisConfigSpec {
@@ -3295,7 +3306,7 @@ mod tests {
         ));
         let batch = price_weight_batch();
         let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         // Per-channel suppression is set in prep; y is untouched (defaults true).
         assert!(!prep.axes.x.show_grid, "per-channel grid=False set in prep");
         assert!(!prep.axes.x.show_domain, "per-channel domain=False set in prep");
@@ -3341,7 +3352,7 @@ mod tests {
         ));
         let batch = price_weight_batch();
         let mut prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
         // Apply the threaded override exactly as render/mod.rs does.
         prep.axes.x.tick_labels = apply_tick_format(
             std::mem::take(&mut prep.axes.x.tick_labels),
@@ -3366,14 +3377,14 @@ mod tests {
         default_spec.encoding.x =
             Some(EncodingSpec { field: "price".into(), ..Default::default() });
         let default_prep =
-            prepare_render_inputs(&default_spec, &batch, &crate::layout::ThemeInputs::default())
+            prepare_render_inputs(&default_spec, &batch, &crate::layout::ThemeInputs::default(), None)
                 .unwrap();
 
         let mut limited_spec = single_layer_spec();
         limited_spec.encoding.x =
             Some(enc_with_axis("price", serde_json::json!({ "tick_count": 2 })));
         let limited_prep =
-            prepare_render_inputs(&limited_spec, &batch, &crate::layout::ThemeInputs::default())
+            prepare_render_inputs(&limited_spec, &batch, &crate::layout::ThemeInputs::default(), None)
                 .unwrap();
 
         assert!(
@@ -3619,7 +3630,7 @@ mod tests {
 
         let batch = cat_batch();
         let prep =
-            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default()).unwrap();
+            prepare_render_inputs(&spec, &batch, &crate::layout::ThemeInputs::default(), None).unwrap();
 
         assert!(
             !prep.legend_entries.is_empty(),

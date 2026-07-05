@@ -1,9 +1,12 @@
 """Figure-chrome positioning resolution for composite and single-chart renders.
 
-The Rust SVG compositors (``compose_svg_horizontal`` / ``compose_svg_vertical``
-/ ``compose_svg_grid``) emit a figure-level title / subtitle / caption band
-around the composed panels.  The horizontal position of that band is controlled
-by three keyword arguments on the Rust side:
+The Rust chrome emitters — ``wrap_svg_with_chrome`` for a flat single-chart
+render (``Chart.to_svg()``'s ``.properties(caption=...)`` post-wrap) and the
+composite root ``config`` slot for composed figures (``HConcatChart`` /
+``VConcatChart`` / ``RepeatChart`` / facets, via the unified Rust composite
+render path) — emit a figure-level title / subtitle / caption band around the
+panels.  The horizontal position of that band is controlled by three keyword
+arguments on the Rust side:
 
 - ``left_inset``  — x of a ``start``-anchored band (left padding, in pixels)
 - ``right_inset`` — distance from the right edge of an ``end``-anchored band

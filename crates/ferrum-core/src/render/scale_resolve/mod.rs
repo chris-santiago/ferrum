@@ -35,10 +35,19 @@ use super::RenderError;
 pub use self::auxiliary::{build_opacity_scale, build_shape_scale, build_size_scale};
 pub use self::color::build_color_scale;
 
+// Domain-union helpers re-exported for the composite resolve pass
+// (`render::composite`), which unions per-channel domains across a composite
+// tree's leaves through the same facet mechanism (`domain` is a private
+// submodule, so the pub(in crate::render) fns need a reachable path here).
+pub(in crate::render) use self::domain::{
+    distinct_positional_categories_shared, locate_field, numeric_domain_union,
+};
+
 // Internal re-exports used by the orchestrator in this module.
 use self::positional::{
     apply_coord_domain_overrides, build_axis_scale, PositionalFields,
 };
+use crate::render::composite::LeafScaleContext;
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -641,7 +650,7 @@ pub struct ResolvedScales {
 
 // ── Shared helpers used by sub-modules ──────────────────────────────────────
 
-fn infer_spec_type(
+pub(in crate::render) fn infer_spec_type(
     enc: &crate::spec::encoding::EncodingSpec,
     dtype: &ArrowDataType,
 ) -> SpecDataType {
@@ -676,7 +685,11 @@ pub(super) use super::arrow_cast::min_max_f64 as column_min_max_f64;
 
 /// Compute (min, max) for a numeric Arrow column, skipping NaN/null values.
 /// Returns (0.0, 1.0) when no finite values are present.
-fn numeric_extent(col: &dyn arrow::array::Array) -> (f64, f64) {
+///
+/// `pub(in crate::render)` so the composite resolve pass (`render::composite`)
+/// can compute a leaf's shared color/size extent through the same primitive the
+/// facet-shared continuous-color path uses (10-pre-b).
+pub(in crate::render) fn numeric_extent(col: &dyn arrow::array::Array) -> (f64, f64) {
     super::arrow_cast::finite_min_max_f64(col).unwrap_or((0.0, 1.0))
 }
 
@@ -738,7 +751,13 @@ pub(super) fn union_panel_with_global_extent(
     (p_lo.min(g_lo), p_hi.max(g_hi))
 }
 
-fn distinct_values_in_order(
+/// First-appearance-order distinct string values of `field` (nulls dropped),
+/// the categorical-domain primitive shared by the color/shape scale builders.
+///
+/// `pub(in crate::render)` so the composite resolve pass (`render::composite`)
+/// can union a leaf's shared categorical color domain through the same primitive
+/// the categorical color path uses (10-pre-b).
+pub(in crate::render) fn distinct_values_in_order(
     batch: &RecordBatch,
     field: &str,
 ) -> Result<Vec<String>, RenderError> {
@@ -793,12 +812,19 @@ fn facet_aux_shared(spec: &ChartSpec) -> bool {
 /// Computes `force_cat` and `aux_shared` internally from `spec` so the three
 /// dispatch sites in `resolve_scales_with_outputs` share one definition. Warning
 /// push order is: `color_warns` (via `extend`), then `shape_warn` (via `push`).
+///
+/// `leaf_scales` is the 10-pre-b composite seam: `Some` only for a composite leaf
+/// whose parent shares `color`/`size`. It seeds the color/size auto path with the
+/// domain unioned across the composite's leaves, exactly as `leaf_scales`
+/// (x/y) seeds the positional axes. `None` for standalone (flat/facet) renders
+/// reproduces the pre-10-pre-b behavior byte-for-byte.
 #[allow(clippy::type_complexity)]
 fn build_auxiliary_scales(
     spec: &ChartSpec,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     theme: &ThemeInputs,
+    leaf_scales: Option<&LeafScaleContext>,
     warnings: &mut Vec<crate::render::RenderWarning>,
 ) -> Result<(Option<ColorScale>, Option<SizeScale>, Option<ShapeScale>, Option<OpacityScale>), RenderError> {
     // FA-5: area marks always group color discretely; force categorical.
@@ -807,9 +833,12 @@ fn build_auxiliary_scales(
     // color, size, opacity) union the global FINAL_OUTPUT_KEY batch so per-panel
     // marks normalize through the same domain as the global legend/colorbar.
     let aux_shared = facet_aux_shared(spec);
-    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared)?;
+    // 10-pre-b: composite shared color/size domains (None → standalone path).
+    let color_domain = leaf_scales.and_then(|c| c.color.as_ref());
+    let size_domain = leaf_scales.and_then(|c| c.size.as_ref());
+    let (color, color_warns) = build_color_scale(&spec.encoding, primary_batch, transform_outputs, theme, force_cat, aux_shared, color_domain)?;
     warnings.extend(color_warns);
-    let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme)?;
+    let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, size_domain)?;
     warnings.extend(size_warns);
     let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared)?;
     warnings.extend(shape_warns);
@@ -864,6 +893,11 @@ pub fn resolve_scales(
 /// axis field (e.g. boxplot's `x="group"`) is preserved on every named output
 /// produced by the composite mark's transform pipeline, so the primary batch
 /// is sufficient there.
+///
+/// Standalone (flat/facet) entry point: no composite leaf-scale context. Delegates
+/// to [`resolve_scales_with_leaf_context`] with `None`, mirroring the way
+/// [`resolve_scales`] delegates here with an empty outputs map. Byte-identical to
+/// the pre-D4b behavior for every existing caller.
 pub fn resolve_scales_with_outputs(
     spec: &ChartSpec,
     primary_batch: &RecordBatch,
@@ -872,7 +906,40 @@ pub fn resolve_scales_with_outputs(
     y_pixel_range: (f64, f64),
     theme: &ThemeInputs,
 ) -> Result<(ResolvedScales, Vec<crate::render::RenderWarning>), RenderError> {
+    resolve_scales_with_leaf_context(
+        spec,
+        primary_batch,
+        transform_outputs,
+        x_pixel_range,
+        y_pixel_range,
+        theme,
+        None,
+    )
+}
+
+/// D4b composite seam: the full scale-resolution form, threading an optional
+/// per-leaf resolved-domain context so a composite-shared leaf resolves its
+/// positional axes on the auto path (facet padding/`nice`), seeded by the shared
+/// domain. `leaf_scales` is `Some` only for a composite leaf; `None` reproduces
+/// the standalone behavior byte-for-byte. A channel carrying a genuine user
+/// `enc.scale` short-circuits at the explicit-scale bypass inside
+/// [`build_axis_scale`] before the context is consulted, so user scale still wins.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::render) fn resolve_scales_with_leaf_context(
+    spec: &ChartSpec,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    x_pixel_range: (f64, f64),
+    y_pixel_range: (f64, f64),
+    theme: &ThemeInputs,
+    leaf_scales: Option<&LeafScaleContext>,
+) -> Result<(ResolvedScales, Vec<crate::render::RenderWarning>), RenderError> {
     let mut warnings = Vec::new();
+
+    // Per-channel composite shared domains (D4b). `None` on a channel → that axis
+    // resolves exactly as it would standalone.
+    let x_shared_domain = leaf_scales.and_then(|c| c.x.as_ref());
+    let y_shared_domain = leaf_scales.and_then(|c| c.y.as_ref());
 
     // T4: per-channel "shared faceted positional scale" flag. When this chart is
     // faceted AND the channel resolves `ResolveMode::Shared` (the documented
@@ -910,8 +977,8 @@ pub fn resolve_scales_with_outputs(
             let x_enc = spec.encoding.x.as_ref().unwrap();
             let x2_enc = spec.encoding.x2.as_ref();
             let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
-            let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, &mut warnings)?;
-            let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
+            let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, x_shared_domain, &mut warnings)?;
+            let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
             return Ok((ResolvedScales {
                 x, y: dummy_unit_scale(y_pixel_range, false),
                 color, size, shape, opacity, x2: None, y2: None,
@@ -922,8 +989,8 @@ pub fn resolve_scales_with_outputs(
             let y2_enc = spec.encoding.y2.as_ref();
             let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
             let pos_fields = PositionalFields { x: None, y: Some(y_enc.field.as_str()) };
-            let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, &mut warnings)?;
-            let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
+            let y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, y_shared_domain, &mut warnings)?;
+            let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
             return Ok((ResolvedScales {
                 x: dummy_unit_scale(x_pixel_range, true), y,
                 color, size, shape, opacity, x2: None, y2: None,
@@ -962,12 +1029,12 @@ pub fn resolve_scales_with_outputs(
         x: Some(x_enc.field.as_str()),
         y: Some(y_enc.field.as_str()),
     };
-    let mut x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, &mut warnings)?;
+    let mut x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, x_shared_domain, &mut warnings)?;
     // Stack-aware y-axis: resolve against the post-Stack batch when the
     // spec carries a matching Stack adjustment. See
     // `position::axis_batch_for_y` for the rationale.
     let y_batch = crate::render::position::axis_batch_for_y(spec, &y_enc.field, primary_batch);
-    let mut y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, &mut warnings)?;
+    let mut y = build_axis_scale("y", y_enc, y2_enc, pos_fields, &y_batch, transform_outputs, y_pixel_range, spec, y_shared, y_shared_domain, &mut warnings)?;
 
     // CoordCartesian / CoordFixed domain overrides: explicit xlim/ylim pins the
     // data domain; expand=false removes the default 5% inward padding.
@@ -980,7 +1047,7 @@ pub fn resolve_scales_with_outputs(
     // it accepts transform_outputs because composite-mark color fields may
     // live in a named output rather than primary.) FA-5 (force_cat) and T3
     // (aux_shared) logic lives in `build_auxiliary_scales`.
-    let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, &mut warnings)?;
+    let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
 
     let x2_field_name = x2_enc.map(|e| e.field.clone());
     let y2_field_name = y2_enc.map(|e| e.field.clone());

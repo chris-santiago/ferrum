@@ -148,6 +148,7 @@ mod tests {
                 axes: vec![],
                 annotations: vec![],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             }],
             decorations: vec![],
             selections: vec![],
@@ -158,5 +159,107 @@ mod tests {
         let json = serde_json::to_string(&scene).expect("serialize");
         let deserialized: SceneGraph = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(scene, deserialized);
+    }
+
+    // ── Panel::layout_scale (ratio-fitted cells / W5 foundation) ──────────────
+
+    #[test]
+    fn layout_scale_identity_apply_is_noop() {
+        let ls = LayoutScale::identity();
+        assert_eq!(ls.apply(10.0, 20.0), (10.0, 20.0));
+    }
+
+    #[test]
+    fn layout_scale_apply_scales_and_translates() {
+        let ls = LayoutScale { sx: 0.5, sy: 2.0, tx: 10.0, ty: -5.0 };
+        assert_eq!(ls.apply(4.0, 3.0), (12.0, 1.0));
+    }
+
+    #[test]
+    fn layout_scale_default_is_identity() {
+        assert_eq!(LayoutScale::default(), LayoutScale::identity());
+        assert!(LayoutScale::default().is_identity());
+    }
+
+    #[test]
+    fn layout_scale_non_identity_is_not_identity() {
+        assert!(!LayoutScale { sx: 1.5, sy: 1.0, tx: 0.0, ty: 0.0 }.is_identity());
+        assert!(!LayoutScale { sx: 1.0, sy: 1.0, tx: 1.0, ty: 0.0 }.is_identity());
+    }
+
+    /// Identity `layout_scale` must be skipped by serde (`skip_serializing_if`)
+    /// so scenes serialized before this field existed stay byte-identical.
+    #[test]
+    fn layout_scale_identity_is_not_serialized() {
+        let panel = Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            grid: vec![],
+            marks: vec![],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
+        };
+        let json = serde_json::to_string(&panel).expect("serialize");
+        assert!(
+            !json.contains("layout_scale"),
+            "identity layout_scale must be omitted from serialized JSON, got: {json}"
+        );
+    }
+
+    /// A `Panel` JSON payload without a `layout_scale` key (e.g. a scene
+    /// serialized before this field existed) must deserialize with
+    /// `layout_scale == LayoutScale::identity()` — the serde back-compat
+    /// contract (`#[serde(default)]`).
+    #[test]
+    fn panel_without_layout_scale_field_defaults_to_identity() {
+        let json = r#"{
+            "id": 0,
+            "plot_area": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+            "clip": {"x": 0.0, "y": 0.0, "w": 100.0, "h": 100.0},
+            "coord": {"kind": "cartesian", "x_domain": null, "y_domain": null, "expand": true, "clip": true},
+            "grid": [],
+            "marks": [],
+            "axes": [],
+            "annotations": [],
+            "strip_title": []
+        }"#;
+        let panel: Panel = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            panel.layout_scale,
+            LayoutScale::identity(),
+            "missing layout_scale field must default to identity"
+        );
+    }
+
+    /// A non-identity `layout_scale` must round-trip through JSON, and the
+    /// serialized form must actually carry the field (proving the skip only
+    /// applies at identity).
+    #[test]
+    fn layout_scale_non_identity_round_trips_through_json() {
+        let ls = LayoutScale { sx: 0.5, sy: 0.25, tx: 12.0, ty: -8.0 };
+        let panel = Panel {
+            id: 1,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            grid: vec![],
+            marks: vec![],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+            layout_scale: ls,
+        };
+        let json = serde_json::to_string(&panel).expect("serialize");
+        assert!(
+            json.contains("layout_scale"),
+            "non-identity layout_scale must be serialized, got: {json}"
+        );
+        let deserialized: Panel = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(deserialized.layout_scale, ls);
+        assert_eq!(panel, deserialized);
     }
 }

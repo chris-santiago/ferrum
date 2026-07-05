@@ -28,23 +28,22 @@ Python layer: ``_ChartLike.properties`` (``src/ferrum/composition.py:245``)
 has no concept of "figure-level" vs "panel-level" properties.  It fans
 ``**kwargs`` indiscriminately to every child chart.
 
-Rust layer: ``compose_svg_vertical`` / ``compose_svg_horizontal``
-(``crates/ferrum-core/src/render/compositor.rs:302 / :262``) accept only SVG
+Rust layer: the string-based 1D SVG compositors (vertical / horizontal stacking,
+previously in the now-deleted ``render/compositor.rs``) accept only SVG
 strings and a spacing value; they have no facility to inject a figure-wide
 title band before the panel grid or a caption band below it.
 
-``compose_svg_grid``
-(``crates/ferrum-core/src/render/grid_compose.rs:42``) similarly has no
-figure-level title or caption parameter.
+The grid compositor (previously in the now-deleted ``render/grid_compose.rs``)
+similarly has no figure-level title or caption parameter.
 
 For a fix to land, both layers must change:
   - Python: ``_ChartLike`` needs a ``figure_title`` / ``figure_subtitle`` /
     ``figure_caption`` store (or an overloaded ``properties`` that distinguishes
     figure-level from per-panel kwargs), and the render call must pass those
     values through.
-  - Rust: ``compose_svg_vertical``, ``compose_svg_horizontal``, and
-    ``compose_svg_grid`` need an optional title-band (above) and caption-band
-    (below) parameter so that a single text node wraps the whole output SVG.
+  - Rust: each string compositor needs an optional title-band (above) and
+    caption-band (below) parameter so that a single text node wraps the whole
+    output SVG.
 
 These tests assert the INTENDED behavior. All tests are expected to FAIL until
 the fix lands (TDD RED).
@@ -341,15 +340,26 @@ def test_d10_t7_caption_on_composite_properties_does_not_raise(two_charts):
 # ---------------------------------------------------------------------------
 
 
-def test_d10_t8_figure_title_appears_before_panel_content(two_charts_with_panel_titles):
-    """The figure-level title must precede all panel body content in SVG order.
+def _text_node_y(svg: str, content: str) -> float:
+    """Return the ``y`` coordinate of the ``<text>`` node whose text is *content*."""
+    import re
 
-    EXPECTED TO FAIL (TDD RED): currently the title is per-child, so the first
-    child's title appears at its natural position inside that child's SVG, not
-    before the entire composed figure.
+    for attrs, text in re.findall(r"<text\s+([^>]*)>([^<]*)</text>", svg):
+        if text.strip() == content:
+            m = re.search(r'y="([^"]+)"', attrs)
+            if m:
+                return float(m.group(1))
+    raise AssertionError(f"no <text> node with content {content!r}")
 
-    We verify document order: the figure title text node must appear at an
-    earlier byte offset than both per-panel titles.
+
+def test_d10_t8_figure_title_appears_above_panel_content(two_charts_with_panel_titles):
+    """The figure-level title must render above all panel content.
+
+    The composite render path emits the figure chrome into one scene and shifts
+    the panels down, so the assertion is on *visual position* (the figure title's
+    y is above both per-panel titles) rather than SVG byte order — the string
+    compositor happened to prepend the chrome band, but z-order/byte-order is a
+    render mechanism, not the figure-level-placement contract this test guards.
     """
     c1, c2 = two_charts_with_panel_titles
     composed = (c1 & c2).properties(title="Figure Title")
@@ -359,17 +369,15 @@ def test_d10_t8_figure_title_appears_before_panel_content(two_charts_with_panel_
     assert "Panel A" in svg, "Panel A must be present"
     assert "Panel B" in svg, "Panel B must be present"
 
-    figure_pos = svg.index("Figure Title")
-    panel_a_pos = svg.index("Panel A")
-    panel_b_pos = svg.index("Panel B")
+    figure_y = _text_node_y(svg, "Figure Title")
+    panel_a_y = _text_node_y(svg, "Panel A")
+    panel_b_y = _text_node_y(svg, "Panel B")
 
-    assert figure_pos < panel_a_pos, (
-        f"Figure title (pos {figure_pos}) must precede Panel A title (pos {panel_a_pos}) "
-        "in SVG document order."
+    assert figure_y < panel_a_y, (
+        f"Figure title (y={figure_y}) must render above Panel A title (y={panel_a_y})."
     )
-    assert figure_pos < panel_b_pos, (
-        f"Figure title (pos {figure_pos}) must precede Panel B title (pos {panel_b_pos}) "
-        "in SVG document order."
+    assert figure_y < panel_b_y, (
+        f"Figure title (y={figure_y}) must render above Panel B title (y={panel_b_y})."
     )
 
 
@@ -420,7 +428,8 @@ def test_d10_t10_concat_chart_figure_chrome_appears_once(two_charts):
     """ConcatChart.properties(title=, subtitle=, caption=) renders each text once.
 
     Previously ConcatChart silently dropped figure chrome: _figure_title was
-    stored but never threaded into compose_svg_grid, so no chrome appeared.
+    stored but never threaded into the (then-existing) grid compositor, so no
+    chrome appeared.
     """
     from ferrum.composition import ConcatChart
 
@@ -684,7 +693,7 @@ def test_d10_t21_empty_dataset_caption_default_inset():
     """Regression: empty-dataset single-chart caption rendered flush-left at x=0 (separate render path).
 
     The empty-data fast-path in _render.py (~line 662) is a distinct
-    compose_svg_vertical call from the normal path.  It must also honour the
+    wrap_svg_with_chrome call from the normal path.  It must also honour the
     default left inset (16) and start-anchor, not emit the caption at x=0.
     """
     empty = pl.DataFrame({"x": [], "y": []}, schema={"x": pl.Float64, "y": pl.Float64})

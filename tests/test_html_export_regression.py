@@ -43,7 +43,6 @@ Covers:
 - Empty DataFrame .interactive() (P40)
 - No encoding .interactive() raises cleanly (P41)
 - InteractiveChart.save() with .html extension (P42)
-- _offset_node must offset path control points cx/cy/c1x/c1y/c2x/c2y (B2)
 - Chart.__add__ preserves RHS selections and conditionals (B3)
 - LayerChart._render_interactive preserves both layers' selections (B3)
 """
@@ -930,63 +929,6 @@ def test_p42_interactive_chart_save_html(tmp_path):
     assert "_render" in content, "HTML must contain _render call"
 
 
-# ── B2. _offset_node missing path control points ─────────────────────────
-
-
-def test_offset_node_path_control_points():
-    """_offset_node must offset ALL coordinate keys in path commands,
-    including QuadTo cx/cy and CubicTo c1x/c1y/c2x/c2y."""
-    from ferrum.composition import _offset_node
-
-    node = {
-        "type": "path",
-        "commands": [
-            {"type": "MoveTo", "x": 10.0, "y": 20.0},
-            {"type": "LineTo", "x": 30.0, "y": 40.0},
-            {"type": "QuadTo", "cx": 50.0, "cy": 60.0, "x": 70.0, "y": 80.0},
-            {
-                "type": "CubicTo",
-                "c1x": 90.0,
-                "c1y": 100.0,
-                "c2x": 110.0,
-                "c2y": 120.0,
-                "x": 130.0,
-                "y": 140.0,
-            },
-            {"type": "HLineTo", "x": 150.0},
-            {"type": "VLineTo", "y": 160.0},
-            {"type": "Close"},
-        ],
-    }
-    _offset_node(node, 100.0, 50.0)
-
-    cmds = node["commands"]
-    # MoveTo
-    assert cmds[0]["x"] == 110.0
-    assert cmds[0]["y"] == 70.0
-    # LineTo
-    assert cmds[1]["x"] == 130.0
-    assert cmds[1]["y"] == 90.0
-    # QuadTo — control point AND endpoint
-    assert cmds[2]["cx"] == 150.0, f"QuadTo cx not offset: {cmds[2]['cx']}"
-    assert cmds[2]["cy"] == 110.0, f"QuadTo cy not offset: {cmds[2]['cy']}"
-    assert cmds[2]["x"] == 170.0
-    assert cmds[2]["y"] == 130.0
-    # CubicTo — both control points AND endpoint
-    assert cmds[3]["c1x"] == 190.0, f"CubicTo c1x not offset: {cmds[3]['c1x']}"
-    assert cmds[3]["c1y"] == 150.0, f"CubicTo c1y not offset: {cmds[3]['c1y']}"
-    assert cmds[3]["c2x"] == 210.0, f"CubicTo c2x not offset: {cmds[3]['c2x']}"
-    assert cmds[3]["c2y"] == 170.0, f"CubicTo c2y not offset: {cmds[3]['c2y']}"
-    assert cmds[3]["x"] == 230.0
-    assert cmds[3]["y"] == 190.0
-    # HLineTo
-    assert cmds[4]["x"] == 250.0
-    # VLineTo
-    assert cmds[5]["y"] == 210.0
-    # Close — no coordinates
-    assert cmds[6] == {"type": "Close"}
-
-
 # ── B3. LayerChart.__add__ drops RHS selections and conditionals ──────────
 
 
@@ -1274,183 +1216,7 @@ def test_w20_csp_nonce_via_interactive_save(tmp_path):
     )
 
 
-# ── B4. _merge_scene_panels must offset strip_title nodes ───────────────
-
-
-def test_b4_strip_title_offset_in_composition():
-    """_merge_scene_panels must offset strip_title nodes the same way it
-    offsets marks, axes, grid, and annotations.  Faceted charts in composed
-    interactive views would otherwise have strip titles stuck at their
-    original coordinates."""
-    from ferrum.composition import _merge_scene_panels
-
-    panel = {
-        "id": 0,
-        "plot_area": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
-        "clip": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
-        "marks": [],
-        "axes": [],
-        "grid": [],
-        "annotations": [],
-        "strip_title": [
-            {
-                "type": "text",
-                "x": 10.0,
-                "y": 5.0,
-                "content": "cat=A",
-                "style": {"font_size": 12, "color": {"r": 0, "g": 0, "b": 0, "a": 255}},
-            }
-        ],
-    }
-    scene = {"panels": [panel]}
-    merged = {"panels": []}
-
-    _merge_scene_panels(merged, scene, dx=300.0, dy=0.0, panel_id_offset=0)
-
-    strip = merged["panels"][0]["strip_title"]
-    assert len(strip) == 1
-    assert strip[0]["x"] == 310.0, f"strip_title x not offset: {strip[0]['x']}"
-    assert strip[0]["y"] == 5.0, f"strip_title y should be unchanged: {strip[0]['y']}"
-
-
-# ── Merge gap: linked_panels offset ──────────────────────────────────────
-
-
-def test_merge_linked_panels_offset():
-    """_merge_one_child must propagate linked_panels from child scenes with
-    panel indices offset by panel_id_offset."""
-    import copy
-
-    from ferrum.composition import _empty_scene, _merge_one_child
-
-    child_a = {
-        "panels": [
-            {
-                "id": 0,
-                "plot_area": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
-                "clip": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
-                "marks": [],
-                "axes": [],
-                "grid": [],
-                "annotations": [],
-            }
-        ],
-        "selections": [],
-        "interaction": {
-            "conditionals": [],
-            "tick_levels": [],
-            "linked_panels": [[0]],
-        },
-        "title": [],
-        "legend": [],
-        "decorations": [],
-        "background": None,
-    }
-    child_b = copy.deepcopy(child_a)
-    child_b["interaction"]["linked_panels"] = [[0]]
-
-    merged = _empty_scene()
-    _merge_one_child(merged, child_a, dx=0.0, dy=0.0, panel_id_offset=0)
-    _merge_one_child(merged, child_b, dx=300.0, dy=0.0, panel_id_offset=1)
-
-    lp = merged["interaction"]["linked_panels"]
-    assert len(lp) == 2, f"expected 2 linked_panels groups; got {len(lp)}"
-    assert lp[0] == [0], f"first group should be [0]; got {lp[0]}"
-    assert lp[1] == [1], f"second group should be [1] (offset); got {lp[1]}"
-
-
-# ── Merge gap: zoom_enabled/pan_enabled propagation ──────────────────────
-
-
-def test_merge_zoom_disabled_propagates():
-    """If any child scene disables zoom_enabled, the merged scene must also
-    have zoom_enabled=False."""
-    import copy
-
-    from ferrum.composition import _empty_scene, _merge_one_child
-
-    child_zoom_off = {
-        "panels": [
-            {
-                "id": 0,
-                "plot_area": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
-                "clip": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
-                "marks": [],
-                "axes": [],
-                "grid": [],
-                "annotations": [],
-            }
-        ],
-        "selections": [],
-        "interaction": {
-            "conditionals": [],
-            "tick_levels": [],
-            "linked_panels": [],
-            "zoom_enabled": False,
-            "pan_enabled": True,
-        },
-        "title": [],
-        "legend": [],
-        "decorations": [],
-        "background": None,
-    }
-    child_zoom_on = copy.deepcopy(child_zoom_off)
-    child_zoom_on["interaction"]["zoom_enabled"] = True
-
-    merged = _empty_scene()
-    _merge_one_child(merged, child_zoom_on, dx=0.0, dy=0.0, panel_id_offset=0)
-    _merge_one_child(merged, child_zoom_off, dx=300.0, dy=0.0, panel_id_offset=1)
-
-    assert merged["interaction"]["zoom_enabled"] is False, (
-        "merged zoom_enabled must be False when any child disables it"
-    )
-
-
-def test_merge_pan_disabled_propagates():
-    """If any child scene disables pan_enabled, the merged scene must also
-    have pan_enabled=False."""
-    import copy
-
-    from ferrum.composition import _empty_scene, _merge_one_child
-
-    child_pan_off = {
-        "panels": [
-            {
-                "id": 0,
-                "plot_area": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
-                "clip": {"x": 0.0, "y": 0.0, "w": 200.0, "h": 150.0},
-                "marks": [],
-                "axes": [],
-                "grid": [],
-                "annotations": [],
-            }
-        ],
-        "selections": [],
-        "interaction": {
-            "conditionals": [],
-            "tick_levels": [],
-            "linked_panels": [],
-            "zoom_enabled": True,
-            "pan_enabled": False,
-        },
-        "title": [],
-        "legend": [],
-        "decorations": [],
-        "background": None,
-    }
-    child_pan_on = copy.deepcopy(child_pan_off)
-    child_pan_on["interaction"]["pan_enabled"] = True
-
-    merged = _empty_scene()
-    _merge_one_child(merged, child_pan_on, dx=0.0, dy=0.0, panel_id_offset=0)
-    _merge_one_child(merged, child_pan_off, dx=300.0, dy=0.0, panel_id_offset=1)
-
-    assert merged["interaction"]["pan_enabled"] is False, (
-        "merged pan_enabled must be False when any child disables it"
-    )
-
-
-# ── B5. _merge_packed_data must rewrite panel_idx in binary headers ──────
+# ── B5. Composed packed data must preserve marks and rewrite panel_idx ───
 
 
 def test_b5_packed_data_preserved_in_composition():
@@ -1491,89 +1257,6 @@ def test_b5_packed_data_panel_idx_rewritten():
         f"second batch panel_idx should be 1 (rewritten with composition offset), "
         f"got {batches[1]['panel_idx']}"
     )
-
-
-def test_b5_merge_packed_data_unit():
-    """Unit test for _merge_packed_data: verify it concatenates and rewrites panel_idx."""
-    import struct
-
-    from ferrum.composition import _merge_packed_data
-
-    # Build a synthetic packed batch: kind=0 (circle), count=2, flags=0
-    header_a = struct.pack("<5I", 0, 0, 0, 2, 0)  # panel_idx=0, batch_idx=0
-    instance_data_a = b"\x00" * (2 * 64)  # 2 CircleInstances
-    packed_a = header_a + instance_data_a
-
-    header_b = struct.pack("<5I", 0, 0, 0, 3, 0)  # panel_idx=0, batch_idx=0
-    instance_data_b = b"\x00" * (3 * 64)  # 3 CircleInstances
-    packed_b = header_b + instance_data_b
-
-    result = _merge_packed_data([packed_a, packed_b], [0, 1], [(0.0, 0.0), (0.0, 0.0)])
-    assert len(result) == len(packed_a) + len(packed_b), (
-        f"merged packed data length mismatch: {len(result)} != {len(packed_a) + len(packed_b)}"
-    )
-
-    # First batch: panel_idx should remain 0 (offset=0)
-    pi0 = struct.unpack_from("<I", result, 0)[0]
-    assert pi0 == 0, f"first batch panel_idx should be 0; got {pi0}"
-
-    # Second batch: panel_idx should be 0+1=1 (offset=1)
-    offset2 = len(packed_a)
-    pi1 = struct.unpack_from("<I", result, offset2)[0]
-    assert pi1 == 1, f"second batch panel_idx should be 1; got {pi1}"
-
-
-def test_b5_merge_packed_data_with_flags():
-    """Unit test for _merge_packed_data with data_indices and tooltips flags.
-
-    The tooltip section uses the REAL packed format produced by
-    ``pack_instances.rs::pack_tooltips``:
-        [num_fields: u32]
-        num_fields   × [name_len: u32][name UTF-8 bytes]
-        count×num_fields × [value_len: u32][value UTF-8 bytes]
-    There is NO overall byte-length prefix.
-    """
-    import struct
-
-    from ferrum.composition import _merge_packed_data
-
-    # Build a packed batch with flags=0x3 (data_indices + tooltips), kind=1 (rect), count=1
-    flags = 0x3
-    count = 1
-    header = struct.pack("<5I", 0, 0, 1, count, flags)  # panel_idx=0, kind=rect, count=1
-    instance_data = b"\x01" * 72  # 1 RectInstance (72 bytes)
-    data_indices = struct.pack("<I", 42)  # 1 data index
-
-    # Real tooltip table: 2 fields ("x" and "y"), 1 row of values.
-    # Layout: [num_fields:u32] [len:u32][name...] ... [len:u32][value...] ...
-    num_fields = 2
-    field_names = [b"x", b"y"]
-    row_values = [b"1.0", b"2.0"]  # 1 row, 2 fields
-    tooltips = struct.pack("<I", num_fields)
-    for name in field_names:
-        tooltips += struct.pack("<I", len(name)) + name
-    for val in row_values:
-        tooltips += struct.pack("<I", len(val)) + val
-
-    packed = header + instance_data + data_indices + tooltips
-
-    result = _merge_packed_data([packed], [5], [(0.0, 0.0)])
-    assert len(result) == len(packed), f"length mismatch: {len(result)} != {len(packed)}"
-
-    # panel_idx should be 0+5=5
-    pi = struct.unpack_from("<I", result, 0)[0]
-    assert pi == 5, f"panel_idx should be 5; got {pi}"
-
-    # All data after the 20-byte header must be byte-identical (merge only rewrites header)
-    assert result[20:] == packed[20:], "data after header should be unchanged"
-
-
-def test_b5_merge_packed_data_empty_inputs():
-    """_merge_packed_data with all-empty inputs returns empty bytes."""
-    from ferrum.composition import _merge_packed_data
-
-    result = _merge_packed_data([b"", b""], [0, 1], [(0.0, 0.0), (0.0, 0.0)])
-    assert result == b""
 
 
 # ---------------------------------------------------------------------------
@@ -1676,8 +1359,9 @@ def test_b5_multi_batch_tooltips_both_batches_survive_untitled():
 def test_b5_multi_batch_tooltips_both_batches_survive_titled():
     """Same as untitled test but with a figure title (exercises tooltip-scan + T3 Y-offset).
 
-    The title injects a header band; _merge_packed_data must both survive the tooltip
-    scan AND apply the Y-offset correctly.  Both batches must be present in the output.
+    The title injects a header band; the composite render entry must both survive the
+    tooltip scan AND apply the Y-offset correctly.  Both batches must be present in the
+    output.
     """
     n = 1500
     df = pl.DataFrame(
@@ -1716,10 +1400,11 @@ def test_b3_repeat_corner_interactive_sparse_layout():
     (row, col) grid positions with gaps for the upper triangle, matching the
     SVG layout.
 
-    Bug: _render_interactive feeds corner cells as a flat list into
-    _merge_child_scenes_grid which wraps linearly (row 0 = cells 0-2,
-    row 1 = cells 3-5), but the SVG path places them at their true grid
-    coordinates: (0,0), (1,0), (1,1), (2,0), (2,1), (2,2).
+    Bug (historical, pre-Task-9): the legacy interactive scene-merge fed
+    corner cells as a flat list into its grid merge, wrapping linearly
+    (row 0 = cells 0-2, row 1 = cells 3-5) while the SVG path placed them at
+    their true grid coordinates: (0,0), (1,0), (1,1), (2,0), (2,1), (2,2).
+    Both paths now share the one Rust composite entry, which this test pins.
     """
     df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0], "c": [7.0, 8.0, 9.0]})
     template = (

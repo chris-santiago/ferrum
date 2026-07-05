@@ -89,10 +89,18 @@ def test_composition_share_scale_accepts_shared(composition: fm.LayerChart) -> N
 
 
 def test_composition_share_scale_accepts_independent(chart: Chart) -> None:
-    """_ChartLike.share_scale accepts 'independent' (no-op) without raising."""
+    """_ChartLike.share_scale accepts 'independent' without raising.
+
+    Post-unification (#45 close), share_scale is sugar for resolve= -- an
+    explicit "independent" merges into ``_resolve`` as real metadata rather
+    than short-circuiting to an identity no-op, even though it renders the
+    same as the (also-independent) default.
+    """
     combined = chart | chart
     result = combined.share_scale(x="independent")
-    assert result is combined  # all-independent returns self (no-op)
+    assert result is not combined
+    assert result._resolve == {"x": "independent"}
+    assert result.to_svg() == combined.to_svg()
 
 
 def test_repeat_share_scale_accepts_shared(repeat_chart: RepeatChart) -> None:

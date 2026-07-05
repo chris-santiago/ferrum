@@ -23,8 +23,13 @@ class AxisExtent(NamedTuple):
     hi: float
 
 
-def _numeric_text_entries(svg: str) -> list[tuple[float, float, float]]:
-    """Return (x, y, value) for every ``<text>`` element whose content parses as float."""
+def numeric_text_entries(svg: str) -> list[tuple[float, float, float]]:
+    """Return (x, y, value) for every ``<text>`` element whose content parses as float.
+
+    This is the single text-node tick parser shared by the extent helpers below
+    and by sibling render tests (e.g. ``test_composite_render_grid.py``): the
+    ``<text x y>value</text>`` regex lives here once so new tests never re-copy it.
+    """
     entries = []
     for attrs, text in re.findall(r"<text\s+([^>]*)>([^<]*)</text>", svg):
         try:
@@ -50,7 +55,7 @@ def x_axis_extents(svg: str) -> list[AxisExtent]:
 
     Returns a list of (lo, hi) sorted by panel order (left panel first).
     """
-    entries = _numeric_text_entries(svg)
+    entries = numeric_text_entries(svg)
     y_groups: dict[int, list[tuple[float, float]]] = defaultdict(list)
     for x, y, val in entries:
         y_groups[round(y)].append((x, val))
@@ -72,7 +77,7 @@ def y_axis_extents(svg: str) -> list[AxisExtent]:
 
     Returns a list of (lo, hi) sorted by panel order (left panel first).
     """
-    entries = _numeric_text_entries(svg)
+    entries = numeric_text_entries(svg)
     x_groups: dict[int, list[float]] = defaultdict(list)
     for x, _, val in entries:
         x_groups[round(x)].append(val)

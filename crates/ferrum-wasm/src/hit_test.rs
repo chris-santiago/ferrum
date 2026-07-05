@@ -606,7 +606,9 @@ mod bug_hunt_tests {
     // ── hit_test_nearest: new coverage ─────────────────────────────────────────
 
     fn make_panel_two_circles(c1: (f64, f64), c2: (f64, f64)) -> Vec<ferrum_scene::Panel> {
-        use ferrum_scene::{BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        };
         let style = FillStroke {
             fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
             stroke: None,
@@ -642,6 +644,7 @@ mod bug_hunt_tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }]
     }
 
@@ -701,7 +704,7 @@ mod bug_hunt_tests {
     #[test]
     fn bug_hunt_hit_test_nearest_panel_with_no_marks() {
         // Panel with no mark batches: nearest must return None, not panic.
-        use ferrum_scene::{CoordKind, Panel, Rect};
+        use ferrum_scene::{CoordKind, LayoutScale, Panel, Rect};
         let panels = vec![Panel {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
@@ -712,6 +715,7 @@ mod bug_hunt_tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }];
         let zoom = identity_zoom_n(1);
         let result = hit_test_nearest(&panels, 250.0, 250.0, &zoom);
@@ -791,7 +795,9 @@ mod bug_hunt_tests {
     #[test]
     fn bug_hunt_hit_test_multi_panel_zoom_independence() {
         // Two panels, only panel 0 zoomed. Click should use correct zoom per panel.
-        use ferrum_scene::{BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{
+            BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        };
         let style = FillStroke {
             fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
             stroke: None, stroke_width: 0.0, opacity: 1.0,
@@ -804,6 +810,7 @@ mod bug_hunt_tests {
                 clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
                 coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
                 grid: vec![], axes: vec![], annotations: vec![], strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle { cx: 100.0, cy: 100.0, r: 5.0, style: style.clone() }],
@@ -818,6 +825,7 @@ mod bug_hunt_tests {
                 clip: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
                 coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
                 grid: vec![], axes: vec![], annotations: vec![], strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
                     kind: MarkBatchKind::Point,
                     nodes: vec![SceneNode::Circle { cx: 350.0, cy: 100.0, r: 5.0, style: style.clone() }],
@@ -892,7 +900,7 @@ mod bug_hunt_tests {
 
     #[test]
     fn bug_hunt_tick_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
         let panel = Panel {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
@@ -903,6 +911,7 @@ mod bug_hunt_tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Tick,
@@ -946,7 +955,7 @@ mod bug_hunt_tests {
 
     #[test]
     fn bug_hunt_text_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
         let panel = Panel {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
@@ -957,6 +966,7 @@ mod bug_hunt_tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Text,
@@ -1029,7 +1039,7 @@ mod bug_hunt_tests {
 
     #[test]
     fn bug_hunt_ribbon_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
         let panel = Panel {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
@@ -1040,6 +1050,7 @@ mod bug_hunt_tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         };
         let commands = vec![
             ferrum_scene::PathCmd::MoveTo { x: 10.0, y: 10.0 },
@@ -1080,7 +1091,7 @@ mod bug_hunt_tests {
 
     #[test]
     fn bug_hunt_segment_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
         let panel = Panel {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
@@ -1091,6 +1102,7 @@ mod bug_hunt_tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Segment,
@@ -1135,7 +1147,7 @@ mod bug_hunt_tests {
 
     #[test]
     fn bug_hunt_image_batch_routes_correctly() {
-        use ferrum_scene::{BlendMode, CoordKind, MarkBatch, MarkBatchKind, Panel, Rect};
+        use ferrum_scene::{BlendMode, CoordKind, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
         let panel = Panel {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
@@ -1146,6 +1158,7 @@ mod bug_hunt_tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Image,
@@ -1172,9 +1185,7 @@ mod bug_hunt_tests {
 mod tests {
     use super::*;
     use crate::zoom_pan::{Affine2, ZoomPanState};
-    use ferrum_scene::{
-        CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect,
-    };
+    use ferrum_scene::{CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect};
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -1225,6 +1236,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }]
     }
 
@@ -1259,6 +1271,7 @@ mod tests {
                 axes: vec![],
                 annotations: vec![],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             },
             Panel {
                 id: 5,  // logical id diverges from array position (1)
@@ -1284,6 +1297,7 @@ mod tests {
                 axes: vec![],
                 annotations: vec![],
                 strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             },
         ]
     }
@@ -1487,6 +1501,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         };
         let batch = MarkBatch {
             kind: MarkBatchKind::Label,
@@ -1548,6 +1563,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }
     }
 
@@ -1593,5 +1609,168 @@ mod tests {
         // node_idx = 99 is beyond the single-element data_indices.
         let result = resolve_data_idx(&panel, 0, 99, None);
         assert_eq!(result, None, "out-of-range node_idx must return None");
+    }
+
+    // ── Task 5c gap-fix: consumer-level hit-test on a non-identity
+    // `layout_scale` panel (D4a amendment addendum) ─────────────────────────
+    //
+    // Spec-review gap: `bake_panels` (crate::scene_load) was only tested in
+    // isolation. These tests exercise `hit_test`/`hit_test_nearest` — the
+    // actual consumers `WasmRenderer::handle_click`/`hit_test_at` call — on
+    // panels produced by `bake_panels`, proving the single-source-of-truth
+    // wiring end to end rather than by code inspection alone.
+
+    /// A non-identity, non-uniform `LayoutScale`: `sx=2.0, sy=8.0, tx=10.0,
+    /// ty=-5.0` — geometric mean `4.0`, matching `scene_load.rs`'s
+    /// `gap_fix_layout_scale` fixture so the expected baked values
+    /// (`(16, 27)`, `r=8`) are pinned identically in both modules.
+    fn non_identity_layout_scale() -> LayoutScale {
+        LayoutScale { sx: 2.0, sy: 8.0, tx: 10.0, ty: -5.0 }
+    }
+
+    /// A one-panel `SceneGraph` whose panel carries `non_identity_layout_scale()`
+    /// and a single circle mark at raw (pre-bake) `(3, 4, r=2)`, baking to
+    /// `(16, 27, r=8)`.
+    fn scene_with_ratio_fitted_panel() -> ferrum_scene::SceneGraph {
+        let panel = Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: None,
+                y_domain: None,
+                expand: true,
+                clip: true,
+            },
+            grid: vec![],
+            marks: vec![MarkBatch {
+                kind: MarkBatchKind::Point,
+                nodes: vec![circle_node(3.0, 4.0, 2.0)],
+                data_indices: Some(vec![7]),
+                tooltips: None,
+                hrefs: None,
+                keys: None,
+                blend: ferrum_scene::BlendMode::Normal,
+                descriptions: None,
+                stroke_cap: None,
+                stroke_join: None,
+                packed_instances: None,
+            }],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+            layout_scale: non_identity_layout_scale(),
+        };
+        ferrum_scene::SceneGraph {
+            width: 200.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![panel],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: ferrum_scene::InteractionConfig::default(),
+            chart_description: None,
+        }
+    }
+
+    #[test]
+    fn hit_test_on_baked_panels_hits_baked_position_and_misses_raw_position() {
+        // `bake_panels` is the single source of truth every interaction
+        // consumer must read for a ratio-fitted (non-identity layout_scale)
+        // panel. Clicking at the BAKED mark position must hit; clicking at
+        // the RAW (pre-bake) position must miss — discriminating in both
+        // directions against the SAME (correct) panels input.
+        let scene = scene_with_ratio_fitted_panel();
+        let baked = crate::scene_load::bake_panels(&scene);
+        let zoom = identity_zoom();
+
+        let hit = hit_test(&baked, 16.0, 27.0, &zoom)
+            .expect("click at baked mark position (16, 27) must hit");
+        assert_eq!(hit.panel_id, 0);
+        assert_eq!(hit.data_idx, Some(7));
+
+        assert!(
+            hit_test(&baked, 3.0, 4.0, &zoom).is_none(),
+            "click at raw pre-bake position (3, 4) must miss against baked panels"
+        );
+    }
+
+    #[test]
+    fn hit_test_nearest_on_baked_panels_finds_baked_position_not_raw() {
+        let scene = scene_with_ratio_fitted_panel();
+        let baked = crate::scene_load::bake_panels(&scene);
+        let zoom = identity_zoom();
+
+        // Nearest search close to the baked position finds the mark.
+        let nearest = hit_test_nearest(&baked, 16.0, 27.0, &zoom)
+            .expect("nearest search at baked position must find the mark");
+        assert_eq!(nearest.data_idx, Some(7));
+
+        // Nearest search anchored at the raw pre-bake position is far from
+        // the baked plot_area's contents in a way that demonstrates the two
+        // coordinate spaces are genuinely different, not coincidentally
+        // identical: the raw click falls entirely outside the baked
+        // plot_area (which itself is not consulted by `hit_test_nearest`,
+        // but the resulting distance below pins the geometry difference).
+        let (px, py) = (3.0, 4.0);
+        let dx = px - 16.0_f64;
+        let dy = py - 27.0_f64;
+        assert!(
+            (dx * dx + dy * dy).sqrt() > 20.0,
+            "fixture must be discriminating: raw and baked positions must differ substantially"
+        );
+    }
+
+    #[test]
+    fn hit_test_on_raw_unbaked_panels_hits_raw_position_not_baked_position() {
+        // Mirror-image regression guard: if a consumer regressed to reading
+        // `scene.panels` directly (skipping `bake_panels`), it would hit at
+        // the RAW position and miss at the BAKED position — the exact
+        // opposite of the correct (baked) consumer above. Pinning this
+        // "wrong" behavior on raw panels makes the baked/raw distinction
+        // unambiguous.
+        let scene = scene_with_ratio_fitted_panel();
+        let zoom = identity_zoom();
+
+        let hit = hit_test(&scene.panels, 3.0, 4.0, &zoom)
+            .expect("click at raw mark position (3, 4) must hit raw (un-baked) panels");
+        assert_eq!(hit.data_idx, Some(7));
+
+        assert!(
+            hit_test(&scene.panels, 16.0, 27.0, &zoom).is_none(),
+            "click at baked position (16, 27) must miss raw (un-baked) panels"
+        );
+    }
+
+    #[test]
+    fn hit_test_zoom_composition_on_baked_panel_uses_baked_position_not_double_baked() {
+        // FA-18 per-panel transform composition (spec-review item 3): the
+        // zoom/pan affine `hit_test` inverse-applies must compose on top of
+        // the ALREADY-baked mark position, never re-apply `layout_scale` a
+        // second time. Zoom: sx=3, sy=3, tx=100, ty=50.
+        let scene = scene_with_ratio_fitted_panel();
+        let baked = crate::scene_load::bake_panels(&scene);
+        let zoom = zoom_with(3.0, 3.0, 100.0, 50.0);
+
+        // Correct: the visual position is `zoom.apply(baked_position)` —
+        // (3*16+100, 3*27+50) = (148, 131).
+        let correct_visual = (3.0 * 16.0 + 100.0, 3.0 * 27.0 + 50.0);
+        let hit = hit_test(&baked, correct_visual.0, correct_visual.1, &zoom)
+            .expect("click at zoom_affine(baked_position) must hit");
+        assert_eq!(hit.data_idx, Some(7));
+
+        // Wrong: a double-bake bug would expect
+        // `zoom.apply(layout_scale.apply(baked_position))` instead —
+        // layout_scale applied a SECOND time on top of the already-baked
+        // position before the zoom affine. That position must miss.
+        let ls = non_identity_layout_scale();
+        let double_baked = ls.apply(16.0, 27.0);
+        let wrong_visual = zoom.transforms[0].apply(double_baked.0, double_baked.1);
+        assert!(
+            hit_test(&baked, wrong_visual.0, wrong_visual.1, &zoom).is_none(),
+            "click at zoom_affine(layout_scale(baked_position)) (double-bake) must miss"
+        );
     }
 }

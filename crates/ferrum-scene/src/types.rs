@@ -34,6 +34,67 @@ pub struct Panel {
     pub axes: Vec<SceneNode>,
     pub annotations: Vec<SceneNode>,
     pub strip_title: Vec<SceneNode>,
+    /// Per-panel layout transform mapping this panel's natively-computed
+    /// geometry into its allocated slot in a composed scene (ratio-fitted
+    /// cells, e.g. JointChart/ClusterMap marginals).
+    ///
+    /// Default is identity (`sx = sy = 1`, `tx = ty = 0`), meaning this
+    /// panel's geometry is already at its final position — the case for
+    /// every flat and faceted chart today. Both `walk_svg` and the WASM
+    /// scene loader apply this transform identically so ratio-fitted cells
+    /// render proportionally in both renderers (the single mechanism behind
+    /// the W5 fix). Absent on deserialize means identity (back-compat with
+    /// scenes serialized before this field existed); identity is not
+    /// serialized, matching the `#[serde(default)]` precedent used elsewhere
+    /// in this schema (see `chart_description` above, `stroke_opacity` /
+    /// `fill_opacity` below).
+    #[serde(default, skip_serializing_if = "LayoutScale::is_identity")]
+    pub layout_scale: LayoutScale,
+}
+
+/// A 2D scale + translate transform: `(x, y) -> (sx * x + tx, sy * y + ty)`.
+///
+/// Deliberately not a full affine (no rotation/shear): neither `walk_svg`
+/// nor the WASM renderer needs it, and this shape maps directly onto the
+/// WASM `Uniforms`/`Affine2` upload (`sx, sy, tx, ty`) with no truncation.
+/// Non-uniform (`sx != sy`) is required — JointChart marginals compute
+/// independent x/y scale factors (grid ratio-fit math in
+/// `render/composite_render.rs`, absorbed from the deleted `grid_compose.rs`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct LayoutScale {
+    pub sx: f64,
+    pub sy: f64,
+    pub tx: f64,
+    pub ty: f64,
+}
+
+impl LayoutScale {
+    /// The no-op transform: `(x, y) -> (x, y)`.
+    pub fn identity() -> Self {
+        Self { sx: 1.0, sy: 1.0, tx: 0.0, ty: 0.0 }
+    }
+
+    /// True when this transform is the identity — the byte-stability anchor
+    /// for `skip_serializing_if` and for both walkers' "do nothing extra"
+    /// fast path. Uses an epsilon comparison, matching this file's existing
+    /// `is_one_f64`/`is_zero_angle` convention.
+    pub fn is_identity(&self) -> bool {
+        (self.sx - 1.0).abs() < f64::EPSILON
+            && (self.sy - 1.0).abs() < f64::EPSILON
+            && self.tx.abs() < f64::EPSILON
+            && self.ty.abs() < f64::EPSILON
+    }
+
+    /// Apply this transform to a point.
+    pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+        (self.sx * x + self.tx, self.sy * y + self.ty)
+    }
+}
+
+impl Default for LayoutScale {
+    fn default() -> Self {
+        Self::identity()
+    }
 }
 
 // ── 3.3 MarkBatch ───────────────────────────────────────────────────

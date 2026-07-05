@@ -1,7 +1,7 @@
 use arrow::record_batch::RecordBatch;
 use ferrum_scene::{
-    BindingRole, BlendMode, CoordKind, InteractionConfig, MarkBatch, Panel, ParamBinding,
-    PanelTickLevels, SceneGraph, SceneNode, TickLevel,
+    BindingRole, BlendMode, CoordKind, InteractionConfig, LayoutScale, MarkBatch, Panel,
+    ParamBinding, PanelTickLevels, SceneGraph, SceneNode, TickLevel,
 };
 use crate::spec::coord::to_scene_coord;
 
@@ -12,6 +12,7 @@ use super::arrow_cast::col_as_str;
 use super::chart_config::StructuralSpec;
 use super::config::RenderConfig;
 use super::draw::{self, to_scene_color, to_scene_text_style, DrawCtx};
+use super::composite::LeafScaleContext;
 use super::marks;
 use super::prepare::PreparedInputs;
 use super::{
@@ -19,6 +20,7 @@ use super::{
     filter_batch_by_facet, position, scale_resolve, RenderError, RenderWarning, CLIP_ID_PREFIX,
 };
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_scene(
     spec: &ChartSpec,
     prep: &PreparedInputs,
@@ -27,6 +29,10 @@ pub fn build_scene(
     config: &RenderConfig,
     warnings: &mut Vec<RenderWarning>,
     chart_config: &super::chart_config::ChartConfig,
+    // D4b composite seam: the shared-domain context for this leaf, forwarded to
+    // the per-panel scale pass. `None` for every standalone (flat/facet) render
+    // → byte-identical.
+    leaf_scales: Option<&LeafScaleContext>,
 ) -> Result<SceneGraph, RenderError> {
     let background = config.background.or(Some(theme.colors.background_color));
 
@@ -116,6 +122,7 @@ pub fn build_scene(
             theme,
             chart_config,
             warnings,
+            leaf_scales,
         )?;
 
         tick_levels.push(build_tick_levels(&scales, panel_idx));
@@ -362,6 +369,7 @@ pub fn build_scene(
             axes: final_axes,
             annotations: final_annotations,
             strip_title: strip_title_nodes,
+            layout_scale: LayoutScale::identity(),
         });
     }
 
@@ -447,6 +455,7 @@ pub fn build_scene(
 /// resolved scales. Scale warnings are appended to `warnings`. `panel_batch` is
 /// the caller's already-facet-filtered batch for this panel (the same one used to
 /// resolve layer batches), passed in to avoid re-running the facet filter.
+#[allow(clippy::too_many_arguments)]
 fn resolve_panel_scales(
     spec: &ChartSpec,
     prep: &PreparedInputs,
@@ -455,6 +464,9 @@ fn resolve_panel_scales(
     theme: &ThemeInputs,
     chart_config: &super::chart_config::ChartConfig,
     warnings: &mut Vec<RenderWarning>,
+    // D4b composite seam: shared-domain context for this leaf. `None` for
+    // standalone renders → resolves exactly as before.
+    leaf_scales: Option<&LeafScaleContext>,
 ) -> Result<(ChartSpec, scale_resolve::ResolvedScales), RenderError> {
     // Encoding merge: layer-0 encoding overlays the chart-level encoding.
     let mut merged_encoding = spec.encoding.clone();
@@ -469,13 +481,14 @@ fn resolve_panel_scales(
     resolve_param_domains(&mut rendering_spec_for_panel);
 
     // Scale resolution over this panel's pixel range.
-    let (mut scales, scale_warnings) = scale_resolve::resolve_scales_with_outputs(
+    let (mut scales, scale_warnings) = scale_resolve::resolve_scales_with_leaf_context(
         &rendering_spec_for_panel,
         panel_batch,
         &prep.transform_outputs,
         (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
         (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
         theme,
+        leaf_scales,
     )?;
     warnings.extend(scale_warnings);
 
@@ -2248,7 +2261,7 @@ mod tests {
         .unwrap();
 
         let theme = ThemeInputs::default();
-        let prep = super::super::prepare::prepare_render_inputs(&spec, &batch, &theme).unwrap();
+        let prep = super::super::prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
         let chart_config = super::super::chart_config::ChartConfig::default();
 
         // Two panels with deliberately different plot_area widths.
@@ -2263,11 +2276,11 @@ mod tests {
 
         let mut warnings = Vec::new();
         let (_spec_a, scales_a) = resolve_panel_scales(
-            &spec, &prep, &panel_narrow, &batch, &theme, &chart_config, &mut warnings,
+            &spec, &prep, &panel_narrow, &batch, &theme, &chart_config, &mut warnings, None,
         )
         .unwrap();
         let (_spec_b, scales_b) = resolve_panel_scales(
-            &spec, &prep, &panel_wide, &batch, &theme, &chart_config, &mut warnings,
+            &spec, &prep, &panel_wide, &batch, &theme, &chart_config, &mut warnings, None,
         )
         .unwrap();
 

@@ -48,10 +48,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render::binding::render_svg, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_png, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::render_interactive, m)?)?;
+    m.add_function(wrap_pyfunction!(render::binding::render_composite_svg, m)?)?;
+    m.add_function(wrap_pyfunction!(render::binding::render_composite_interactive, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::rasterize_svg, m)?)?;
-    m.add_function(wrap_pyfunction!(render::binding::compose_svg_horizontal_py, m)?)?;
-    m.add_function(wrap_pyfunction!(render::binding::compose_svg_vertical_py, m)?)?;
-    m.add_function(wrap_pyfunction!(render::binding::compose_svg_grid_py, m)?)?;
+    m.add_function(wrap_pyfunction!(render::binding::wrap_svg_with_chrome_py, m)?)?;
     m.add_function(wrap_pyfunction!(render::binding::figure_title_nodes_py, m)?)?;
     // Theme key contract (D-THEME-1): `ThemeOverridesSpec` is the single
     // source of truth; Python derives its key lists from these accessors.

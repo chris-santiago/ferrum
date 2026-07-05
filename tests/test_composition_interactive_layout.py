@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 import polars as pl
+import pytest
 
 import ferrum as fm
 
@@ -28,18 +29,27 @@ class TestJointChartInteractiveGrid:
     """JointChart._render_interactive must produce a 2x2 grid, not flat horizontal."""
 
     def test_grid_dimensions_all_three(self):
-        """With center + top + right, merged scene must reflect 2x2 grid dimensions.
+        """With center + top + right, merged scene must reflect the 2x2 ratio grid.
 
-        In a flat horizontal layout, width = center_w + top_w + right_w + 2*spacing.
-        In a proper grid:
-          width  = max(top_w, center_w) + spacing + right_w
-          height = top_h + spacing + max(center_h, right_h)
+        Post-8b, JointChart's interactive path routes through the composite grid
+        entry and applies the same F20 ratio math as the SVG path
+        (``marginal_share = 1/(ratio+1)``, ``center_share = ratio/(ratio+1)``;
+        default ``ratio=5`` -> marginal_share=1/6, center_share=5/6) via each
+        panel's non-identity ``layout_scale`` — this is the W5 fix: previously the
+        interactive body kept every panel at native size (no ratio scaling at all).
 
-        Since all children are 200x200 here, the grid is 2 cols and 2 rows:
-          width  = 200 + spacing + 200  (col0 = max(top,center)=200, col1 = right=200)
-          height = 200 + spacing + 200  (row0 = top=200, row1 = max(center,right)=200)
+        All three panels are 200x200 here:
+          native_col_w = [max(top_w, center_w)=200, right_w=200]
+          native_row_h = [top_h=200, max(center_h, right_h)=200]
+          k_w = min(200/(5/6), 200/(1/6)) = min(240, 1200) = 240
+          k_h = min(200/(1/6), 200/(5/6)) = min(1200, 240) = 240
+          col_w = [240*5/6, 240*1/6] = [200, 40]
+          row_h = [240*1/6, 240*5/6] = [40, 200]
+          width  = col_w[0] + spacing + col_w[1] = 200 + 10 + 40  = 250
+          height = row_h[0] + spacing + row_h[1] = 40  + 10 + 200 = 250
 
-        The flat horizontal would give width = 200+200+200+2*spacing = 620 (spacing=10).
+        A flat-horizontal layout would give width=620, height=200; a non-ratio
+        dense grid (pre-8b interactive behavior) would give width=410, height=410.
         """
         center = _simple_chart(200, 200)
         top = _simple_chart(200, 200)
@@ -49,15 +59,11 @@ class TestJointChartInteractiveGrid:
         scene_json, packed = jc._render_interactive()
         scene = json.loads(scene_json)
 
-        # Grid layout: width should NOT be 3*200 + 2*10 = 620 (flat horizontal)
-        # It should be closer to 200 + 10 + 200 = 410 (2 cols)
-        assert scene["width"] < 600, (
-            f"Width {scene['width']} suggests flat horizontal layout, not 2x2 grid"
+        assert scene["width"] == pytest.approx(250.0, abs=1.0), (
+            f"Width {scene['width']} does not match the ratio-scaled 2x2 grid"
         )
-        # Height should NOT be max(200, 200, 200) = 200 (flat horizontal)
-        # It should be closer to 200 + 10 + 200 = 410 (2 rows)
-        assert scene["height"] > 300, (
-            f"Height {scene['height']} suggests flat horizontal layout, not 2x2 grid"
+        assert scene["height"] == pytest.approx(250.0, abs=1.0), (
+            f"Height {scene['height']} does not match the ratio-scaled 2x2 grid"
         )
 
     def test_panel_offsets_grid_placement(self):
@@ -146,53 +152,75 @@ class TestJointChartInteractiveGrid:
 
 
 class TestClusterMapChartInteractiveGrid:
-    """ClusterMapChart._render_interactive must produce a 2x2 grid, not flat horizontal."""
+    """ClusterMapChart._render_interactive must produce a 2x2 ratio grid, not flat horizontal.
+
+    Post-8b, ``ClusterMapChart`` pre-resizes each dendrogram from the heatmap's own
+    declared size and ``dendrogram_ratio`` — ``dendro_dim = heatmap_dim * d / (1 - d)``
+    — *before* lowering to a leaf spec (see ``composition.py``
+    ``_pre_resized_dendrograms``), exactly mirroring the pre-cutover SVG path. This
+    means whatever width/height a test passes to ``row_dendrogram=``/
+    ``col_dendrogram=`` directly is **discarded and overridden** by that derived
+    value — only the heatmap's size and ``dendrogram_ratio`` matter. These fixtures
+    use ``heatmap=300x300`` with an explicit ``dendrogram_ratio=0.3`` (rather than
+    relying on the 0.2 default) so the derived dendrogram dimension
+    (``300 * 0.3/0.7 ≈ 128.6``) comfortably clears the render pipeline's ~80px
+    minimum-viewport floor (a pre-existing, unrelated limitation — a viewport
+    dimension below roughly 60-80px renders zero panels; see the 8a report).
+    """
+
+    _HM = 300.0
+    _RATIO = 0.3
+    _DENDRO = _HM * _RATIO / (1.0 - _RATIO)  # ~128.57
 
     def test_grid_dimensions(self):
-        """With heatmap + row_dendro + col_dendro, layout should be a 2x2 grid.
+        """With heatmap + row_dendro + col_dendro, layout should be a 2x2 ratio grid.
 
         SVG layout:
           - col_dendrogram at (0, 1) -- above heatmap
           - row_dendrogram at (1, 0) -- left of heatmap
           - heatmap        at (1, 1) -- main content
 
-        Grid dimensions:
-          width  = row_dendro_w + spacing + max(col_dendro_w, heatmap_w)
-          height = col_dendro_h + spacing + max(row_dendro_h, heatmap_h)
+        Both dendrograms are pre-resized to the same derived dimension (see class
+        docstring), so the ratio grid's fit-factor math degenerates to identity
+        scale (native extents already match their ratio-derived slots exactly):
+          width  = dendro_dim + spacing + heatmap_w = 128.57 + 10 + 300 = 438.57
+          height = dendro_dim + spacing + heatmap_h = 128.57 + 10 + 300 = 438.57
 
-        Flat horizontal would give width = heatmap_w + row_w + col_w + 2*spacing.
+        Flat horizontal would give width = heatmap_w + row_w + col_w + 2*spacing
+        (much larger); a non-ratio dense grid would give width=height=310.
         """
-        heatmap = _simple_chart(200, 200)
+        heatmap = _simple_chart(self._HM, self._HM)
         row_dendro = _simple_chart(100, 200)
         col_dendro = _simple_chart(200, 100)
         cmc = fm.ClusterMapChart(
             heatmap,
             row_dendrogram=row_dendro,
             col_dendrogram=col_dendro,
+            dendrogram_ratio=self._RATIO,
             spacing=10.0,
         )
 
         scene_json, packed = cmc._render_interactive()
         scene = json.loads(scene_json)
 
-        # In flat horizontal: width = 200+100+200+20 = 520, height = 200
-        # In grid: width = 100+10+200 = 310, height = 100+10+200 = 310
-        assert scene["width"] < 500, (
-            f"Width {scene['width']} suggests flat horizontal, not 2x2 grid"
+        expected = self._DENDRO + 10.0 + self._HM
+        assert scene["width"] == pytest.approx(expected, abs=2.0), (
+            f"Width {scene['width']} does not match the ratio-scaled 2x2 grid"
         )
-        assert scene["height"] > 200, (
-            f"Height {scene['height']} suggests flat horizontal, not 2x2 grid"
+        assert scene["height"] == pytest.approx(expected, abs=2.0), (
+            f"Height {scene['height']} does not match the ratio-scaled 2x2 grid"
         )
 
     def test_panel_offsets_grid(self):
         """Panels must be placed at grid positions, not in a flat row."""
-        heatmap = _simple_chart(200, 200)
+        heatmap = _simple_chart(self._HM, self._HM)
         row_dendro = _simple_chart(100, 200)
         col_dendro = _simple_chart(200, 100)
         cmc = fm.ClusterMapChart(
             heatmap,
             row_dendrogram=row_dendro,
             col_dendrogram=col_dendro,
+            dendrogram_ratio=self._RATIO,
             spacing=10.0,
         )
 
@@ -223,11 +251,12 @@ class TestClusterMapChartInteractiveGrid:
 
         Grid positions: row_dendro at (0, 0), heatmap at (0, 1). Single row.
         """
-        heatmap = _simple_chart(200, 200)
+        heatmap = _simple_chart(self._HM, self._HM)
         row_dendro = _simple_chart(100, 200)
         cmc = fm.ClusterMapChart(
             heatmap,
             row_dendrogram=row_dendro,
+            dendrogram_ratio=self._RATIO,
             spacing=10.0,
         )
 
@@ -235,18 +264,21 @@ class TestClusterMapChartInteractiveGrid:
         scene = json.loads(scene_json)
 
         # Width should reflect side-by-side arrangement
-        assert scene["width"] > 200, f"Width {scene['width']} too small for horizontal arrangement"
+        assert scene["width"] > self._HM, (
+            f"Width {scene['width']} too small for horizontal arrangement"
+        )
 
     def test_heatmap_plus_col_only(self):
         """ClusterMapChart with heatmap + col_dendro (no row) arranges vertically.
 
         Grid positions: col_dendro at (0, 0), heatmap at (1, 0). Single column.
         """
-        heatmap = _simple_chart(200, 200)
+        heatmap = _simple_chart(self._HM, self._HM)
         col_dendro = _simple_chart(200, 100)
         cmc = fm.ClusterMapChart(
             heatmap,
             col_dendrogram=col_dendro,
+            dendrogram_ratio=self._RATIO,
             spacing=10.0,
         )
 
@@ -254,4 +286,4 @@ class TestClusterMapChartInteractiveGrid:
         scene = json.loads(scene_json)
 
         # Height should reflect vertical stacking
-        assert scene["height"] > 200, f"Height {scene['height']} too small for vertical stack"
+        assert scene["height"] > self._HM, f"Height {scene['height']} too small for vertical stack"

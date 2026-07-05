@@ -384,7 +384,8 @@ fn geometry_contains(entry: &MarkEntry, x: f64, y: f64, tolerance: f64) -> bool 
 mod tests {
     use super::*;
     use ferrum_scene::{
-        BlendMode, CoordKind, FillStroke, MarkBatch, MarkBatchKind, Panel, Rect, SceneNode,
+        BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        SceneNode,
     };
     use rstar::PointDistance;
 
@@ -427,6 +428,7 @@ mod tests {
             axes: vec![],
             annotations: vec![],
             strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
         }
     }
 
@@ -1391,5 +1393,101 @@ mod tests {
         // Distance to center is 0; distance to a point 10px away is 10.
         assert!((e.distance_2(&[50.0, 50.0])).abs() < 1e-10);
         assert!((e.distance_2(&[60.0, 50.0]).sqrt() - 10.0).abs() < 1e-6);
+    }
+
+    // ── Task 5c gap-fix: `SpatialIndex` built from a non-identity
+    // `layout_scale` panel (D4a amendment addendum) ─────────────────────────
+    //
+    // Spec-review gap: brush/crossfilter entry points build `SpatialIndex`
+    // from `loaded.baked_panels` (`WasmRenderer::load_scene`), never raw
+    // `scene.panels`, for a ratio-fitted panel. These tests build the index
+    // the same way the runtime does — via `bake_panels` — and prove queries
+    // land on the baked geometry, not the raw pre-bake geometry.
+
+    /// A non-identity, non-uniform `LayoutScale`, matching the same
+    /// `sx=2.0, sy=8.0, tx=10.0, ty=-5.0` fixture used in `scene_load.rs`
+    /// and `hit_test.rs` so the expected baked circle (`16, 27, r=8`) is
+    /// pinned identically across all three modules.
+    fn gap_fix_layout_scale() -> LayoutScale {
+        LayoutScale { sx: 2.0, sy: 8.0, tx: 10.0, ty: -5.0 }
+    }
+
+    /// A one-panel `SceneGraph` whose panel carries `gap_fix_layout_scale()`
+    /// and a single circle mark at raw (pre-bake) `(3, 4, r=2)`, baking to
+    /// `(16, 27, r=8)`.
+    fn scene_with_ratio_fitted_panel() -> ferrum_scene::SceneGraph {
+        let panel = panel_with_batches(vec![point_batch(
+            vec![circle(3.0, 4.0, 2.0)],
+            Some(vec![7]),
+        )]);
+        let panel = Panel {
+            layout_scale: gap_fix_layout_scale(),
+            ..panel
+        };
+        ferrum_scene::SceneGraph {
+            width: 200.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![panel],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: ferrum_scene::InteractionConfig::default(),
+            chart_description: None,
+        }
+    }
+
+    #[test]
+    fn spatial_index_built_from_baked_panels_hits_baked_position_not_raw() {
+        let scene = scene_with_ratio_fitted_panel();
+        let baked = crate::scene_load::bake_panels(&scene);
+        let idx = SpatialIndex::build(&baked);
+
+        // Envelope-based hit_test at the BAKED position must find the mark.
+        let hit = idx
+            .hit_test(0, 16.0, 27.0, 0.5)
+            .expect("hit_test at baked position (16, 27) must find the mark");
+        assert_eq!(hit.data_idx, Some(7));
+
+        // Envelope-based hit_test at the RAW (pre-bake) position must miss —
+        // the baked circle's AABB (center (16, 27), r=8) does not overlap a
+        // small envelope around (3, 4).
+        assert!(
+            idx.hit_test(0, 3.0, 4.0, 0.5).is_none(),
+            "hit_test at raw pre-bake position (3, 4) must miss the baked index"
+        );
+    }
+
+    #[test]
+    fn spatial_index_built_from_baked_panels_nearest_finds_baked_position() {
+        let scene = scene_with_ratio_fitted_panel();
+        let baked = crate::scene_load::bake_panels(&scene);
+        let idx = SpatialIndex::build(&baked);
+
+        let (entry, dist) = idx
+            .nearest(0, 16.0, 27.0)
+            .expect("nearest at baked position must find the mark");
+        assert_eq!(entry.data_idx, Some(7));
+        assert!(dist < 1e-6, "query exactly at the baked center must have ~0 distance, got {dist}");
+    }
+
+    #[test]
+    fn spatial_index_built_from_raw_panels_hits_raw_position_not_baked() {
+        // Mirror-image regression guard: an index built from raw (un-baked)
+        // `scene.panels` hits at the RAW position and misses at the BAKED
+        // position — the exact opposite of the correct (baked) index above.
+        let scene = scene_with_ratio_fitted_panel();
+        let idx = SpatialIndex::build(&scene.panels);
+
+        let hit = idx
+            .hit_test(0, 3.0, 4.0, 0.5)
+            .expect("hit_test at raw position (3, 4) must find the mark in a raw-built index");
+        assert_eq!(hit.data_idx, Some(7));
+
+        assert!(
+            idx.hit_test(0, 16.0, 27.0, 0.5).is_none(),
+            "hit_test at baked position (16, 27) must miss a raw-built index"
+        );
     }
 }

@@ -77,13 +77,43 @@ Move all composition rendering (concat/grid/joint/clustermap/repeat/layer) onto 
 - [ ] Verify: `cargo test -p ferrum-core` (DYLD prefix as in Constraints)
 - [ ] Commit (rust-review-lite gated)
 
-### Task 5: Composite layout + scene passes + PyO3 entries
+> **Task 5 split (2026-07-03, implementer-proposed, orchestrator-accepted):** 5a =
+> D4b context threading (scale pipeline, byte-identical when None, lands first);
+> 5b = layout + scene renderer core (one SceneGraph, ratio math, renumbering,
+> chrome via `figure_chrome::title_nodes` — NOT the stale `build_figure_chrome_nodes`
+> name — dead-code allow removals); 5c = PyO3 entries + WASM interaction-geometry
+> baking (D4a addendum, double-apply hazard, wasm-clippy gate). Each lands as its
+> own gated commit; the checklist items below distribute accordingly.
+
+### Task 5 (split 5a/5b/5c): Composite layout + scene passes + PyO3 entries
 - Consumes: Tasks 2–4; decisions (b) leaf seam and (c) packed indexing
+- [ ] Resolve the raw-vs-baked panel-geometry split (decisions doc D4a addendum): interaction consumers (hit_test/lib/spatial_index/render upload) must read geometry consistent with baked layout-scale panels
 - [ ] Layout pass: hconcat/vconcat/grid/wrap/overlay placement + ratio cells (absorb `grid_compose.rs` math), leaf render via the decided seam with resolved domains; scene pass: one `SceneGraph`, globally unique panel/clip ids, chrome in-scene, `Raw` nodes at final coords
 - [ ] `render_composite_svg` / `render_composite_interactive` in `binding.rs` + `lib.rs` registration (signature family per spec §6)
 - [ ] Rust unit + snapshot-level tests (scene shape, panel rects, id uniqueness)
 - [ ] Verify: `cargo test` + `maturin develop` + full `uv run pytest -n auto` (no Python consumer yet — suite must stay green untouched)
 - [ ] Commit (rust-review-lite gated)
+
+> **Task 6 finding (2026-07-03): new Task 5d required.** The 5c PyO3 entry applies
+> ONE theme/viewport/chart_config to all leaves (`build_composite_leaves` collapses
+> the per-leaf `CompositeLeafInput`). Task 6 therefore GATES the new path to
+> homogeneous linear compositions (identical leaf theme+viewport+chart_config, no
+> per-node configure layers, x/y-only shared resolve, no nested chrome) with the old
+> path retained as fallback. **Task 5d (rust-coder, before Task 7 completes):**
+> per-leaf binding inputs on both composite entries (theme/viewport/chart_config per
+> leaf; per-node config; composite resolve beyond x/y stays out — color/size sharing
+> remains Python-side until re-decided), then Tasks 7-9 widen the gate as forms cut
+> over, and Task 10's deletion requires the gate to be fully open.
+>
+> **Task 7 addition to 5d scope:** per-child panel labels. `_compose_compare` labels
+> children via `child.properties(title=name)`; a composite (e.g. VConcat) child's
+> label becomes a non-root figure title, which the wire forbids — so residuals
+> compare= (the #45 headline) stays gated. 5d must add a per-child label field on
+> composite nodes (strip-title-like, rendered as the panel-group header the old
+> compositor drew), after which the figure-chrome gate drops and Task 7's strict
+> xfail (`test_titled_composite_children_share_axis_position_wise`) flips. Also
+> recorded: sparse-grid holes have no wire concept (RepeatChart corner=True) —
+> resolve by Task 10 (wire support or documented permanent gate).
 
 ### Task 6: Cutover — linear forms (HConcat/VConcat)
 - Consumes: Task 5 entries; tree lowering contract spec §5
@@ -101,7 +131,16 @@ Move all composition rendering (concat/grid/joint/clustermap/repeat/layer) onto 
 - [ ] Verify: full `uv run pytest -n auto`
 - [ ] Commit (python-review-lite gated)
 
-### Task 8: Cutover — ratio forms (JointChart, ClusterMapChart)
+> **Task 8 split (2026-07-03, orchestrator decision after two API-killed attempts):**
+> the grid-hole question is decided — option (b), Rust wire hole support: a hole
+> child in grid/wrap layouts (kind "hole"), skipped by layout/leaf-counting/packing,
+> covering BOTH JointChart's empty 2×2 corner and RepeatChart corner=True — this
+> also resolves the recorded Task 10 sparse blocker. **8a (rust-coder):** the hole
+> wire + layout skip + validation + PyO3 + tests. **8b (python-coder):** the
+> Joint/ClusterMap cutover per the original checklist, emitting holes for empty
+> cells.
+
+### Task 8 (split 8a/8b): Cutover — ratio forms (JointChart, ClusterMapChart)
 - Consumes: Task 3 per-panel scale; Task 6 pattern
 - [ ] Lower 2×2 ratio grids to composite tree with row/col ratios; static + interactive through composite entries (marginal axis hiding preserved)
 - [ ] Behavior tests: SVG marginal proportions match ratio; interactive scene carries per-panel scale (W5 slice)
@@ -116,6 +155,74 @@ Move all composition rendering (concat/grid/joint/clustermap/repeat/layer) onto 
 - [ ] Regenerate repeat/layer goldens; orchestrator PNG-inspects
 - [ ] Verify: full `uv run pytest -n auto`
 - [ ] Commit (python-review-lite gated)
+
+> **Task 10 pre-flight findings (2026-07-04):** the deletion must reconcile with the
+> retained legacy consumers: (a) LayerChart's interactive path stays on the legacy
+> merged-Chart route (one-panel interactive contract, Task 9 fix) and conditionally
+> calls `_scale_share.compute_union_domain`/`inject_scale` when `resolve=` has a
+> shared channel — port those two calls inline (or verify unreachable) before
+> deleting `_scale_share.py`; it does NOT touch `_scene_merge.py`. (b) The remaining
+> Python-side gates (configure layers — possibly droppable now that 5d's per-leaf
+> chart_config exists; non-x/y shared resolve; empty-data leaves) keep legacy
+> fallback paths alive — Task 10 must either widen those gates away or surface the
+> ledger-statement-7 tension ("_scene_merge/_scale_share/compose_svg_* no longer
+> exist") to the user for an explicit scope decision. Do not silently keep remnants.
+>
+> **USER DECISION (2026-07-04): FULL-LITERAL.** Task 10 splits: **10-pre-b
+> (rust-coder):** non-positional (color/size) channel support in the composite
+> resolve pass + the D4b seam, so non-x/y shared resolve rides the tree. **10-pre-a
+> (python-coder, consumes 10-pre-b):** drop the non-x/y gate; lower empty-data
+> leaves as holes (faithful — the legacy placeholder is visually blank); recursive
+> lowering for non-leaf grid cells; verify + drop the configure-layers gate (per-leaf
+> chart_config); port LayerChart's two inline _scale_share calls (its interactive
+> stays legacy-merged by the one-panel contract, but merged-Chart rendering is the
+> FLAT path — it needs no composite machinery, just the two-line domain union,
+> ported). **10 proper:** the deletion sweep with grep proofs, statement 7 literal.
+>
+> **10-pre-a FINDINGS (2026-07-04).** (1) A Rust `ctx_opt` gate bug (composite_render.rs
+> checked only x/y before threading the resolved context) was found by 10-pre-a and
+> fixed inline by the orchestrator via `LeafScaleContext::is_empty()`; color/size-only
+> sharing now works end-to-end (regression test
+> `test_hconcat_resolve_shared_color_alone_unions_domain`). (2) One narrow gate
+> remains after 10-pre-a: composite-level `configure_padding(left=/right=)` /
+> `configure_title(anchor=)` (`_composite_chrome_kwargs`) — a genuine composite-render-entry
+> gap, since `inject_root_chrome` (composite_render.rs) never reads a per-composite
+> chrome override on either path. **Task 10 proper must close it BEFORE the deletion
+> sweep** by wiring the composite tree's reserved root-only `config` slot (currently
+> dead on the Rust side) into `inject_root_chrome`'s FigureChrome, then dropping the
+> `_composite_chrome_kwargs` gate; `tests/test_flexibility_caps/test_d10_figure_title.py`
+> (t16/17/18/22/23/24) is the behavioral coverage. Empty-data holes exist only on
+> grid/wrap wire layouts; hconcat/vconcat/overlay still decline empty leaves to
+> legacy — Task 10 must close this before deletion, faithful to legacy's blank
+> rendering (extend hole support to hconcat/vconcat on the wire — `build_placed`'s
+> zero-footprint arm already exists — and for overlay skip empty children at
+> lowering, since an empty layer draws no marks; an all-empty tree keeps the
+> existing decline-to-`None` guard, which after deletion becomes a typed error, not
+> a silent fallback). Also: the ported `compute_union_domain`/`inject_scale` call
+> sites (`share_scale`, `RepeatChart._apply_resolve`, `LayerChart._build_merged`)
+> are the FLAT-path domain union and REMAIN after the sweep — Task 10's grep proofs
+> target `_scale_share`/`_scene_merge`/`compose_svg_*` symbols, not these.
+>
+> **STAGE-2 DONE (2026-07-04); STAGE-3 SCOPE PINNED.** Stage 2 deleted
+> `_scene_merge.py`/`_scale_share.py` and every Python legacy composition path
+> (grep-proven; suite 6828/0 after removing 68 white-box tests of deleted
+> internals). Two `compose_svg_*` consumers survive for stage 3 (Rust):
+> (1) `src/ferrum/_render.py` uses `compose_svg_vertical` for the FLAT
+> single-chart `.properties(caption=)` band (2 call sites incl. the empty-data
+> path) — stage 3 must replace it with a Rust chrome-wrap entry that reuses
+> `figure_chrome::wrap_with_chrome` so flat output stays BYTE-IDENTICAL (the
+> composite entry's scene-native chrome is NOT byte-compatible; regenerated
+> composition goldens prove it), then delete `compose_svg_{horizontal,vertical,
+> grid}` bindings + `compositor.rs` + `grid_compose.rs`; (2) `ferrum/__init__.py`
+> re-exports `compose_svg_*` as PUBLIC API (`__all__`) — remove with the
+> bindings, re-run `scripts/gen_api_pages.py`, and note the removal for the
+> next release's changelog. Also on the stage-3 checklist: `src/ferrum/_core.pyi`
+> `compose_svg_*` stub signatures die with the bindings (spec-review finding).
+> Changelog note for Task 12: all-empty compositions (e.g. zero-row pairplot/
+> jointplot) now raise a typed ValueError instead of rendering a blank grid —
+> a deliberate, user-facing behavior change (stage-2 sub-task-3 decision;
+> a faithful full-size blank render would need leafless-grid sizing in Rust,
+> logged as a possible follow-up if visual fidelity for this edge is wanted).
 
 ### Task 10: Hard deletion + grep proofs
 - Consumes: all forms cut over (Tasks 6–9)

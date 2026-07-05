@@ -19,18 +19,15 @@ pub(crate) mod binding;
 pub(crate) mod mark_nodes;
 pub(crate) mod marks;
 pub(crate) mod position;
-pub mod compositor;
-pub(crate) mod grid_compose;
 pub(crate) mod figure_chrome;
 pub(crate) mod pack_instances;
+pub(crate) mod composite;
+pub(crate) mod composite_render;
 pub(crate) mod scene_build;
 pub(crate) mod svg_walk;
 pub(crate) mod secondary_axis;
 pub(crate) mod break_axis;
 pub(crate) mod inset;
-pub use compositor::{
-    compose_svg_horizontal, compose_svg_vertical, CompositorError, HorizontalAlign, VerticalAlign,
-};
 
 // Constants (spec §6.1).
 pub const FLOAT_PRECISION: usize = 3;
@@ -1090,8 +1087,12 @@ fn prepare_and_layout(
     theme: &ThemeInputs,
     viewport: Viewport,
     chart_config: &ChartConfig,
+    // D4b composite seam: the resolved shared-domain context for this leaf,
+    // forwarded into the provisional scale pass. `None` for every standalone
+    // (flat/facet) render → byte-identical output.
+    leaf_scales: Option<&composite::LeafScaleContext>,
 ) -> Result<PipelineOutput, RenderError> {
-    let mut prep = prepare::prepare_render_inputs(spec, batch, theme)?;
+    let mut prep = prepare::prepare_render_inputs(spec, batch, theme, leaf_scales)?;
     let mut warnings = prep.warnings.clone();
 
     // Apply ChartConfig axis overrides (level 3) to AxisInput (level 2 wins when already set).
@@ -1243,10 +1244,10 @@ pub fn render_svg(
     };
 
     let PipelineOutput { prep, layout, effective_theme, mut warnings } =
-        prepare_and_layout(spec, batch, theme, viewport, chart_config)?;
+        prepare_and_layout(spec, batch, theme, viewport, chart_config, None)?;
 
     let scene = scene_build::build_scene(
-        spec, &prep, &layout, &effective_theme, config, &mut warnings, chart_config,
+        spec, &prep, &layout, &effective_theme, config, &mut warnings, chart_config, None,
     )?;
     let svg_string = svg_walk::walk_svg(&scene, config.embed_fonts);
 
@@ -1289,10 +1290,10 @@ pub fn render_scene_json(
     };
 
     let PipelineOutput { prep, layout, effective_theme, mut warnings } =
-        prepare_and_layout(spec, batch, theme, viewport, chart_config)?;
+        prepare_and_layout(spec, batch, theme, viewport, chart_config, None)?;
 
     let mut scene = scene_build::build_scene(
-        spec, &prep, &layout, &effective_theme, config, &mut warnings, chart_config,
+        spec, &prep, &layout, &effective_theme, config, &mut warnings, chart_config, None,
     )?;
 
     // Extract large homogeneous mark batches as raw packed bytes, clearing
@@ -1497,7 +1498,7 @@ mod orchestration_tests {
         let cfg = config::RenderConfig::default();
         let old_svg = render_svg(&spec, &batch, &theme, viewport, &cfg, &ChartConfig::default()).unwrap().bytes;
 
-        let prep = prepare::prepare_render_inputs(&spec, &batch, &theme).unwrap();
+        let prep = prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
         let mut warnings = prep.warnings.clone();
 
         let mut effective_theme = theme.clone();
@@ -1538,7 +1539,7 @@ mod orchestration_tests {
 
         let scene = scene_build::build_scene(
             &spec, &prep, &layout, theme_ref, &cfg, &mut warnings,
-            &ChartConfig::default(),
+            &ChartConfig::default(), None,
         ).unwrap();
         let new_svg = svg_walk::walk_svg(&scene, cfg.embed_fonts);
 

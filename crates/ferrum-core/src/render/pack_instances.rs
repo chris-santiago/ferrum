@@ -518,6 +518,7 @@ mod tests {
                     packed_instances: None,
                 }],
                 axes: vec![], annotations: vec![], strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
             }],
             legend: vec![], decorations: vec![], selections: vec![],
             interaction: InteractionConfig::default(), chart_description: None,

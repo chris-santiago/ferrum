@@ -430,6 +430,127 @@ pub fn escape_attr(s: &str) -> String {
     s.replace('\0', "").replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
+// ---------------------------------------------------------------------------
+// SVG root parsing + clip-id uniquification
+//
+// Moved from the now-deleted `render/compositor.rs` (Task 10 stage 3): these
+// helpers parse/re-emit an SVG document's root element and rewrite embedded
+// clip ids for cross-cell uniqueness. Surviving consumers are
+// `figure_chrome::wrap_with_chrome`/`wrap_svg_with_chrome` (the composite
+// chrome band and the flat single-chart chrome wrap) and
+// `composite_render`'s raw-node clip uniquification (the unified Rust
+// composite renderer) — the deleted N-ary SVG compositor's PyO3 bindings
+// were the third consumer.
+// ---------------------------------------------------------------------------
+
+/// Error parsing an SVG document's root element.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SvgParseError {
+    NoSvgRoot,
+    MalformedRoot,
+    NoClosingTag,
+    MissingAttr(String),
+    MalformedAttr(String),
+    AttrNotNumeric(String),
+}
+
+impl std::fmt::Display for SvgParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SvgParseError::NoSvgRoot => write!(f, "input does not contain <svg ...>"),
+            SvgParseError::MalformedRoot => write!(f, "<svg> open tag is malformed"),
+            SvgParseError::NoClosingTag => write!(f, "input does not contain </svg>"),
+            SvgParseError::MissingAttr(n) => write!(f, "<svg> missing required attr '{n}'"),
+            SvgParseError::MalformedAttr(n) => write!(f, "<svg> attr '{n}' is malformed"),
+            SvgParseError::AttrNotNumeric(n) => write!(f, "<svg> attr '{n}' is not numeric"),
+        }
+    }
+}
+
+impl std::error::Error for SvgParseError {}
+
+#[derive(Debug)]
+pub(crate) struct ParsedSvg<'a> {
+    pub(crate) width: f64,
+    pub(crate) height: f64,
+    pub(crate) body: &'a str,
+}
+
+/// Parse the width and height attributes from an SVG root element.
+/// Returns a `ParsedSvg` where `body` is the content between the opening
+/// `<svg ...>` tag and the closing `</svg>`.
+pub(crate) fn parse_svg_root(svg: &str) -> Result<ParsedSvg<'_>, SvgParseError> {
+    let svg_open_start = svg.find("<svg").ok_or(SvgParseError::NoSvgRoot)?;
+    let svg_open_end = svg[svg_open_start..]
+        .find('>')
+        .ok_or(SvgParseError::MalformedRoot)?
+        + svg_open_start
+        + 1;
+    let svg_close = svg.rfind("</svg>").ok_or(SvgParseError::NoClosingTag)?;
+
+    let attrs = &svg[svg_open_start..svg_open_end];
+    let width = extract_attr_f64(attrs, "width")?;
+    let height = extract_attr_f64(attrs, "height")?;
+
+    Ok(ParsedSvg {
+        width,
+        height,
+        body: &svg[svg_open_end..svg_close],
+    })
+}
+
+fn extract_attr_f64(attrs: &str, name: &str) -> Result<f64, SvgParseError> {
+    let needle = format!(r#"{}=""#, name);
+    let start = attrs
+        .find(&needle)
+        .ok_or_else(|| SvgParseError::MissingAttr(name.into()))?;
+    let val_start = start + needle.len();
+    let val_end = attrs[val_start..]
+        .find('"')
+        .ok_or_else(|| SvgParseError::MalformedAttr(name.into()))?
+        + val_start;
+    attrs[val_start..val_end]
+        .parse::<f64>()
+        .map_err(|_| SvgParseError::AttrNotNumeric(name.into()))
+}
+
+/// Emit an outer `<svg ...>` opening tag with width/height/viewBox set to the
+/// same `(w, h)` dimensions. The doc-comment on [`parse_svg_root`] notes that
+/// attribute order matters for the round-trip; this helper is the single
+/// source of truth for that order.
+pub(crate) fn write_svg_open(out: &mut String, w: f64, h: f64) {
+    out.push_str(&format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">"#,
+        fmt_f(w), fmt_f(h), fmt_f(w), fmt_f(h),
+    ));
+}
+
+/// Rewrite every clipPath `id="…"` and `url(#…)` reference in a single SVG
+/// body so each merged/composited cell uses globally-unique IDs. Covers the
+/// three id families ferrum emits: `ferrum-clip-`, `ferrum-colorbar-`, and
+/// `ferrum-legend-clip-`.
+///
+/// Each ferrum-rendered chart numbers its clipPaths per-panel starting at 0
+/// (`ferrum-clip-0`, `ferrum-clip-1`, ...). When multiple single-panel charts
+/// are merged into one document, they can all define `id="ferrum-clip-0"`,
+/// and an SVG renderer would silently pick one definition — clipping every
+/// cell by the wrong rect. The same collision hits `ferrum-colorbar-0`
+/// colorbar gradients and `ferrum-legend-clip-0` legend `clip_height` clips.
+/// Prefixing each cell's IDs with `cellNN-` makes them disjoint while
+/// preserving each body's internal `id` ↔ `url(#id)` references.
+pub(crate) fn uniquify_clip_ids(body: &str, cell_idx: usize) -> String {
+    let clip_prefix = format!("cell{cell_idx}-ferrum-clip-");
+    let colorbar_prefix = format!("cell{cell_idx}-ferrum-colorbar-");
+    let legend_clip_prefix = format!("cell{cell_idx}-ferrum-legend-clip-");
+    body
+        .replace("id=\"ferrum-clip-", &format!("id=\"{clip_prefix}"))
+        .replace("url(#ferrum-clip-", &format!("url(#{clip_prefix}"))
+        .replace("id=\"ferrum-colorbar-", &format!("id=\"{colorbar_prefix}"))
+        .replace("url(#ferrum-colorbar-", &format!("url(#{colorbar_prefix}"))
+        .replace("id=\"ferrum-legend-clip-", &format!("id=\"{legend_clip_prefix}"))
+        .replace("url(#ferrum-legend-clip-", &format!("url(#{legend_clip_prefix}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -755,5 +876,80 @@ mod tests {
             !out.contains("data:image/png;base64,"),
             "PNG mime must not appear for JPEG image; got: {out}"
         );
+    }
+
+    // ── SVG root parsing + clip-id uniquification (moved from the deleted
+    //    render/compositor.rs, Task 10 stage 3) ─────────────────────────
+
+    fn make_root_svg(w: f64, h: f64, body: &str) -> String {
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">{}</svg>"#,
+            w, h, w, h, body,
+        )
+    }
+
+    #[test]
+    fn parse_svg_root_extracts_dimensions() {
+        let s = make_root_svg(100.0, 50.0, "<rect/>");
+        let parsed = parse_svg_root(&s).unwrap();
+        assert_eq!(parsed.width, 100.0);
+        assert_eq!(parsed.height, 50.0);
+        assert_eq!(parsed.body, "<rect/>");
+    }
+
+    #[test]
+    fn parse_svg_root_rejects_missing_root() {
+        assert_eq!(parse_svg_root("<rect/>").unwrap_err(), SvgParseError::NoSvgRoot);
+    }
+
+    #[test]
+    fn parse_svg_root_rejects_missing_dimension() {
+        let s = r#"<svg xmlns="http://www.w3.org/2000/svg" height="50"></svg>"#;
+        assert_eq!(
+            parse_svg_root(s).unwrap_err(),
+            SvgParseError::MissingAttr("width".to_string()),
+        );
+    }
+
+    #[test]
+    fn write_svg_open_matches_parse_svg_root_attribute_order() {
+        let mut out = String::new();
+        write_svg_open(&mut out, 200.0, 100.0);
+        out.push_str("</svg>");
+        let parsed = parse_svg_root(&out).unwrap();
+        assert_eq!(parsed.width, 200.0);
+        assert_eq!(parsed.height, 100.0);
+    }
+
+    /// Two merged bodies each carry a `clip_height` legend clip, so both
+    /// share `id="ferrum-legend-clip-0"` + `clip-path="url(#ferrum-legend-clip-0)"`.
+    /// `uniquify_clip_ids` must namespace each per its `cell_idx` so the two
+    /// defs + references stay distinct (the JointChart/HConcat/composite
+    /// merge collision this helper exists to prevent).
+    #[test]
+    fn uniquify_clip_ids_namespaces_clip_colorbar_and_legend_ids() {
+        let body = concat!(
+            r#"<defs><clipPath id="ferrum-clip-0"><rect/></clipPath></defs>"#,
+            r#"<g clip-path="url(#ferrum-clip-0)">"#,
+            r#"<linearGradient id="ferrum-colorbar-0"/>"#,
+            r#"<rect fill="url(#ferrum-colorbar-0)"/>"#,
+            r#"<clipPath id="ferrum-legend-clip-0"><rect/></clipPath>"#,
+            r#"<g clip-path="url(#ferrum-legend-clip-0)"/></g>"#,
+        );
+
+        let cell0 = uniquify_clip_ids(body, 0);
+        let cell1 = uniquify_clip_ids(body, 1);
+
+        for (out, idx) in [(&cell0, 0), (&cell1, 1)] {
+            assert!(!out.contains(r#"id="ferrum-clip-"#), "unprefixed clip def leaked: {out}");
+            assert!(!out.contains("url(#ferrum-clip-0)"), "unprefixed clip ref leaked: {out}");
+            for prefix in ["ferrum-clip-0", "ferrum-colorbar-0", "ferrum-legend-clip-0"] {
+                let namespaced = format!("cell{idx}-{prefix}");
+                assert!(out.contains(&format!(r#"id="{namespaced}""#)), "missing def for {namespaced}: {out}");
+                assert!(out.contains(&format!("url(#{namespaced})")), "missing ref for {namespaced}: {out}");
+            }
+        }
+        // Different cell indices must not collide with each other.
+        assert_ne!(cell0, cell1);
     }
 }

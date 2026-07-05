@@ -10,6 +10,7 @@ use crate::spec::encoding::DataType as SpecDataType;
 
 use crate::render::color::Color;
 use crate::render::color::palette;
+use crate::render::composite::SharedDomain;
 use crate::render::RenderError;
 
 use super::domain::{apply_sort_to_domain, locate_field, SortContext};
@@ -75,6 +76,22 @@ use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_ca
 /// `FINAL_OUTPUT_KEY` batch's extent, so per-panel marks normalize through the same
 /// domain as the global colorbar. Explicit `scale_explicit_domain` overrides still
 /// win. Non-faceted callers pass `false`; the per-panel-only path is byte-identical.
+///
+/// # 10-pre-b — `composite_domain` for shared color across a composition
+///
+/// When a composite node shares `color`, the resolve pass
+/// ([`crate::render::composite`]) unions one domain across the leaves and threads
+/// it here as `composite_domain`. It seeds the auto path, mirroring `facet_shared`
+/// but with an explicit (rather than global-batch-derived) domain:
+/// - continuous color: a [`SharedDomain::Numeric`] extent replaces the auto data
+///   extent (an explicit user `scale.domain` still wins — but such a leaf is
+///   excluded from sharing upstream, so the two never collide);
+/// - categorical color: a [`SharedDomain::Ordinal`] vector replaces the
+///   data-derived first-appearance domain, so every leaf's swatches/legend agree.
+///
+/// `None` (every standalone and faceted caller) reproduces the pre-10-pre-b path
+/// byte-for-byte.
+#[allow(clippy::too_many_arguments)]
 pub fn build_color_scale(
     encoding: &crate::spec::encoding::Encoding,
     primary_batch: &RecordBatch,
@@ -82,6 +99,7 @@ pub fn build_color_scale(
     theme: &ThemeInputs,
     force_categorical: bool,
     facet_shared: bool,
+    composite_domain: Option<&SharedDomain>,
 ) -> Result<(Option<ColorScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(c_enc) = &encoding.color else {
         return Ok((None, Vec::new()));
@@ -119,8 +137,11 @@ pub fn build_color_scale(
         // D1: honor explicit domain from Sequential/Diverging scale specs.
         // When the spec carries domain=[lo, hi] or domain=[lo, mid, hi], use
         // those bounds instead of auto-inferring from the data column. When the
-        // spec domain is absent, fall back to the data extent.
-        let (lo, hi) = scale_explicit_domain(c_enc).unwrap_or(data_extent);
+        // spec domain is absent, a 10-pre-b composite shared extent wins over the
+        // per-leaf data extent; otherwise fall back to the data extent.
+        let (lo, hi) = scale_explicit_domain(c_enc)
+            .or_else(|| composite_numeric_extent(composite_domain))
+            .unwrap_or(data_extent);
         use crate::render::color::{ContinuousScheme, NamedContinuous};
 
         // D1/D4: resolve scheme from (1) encoding.scheme, (2) encoding.scale
@@ -225,11 +246,40 @@ pub fn build_color_scale(
         }
 
         // Default path: look up a named categorical palette.
+        //
+        // 10-pre-b: a composite shared categorical domain (unioned across the
+        // composition's leaves, first-appearance order) replaces the per-leaf
+        // data-derived domain so every leaf's swatch/legend order agrees. `sort`
+        // still applies on top, mirroring the facet-shared categorical path. The
+        // explicit-string-range branches above are unreachable when a composite
+        // domain is present (color is excluded from sharing on an explicit
+        // `enc.scale`), so seeding only this default path is sufficient.
         let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
-        let mut domain = distinct_values_in_order(domain_batch, &c_enc.field)?;
+        let mut domain = match composite_categorical_domain(composite_domain) {
+            Some(cats) => cats,
+            None => distinct_values_in_order(domain_batch, &c_enc.field)?,
+        };
         apply_sort_to_domain(&mut domain, c_enc.sort.as_ref(), &sort_ctx, &mut warnings);
         let scale = build_default_categorical_scale(domain, c_enc, theme, &mut warnings);
         Ok((Some(scale), warnings))
+    }
+}
+
+/// The `(lo, hi)` extent of a 10-pre-b composite shared color domain, when it is
+/// the continuous ([`SharedDomain::Numeric`]) variant. `None` otherwise.
+fn composite_numeric_extent(domain: Option<&SharedDomain>) -> Option<(f64, f64)> {
+    match domain? {
+        SharedDomain::Numeric { lo, hi } => Some((*lo, *hi)),
+        SharedDomain::Ordinal(_) => None,
+    }
+}
+
+/// The category vector of a 10-pre-b composite shared color domain, when it is
+/// the categorical ([`SharedDomain::Ordinal`]) variant. `None` otherwise.
+fn composite_categorical_domain(domain: Option<&SharedDomain>) -> Option<Vec<String>> {
+    match domain? {
+        SharedDomain::Ordinal(cats) => Some(cats.clone()),
+        SharedDomain::Numeric { .. } => None,
     }
 }
 

@@ -445,9 +445,9 @@ Beyond-scope deferrals surfaced while executing Tier 4 of the cohesion campaign.
 
 | Source | Sev | Issue | Item |
 |---|---|---|---|
-| COMP-08 / W5 | S2 | [#33](https://github.com/chris-santiago/ferrum/issues/33) | **JointChart/ClusterMap interactive layout ≠ SVG ratio-grid (caption-y drift).** Interactive scene-merge only translates panels; SVG ratio-scales via the Rust compositor. Needs a per-panel layout-scale slot through the scene schema → WASM (cross-language, browser-validated). Deferred by user decision in T4.2c. |
+| COMP-08 / W5 | S2 | [#33](https://github.com/chris-santiago/ferrum/issues/33) | ✅ **RESOLVED 2026-07-05** (`feat/composite-render-unification`, Phase B / #45). **JointChart/ClusterMap interactive layout ≠ SVG ratio-grid (caption-y drift).** Fixed exactly as prescribed: `Panel.layout_scale` (`{sx,sy,tx,ty}`, serde-default identity) through the scene schema, baked at load by the WASM renderer; both output kinds now share one Rust composite layout pass (`render_composite_interactive`), browser-validated via headless captures (`.claude/output/phase-b-captures/`). The Python interactive scene-merge no longer exists. |
 | T4.2b | S2 | [#34](https://github.com/chris-santiago/ferrum/issues/34) | ✅ **RESOLVED 2026-06-23** (`fix/composed-raw-node-offset`, see the 2026-06-23 section below). **Composed interactive renders did not offset inset `<svg>` / data-anchored `<image>` raw nodes.** The `_offset_node` raw branch (COMP-07/W4) offset only `<rect x/y>`; `inset.rs` `<svg x/y>` and `annotation.rs` `<image x/y>` producers stayed at child-local coords. Fixed by wrapping each raw fragment in a `<g transform="translate(dx,dy)">` (browser-verified). |
-| T3.5 | S2 | [#35](https://github.com/chris-santiago/ferrum/issues/35) | **Multi-model (`compare=`) RENDERING for the 17 aggregate diagnostics.** T3.5/D-COMPARE-1 wired multi-model where Python-only scope allowed; 17 diagnostics raise a documented `ValueError` on single-model-aggregate paths (CI/reference_band, multi-panel). Full rendering needs a dodge/facet/position-adjustment subsystem (Rust + mark + encoding). |
+| T3.5 | S2 | [#35](https://github.com/chris-santiago/ferrum/issues/35) | ✅ **RESOLVED** (small-multiples rendering landed `ae2e305` 2026-07-01 via `_compose_compare`; per-panel scale SHARING completed by Phase B / #45 — residuals `compare=` shares axes position-wise through the Rust composite resolve pass). **Multi-model (`compare=`) RENDERING for the 17 aggregate diagnostics.** |
 | T1.5 | S2 | [#36](https://github.com/chris-santiago/ferrum/issues/36) | ✅ **RESOLVED** (already fixed in `f20a135`, shipped v0.18.0; issue was filed ~10 h *after* the fix landed and closed 2026-06-23 as stale). **Precomputed 1-D binary gain/lift ranked negative class by `p`, inconsistent with roc/pr (`1-p`).** Now builds `column_stack([1-p, p])` so the whole precomputed-1D-binary family is consistent; regression test + v0.18.0 changelog entry present. |
 | WIRE-ASFIELD-1 | S1 | [#37](https://github.com/chris-santiago/ferrum/issues/37) | **`transform_calculate` emits wire key `as_field` while siblings emit `as_`.** Rust `TransformSpec` serde rename decision (pinned by a test). Candidate for a Tier-6 or dedicated transform-wire pass. |
 
@@ -471,3 +471,36 @@ Verified at three levels: 6 regression tests (5 node-level in `test_bug_hunt_sce
   single-exit refactor or a shared epilogue when this function is next touched.
   Channel-clone/private-`_kwargs` + scale-shape normalization are scheduled in the
   Phase B plan Task 10 (sole-ownership consolidation after `_scale_share.py` deletion).
+
+- **DSG-2 (S3-adjacent, Task 5d quality review; expanded by Task 8a):**
+  `render/binding.rs::collect_leaf_bindings_walk` duplicates the dict→kind→children
+  tree-walk that `spec/composite.rs::composite_node_from_py` owns, guarded only by a
+  count-equality check (catches count drift, not reorder-with-equal-count). Task 8a
+  raised the stakes: the walk now tracks a THIRD node kind ("hole", which contributes
+  no leaf) in lockstep by convention only — a future kind added to one walk but not
+  the other is a runtime error. Export the shared kind/children extraction helpers
+  `pub(crate)` and consolidate to one walk when the binding layer is next touched.
+- **DSG-3 (chore):** `binding.rs` new code uses non-deprecated `Bound::cast`/`cast_into`
+  while the rest of the crate (incl. `spec/composite.rs`) uses the deprecated
+  `downcast` idiom — crate-wide migration chore, clippy-motivated.
+
+---
+
+## 2026-07-05 — Phase B close design reviews (non-blocking follow-ups)
+
+The Phase B (#45 composite-render-unification) verification close ran both
+design reviewers over the whole branch. Rust verdict PASS, Python verdict
+CONCERNS (S3s remediated in-branch: share_scale unified onto resolve=,
+stale `.spec` docstrings fixed, LayerChart explicit-independent typed error;
+see the close commits). The S2-and-below findings below are logged for the
+next touch of each subsystem. Full reports: `.claude/output/phase-b-close/`.
+
+| Sev | Area | Item |
+|---|---|---|
+| S2 | rust layering | `scale_resolve` imports `SharedDomain`/`LeafScaleContext` from `render::composite` while `composite` imports union helpers back — inverted layering; move the seam value-types into the resolver. |
+| S2 | rust binding | `composite_tree_from_py` and `collect_leaf_bindings_walk` walk the same Python dicts separately, coupled only by a leaf-count guard (catches count drift, not reorder). Unify into one walk when next touched. |
+| S1 | rust interaction | `merge_children` AND-folds zoom/pan across children but hardcodes `toolbar: true`. |
+| S2 | python scene | `_scene.py::_empty_scene_json` is a hand-maintained scene-schema mirror (flat-path bootstrap). Consider a Rust-emitted empty scene. |
+| S2 | python lowering | `_rebuild_with_charts` sibling signature drift: base + 3 forms carry `resolve=_RESOLVE_UNCHANGED`, Joint/Repeat/ClusterMap don't (unreachable today — Repeat has a semantically-identical bespoke `share_scale`; collapse it onto the base sugar when next touched). `_build_grid_tree` has a 12-parameter signature; composite-node dict construction is triplicated across the lowering sites (unvalidated tree contract — a tiny builder/validator would pin it). |
+| S2 | python overlay | LayerChart static (Rust overlay tree) vs interactive (merged flat chart) shared color/size math can diverge (raw-column vs transform-aware unions) — single remaining injection seam, documented; real fix rides GH #52 (secondary axis / per-layer scale slots). |
+| — | wasm | wgpu 29.0.3 scissor workaround sunset: tracked in GH #51. |

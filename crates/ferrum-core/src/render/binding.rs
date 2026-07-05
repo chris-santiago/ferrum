@@ -157,6 +157,356 @@ pub fn render_interactive(
     Ok((json, py_bytes.unbind()))
 }
 
+// ---------------------------------------------------------------------------
+// Composite render bindings (Task 5c)
+// ---------------------------------------------------------------------------
+
+/// Render a composite chart tree (`hconcat`/`vconcat`/`grid`/`wrap`/`overlay`)
+/// to a single SVG string.
+///
+/// Parameters
+/// ----------
+/// tree : dict
+///     A composite tree node: ``{"kind": "leaf", "spec": ChartSpec, "data": int}``
+///     or ``{"kind": "composite", "layout": ..., "children": [...], ...}``. See
+///     ``crate::spec::composite`` for the full wire shape.
+/// payloads : list[pyarrow.RecordBatchReader or compatible]
+///     Arrow data streams, one per leaf's ``data`` index. A leaf's ``data``
+///     field selects its batch from this list by position.
+/// viewport : tuple[float, float]
+///     ``(width, height)`` passed to every leaf's standalone render (the same
+///     contract as ``render_svg``'s ``viewport``).
+/// theme : dict, optional
+///     Sparse theme override dict, applied to every leaf. See ``render_svg``.
+/// config : dict, optional
+///     Render-config dict, applied to every leaf. See ``render_svg``.
+/// chart_config : dict, optional
+///     Per-chart configuration dict, applied to every leaf.
+///
+/// Returns
+/// -------
+/// str
+///     Complete SVG document as a UTF-8 string.
+///
+/// Raises
+/// ------
+/// ValueError
+///     If the tree is malformed (unknown node kind, missing keys, root-only
+///     chrome on a non-root node), a leaf's ``data`` index is out of bounds
+///     for *payloads*, a payload stream is empty or unreadable, or rendering
+///     any leaf fails.
+///
+/// Notes
+/// -----
+/// Byte-deterministic given the same *tree*, *payloads*, and *theme* inputs
+/// (same contract as ``render_svg``). Render warnings are forwarded to
+/// Python's ``warnings.warn``.
+#[pyfunction]
+#[pyo3(signature = (tree, payloads, *, viewport, theme = None, config = None, chart_config = None))]
+pub fn render_composite_svg(
+    py: Python<'_>,
+    tree: &Bound<'_, PyAny>,
+    payloads: Vec<PyRecordBatchReader>,
+    viewport: (f64, f64),
+    theme: Option<&Bound<'_, PyDict>>,
+    config: Option<&Bound<'_, PyDict>>,
+    chart_config: Option<&Bound<'_, PyDict>>,
+) -> PyResult<String> {
+    let node = crate::spec::composite::composite_tree_from_py(tree)?;
+    let (batches, t, c, cc, vp) =
+        decode_composite_inputs(payloads, viewport, theme, config, chart_config)?;
+    let bindings = collect_leaf_bindings(tree, &t, vp, &c, &cc)?;
+    let leaves = build_composite_leaves(&node, &batches, &bindings)?;
+    let (scene, warnings) = super::composite_render::render_composite_scene(&node, &leaves, &t)
+        .map_err(composite_render_err_to_py)?;
+    emit_warnings(py, &warnings)?;
+    Ok(super::svg_walk::walk_svg(&scene, c.embed_fonts))
+}
+
+/// Render a composite chart tree to an interactive scene (JSON + packed bytes).
+///
+/// Same tree/payload/viewport/theme/config contract as
+/// [`render_composite_svg`]; produces the WASM-consumable pair instead of an
+/// SVG string, mirroring ``render_interactive``.
+///
+/// Parameters
+/// ----------
+/// tree : dict
+///     A composite tree node (see [`render_composite_svg`]).
+/// payloads : list[pyarrow.RecordBatchReader or compatible]
+///     Arrow data streams, one per leaf's ``data`` index.
+/// viewport : tuple[float, float]
+///     ``(width, height)`` passed to every leaf's standalone render.
+/// theme : dict, optional
+///     Sparse theme override dict, applied to every leaf.
+/// config : dict, optional
+///     Render-config dict, applied to every leaf.
+/// chart_config : dict, optional
+///     Per-chart configuration dict, applied to every leaf.
+///
+/// Returns
+/// -------
+/// tuple[str, bytes]
+///     ``(scene_json, packed_bytes)`` — the merged scene's JSON plus the
+///     packed binary sidecar for large homogeneous mark batches. Panel ids in
+///     the JSON and `panel_idx` values in the packed headers share one flat
+///     0-based namespace numbered in tree pre-order (D4c): the packed headers
+///     are written directly against each leaf's already-renumbered panels, so
+///     no post-hoc header rewrite is needed.
+///
+/// Raises
+/// ------
+/// ValueError
+///     Same conditions as [`render_composite_svg`].
+#[pyfunction]
+#[pyo3(signature = (tree, payloads, *, viewport, theme = None, config = None, chart_config = None))]
+pub fn render_composite_interactive<'py>(
+    py: Python<'py>,
+    tree: &Bound<'_, PyAny>,
+    payloads: Vec<PyRecordBatchReader>,
+    viewport: (f64, f64),
+    theme: Option<&Bound<'_, PyDict>>,
+    config: Option<&Bound<'_, PyDict>>,
+    chart_config: Option<&Bound<'_, PyDict>>,
+) -> PyResult<(String, Py<PyBytes>)> {
+    let node = crate::spec::composite::composite_tree_from_py(tree)?;
+    let (batches, t, c, cc, vp) =
+        decode_composite_inputs(payloads, viewport, theme, config, chart_config)?;
+    let bindings = collect_leaf_bindings(tree, &t, vp, &c, &cc)?;
+    let leaves = build_composite_leaves(&node, &batches, &bindings)?;
+    // Warning emission deferred here (unlike `render_composite_svg`): its flat
+    // sibling `render_interactive` has the identical pre-existing gap —
+    // `render_scene_json` doesn't surface `RenderWarning`s to this binding at
+    // all, so there is no established `emit_warnings` call for the interactive
+    // path to mirror. Fixing this composite entry alone would make it diverge
+    // from `render_interactive` instead of matching it. Both are tracked in
+    // GH #50 (orchestrator decision: consistency over one-sided fixing).
+    let (mut scene, _warnings) = super::composite_render::render_composite_scene(&node, &leaves, &t)
+        .map_err(composite_render_err_to_py)?;
+    let packed_bytes = super::pack_instances::extract_packed_bytes(&mut scene);
+    let json = serde_json::to_string(&scene)
+        .map_err(|e| PyValueError::new_err(format!("composite scene serialization: {e}")))?;
+    let py_bytes = PyBytes::new(py, &packed_bytes);
+    Ok((json, py_bytes.unbind()))
+}
+
+fn composite_render_err_to_py(e: super::composite_render::CompositeRenderError) -> PyErr {
+    PyValueError::new_err(e.to_string())
+}
+
+/// Collect every payload reader into one Arrow batch each (same per-batch
+/// collection rule as [`collect_single_batch`]) and decode the shared
+/// theme/config/chart-config/viewport inputs applied to every leaf.
+fn decode_composite_inputs(
+    payloads: Vec<PyRecordBatchReader>,
+    viewport: (f64, f64),
+    theme: Option<&Bound<'_, PyDict>>,
+    config: Option<&Bound<'_, PyDict>>,
+    chart_config: Option<&Bound<'_, PyDict>>,
+) -> PyResult<(
+    Vec<arrow::record_batch::RecordBatch>,
+    crate::layout::ThemeInputs,
+    super::config::RenderConfig,
+    super::chart_config::ChartConfig,
+    Viewport,
+)> {
+    let batches = payloads
+        .into_iter()
+        .map(collect_single_batch)
+        .collect::<PyResult<Vec<_>>>()?;
+    let t = theme_from_dict(theme)?;
+    let c = config_from_dict(config)?;
+    let cc = chart_config_from_dict(chart_config)?;
+    let vp = Viewport { width: viewport.0, height: viewport.1 };
+    Ok((batches, t, c, cc, vp))
+}
+
+/// Fully-resolved per-leaf render inputs for one composite leaf (Task 5d).
+///
+/// Each leaf either carries its own binding override — decoded exactly like a
+/// standalone `render_svg` call (built from defaults) — or inherits the
+/// call-level value (a clone). Owned so [`CompositeLeafInput`] can borrow it
+/// for the leaf's lifetime; the collection lives in the PyO3 entry alongside
+/// the tree and batches.
+#[derive(Debug)]
+struct LeafBinding {
+    theme: crate::layout::ThemeInputs,
+    viewport: Viewport,
+    config: super::config::RenderConfig,
+    chart_config: super::chart_config::ChartConfig,
+}
+
+/// Walk the Python composite tree in leaf pre-order (the same order
+/// [`super::composite::flatten_leaves`] produces for the already-coerced
+/// [`CompositeNode`]) and resolve each leaf's render inputs (Task 5d per-leaf
+/// binding). A leaf may carry optional `theme`/`viewport`/`config`/
+/// `chart_config` keys; an absent key inherits the call-level value, so a
+/// homogeneous tree (Task 6/7's) resolves every leaf to a clone of the
+/// call-level inputs — byte-identical to the pre-5d single-value path. A
+/// `hole` (Task 8a) is skipped outright — it has no `spec`/`data`, so no
+/// render inputs to resolve, and it must not appear in the returned bindings
+/// or `flatten_leaves`' count check would fail.
+///
+/// This is a binding-layer traversal reading the render-input keys the
+/// spec-layer coercion ([`composite_tree_from_py`]) deliberately ignores; the
+/// two walks read disjoint key sets of the same dicts. The tree has already
+/// passed `composite_tree_from_py` (structure validated) before this runs, so
+/// the shape checks here are defensive; `build_composite_leaves` additionally
+/// asserts the leaf/binding counts agree, catching any traversal drift.
+fn collect_leaf_bindings(
+    tree: &Bound<'_, PyAny>,
+    call_theme: &crate::layout::ThemeInputs,
+    call_viewport: Viewport,
+    call_config: &super::config::RenderConfig,
+    call_chart_config: &super::chart_config::ChartConfig,
+) -> PyResult<Vec<LeafBinding>> {
+    let mut out = Vec::new();
+    collect_leaf_bindings_walk(
+        tree,
+        call_theme,
+        call_viewport,
+        call_config,
+        call_chart_config,
+        &mut out,
+    )?;
+    Ok(out)
+}
+
+fn collect_leaf_bindings_walk(
+    node: &Bound<'_, PyAny>,
+    call_theme: &crate::layout::ThemeInputs,
+    call_viewport: Viewport,
+    call_config: &super::config::RenderConfig,
+    call_chart_config: &super::chart_config::ChartConfig,
+    out: &mut Vec<LeafBinding>,
+) -> PyResult<()> {
+    let dict: &Bound<'_, PyDict> = node
+        .cast::<PyDict>()
+        .map_err(|_| PyValueError::new_err("composite tree node must be a dict"))?;
+    let kind: String = dict
+        .get_item("kind")?
+        .ok_or_else(|| PyValueError::new_err("composite tree node missing required key 'kind'"))?
+        .extract()?;
+    match kind.as_str() {
+        "leaf" => {
+            let theme = match leaf_override_dict(dict, "theme")? {
+                Some(d) => theme_from_dict(Some(&d))?,
+                None => call_theme.clone(),
+            };
+            let viewport = match dict.get_item("viewport")? {
+                Some(v) if !v.is_none() => {
+                    let (w, h): (f64, f64) = v.extract()?;
+                    Viewport { width: w, height: h }
+                }
+                _ => call_viewport,
+            };
+            let config = match leaf_override_dict(dict, "config")? {
+                Some(d) => config_from_dict(Some(&d))?,
+                None => call_config.clone(),
+            };
+            let chart_config = match leaf_override_dict(dict, "chart_config")? {
+                Some(d) => chart_config_from_dict(Some(&d))?,
+                None => call_chart_config.clone(),
+            };
+            out.push(LeafBinding { theme, viewport, config, chart_config });
+            Ok(())
+        }
+        // A hole carries no render inputs of its own (no `spec`/`data`, so no
+        // theme/viewport/config/chart_config to resolve) and is not a leaf —
+        // it contributes nothing to `out`, keeping this walk's leaf count in
+        // lockstep with `flatten_leaves` (Task 8a; `build_composite_leaves`
+        // asserts the two counts agree).
+        "hole" => Ok(()),
+        "composite" => {
+            let children = dict.get_item("children")?.ok_or_else(|| {
+                PyValueError::new_err("composite node missing required key 'children'")
+            })?;
+            let list = children
+                .cast::<pyo3::types::PyList>()
+                .map_err(|_| PyValueError::new_err("composite node: 'children' must be a list"))?;
+            for item in list.iter() {
+                collect_leaf_bindings_walk(
+                    &item,
+                    call_theme,
+                    call_viewport,
+                    call_config,
+                    call_chart_config,
+                    out,
+                )?;
+            }
+            Ok(())
+        }
+        other => Err(PyValueError::new_err(format!(
+            "unknown composite tree node kind: '{other}'; expected 'leaf', 'composite', or 'hole'"
+        ))),
+    }
+}
+
+/// Fetch an optional per-leaf override dict (`theme`/`config`/`chart_config`),
+/// treating a present-but-`None` value as absent, and rejecting a non-dict
+/// value with a typed error naming the key.
+fn leaf_override_dict<'py>(
+    dict: &Bound<'py, PyDict>,
+    key: &str,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    match dict.get_item(key)? {
+        None => Ok(None),
+        Some(v) if v.is_none() => Ok(None),
+        Some(v) => Ok(Some(v.cast_into::<PyDict>().map_err(|_| {
+            PyValueError::new_err(format!("composite leaf '{key}' override must be a dict"))
+        })?)),
+    }
+}
+
+/// Pair each of `tree`'s leaves (in pre-order) with its selected Arrow batch
+/// and resolved per-leaf [`LeafBinding`], validating every `data` index against
+/// `batches`' length up front — a malformed tree fails fast with the offending
+/// leaf pinpointed (`CompositeRenderError::LeafDataIndexOutOfBounds`) rather
+/// than panicking on an out-of-bounds slice access deeper in the render core.
+///
+/// `bindings` must be in the same leaf pre-order (as produced by
+/// [`collect_leaf_bindings`]); the count-equality check guards against any
+/// drift between the two traversals of the tree.
+fn build_composite_leaves<'a>(
+    tree: &'a crate::spec::composite::CompositeNode,
+    batches: &'a [arrow::record_batch::RecordBatch],
+    bindings: &'a [LeafBinding],
+) -> PyResult<Vec<super::composite_render::CompositeLeafInput<'a>>> {
+    let flat = super::composite::flatten_leaves(tree);
+    if flat.len() != bindings.len() {
+        return Err(PyValueError::new_err(format!(
+            "internal error: composite tree has {} leaves but {} per-leaf \
+             binding(s) were collected",
+            flat.len(),
+            bindings.len()
+        )));
+    }
+    flat.into_iter()
+        .enumerate()
+        .map(|(index, (spec, data))| {
+            let batch = batches.get(data).ok_or_else(|| {
+                composite_render_err_to_py(
+                    super::composite_render::CompositeRenderError::LeafDataIndexOutOfBounds {
+                        kind: "leaf",
+                        index,
+                        data,
+                        payload_count: batches.len(),
+                    },
+                )
+            })?;
+            let b = &bindings[index];
+            Ok(super::composite_render::CompositeLeafInput {
+                spec,
+                batch,
+                theme: &b.theme,
+                viewport: b.viewport,
+                config: &b.config,
+                chart_config: &b.chart_config,
+            })
+        })
+        .collect()
+}
+
 fn collect_single_batch(reader: PyRecordBatchReader) -> PyResult<arrow::record_batch::RecordBatch> {
     let iter = reader
         .into_reader()
@@ -978,51 +1328,22 @@ fn decode_render_inputs(
 }
 
 // ---------------------------------------------------------------------------
-// SVG compositor bindings (Task 11)
+// Figure chrome bindings (Task 11; N-ary SVG compositor removed Task 10 stage 3)
 // ---------------------------------------------------------------------------
 
 use crate::render::figure_chrome::{ChromeAnchor, FigureChrome, DEFAULT_CHROME_INSET};
 
 /// Parse the user-facing chrome-anchor string into a [`ChromeAnchor`].
 ///
-/// `None` and `"start"` both map to the default left alignment. Any other
-/// string is rejected with a `ValueError` naming the valid set.
+/// `None` maps to the default left alignment; any other string is delegated
+/// to [`ChromeAnchor`]'s `FromStr` impl and rejected with a `ValueError`
+/// naming the valid set on failure (shared with the composite tree's root
+/// `config` slot parser, `render/composite_render.rs`).
 fn parse_chrome_anchor(anchor: Option<&str>) -> PyResult<ChromeAnchor> {
     match anchor {
-        None | Some("start") => Ok(ChromeAnchor::Start),
-        Some("middle") => Ok(ChromeAnchor::Middle),
-        Some("end") => Ok(ChromeAnchor::End),
-        Some(other) => Err(PyValueError::new_err(format!(
-            "anchor must be one of 'start'|'middle'|'end', got '{other}'"
-        ))),
+        None => Ok(ChromeAnchor::Start),
+        Some(s) => s.parse::<ChromeAnchor>().map_err(|e| PyValueError::new_err(e.to_string())),
     }
-}
-
-/// Apply figure chrome to an already-composed SVG string.
-///
-/// This is the shared tail of all three `compose_svg_*_py` bindings:
-/// build the [`FigureChrome`] from the chrome kwargs and call
-/// [`wrap_with_chrome`](crate::render::figure_chrome::wrap_with_chrome).
-///
-/// `composed` is the raw composed SVG (no chrome yet) produced by the
-/// compositor. `title`/`subtitle`/`caption`/`left_inset`/`right_inset`/
-/// `anchor` are the same chrome kwargs accepted by every compose binding.
-///
-/// Errors from [`wrap_with_chrome`] are mapped to `PyValueError` here so
-/// callers don't need to repeat the `map_err` boilerplate.
-#[allow(clippy::too_many_arguments)]
-fn compose_and_wrap(
-    composed: String,
-    title: Option<&str>,
-    subtitle: Option<&str>,
-    caption: Option<&str>,
-    left_inset: Option<f64>,
-    right_inset: Option<f64>,
-    anchor: Option<&str>,
-) -> PyResult<String> {
-    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
-    crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 /// Build a [`FigureChrome`] from the chrome-related keyword params, applying the
@@ -1042,33 +1363,35 @@ fn build_chrome<'a>(
         left_inset: left_inset.unwrap_or(DEFAULT_CHROME_INSET),
         right_inset: right_inset.unwrap_or(DEFAULT_CHROME_INSET),
         anchor: parse_chrome_anchor(anchor)?,
+        ..Default::default()
     })
 }
 
-/// Compose SVG panels side-by-side into a single horizontal strip.
+/// Wrap a single already-rendered SVG with a figure-level chrome band
+/// (title/subtitle/caption).
+///
+/// This is the flat single-chart counterpart of the (now-removed) N-ary SVG
+/// compositor's chrome kwargs, extracted (Task 10 stage 3) so
+/// `Chart.to_svg()`'s `.properties(caption=)` post-wrap in `_render.py` no
+/// longer routes a single SVG through the general N-ary compositor. Not
+/// re-exported in `ferrum.__all__` — it is a private `ferrum._core`
+/// implementation detail of `_render.py`.
 ///
 /// Parameters
 /// ----------
-/// svgs : list[str]
-///     SVG document strings to lay out left-to-right. Each must be a valid
-///     SVG with a parseable ``viewBox`` or ``width``/``height`` attribute.
-/// spacing : float, default 10.0
-///     Gap in pixels between adjacent panels.
-/// align : str, default "top"
-///     Vertical alignment of panels with different heights. One of
-///     ``"top"``, ``"center"``, or ``"bottom"``.
+/// svg : str
+///     The already-rendered SVG document string to wrap.
 /// title : str or None, default None
-///     Figure-level title rendered as a band above all panels (bold, 16 px).
-///     Per-panel child titles are unaffected.
+///     Figure-level title rendered as a band above the chart (bold, 16 px).
 /// subtitle : str or None, default None
-///     Figure-level subtitle rendered below the title, above the panels (13 px).
+///     Figure-level subtitle rendered below the title, above the chart (13 px).
 /// caption : str or None, default None
-///     Figure-level caption rendered as a band below all panels (muted, 11 px).
+///     Figure-level caption rendered as a band below the chart (muted, 11 px).
 /// left_inset : float or None, default None
-///     Horizontal inset (px) from the left panel edge for ``"start"``-anchored
-///     chrome. Defaults to 16.0 (matching single-chart title inset).
+///     Horizontal inset (px) from the left edge for ``"start"``-anchored
+///     chrome. Defaults to 16.0.
 /// right_inset : float or None, default None
-///     Horizontal inset (px) from the right panel edge for ``"end"``-anchored
+///     Horizontal inset (px) from the right edge for ``"end"``-anchored
 ///     chrome. Defaults to 16.0.
 /// anchor : str or None, default None
 ///     Horizontal alignment of all chrome lines. One of ``"start"``,
@@ -1077,36 +1400,22 @@ fn build_chrome<'a>(
 /// Returns
 /// -------
 /// str
-///     A single SVG document whose width equals the sum of panel widths
-///     plus total spacing and whose height equals the tallest panel (plus
-///     header/footer bands when title/subtitle/caption are provided).
+///     The wrapped SVG document. When *title*, *subtitle*, and *caption* are
+///     all ``None`` the output is byte-identical to what the (now-removed)
+///     N-ary SVG compositor's vertical-stack entry point produced for a
+///     one-element list with ``spacing=0.0`` and the same chrome parameters.
 ///
 /// Raises
 /// ------
 /// ValueError
-///     If *align* is not one of the accepted values, or if any SVG string
-///     cannot be parsed.
-///
-/// Notes
-/// -----
-/// Used internally by ``HConcatChart`` to combine column-concatenated
-/// charts. The returned SVG preserves each panel's coordinate system via
-/// nested ``<g transform="translate(...)">`` elements.
-/// When all of *title*, *subtitle*, and *caption* are ``None`` the output is
-/// byte-identical to the previous behavior.
-///
-/// Examples
-/// --------
-/// >>> import ferrum as fm
-/// >>> combined = fm.compose_svg_horizontal([svg1, svg2], spacing=10)
+///     If *svg* cannot be parsed, or *anchor* is not one of the accepted
+///     values.
 #[pyfunction]
-#[pyo3(name = "compose_svg_horizontal")]
-#[pyo3(signature = (svgs, *, spacing = 10.0, align = "top", title = None, subtitle = None, caption = None, left_inset = None, right_inset = None, anchor = None))]
+#[pyo3(name = "wrap_svg_with_chrome")]
+#[pyo3(signature = (svg, *, title = None, subtitle = None, caption = None, left_inset = None, right_inset = None, anchor = None))]
 #[allow(clippy::too_many_arguments)]
-pub fn compose_svg_horizontal_py(
-    svgs: Vec<String>,
-    spacing: f64,
-    align: &str,
+pub fn wrap_svg_with_chrome_py(
+    svg: String,
     title: Option<&str>,
     subtitle: Option<&str>,
     caption: Option<&str>,
@@ -1114,199 +1423,16 @@ pub fn compose_svg_horizontal_py(
     right_inset: Option<f64>,
     anchor: Option<&str>,
 ) -> PyResult<String> {
-    let align_val = crate::render::compositor::VerticalAlign::try_from(align)
-        .map_err(pyo3::exceptions::PyValueError::new_err)?;
-    let composed = crate::render::compositor::compose_svg_horizontal(&svgs, spacing, align_val)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    compose_and_wrap(composed, title, subtitle, caption, left_inset, right_inset, anchor)
-}
-
-/// Compose SVG panels stacked top-to-bottom into a single vertical strip.
-///
-/// Parameters
-/// ----------
-/// svgs : list[str]
-///     SVG document strings to lay out top-to-bottom. Each must be a valid
-///     SVG with a parseable ``viewBox`` or ``width``/``height`` attribute.
-/// spacing : float, default 10.0
-///     Gap in pixels between adjacent panels.
-/// align : str, default "left"
-///     Horizontal alignment of panels with different widths. One of
-///     ``"left"``, ``"center"``, or ``"right"``.
-/// title : str or None, default None
-///     Figure-level title rendered as a band above all panels (bold, 16 px).
-///     Per-panel child titles are unaffected.
-/// subtitle : str or None, default None
-///     Figure-level subtitle rendered below the title, above the panels (13 px).
-/// caption : str or None, default None
-///     Figure-level caption rendered as a band below all panels (muted, 11 px).
-/// left_inset : float or None, default None
-///     Horizontal inset (px) from the left panel edge for ``"start"``-anchored
-///     chrome. Defaults to 16.0 (matching single-chart title inset).
-/// right_inset : float or None, default None
-///     Horizontal inset (px) from the right panel edge for ``"end"``-anchored
-///     chrome. Defaults to 16.0.
-/// anchor : str or None, default None
-///     Horizontal alignment of all chrome lines. One of ``"start"``,
-///     ``"middle"``, or ``"end"``. ``None`` is treated as ``"start"``.
-///
-/// Returns
-/// -------
-/// str
-///     A single SVG document whose height equals the sum of panel heights
-///     plus total spacing and whose width equals the widest panel (plus
-///     header/footer bands when title/subtitle/caption are provided).
-///
-/// Raises
-/// ------
-/// ValueError
-///     If *align* is not one of the accepted values, or if any SVG string
-///     cannot be parsed.
-///
-/// Notes
-/// -----
-/// Used internally by ``VConcatChart`` to combine row-concatenated charts.
-/// The returned SVG preserves each panel's coordinate system via nested
-/// ``<g transform="translate(...)">`` elements.
-/// When all of *title*, *subtitle*, and *caption* are ``None`` the output is
-/// byte-identical to the previous behavior.
-///
-/// Examples
-/// --------
-/// >>> import ferrum as fm
-/// >>> combined = fm.compose_svg_vertical([svg1, svg2], spacing=10)
-#[pyfunction]
-#[pyo3(name = "compose_svg_vertical")]
-#[pyo3(signature = (svgs, *, spacing = 10.0, align = "left", title = None, subtitle = None, caption = None, left_inset = None, right_inset = None, anchor = None))]
-#[allow(clippy::too_many_arguments)]
-pub fn compose_svg_vertical_py(
-    svgs: Vec<String>,
-    spacing: f64,
-    align: &str,
-    title: Option<&str>,
-    subtitle: Option<&str>,
-    caption: Option<&str>,
-    left_inset: Option<f64>,
-    right_inset: Option<f64>,
-    anchor: Option<&str>,
-) -> PyResult<String> {
-    let align_val = crate::render::compositor::HorizontalAlign::try_from(align)
-        .map_err(pyo3::exceptions::PyValueError::new_err)?;
-    let composed = crate::render::compositor::compose_svg_vertical(&svgs, spacing, align_val)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    compose_and_wrap(composed, title, subtitle, caption, left_inset, right_inset, anchor)
-}
-
-/// Compose SVG panels into a rectangular grid.
-///
-/// Parameters
-/// ----------
-/// cells : list[str | None]
-///     Flat list of SVG document strings in row-major order (length must
-///     equal *rows* × *cols*). Pass ``None`` for empty cells.
-/// rows : int
-///     Number of grid rows.
-/// cols : int
-///     Number of grid columns.
-/// row_ratios : list[float]
-///     Relative height weight for each row (length must equal *rows*).
-///     E.g. ``[2.0, 1.0]`` makes the first row twice as tall as the second.
-/// col_ratios : list[float]
-///     Relative width weight for each column (length must equal *cols*).
-/// spacing : float, default 10.0
-///     Gap in pixels between adjacent cells (applied both horizontally and
-///     vertically).
-/// title : str or None, default None
-///     Figure-level title rendered as a band above all panels (bold, 16 px).
-///     Per-panel child titles are unaffected.
-/// subtitle : str or None, default None
-///     Figure-level subtitle rendered below the title, above the panels (13 px).
-/// caption : str or None, default None
-///     Figure-level caption rendered as a band below all panels (muted, 11 px).
-/// left_inset : float or None, default None
-///     Horizontal inset (px) from the left panel edge for ``"start"``-anchored
-///     chrome. Defaults to 16.0 (matching single-chart title inset).
-/// right_inset : float or None, default None
-///     Horizontal inset (px) from the right panel edge for ``"end"``-anchored
-///     chrome. Defaults to 16.0.
-/// anchor : str or None, default None
-///     Horizontal alignment of all chrome lines. One of ``"start"``,
-///     ``"middle"``, or ``"end"``. ``None`` is treated as ``"start"``.
-///
-/// Returns
-/// -------
-/// str
-///     A single SVG document containing all cells positioned according to
-///     the ratio-weighted grid layout (plus header/footer bands when
-///     title/subtitle/caption are provided).
-///
-/// Raises
-/// ------
-/// ValueError
-///     If ``len(cells) != rows * cols``, ratios lists have wrong lengths,
-///     or any non-``None`` cell SVG cannot be parsed.
-///
-/// Notes
-/// -----
-/// Used internally by ``RepeatChart`` and the figure-level ``pairplot`` /
-/// ``clustermap`` combinators. Each cell is embedded via a nested
-/// ``<g transform="translate(...)">`` (native fit) or
-/// ``<svg viewBox preserveAspectRatio="none">`` (scaled fit) preserving
-/// its internal coordinate system.
-///
-/// Axis sharing (the prior `share_x` / `share_y` parameters) belongs at
-/// the Python layer pre-render: shared scales are computed before each
-/// cell renders so the resulting SVGs already align. The compositor sees
-/// opaque SVG strings and has no scale metadata to enforce sharing
-/// against; the parameters were never functional. Use
-/// `Chart.encode(x=fr.X(field, scale=...))` with a shared scale spec at
-/// composition time, or `JointChart`/`ClusterMapChart`'s `axis(show=False)`
-/// suppression for marginal/dendrogram cells.
-///
-/// When all of *title*, *subtitle*, and *caption* are ``None`` the output is
-/// byte-identical to the previous behavior.
-///
-/// Examples
-/// --------
-/// >>> import ferrum as fm
-/// >>> combined = fm.compose_svg_grid(
-/// ...     [svg_a, svg_b, svg_c, svg_d], rows=2, cols=2,
-/// ...     row_ratios=[1.0, 1.0], col_ratios=[1.0, 1.0], spacing=8,
-/// ... )
-#[pyfunction]
-#[pyo3(name = "compose_svg_grid")]
-#[pyo3(signature = (cells, *, rows, cols, row_ratios, col_ratios, spacing = 10.0, title = None, subtitle = None, caption = None, left_inset = None, right_inset = None, anchor = None))]
-#[allow(clippy::too_many_arguments)]
-pub fn compose_svg_grid_py(
-    cells: Vec<Option<String>>,
-    rows: usize,
-    cols: usize,
-    row_ratios: Vec<f64>,
-    col_ratios: Vec<f64>,
-    spacing: f64,
-    title: Option<&str>,
-    subtitle: Option<&str>,
-    caption: Option<&str>,
-    left_inset: Option<f64>,
-    right_inset: Option<f64>,
-    anchor: Option<&str>,
-) -> PyResult<String> {
-    let composed = crate::render::grid_compose::compose_svg_grid(
-        &cells,
-        rows,
-        cols,
-        &row_ratios,
-        &col_ratios,
-        spacing,
-    )
-    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    compose_and_wrap(composed, title, subtitle, caption, left_inset, right_inset, anchor)
+    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
+    crate::render::figure_chrome::wrap_svg_with_chrome(&svg, chrome)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 /// Lay out a figure-level chrome title/subtitle/caption band as scene nodes.
 ///
 /// Produces the interactive (WASM) counterpart of the SVG band emitted by
-/// ``compose_svg_horizontal``/``_vertical``/``_grid``. The Python composite
+/// ``wrap_svg_with_chrome`` (flat single-chart) and the composite tree's root
+/// chrome config (composed figures). The Python composite
 /// merge injects the returned nodes into the merged scene's ``title`` list and
 /// offsets the merged child panels down by ``header_h`` — mirroring how the SVG
 /// path reserves top space — so the static and interactive renders place the
@@ -1350,7 +1476,8 @@ pub fn compose_svg_grid_py(
 ///       no title/subtitle is present (e.g. caption-only or all-``None``).
 ///     - ``footer_h`` — vertical band height (px) reserved **below** the panels
 ///       (caption). Grow the merged scene's ``height`` by ``footer_h`` so the
-///       interactive canvas matches the SVG canvas that ``compose_svg_*`` produces.
+///       interactive canvas matches the SVG canvas that the chrome-wrap emitters
+///       (``wrap_svg_with_chrome`` / the composite chrome band) produce.
 ///       ``0.0`` when no caption is present.
 ///
 ///     The caption node's ``y`` is already absolute in outer-canvas space
@@ -1438,4 +1565,467 @@ fn emit_warnings(py: Python<'_>, warnings: &[super::RenderWarning]) -> PyResult<
         warnings_mod.call_method1("warn", (msg,))?;
     }
     Ok(())
+}
+
+// ── Task 5c gap-fix (spec-review item 4): LeafDataIndexOutOfBounds ─────────
+//
+// `build_composite_leaves` bounds-checks each leaf's `data` index against the
+// caller's payload list *before* any leaf renders, so a malformed tree fails
+// fast with the offending leaf pinpointed rather than panicking on an
+// out-of-bounds slice access deeper in `render_composite_scene`. No test
+// previously exercised this boundary check directly.
+#[cfg(test)]
+mod composite_leaf_bounds_tests {
+    use super::*;
+    use crate::spec::composite::CompositeNode;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::Encoding;
+    use crate::spec::mark::Mark;
+
+    /// A single-leaf composite tree whose leaf selects payload index `data`.
+    fn dummy_leaf(data: usize) -> CompositeNode {
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            params: Vec::new(),
+            chart_description: None,
+        };
+        CompositeNode::Leaf { spec: Box::new(spec), data, label: None }
+    }
+
+    /// One inherited-from-call-level [`LeafBinding`] per leaf — the homogeneous
+    /// (pre-5d) shape the bounds tests exercise. Length must match the tree's
+    /// leaf count (these single-leaf trees need exactly one).
+    fn inherited_bindings(n: usize) -> Vec<LeafBinding> {
+        (0..n)
+            .map(|_| LeafBinding {
+                theme: ThemeInputs::default(),
+                viewport: Viewport { width: 100.0, height: 100.0 },
+                config: RenderConfig::default(),
+                chart_config: ChartConfig::default(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn build_composite_leaves_rejects_out_of_bounds_data_index() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            // Leaf #0 asks for payload index 2, but zero payloads are supplied.
+            let tree = dummy_leaf(2);
+            let batches: Vec<arrow::record_batch::RecordBatch> = vec![];
+            let bindings = inherited_bindings(1);
+
+            let result = build_composite_leaves(&tree, &batches, &bindings);
+            let err = match result {
+                Ok(_) => panic!("data index 2 with 0 payloads must be rejected, not accepted"),
+                Err(e) => e,
+            };
+
+            assert!(
+                err.is_instance_of::<PyValueError>(py),
+                "must surface as PyValueError, matching composite_render_err_to_py"
+            );
+            let msg = err.value(py).to_string();
+            assert!(msg.contains("leaf #0"), "must name the offending leaf index, got: {msg}");
+            assert!(
+                msg.contains("data index 2 out of bounds"),
+                "must name the invalid data index, got: {msg}"
+            );
+            assert!(
+                msg.contains("0 payload(s) provided"),
+                "must name the actual payload count, got: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn build_composite_leaves_accepts_in_bounds_data_index() {
+        // Discriminating counterpart: the same leaf shape with an in-bounds
+        // `data` index (0, with 1 payload) must succeed, proving the bounds
+        // check above is not simply rejecting every leaf.
+        pyo3::Python::initialize();
+        Python::attach(|_py| {
+            let tree = dummy_leaf(0);
+            let batch = {
+                use arrow::array::Float64Array;
+                use arrow::datatypes::{DataType, Field, Schema};
+                use std::sync::Arc;
+                let schema = Arc::new(Schema::new(vec![Field::new(
+                    "x",
+                    DataType::Float64,
+                    false,
+                )]));
+                arrow::record_batch::RecordBatch::try_new(
+                    schema,
+                    vec![Arc::new(Float64Array::from(vec![1.0, 2.0]))],
+                )
+                .unwrap()
+            };
+            let batches = vec![batch];
+            let bindings = inherited_bindings(1);
+
+            let leaves = build_composite_leaves(&tree, &batches, &bindings)
+                .expect("data index 0 with 1 payload must succeed");
+            assert_eq!(leaves.len(), 1);
+        });
+    }
+}
+
+// ── Task 5d: per-leaf binding wire (collect_leaf_bindings) ─────────────────
+//
+// Each composite leaf may carry its own `theme`/`viewport`/`config`/
+// `chart_config` override; an absent key inherits the call-level value. These
+// tests exercise the binding-layer tree walk directly (it reads only the
+// render-input keys the spec coercion ignores, so the leaves need no `spec`).
+#[cfg(test)]
+mod composite_leaf_binding_tests {
+    use super::*;
+    use pyo3::types::{PyDict, PyList};
+
+    /// A minimal leaf dict for the binding walk (no `spec`/`data` needed — the
+    /// walk reads only render-input keys), optionally carrying a `theme` and/or
+    /// `viewport` override.
+    fn leaf_dict<'py>(
+        py: Python<'py>,
+        theme: Option<&Bound<'py, PyDict>>,
+        viewport: Option<(f64, f64)>,
+    ) -> Bound<'py, PyDict> {
+        let d = PyDict::new(py);
+        d.set_item("kind", "leaf").unwrap();
+        if let Some(t) = theme {
+            d.set_item("theme", t).unwrap();
+        }
+        if let Some(vp) = viewport {
+            d.set_item("viewport", vp).unwrap();
+        }
+        d
+    }
+
+    #[test]
+    fn per_leaf_theme_and_viewport_override_or_inherit() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            // Leaf 0 inherits every call-level value; leaf 1 overrides its theme
+            // (point_size) and viewport.
+            let theme1 = PyDict::new(py);
+            theme1.set_item("point_size", 42.0).unwrap();
+
+            let children = PyList::new(
+                py,
+                [
+                    leaf_dict(py, None, None),
+                    leaf_dict(py, Some(&theme1), Some((400.0, 250.0))),
+                ],
+            )
+            .unwrap();
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "hconcat").unwrap();
+            root.set_item("children", children).unwrap();
+
+            let call_theme = ThemeInputs::default();
+            let call_vp = Viewport { width: 100.0, height: 100.0 };
+            let call_config = RenderConfig::default();
+            let call_cc = ChartConfig::default();
+
+            let bindings = collect_leaf_bindings(
+                root.as_any(),
+                &call_theme,
+                call_vp,
+                &call_config,
+                &call_cc,
+            )
+            .unwrap();
+            assert_eq!(bindings.len(), 2, "one binding per leaf, in pre-order");
+
+            // Leaf 0 inherits the call-level defaults verbatim.
+            assert_eq!(bindings[0].theme.sizes.point_size, call_theme.sizes.point_size);
+            assert_eq!(bindings[0].viewport, call_vp);
+
+            // Leaf 1's overrides applied — and DISTINCT from the inherited leaf,
+            // proving the wire carries per-leaf values, not one collapsed value.
+            assert_eq!(bindings[1].theme.sizes.point_size, 42.0);
+            assert_eq!(bindings[1].viewport, Viewport { width: 400.0, height: 250.0 });
+            assert_ne!(
+                bindings[1].theme.sizes.point_size,
+                bindings[0].theme.sizes.point_size,
+                "per-leaf theme override must not leak into the inherited leaf"
+            );
+        });
+    }
+
+    #[test]
+    fn absent_overrides_inherit_call_level_for_every_leaf() {
+        // Back-compat: a homogeneous tree (no per-leaf keys) resolves every leaf
+        // to the call-level value — the pre-5d single-value behavior.
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let children =
+                PyList::new(py, [leaf_dict(py, None, None), leaf_dict(py, None, None)]).unwrap();
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "vconcat").unwrap();
+            root.set_item("children", children).unwrap();
+
+            let mut call_theme = ThemeInputs::default();
+            call_theme.sizes.point_size = 77.0;
+            let call_vp = Viewport { width: 321.0, height: 123.0 };
+
+            let bindings = collect_leaf_bindings(
+                root.as_any(),
+                &call_theme,
+                call_vp,
+                &RenderConfig::default(),
+                &ChartConfig::default(),
+            )
+            .unwrap();
+            assert_eq!(bindings.len(), 2);
+            for b in &bindings {
+                assert_eq!(b.theme.sizes.point_size, 77.0, "inherit call-level theme");
+                assert_eq!(b.viewport, call_vp, "inherit call-level viewport");
+            }
+        });
+    }
+
+    #[test]
+    fn non_dict_theme_override_is_typed_error() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let bad = leaf_dict(py, None, None);
+            bad.set_item("theme", "not a dict").unwrap();
+            let children = PyList::new(py, [bad]).unwrap();
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "hconcat").unwrap();
+            root.set_item("children", children).unwrap();
+
+            let err = collect_leaf_bindings(
+                root.as_any(),
+                &ThemeInputs::default(),
+                Viewport { width: 100.0, height: 100.0 },
+                &RenderConfig::default(),
+                &ChartConfig::default(),
+            )
+            .unwrap_err();
+            let msg = err.value(py).to_string();
+            assert!(msg.contains("theme") && msg.contains("dict"), "msg: {msg}");
+        });
+    }
+
+    #[test]
+    fn hole_contributes_no_binding_and_keeps_leaf_count_in_sync() {
+        // A grid with a hole among its children: `collect_leaf_bindings_walk`
+        // must skip it (Task 8a) so its binding count stays in lockstep with
+        // `flatten_leaves`' leaf count (which also excludes the hole).
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let hole = PyDict::new(py);
+            hole.set_item("kind", "hole").unwrap();
+            let children =
+                PyList::new(py, [leaf_dict(py, None, None), hole, leaf_dict(py, None, None)])
+                    .unwrap();
+            let root = PyDict::new(py);
+            root.set_item("kind", "composite").unwrap();
+            root.set_item("layout", "grid").unwrap();
+            root.set_item("children", children).unwrap();
+            root.set_item("nrows", 1usize).unwrap();
+            root.set_item("ncols", 3usize).unwrap();
+
+            let bindings = collect_leaf_bindings(
+                root.as_any(),
+                &ThemeInputs::default(),
+                Viewport { width: 100.0, height: 100.0 },
+                &RenderConfig::default(),
+                &ChartConfig::default(),
+            )
+            .unwrap();
+            assert_eq!(bindings.len(), 2, "hole must not produce a binding");
+        });
+    }
+}
+
+// ── Task 5c REVISE fix: composite warning threading ────────────────────────
+//
+// `render_composite_scene` used to drop every leaf's `RenderWarning`s (they
+// lived on `render_leaf`'s local `po.warnings`, which went out of scope
+// before the caller ever saw it), and `render_composite_svg`'s docstring
+// claimed warnings were "forwarded to Python's `warnings.warn`" without ever
+// calling `emit_warnings`. This test exercises the real PyO3 entry end to
+// end — a leaf whose nominal color field has more distinct categories than
+// the default palette holds — and asserts the warning actually reaches
+// Python, mirroring how `render_svg`'s own warning contract is documented
+// (this module's `Notes` sections) rather than a Rust-only unit check on
+// `render_composite_scene`.
+#[cfg(test)]
+mod composite_warning_tests {
+    use super::*;
+    use crate::spec::composite::CompositeNode;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::{Encoding, EncodingSpec};
+    use crate::spec::mark::Mark;
+    use arrow::array::{Float64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::{RecordBatch, RecordBatchIterator};
+    use std::sync::Arc;
+
+    /// A point spec with x/y plus a nominal `color` field — the same shape
+    /// `scale_resolve::tests`'s `ColorPaletteOverflowed` fixture uses, minus
+    /// the composite wrapping.
+    fn color_overflow_spec() -> ChartSpec {
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            params: Vec::new(),
+            chart_description: None,
+        }
+    }
+
+    /// 13 rows, 13 distinct `g` categories — more than every built-in
+    /// categorical palette (the largest is 10 entries), so the default
+    /// theme's categorical color scale always overflows regardless of which
+    /// scheme resolves.
+    fn color_overflow_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let groups: Vec<String> = (0..13).map(|i| format!("g{i}")).collect();
+        let groups_str: Vec<&str> = groups.iter().map(String::as_str).collect();
+        let xs: Vec<f64> = (0..13).map(|i| i as f64).collect();
+        let ys = xs.clone();
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs)),
+                Arc::new(Float64Array::from(ys)),
+                Arc::new(StringArray::from(groups_str)),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn single_leaf_payload(batch: RecordBatch) -> PyRecordBatchReader {
+        let schema = batch.schema();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+        PyRecordBatchReader::new(Box::new(reader))
+    }
+
+    #[test]
+    fn render_composite_svg_forwards_leaf_warnings_to_python() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let tree_dict = PyDict::new(py);
+            tree_dict.set_item("kind", "leaf").unwrap();
+            tree_dict
+                .set_item("spec", Py::new(py, color_overflow_spec()).unwrap())
+                .unwrap();
+            tree_dict.set_item("data", 0usize).unwrap();
+            let tree: &pyo3::Bound<'_, pyo3::PyAny> = tree_dict.as_any();
+
+            let payloads = vec![single_leaf_payload(color_overflow_batch())];
+
+            // Python's `warnings.catch_warnings(record=True)` context manager,
+            // driven manually via `__enter__`/`__exit__` since this is plain
+            // Rust, not a `#[pyfunction]` test harness — the same idiom
+            // `test_scale_rendering.py`'s auto-raster warning tests use from
+            // the Python side (`with warnings.catch_warnings(record=True) as
+            // caught: warnings.simplefilter("always"); ...`).
+            let warnings_mod = py.import("warnings").unwrap();
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("record", true).unwrap();
+            let cw = warnings_mod
+                .call_method("catch_warnings", (), Some(&kwargs))
+                .unwrap();
+            let caught = cw.call_method0("__enter__").unwrap();
+            warnings_mod.call_method1("simplefilter", ("always",)).unwrap();
+
+            let svg = render_composite_svg(py, tree, payloads, (300.0, 200.0), None, None, None)
+                .expect("render_composite_svg should succeed for a valid single-leaf tree");
+            assert!(svg.contains("<svg"), "expected a real SVG document, got: {svg}");
+
+            let messages: Vec<String> = caught
+                .try_iter()
+                .unwrap()
+                .map(|w| {
+                    w.unwrap()
+                        .getattr("message")
+                        .unwrap()
+                        .call_method0("__str__")
+                        .unwrap()
+                        .to_string()
+                })
+                .collect();
+            cw.call_method1("__exit__", (py.None(), py.None(), py.None())).unwrap();
+
+            assert!(
+                messages.iter().any(|m| m.contains("palette")),
+                "expected a color-palette-overflow warning to surface through \
+                 render_composite_svg's emit_warnings call, got: {messages:?}"
+            );
+        });
+    }
+
+    /// Discriminating counterpart: with the deferred emission on the
+    /// interactive entry (orchestrator decision, matches `render_interactive`'s
+    /// pre-existing identical gap), the same tree must still render
+    /// successfully — the fix only threads warnings through, it must not
+    /// break the interactive path.
+    #[test]
+    fn render_composite_interactive_still_succeeds_with_leaf_warnings() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let tree_dict = PyDict::new(py);
+            tree_dict.set_item("kind", "leaf").unwrap();
+            tree_dict
+                .set_item("spec", Py::new(py, color_overflow_spec()).unwrap())
+                .unwrap();
+            tree_dict.set_item("data", 0usize).unwrap();
+            let tree: &pyo3::Bound<'_, pyo3::PyAny> = tree_dict.as_any();
+
+            let payloads = vec![single_leaf_payload(color_overflow_batch())];
+
+            let (json, _packed) = render_composite_interactive(
+                py,
+                tree,
+                payloads,
+                (300.0, 200.0),
+                None,
+                None,
+                None,
+            )
+            .expect("render_composite_interactive should succeed for a valid single-leaf tree");
+            assert!(json.contains("\"panels\""), "expected scene JSON, got: {json}");
+        });
+    }
 }

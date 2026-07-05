@@ -1,8 +1,8 @@
 """Packed-instance alignment under the figure-title band (round-3 T3).
 
-`_inject_figure_chrome` shifts a composite's scene-graph mark nodes and each
-panel's ``plot_area`` / ``clip`` / axes down by the figure-title header band
-(``header_h``).  High-cardinality (>1000-mark) circle / rect batches do NOT
+The composite render entry shifts a composite's scene-graph mark nodes and
+each panel's ``plot_area`` / ``clip`` / axes down by the figure-title header
+band (``header_h``).  High-cardinality (>1000-mark) circle / rect batches do NOT
 travel as scene-graph nodes — they are packed into a binary GPU-instance
 sidecar (``CircleInstance`` / ``RectInstance``), bypassing the scene JSON.
 
@@ -108,8 +108,8 @@ def _packed_xs(packed: bytes) -> list[float]:
 def _header_h_for(composite) -> float:
     """Compute the header band height the composite's figure chrome injects.
 
-    Mirrors :func:`ferrum.composition._inject_figure_chrome`: feed the merged
-    pre-chrome body width/height to the same Rust layout helper.
+    Feeds the merged pre-chrome body width/height to the same Rust layout
+    helper (``figure_title_nodes``) the composite render entry uses internally.
     """
     import json
 

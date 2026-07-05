@@ -424,6 +424,63 @@ fn upload_image_quad(
     Some(ImageGpu { vertex_buffer, bind_group })
 }
 
+/// Begin a render pass over `color_view` (resolving into `resolve_target` when
+/// MSAA is active). `clear` selects `LoadOp::Clear(bg)` for the first pass of
+/// a frame; every subsequent pass in the same frame uses `LoadOp::Load` to
+/// preserve what earlier passes already drew.
+///
+/// Factored out so `render_frame` can open more than one pass per frame (see
+/// the "one scissor rect per pass" note there) without repeating the
+/// attachment/descriptor boilerplate.
+fn begin_pass<'e>(
+    encoder: &'e mut wgpu::CommandEncoder,
+    color_view: &'e wgpu::TextureView,
+    resolve_target: Option<&'e wgpu::TextureView>,
+    bg: [f32; 4],
+    clear: bool,
+) -> wgpu::RenderPass<'e> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("main"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: color_view,
+            resolve_target,
+            ops: wgpu::Operations {
+                load: if clear {
+                    wgpu::LoadOp::Clear(wgpu::Color {
+                        r: bg[0] as f64,
+                        g: bg[1] as f64,
+                        b: bg[2] as f64,
+                        a: bg[3] as f64,
+                    })
+                } else {
+                    wgpu::LoadOp::Load
+                },
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    })
+}
+
+/// `true` when moving from `current`'s scissor state to `desired` requires
+/// ending the active render pass and starting a fresh one.
+///
+/// `None` means "full surface" (a pass's default state at creation — no
+/// explicit `set_scissor_rect` call needed). Extracted as a pure, host-testable
+/// function — mirroring `zoom_pan::select_panel_transform` — so the
+/// "one `set_scissor_rect` call per pass" invariant `render_frame` relies on
+/// (see the task-11fix note there) is unit-testable without a GPU device.
+pub(crate) fn scissor_requires_new_pass(
+    current: Option<[u32; 4]>,
+    desired: Option<[u32; 4]>,
+) -> bool {
+    current != desired
+}
+
 pub fn render_frame(
     gpu: &GpuContext,
     pipelines: &RenderPipelines,
@@ -457,27 +514,6 @@ pub fn render_frame(
             Some(msaa) => (msaa, Some(&view)),
             None => (&view, None),
         };
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("main"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: color_view,
-                resolve_target,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: bg[0] as f64,
-                        g: bg[1] as f64,
-                        b: bg[2] as f64,
-                        a: bg[3] as f64,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
 
         // Surface dimensions and DPR scale factors — used throughout the draw
         // sequence for scissor rect scaling. Computed once here rather than
@@ -489,6 +525,50 @@ pub fn render_frame(
         // (e.g., 2x on Retina), plot_area is still in logical pixels.
         let scale_x = surface_w as f32 / buffers.scene_width;
         let scale_y = surface_h as f32 / buffers.scene_height;
+
+        let mut pass = begin_pass(&mut encoder, color_view, resolve_target, bg, true);
+        // The scissor rect physically applied to `pass` right now. `None`
+        // means "pass-default" — every fresh `begin_render_pass` starts
+        // scissored to the full render target, so a `None` request never
+        // needs an explicit `set_scissor_rect` call.
+        //
+        // task-11fix: a composite scene with 3+ mark-bearing panels drew only
+        // the LAST panel's circles/rects (any layout — Grid, hconcat,
+        // vconcat all reproduced it; 2-panel scenes were unaffected). Root
+        // cause: wgpu 29.0.3 (the version pinned when this landed — re-test
+        // whether this workaround is still needed on any wgpu bump) silently
+        // drops every draw but the last when a single render pass contains
+        // 3+ sequential `set_scissor_rect` calls to *different* rectangles
+        // — confirmed by
+        // instrumenting every scissor rect with a console log (values were
+        // always correct) and by isolating scissor-rect changes from
+        // bind-group changes in a headless-Chrome capture. `ensure_scissor!`
+        // below sidesteps the defect: instead of changing the scissor rect
+        // within one pass, it ends the current pass and opens a fresh
+        // `Load` pass, so `set_scissor_rect` is called AT MOST ONCE per
+        // pass. This can't be a plain function: a `wgpu::RenderPass<'e>`
+        // borrows `encoder` for its own lifetime, so replacing it needs the
+        // OLD pass dropped in the very statement that reborrows `encoder`
+        // for the new one — passing `pass` through a function argument list
+        // keeps the old borrow alive (from the borrow checker's view) for
+        // the whole call, which conflicts with the second `&mut encoder`
+        // argument the callee would need.
+        let mut pass_scissor: Option<[u32; 4]> = None;
+        macro_rules! ensure_scissor {
+            ($desired:expr) => {
+                // Bind once: `$desired` must not be re-evaluated per use below
+                // (harmless for today's Copy args, a footgun for future sites).
+                let desired: Option<[u32; 4]> = $desired;
+                if scissor_requires_new_pass(pass_scissor, desired) {
+                    drop(pass);
+                    pass = begin_pass(&mut encoder, color_view, resolve_target, bg, false);
+                    if let Some(r) = desired {
+                        pass.set_scissor_rect(r[0], r[1], r[2], r[3]);
+                    }
+                    pass_scissor = desired;
+                }
+            };
+        }
 
         // Draw order:
         //   1. Static mesh (grid, axes, legend, title) — identity transform
@@ -528,47 +608,53 @@ pub fn render_frame(
         if let (Some(vb), Some(ib)) =
             (&buffers.mesh_vertex_buffer, &buffers.mesh_index_buffer)
         {
-            pass.set_pipeline(&pipelines.mesh);
-            pass.set_vertex_buffer(0, vb.slice(..));
-            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-
             if buffers.mark_mesh_panels.is_empty() {
                 // Fallback: no panel metadata (should not occur in practice for
                 // mesh-bearing scenes, but guards against stale GpuBuffers).
                 // Bind panel 0's transform — the single-panel common case.
+                pass.set_pipeline(&pipelines.mesh);
+                pass.set_vertex_buffer(0, vb.slice(..));
+                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                 pass.set_bind_group(0, buffers.mark_bind_group(0), &[]);
                 pass.draw_indexed(0..buffers.mesh_index_count, 0, 0..1);
             } else {
                 for panel in &buffers.mark_mesh_panels {
                     let pa = &panel.plot_area;
-                    pass.set_scissor_rect(
+                    let rect = [
                         (pa[0] * scale_x) as u32,
                         (pa[1] * scale_y) as u32,
                         (pa[2] * scale_x) as u32,
                         (pa[3] * scale_y) as u32,
-                    );
+                    ];
+                    ensure_scissor!(Some(rect));
+                    // Pass state does not persist across `ensure_scissor!`'s
+                    // pass split, so pipeline/buffers are re-bound every
+                    // iteration (a cheap no-op when the pass didn't change).
+                    pass.set_pipeline(&pipelines.mesh);
+                    pass.set_vertex_buffer(0, vb.slice(..));
+                    pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                     // Bind this panel's own affine so a non-uniform rescale on a
                     // sibling panel does not shear this panel's mesh.
                     pass.set_bind_group(0, buffers.mark_bind_group(panel.panel_id), &[]);
                     let range = panel.index_start..(panel.index_start + panel.index_count);
                     pass.draw_indexed(range, 0, 0..1);
                 }
-                // Relax scissor to full surface so subsequent draws
-                // (images, circle/rect commands, annotations) are not clipped
-                // to the last panel's plot area.
-                pass.set_scissor_rect(0, 0, surface_w, surface_h);
             }
         }
 
-        for img in &buffers.image_draws {
-            pass.set_pipeline(&pipelines.textured);
-            // Images (heatmap rasters) carry no panel association yet (W4); bind
-            // panel 0's transform, matching the single-panel common case the
-            // former single mark uniform served.
-            pass.set_bind_group(0, buffers.mark_bind_group(0), &[]);
-            pass.set_bind_group(1, &img.bind_group, &[]);
-            pass.set_vertex_buffer(0, img.vertex_buffer.slice(..));
-            pass.draw(0..4, 0..1);
+        // Images: zoom/pan transform, full-surface scissor.
+        if !buffers.image_draws.is_empty() {
+            ensure_scissor!(None::<[u32; 4]>);
+            for img in &buffers.image_draws {
+                pass.set_pipeline(&pipelines.textured);
+                // Images (heatmap rasters) carry no panel association yet (W4); bind
+                // panel 0's transform, matching the single-panel common case the
+                // former single mark uniform served.
+                pass.set_bind_group(0, buffers.mark_bind_group(0), &[]);
+                pass.set_bind_group(1, &img.bind_group, &[]);
+                pass.set_vertex_buffer(0, img.vertex_buffer.slice(..));
+                pass.draw(0..4, 0..1);
+            }
         }
 
         // Per-batch circle/rect draw commands. Mark commands use the
@@ -580,16 +666,15 @@ pub fn render_frame(
                 continue;
             }
 
-            if let Some(pa) = cmd.plot_area.filter(|_| cmd.is_mark) {
-                pass.set_scissor_rect(
+            let desired = cmd.plot_area.filter(|_| cmd.is_mark).map(|pa| {
+                [
                     (pa[0] * scale_x) as u32,
                     (pa[1] * scale_y) as u32,
                     (pa[2] * scale_x) as u32,
                     (pa[3] * scale_y) as u32,
-                );
-            } else {
-                pass.set_scissor_rect(0, 0, surface_w, surface_h);
-            }
+                ]
+            });
+            ensure_scissor!(desired);
 
             let bind_group = if cmd.is_mark {
                 // Mark instances follow their owning panel's affine.
@@ -638,13 +723,21 @@ pub fn render_frame(
             &buffers.annotation_mesh_vertex_buffer,
             &buffers.annotation_mesh_index_buffer,
         ) {
-            pass.set_scissor_rect(0, 0, surface_w, surface_h);
+            ensure_scissor!(None::<[u32; 4]>);
             pass.set_pipeline(&pipelines.mesh);
             pass.set_bind_group(0, &buffers.identity_uniform_bind_group, &[]);
             pass.set_vertex_buffer(0, vb.slice(..));
             pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..buffers.annotation_mesh_index_count, 0, 0..1);
         }
+
+        // `pass_scissor`'s final write (from the annotation-mesh
+        // `ensure_scissor!` above) is never read again — silence the
+        // otherwise-legitimate `unused_assignments` lint without an
+        // `#[allow]` that would also hide a real dead-store bug earlier in
+        // this block.
+        let _ = pass_scissor;
+        drop(pass);
     }
 
     gpu.queue.submit(std::iter::once(encoder.finish()));
@@ -738,5 +831,90 @@ mod tests {
         fn _assert_mesh_index_count_accessible(b: &GpuBuffers) -> u32 {
             b.mesh_index_count
         }
+    }
+
+    // ── task-11fix: scissor-rect pass-splitting invariant ──────────────
+    //
+    // A composite scene (Grid, hconcat, or vconcat — layout kind is not the
+    // discriminator) with 3+ mark-bearing panels drew only the LAST panel's
+    // circles/rects in interactive (WASM/WebGPU) output: the browser's wgpu
+    // backend silently drops every draw but the last when a single render
+    // pass contains 3+ sequential `set_scissor_rect` calls to *different*
+    // rectangles (confirmed via headless-Chrome console instrumentation —
+    // every CPU-computed scissor rect was correct; only the GPU-side result
+    // was wrong). `render_frame` now opens a fresh `Load` pass every time the
+    // desired scissor rect changes, so a pass never has `set_scissor_rect`
+    // called more than once. These tests pin `scissor_requires_new_pass`, the
+    // pure decision function that drives that pass-splitting.
+
+    #[test]
+    fn scissor_requires_new_pass_only_on_change() {
+        assert!(
+            !scissor_requires_new_pass(None, None),
+            "full-surface -> full-surface must reuse the current pass"
+        );
+        assert!(
+            scissor_requires_new_pass(None, Some([1, 2, 3, 4])),
+            "full-surface -> a panel rect must split into a new pass"
+        );
+        assert!(
+            scissor_requires_new_pass(Some([1, 2, 3, 4]), Some([5, 6, 7, 8])),
+            "panel A's rect -> panel B's rect must split into a new pass"
+        );
+        assert!(
+            !scissor_requires_new_pass(Some([1, 2, 3, 4]), Some([1, 2, 3, 4])),
+            "repeating the same panel rect must reuse the current pass"
+        );
+        assert!(
+            scissor_requires_new_pass(Some([1, 2, 3, 4]), None),
+            "a panel rect -> full-surface (e.g. images/annotations after a \
+             mesh loop) must split into a new pass"
+        );
+    }
+
+    /// A 3-panel composite scene's draw-command scissor sequence must open
+    /// exactly 3 passes (one per distinct panel rect) — the regression this
+    /// task-11fix guards against: collapsing them into a single pass with 3
+    /// sequential `set_scissor_rect` calls reproduces the bug where only the
+    /// last panel's marks render.
+    #[test]
+    fn three_panel_scissor_sequence_opens_three_passes() {
+        let panel_rects = [
+            Some([0u32, 0, 100, 100]),
+            Some([100u32, 0, 100, 100]),
+            Some([200u32, 0, 100, 100]),
+        ];
+        let mut current: Option<[u32; 4]> = None;
+        let mut pass_count = 0;
+        for &desired in &panel_rects {
+            if scissor_requires_new_pass(current, desired) {
+                pass_count += 1;
+                current = desired;
+            }
+        }
+        assert_eq!(
+            pass_count, 3,
+            "each of the 3 distinct panel rects must open its own pass"
+        );
+    }
+
+    /// Consecutive draw commands sharing the SAME desired scissor (e.g. two
+    /// non-mark legend/axis draws, both full-surface) must NOT split into
+    /// extra passes — only an actual rect change should.
+    #[test]
+    fn repeated_scissor_value_does_not_fragment_passes() {
+        let sequence = [None, None, Some([0u32, 0, 50, 50]), Some([0u32, 0, 50, 50]), None];
+        let mut current: Option<[u32; 4]> = None;
+        let mut pass_count = 0;
+        for &desired in &sequence {
+            if scissor_requires_new_pass(current, desired) {
+                pass_count += 1;
+                current = desired;
+            }
+        }
+        assert_eq!(
+            pass_count, 2,
+            "only the 2 actual value changes (None->rect, rect->None) should open new passes"
+        );
     }
 }

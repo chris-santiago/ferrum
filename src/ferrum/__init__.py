@@ -48,9 +48,6 @@ from ferrum._core import (
     process_batch,
     render_png,
     render_svg,
-    compose_svg_horizontal,
-    compose_svg_vertical,
-    compose_svg_grid,
 )
 from ferrum.schemes import continuous_palette, Gradient
 
@@ -441,9 +438,6 @@ __all__ = [
     "process_batch",
     "render_png",
     "render_svg",
-    "compose_svg_horizontal",
-    "compose_svg_vertical",
-    "compose_svg_grid",
     # Phase 8a
     "Chart",
     "RenderConfig",

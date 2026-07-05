@@ -958,6 +958,45 @@ def render_interactive(
     config: Any = None,
     chart_config: Any = None,
 ) -> Tuple[str, bytes]: ...
+
+# `tree` is a nested-dict composite tree (see crate::spec::composite):
+#   leaf:      {"kind": "leaf", "spec": ChartSpec, "data": int,
+#               # optional Task 5d per-leaf binding overrides (absent = inherit
+#               # the call-level value); optional per-child label:
+#               "theme"?: dict, "viewport"?: tuple[float, float],
+#               "config"?: dict, "chart_config"?: dict, "label"?: str}
+#   composite: {"kind": "composite", "layout": str, "children": [...],
+#               # root-only chrome: "title"/"subtitle"/"caption"/"config";
+#               # per-child (non-root) label:
+#               "label"?: str, "resolve"?: dict, "ncols"?: int, "nrows"?: int,
+#               "row_ratios"?: list, "col_ratios"?: list, "spacing"?: float}
+#               # resolve maps channel -> "shared"/"independent"; supported
+#               # channels are "x", "y", "color", "size" (10-pre-b).
+#   hole:      {"kind": "hole"}  # Task 8a: a field-less placeholder cell —
+#               # valid only as a direct child of a "grid"/"wrap" composite
+#               # (never at the tree root); reserves its row/column slot but
+#               # renders no panel/label/chrome. Covers JointChart's empty 2x2
+#               # corner and RepeatChart's `corner=True`.
+# `theme`/`config`/`chart_config`/`viewport` below are the call-level defaults
+# every leaf inherits unless it carries its own override.
+def render_composite_svg(
+    tree: Any,
+    payloads: Any,
+    *,
+    viewport: Any,
+    theme: Any = None,
+    config: Any = None,
+    chart_config: Any = None,
+) -> str: ...
+def render_composite_interactive(
+    tree: Any,
+    payloads: Any,
+    *,
+    viewport: Any,
+    theme: Any = None,
+    config: Any = None,
+    chart_config: Any = None,
+) -> Tuple[str, bytes]: ...
 def silhouette_samples(x_table: Any, labels: Any, metric: str = "euclidean") -> Any: ...
 def silhouette_score(x_table: Any, labels: Any, metric: str = "euclidean") -> float: ...
 def tsne_embedding(
@@ -977,13 +1016,11 @@ def umap_embedding(
     n_epochs: Optional[int] = None,
 ) -> Any: ...
 
-# ---------- SVG compositor (Phase 8a Task 11) ----------
+# ---------- Figure chrome (flat single-chart caption/title band) ----------
 
-def compose_svg_horizontal(
-    svgs: list[str],
+def wrap_svg_with_chrome(
+    svg: str,
     *,
-    spacing: float = 10.0,
-    align: Literal["top", "center", "bottom"] = "top",
     title: str | None = None,
     subtitle: str | None = None,
     caption: str | None = None,
@@ -992,68 +1029,11 @@ def compose_svg_horizontal(
     anchor: str | None = None,
 ) -> str:
     """
-    Lay out SVG panels side-by-side.
+    Wrap a single already-rendered SVG with a figure-level chrome band.
 
-    When *title*, *subtitle*, and *caption* are all ``None`` (default) the
-    output is byte-identical to the previous behavior.
-
-    Examples
-    --------
-    >>> import ferrum as fm
-    >>> combined = fm.compose_svg_horizontal([svg1, svg2], spacing=10)
-    """
-    ...
-
-def compose_svg_vertical(
-    svgs: list[str],
-    *,
-    spacing: float = 10.0,
-    align: Literal["left", "center", "right"] = "left",
-    title: str | None = None,
-    subtitle: str | None = None,
-    caption: str | None = None,
-    left_inset: float | None = None,
-    right_inset: float | None = None,
-    anchor: str | None = None,
-) -> str:
-    """
-    Stack SVG panels top-to-bottom.
-
-    When *title*, *subtitle*, and *caption* are all ``None`` (default) the
-    output is byte-identical to the previous behavior.
-
-    Examples
-    --------
-    >>> import ferrum as fm
-    >>> combined = fm.compose_svg_vertical([svg1, svg2], spacing=10)
-    """
-    ...
-
-def compose_svg_grid(
-    cells: list[str | None],
-    *,
-    rows: int,
-    cols: int,
-    row_ratios: list[float],
-    col_ratios: list[float],
-    spacing: float = 10.0,
-    title: str | None = None,
-    subtitle: str | None = None,
-    caption: str | None = None,
-    left_inset: float | None = None,
-    right_inset: float | None = None,
-    anchor: str | None = None,
-) -> str:
-    """
-    Arrange SVG panels in a grid.
-
-    When *title*, *subtitle*, and *caption* are all ``None`` (default) the
-    output is byte-identical to the previous behavior.
-
-    Examples
-    --------
-    >>> import ferrum as fm
-    >>> combined = fm.compose_svg_grid([[svg1, svg2], [svg3, svg4]], spacing=10)
+    Private ``ferrum._core`` implementation detail of ``Chart.to_svg()``'s
+    ``.properties(caption=...)`` post-wrap. When *title*, *subtitle*, and
+    *caption* are all ``None`` the output is byte-identical to the input.
     """
     ...
 

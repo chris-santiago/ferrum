@@ -1,6 +1,6 @@
 """compare= aggregate rendering — composite golden tests (GH #35).
 
-Three representative goldens, one per bucket defined in the spec:
+Four representative goldens, one per bucket defined in the spec:
 
 1. NESTED case — ``pdp_chart`` with two features and ``compare=``.
    The outer ``ConcatChart`` holds one PDP facet-composite per model;
@@ -13,6 +13,11 @@ Three representative goldens, one per bucket defined in the spec:
 3. UNSUPERVISED case — ``silhouette_chart`` with ``compare=``.
    A ``ConcatChart`` of one silhouette-bar panel per clusterer,
    with independent per-panel scales (cluster coordinate systems differ).
+
+4. TITLED-COMPOSITE case (GH #45) — ``residuals_chart`` with ``compare=``.
+   Each per-model panel is itself a titled 2x2 diagnostic composite; the
+   figure title lowers to a per-child label (Task 5d), so the panels share
+   axes position-wise instead of gating to the old non-sharing path.
 
 All fixtures and seeds are fixed for byte-stable reproduction.
 
@@ -155,3 +160,43 @@ def test_golden_compare_silhouette_two_clusterers():
     base, alt, df = _silhouette_clusterers()
     chart = ferrum.silhouette_chart(base, df, compare={"k4": alt})
     _check_golden(chart.to_svg(), "compare_silhouette_two_clusterers")
+
+
+# ---------------------------------------------------------------------------
+# Bucket 4 — titled-composite (residuals, GH #45 headline)
+# ---------------------------------------------------------------------------
+
+
+def _residuals_models():
+    """Two linear regressors whose fitted ranges genuinely differ.
+
+    Base is the pinned Ridge fixture (fitted values span roughly [-8, 5]);
+    alt is a heavily-regularized ``Ridge(alpha=300)`` fitted deterministically
+    (closed-form, so byte-stable within a pinned sklearn version) whose fitted
+    values span the narrower [-3.5, 2.5].  Both are linear, so each yields the
+    full 4-panel diagnostic (including residuals-vs-leverage), making the two
+    per-model grids congruent — the precondition for position-wise pairing.
+    The different fitted ranges make the shared-axis union observable: alt's
+    fitted axis is pulled out to base's wider range.
+    """
+    from sklearn.linear_model import Ridge
+
+    df = load_dataset("regression")
+    X = df.select(_REG_FEATURES)
+    y = df["y"]
+    base = load_fixture("regression_ridge")
+    alt = Ridge(alpha=300.0).fit(X.to_numpy(), y.to_numpy())
+    return base, alt, X, y
+
+
+def test_golden_compare_residuals_two_models():
+    """Titled-composite golden (GH #45): ConcatChart of two per-model residuals grids.
+
+    Each model panel is a titled 2x2 residuals diagnostic composite.  The
+    per-model title lowers to a per-child label (Task 5d), so the composition
+    rides the one-call Rust composite path and the two congruent grids share
+    axes position-wise rather than gating to the old non-sharing path.
+    """
+    base, alt, X, y = _residuals_models()
+    chart = ferrum.residuals_chart(base, X, y, compare={"alt": alt})
+    _check_golden(chart.to_svg(), "compare_residuals_two_models")
