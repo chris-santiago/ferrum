@@ -6,6 +6,60 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.19.0 — 2026-07-05
+
+### Breaking changes
+
+- `compose_svg_horizontal` / `compose_svg_vertical` / `compose_svg_grid` removed from the public API — every composition renders through the unified Rust composite path; there is no public low-level SVG-stitching surface
+- All-empty compositions (e.g. zero-row `pairplot`/`jointplot`) raise a typed `ValueError` instead of rendering a blank grid
+- `JointChart.share_scale()` / `ClusterMapChart.share_scale()` raise a typed `ValueError` — their panels share axes by construction ([#53](https://github.com/chris-santiago/ferrum/issues/53) tracks native `resolve=` support)
+- `LayerChart` with explicit `resolve={"x"/"y": "independent"}` raises a typed `ValueError` (overlay one-panel contract; [#52](https://github.com/chris-santiago/ferrum/issues/52) tracks per-layer scales) — previously silently ignored
+- `share_scale()` now resolves at render time through the composite tree with transform-aware unions (box whisker reach, KDE support); it no longer injects explicit `scale=` dicts onto child charts
+
+### Added
+
+- composite spec tree types for the Rust composite render path (#45)
+- per-panel LayoutScale for ratio-fitted composite cells (#45, D4a as amended)
+- composite scale-resolution pass (#45, pass 1 of 3)
+- thread D4b resolved-domain context through the scale seam (#45, Task 5a)
+- composite render core — layout + scene passes (#45, passes 2+3)
+- PyO3 composite entries + WASM baked-geometry single source of truth (#45, Task 5c)
+- route HConcat/VConcat through the Rust composite render path (#45, Task 6)
+- ConcatChart wrap grids through the Rust composite path — compare= rides automatically (#45, Task 7)
+- per-leaf binding inputs + themed per-child panel labels (#45, Task 5d)
+- residuals compare= shares axes position-wise — the #45 headline
+- grid/wrap hole children on the composite wire (#45, Task 8a)
+- JointChart + ClusterMapChart through the Rust composite path as ratio grids (#45, Task 8b)
+- RepeatChart + LayerChart through the Rust composite path — all forms unified (#45, Task 9)
+- color/size channels in the composite resolve pass (#45)
+- Python composite-path gate drops ahead of legacy deletion (#45)
+- root chrome config + sized linear holes on the composite wire (#45)
+- delete the Python legacy composition paths (#45)
+- compose_svg_* no longer exist (#45)
+
+### Fixed
+
+- clear ValueError for leverage-only charts on no-hat-matrix models (#44)
+- per-class cumulative walk + facet for shap_waterfall per_class=True (#46)
+- chart-level explicit x/y scales survive composite-mark desugar (#45)
+- sanitize zero/non-finite log-domain endpoints at construction (#49)
+- split render passes at scissor boundaries — wgpu 29.0.3 workaround: interactive scenes with 3+ mark-bearing panels drew only one panel's marks (#51 tracks upstream)
+- full 72h-review findings burn-down — every logged item resolved; interactive renders now emit RenderWarnings like static output (#50)
+
+### Changed
+
+- share_scale unified onto resolve= — one sharing mechanism (#45 close)
+- collapse whole-change gate findings (#45)
+
+### Other
+
+- per-class waterfall golden + SHAP compare= shared-x hardening (#46)
+- remediation spec + plan for issues #44/#45/#46; Phase B spec, plan, and sub-decision records
+- Phase B close — composite rendering documented, W4/W5 retired
+- track Phase A design-review S2 deferrals
+- 72h full-span review close — exclusion semantics documented, findings logged
+- ruff-format the wrap_svg_with_chrome stub
+
 ## 0.18.2
 
 *2026-06-27*
