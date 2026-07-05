@@ -189,13 +189,23 @@ Bug fixes must be **cohesive and paradigm-respecting** — do not paper over a s
 
 ---
 
-## Known interactive-export limitations (2026-05-18 wiring audit)
+## Composite rendering (Phase B, 2026-07-05)
 
-These were identified by a 4-agent wiring audit and intentionally deferred. They are **feature gaps requiring design work**, not bugs. Fix them when the relevant subsystem is next touched.
-
-- **W4 — `_offset_node` ignores `raw` node types.** `_offset_node` now handles image/polygon/polyline (added since this note was written; verified by `tests/test_bug_hunt_scene_composition.py`), so the gap is narrowed to **`raw`** only: a `SceneNode::Raw` (e.g. the legend `clip_height` `<clipPath>` def, the colorbar gradient def) bakes absolute coordinates into an opaque SVG string and is left at its original position in composed interactive renders. Inert today because the consuming `<g clip-path>` `Group.attrs` are dropped by the WASM loader (so the clip never applies in the interactive path — see W5/clip notes), but it would bite if WASM ever honors `Group.attrs`. The correct fix is a `"raw"` branch in `_offset_node` that rewrites the baked `<rect x/y>` coords + uniquifies the clip id per child, mirroring `render/compositor.rs::uniquify_clip_ids` (which already does this for the static-SVG path). File: `src/ferrum/composition.py` `_offset_node`.
-
-- **W5 — JointChart interactive layout is flat horizontal, not 2x2 grid.** `JointChart._render_interactive` merges center + top + right in a flat horizontal layout. The SVG path uses a proper 2x2 grid. Fixing requires a grid-aware merge (like `_merge_child_scenes_grid` but with explicit row/col placement). File: `src/ferrum/composition.py` `JointChart._render_interactive`.
+All composition (HConcat/VConcat/Concat/Joint/ClusterMap/Repeat/Layer) renders
+through ONE Rust composite entry per output kind (`render_composite_svg` /
+`render_composite_interactive`): Python lowers the composition to a composite
+spec tree (`src/ferrum/composition.py`, `_lower_any`/`_build_grid_tree`), Rust
+resolves shared scales across leaves, plans the layout, and emits one
+SceneGraph. There is NO legacy fallback — a composition that cannot lower
+raises a typed `ValueError`. The former W4/W5 interactive-export limitations
+(raw-node offsets; JointChart's flat interactive layout) were subsumed:
+raw-node defs place per-panel via Rust clip uniquification, and JointChart
+interactive is a true ratio grid (verified by headless WASM captures,
+`.claude/output/phase-b-captures/`). The one deliberate interactive exception:
+`LayerChart._render_interactive` renders the merged single-panel Chart (the
+flat path) because selections/hit-testing require overlays to be ONE scene
+panel. Deliberate behavior change: an all-empty composition (e.g. zero-row
+pairplot) raises instead of rendering a blank grid.
 
 ---
 
@@ -205,7 +215,7 @@ These were identified by a 4-agent wiring audit and intentionally deferred. They
 
 - **Channels:** `Description`/`Key` encoding (TODO G1 chart-level done, but `Key` is interactive-only), `Href` encoding already works
 - **Features:** `mark_ribbon(interpolate=...)`, `mark_hex(stroke=)`, `mark_function(clip=False)`
-- **Missing spec implementations:** `ferrum.Grid`, full palette library, `SceneNode::Raw` WASM, `compare=` routing for 3 diagnostic charts
+- **Missing spec implementations:** `ferrum.Grid`, full palette library (`SceneNode::Raw` WASM and `compare=` diagnostic routing were resolved by the compare-aggregate work + Phase B composite unification, 2026-07)
 - **Rust dead code:** `ticks.rs` blanket `#[allow(dead_code)]`, `CategoricalPalette`/`Scheme` module, `OutlierRow`, `apply_transforms*`, label `MarkBatchKind::Text`
 - **Resolved (2026-05-22):** Opacity semantics (`fill_opacity`/`stroke_opacity` now applied per-channel in WASM shaders; `opacity` no longer double-applied to stroke) and annotation z-order (annotation mesh drawn after marks, not before) were fixed in the `feat/rtree-toolbar` merge.
 

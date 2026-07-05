@@ -51,9 +51,37 @@ Decision made 2026-05-10: alternative was ~250 LOC of in-house pandas dtype norm
 
 When `layers.is_none()`, the renderer uses single-layer `mark` + `encoding` and the JSON shape is byte-identical to phases 3–7 — existing goldens stay valid. When `layers.is_some()`, the renderer iterates layers within each panel, sharing x/y/color scales by default.
 
-**One `ChartSpec` = one `RecordBatch`** is load-bearing: mixed-data layered charts (`Chart(df1) + Chart(df2)`) route through the SVG compositor instead of growing multi-batch logic in the renderer.
+**One `ChartSpec` = one `RecordBatch`** is load-bearing: mixed-data layered charts (`Chart(df1) + Chart(df2)`) merge via null-padded diagonal concat into one batch rather than growing multi-batch logic in the renderer.
 
-Decision made 2026-05-10.
+Decision made 2026-05-10. (Updated 2026-07-05: the SVG string compositor this
+section originally cited was retired by the composite render unification —
+see "Composition rendering" below.)
+
+---
+
+## Composition rendering
+
+**One Rust composite entry per output kind; no Python-side scene or SVG merging.**
+
+Every composition form (HConcat/VConcat/Concat wrap grids, JointChart,
+ClusterMapChart, RepeatChart, LayerChart overlays) lowers in Python to a
+composite spec tree — `{"kind": "leaf"|"composite"|"hole", "layout":
+"hconcat|vconcat|grid|wrap|overlay", children, resolve, spacing, ratios,
+root-only title/subtitle/caption/config, per-child label}` — and renders
+through `render_composite_svg` / `render_composite_interactive` in one call.
+Rust owns all three passes: scale resolution across leaves (`resolve=` sharing
+via congruent tree-path pairing; x/y/color/size), layout planning (ratio cells
+emit native-size content plus a per-panel `LayoutScale` that the WASM loader
+bakes at load), and scene assembly (flat pre-order panel namespace, D4c).
+Sized holes reserve blank space for empty-data children on linear layouts;
+grid/wrap holes are cell-positional. The flat single-chart caption band uses
+`wrap_svg_with_chrome` (the extracted single-cell chrome wrap); the N-ary
+string compositor (`compose_svg_*`, `compositor.rs`, `grid_compose.rs`) and
+the Python scene-merge/scale-share modules no longer exist. The one
+interactive exception: LayerChart renders the merged single-panel Chart
+because the selection/hit-testing contract requires overlays to be one panel.
+
+Decision made 2026-07-02 (Phase B spec); landed 2026-07-05.
 
 ---
 

@@ -904,6 +904,21 @@ Annotations are lightweight overlays that don't participate in scale domain calc
 
 ### 3.12 Compound Views
 
+> **2026-07-05 (Phase B, composite render unification / #45):** every compound
+> view in this section now renders through ONE Rust composite entry per output
+> kind (`render_composite_svg` / `render_composite_interactive`): Python lowers
+> the composition to a composite spec tree; Rust resolves `resolve=` sharing
+> across the tree's leaves (x/y/color/size; congruent position-wise pairing),
+> plans the layout (ratio cells via per-panel `LayoutScale`, holes for empty
+> corner/trailing/empty-data cells), and emits one scene. The
+> `compose_svg_*` helpers referenced by the historical notes below NO LONGER
+> EXIST (removed from the public API); static and interactive output share the
+> same layout, subsuming the former W4/W5 interactive limitations. Behavior
+> change: an all-empty compound view (every child zero-row) raises a
+> `ValueError` instead of rendering a blank grid. Historical notes below are
+> retained for the pixel-semantics decisions they record (spacing, ratio math),
+> which carried over into the composite layout pass.
+
 > **2026-05-10 (Phase 9):** `JointChart` (sketched in 8b) is implemented as
 > a 2×2 layout (center + optional top/right marginals) backed by
 > `ferrum._core.compose_svg_grid`; it supports `.theme()`, `.properties()`,
