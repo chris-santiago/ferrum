@@ -369,7 +369,7 @@ Both `LayerChart` and `ConcatChart` support `.theme()`, `.properties()`, `.save(
 
 ## How composition renders
 
-Every composition — `|`, `&`, `ConcatChart`, `LayerChart`, and the grid forms behind `jointplot`/`pairplot`/`clustermap` — lowers to a single composite spec tree that one Rust render call turns into the final document. Scales resolve across panels in that same pass (`resolve=` sharing), panel geometry is laid out natively, and figure chrome (title, subtitle, caption, padding) is injected at the tree root. There is no public low-level SVG-stitching API: the earlier `compose_svg_*` helpers were removed when composition moved onto this unified path, and the `|`/`&`/class-based APIs are the supported way to combine charts.
+Every composition — `|`, `&`, `ConcatChart`, `LayerChart`, and the grid forms behind `jointplot`/`pairplot`/`clustermap` — lowers to a single composite spec tree that one Rust render call turns into the final document. Scales resolve across panels in that same pass (`resolve=` sharing). A child whose channel carries an explicit `scale=` is excluded from a shared union and keeps its pinned domain — explicit per-chart scales win over composition-level sharing, and the remaining panels still share among themselves, panel geometry is laid out natively, and figure chrome (title, subtitle, caption, padding) is injected at the tree root. There is no public low-level SVG-stitching API: the earlier `compose_svg_*` helpers were removed when composition moved onto this unified path, and the `|`/`&`/class-based APIs are the supported way to combine charts.
 
 ## Where to go next
 

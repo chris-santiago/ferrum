@@ -1025,6 +1025,13 @@ class _ChartLike(ConfigureMixin):
         injection seam (:meth:`LayerChart._build_merged`, the
         interactive one-panel path; GH #52).
 
+        A child whose channel carries an explicit ``scale=`` (e.g.
+        ``fm.Y("y", scale={"domain": [0, 200]})``) is EXCLUDED from the
+        shared union and keeps its pinned domain -- an explicit per-chart
+        scale always wins over composition-level sharing (spec §6). The
+        remaining children still share among themselves; with only one
+        unpinned child left, its "union" is simply its own domain.
+
         Parameters
         ----------
         **channels : str
