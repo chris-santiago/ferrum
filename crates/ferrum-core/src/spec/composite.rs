@@ -572,7 +572,7 @@ pub(crate) fn composite_tree_from_py(obj: &Bound<'_, PyAny>) -> PyResult<Composi
 
 fn composite_node_from_py(obj: &Bound<'_, PyAny>) -> PyResult<CompositeNode> {
     let dict: &Bound<'_, PyDict> = obj
-        .downcast::<PyDict>()
+        .cast::<PyDict>()
         .map_err(|_| PyValueError::new_err("composite tree node must be a dict"))?;
     let kind = require_str(dict, "kind")?;
 
@@ -598,7 +598,7 @@ fn composite_node_from_py(obj: &Bound<'_, PyAny>) -> PyResult<CompositeNode> {
                 PyValueError::new_err("composite node missing required key 'children'")
             })?;
             let children_list: &Bound<'_, PyList> = children_obj
-                .downcast::<PyList>()
+                .cast::<PyList>()
                 .map_err(|_| PyValueError::new_err("composite node: 'children' must be a list"))?;
             let children = children_list
                 .iter()

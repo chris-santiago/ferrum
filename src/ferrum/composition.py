@@ -249,6 +249,30 @@ class _LoweredTree:
     theme: dict
     chart_config: Optional[dict]
 
+    def render_svg(self) -> str:
+        """Render this lowered tree to an SVG string via the composite entry."""
+        from ferrum._core import render_composite_svg
+
+        return render_composite_svg(
+            self.tree,
+            self.payloads,
+            viewport=self.viewport,
+            theme=self.theme,
+            chart_config=self.chart_config,
+        )
+
+    def render_interactive(self) -> tuple[str, bytes]:
+        """Render this lowered tree to (scene_json, packed_data) via the composite entry."""
+        from ferrum._core import render_composite_interactive
+
+        return render_composite_interactive(
+            self.tree,
+            self.payloads,
+            viewport=self.viewport,
+            theme=self.theme,
+            chart_config=self.chart_config,
+        )
+
 
 def _is_leaf_chart(node) -> bool:
     """Return True when *node* is a single ``Chart`` that lowers to a tree leaf.
@@ -1305,15 +1329,7 @@ class _CompositeBase(_ChartLike):
         entry (``render_composite_interactive``); see :func:`_lower_composite`.
         """
         lowered = _lower_composite(self, auto_tooltips=True)
-        from ferrum._core import render_composite_interactive
-
-        return render_composite_interactive(
-            lowered.tree,
-            lowered.payloads,
-            viewport=lowered.viewport,
-            theme=lowered.theme,
-            chart_config=lowered.chart_config,
-        )
+        return lowered.render_interactive()
 
     def to_svg(self) -> str:
         """Render the concatenated charts to an SVG string.
@@ -1322,15 +1338,7 @@ class _CompositeBase(_ChartLike):
         entry (``render_composite_svg``); see :func:`_lower_composite`.
         """
         lowered = _lower_composite(self, auto_tooltips=False)
-        from ferrum._core import render_composite_svg
-
-        return render_composite_svg(
-            lowered.tree,
-            lowered.payloads,
-            viewport=lowered.viewport,
-            theme=lowered.theme,
-            chart_config=lowered.chart_config,
-        )
+        return lowered.render_svg()
 
     def __repr__(self) -> str:
         """Return a short developer-readable description."""
@@ -1629,15 +1637,7 @@ class JointChart(_CompositeBase):
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) via the composite grid entry."""
         lowered = self._composite_tree(auto_tooltips=True)
-        from ferrum._core import render_composite_interactive
-
-        return render_composite_interactive(
-            lowered.tree,
-            lowered.payloads,
-            viewport=lowered.viewport,
-            theme=lowered.theme,
-            chart_config=lowered.chart_config,
-        )
+        return lowered.render_interactive()
 
     def to_svg(self) -> str:
         """Render the joint chart to an SVG string.
@@ -1648,15 +1648,7 @@ class JointChart(_CompositeBase):
             SVG markup with the 2 × 2 grid layout.
         """
         lowered = self._composite_tree(auto_tooltips=False)
-        from ferrum._core import render_composite_svg
-
-        return render_composite_svg(
-            lowered.tree,
-            lowered.payloads,
-            viewport=lowered.viewport,
-            theme=lowered.theme,
-            chart_config=lowered.chart_config,
-        )
+        return lowered.render_svg()
 
     def __repr__(self) -> str:
         """Return a short developer-readable description."""
@@ -2085,15 +2077,7 @@ class RepeatChart(_CompositeBase):
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) via the composite grid entry."""
         lowered = self._composite_tree(auto_tooltips=True)
-        from ferrum._core import render_composite_interactive
-
-        return render_composite_interactive(
-            lowered.tree,
-            lowered.payloads,
-            viewport=lowered.viewport,
-            theme=lowered.theme,
-            chart_config=lowered.chart_config,
-        )
+        return lowered.render_interactive()
 
     def to_svg(self) -> str:
         """Render the repeated grid to an SVG string.
@@ -2113,15 +2097,7 @@ class RepeatChart(_CompositeBase):
         the 1-D layout is a single row (column-only) or column (row-only).
         """
         lowered = self._composite_tree(auto_tooltips=False)
-        from ferrum._core import render_composite_svg
-
-        return render_composite_svg(
-            lowered.tree,
-            lowered.payloads,
-            viewport=lowered.viewport,
-            theme=lowered.theme,
-            chart_config=lowered.chart_config,
-        )
+        return lowered.render_svg()
 
     def _wrap_dimensions(self, n_panels: int) -> tuple:
         """Compute ``(n_cols, n_rows)`` for a 1-D wrapped layout.
@@ -2377,15 +2353,7 @@ class ClusterMapChart(_CompositeBase):
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) via the composite grid entry."""
         lowered = self._composite_tree(auto_tooltips=True)
-        from ferrum._core import render_composite_interactive
-
-        return render_composite_interactive(
-            lowered.tree,
-            lowered.payloads,
-            viewport=lowered.viewport,
-            theme=lowered.theme,
-            chart_config=lowered.chart_config,
-        )
+        return lowered.render_interactive()
 
     def to_svg(self) -> str:
         """Render the cluster map to an SVG string.
@@ -2396,15 +2364,7 @@ class ClusterMapChart(_CompositeBase):
             SVG markup with the 2 × 2 grid layout.
         """
         lowered = self._composite_tree(auto_tooltips=False)
-        from ferrum._core import render_composite_svg
-
-        return render_composite_svg(
-            lowered.tree,
-            lowered.payloads,
-            viewport=lowered.viewport,
-            theme=lowered.theme,
-            chart_config=lowered.chart_config,
-        )
+        return lowered.render_svg()
 
     def __repr__(self) -> str:
         """Return a short developer-readable description."""
@@ -2616,15 +2576,7 @@ class LayerChart(_ChartLike):
             SVG markup with all layers rendered in a single plot area.
         """
         lowered = self._composite_tree(auto_tooltips=False)
-        from ferrum._core import render_composite_svg
-
-        return render_composite_svg(
-            lowered.tree,
-            lowered.payloads,
-            viewport=lowered.viewport,
-            theme=lowered.theme,
-            chart_config=lowered.chart_config,
-        )
+        return lowered.render_svg()
 
     def _build_merged(self):
         """Merge member charts into a single multi-layer Chart via ``+``.
