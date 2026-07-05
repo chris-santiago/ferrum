@@ -4,6 +4,11 @@ on:
     branches:
       - master
       - main
+  # Manual redeploy: GitHub Pages deployments fail transiently service-side
+  # ("Deployment failed, try again later"), and re-running a failed Pages run
+  # duplicates the github-pages artifact, which deploy-pages rejects. A fresh
+  # dispatch is the correct retry.
+  workflow_dispatch:
 permissions:
   contents: read
   pages: write
