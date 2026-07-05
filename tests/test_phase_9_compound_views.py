@@ -6,6 +6,7 @@ import polars as pl
 import ferrum as fe
 from ferrum import Repeat
 from ferrum.repeat import _RepeatPlaceholder
+from tests._svg_extents import x_axis_extents, y_axis_extents
 
 
 class TestRepeatSentinel:
@@ -330,8 +331,11 @@ class TestRepeatChart:
             assert ca._encoding["x"]._kwargs == cb._encoding["x"]._kwargs
 
     def test_resolve_shared_x_injects_union_domain(self):
-        # Two columns with disjoint ranges; resolve={"x": "shared"} should
-        # inject a scale dict with the union domain on every cell.
+        # Two columns with disjoint ranges; resolve={"x": "shared"} must
+        # union the x domain across panels at RENDER time -- the composite
+        # tree's Rust resolve pass -- not by injecting a scale= dict into
+        # expand()'s materialized panels (expand() is a pre-render
+        # materialization step; resolve= is render-time only).
         df = pl.DataFrame(
             {
                 "small": [0.0, 1.0, 2.0, 3.0, 4.0],
@@ -344,15 +348,19 @@ class TestRepeatChart:
         cells = rc.expand()
         assert len(cells) == 2
         for _, _, chart in cells:
-            scale = chart._encoding["x"]._kwargs.get("scale")
-            assert isinstance(scale, dict)
-            assert scale["type"] == "linear"
-            assert scale["domain"] == [0.0, 20.0]
+            assert chart._encoding["x"]._kwargs.get("scale") is None
+
+        svg = rc.to_svg()
+        extents = x_axis_extents(svg)
+        assert len(extents) == 2
+        assert extents[0] == extents[1]
+        assert extents[0].hi >= 20.0
 
     def test_resolve_shared_y_with_layered_cells(self):
         # Each cell stacks two layers, each binding a different field on y.
         # The shared-y domain must span ALL layer fields, not just the
-        # first.
+        # first -- proven by the rendered tick extent, since expand() no
+        # longer injects a scale= dict for resolve= sharing.
         df = pl.DataFrame(
             {
                 "x": [1, 2, 3, 4, 5],
@@ -365,13 +373,15 @@ class TestRepeatChart:
         cells = rc.expand()
         assert len(cells) == 1
         _, _, chart = cells[0]
-        # Layered cell: each layer's y encoding must carry the union domain.
         assert chart._layers is not None
         for layer in chart._layers:
-            scale = layer.encoding["y"]._kwargs.get("scale")
-            assert isinstance(scale, dict)
-            assert scale["type"] == "linear"
-            assert scale["domain"] == [1.0, 90.0]
+            assert layer.encoding["y"]._kwargs.get("scale") is None
+
+        svg = rc.to_svg()
+        extents = y_axis_extents(svg)
+        assert len(extents) == 1
+        assert extents[0].lo <= 10.0
+        assert extents[0].hi >= 90.0
 
     def test_resolve_shared_categorical_color(self):
         df = pl.DataFrame(
@@ -385,11 +395,16 @@ class TestRepeatChart:
         rc = fe.RepeatChart(tpl, column=["c1", "c2"], resolve={"color": "shared"})
         cells = rc.expand()
         for _, _, chart in cells:
-            scale = chart._encoding["color"]._kwargs.get("scale")
-            assert isinstance(scale, dict)
-            assert scale["type"] == "ordinal"
-            # Union of {"a","b"} and {"b","c"} → {"a","b","c"} preserving order
-            assert set(scale["domain"]) == {"a", "b", "c"}
+            # expand() never injects scale= -- resolve= sharing rides the
+            # composite tree's resolve field, not a per-panel scale= dict.
+            assert chart._encoding["color"]._kwargs.get("scale") is None
+
+        # The tree resolve field is what actually drives the Rust
+        # composite resolve pass's cross-panel ordinal union (see
+        # test_composite_render_repeat_layer.py for the render-side proof
+        # of that pass with numeric/categorical channels).
+        lowered = rc._composite_tree(auto_tooltips=False)
+        assert lowered.tree["resolve"] == {"color": "shared"}
 
 
 class TestClusterMapChart:
@@ -456,9 +471,15 @@ class TestShareScale:
         df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
         c = fe.Chart(df).mark_point().encode(x="x", y="y")
         comp = c | c
-        # All-independent (or empty) should no-op.
+        # No channels given at all is a true no-op (identity).
         assert comp.share_scale() is comp
-        assert comp.share_scale(x="independent") is comp
+        # An explicit "independent" is meaningful resolve= metadata now (no
+        # longer a silent identity no-op) even though it renders the same as
+        # the (also-independent) default.
+        result = comp.share_scale(x="independent")
+        assert result is not comp
+        assert result._resolve == {"x": "independent"}
+        assert result.to_svg() == comp.to_svg()
 
     def test_hconcat_share_x(self):
         df = pl.DataFrame(
@@ -471,13 +492,17 @@ class TestShareScale:
         left = fe.Chart(df).mark_point().encode(x="a", y="y")
         right = fe.Chart(df).mark_point().encode(x="b", y="y")
         shared = (left | right).share_scale(x="shared")
-        # Each child must now carry an explicit linear scale spanning [0, 40].
+        assert shared._resolve == {"x": "shared"}
+        # share_scale never injects scale= -- resolve= sharing is render-time.
         for child in shared.charts:
-            scale_kw = child._encoding["x"]
-            scale = scale_kw._kwargs.get("scale") if hasattr(scale_kw, "_kwargs") else None
-            assert isinstance(scale, dict)
-            assert scale["type"] == "linear"
-            assert scale["domain"] == [0.0, 40.0]
+            assert child._encoding["x"]._kwargs.get("scale") is None
+        # Must render byte-identical to the equivalent resolve= construction.
+        equivalent = fe.HConcatChart([left, right], resolve={"x": "shared"})
+        assert shared.to_svg() == equivalent.to_svg()
+        extents = x_axis_extents(shared.to_svg())
+        assert len(extents) == 2
+        assert extents[0] == extents[1]
+        assert extents[0].hi >= 40.0
 
     def test_vconcat_share_y(self):
         df = pl.DataFrame(
@@ -490,12 +515,20 @@ class TestShareScale:
         top = fe.Chart(df).mark_point().encode(x="x", y="low")
         bot = fe.Chart(df).mark_point().encode(x="x", y="high")
         shared = (top & bot).share_scale(y="shared")
+        assert shared._resolve == {"y": "shared"}
         for child in shared.charts:
-            scale = child._encoding["y"]._kwargs.get("scale")
-            assert isinstance(scale, dict)
-            assert scale["domain"] == [0.0, 400.0]
+            assert child._encoding["y"]._kwargs.get("scale") is None
+        equivalent = fe.VConcatChart([top, bot], resolve={"y": "shared"})
+        assert shared.to_svg() == equivalent.to_svg()
+        # Sharing must have actually changed the render relative to the
+        # independent default, proving the resolve field drove a real union.
+        assert shared.to_svg() != (top & bot).to_svg()
 
-    def test_joint_share_y_across_center_and_right_marginal(self):
+    def test_joint_share_y_raises_unsupported(self):
+        # JointChart carries no resolve= field at all -- its marginal
+        # alignment is fixed grid geometry, not a resolve= channel. share_scale
+        # must raise a typed error instead of silently performing the old
+        # (now-removed) raw-column scale injection.
         df = pl.DataFrame(
             {
                 "x": [1.0, 2.0, 3.0, 4.0],
@@ -505,29 +538,19 @@ class TestShareScale:
         )
         center = fe.Chart(df).mark_point().encode(x="x", y="y")
         right = fe.Chart(df).mark_point().encode(x="x", y="y_marginal")
-        shared = fe.JointChart(center, right=right).share_scale(y="shared")
-        assert shared.center._encoding["y"]._kwargs.get("scale") == {
-            "type": "linear",
-            "domain": [5.0, 100.0],
-        }
-        assert shared.right._encoding["y"]._kwargs.get("scale") == {
-            "type": "linear",
-            "domain": [5.0, 100.0],
-        }
+        joint = fe.JointChart(center, right=right)
+        with pytest.raises(ValueError, match="JointChart.*resolve="):
+            joint.share_scale(y="shared")
 
-    def test_clustermap_share_x_across_heatmap_and_col_dendrogram(self):
+    def test_clustermap_share_x_raises_unsupported(self):
+        # Same reasoning as JointChart above: ClusterMapChart has no
+        # resolve= field, so share_scale must raise rather than diverge.
         df = pl.DataFrame({"a": [1.0, 2.0, 3.0], "b": [10.0, 20.0, 30.0], "r": [0, 1, 2]})
         heat = fe.Chart(df).mark_rect().encode(x="a", y="r", fill="b")
         col_d = fe.Chart(df).mark_rule().encode(x="b", y="r")
-        shared = fe.ClusterMapChart(heat, col_dendrogram=col_d).share_scale(x="shared")
-        assert shared.heatmap._encoding["x"]._kwargs.get("scale") == {
-            "type": "linear",
-            "domain": [1.0, 30.0],
-        }
-        assert shared.col_dendrogram._encoding["x"]._kwargs.get("scale") == {
-            "type": "linear",
-            "domain": [1.0, 30.0],
-        }
+        cm = fe.ClusterMapChart(heat, col_dendrogram=col_d)
+        with pytest.raises(ValueError, match="ClusterMapChart.*resolve="):
+            cm.share_scale(x="shared")
 
     def test_repeat_share_scale_merges_into_resolve(self):
         df = pl.DataFrame(
@@ -540,14 +563,16 @@ class TestShareScale:
         tpl = fe.Chart(df).mark_point().encode(x=Repeat.column, y="y")
         rc = fe.RepeatChart(tpl, column=["small", "big"])
         shared = rc.share_scale(x="shared")
-        # New RepeatChart with resolve config carried; expand() runs the
-        # union-domain pass and injects the same scale dict on both cells.
         assert shared.resolve == {"x": "shared"}
+        # expand() no longer injects scale= -- sharing rides the composite
+        # tree's resolve field at render time.
         cells = shared.expand()
         for _, _, chart in cells:
-            scale = chart._encoding["x"]._kwargs.get("scale")
-            assert isinstance(scale, dict)
-            assert scale["domain"] == [0.0, 30.0]
+            assert chart._encoding["x"]._kwargs.get("scale") is None
+        extents = x_axis_extents(shared.to_svg())
+        assert len(extents) == 2
+        assert extents[0] == extents[1]
+        assert extents[0].hi >= 30.0
 
     def test_repeat_share_scale_merges_with_existing_resolve(self):
         df = pl.DataFrame(

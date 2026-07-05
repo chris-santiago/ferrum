@@ -114,6 +114,12 @@ def _validate_share_modes(channels: Dict[str, str]) -> None:
             raise ValueError(f"share_scale: {ch}={mode!r}; expected 'shared' or 'independent'")
 
 
+# Sentinel distinguishing "no override requested" from an explicit
+# ``resolve=None`` in ``_rebuild_with_charts(fn, resolve=...)`` overrides --
+# see ``_ChartLike.share_scale``, the only caller that passes ``resolve=``.
+_RESOLVE_UNCHANGED = object()
+
+
 def compute_union_domain(charts, channel: str) -> Optional[dict]:
     """Compute a ferrum scale dict spanning *channel* across *charts*.
 
@@ -122,11 +128,19 @@ def compute_union_domain(charts, channel: str) -> Optional[dict]:
     unions numeric min/max (linear) or unique values (ordinal).  Time
     domains use the same numeric union path but emit ``type="time"``.
 
-    Shared by :meth:`_ChartLike.share_scale`, :meth:`RepeatChart._apply_resolve`,
-    and :meth:`LayerChart._build_merged` — the flat-path (non-composite-tree)
-    domain-union call sites; HConcat/VConcat/ConcatChart/Joint/ClusterMap/
-    RepeatChart's own ``resolve=`` sharing instead rides the Rust composite
-    resolve pass (:func:`_composite_resolve_field`).
+    :meth:`LayerChart._build_merged` (the interactive one-panel merged
+    path) is the ONLY production caller left. Every other composition's
+    scale sharing -- ``_ChartLike.share_scale``, ``RepeatChart.expand()``
+    /``resolve=``, and HConcat/VConcat/ConcatChart/JointChart/ClusterMapChart's
+    own ``resolve=`` -- rides the Rust composite resolve pass instead
+    (:func:`_composite_resolve_field`), which unions *transform-aware*
+    chart extents (e.g. a box mark's whisker reach, a KDE's density
+    support) rather than this function's raw column min/max. That
+    divergence is real and intentional for now: ``_build_merged`` renders
+    through the flat single-Chart entry (the interactive one-panel
+    contract), which has no composite tree to carry a resolve field, so
+    this raw-column union is the only mechanism available there. See
+    GH #52 for closing that gap.
 
     Parameters
     ----------
@@ -197,6 +211,10 @@ def inject_scale(chart, channel: str, scale_dict: dict):
     For layered charts each layer's encoding is updated independently.
     Channels not currently bound on the chart (or on a particular layer)
     are left untouched — no implicit binding is added.
+
+    Paired exclusively with :func:`compute_union_domain` at
+    :meth:`LayerChart._build_merged` -- the single remaining raw-column
+    scale-injection seam (see that function's docstring for why).
     """
     from ferrum._layer import _Layer
     from ferrum.encoding.base import ChannelBase
@@ -993,13 +1011,19 @@ class _ChartLike(ConfigureMixin):
         )
 
     def share_scale(self, **channels):
-        """Share scales across this composition's member charts.
+        """Merge ``channels`` into this composition's ``resolve=`` field.
 
-        Computes the union domain for each channel marked ``"shared"``
-        and re-emits every member chart with an explicit ``scale=`` dict
-        on that channel, so the participating axes lock to the same
-        ticks.  Channels marked ``"independent"`` (the default for any
-        channel not listed) keep their per-chart domains.
+        Pure sugar for constructing the same composition with
+        ``resolve={**(self._resolve or {}), **channels}`` — resolution
+        happens at render time through the composite tree, the same
+        Rust resolve pass (:func:`_composite_resolve_field`) that
+        ``resolve=`` at construction already uses. No ``scale=`` dict is
+        computed or injected here, and a "shared" union runs over
+        transform-aware chart extents (e.g. a box mark's whisker reach,
+        a KDE's density support), not raw column min/max — see
+        :func:`compute_union_domain` for the one remaining raw-column
+        injection seam (:meth:`LayerChart._build_merged`, the
+        interactive one-panel path; GH #52).
 
         Parameters
         ----------
@@ -1010,42 +1034,38 @@ class _ChartLike(ConfigureMixin):
         Returns
         -------
         _ChartLike
-            A new composition of the same type with the shared scales
-            injected.  No-op (returns ``self``) when no channel is
-            ``"shared"`` or none of the requested channels are bound on
-            any member chart.
+            A new composition of the same type with the merged
+            ``resolve=`` field.  No-op (returns ``self``) when no
+            channel is given.
 
         Raises
         ------
         ValueError
-            If any value is not ``"shared"`` or ``"independent"``.
+            If any value is not ``"shared"`` or ``"independent"``, or if
+            this composition has no ``resolve=`` field to merge into
+            (``JointChart``/``ClusterMapChart``: their marginal/dendrogram
+            alignment is fixed layout geometry, not a resolve= channel).
 
         Examples
         --------
         >>> import ferrum as fm
         >>> combined = (chart_a | chart_b).share_scale(x="shared")
-        >>> grid = fm.JointChart(center, top=hist_x, right=hist_y).share_scale(y="shared")
+        >>> grid = fm.HConcatChart([chart_a, chart_b], resolve={"x": "shared"})
+        >>> combined.to_svg() == grid.to_svg()
+        True
         """
         _validate_share_modes(channels)
-        shared = [ch for ch, mode in channels.items() if mode == "shared"]
-        if not shared:
+        if not channels:
             return self
-        member_charts = self.charts
-        scale_dicts = {}
-        for channel in shared:
-            sd = compute_union_domain(member_charts, channel)
-            if sd is not None:
-                scale_dicts[channel] = sd
-        if not scale_dicts:
-            return self
-
-        def _apply(chart):
-            out = chart
-            for ch, sd in scale_dicts.items():
-                out = inject_scale(out, ch, sd)
-            return out
-
-        result = self._rebuild_with_charts(_apply)
+        if not hasattr(self, "_resolve"):
+            raise ValueError(
+                f"{type(self).__name__}: share_scale requires a resolve= field, which "
+                f"{type(self).__name__} does not carry (its panel alignment is fixed "
+                "layout geometry, not a resolve= channel); construct a composition "
+                "that supports resolve= (HConcat/VConcat/Concat/Repeat/Layer) instead"
+            )
+        merged = {**(self._resolve or {}), **channels}
+        result = self._rebuild_with_charts(lambda c: c, resolve=merged)
         _copy_configure_layers(self, result)
         return result
 
@@ -1128,12 +1148,18 @@ class _ChartLike(ConfigureMixin):
 
     # ---- Declarative configuration surface (provided by ConfigureMixin) ----
 
-    def _rebuild_with_charts(self, fn):  # pragma: no cover - abstract
+    def _rebuild_with_charts(
+        self, fn, *, resolve=_RESOLVE_UNCHANGED
+    ):  # pragma: no cover - abstract
         """Return a new composition with each member chart transformed by *fn*.
 
         Subclasses must implement this — it's the seam between the
-        generic ``share_scale`` / ``theme`` / ``properties`` plumbing on
-        the base and each composition's constructor signature.
+        generic ``theme`` / ``properties`` plumbing on the base and each
+        composition's constructor signature. Subclasses whose composition
+        carries a ``_resolve`` field (and are therefore reachable through
+        the base :meth:`share_scale`) additionally accept a ``resolve=``
+        override — when given, it replaces the rebuilt instance's
+        ``resolve=`` instead of preserving the original.
         """
         raise NotImplementedError(f"{type(self).__name__} must implement _rebuild_with_charts")
 
@@ -1313,11 +1339,11 @@ class _CompositeBase(_ChartLike):
         """
         return {}
 
-    def _rebuild_with_charts(self, fn):
+    def _rebuild_with_charts(self, fn, *, resolve=_RESOLVE_UNCHANGED):
         new = type(self)(
             [fn(c) for c in self.charts],
             spacing=self.spacing,
-            resolve=getattr(self, "_resolve", None),
+            resolve=(getattr(self, "_resolve", None) if resolve is _RESOLVE_UNCHANGED else resolve),
         )
         self._carry_figure_chrome(new)
         return new
@@ -1483,7 +1509,12 @@ class JointChart(_CompositeBase):
 
     @property
     def spec(self) -> dict:
-        """Dict : Serializable layout spec consumed by the SVG compositor."""
+        """Dict : Serializable layout introspection (ferrum-spec §3.12 contract).
+
+        Embedded charts round-trip through ``ChartSpec.from_json``. Purely an
+        introspection/serialization surface — rendering goes through the
+        composite spec tree (:meth:`_composite_tree`), not this dict.
+        """
         share_x = ["center"]
         if self.top is not None:
             share_x.append("top")
@@ -1769,7 +1800,12 @@ class RepeatChart(_CompositeBase):
 
     @property
     def spec(self) -> dict:
-        """Dict : Serializable layout spec consumed by the SVG compositor."""
+        """Dict : Serializable layout introspection (ferrum-spec §3.12 contract).
+
+        Embedded charts round-trip through ``ChartSpec.from_json``. Purely an
+        introspection/serialization surface — rendering goes through the
+        composite spec tree (:meth:`_composite_tree`), not this dict.
+        """
         return {
             "kind": "repeat",
             "template": _embed_chart_spec(self.template),
@@ -1806,8 +1842,16 @@ class RepeatChart(_CompositeBase):
         -------
         list of tuple
             Each element is ``(row_field, col_field, Chart)`` with all
-            ``Repeat.*`` placeholders replaced.  For 1-D and layer-only
-            layouts the unused axis is ``None``.
+            ``Repeat.*`` placeholders replaced. For 1-D and layer-only
+            layouts the unused axis is ``None``. Panels are returned
+            exactly as materialized — ``resolve=`` is NOT applied here.
+            Scale sharing is a render-time concern: :meth:`to_svg` /
+            :meth:`_render_interactive` (via :meth:`_composite_tree`) lower
+            ``self.resolve`` onto the composite tree's resolve field, which
+            the Rust resolve pass unions across cells (see
+            :func:`_composite_resolve_field`). A caller that wants shared
+            panels should render the ``RepeatChart`` directly rather than
+            reading scale dicts off ``expand()``'s output.
 
         Raises
         ------
@@ -1816,38 +1860,10 @@ class RepeatChart(_CompositeBase):
             repeat), or if the template references a ``Repeat.*``
             placeholder for an axis that was not populated.
         """
-        panels = [
+        return [
             (row_field, col_field, self._make_panel(row_field, col_field))
             for row_field, col_field in self._panel_coordinates()
         ]
-        return self._apply_resolve(panels)
-
-    def _apply_resolve(self, panels: list) -> list:
-        """Inject shared scales onto every panel per ``self.resolve``.
-
-        For each channel marked ``"shared"``, walks every panel (and every
-        layer of layered panels), computes the union domain, and re-emits
-        each panel with an explicit ``scale=`` dict on that channel.
-        ``"independent"`` channels are no-ops.  When no panel binds a
-        shared channel the channel is silently skipped — sharing a
-        channel that nothing uses is harmless.
-        """
-        if not self.resolve:
-            return panels
-        shared = [ch for ch, mode in self.resolve.items() if mode == "shared"]
-        if not shared:
-            return panels
-        result = list(panels)
-        for channel in shared:
-            charts = [chart for _, _, chart in result]
-            scale_dict = compute_union_domain(charts, channel)
-            if scale_dict is None:
-                continue
-            result = [
-                (row_field, col_field, inject_scale(chart, channel, scale_dict))
-                for row_field, col_field, chart in result
-            ]
-        return result
 
     def _panel_coordinates(self) -> list:
         """Compute ``(row_field, col_field)`` pairs for every panel.
@@ -1973,11 +1989,15 @@ class RepeatChart(_CompositeBase):
     def share_scale(self, **channels):
         """Share scales across this repeat's panels by merging into ``resolve=``.
 
-        Equivalent to constructing the chart with ``resolve={...}`` set
-        — both paths run through :meth:`_apply_resolve` at ``expand()``
-        time, so the union-domain computation sees every panel (including
-        each layer of layered panels) exactly once.  Passing the same
-        channel twice with different modes takes the call's value.
+        Equivalent to constructing the chart with ``resolve={...}`` set —
+        both paths store the identical ``resolve`` dict, which
+        :meth:`_composite_tree` lowers onto the composite tree's resolve
+        field at render time (:meth:`to_svg` / :meth:`_render_interactive`);
+        the Rust resolve pass then unions the shared channel's domain across
+        every panel (including each layer of layered panels).
+        :meth:`expand` does NOT apply ``resolve=`` — it returns panels
+        un-injected regardless of this setting.  Passing the same channel
+        twice with different modes takes the call's value.
 
         Parameters
         ----------
@@ -2027,8 +2047,8 @@ class RepeatChart(_CompositeBase):
         ``resolve=`` sharing rides the tree's resolve field (the Rust resolve
         pass unions domains across cells for the supported channels — see
         :func:`_composite_resolve_field`, which raises on unsupported shared
-        channels). Panels are materialized *without* the per-panel
-        ``_apply_resolve`` injection.
+        channels). :meth:`expand` already returns panels un-injected, so this
+        reuses it directly rather than re-materializing the grid inline.
 
         Returns
         -------
@@ -2036,12 +2056,7 @@ class RepeatChart(_CompositeBase):
         """
         resolve_field = _composite_resolve_field(self.resolve, kind="RepeatChart")
 
-        # Materialize raw panels (no _apply_resolve: the tree resolve field
-        # drives sharing via the Rust resolve pass).
-        panels = [
-            (row_field, col_field, self._make_panel(row_field, col_field))
-            for row_field, col_field in self._panel_coordinates()
-        ]
+        panels = self.expand()
         charts = [self._inject_parent_config(chart) for _, _, chart in panels]
 
         cells: List[Optional[object]]
@@ -2201,7 +2216,12 @@ class ClusterMapChart(_CompositeBase):
 
     @property
     def spec(self) -> dict:
-        """Dict : Serializable layout spec consumed by the SVG compositor."""
+        """Dict : Serializable layout introspection (ferrum-spec §3.12 contract).
+
+        Embedded charts round-trip through ``ChartSpec.from_json``. Purely an
+        introspection/serialization surface — rendering goes through the
+        composite spec tree (:meth:`_composite_tree`), not this dict.
+        """
         return {
             "kind": "cluster_map",
             "heatmap": _embed_chart_spec(self.heatmap),
@@ -2380,10 +2400,41 @@ class ClusterMapChart(_CompositeBase):
 # ---------------------------------------------------------------------------
 
 
+def _validate_layer_resolve(resolve: Optional[Dict[str, str]]) -> None:
+    """Raise ``ValueError`` when *resolve* marks ``x`` or ``y`` ``"independent"``.
+
+    ``LayerChart`` overlays share one coordinate space by design (the
+    overlay contract): :meth:`LayerChart._composite_tree` unconditionally
+    forces the tree's ``x``/``y`` resolve entries to ``"shared"`` regardless
+    of what *resolve* says. Accepting an explicit ``"independent"`` request
+    here without raising would mean the rendered axes silently diverge from
+    what the caller asked for — the same drift class this task closes for
+    ``share_scale``. Per-layer independent x/y scales (a secondary axis) are
+    not supported; see GH #52.
+
+    Parameters
+    ----------
+    resolve : dict or None
+        The ``resolve=`` mapping passed to :class:`LayerChart` (already
+        validated for mode vocabulary by :func:`_validate_resolve`).
+    """
+    if not resolve:
+        return
+    for channel in ("x", "y"):
+        if resolve.get(channel) == "independent":
+            raise ValueError(
+                "LayerChart: layers share one coordinate space (overlay contract); "
+                "per-layer independent x/y scales are not supported "
+                "(see GH #52 secondary-axis)"
+            )
+
+
 class LayerChart(_ChartLike):
     """Overlay multiple charts on shared axes (same coordinate space).
 
-    All layers share x/y scales by default (union domain).  The charts
+    All layers share x/y scales by default (union domain) and this cannot
+    be turned off — the overlay only makes sense with a single shared
+    coordinate space; see :func:`_validate_layer_resolve`.  The charts
     are merged using the same ``Chart + Chart`` layer-merge logic that
     the ``+`` operator provides — domain union, null-padded diagonal
     concat for heterogeneous data, named-transform routing for per-layer
@@ -2400,17 +2451,19 @@ class LayerChart(_ChartLike):
         Two or more charts to overlay.  At least one chart is required.
     resolve : dict, optional
         Per-channel scale-sharing overrides — e.g.
-        ``resolve={"color": "independent"}``.  By default all positional
-        channels (x, y) are shared (union domain); non-positional
-        channels follow the same inheritance rules as ``Chart + Chart``.
+        ``resolve={"color": "independent"}``.  ``x``/``y`` are always
+        shared (the overlay contract) and marking either ``"independent"``
+        raises; non-positional channels follow the same inheritance rules
+        as ``Chart + Chart``.
     title : str, optional
         Title applied to the combined chart via ``.properties(title=...)``.
 
     Raises
     ------
     ValueError
-        If fewer than one chart is provided, or if ``resolve`` contains
-        invalid values.
+        If fewer than one chart is provided, if ``resolve`` contains
+        invalid values, or if ``resolve`` marks ``x`` or ``y``
+        ``"independent"`` (see GH #52 secondary-axis).
 
     Examples
     --------
@@ -2431,6 +2484,7 @@ class LayerChart(_ChartLike):
         if len(charts) < 1:
             raise ValueError("LayerChart requires at least one chart")
         _validate_resolve(resolve, "LayerChart")
+        _validate_layer_resolve(resolve)
         self._charts = list(charts)
         self._resolve = resolve
         self._title = title
@@ -2485,6 +2539,11 @@ class LayerChart(_ChartLike):
             is empty.
         """
         resolve_field = _composite_resolve_field(self._resolve, kind="LayerChart")
+        # x/y are always forced "shared" here regardless of self._resolve --
+        # __init__'s _validate_layer_resolve already rejects an explicit
+        # "independent" for either channel, so this can never silently
+        # override a request the caller actually made; it only fills in
+        # the default when self._resolve left x/y unset.
         resolve_field["x"] = "shared"
         resolve_field["y"] = "shared"
 
@@ -2583,6 +2642,14 @@ class LayerChart(_ChartLike):
 
         Applies ``resolve=`` scale sharing, ``title=``, and composition-level
         configure layers when set.
+
+        This is the single remaining production call site for
+        :func:`compute_union_domain`/:func:`inject_scale`'s raw-column scale
+        injection (the one-panel interactive-render contract has no
+        composite tree to carry a resolve field — see those functions'
+        docstrings). Its union semantics for ``color``/``size`` may
+        therefore diverge from the static overlay tree's transform-aware
+        unions (:meth:`_composite_tree`); see GH #52.
         """
         result = self._charts[0]
         for chart in self._charts[1:]:
@@ -2644,10 +2711,10 @@ class LayerChart(_ChartLike):
 
         return result
 
-    def _rebuild_with_charts(self, fn):
+    def _rebuild_with_charts(self, fn, *, resolve=_RESOLVE_UNCHANGED):
         return LayerChart(
             *[fn(c) for c in self._charts],
-            resolve=self._resolve,
+            resolve=(self._resolve if resolve is _RESOLVE_UNCHANGED else resolve),
             title=self._title,
         )
 
@@ -2729,12 +2796,12 @@ class ConcatChart(_CompositeBase):
         """Emit the ``wrap`` layout's ``ncols`` for the composite render-tree."""
         return {"ncols": self._wrap_ncols()}
 
-    def _rebuild_with_charts(self, fn):
+    def _rebuild_with_charts(self, fn, *, resolve=_RESOLVE_UNCHANGED):
         new = ConcatChart(
             *[fn(c) for c in self.charts],
             columns=self._columns,
             spacing=self.spacing,
-            resolve=self._resolve,
+            resolve=(self._resolve if resolve is _RESOLVE_UNCHANGED else resolve),
         )
         # Carry figure-level chrome through rebuilds.
         self._carry_figure_chrome(new)

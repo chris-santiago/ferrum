@@ -483,3 +483,24 @@ Verified at three levels: 6 regression tests (5 node-level in `test_bug_hunt_sce
 - **DSG-3 (chore):** `binding.rs` new code uses non-deprecated `Bound::cast`/`cast_into`
   while the rest of the crate (incl. `spec/composite.rs`) uses the deprecated
   `downcast` idiom — crate-wide migration chore, clippy-motivated.
+
+---
+
+## 2026-07-05 — Phase B close design reviews (non-blocking follow-ups)
+
+The Phase B (#45 composite-render-unification) verification close ran both
+design reviewers over the whole branch. Rust verdict PASS, Python verdict
+CONCERNS (S3s remediated in-branch: share_scale unified onto resolve=,
+stale `.spec` docstrings fixed, LayerChart explicit-independent typed error;
+see the close commits). The S2-and-below findings below are logged for the
+next touch of each subsystem. Full reports: `.claude/output/phase-b-close/`.
+
+| Sev | Area | Item |
+|---|---|---|
+| S2 | rust layering | `scale_resolve` imports `SharedDomain`/`LeafScaleContext` from `render::composite` while `composite` imports union helpers back — inverted layering; move the seam value-types into the resolver. |
+| S2 | rust binding | `composite_tree_from_py` and `collect_leaf_bindings_walk` walk the same Python dicts separately, coupled only by a leaf-count guard (catches count drift, not reorder). Unify into one walk when next touched. |
+| S1 | rust interaction | `merge_children` AND-folds zoom/pan across children but hardcodes `toolbar: true`. |
+| S2 | python scene | `_scene.py::_empty_scene_json` is a hand-maintained scene-schema mirror (flat-path bootstrap). Consider a Rust-emitted empty scene. |
+| S2 | python lowering | `_rebuild_with_charts` sibling signature drift: base + 3 forms carry `resolve=_RESOLVE_UNCHANGED`, Joint/Repeat/ClusterMap don't (unreachable today — Repeat has a semantically-identical bespoke `share_scale`; collapse it onto the base sugar when next touched). `_build_grid_tree` has a 12-parameter signature; composite-node dict construction is triplicated across the lowering sites (unvalidated tree contract — a tiny builder/validator would pin it). |
+| S2 | python overlay | LayerChart static (Rust overlay tree) vs interactive (merged flat chart) shared color/size math can diverge (raw-column vs transform-aware unions) — single remaining injection seam, documented; real fix rides GH #52 (secondary axis / per-layer scale slots). |
+| — | wasm | wgpu 29.0.3 scissor workaround sunset: tracked in GH #51. |

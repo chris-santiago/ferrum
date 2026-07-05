@@ -1690,13 +1690,21 @@ def test_share_scale_invalid_mode_raises_value_error():
 
 
 def test_share_scale_independent_is_noop():
-    """share_scale with all-independent channels returns self."""
+    """share_scale with all-independent channels renders the same as the default.
+
+    Post-#45-close, share_scale is sugar for resolve= -- an explicit
+    "independent" is stored as real resolve= metadata (not a silent identity
+    no-op), but since independent is also the default, the rendered output
+    is unaffected.
+    """
     df = pl.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
     c1 = Chart(df).mark_point().encode(x="x", y="y")
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     combined = c1 | c2
     result = combined.share_scale(x="independent", y="independent")
-    assert result is combined
+    assert result is not combined
+    assert result._resolve == {"x": "independent", "y": "independent"}
+    assert result.to_svg() == combined.to_svg()
 
 
 # ---------------------------------------------------------------------------
