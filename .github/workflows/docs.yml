@@ -15,6 +15,10 @@ permissions:
   id-token: write
 jobs:
   deploy:
+    # workflow_dispatch can be invoked against any ref; Pages must only ever
+    # deploy from the default branch (dispatch from main to retry a transient
+    # Pages-service failure — that is the sole intended manual use).
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
