@@ -14,8 +14,8 @@
 //! 2. **Layout** (here): each leaf renders standalone (with its resolved-domain
 //!    context threaded through the D4b seam), then the tree is walked to place
 //!    every leaf scene — hconcat/vconcat (linear + spacing), grid (row-major with
-//!    F20 ratio math absorbed from [`super::grid_compose`]), wrap (`ncols`), and
-//!    overlay (children share one region, z-order = child order).
+//!    F20 ratio math absorbed from the deleted `grid_compose.rs`), wrap (`ncols`),
+//!    and overlay (children share one region, z-order = child order).
 //! 3. **Scene** (here): the placed leaf scenes are merged into one graph —
 //!    panels renumbered `0..N` flat in pre-order (D4c), clip ids uniquified,
 //!    figure chrome injected via [`super::figure_chrome::title_nodes`].
@@ -74,19 +74,20 @@ use super::composite::{
     flatten_leaf_specs, resolve_composite_scales, CompositeResolveError, LeafResolveInput,
     LeafScaleContext,
 };
-use super::compositor::uniquify_clip_ids;
+use super::svg::uniquify_clip_ids;
 use super::config::RenderConfig;
 use super::figure_chrome::{title_nodes, ChromeAnchor, FigureChrome, DEFAULT_CHROME_INSET};
 use super::{prepare, scene_build, RenderError, RenderWarning};
 use crate::spec::composite::{CompositeLayout, CompositeNode};
 
-/// Default pixel gap between adjacent cells, matching the composition binding's
-/// `spacing = 10.0` default (`compose_svg_horizontal`/`_vertical`) so composites
-/// stay visually equivalent to the string-compositor path they replace.
+/// Default pixel gap between adjacent cells, matching the deleted string
+/// compositor's `spacing = 10.0` default (`render/compositor.rs`, removed in
+/// Task 10 stage 3) so composites stay visually equivalent to the
+/// string-compositor path they replaced.
 const DEFAULT_SPACING: f64 = 10.0;
 
-/// Slack for the "slot matches native" comparison — mirrors `grid_compose.rs`'s
-/// `near_eq` (`1e-6`), so a ratio cell whose allocation equals its native size
+/// Slack for the "slot matches native" comparison — mirrors the deleted
+/// `grid_compose.rs`'s `near_eq` (`1e-6`), so a ratio cell whose allocation equals its native size
 /// bakes its offset (identity `layout_scale`) exactly as the string compositor
 /// keeps such a cell on the lightweight `<g translate>` path.
 const SLOT_MATCH_EPS: f64 = 1e-6;
@@ -545,7 +546,7 @@ fn plan_wrap(children: &[Placed], spacing: f64, cols: usize) -> LayoutPlan {
     LayoutPlan { placements, width: total_w, height: total_h }
 }
 
-/// Grid: row-major placement with F20 ratio math (absorbed from
+/// Grid: row-major placement with F20 ratio math (absorbed from the deleted
 /// `grid_compose.rs`). Each column's allocated width is `K_w * col_ratio[c]`,
 /// where `K_w = min_c(native_col_w[c] / col_ratio[c])` keeps the dominant cell at
 /// native size and shrinks smaller-share cells into their slots; rows are
@@ -606,7 +607,7 @@ fn plan_grid(
 
 /// `K = min over lanes of (native[i] / ratio[i])` for lanes with positive ratio
 /// and native extent; `0.0` when no lane qualifies (all-empty grid). Mirrors
-/// `grid_compose.rs`'s `k_w`/`k_h` derivation.
+/// the deleted `grid_compose.rs`'s `k_w`/`k_h` derivation.
 fn fit_factor(ratios: &[f64], native: &[f64]) -> f64 {
     let k = ratios
         .iter()
@@ -902,7 +903,7 @@ fn offset_path_cmd(cmd: &mut ferrum_scene::PathCmd, dx: f64, dy: f64) {
 // ---------------------------------------------------------------------------
 
 /// Uniquify every `Raw` node's clip/colorbar/legend-clip ids in `scene` with the
-/// per-leaf `cell_idx` prefix, mirroring `compositor::uniquify_clip_ids` for the
+/// per-leaf `cell_idx` prefix, mirroring [`super::svg::uniquify_clip_ids`] for the
 /// scene-node world. Applied once per leaf (before placement) so colorbar and
 /// legend-clip defs from different leaves stay disjoint in the merged scene.
 fn uniquify_scene_raw_clips(scene: &mut SceneGraph, cell_idx: usize) {
@@ -968,10 +969,10 @@ fn inject_root_chrome(
 
 /// Chrome config parsed from a composite tree root's `config` slot (spec §6,
 /// Task 10-rust): `{"left_inset": f64?, "right_inset": f64?, "anchor": str?}`
-/// — exactly the shape `_chrome.py::chrome_kwargs()` produces for the legacy
-/// `compose_svg_*` entries, so `configure_padding(left=/right=)` and
-/// `configure_title(anchor=)` reach the composite entry the same way they
-/// reach the legacy path. `deny_unknown_fields` mirrors
+/// — exactly the shape `_chrome.py::chrome_kwargs()` produces for the deleted
+/// N-ary SVG compositor's PyO3 bindings, so `configure_padding(left=/right=)`
+/// and `configure_title(anchor=)` reach the composite entry the same way they
+/// reached the legacy path. `deny_unknown_fields` mirrors
 /// [`crate::spec::composite::CompositeNode`]'s wire convention: a stray key is
 /// a typed error, not a silent ignore.
 #[derive(serde::Deserialize)]
@@ -987,8 +988,8 @@ struct RootChromeConfig {
 
 /// Resolve `(left_inset, right_inset, anchor)` from the root's opaque `config`
 /// `serde_json::Value` (absent keys, or an absent `config` entirely, keep the
-/// same Rust default the legacy `compose_svg_*` bindings apply on omission —
-/// [`DEFAULT_CHROME_INSET`] / [`ChromeAnchor::Start`]). `kind` is the tree
+/// same Rust default the deleted N-ary SVG compositor's bindings applied on
+/// omission — [`DEFAULT_CHROME_INSET`] / [`ChromeAnchor::Start`]). `kind` is the tree
 /// root's kind name (always a layout kind — `config` is root-only, and only
 /// `Composite` nodes carry it), used to pinpoint a malformed `config` in the
 /// returned error.
@@ -1600,8 +1601,8 @@ mod tests {
 
     #[test]
     fn root_config_absent_uses_default_inset_and_start_anchor() {
-        // No `config` at all: same default the legacy `compose_svg_*` bindings
-        // apply on omission (`DEFAULT_CHROME_INSET`, `ChromeAnchor::Start`).
+        // No `config` at all: same default the deleted N-ary SVG compositor's
+        // bindings applied on omission (`DEFAULT_CHROME_INSET`, `ChromeAnchor::Start`).
         let tree = hconcat_two_leaves_titled();
         let h0 = hold();
         let h1 = hold();

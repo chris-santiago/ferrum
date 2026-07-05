@@ -5,9 +5,6 @@ Low-level rendering entry points — `render_svg`, `render_png`, layout/compose 
 ::: ferrum
     options:
       members:
-        - compose_svg_grid
-        - compose_svg_horizontal
-        - compose_svg_vertical
         - compute_layout
         - process_batch
         - render_png

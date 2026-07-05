@@ -1015,13 +1015,11 @@ def umap_embedding(
     n_epochs: Optional[int] = None,
 ) -> Any: ...
 
-# ---------- SVG compositor (Phase 8a Task 11) ----------
+# ---------- Figure chrome (flat single-chart caption/title band) ----------
 
-def compose_svg_horizontal(
-    svgs: list[str],
+def wrap_svg_with_chrome(
+    svg: str,
     *,
-    spacing: float = 10.0,
-    align: Literal["top", "center", "bottom"] = "top",
     title: str | None = None,
     subtitle: str | None = None,
     caption: str | None = None,
@@ -1030,68 +1028,11 @@ def compose_svg_horizontal(
     anchor: str | None = None,
 ) -> str:
     """
-    Lay out SVG panels side-by-side.
+    Wrap a single already-rendered SVG with a figure-level chrome band.
 
-    When *title*, *subtitle*, and *caption* are all ``None`` (default) the
-    output is byte-identical to the previous behavior.
-
-    Examples
-    --------
-    >>> import ferrum as fm
-    >>> combined = fm.compose_svg_horizontal([svg1, svg2], spacing=10)
-    """
-    ...
-
-def compose_svg_vertical(
-    svgs: list[str],
-    *,
-    spacing: float = 10.0,
-    align: Literal["left", "center", "right"] = "left",
-    title: str | None = None,
-    subtitle: str | None = None,
-    caption: str | None = None,
-    left_inset: float | None = None,
-    right_inset: float | None = None,
-    anchor: str | None = None,
-) -> str:
-    """
-    Stack SVG panels top-to-bottom.
-
-    When *title*, *subtitle*, and *caption* are all ``None`` (default) the
-    output is byte-identical to the previous behavior.
-
-    Examples
-    --------
-    >>> import ferrum as fm
-    >>> combined = fm.compose_svg_vertical([svg1, svg2], spacing=10)
-    """
-    ...
-
-def compose_svg_grid(
-    cells: list[str | None],
-    *,
-    rows: int,
-    cols: int,
-    row_ratios: list[float],
-    col_ratios: list[float],
-    spacing: float = 10.0,
-    title: str | None = None,
-    subtitle: str | None = None,
-    caption: str | None = None,
-    left_inset: float | None = None,
-    right_inset: float | None = None,
-    anchor: str | None = None,
-) -> str:
-    """
-    Arrange SVG panels in a grid.
-
-    When *title*, *subtitle*, and *caption* are all ``None`` (default) the
-    output is byte-identical to the previous behavior.
-
-    Examples
-    --------
-    >>> import ferrum as fm
-    >>> combined = fm.compose_svg_grid([[svg1, svg2], [svg3, svg4]], spacing=10)
+    Private ``ferrum._core`` implementation detail of ``Chart.to_svg()``'s
+    ``.properties(caption=...)`` post-wrap. When *title*, *subtitle*, and
+    *caption* are all ``None`` the output is byte-identical to the input.
     """
     ...
 

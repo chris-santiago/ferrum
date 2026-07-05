@@ -159,9 +159,6 @@ _DOC_ALLOWLIST: set[str] = {
     "compute_layout",
     "render_svg",
     "render_png",
-    "compose_svg_horizontal",
-    "compose_svg_vertical",
-    "compose_svg_grid",
     # Phase 10 — model diagnostics layer (added 2026-05-11)
     "ModelSource",
     "ComparedModelSource",

@@ -19,8 +19,6 @@ pub(crate) mod binding;
 pub(crate) mod mark_nodes;
 pub(crate) mod marks;
 pub(crate) mod position;
-pub mod compositor;
-pub(crate) mod grid_compose;
 pub(crate) mod figure_chrome;
 pub(crate) mod pack_instances;
 pub(crate) mod composite;
@@ -30,9 +28,6 @@ pub(crate) mod svg_walk;
 pub(crate) mod secondary_axis;
 pub(crate) mod break_axis;
 pub(crate) mod inset;
-pub use compositor::{
-    compose_svg_horizontal, compose_svg_vertical, CompositorError, HorizontalAlign, VerticalAlign,
-};
 
 // Constants (spec §6.1).
 pub const FLOAT_PRECISION: usize = 3;

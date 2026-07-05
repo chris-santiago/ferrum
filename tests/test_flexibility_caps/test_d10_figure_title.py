@@ -28,23 +28,22 @@ Python layer: ``_ChartLike.properties`` (``src/ferrum/composition.py:245``)
 has no concept of "figure-level" vs "panel-level" properties.  It fans
 ``**kwargs`` indiscriminately to every child chart.
 
-Rust layer: ``compose_svg_vertical`` / ``compose_svg_horizontal``
-(``crates/ferrum-core/src/render/compositor.rs:302 / :262``) accept only SVG
+Rust layer: the string-based 1D SVG compositors (vertical / horizontal stacking,
+previously in the now-deleted ``render/compositor.rs``) accept only SVG
 strings and a spacing value; they have no facility to inject a figure-wide
 title band before the panel grid or a caption band below it.
 
-``compose_svg_grid``
-(``crates/ferrum-core/src/render/grid_compose.rs:42``) similarly has no
-figure-level title or caption parameter.
+The grid compositor (previously in the now-deleted ``render/grid_compose.rs``)
+similarly has no figure-level title or caption parameter.
 
 For a fix to land, both layers must change:
   - Python: ``_ChartLike`` needs a ``figure_title`` / ``figure_subtitle`` /
     ``figure_caption`` store (or an overloaded ``properties`` that distinguishes
     figure-level from per-panel kwargs), and the render call must pass those
     values through.
-  - Rust: ``compose_svg_vertical``, ``compose_svg_horizontal``, and
-    ``compose_svg_grid`` need an optional title-band (above) and caption-band
-    (below) parameter so that a single text node wraps the whole output SVG.
+  - Rust: each string compositor needs an optional title-band (above) and
+    caption-band (below) parameter so that a single text node wraps the whole
+    output SVG.
 
 These tests assert the INTENDED behavior. All tests are expected to FAIL until
 the fix lands (TDD RED).
@@ -429,7 +428,8 @@ def test_d10_t10_concat_chart_figure_chrome_appears_once(two_charts):
     """ConcatChart.properties(title=, subtitle=, caption=) renders each text once.
 
     Previously ConcatChart silently dropped figure chrome: _figure_title was
-    stored but never threaded into compose_svg_grid, so no chrome appeared.
+    stored but never threaded into the (then-existing) grid compositor, so no
+    chrome appeared.
     """
     from ferrum.composition import ConcatChart
 
@@ -693,7 +693,7 @@ def test_d10_t21_empty_dataset_caption_default_inset():
     """Regression: empty-dataset single-chart caption rendered flush-left at x=0 (separate render path).
 
     The empty-data fast-path in _render.py (~line 662) is a distinct
-    compose_svg_vertical call from the normal path.  It must also honour the
+    wrap_svg_with_chrome call from the normal path.  It must also honour the
     default left inset (16) and start-anchor, not emit the caption at x=0.
     """
     empty = pl.DataFrame({"x": [], "y": []}, schema={"x": pl.Float64, "y": pl.Float64})

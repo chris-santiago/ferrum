@@ -1328,7 +1328,7 @@ fn decode_render_inputs(
 }
 
 // ---------------------------------------------------------------------------
-// SVG compositor bindings (Task 11)
+// Figure chrome bindings (Task 11; N-ary SVG compositor removed Task 10 stage 3)
 // ---------------------------------------------------------------------------
 
 use crate::render::figure_chrome::{ChromeAnchor, FigureChrome, DEFAULT_CHROME_INSET};
@@ -1344,33 +1344,6 @@ fn parse_chrome_anchor(anchor: Option<&str>) -> PyResult<ChromeAnchor> {
         None => Ok(ChromeAnchor::Start),
         Some(s) => s.parse::<ChromeAnchor>().map_err(|e| PyValueError::new_err(e.to_string())),
     }
-}
-
-/// Apply figure chrome to an already-composed SVG string.
-///
-/// This is the shared tail of all three `compose_svg_*_py` bindings:
-/// build the [`FigureChrome`] from the chrome kwargs and call
-/// [`wrap_with_chrome`](crate::render::figure_chrome::wrap_with_chrome).
-///
-/// `composed` is the raw composed SVG (no chrome yet) produced by the
-/// compositor. `title`/`subtitle`/`caption`/`left_inset`/`right_inset`/
-/// `anchor` are the same chrome kwargs accepted by every compose binding.
-///
-/// Errors from [`wrap_with_chrome`] are mapped to `PyValueError` here so
-/// callers don't need to repeat the `map_err` boilerplate.
-#[allow(clippy::too_many_arguments)]
-fn compose_and_wrap(
-    composed: String,
-    title: Option<&str>,
-    subtitle: Option<&str>,
-    caption: Option<&str>,
-    left_inset: Option<f64>,
-    right_inset: Option<f64>,
-    anchor: Option<&str>,
-) -> PyResult<String> {
-    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
-    crate::render::figure_chrome::wrap_with_chrome(&composed, chrome)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 /// Build a [`FigureChrome`] from the chrome-related keyword params, applying the
@@ -1394,30 +1367,31 @@ fn build_chrome<'a>(
     })
 }
 
-/// Compose SVG panels side-by-side into a single horizontal strip.
+/// Wrap a single already-rendered SVG with a figure-level chrome band
+/// (title/subtitle/caption).
+///
+/// This is the flat single-chart counterpart of the (now-removed) N-ary SVG
+/// compositor's chrome kwargs, extracted (Task 10 stage 3) so
+/// `Chart.to_svg()`'s `.properties(caption=)` post-wrap in `_render.py` no
+/// longer routes a single SVG through the general N-ary compositor. Not
+/// re-exported in `ferrum.__all__` — it is a private `ferrum._core`
+/// implementation detail of `_render.py`.
 ///
 /// Parameters
 /// ----------
-/// svgs : list[str]
-///     SVG document strings to lay out left-to-right. Each must be a valid
-///     SVG with a parseable ``viewBox`` or ``width``/``height`` attribute.
-/// spacing : float, default 10.0
-///     Gap in pixels between adjacent panels.
-/// align : str, default "top"
-///     Vertical alignment of panels with different heights. One of
-///     ``"top"``, ``"center"``, or ``"bottom"``.
+/// svg : str
+///     The already-rendered SVG document string to wrap.
 /// title : str or None, default None
-///     Figure-level title rendered as a band above all panels (bold, 16 px).
-///     Per-panel child titles are unaffected.
+///     Figure-level title rendered as a band above the chart (bold, 16 px).
 /// subtitle : str or None, default None
-///     Figure-level subtitle rendered below the title, above the panels (13 px).
+///     Figure-level subtitle rendered below the title, above the chart (13 px).
 /// caption : str or None, default None
-///     Figure-level caption rendered as a band below all panels (muted, 11 px).
+///     Figure-level caption rendered as a band below the chart (muted, 11 px).
 /// left_inset : float or None, default None
-///     Horizontal inset (px) from the left panel edge for ``"start"``-anchored
-///     chrome. Defaults to 16.0 (matching single-chart title inset).
+///     Horizontal inset (px) from the left edge for ``"start"``-anchored
+///     chrome. Defaults to 16.0.
 /// right_inset : float or None, default None
-///     Horizontal inset (px) from the right panel edge for ``"end"``-anchored
+///     Horizontal inset (px) from the right edge for ``"end"``-anchored
 ///     chrome. Defaults to 16.0.
 /// anchor : str or None, default None
 ///     Horizontal alignment of all chrome lines. One of ``"start"``,
@@ -1426,36 +1400,22 @@ fn build_chrome<'a>(
 /// Returns
 /// -------
 /// str
-///     A single SVG document whose width equals the sum of panel widths
-///     plus total spacing and whose height equals the tallest panel (plus
-///     header/footer bands when title/subtitle/caption are provided).
+///     The wrapped SVG document. When *title*, *subtitle*, and *caption* are
+///     all ``None`` the output is byte-identical to what the (now-removed)
+///     N-ary SVG compositor's vertical-stack entry point produced for a
+///     one-element list with ``spacing=0.0`` and the same chrome parameters.
 ///
 /// Raises
 /// ------
 /// ValueError
-///     If *align* is not one of the accepted values, or if any SVG string
-///     cannot be parsed.
-///
-/// Notes
-/// -----
-/// Used internally by ``HConcatChart`` to combine column-concatenated
-/// charts. The returned SVG preserves each panel's coordinate system via
-/// nested ``<g transform="translate(...)">`` elements.
-/// When all of *title*, *subtitle*, and *caption* are ``None`` the output is
-/// byte-identical to the previous behavior.
-///
-/// Examples
-/// --------
-/// >>> import ferrum as fm
-/// >>> combined = fm.compose_svg_horizontal([svg1, svg2], spacing=10)
+///     If *svg* cannot be parsed, or *anchor* is not one of the accepted
+///     values.
 #[pyfunction]
-#[pyo3(name = "compose_svg_horizontal")]
-#[pyo3(signature = (svgs, *, spacing = 10.0, align = "top", title = None, subtitle = None, caption = None, left_inset = None, right_inset = None, anchor = None))]
+#[pyo3(name = "wrap_svg_with_chrome")]
+#[pyo3(signature = (svg, *, title = None, subtitle = None, caption = None, left_inset = None, right_inset = None, anchor = None))]
 #[allow(clippy::too_many_arguments)]
-pub fn compose_svg_horizontal_py(
-    svgs: Vec<String>,
-    spacing: f64,
-    align: &str,
+pub fn wrap_svg_with_chrome_py(
+    svg: String,
     title: Option<&str>,
     subtitle: Option<&str>,
     caption: Option<&str>,
@@ -1463,199 +1423,16 @@ pub fn compose_svg_horizontal_py(
     right_inset: Option<f64>,
     anchor: Option<&str>,
 ) -> PyResult<String> {
-    let align_val = crate::render::compositor::VerticalAlign::try_from(align)
-        .map_err(pyo3::exceptions::PyValueError::new_err)?;
-    let composed = crate::render::compositor::compose_svg_horizontal(&svgs, spacing, align_val)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    compose_and_wrap(composed, title, subtitle, caption, left_inset, right_inset, anchor)
-}
-
-/// Compose SVG panels stacked top-to-bottom into a single vertical strip.
-///
-/// Parameters
-/// ----------
-/// svgs : list[str]
-///     SVG document strings to lay out top-to-bottom. Each must be a valid
-///     SVG with a parseable ``viewBox`` or ``width``/``height`` attribute.
-/// spacing : float, default 10.0
-///     Gap in pixels between adjacent panels.
-/// align : str, default "left"
-///     Horizontal alignment of panels with different widths. One of
-///     ``"left"``, ``"center"``, or ``"right"``.
-/// title : str or None, default None
-///     Figure-level title rendered as a band above all panels (bold, 16 px).
-///     Per-panel child titles are unaffected.
-/// subtitle : str or None, default None
-///     Figure-level subtitle rendered below the title, above the panels (13 px).
-/// caption : str or None, default None
-///     Figure-level caption rendered as a band below all panels (muted, 11 px).
-/// left_inset : float or None, default None
-///     Horizontal inset (px) from the left panel edge for ``"start"``-anchored
-///     chrome. Defaults to 16.0 (matching single-chart title inset).
-/// right_inset : float or None, default None
-///     Horizontal inset (px) from the right panel edge for ``"end"``-anchored
-///     chrome. Defaults to 16.0.
-/// anchor : str or None, default None
-///     Horizontal alignment of all chrome lines. One of ``"start"``,
-///     ``"middle"``, or ``"end"``. ``None`` is treated as ``"start"``.
-///
-/// Returns
-/// -------
-/// str
-///     A single SVG document whose height equals the sum of panel heights
-///     plus total spacing and whose width equals the widest panel (plus
-///     header/footer bands when title/subtitle/caption are provided).
-///
-/// Raises
-/// ------
-/// ValueError
-///     If *align* is not one of the accepted values, or if any SVG string
-///     cannot be parsed.
-///
-/// Notes
-/// -----
-/// Used internally by ``VConcatChart`` to combine row-concatenated charts.
-/// The returned SVG preserves each panel's coordinate system via nested
-/// ``<g transform="translate(...)">`` elements.
-/// When all of *title*, *subtitle*, and *caption* are ``None`` the output is
-/// byte-identical to the previous behavior.
-///
-/// Examples
-/// --------
-/// >>> import ferrum as fm
-/// >>> combined = fm.compose_svg_vertical([svg1, svg2], spacing=10)
-#[pyfunction]
-#[pyo3(name = "compose_svg_vertical")]
-#[pyo3(signature = (svgs, *, spacing = 10.0, align = "left", title = None, subtitle = None, caption = None, left_inset = None, right_inset = None, anchor = None))]
-#[allow(clippy::too_many_arguments)]
-pub fn compose_svg_vertical_py(
-    svgs: Vec<String>,
-    spacing: f64,
-    align: &str,
-    title: Option<&str>,
-    subtitle: Option<&str>,
-    caption: Option<&str>,
-    left_inset: Option<f64>,
-    right_inset: Option<f64>,
-    anchor: Option<&str>,
-) -> PyResult<String> {
-    let align_val = crate::render::compositor::HorizontalAlign::try_from(align)
-        .map_err(pyo3::exceptions::PyValueError::new_err)?;
-    let composed = crate::render::compositor::compose_svg_vertical(&svgs, spacing, align_val)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    compose_and_wrap(composed, title, subtitle, caption, left_inset, right_inset, anchor)
-}
-
-/// Compose SVG panels into a rectangular grid.
-///
-/// Parameters
-/// ----------
-/// cells : list[str | None]
-///     Flat list of SVG document strings in row-major order (length must
-///     equal *rows* × *cols*). Pass ``None`` for empty cells.
-/// rows : int
-///     Number of grid rows.
-/// cols : int
-///     Number of grid columns.
-/// row_ratios : list[float]
-///     Relative height weight for each row (length must equal *rows*).
-///     E.g. ``[2.0, 1.0]`` makes the first row twice as tall as the second.
-/// col_ratios : list[float]
-///     Relative width weight for each column (length must equal *cols*).
-/// spacing : float, default 10.0
-///     Gap in pixels between adjacent cells (applied both horizontally and
-///     vertically).
-/// title : str or None, default None
-///     Figure-level title rendered as a band above all panels (bold, 16 px).
-///     Per-panel child titles are unaffected.
-/// subtitle : str or None, default None
-///     Figure-level subtitle rendered below the title, above the panels (13 px).
-/// caption : str or None, default None
-///     Figure-level caption rendered as a band below all panels (muted, 11 px).
-/// left_inset : float or None, default None
-///     Horizontal inset (px) from the left panel edge for ``"start"``-anchored
-///     chrome. Defaults to 16.0 (matching single-chart title inset).
-/// right_inset : float or None, default None
-///     Horizontal inset (px) from the right panel edge for ``"end"``-anchored
-///     chrome. Defaults to 16.0.
-/// anchor : str or None, default None
-///     Horizontal alignment of all chrome lines. One of ``"start"``,
-///     ``"middle"``, or ``"end"``. ``None`` is treated as ``"start"``.
-///
-/// Returns
-/// -------
-/// str
-///     A single SVG document containing all cells positioned according to
-///     the ratio-weighted grid layout (plus header/footer bands when
-///     title/subtitle/caption are provided).
-///
-/// Raises
-/// ------
-/// ValueError
-///     If ``len(cells) != rows * cols``, ratios lists have wrong lengths,
-///     or any non-``None`` cell SVG cannot be parsed.
-///
-/// Notes
-/// -----
-/// Used internally by ``RepeatChart`` and the figure-level ``pairplot`` /
-/// ``clustermap`` combinators. Each cell is embedded via a nested
-/// ``<g transform="translate(...)">`` (native fit) or
-/// ``<svg viewBox preserveAspectRatio="none">`` (scaled fit) preserving
-/// its internal coordinate system.
-///
-/// Axis sharing (the prior `share_x` / `share_y` parameters) belongs at
-/// the Python layer pre-render: shared scales are computed before each
-/// cell renders so the resulting SVGs already align. The compositor sees
-/// opaque SVG strings and has no scale metadata to enforce sharing
-/// against; the parameters were never functional. Use
-/// `Chart.encode(x=fr.X(field, scale=...))` with a shared scale spec at
-/// composition time, or `JointChart`/`ClusterMapChart`'s `axis(show=False)`
-/// suppression for marginal/dendrogram cells.
-///
-/// When all of *title*, *subtitle*, and *caption* are ``None`` the output is
-/// byte-identical to the previous behavior.
-///
-/// Examples
-/// --------
-/// >>> import ferrum as fm
-/// >>> combined = fm.compose_svg_grid(
-/// ...     [svg_a, svg_b, svg_c, svg_d], rows=2, cols=2,
-/// ...     row_ratios=[1.0, 1.0], col_ratios=[1.0, 1.0], spacing=8,
-/// ... )
-#[pyfunction]
-#[pyo3(name = "compose_svg_grid")]
-#[pyo3(signature = (cells, *, rows, cols, row_ratios, col_ratios, spacing = 10.0, title = None, subtitle = None, caption = None, left_inset = None, right_inset = None, anchor = None))]
-#[allow(clippy::too_many_arguments)]
-pub fn compose_svg_grid_py(
-    cells: Vec<Option<String>>,
-    rows: usize,
-    cols: usize,
-    row_ratios: Vec<f64>,
-    col_ratios: Vec<f64>,
-    spacing: f64,
-    title: Option<&str>,
-    subtitle: Option<&str>,
-    caption: Option<&str>,
-    left_inset: Option<f64>,
-    right_inset: Option<f64>,
-    anchor: Option<&str>,
-) -> PyResult<String> {
-    let composed = crate::render::grid_compose::compose_svg_grid(
-        &cells,
-        rows,
-        cols,
-        &row_ratios,
-        &col_ratios,
-        spacing,
-    )
-    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-    compose_and_wrap(composed, title, subtitle, caption, left_inset, right_inset, anchor)
+    let chrome = build_chrome(title, subtitle, caption, left_inset, right_inset, anchor)?;
+    crate::render::figure_chrome::wrap_svg_with_chrome(&svg, chrome)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
 }
 
 /// Lay out a figure-level chrome title/subtitle/caption band as scene nodes.
 ///
 /// Produces the interactive (WASM) counterpart of the SVG band emitted by
-/// ``compose_svg_horizontal``/``_vertical``/``_grid``. The Python composite
+/// ``wrap_svg_with_chrome`` (flat single-chart) and the composite tree's root
+/// chrome config (composed figures). The Python composite
 /// merge injects the returned nodes into the merged scene's ``title`` list and
 /// offsets the merged child panels down by ``header_h`` — mirroring how the SVG
 /// path reserves top space — so the static and interactive renders place the
@@ -1699,7 +1476,8 @@ pub fn compose_svg_grid_py(
 ///       no title/subtitle is present (e.g. caption-only or all-``None``).
 ///     - ``footer_h`` — vertical band height (px) reserved **below** the panels
 ///       (caption). Grow the merged scene's ``height`` by ``footer_h`` so the
-///       interactive canvas matches the SVG canvas that ``compose_svg_*`` produces.
+///       interactive canvas matches the SVG canvas that the chrome-wrap emitters
+///       (``wrap_svg_with_chrome`` / the composite chrome band) produce.
 ///       ``0.0`` when no caption is present.
 ///
 ///     The caption node's ``y`` is already absolute in outer-canvas space

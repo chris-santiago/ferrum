@@ -58,7 +58,8 @@ pub struct Panel {
 /// nor the WASM renderer needs it, and this shape maps directly onto the
 /// WASM `Uniforms`/`Affine2` upload (`sx, sy, tx, ty`) with no truncation.
 /// Non-uniform (`sx != sy`) is required — JointChart marginals compute
-/// independent x/y scale factors (see `grid_compose.rs`).
+/// independent x/y scale factors (grid ratio-fit math in
+/// `render/composite_render.rs`, absorbed from the deleted `grid_compose.rs`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct LayoutScale {
     pub sx: f64,

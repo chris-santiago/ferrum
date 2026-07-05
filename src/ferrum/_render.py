@@ -382,11 +382,10 @@ class _RenderMixin:
             figure_caption = getattr(chart, "_figure_caption", None)
             if figure_caption is not None:
                 from ferrum._chrome import chrome_kwargs
-                from ferrum._core import compose_svg_vertical
+                from ferrum._core import wrap_svg_with_chrome
 
-                return compose_svg_vertical(
-                    [empty_svg],
-                    spacing=0.0,
+                return wrap_svg_with_chrome(
+                    empty_svg,
                     caption=figure_caption,
                     **chrome_kwargs(chart_config_dict),
                 )
@@ -399,17 +398,16 @@ class _RenderMixin:
             chart_config=chart_config_dict or None,
         )
         # Post-wrap with a caption band when one has been set via
-        # .properties(caption=...).  Using compose_svg_vertical with a single
-        # SVG is byte-identical to the plain SVG when no chrome is given, so
-        # this branch is only reached when a caption is actually present.
+        # .properties(caption=...).  wrap_svg_with_chrome is a no-op wrapper
+        # when no chrome is given, so this branch is only reached when a
+        # caption is actually present.
         figure_caption = getattr(chart, "_figure_caption", None)
         if figure_caption is not None:
             from ferrum._chrome import chrome_kwargs
-            from ferrum._core import compose_svg_vertical
+            from ferrum._core import wrap_svg_with_chrome
 
-            svg = compose_svg_vertical(
-                [svg],
-                spacing=0.0,
+            svg = wrap_svg_with_chrome(
+                svg,
                 caption=figure_caption,
                 **chrome_kwargs(chart_config_dict),
             )

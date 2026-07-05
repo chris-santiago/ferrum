@@ -1,8 +1,9 @@
-//! Figure-level chrome bands for composite charts.
+//! Figure-level chrome bands for composite and flat single-chart renders.
 //!
-//! Wraps a composed SVG (from `compose_svg_horizontal`, `compose_svg_vertical`,
-//! or `compose_svg_grid`) with an optional title + subtitle band above the panels
-//! and an optional caption band below the panels.
+//! Wraps an already-composed SVG (the unified Rust composite renderer's output
+//! for `HConcatChart`/`VConcatChart`/`RepeatChart`/facets, or a single chart's
+//! own SVG via [`wrap_svg_with_chrome`]) with an optional title + subtitle band
+//! above the panels and an optional caption band below the panels.
 //!
 //! **Byte-stability guarantee:** when all three of `title`, `subtitle`, and `caption`
 //! are `None`, `wrap_with_chrome` returns the input SVG unmodified. Callers can rely
@@ -15,13 +16,14 @@
 //!
 //! These constants match `layout::ThemeTypography` defaults so the chrome looks
 //! consistent with per-chart titles even when no theme dict is passed to the PyO3
-//! compositor binding (which operates at the SVG string level, post-render).
+//! chrome bindings (which operate at the SVG string level, post-render).
 
 use std::fmt;
 
 use super::color::fmt_svg;
-use super::svg::{escape_text, fmt_f};
-use super::compositor::{parse_svg_root, write_svg_open, CompositorError};
+use super::svg::{
+    escape_text, fmt_f, parse_svg_root, uniquify_clip_ids, write_svg_open, SvgParseError,
+};
 use ferrum_scene::{Color, FontWeight, SceneNode, TextAnchor, TextBaseline, TextStyle};
 
 // ---------------------------------------------------------------------------
@@ -65,9 +67,9 @@ const CAPTION_BOTTOM_PAD: f64 = 4.0;
 /// Horizontal alignment for figure-level chrome text (title, subtitle, caption).
 ///
 /// Governs all three chrome lines uniformly. Every caller (the PyO3
-/// `compose_svg_*` bindings, `render/binding.rs`; the composite tree's root
-/// `config` slot, `render/composite_render.rs`) parses the user-facing anchor
-/// string once via [`FromStr`](std::str::FromStr) into this typed enum.
+/// `wrap_svg_with_chrome` binding, `render/binding.rs`; the composite tree's
+/// root `config` slot, `render/composite_render.rs`) parses the user-facing
+/// anchor string once via [`FromStr`](std::str::FromStr) into this typed enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChromeAnchor {
     /// Flush-left: `x = left_inset`, `text-anchor="start"`.
@@ -342,7 +344,7 @@ struct ChromeLayout<'a> {
 /// │                        CAPTION_BOTTOM_PAD  │
 /// └────────────────────────────────────────────┘
 /// ```
-pub fn wrap_with_chrome(svg: &str, chrome: FigureChrome<'_>) -> Result<String, CompositorError> {
+pub fn wrap_with_chrome(svg: &str, chrome: FigureChrome<'_>) -> Result<String, SvgParseError> {
     if chrome.is_empty() {
         return Ok(svg.to_string());
     }
@@ -389,6 +391,47 @@ pub fn wrap_with_chrome(svg: &str, chrome: FigureChrome<'_>) -> Result<String, C
 
     out.push_str("</svg>");
     Ok(out)
+}
+
+/// Compose a single already-rendered SVG through the same single-cell wrap
+/// step the deleted N-ary SVG compositor (`render/compositor.rs`, removed in
+/// Task 10 stage 3) applied to a one-element input: re-emit the `<svg>` root
+/// at the same dimensions and wrap the body in a
+/// `<g transform="translate(0,0)">`, running it through [`uniquify_clip_ids`]
+/// with `cell_idx = 0`.
+///
+/// The former compositor's per-cell emitter applied `uniquify_clip_ids`
+/// unconditionally — even for the first/only cell — so this reproduces that
+/// side effect exactly rather than skipping it as an optimization. This was
+/// the flat single-chart counterpart of the deleted compositor's
+/// vertical-stack entry point called with a one-element list and
+/// `spacing=0.0`, extracted here so [`wrap_svg_with_chrome`] doesn't depend
+/// on the (now-deleted) general N-ary SVG compositor.
+fn compose_single_cell(svg: &str) -> Result<String, SvgParseError> {
+    let parsed = parse_svg_root(svg)?;
+    let mut out = String::with_capacity(svg.len() + 64);
+    write_svg_open(&mut out, parsed.width, parsed.height);
+    out.push_str(&format!(
+        r#"<g transform="translate({},{})">"#,
+        fmt_f(0.0), fmt_f(0.0),
+    ));
+    out.push_str(&uniquify_clip_ids(parsed.body, 0));
+    out.push_str("</g></svg>");
+    Ok(out)
+}
+
+/// Wrap a single (already-rendered) SVG with a figure-level chrome band.
+///
+/// This is the flat single-chart entry point that used to be reached via the
+/// deleted compositor's vertical-stack entry point (one-element list,
+/// `spacing=0.0`, `caption=..., **chrome_kwargs`) in `src/ferrum/_render.py`'s
+/// `.properties(caption=)` post-wrap (Task 10 stage 3). It takes the same
+/// code path — [`compose_single_cell`] followed by [`wrap_with_chrome`] —
+/// without depending on the general N-ary SVG compositor, and is
+/// byte-identical to that call for the same chrome parameters.
+pub fn wrap_svg_with_chrome(svg: &str, chrome: FigureChrome<'_>) -> Result<String, SvgParseError> {
+    let composed = compose_single_cell(svg)?;
+    wrap_with_chrome(&composed, chrome)
 }
 
 /// Build figure-level chrome as positioned `SceneNode::Text` nodes (title,
@@ -1062,5 +1105,109 @@ mod tests {
             SceneNode::Text { style, .. } => style.font_size,
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    // ── wrap_svg_with_chrome (flat single-chart chrome wrap) ────────────────
+    //
+    // Task 10 stage 3: `wrap_svg_with_chrome` replaced the flat single-chart
+    // caption/title path that used to go through the deleted general N-ary
+    // SVG compositor's vertical-stack entry point (one-element list,
+    // `spacing=0.0`, before `render/compositor.rs` was deleted). While both
+    // entries coexisted, a parity test suite (Rust unit tests here + a smoke
+    // check through the compiled PyO3 bindings) pinned byte-identity between
+    // them across every chrome kwarg combination the flat caption/title path
+    // uses; it was deleted alongside the N-ary compositor's PyO3 bindings in
+    // this same stage since there is no second implementation left to
+    // compare against. These tests instead pin `wrap_svg_with_chrome`'s own
+    // behavior directly.
+
+    #[test]
+    fn wrap_svg_with_chrome_no_chrome_matches_compose_single_cell() {
+        // No-chrome early return happens inside `wrap_with_chrome`, on the
+        // *composed* (single-cell-wrapped) string, not the raw input — so
+        // `wrap_svg_with_chrome` with no chrome must equal `compose_single_cell`
+        // directly, not the original `svg` argument.
+        let svg = make_svg(200.0, 100.0);
+        let chrome = FigureChrome::default();
+        let wrapped = wrap_svg_with_chrome(&svg, chrome).unwrap();
+        let composed = compose_single_cell(&svg).unwrap();
+        assert_eq!(wrapped, composed, "no-chrome case must equal the single-cell composition");
+    }
+
+    #[test]
+    fn wrap_svg_with_chrome_uniquifies_clip_ids_with_cell0_prefix() {
+        // compose_single_cell (like the deleted compositor's write_cell) applies
+        // uniquify_clip_ids unconditionally, even for the sole cell.
+        let body = r#"<defs><clipPath id="ferrum-clip-0"><rect/></clipPath></defs><g clip-path="url(#ferrum-clip-0)"/>"#;
+        let svg = make_root_svg(100.0, 50.0, body);
+        let composed = compose_single_cell(&svg).unwrap();
+        assert!(composed.contains(r#"id="cell0-ferrum-clip-0""#), "composed: {composed}");
+        assert!(composed.contains("url(#cell0-ferrum-clip-0)"), "composed: {composed}");
+        assert!(!composed.contains(r#"id="ferrum-clip-0""#), "unprefixed id leaked: {composed}");
+    }
+
+    fn make_root_svg(w: f64, h: f64, body: &str) -> String {
+        format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">{}</svg>"#,
+            w, h, w, h, body,
+        )
+    }
+
+    #[test]
+    fn wrap_svg_with_chrome_caption_expands_height_and_preserves_width() {
+        let svg = make_svg(200.0, 100.0);
+        let chrome = FigureChrome { caption: Some("Source: note"), ..Default::default() };
+        let result = wrap_svg_with_chrome(&svg, chrome).unwrap();
+        let parsed = parse_svg_root(&result).unwrap();
+        assert_eq!(parsed.width, 200.0, "width unchanged");
+        assert!(parsed.height > 100.0, "height should grow with caption: {}", parsed.height);
+        assert!(result.contains("Source: note"));
+    }
+
+    #[test]
+    fn wrap_svg_with_chrome_left_right_inset_and_anchor_match_wrap_with_chrome() {
+        // wrap_svg_with_chrome must honor the same insets/anchor resolution
+        // wrap_with_chrome does for a composite, since it delegates to it.
+        for (left_inset, right_inset, anchor) in [
+            (40.0, 30.0, ChromeAnchor::Start),
+            (16.0, 16.0, ChromeAnchor::Middle),
+            (16.0, 16.0, ChromeAnchor::End),
+        ] {
+            let svg = make_svg(200.0, 100.0);
+            let chrome = FigureChrome {
+                caption: Some("Source: note"),
+                left_inset,
+                right_inset,
+                anchor,
+                ..Default::default()
+            };
+            let result = wrap_svg_with_chrome(&svg, chrome).unwrap();
+            let expected_anchor = match anchor {
+                ChromeAnchor::Start => "start",
+                ChromeAnchor::Middle => "middle",
+                ChromeAnchor::End => "end",
+            };
+            assert!(
+                result.contains(&format!(r#"text-anchor="{expected_anchor}""#)),
+                "expected anchor {expected_anchor}: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_svg_with_chrome_empty_dataset_svg_caption_and_no_caption() {
+        // The exact 97-byte placeholder `_render.py` emits for an empty dataset.
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="600.0" height="400.0"><!-- empty dataset --></svg>"#;
+        assert_eq!(svg.len(), 97, "pins the literal this test asserts against");
+
+        let with_caption =
+            wrap_svg_with_chrome(svg, FigureChrome { caption: Some("EmptyCap"), ..Default::default() })
+                .unwrap();
+        assert!(with_caption.contains("EmptyCap"));
+        let parsed = parse_svg_root(&with_caption).unwrap();
+        assert!(parsed.height > 400.0, "height should grow with caption: {}", parsed.height);
+
+        let no_chrome = wrap_svg_with_chrome(svg, FigureChrome::default()).unwrap();
+        assert_eq!(no_chrome, compose_single_cell(svg).unwrap());
     }
 }

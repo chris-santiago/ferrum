@@ -453,7 +453,7 @@ impl CompositeNode {
 /// variant names the offending node's `kind` (`"leaf"` never appears here —
 /// leaves have no structural invariants to violate) so a Python
 /// `ValueError` message pinpoints the failing node directly, matching the
-/// existing `RenderError`/`CompositorError` idiom (`Display` + `Error`,
+/// existing `RenderError`/`SvgParseError` idiom (`Display` + `Error`,
 /// mapped to `PyValueError` at the PyO3 boundary).
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompositeSpecError {

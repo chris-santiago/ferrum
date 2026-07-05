@@ -367,11 +367,9 @@ Charts are placed left-to-right, wrapping to the next row after `columns` charts
 
 Both `LayerChart` and `ConcatChart` support `.theme()`, `.properties()`, `.save()`, and `.share_scale()` — the full composition API surface.
 
-## Low-level SVG composition
+## How composition renders
 
-The composition classes above produce their final SVG output using three low-level helpers: [`compose_svg_horizontal`][ferrum.compose_svg_horizontal], [`compose_svg_vertical`][ferrum.compose_svg_vertical], and [`compose_svg_grid`][ferrum.compose_svg_grid]. These are Rust-backed functions that stitch pre-rendered SVG strings into a single SVG document with configurable spacing and alignment.
-
-You rarely need them directly — the `|`, `&`, and class-based APIs handle layout automatically. They exist for advanced cases where you have pre-rendered SVG strings and want to combine them without going through the chart object model.
+Every composition — `|`, `&`, `ConcatChart`, `LayerChart`, and the grid forms behind `jointplot`/`pairplot`/`clustermap` — lowers to a single composite spec tree that one Rust render call turns into the final document. Scales resolve across panels in that same pass (`resolve=` sharing), panel geometry is laid out natively, and figure chrome (title, subtitle, caption, padding) is injected at the tree root. There is no public low-level SVG-stitching API: the earlier `compose_svg_*` helpers were removed when composition moved onto this unified path, and the `|`/`&`/class-based APIs are the supported way to combine charts.
 
 ## Where to go next
 
