@@ -1236,7 +1236,7 @@ class TestRawNodeNotSilentlyDropped:
 #
 # Regression for: data-anchored raw nodes (e.g. <image> annotations) on the
 # right-hand child of a horizontal concat were left at child-local coords.
-# Fixed in _scene_merge._offset_node: the raw handler wraps each fragment in
+# Fixed by the composite render entry (Rust): each raw fragment is wrapped in
 # `<g transform="translate(dx,dy)">` so the node rides along with its panel.
 
 

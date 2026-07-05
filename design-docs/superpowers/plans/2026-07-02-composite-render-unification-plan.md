@@ -202,6 +202,27 @@ Move all composition rendering (concat/grid/joint/clustermap/repeat/layer) onto 
 > sites (`share_scale`, `RepeatChart._apply_resolve`, `LayerChart._build_merged`)
 > are the FLAT-path domain union and REMAIN after the sweep — Task 10's grep proofs
 > target `_scale_share`/`_scene_merge`/`compose_svg_*` symbols, not these.
+>
+> **STAGE-2 DONE (2026-07-04); STAGE-3 SCOPE PINNED.** Stage 2 deleted
+> `_scene_merge.py`/`_scale_share.py` and every Python legacy composition path
+> (grep-proven; suite 6828/0 after removing 68 white-box tests of deleted
+> internals). Two `compose_svg_*` consumers survive for stage 3 (Rust):
+> (1) `src/ferrum/_render.py` uses `compose_svg_vertical` for the FLAT
+> single-chart `.properties(caption=)` band (2 call sites incl. the empty-data
+> path) — stage 3 must replace it with a Rust chrome-wrap entry that reuses
+> `figure_chrome::wrap_with_chrome` so flat output stays BYTE-IDENTICAL (the
+> composite entry's scene-native chrome is NOT byte-compatible; regenerated
+> composition goldens prove it), then delete `compose_svg_{horizontal,vertical,
+> grid}` bindings + `compositor.rs` + `grid_compose.rs`; (2) `ferrum/__init__.py`
+> re-exports `compose_svg_*` as PUBLIC API (`__all__`) — remove with the
+> bindings, re-run `scripts/gen_api_pages.py`, and note the removal for the
+> next release's changelog. Also on the stage-3 checklist: `src/ferrum/_core.pyi`
+> `compose_svg_*` stub signatures die with the bindings (spec-review finding).
+> Changelog note for Task 12: all-empty compositions (e.g. zero-row pairplot/
+> jointplot) now raise a typed ValueError instead of rendering a blank grid —
+> a deliberate, user-facing behavior change (stage-2 sub-task-3 decision;
+> a faithful full-size blank render would need leafless-grid sizing in Rust,
+> logged as a possible follow-up if visual fidelity for this edge is wanted).
 
 ### Task 10: Hard deletion + grep proofs
 - Consumes: all forms cut over (Tasks 6–9)

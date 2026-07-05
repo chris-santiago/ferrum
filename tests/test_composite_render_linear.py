@@ -6,7 +6,7 @@ Phase B Task 6 routes HConcat/VConcat static (``to_svg``) and interactive
 per-child string-compositor / scene-merge path.
 
 These tests lock **parity through the new mechanism**.  Linear-form scale
-sharing already worked via Phase A's ``_scale_share`` injection, so shared /
+sharing already worked via Phase A's legacy scale-share injection, so shared /
 independent extents are not a RED→GREEN flip here — the point is that the same
 observable behavior now flows through the composite tree + Rust resolve pass.
 The RED-provable #45 remainder (grid-composite children) is Task 7's.
@@ -388,7 +388,7 @@ def test_hconcat_resolve_shared_color_unions_categorical_domain(small_df, large_
 
     Task 10-pre-a sub-task 1: ``_composite_resolve_field`` now passes ``color``/
     ``size`` through to the Rust composite resolve pass (10-pre-b) instead of
-    forcing the whole tree to the legacy ``_scale_share`` injection path. RED
+    forcing the whole tree to the legacy scale-share injection path. RED
     before this task (any non-x/y shared channel returned ``None``, forcing
     ``_lower_composite`` to decline); GREEN after.
 
@@ -474,21 +474,25 @@ def test_hconcat_interactive_routes_through_composite_entry(small_chart, large_c
 
 
 def test_composite_resolve_field_positional_and_color_size():
-    assert _composite_resolve_field(None) == {}
-    assert _composite_resolve_field({}) == {}
-    assert _composite_resolve_field({"x": "shared"}) == {"x": "shared"}
-    assert _composite_resolve_field({"x": "shared", "y": "independent"}) == {
+    kind = {"kind": "hconcat"}
+    assert _composite_resolve_field(None, **kind) == {}
+    assert _composite_resolve_field({}, **kind) == {}
+    assert _composite_resolve_field({"x": "shared"}, **kind) == {"x": "shared"}
+    assert _composite_resolve_field({"x": "shared", "y": "independent"}, **kind) == {
         "x": "shared",
         "y": "independent",
     }
     # color/size are supported (10-pre-b Rust support + Task 10-pre-a gate drop).
-    assert _composite_resolve_field({"color": "shared"}) == {"color": "shared"}
-    assert _composite_resolve_field({"size": "shared"}) == {"size": "shared"}
-    assert _composite_resolve_field({"color": "independent"}) == {"color": "independent"}
-    # A shared channel outside {x, y, color, size} is still not representable.
-    assert _composite_resolve_field({"shape": "shared"}) is None
+    assert _composite_resolve_field({"color": "shared"}, **kind) == {"color": "shared"}
+    assert _composite_resolve_field({"size": "shared"}, **kind) == {"size": "shared"}
+    assert _composite_resolve_field({"color": "independent"}, **kind) == {"color": "independent"}
+    # A shared channel outside {x, y, color, size} is not representable: with
+    # no legacy path left to defer to (Task 10), it raises a typed error
+    # naming the composition node kind and the offending channel.
+    with pytest.raises(ValueError, match=r"hconcat: resolve= marks 'shape' 'shared'"):
+        _composite_resolve_field({"shape": "shared"}, **kind)
     # An independent unsupported channel is the default -> nothing to share.
-    assert _composite_resolve_field({"shape": "independent"}) == {}
+    assert _composite_resolve_field({"shape": "independent"}, **kind) == {}
 
 
 # ---------------------------------------------------------------------------

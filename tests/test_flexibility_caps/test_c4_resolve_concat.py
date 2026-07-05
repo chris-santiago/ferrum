@@ -14,7 +14,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
-from ferrum.composition import HConcatChart, VConcatChart
+from ferrum.composition import HConcatChart, VConcatChart, _lower_composite
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +59,24 @@ def chart_bottom(df_two_groups):
 # ---------------------------------------------------------------------------
 
 
+def _panel_point_fills(svg: str, n_left: int) -> list[set]:
+    """Distinct data-point fill colors per panel (document order split).
+
+    Same idiom as ``tests/test_composite_render_linear.py::_point_fill_colors``:
+    every data ``<circle>`` fill in document order (panel 1's circles first),
+    excluding legend swatches by their fixed ``r="4"`` radius; split after the
+    left/top panel's *n_left* points.
+    """
+    import re as _re
+
+    fills = [
+        fill
+        for attrs, fill in _re.findall(r'<circle\s+([^>]*)fill="([^"]+)"', svg)
+        if 'r="4"' not in attrs
+    ]
+    return [set(fills[:n_left]), set(fills[n_left:])]
+
+
 class TestHConcatChartResolve:
     """HConcatChart accepts, stores, and validates resolve=."""
 
@@ -89,8 +107,15 @@ class TestHConcatChartResolve:
         assert "<svg" in svg
 
     def test_hconcat_resolve_unifies_color_domain(self, df_two_groups):
-        """Resolved charts share a unified color scale domain."""
-        # Build charts with a subset of data each — different color domains.
+        """Shared color resolve renders one union domain across both panels.
+
+        Rewritten for Task 10: the legacy per-chart ``_resolved_charts()``
+        scale injection was deleted — sharing now rides the composite tree's
+        resolve field through the Rust resolve pass, so the observable proxy
+        is the RENDERED output: the overlap category ("b") must map to the
+        same palette color in both panels, and each panel must draw the
+        colors of its own categories mapped against the 3-category union.
+        """
         c1 = (
             fm.Chart(df_two_groups.filter(pl.col("cat").is_in(["a", "b"])))
             .mark_point()
@@ -102,20 +127,19 @@ class TestHConcatChartResolve:
             .encode(x="x", y="y", color="cat")
         )
         rc = HConcatChart([c1, c2], resolve={"color": "shared"})
-        resolved = rc._resolved_charts()
-        # After resolution all charts must share a domain covering all three categories.
-        domains = []
-        for chart in resolved:
-            enc = chart._encoding if hasattr(chart, "_encoding") else {}
-            color_enc = enc.get("color")
-            if color_enc is not None:
-                scale = getattr(color_enc, "_kwargs", {}).get("scale") or {}
-                domain = scale.get("domain", [])
-                domains.append(set(domain))
-        # All panels must have the same domain.
-        assert len(domains) >= 2
-        assert domains[0] == domains[1]
-        assert {"a", "b", "c"} == domains[0]
+        lowered = _lower_composite(rc, auto_tooltips=False)
+        assert lowered.tree["resolve"] == {"color": "shared"}
+
+        shared_fills = _panel_point_fills(rc.to_svg(), n_left=4)
+        indep_fills = _panel_point_fills((c1 | c2).to_svg(), n_left=4)
+        # Shared: panel 2's "b" keeps panel 1's "b" color (union domain), so
+        # the two panels' fill sets overlap in exactly the "b" color...
+        assert len(shared_fills[0] & shared_fills[1]) == 1
+        # ...and the union spans 3 distinct colors, one per category.
+        assert len(shared_fills[0] | shared_fills[1]) == 3
+        # Independent: both panels reuse palette slots 0/1, i.e. the SAME two
+        # colors — the discriminating contrast with the shared render.
+        assert indep_fills[0] == indep_fills[1]
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +177,11 @@ class TestVConcatChartResolve:
         assert "<svg" in svg
 
     def test_vconcat_resolve_unifies_color_domain(self, df_two_groups):
-        """Resolved charts share a unified color scale domain."""
+        """Shared color resolve renders one union domain across stacked panels.
+
+        Same rewrite as the HConcat sibling (Task 10: legacy injection
+        deleted; rendered fills are the observable proxy).
+        """
         c1 = (
             fm.Chart(df_two_groups.filter(pl.col("cat").is_in(["a", "b"])))
             .mark_point()
@@ -165,18 +193,12 @@ class TestVConcatChartResolve:
             .encode(x="x", y="y", color="cat")
         )
         rc = VConcatChart([c1, c2], resolve={"color": "shared"})
-        resolved = rc._resolved_charts()
-        domains = []
-        for chart in resolved:
-            enc = chart._encoding if hasattr(chart, "_encoding") else {}
-            color_enc = enc.get("color")
-            if color_enc is not None:
-                scale = getattr(color_enc, "_kwargs", {}).get("scale") or {}
-                domain = scale.get("domain", [])
-                domains.append(set(domain))
-        assert len(domains) >= 2
-        assert domains[0] == domains[1]
-        assert {"a", "b", "c"} == domains[0]
+        lowered = _lower_composite(rc, auto_tooltips=False)
+        assert lowered.tree["resolve"] == {"color": "shared"}
+
+        shared_fills = _panel_point_fills(rc.to_svg(), n_left=4)
+        assert len(shared_fills[0] & shared_fills[1]) == 1
+        assert len(shared_fills[0] | shared_fills[1]) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -320,12 +342,17 @@ class TestRegressionNoResolve:
         assert isinstance(rc, VConcatChart)
         assert rc._resolve is None
 
-    def test_hconcat_resolved_charts_passthrough(self, chart_left, chart_right):
-        """_resolved_charts() without resolve= returns the original chart list."""
-        rc = HConcatChart([chart_left, chart_right])
-        assert rc._resolved_charts() is rc.charts or rc._resolved_charts() == rc.charts
+    def test_hconcat_no_resolve_lowers_without_resolve_field(self, chart_left, chart_right):
+        """No resolve= -> the lowered composite tree carries no resolve field.
 
-    def test_vconcat_resolved_charts_passthrough(self, chart_top, chart_bottom):
-        """_resolved_charts() without resolve= returns the original chart list."""
+        Rewritten for Task 10 (``_resolved_charts()`` deleted): the default-
+        independent regression guard is now that the wire tree omits
+        ``resolve`` entirely, so the Rust pass leaves every leaf standalone.
+        """
+        rc = HConcatChart([chart_left, chart_right])
+        assert "resolve" not in _lower_composite(rc, auto_tooltips=False).tree
+
+    def test_vconcat_no_resolve_lowers_without_resolve_field(self, chart_top, chart_bottom):
+        """No resolve= -> the lowered composite tree carries no resolve field."""
         rc = VConcatChart([chart_top, chart_bottom])
-        assert rc._resolved_charts() is rc.charts or rc._resolved_charts() == rc.charts
+        assert "resolve" not in _lower_composite(rc, auto_tooltips=False).tree

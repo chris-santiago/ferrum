@@ -30,9 +30,6 @@ from ferrum.composition import (
     RepeatChart,
     VConcatChart,
     ClusterMapChart,
-    _offset_node,
-    _empty_scene,
-    _merge_packed_data,
 )
 from ferrum.configure import (
     AxisConfig,
@@ -1063,184 +1060,6 @@ def test_layer_warns_on_facet_conflict():
 
 
 # ---------------------------------------------------------------------------
-# 15. _offset_node edge cases (interactive scene merging)
-# ---------------------------------------------------------------------------
-
-
-def test_offset_node_unknown_type_is_noop():
-    """_offset_node with an unknown type should not crash.
-
-    Targets composition._offset_node: no match arm for unknown type.
-    The function should silently do nothing for unrecognized types.
-    """
-    node = {"type": "custom_unknown", "x": 10, "y": 20}
-    _offset_node(node, 5.0, 5.0)
-    # Unknown type: coordinates should NOT be modified
-    assert node["x"] == 10
-    assert node["y"] == 20
-
-
-def test_offset_node_zero_offset_is_noop():
-    """_offset_node with dx=0, dy=0 should not modify the node.
-
-    Targets composition._offset_node line 1868-1869: early return.
-    """
-    node = {"type": "circle", "cx": 100, "cy": 200}
-    _offset_node(node, 0.0, 0.0)
-    assert node["cx"] == 100
-    assert node["cy"] == 200
-
-
-def test_offset_node_group_recurses():
-    """_offset_node on a group node should recurse into children.
-
-    Targets composition._offset_node lines 1905-1907: group branch.
-    """
-    node = {
-        "type": "group",
-        "children": [
-            {"type": "circle", "cx": 10, "cy": 20},
-            {"type": "rect", "x": 30, "y": 40},
-        ],
-    }
-    _offset_node(node, 5.0, 10.0)
-    assert node["children"][0]["cx"] == 15
-    assert node["children"][0]["cy"] == 30
-    assert node["children"][1]["x"] == 35
-    assert node["children"][1]["y"] == 50
-
-
-def test_offset_node_path_commands():
-    """_offset_node on a path node offsets all command coordinates.
-
-    Targets composition._offset_node lines 1886-1892: path branch.
-    """
-    node = {
-        "type": "path",
-        "commands": [
-            {"x": 10, "y": 20},
-            {"x": 30, "y": 40, "cx": 15, "cy": 25},
-            {"x": 50, "y": 60, "c1x": 35, "c1y": 45, "c2x": 40, "c2y": 50},
-        ],
-    }
-    _offset_node(node, 100.0, 200.0)
-    assert node["commands"][0]["x"] == 110
-    assert node["commands"][0]["y"] == 220
-    assert node["commands"][1]["cx"] == 115
-    assert node["commands"][1]["cy"] == 225
-    assert node["commands"][2]["c1x"] == 135
-    assert node["commands"][2]["c1y"] == 245
-    assert node["commands"][2]["c2x"] == 140
-    assert node["commands"][2]["c2y"] == 250
-
-
-def test_offset_node_image():
-    """_offset_node on an image node offsets x/y.
-
-    Targets composition._offset_node lines 1893-1895: image branch.
-    """
-    node = {"type": "image", "x": 5, "y": 10}
-    _offset_node(node, 3.0, 7.0)
-    assert node["x"] == 8
-    assert node["y"] == 17
-
-
-def test_offset_node_polygon_offsets_rings():
-    """_offset_node on a polygon node offsets all ring points.
-
-    Targets composition._offset_node lines 1896-1899: polygon branch.
-    """
-    node = {
-        "type": "polygon",
-        "rings": [
-            [[0, 0], [10, 0], [10, 10], [0, 10]],
-        ],
-    }
-    _offset_node(node, 5.0, 5.0)
-    assert node["rings"][0][0] == [5, 5]
-    assert node["rings"][0][1] == [15, 5]
-    assert node["rings"][0][2] == [15, 15]
-    assert node["rings"][0][3] == [5, 15]
-
-
-def test_offset_node_polyline_offsets_points():
-    """_offset_node on a polyline node offsets all points.
-
-    Targets composition._offset_node lines 1900-1903: polyline branch.
-    """
-    node = {
-        "type": "polyline",
-        "points": [[0, 0], [10, 20], [30, 40]],
-    }
-    _offset_node(node, 2.0, 3.0)
-    assert node["points"][0] == [2, 3]
-    assert node["points"][1] == [12, 23]
-    assert node["points"][2] == [32, 43]
-
-
-def test_offset_node_line():
-    """_offset_node on a line node offsets all four endpoints.
-
-    Targets composition._offset_node lines 1878-1882: line branch.
-    """
-    node = {"type": "line", "x1": 0, "y1": 0, "x2": 100, "y2": 100}
-    _offset_node(node, 10.0, 20.0)
-    assert node["x1"] == 10
-    assert node["y1"] == 20
-    assert node["x2"] == 110
-    assert node["y2"] == 120
-
-
-# ---------------------------------------------------------------------------
-# 16. _merge_packed_data edge cases
-# ---------------------------------------------------------------------------
-
-
-def test_merge_packed_data_empty_input():
-    """_merge_packed_data with empty packed_list returns empty bytes.
-
-    Targets composition._merge_packed_data line 1944: zip over empty lists.
-    """
-    result = _merge_packed_data([], [], [])
-    assert result == b""
-
-
-def test_merge_packed_data_with_empty_bytes():
-    """_merge_packed_data with empty bytes in packed_list skips them.
-
-    Targets composition._merge_packed_data line 1945: 'if not packed: continue'.
-    """
-    result = _merge_packed_data([b"", b""], [0, 0], [(0.0, 0.0), (0.0, 0.0)])
-    assert result == b""
-
-
-# ---------------------------------------------------------------------------
-# 17. _empty_scene shape
-# ---------------------------------------------------------------------------
-
-
-def test_empty_scene_has_all_required_keys():
-    """_empty_scene returns a dict with all keys needed for merging.
-
-    Targets composition._empty_scene lines 1807-1825.
-    """
-    scene = _empty_scene()
-    assert scene["width"] == 0
-    assert scene["height"] == 0
-    assert scene["background"] is None
-    assert scene["panels"] == []
-    assert scene["legend"] == []
-    assert scene["decorations"] == []
-    assert scene["selections"] == []
-    assert scene["title"] == []
-    assert scene["interaction"]["zoom_enabled"] is True
-    assert scene["interaction"]["pan_enabled"] is True
-    assert scene["interaction"]["conditionals"] == []
-    assert scene["interaction"]["linked_panels"] == []
-    assert scene["interaction"]["tick_levels"] == []
-
-
-# ---------------------------------------------------------------------------
 # 18. Coord edge cases through composition
 # ---------------------------------------------------------------------------
 
@@ -1459,7 +1278,8 @@ def test_theme_on_layer_chart_propagates():
 def test_concat_chart_shared_scale_renders():
     """ConcatChart with resolve={'x': 'shared'} should render valid SVG.
 
-    Targets ConcatChart._resolved_charts lines 1443-1458.
+    The shared domain rides the composite tree's resolve field (Rust
+    resolve pass) since Task 10 deleted the legacy per-chart injection.
     """
     df1 = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
     df2 = pl.DataFrame({"x": [10.0, 20.0, 30.0], "y": [40.0, 50.0, 60.0]})
@@ -1473,7 +1293,8 @@ def test_concat_chart_shared_scale_renders():
 def test_concat_chart_shared_unbound_channel_is_noop():
     """ConcatChart sharing a channel that no chart binds should be a no-op.
 
-    Targets ConcatChart._resolved_charts -> compute_union_domain returning None.
+    In the composite resolve pass, a shared channel no leaf binds produces
+    no domain group -- the render must be an unchanged no-op, not an error.
     """
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     c1 = Chart(df).mark_point().encode(x="x", y="y")
@@ -3277,61 +3098,6 @@ def test_serialize_structural_unknown_type_raises():
 
     with pytest.raises(TypeError, match="Unknown structural"):
         _RenderMixin._serialize_structural(FakeStructural())
-
-
-# ---------------------------------------------------------------------------
-# 57. Deeply nested offset_node group
-# ---------------------------------------------------------------------------
-
-
-def test_offset_node_deeply_nested_group():
-    """_offset_node should recurse through nested groups.
-
-    Targets composition._offset_node: group recursion at multiple levels.
-    """
-    node = {
-        "type": "group",
-        "children": [
-            {
-                "type": "group",
-                "children": [
-                    {"type": "circle", "cx": 5, "cy": 10},
-                ],
-            },
-        ],
-    }
-    _offset_node(node, 100.0, 200.0)
-    inner = node["children"][0]["children"][0]
-    assert inner["cx"] == 105
-    assert inner["cy"] == 210
-
-
-# ---------------------------------------------------------------------------
-# 58. _merge_packed_data with truncated data
-# ---------------------------------------------------------------------------
-
-
-def test_merge_packed_data_truncated_header():
-    """_merge_packed_data with a buffer shorter than 20 bytes should not crash.
-
-    Targets composition._merge_packed_data while loop condition: pos + 20 <= len(packed).
-    """
-    # Less than 20 bytes: header cannot be parsed, should silently skip.
-    result = _merge_packed_data([b"\x00" * 10], [0], [(0.0, 0.0)])
-    assert result == b""
-
-
-def test_merge_packed_data_unknown_kind_stops_parsing():
-    """_merge_packed_data with unknown kind in header should stop parsing that child.
-
-    Targets composition._merge_packed_data line 1951: kind not in _INSTANCE_SIZES.
-    """
-    import struct
-
-    # Create a 20-byte header with kind=99 (unknown)
-    header = struct.pack("<5I", 0, 0, 99, 0, 0)
-    result = _merge_packed_data([header], [0], [(0.0, 0.0)])
-    assert result == b""
 
 
 # ---------------------------------------------------------------------------

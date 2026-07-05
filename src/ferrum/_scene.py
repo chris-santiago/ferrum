@@ -3,9 +3,11 @@
 This module is the single, neutral home for turning any chart-like object into
 the SceneGraph JSON + packed-instance buffer the WASM renderer consumes.  The
 sole producer is :func:`_render_scene`; the interactive widget
-(``ferrum._interactive``), the HTML/JSON export router (``ferrum.display``), the
-composite merge layer (``ferrum._scene_merge``), and the composite wrappers
-(``ferrum.composition``) all route through it, so there is exactly one
+(``ferrum._interactive``), the HTML/JSON export router (``ferrum.display``), and
+the composite wrappers (``ferrum.composition`` — most composites route through
+the Rust composite-render entry directly via their own ``_render_interactive``,
+while ``LayerChart``'s merged single-panel path calls back into
+:func:`_render_scene`) all route through it, so there is exactly one
 chart→scene path with no parallel copies.
 
 The render-contract Protocols (:class:`SupportsRender`, :class:`SceneRenderable`,

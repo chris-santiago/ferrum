@@ -462,10 +462,10 @@ def test_importance_chart_compare_svg_is_deterministic():
     """importance_chart(model, X, y, compare=...) must produce byte-identical
     SVG across repeated calls in the same process.
 
-    Root cause: _scale_share._column_unique formerly called
-    col.unique() without maintain_order=True.  Polars returns unique values in
-    hash order (non-deterministic across calls), making the shared categorical
-    y-axis domain non-deterministic and thus the SVG non-deterministic.
+    Root cause: the ordinal-domain union helper formerly called col.unique()
+    without maintain_order=True.  Polars returns unique values in hash order
+    (non-deterministic across calls), making the shared categorical y-axis
+    domain non-deterministic and thus the SVG non-deterministic.
     """
     from sklearn.ensemble import RandomForestRegressor
 
@@ -482,7 +482,7 @@ def test_importance_chart_compare_svg_is_deterministic():
     }
     assert len(svgs) == 1, (
         "importance_chart compare= produced non-deterministic SVG across 3 calls; "
-        "check _scale_share._column_unique for maintain_order=True"
+        "check the ordinal-domain union helper for maintain_order=True"
     )
 
 
@@ -490,11 +490,11 @@ def test_compute_union_domain_ordinal_is_stable_across_calls():
     """compute_union_domain over ordinal columns must return the same domain
     every time it is called (order-preserving unique, not hash-order).
 
-    This is the unit-level guard for _scale_share._column_unique.
+    This is the unit-level guard for the ordinal-domain union helper.
     """
     import polars as pl
 
-    from ferrum._scale_share import compute_union_domain
+    from ferrum.composition import compute_union_domain
 
     # Build two minimal charts whose feature column has the same values but
     # may be encountered in different orders by the uniqueness kernel.

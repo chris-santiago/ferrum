@@ -7,13 +7,12 @@ LayerChart lowers to the Rust ``"overlay"`` composite layout (children share
 one panel rect; z-order = child declaration order).
 
 RepeatChart routes BOTH static (``to_svg``) and interactive
-(``_render_interactive``) rendering through the one-call composite entry when
-the composition lowers cleanly, falling back to the pre-existing per-child
-render path otherwise (same two-path precedent already shipped for every
-other composite form in this file).
+(``_render_interactive``) rendering through the one-call composite entry
+unconditionally (Task 10 deleted the per-child fallback; a composition that
+cannot lower raises a typed ValueError).
 
 LayerChart is split: ``to_svg`` (static) routes through the overlay composite
-entry, but ``_render_interactive`` ALWAYS uses the legacy merged-chart route
+entry, but ``_render_interactive`` ALWAYS uses the merged-chart route
 (never the overlay tree), because the interactive scene contract requires
 LayerChart to produce EXACTLY ONE panel — selections, hit-testing, and the
 WASM interaction runtime assume layered marks share a single panel. The
@@ -149,7 +148,7 @@ def test_repeat_resolve_shared_color_lowers_via_composite_path(repeat_df):
 
     ``_composite_resolve_field`` passes ``color``/``size`` through to the Rust
     composite resolve pass (10-pre-b) instead of forcing the whole tree to the
-    legacy ``_scale_share`` injection path. RED before this task (any non-x/y
+    legacy scale-share injection path. RED before this task (any non-x/y
     shared channel returned ``None``); GREEN after.
     """
     chart = RepeatChart(
@@ -324,7 +323,7 @@ def test_layer_resolve_shared_color_unions_categorical_domain():
     Task 10-pre-a sub-task 1: ``_composite_resolve_field`` now passes ``color``/
     ``size`` through to the Rust composite resolve pass (10-pre-b). RED before
     this task (any non-x/y shared channel forced the whole overlay to
-    ``_build_merged``'s legacy ``_scale_share`` injection); GREEN after.
+    ``_build_merged``'s legacy scale-share injection); GREEN after.
 
     Unlike HConcat/VConcat/grid forms, an overlay ALWAYS shares x/y (the tree's
     ``resolve`` unconditionally forces both). The standalone color-only case

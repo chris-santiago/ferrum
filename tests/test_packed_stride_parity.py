@@ -1,9 +1,14 @@
-"""Packed-stride parity: Python mirror constants match Rust producer output.
+"""Packed-stride parity: pins the Rust packed-buffer wire format directly.
 
-``composition._PACKED_INSTANCE_SIZES = {0: 64, 1: 72}`` is a hand-synced copy
-of ``ferrum-core/src/render/pack_instances.rs`` constants ``CIRCLE_STRIDE = 64``
-and ``RECT_STRIDE = 72``.  No test previously verified these matched the bytes
-the Rust producer actually emits.  This file is the regression gate.
+``ferrum-core/src/render/pack_instances.rs`` defines ``CIRCLE_STRIDE = 64`` and
+``RECT_STRIDE = 72``.  Task 10 (composite-render-unification) deleted the
+Python-side hand-synced mirror of these constants
+(``composition._PACKED_INSTANCE_SIZES``, formerly re-exported from the
+now-deleted legacy Python scene-merge module) along with the Python packed-buffer merge
+machinery it served — there is no more Python-side copy to drift from Rust.
+This file keeps the *value* pin (64 / 72) as literal constants measured
+directly against Rust's actual output, so a real Rust-side stride change is
+still caught here.
 
 ## How stride is measured
 
@@ -18,16 +23,16 @@ section.  Solving for stride:
 
     actual_stride = (len(packed) - 20 - count * 4) // count
 
-This is computed entirely from the buffer and the header count field, with no
-reference to ``_PACKED_INSTANCE_SIZES``.  The test then asserts:
+This is computed entirely from the buffer and the header count field. The test
+then asserts:
 
-    actual_stride == _PACKED_INSTANCE_SIZES[kind]
+    actual_stride == _CIRCLE_STRIDE  # or _RECT_STRIDE
 
 ## Why this is a real discriminator
 
 A deliberately-wrong constant (e.g. 60 for circles instead of 64) causes the
 assertion to fail, because ``len(packed) - 20 == count * 64`` (as produced by
-Rust) but ``_PACKED_INSTANCE_SIZES[0] == 60`` would claim 60.  The test
+Rust) but a wrong pin of 60 would not match. The test
 ``test_wrong_stride_would_fail`` exercises this explicitly.
 
 ## X@byte0, Y@byte4 sanity check
@@ -47,7 +52,6 @@ import pytest
 
 import ferrum as fm
 from ferrum._core import render_interactive
-from ferrum.composition import _PACKED_INSTANCE_SIZES
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -56,6 +60,11 @@ from ferrum.composition import _PACKED_INSTANCE_SIZES
 _HEADER_SIZE = 20  # 5 × u32 LE
 _X_BYTE_OFFSET = 0  # f32[0] = byte 0
 _Y_BYTE_OFFSET = 4  # f32[1] = byte 4
+
+# Rust-side wire-format constants (ferrum-core/src/render/pack_instances.rs),
+# pinned here directly now that no Python-side mirror exists to drift from them.
+_CIRCLE_STRIDE = 64
+_RECT_STRIDE = 72
 
 # Sentinel: no trailing data when flags == 0.
 _FLAG_HAS_DATA_INDICES = 0x2
@@ -154,30 +163,30 @@ def big_rect_chart() -> fm.Chart:
 
 
 def test_circle_stride_matches_constant(big_circle_chart):
-    """Kind-0 (circle) actual stride equals ``_PACKED_INSTANCE_SIZES[0]``."""
+    """Kind-0 (circle) actual stride equals the pinned ``_CIRCLE_STRIDE``."""
     packed = _packed_no_tooltips(big_circle_chart)
     assert packed, "a >1000-mark point chart must produce non-empty packed bytes"
 
     kind, count, measured = _measure_stride(packed)
     assert kind == 0, f"expected kind=0 (circle); got {kind}"
     assert count >= 1500, f"expected at least 1500 instances; got {count}"
-    assert measured == _PACKED_INSTANCE_SIZES[0], (
+    assert measured == _CIRCLE_STRIDE, (
         f"circle stride mismatch: Rust emits {measured} bytes/instance, "
-        f"but _PACKED_INSTANCE_SIZES[0] == {_PACKED_INSTANCE_SIZES[0]}"
+        f"but the pinned constant is {_CIRCLE_STRIDE}"
     )
 
 
 def test_rect_stride_matches_constant(big_rect_chart):
-    """Kind-1 (rect) actual stride equals ``_PACKED_INSTANCE_SIZES[1]``."""
+    """Kind-1 (rect) actual stride equals the pinned ``_RECT_STRIDE``."""
     packed = _packed_no_tooltips(big_rect_chart)
     assert packed, "a >1000-mark bar chart must produce non-empty packed bytes"
 
     kind, count, measured = _measure_stride(packed)
     assert kind == 1, f"expected kind=1 (rect); got {kind}"
     assert count >= 1500, f"expected at least 1500 instances; got {count}"
-    assert measured == _PACKED_INSTANCE_SIZES[1], (
+    assert measured == _RECT_STRIDE, (
         f"rect stride mismatch: Rust emits {measured} bytes/instance, "
-        f"but _PACKED_INSTANCE_SIZES[1] == {_PACKED_INSTANCE_SIZES[1]}"
+        f"but the pinned constant is {_RECT_STRIDE}"
     )
 
 
@@ -271,16 +280,16 @@ def test_wrong_stride_would_fail(big_circle_chart):
             "the discriminator is broken."
         )
 
-    # To make it explicit: if _PACKED_INSTANCE_SIZES[0] were wrong, this is
-    # what would fail in test_circle_stride_matches_constant:
+    # To make it explicit: if _CIRCLE_STRIDE were wrong, this is what would
+    # fail in test_circle_stride_matches_constant:
     #
-    #   assert measured_circle_stride == _PACKED_INSTANCE_SIZES[0]
+    #   assert measured_circle_stride == _CIRCLE_STRIDE
     #   → assert 64 == 60   # FAILS if constant is wrong
     #
     # The assertion that follows verifies the current constant is correct:
-    assert measured_circle_stride == _PACKED_INSTANCE_SIZES[0], (
-        f"_PACKED_INSTANCE_SIZES[0] drifted from Rust: "
-        f"Rust emits {measured_circle_stride}, constant says {_PACKED_INSTANCE_SIZES[0]}"
+    assert measured_circle_stride == _CIRCLE_STRIDE, (
+        f"_CIRCLE_STRIDE drifted from Rust: "
+        f"Rust emits {measured_circle_stride}, constant says {_CIRCLE_STRIDE}"
     )
 
 
@@ -305,11 +314,11 @@ def test_wrong_rect_stride_would_fail(big_rect_chart):
             "the discriminator is broken."
         )
 
-    # If _PACKED_INSTANCE_SIZES[1] were wrong, test_rect_stride_matches_constant would fail:
+    # If _RECT_STRIDE were wrong, test_rect_stride_matches_constant would fail:
     #
-    #   assert measured_rect_stride == _PACKED_INSTANCE_SIZES[1]
+    #   assert measured_rect_stride == _RECT_STRIDE
     #   → assert 72 == 64   # FAILS if constant is wrong
-    assert measured_rect_stride == _PACKED_INSTANCE_SIZES[1], (
-        f"_PACKED_INSTANCE_SIZES[1] drifted from Rust: "
-        f"Rust emits {measured_rect_stride}, constant says {_PACKED_INSTANCE_SIZES[1]}"
+    assert measured_rect_stride == _RECT_STRIDE, (
+        f"_RECT_STRIDE drifted from Rust: "
+        f"Rust emits {measured_rect_stride}, constant says {_RECT_STRIDE}"
     )
