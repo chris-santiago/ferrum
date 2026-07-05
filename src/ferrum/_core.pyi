@@ -958,6 +958,7 @@ def render_interactive(
     config: Any = None,
     chart_config: Any = None,
 ) -> Tuple[str, bytes]: ...
+
 # `tree` is a nested-dict composite tree (see crate::spec::composite):
 #   leaf:      {"kind": "leaf", "spec": ChartSpec, "data": int,
 #               # optional Task 5d per-leaf binding overrides (absent = inherit
