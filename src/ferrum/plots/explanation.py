@@ -265,6 +265,14 @@ def _shap_bar_chart_from_source(
     ``class_label`` (one bar panel per class). ``per_class=False``
     (default) renders a single panel using the first class_label group
     (the only group on regression and binary classifiers).
+
+    Feature selection follows the same global-feature-set principle as
+    ``beeswarm``/``waterfall``: features are ranked once via
+    ``_shap_order_features`` (aggregating across all classes present),
+    and every class panel keeps that same top-``max_display`` set — no
+    class-blind top-k over ``(class_label, feature)`` pairs, which could
+    hand different feature sets to different class panels or starve a
+    low-magnitude class of representation.
     """
     _validate_choice("shap_bar_chart", "order", order, _SHAP_ORDER_VALUES)
     import ferrum
@@ -273,12 +281,21 @@ def _shap_bar_chart_from_source(
     agg_expr = expr.mean() if order == "abs_mean" else expr.max()
     sv = source.shap_values(background=background)
     sv = _shap_select_class(sv, per_class=per_class)
+    keep = _shap_order_features(sv, order=order, max_display=max_display)
     group_keys = ["class_label", "feature"] if per_class else ["feature"]
     agg = (
-        sv.group_by(group_keys)
+        sv.filter(pl.col("feature").is_in(keep))
+        .group_by(group_keys)
         .agg(agg_expr.alias("abs_mean_shap"))
-        .sort("abs_mean_shap", descending=True)
-        .head(max_display * sv["class_label"].n_unique() if per_class else max_display)
+    )
+    # Sort rows so features appear in the same descending-rank order across
+    # every class facet (keep[0] is most important) -- Rust's
+    # distinct_values_in_order uses row encounter order to build the
+    # ordinal-y domain, so row order drives axis ordering, same as beeswarm.
+    agg = (
+        agg.with_columns(pl.col("feature").cast(pl.Enum(keep)).alias("_feature_order"))
+        .sort("_feature_order")
+        .drop("_feature_order")
     )
     x_max = float(agg["abs_mean_shap"].max())
     domain = (0.0, x_max * 1.05 if x_max > 0 else 1.0)
@@ -286,7 +303,8 @@ def _shap_bar_chart_from_source(
         max_display=max_display,
         x_scale_domain=domain,
     )
-    if _should_facet_by_class(agg, per_class=per_class):
+    is_faceted = _should_facet_by_class(agg, per_class=per_class)
+    if is_faceted:
         chart = chart.facet(col="class_label")
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
@@ -380,7 +398,8 @@ def _shap_waterfall_chart_from_source(
         max_display=max_display,
         x_scale_domain=domain,
     )
-    if _should_facet_by_class(plot_df, per_class=per_class):
+    is_faceted = _should_facet_by_class(plot_df, per_class=per_class)
+    if is_faceted:
         chart = chart.facet(col="class_label")
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme

@@ -7,6 +7,7 @@ use pyo3_arrow::PyRecordBatchReader;
 
 use crate::layout::{LegendDirection, LegendOrient, TextAnchor, ThemeInputs, Viewport};
 use crate::spec::chart::ChartSpec;
+use crate::spec::composite::CompositeNode;
 
 use super::chart_config::ChartConfig;
 use super::config::RenderConfig;
@@ -151,8 +152,9 @@ pub fn render_interactive(
     chart_config: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<(String, Py<PyBytes>)> {
     let (batch, t, c, cc, vp) = decode_render_inputs(data, viewport, theme, config, chart_config)?;
-    let (json, packed_bytes) = super::render_scene_json(spec, &batch, &t, vp, &c, &cc)
+    let (json, packed_bytes, warnings) = super::render_scene_json(spec, &batch, &t, vp, &c, &cc)
         .map_err(render_err_to_py)?;
+    emit_warnings(py, &warnings)?;
     let py_bytes = PyBytes::new(py, &packed_bytes);
     Ok((json, py_bytes.unbind()))
 }
@@ -215,7 +217,7 @@ pub fn render_composite_svg(
     let node = crate::spec::composite::composite_tree_from_py(tree)?;
     let (batches, t, c, cc, vp) =
         decode_composite_inputs(payloads, viewport, theme, config, chart_config)?;
-    let bindings = collect_leaf_bindings(tree, &t, vp, &c, &cc)?;
+    let bindings = collect_leaf_bindings(tree, &node, &t, vp, &c, &cc)?;
     let leaves = build_composite_leaves(&node, &batches, &bindings)?;
     let (scene, warnings) = super::composite_render::render_composite_scene(&node, &leaves, &t)
         .map_err(composite_render_err_to_py)?;
@@ -272,17 +274,18 @@ pub fn render_composite_interactive<'py>(
     let node = crate::spec::composite::composite_tree_from_py(tree)?;
     let (batches, t, c, cc, vp) =
         decode_composite_inputs(payloads, viewport, theme, config, chart_config)?;
-    let bindings = collect_leaf_bindings(tree, &t, vp, &c, &cc)?;
+    let bindings = collect_leaf_bindings(tree, &node, &t, vp, &c, &cc)?;
     let leaves = build_composite_leaves(&node, &batches, &bindings)?;
-    // Warning emission deferred here (unlike `render_composite_svg`): its flat
-    // sibling `render_interactive` has the identical pre-existing gap —
-    // `render_scene_json` doesn't surface `RenderWarning`s to this binding at
-    // all, so there is no established `emit_warnings` call for the interactive
-    // path to mirror. Fixing this composite entry alone would make it diverge
-    // from `render_interactive` instead of matching it. Both are tracked in
-    // GH #50 (orchestrator decision: consistency over one-sided fixing).
-    let (mut scene, _warnings) = super::composite_render::render_composite_scene(&node, &leaves, &t)
+    // GH #50: warning emission used to be deferred here because the flat
+    // sibling `render_interactive` had the identical gap (`render_scene_json`
+    // didn't surface `RenderWarning`s at all — fixed above, in this same
+    // burndown, by adding `warnings` to its return). Both interactive entries
+    // now emit through the same `py`/GIL context `render_composite_svg` and
+    // `render_svg`/`render_png` already use — no design blocker, just a
+    // one-sided fix that's no longer one-sided.
+    let (mut scene, warnings) = super::composite_render::render_composite_scene(&node, &leaves, &t)
         .map_err(composite_render_err_to_py)?;
+    emit_warnings(py, &warnings)?;
     let packed_bytes = super::pack_instances::extract_packed_bytes(&mut scene);
     let json = serde_json::to_string(&scene)
         .map_err(|e| PyValueError::new_err(format!("composite scene serialization: {e}")))?;
@@ -336,25 +339,30 @@ struct LeafBinding {
     chart_config: super::chart_config::ChartConfig,
 }
 
-/// Walk the Python composite tree in leaf pre-order (the same order
-/// [`super::composite::flatten_leaves`] produces for the already-coerced
-/// [`CompositeNode`]) and resolve each leaf's render inputs (Task 5d per-leaf
-/// binding). A leaf may carry optional `theme`/`viewport`/`config`/
-/// `chart_config` keys; an absent key inherits the call-level value, so a
-/// homogeneous tree (Task 6/7's) resolves every leaf to a clone of the
-/// call-level inputs — byte-identical to the pre-5d single-value path. A
-/// `hole` (Task 8a) is skipped outright — it has no `spec`/`data`, so no
-/// render inputs to resolve, and it must not appear in the returned bindings
-/// or `flatten_leaves`' count check would fail.
+/// Walk the Python composite tree in leaf pre-order and resolve each leaf's
+/// render inputs (Task 5d per-leaf binding). A leaf may carry optional
+/// `theme`/`viewport`/`config`/`chart_config` keys; an absent key inherits the
+/// call-level value, so a homogeneous tree (Task 6/7's) resolves every leaf to
+/// a clone of the call-level inputs — byte-identical to the pre-5d
+/// single-value path. A `hole` (Task 8a) is skipped outright — it has no
+/// `spec`/`data`, so no render inputs to resolve, and it must not appear in
+/// the returned bindings.
 ///
-/// This is a binding-layer traversal reading the render-input keys the
-/// spec-layer coercion ([`composite_tree_from_py`]) deliberately ignores; the
-/// two walks read disjoint key sets of the same dicts. The tree has already
-/// passed `composite_tree_from_py` (structure validated) before this runs, so
-/// the shape checks here are defensive; `build_composite_leaves` additionally
-/// asserts the leaf/binding counts agree, catching any traversal drift.
+/// `built` is the tree already produced by [`composite_tree_from_py`] for this
+/// same `tree` dict; the walk recurses through the raw Python dict AND
+/// `built` **together**, dispatching on `built`'s node kind rather than
+/// re-reading a `"kind"` string off the dict. This was previously two
+/// independent pre-order walks of the same dicts — this one (render-input
+/// keys) and `composite_tree_from_py`'s (spec/structure keys) — reconciled
+/// only by a leaf-count check in `build_composite_leaves`, which would not
+/// catch a same-count reorder. Walking both structures in lockstep makes that
+/// structurally impossible: any mismatch between the dict's shape and the
+/// already-validated `built` tree (a "leaf" dict paired with a `Composite`
+/// node, a children-length mismatch, …) surfaces immediately as a typed error
+/// naming the offending node, rather than only a leaf-count guard at the end.
 fn collect_leaf_bindings(
     tree: &Bound<'_, PyAny>,
+    built: &CompositeNode,
     call_theme: &crate::layout::ThemeInputs,
     call_viewport: Viewport,
     call_config: &super::config::RenderConfig,
@@ -363,6 +371,7 @@ fn collect_leaf_bindings(
     let mut out = Vec::new();
     collect_leaf_bindings_walk(
         tree,
+        built,
         call_theme,
         call_viewport,
         call_config,
@@ -374,6 +383,7 @@ fn collect_leaf_bindings(
 
 fn collect_leaf_bindings_walk(
     node: &Bound<'_, PyAny>,
+    built: &CompositeNode,
     call_theme: &crate::layout::ThemeInputs,
     call_viewport: Viewport,
     call_config: &super::config::RenderConfig,
@@ -383,12 +393,8 @@ fn collect_leaf_bindings_walk(
     let dict: &Bound<'_, PyDict> = node
         .cast::<PyDict>()
         .map_err(|_| PyValueError::new_err("composite tree node must be a dict"))?;
-    let kind: String = dict
-        .get_item("kind")?
-        .ok_or_else(|| PyValueError::new_err("composite tree node missing required key 'kind'"))?
-        .extract()?;
-    match kind.as_str() {
-        "leaf" => {
+    match built {
+        CompositeNode::Leaf { .. } => {
             let theme = match leaf_override_dict(dict, "theme")? {
                 Some(d) => theme_from_dict(Some(&d))?,
                 None => call_theme.clone(),
@@ -414,19 +420,26 @@ fn collect_leaf_bindings_walk(
         // A hole carries no render inputs of its own (no `spec`/`data`, so no
         // theme/viewport/config/chart_config to resolve) and is not a leaf —
         // it contributes nothing to `out`, keeping this walk's leaf count in
-        // lockstep with `flatten_leaves` (Task 8a; `build_composite_leaves`
-        // asserts the two counts agree).
-        "hole" => Ok(()),
-        "composite" => {
+        // lockstep with `flatten_leaves` (Task 8a).
+        CompositeNode::Hole { .. } => Ok(()),
+        CompositeNode::Composite { children: built_children, .. } => {
             let children = dict.get_item("children")?.ok_or_else(|| {
                 PyValueError::new_err("composite node missing required key 'children'")
             })?;
             let list = children
                 .cast::<pyo3::types::PyList>()
                 .map_err(|_| PyValueError::new_err("composite node: 'children' must be a list"))?;
-            for item in list.iter() {
+            if list.len() != built_children.len() {
+                return Err(PyValueError::new_err(format!(
+                    "internal error: composite node has {} pydict children but {} tree children",
+                    list.len(),
+                    built_children.len()
+                )));
+            }
+            for (item, built_child) in list.iter().zip(built_children) {
                 collect_leaf_bindings_walk(
                     &item,
+                    built_child,
                     call_theme,
                     call_viewport,
                     call_config,
@@ -436,9 +449,6 @@ fn collect_leaf_bindings_walk(
             }
             Ok(())
         }
-        other => Err(PyValueError::new_err(format!(
-            "unknown composite tree node kind: '{other}'; expected 'leaf', 'composite', or 'hole'"
-        ))),
     }
 }
 
@@ -465,8 +475,11 @@ fn leaf_override_dict<'py>(
 /// than panicking on an out-of-bounds slice access deeper in the render core.
 ///
 /// `bindings` must be in the same leaf pre-order (as produced by
-/// [`collect_leaf_bindings`]); the count-equality check guards against any
-/// drift between the two traversals of the tree.
+/// [`collect_leaf_bindings`], which now walks in lockstep with `tree` itself —
+/// see its doc comment). The count-equality check here is defense-in-depth,
+/// not the primary safeguard: a genuine ordering drift between `tree` and
+/// `bindings` can no longer happen without also tripping a typed error inside
+/// `collect_leaf_bindings_walk`.
 fn build_composite_leaves<'a>(
     tree: &'a crate::spec::composite::CompositeNode,
     batches: &'a [arrow::record_batch::RecordBatch],
@@ -1688,16 +1701,44 @@ mod composite_leaf_bounds_tests {
 //
 // Each composite leaf may carry its own `theme`/`viewport`/`config`/
 // `chart_config` override; an absent key inherits the call-level value. These
-// tests exercise the binding-layer tree walk directly (it reads only the
-// render-input keys the spec coercion ignores, so the leaves need no `spec`).
+// tests exercise the binding-layer tree walk directly, against the fused
+// walk (burndown item 2): `collect_leaf_bindings` now takes the already-built
+// `CompositeNode` (from `composite_tree_from_py`) alongside the raw dict and
+// recurses through both together, so every leaf dict here needs a (dummy)
+// `spec`/`data` pair for that build to succeed, even though the binding walk
+// itself only reads the render-input keys.
 #[cfg(test)]
 mod composite_leaf_binding_tests {
     use super::*;
+    use crate::spec::data_ref::DataRef;
+    use crate::spec::encoding::Encoding;
+    use crate::spec::mark::Mark;
     use pyo3::types::{PyDict, PyList};
 
-    /// A minimal leaf dict for the binding walk (no `spec`/`data` needed — the
-    /// walk reads only render-input keys), optionally carrying a `theme` and/or
-    /// `viewport` override.
+    fn dummy_chart_spec() -> ChartSpec {
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            params: Vec::new(),
+            chart_description: None,
+        }
+    }
+
+    /// A leaf dict for the fused walk: carries a dummy `spec`/`data` (so the
+    /// lockstep tree build in `collect_leaf_bindings` succeeds), optionally
+    /// with a `theme` and/or `viewport` override.
     fn leaf_dict<'py>(
         py: Python<'py>,
         theme: Option<&Bound<'py, PyDict>>,
@@ -1705,6 +1746,8 @@ mod composite_leaf_binding_tests {
     ) -> Bound<'py, PyDict> {
         let d = PyDict::new(py);
         d.set_item("kind", "leaf").unwrap();
+        d.set_item("spec", Py::new(py, dummy_chart_spec()).unwrap()).unwrap();
+        d.set_item("data", 0usize).unwrap();
         if let Some(t) = theme {
             d.set_item("theme", t).unwrap();
         }
@@ -1712,6 +1755,12 @@ mod composite_leaf_binding_tests {
             d.set_item("viewport", vp).unwrap();
         }
         d
+    }
+
+    /// Build the validated [`CompositeNode`] `collect_leaf_bindings` now walks
+    /// in lockstep with, the same way the real PyO3 entries do.
+    fn built(tree: &Bound<'_, PyAny>) -> CompositeNode {
+        crate::spec::composite::composite_tree_from_py(tree).unwrap()
     }
 
     #[test]
@@ -1740,9 +1789,11 @@ mod composite_leaf_binding_tests {
             let call_vp = Viewport { width: 100.0, height: 100.0 };
             let call_config = RenderConfig::default();
             let call_cc = ChartConfig::default();
+            let node = built(root.as_any());
 
             let bindings = collect_leaf_bindings(
                 root.as_any(),
+                &node,
                 &call_theme,
                 call_vp,
                 &call_config,
@@ -1783,9 +1834,11 @@ mod composite_leaf_binding_tests {
             let mut call_theme = ThemeInputs::default();
             call_theme.sizes.point_size = 77.0;
             let call_vp = Viewport { width: 321.0, height: 123.0 };
+            let node = built(root.as_any());
 
             let bindings = collect_leaf_bindings(
                 root.as_any(),
+                &node,
                 &call_theme,
                 call_vp,
                 &RenderConfig::default(),
@@ -1811,9 +1864,11 @@ mod composite_leaf_binding_tests {
             root.set_item("kind", "composite").unwrap();
             root.set_item("layout", "hconcat").unwrap();
             root.set_item("children", children).unwrap();
+            let node = built(root.as_any());
 
             let err = collect_leaf_bindings(
                 root.as_any(),
+                &node,
                 &ThemeInputs::default(),
                 Viewport { width: 100.0, height: 100.0 },
                 &RenderConfig::default(),
@@ -1843,9 +1898,11 @@ mod composite_leaf_binding_tests {
             root.set_item("children", children).unwrap();
             root.set_item("nrows", 1usize).unwrap();
             root.set_item("ncols", 3usize).unwrap();
+            let node = built(root.as_any());
 
             let bindings = collect_leaf_bindings(
                 root.as_any(),
+                &node,
                 &ThemeInputs::default(),
                 Viewport { width: 100.0, height: 100.0 },
                 &RenderConfig::default(),
@@ -1941,8 +1998,21 @@ mod composite_warning_tests {
         PyRecordBatchReader::new(Box::new(reader))
     }
 
+    /// `warnings.catch_warnings(record=True)` mutates *process-global*
+    /// interpreter state (the `warnings` module's filter list); CPython
+    /// documents it as not thread-safe. Cargo's default parallel test runner
+    /// can run any of the three `catch_warnings`-based tests below on
+    /// concurrent OS threads, which was observed to intermittently clobber a
+    /// sibling's recorded messages (empty `messages` under `--test-threads`
+    /// > 1, reliable under `--test-threads=1`). These are the only
+    /// `catch_warnings` users in this crate, so serializing them against each
+    /// other with a plain (non-GIL) mutex is sufficient — tolerate poisoning
+    /// so one test's panic can't cascade-fail its siblings.
+    static WARNING_CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn render_composite_svg_forwards_leaf_warnings_to_python() {
+        let _guard = WARNING_CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         pyo3::Python::initialize();
         Python::attach(|py| {
             let tree_dict = PyDict::new(py);
@@ -1996,13 +2066,16 @@ mod composite_warning_tests {
         });
     }
 
-    /// Discriminating counterpart: with the deferred emission on the
-    /// interactive entry (orchestrator decision, matches `render_interactive`'s
-    /// pre-existing identical gap), the same tree must still render
-    /// successfully — the fix only threads warnings through, it must not
-    /// break the interactive path.
+    /// GH #50 fix (burndown item 6): `render_composite_interactive` used to
+    /// drop leaf `RenderWarning`s outright (deferred to match
+    /// `render_interactive`'s then-identical gap). Both gaps are closed now
+    /// that `render_scene_json` returns its warnings instead of discarding
+    /// them — this is the composite counterpart of
+    /// `render_composite_svg_forwards_leaf_warnings_to_python`, proving the
+    /// interactive entry forwards the same warning through `emit_warnings`.
     #[test]
-    fn render_composite_interactive_still_succeeds_with_leaf_warnings() {
+    fn render_composite_interactive_forwards_leaf_warnings_to_python() {
+        let _guard = WARNING_CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         pyo3::Python::initialize();
         Python::attach(|py| {
             let tree_dict = PyDict::new(py);
@@ -2015,6 +2088,15 @@ mod composite_warning_tests {
 
             let payloads = vec![single_leaf_payload(color_overflow_batch())];
 
+            let warnings_mod = py.import("warnings").unwrap();
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("record", true).unwrap();
+            let cw = warnings_mod
+                .call_method("catch_warnings", (), Some(&kwargs))
+                .unwrap();
+            let caught = cw.call_method0("__enter__").unwrap();
+            warnings_mod.call_method1("simplefilter", ("always",)).unwrap();
+
             let (json, _packed) = render_composite_interactive(
                 py,
                 tree,
@@ -2026,6 +2108,75 @@ mod composite_warning_tests {
             )
             .expect("render_composite_interactive should succeed for a valid single-leaf tree");
             assert!(json.contains("\"panels\""), "expected scene JSON, got: {json}");
+
+            let messages: Vec<String> = caught
+                .try_iter()
+                .unwrap()
+                .map(|w| {
+                    w.unwrap()
+                        .getattr("message")
+                        .unwrap()
+                        .call_method0("__str__")
+                        .unwrap()
+                        .to_string()
+                })
+                .collect();
+            cw.call_method1("__exit__", (py.None(), py.None(), py.None())).unwrap();
+
+            assert!(
+                messages.iter().any(|m| m.contains("palette")),
+                "expected a color-palette-overflow warning to surface through \
+                 render_composite_interactive's emit_warnings call, got: {messages:?}"
+            );
+        });
+    }
+
+    /// GH #50 fix, flat sibling: `render_interactive` had the identical gap
+    /// (`render_scene_json` never returned its computed warnings at all, so
+    /// there was nothing for this binding's `emit_warnings` to forward).
+    /// Same fixture as the two composite tests above, called through the flat
+    /// entry directly (no composite tree).
+    #[test]
+    fn render_interactive_forwards_leaf_warnings_to_python() {
+        let _guard = WARNING_CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let data = single_leaf_payload(color_overflow_batch());
+            let spec = color_overflow_spec();
+
+            let warnings_mod = py.import("warnings").unwrap();
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("record", true).unwrap();
+            let cw = warnings_mod
+                .call_method("catch_warnings", (), Some(&kwargs))
+                .unwrap();
+            let caught = cw.call_method0("__enter__").unwrap();
+            warnings_mod.call_method1("simplefilter", ("always",)).unwrap();
+
+            let (json, _packed) =
+                super::render_interactive(py, &spec, data, (300.0, 200.0), None, None, None)
+                    .expect("render_interactive should succeed for a valid spec/batch");
+            assert!(json.contains("\"panels\""), "expected scene JSON, got: {json}");
+
+            let messages: Vec<String> = caught
+                .try_iter()
+                .unwrap()
+                .map(|w| {
+                    w.unwrap()
+                        .getattr("message")
+                        .unwrap()
+                        .call_method0("__str__")
+                        .unwrap()
+                        .to_string()
+                })
+                .collect();
+            cw.call_method1("__exit__", (py.None(), py.None(), py.None())).unwrap();
+
+            assert!(
+                messages.iter().any(|m| m.contains("palette")),
+                "expected a color-palette-overflow warning to surface through \
+                 render_interactive's emit_warnings call, got: {messages:?}"
+            );
         });
     }
 }

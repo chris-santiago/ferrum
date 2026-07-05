@@ -474,7 +474,11 @@ def test_hconcat_interactive_routes_through_composite_entry(small_chart, large_c
 
 
 def test_composite_resolve_field_positional_and_color_size():
-    kind = {"kind": "hconcat"}
+    # Burndown P1 item 5: every real caller now passes kind=type(node).__name__
+    # (a class name, e.g. "HConcatChart"), not the wire ``layout`` string
+    # (e.g. "hconcat") -- see _lower_any. This unit test exercises
+    # _composite_resolve_field directly with that same class-name convention.
+    kind = {"kind": "HConcatChart"}
     assert _composite_resolve_field(None, **kind) == {}
     assert _composite_resolve_field({}, **kind) == {}
     assert _composite_resolve_field({"x": "shared"}, **kind) == {"x": "shared"}
@@ -488,11 +492,30 @@ def test_composite_resolve_field_positional_and_color_size():
     assert _composite_resolve_field({"color": "independent"}, **kind) == {"color": "independent"}
     # A shared channel outside {x, y, color, size} is not representable: with
     # no legacy path left to defer to (Task 10), it raises a typed error
-    # naming the composition node kind and the offending channel.
-    with pytest.raises(ValueError, match=r"hconcat: resolve= marks 'shape' 'shared'"):
+    # naming the composition node kind (class name) and the offending channel.
+    with pytest.raises(ValueError, match=r"HConcatChart: resolve= marks 'shape' 'shared'"):
         _composite_resolve_field({"shape": "shared"}, **kind)
     # An independent unsupported channel is the default -> nothing to share.
     assert _composite_resolve_field({"shape": "independent"}, **kind) == {}
+
+
+def test_composite_resolve_field_error_names_the_real_class_via_lower_any():
+    """Regression: Burndown P1 item 5 — _lower_any passes the class name, not the wire layout.
+
+    Discriminates the old (wire-layout) naming from the new (class-name)
+    naming: an ``HConcatChart`` with an unsupported ``resolve={"shape": "shared"}``
+    must raise naming ``"HConcatChart"``, never the wire ``"hconcat"`` string.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    a = fm.Chart(df).mark_point().encode(x="x", y="y", shape="x")
+    b = fm.Chart(df).mark_point().encode(x="x", y="y", shape="x")
+    combo = HConcatChart([a, b], resolve={"shape": "shared"})
+    with pytest.raises(
+        ValueError, match=r"HConcatChart: resolve= marks 'shape' 'shared'"
+    ) as excinfo:
+        combo.to_svg()
+    # Must NOT match the old wire-layout-named text.
+    assert "hconcat:" not in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

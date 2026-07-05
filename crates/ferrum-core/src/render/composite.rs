@@ -33,12 +33,19 @@
 //! (returns `None`), so it still short-circuits at the existing explicit-scale
 //! bypass — user scale wins over sharing (spec §6).
 //!
+//! [`SharedDomain`], [`LeafScaleContext`], and [`Channel`] are homed in
+//! `render::scale_resolve` (`scale_resolve::seam`), not here: they are the
+//! lower layer's own vocabulary (both this resolve pass and
+//! `scale_resolve`'s builders consume them), so the dependency points one
+//! way — this module depends on `scale_resolve`, never the reverse (72h
+//! findings burndown item 1; pure move, no behavior change).
+//!
 //! Everything in this module is consumed by Task 5b's composite render core
 //! ([`crate::render::composite_render`]) and the D4b scale seam, which reach it
 //! from within the crate.
 use crate::render::scale_resolve::{
     distinct_positional_categories_shared, distinct_values_in_order, infer_spec_type, locate_field,
-    numeric_domain_union, numeric_extent,
+    numeric_domain_union, numeric_extent, Channel, LeafScaleContext, SharedDomain,
 };
 use crate::render::RenderError;
 use crate::spec::chart::ChartSpec;
@@ -53,54 +60,6 @@ use std::fmt;
 // ---------------------------------------------------------------------------
 // Public output types
 // ---------------------------------------------------------------------------
-
-/// A positional channel resolved across a composite group. Numeric/temporal
-/// channels union to a single `[lo, hi]` extent; ordinal channels union to an
-/// order-preserving category vector (semantics locked by #35).
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum SharedDomain {
-    /// Quantitative or temporal extent (temporal is epoch-ms, same as the scale
-    /// resolver treats it). The consuming auto path decides Linear vs Time from
-    /// the leaf's own column dtype; this only supplies the shared extent.
-    Numeric { lo: f64, hi: f64 },
-    /// Ordinal/nominal domain in first-appearance order across the group.
-    Ordinal(Vec<String>),
-}
-
-/// The resolved shared domains for one leaf's shared channels (positional x/y
-/// plus non-positional color/size). `None` on a channel means "no composite
-/// sharing applies" — the leaf resolves that channel exactly as it would
-/// standalone (its own data, its own explicit scale, or its own internal facet
-/// resolution).
-///
-/// For `color`, a [`SharedDomain::Numeric`] is a continuous (colorbar) extent and
-/// a [`SharedDomain::Ordinal`] is the categorical (swatch) domain; for `size`,
-/// only [`SharedDomain::Numeric`] is produced.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct LeafScaleContext {
-    pub(crate) x: Option<SharedDomain>,
-    pub(crate) y: Option<SharedDomain>,
-    pub(crate) color: Option<SharedDomain>,
-    pub(crate) size: Option<SharedDomain>,
-}
-
-impl LeafScaleContext {
-    /// True when no channel carries a shared domain — the leaf renders exactly
-    /// as it would standalone. Compares against `Default` so a future channel
-    /// slot is covered automatically.
-    pub(crate) fn is_empty(&self) -> bool {
-        *self == Self::default()
-    }
-
-    fn set(&mut self, channel: Channel, domain: SharedDomain) {
-        match channel {
-            Channel::X => self.x = Some(domain),
-            Channel::Y => self.y = Some(domain),
-            Channel::Color => self.color = Some(domain),
-            Channel::Size => self.size = Some(domain),
-        }
-    }
-}
 
 /// Already-prepared per-leaf inputs the resolve pass unions over. The caller
 /// (Task 5) builds one per leaf from that leaf's `PreparedInputs`:
@@ -168,28 +127,6 @@ impl std::error::Error for CompositeResolveError {}
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
-
-/// Shared-channel selector, local to the resolve pass. Positional `x`/`y` union
-/// through the facet mechanism; non-positional `color`/`size` union through the
-/// simpler per-column extent/category helpers (10-pre-b).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Channel {
-    X,
-    Y,
-    Color,
-    Size,
-}
-
-impl Channel {
-    fn as_str(self) -> &'static str {
-        match self {
-            Channel::X => "x",
-            Channel::Y => "y",
-            Channel::Color => "color",
-            Channel::Size => "size",
-        }
-    }
-}
 
 /// Read the resolve mode for `channel` off a composite node's [`CompositeResolve`].
 fn resolve_mode(resolve: &crate::spec::composite::CompositeResolve, channel: Channel) -> ResolveMode {
@@ -404,8 +341,21 @@ fn resolve_group(
         }
         SharedDomain::Ordinal(cats)
     } else {
-        // Mixed numeric/ordinal in one shared group has no meaningful union —
-        // skip sharing for this group (documented; rendering is otherwise normal).
+        // A shared group mixing a Numeric and an Ordinal domain (e.g. one
+        // sibling's shared channel is quantitative, another's is
+        // categorical) has no meaningful union. Spec §6's "Resolve
+        // semantics" only spells out the skip for a *non-congruent* tree
+        // shape ("non-congruent → skip that channel for the group"), but the
+        // same skip-not-error philosophy applies here: there is no
+        // semantically right domain for mismatched types any more than
+        // there is for mismatched tree shapes, and erroring would reject a
+        // hand-built heterogeneous concat that renders fine standalone.
+        // Skip sharing for this group; each participating leaf falls back to
+        // its own standalone resolution (rendering is otherwise normal).
+        // Reachable only via a hand-built tree with heterogeneous leaf dtypes
+        // on the same shared channel — `compare=` producers always emit
+        // uniform dtypes, so this is a defensive fallback, not a documented
+        // user-facing feature.
         return Ok(());
     };
 

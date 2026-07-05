@@ -18,6 +18,8 @@ from __future__ import annotations
 import warnings
 from typing import Any, Iterable
 
+import polars as pl
+
 from ferrum.encoding.base import ChannelBase
 
 
@@ -80,8 +82,6 @@ def _apply_label_maps(
     """
     if not label_maps:
         return data
-
-    import polars as pl
 
     if not isinstance(data, pl.DataFrame):
         # Non-polars data: coerce first, but we can't modify Arrow tables
@@ -146,11 +146,33 @@ def _chart_bindings(chart: Any, channel: str) -> Iterable[str | None]:
 
 
 def _column_minmax(data, field: str) -> tuple | None:
-    """Return ``(min, max)`` of *field* in *data* as floats, or ``None``."""
+    """Return ``(min, max)`` of *field* in *data* as floats, or ``None``.
+
+    Temporal columns (``Date``/``Datetime``/``Time``) are cast to their
+    epoch-millisecond numeric representation before taking min/max --
+    the same units ``TimeScale(domain=[...])`` expects on the wire and
+    the same normalization ``ferrum._coerce.to_arrow_table`` applies to
+    every temporal column before it reaches the Rust renderer (``Date``
+    and non-ms ``Datetime`` both cast to ``Datetime("ms")``). Casting the
+    *column* (not calling Python's ``datetime.timestamp()`` on the
+    scalar ``col.min()``/``col.max()`` return value) avoids the stdlib's
+    local-timezone assumption for naive datetimes; ``float(a_datetime)``
+    also simply raises ``TypeError``, which is the bug this guards
+    against (reachable via ``LayerChart``'s interactive
+    ``compute_union_domain``/``inject_scale`` seam sharing a temporal
+    x/y -- see ``composition.py::LayerChart._build_merged``).
+    """
     try:
         col = data[field]
-    except (KeyError, AttributeError):
+    except (KeyError, AttributeError, pl.exceptions.ColumnNotFoundError):
         return None
+
+    dtype = col.dtype
+    if dtype == pl.Date or isinstance(dtype, pl.Datetime):
+        col = col.cast(pl.Datetime("ms")).cast(pl.Int64)
+    elif dtype == pl.Time:
+        # Time has no epoch; nanoseconds-since-midnight -> ms-since-midnight.
+        col = col.cast(pl.Int64) / 1_000_000
     lo, hi = col.min(), col.max()
     if lo is None or hi is None:
         return None
@@ -162,7 +184,7 @@ def _column_unique(data, field: str) -> list:
     appearance order."""
     try:
         col = data[field]
-    except (KeyError, AttributeError):
+    except (KeyError, AttributeError, pl.exceptions.ColumnNotFoundError):
         return []
     return col.unique(maintain_order=True).to_list()
 
@@ -175,13 +197,9 @@ def _classify_field(data, field: str) -> str | None:
     """
     try:
         col = data[field]
-    except (KeyError, AttributeError):
+    except (KeyError, AttributeError, pl.exceptions.ColumnNotFoundError):
         return None
     dtype = col.dtype
-    # Lazy import polars to avoid hard-coupling this module to polars
-    # initialization order; ferrum already requires polars at runtime.
-    import polars as pl
-
     if dtype.is_numeric():
         return "linear"
     if dtype in (pl.Datetime, pl.Date, pl.Time):
@@ -241,7 +259,6 @@ def _extract_ordinal_domain(chart: Any, channel: str) -> list:
     list
         Unique values in first-appearance order.
     """
-    import polars as pl
 
     data = getattr(chart, "_data", None)
     if data is None or not isinstance(data, pl.DataFrame):
@@ -252,7 +269,7 @@ def _extract_ordinal_domain(chart: Any, channel: str) -> list:
             continue
         try:
             col = data[field]
-        except (KeyError, AttributeError):
+        except (KeyError, AttributeError, pl.exceptions.ColumnNotFoundError):
             continue
         if col.dtype not in (pl.Utf8, pl.String, pl.Categorical):
             continue

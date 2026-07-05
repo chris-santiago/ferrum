@@ -486,7 +486,7 @@ pub fn prepare_render_inputs(
     spec: &ChartSpec,
     batch: &RecordBatch,
     theme: &crate::layout::ThemeInputs,
-    leaf_scales: Option<&crate::render::composite::LeafScaleContext>,
+    leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
 ) -> Result<PreparedInputs, RenderError> {
     if batch.num_rows() == 0 {
         return Err(RenderError::EmptyBatch);

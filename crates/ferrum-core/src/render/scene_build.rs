@@ -12,9 +12,9 @@ use super::arrow_cast::col_as_str;
 use super::chart_config::StructuralSpec;
 use super::config::RenderConfig;
 use super::draw::{self, to_scene_color, to_scene_text_style, DrawCtx};
-use super::composite::LeafScaleContext;
 use super::marks;
 use super::prepare::PreparedInputs;
+use super::scale_resolve::LeafScaleContext;
 use super::{
     break_axis, inset, secondary_axis,
     filter_batch_by_facet, position, scale_resolve, RenderError, RenderWarning, CLIP_ID_PREFIX,
