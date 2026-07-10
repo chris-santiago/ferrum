@@ -302,6 +302,21 @@ class TestEligibilityMatrix:
             ("errorbar", "Jitter", False),
             ("errorband", "Dodge", True),
             ("errorband", "Stack", False),
+            # GH #42 — text-offset consumption in the Rust renderer makes
+            # `text` dodge-eligible (spec D5); value-label overlays dodge
+            # alongside their bars under compare= dodge-by-model layouts.
+            ("text", "Dodge", True),
+            ("text", "Jitter", False),
+            # GH #42 — diagnostic composites that desugar to dodge-consuming
+            # bar/box/point layers under compare= dodge-by-model layouts
+            # (importance_chart, shap_bar_chart, cv_scores_chart), same
+            # footing as histogram/density.
+            ("importance", "Dodge", True),
+            ("importance", "Jitter", False),
+            ("shap_bar", "Dodge", True),
+            ("shap_bar", "Jitter", False),
+            ("cv_scores", "Dodge", True),
+            ("cv_scores", "Jitter", False),
         ],
     )
     def test_eligibility(self, mark_name, position_class, should_accept):

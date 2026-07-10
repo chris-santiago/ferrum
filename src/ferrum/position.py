@@ -52,6 +52,17 @@ _DODGE_ELIGIBLE = frozenset(
         # Composite marks that desugar to bar/area underneath:
         "histogram",
         "density",
+        # Diagnostic composites that desugar to dodge-consuming primitive
+        # layers under compare= (GH #42): grouped bars (importance,
+        # shap_bar) and box/strip (cv_scores), same footing as
+        # histogram/density above.
+        "importance",
+        "shap_bar",
+        "cv_scores",
+        # Annotation-style: value-label overlays (e.g. importance_chart's
+        # show_values text layer) must dodge alongside their bars so labels
+        # track the sub-band their bar was offset into (GH #42, spec D5).
+        "text",
     ]
 )
 _JITTER_ELIGIBLE = frozenset(["point", "swarm", "tick"])
@@ -149,7 +160,8 @@ class Dodge:
 
     Eligible marks: ``bar``, ``point``, ``box``, ``boxplot``, ``boxen``,
     ``swarm``, ``violin``, ``errorbar``, ``errorband``, ``ribbon``,
-    ``histogram``, ``density``.
+    ``histogram``, ``density``, ``importance``, ``shap_bar``,
+    ``cv_scores``, ``text``.
 
     Parameters
     ----------
