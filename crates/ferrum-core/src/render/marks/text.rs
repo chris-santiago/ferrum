@@ -22,6 +22,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         (Some(a), Some(b)) => (a, b), _ => return empty(),
     };
 
+    // GH #42: text is the value-label layer for dodged bars (e.g.
+    // importance_chart's `show_values=True`). Every other positional mark
+    // renderer adds the per-row `__pos_x_offset__`/`__pos_y_offset__` to its
+    // resolved pixel position (see tick.rs); text must do the same so dodged
+    // labels track their bar's sub-band. Zero-effect when absent — the
+    // accessor returns all-zero offsets.
+    let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+
     let x_ordinal = matches!(ctx.scales.x, ScaleKind::Ordinal(_));
     let y_ordinal = matches!(ctx.scales.y, ScaleKind::Ordinal(_));
 
@@ -119,6 +127,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 None => continue,
             }
         } else { continue };
+        let px = px + x_offsets[i];
 
         let py = if let Some(ys) = &ys_f {
             match ys[i] {
@@ -135,6 +144,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 None => continue,
             }
         } else { continue };
+        let py = py + y_offsets[i];
 
         let raw_label: String = if let Some(t) = &texts {
             match &t[i] {
@@ -388,6 +398,122 @@ mod tests {
             "mark_text must still produce MarkBatchKind::Text, got {:?}",
             result.kind
         );
+    }
+
+    // ── GH #42: dodge position-offset consumption ────────────────────────────
+    //
+    // Text is the value-label layer for dodged bars (e.g. importance_chart's
+    // `show_values=True`). Every other positional mark renderer (tick, rect,
+    // point, ...) reads `__pos_x_offset__`/`__pos_y_offset__` via
+    // `read_position_offsets` and adds the per-row offset to its resolved
+    // pixel position; text alone ignored them, so dodged labels sat at the
+    // undodged band center. These offset columns are absent from user data —
+    // no field of that name is ever encoded — so this is additive: a batch
+    // without them renders byte-identically (`text_no_skip_tooltips_unchanged`
+    // and friends above already pin that path).
+
+    /// With `__pos_x_offset__` present, each glyph's x shifts by its row's
+    /// offset relative to the undodged position.
+    #[test]
+    fn text_applies_pos_x_offset_when_present() {
+        use arrow::array::Float64Array as F64Arr;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("__pos_x_offset__", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0, 50.0])),
+            Arc::new(Float64Array::from(vec![10.0, 50.0])),
+            Arc::new(F64Arr::from(vec![7.5, -3.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Text);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let result = super::build(&ctx);
+        let xs: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Text { x, .. } = n { Some(*x) } else { None }
+        }).collect();
+        assert_eq!(xs.len(), 2);
+
+        // Same spec/batch minus the offset column → undodged baseline x.
+        let baseline_schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let baseline_batch = arrow::record_batch::RecordBatch::try_new(baseline_schema, vec![
+            Arc::new(Float64Array::from(vec![10.0, 50.0])),
+            Arc::new(Float64Array::from(vec![10.0, 50.0])),
+        ]).unwrap();
+        let (baseline_scales, _) = resolve_scales(&spec, &baseline_batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
+        let baseline_ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &baseline_scales, batch: &baseline_batch, mark_style: &mark_style };
+        let baseline_result = super::build(&baseline_ctx);
+        let baseline_xs: Vec<f64> = baseline_result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Text { x, .. } = n { Some(*x) } else { None }
+        }).collect();
+
+        assert!((xs[0] - (baseline_xs[0] + 7.5)).abs() < 1e-9,
+            "row 0 x must shift by its __pos_x_offset__ (7.5); got {} vs baseline {}", xs[0], baseline_xs[0]);
+        assert!((xs[1] - (baseline_xs[1] + -3.0)).abs() < 1e-9,
+            "row 1 x must shift by its __pos_x_offset__ (-3.0); got {} vs baseline {}", xs[1], baseline_xs[1]);
+    }
+
+    /// Without offset columns, text output is unaffected — the accessor
+    /// returns all-zero offsets and glyph positions are unchanged.
+    #[test]
+    fn text_no_offset_columns_zero_effect() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Text,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![10.0, 50.0])),
+            Arc::new(Float64Array::from(vec![10.0, 50.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &crate::layout::ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Text);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let xs: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Text { x, .. } = n { Some(*x) } else { None }
+        }).collect();
+        let expected = vec![
+            scales.x.to_pixel_f64(10.0).unwrap(),
+            scales.x.to_pixel_f64(50.0).unwrap(),
+        ];
+        assert_eq!(xs, expected, "no offset columns: text x must equal raw scaled position");
     }
 
     // ── Metadata-alignment regression tests (#6 defect class) ────────────────
