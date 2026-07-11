@@ -1,6 +1,7 @@
-"""compare= aggregate rendering — composite golden tests (GH #35).
+"""compare= aggregate rendering — composite golden tests (GH #35, GH #42).
 
-Four representative goldens, one per bucket defined in the spec:
+Four representative small-multiples goldens, one per bucket defined in the
+GH #35 spec, plus two dodge-by-model goldens added for GH #42:
 
 1. NESTED case — ``pdp_chart`` with two features and ``compare=``.
    The outer ``ConcatChart`` holds one PDP facet-composite per model;
@@ -18,6 +19,16 @@ Four representative goldens, one per bucket defined in the spec:
    Each per-model panel is itself a titled 2x2 diagnostic composite; the
    figure title lowers to a per-child label (Task 5d), so the panels share
    axes position-wise instead of gating to the old non-sharing path.
+
+5. DODGE-BY-MODEL case (GH #42) — ``importance_chart`` with ``compare=``.
+   A single ``Chart`` (not a ``ConcatChart``) with one bar per
+   (feature, model), dodged within each feature band, plus dodged error
+   rules and dodged value labels, rendered via the vertical desugar form +
+   ``CoordFlip`` for the default ``orient="horizontal"``.
+
+6. DODGE-BY-MODEL case (GH #42) — ``shap_bar_chart`` with ``compare=``
+   (``per_class=False``). A single ``Chart`` with one bar per
+   (feature, model), dodged within each feature band.
 
 All fixtures and seeds are fixed for byte-stable reproduction.
 
@@ -200,3 +211,44 @@ def test_golden_compare_residuals_two_models():
     base, alt, X, y = _residuals_models()
     chart = ferrum.residuals_chart(base, X, y, compare={"alt": alt})
     _check_golden(chart.to_svg(), "compare_residuals_two_models")
+
+
+# ---------------------------------------------------------------------------
+# Buckets 5 & 6 — dodge-by-model (importance_chart / shap_bar_chart, GH #42)
+# ---------------------------------------------------------------------------
+
+
+def _dodge_compare_models():
+    """Two pre-fitted regression models for the dodge-by-model goldens.
+
+    Ridge and RandomForest, both loaded from pinned fixtures (same fixture
+    pair used throughout ``tests/diagnostics/test_compare_dodge.py``), so
+    the goldens are byte-stable within a pinned sklearn version.
+    """
+    df = load_dataset("regression")
+    X = df.select(_REG_FEATURES)
+    y = df["y"]
+    base = load_fixture("regression_ridge")
+    alt = load_fixture("regression_rf")
+    return base, alt, X, y
+
+
+def test_golden_compare_importance_two_models():
+    """Dodge-by-model golden: single Chart with bars dodged per feature band.
+
+    Default ``orient="horizontal"`` renders the vertical desugar form under
+    ``CoordFlip``; default ``error_bars=True``/``show_values=True`` exercise
+    the dodged error-rule and dodged value-label layers alongside the bars.
+    """
+    base, alt, X, y = _dodge_compare_models()
+    chart = ferrum.importance_chart(base, X, y, compare={"alt": alt})
+    _check_golden(chart.to_svg(), "compare_importance_two_models")
+
+
+def test_golden_compare_shap_bar_two_models():
+    """Dodge-by-model golden: single Chart with mean-|SHAP| bars dodged per
+    feature band (``per_class=False``, the default, so no competing
+    class-facet dimension)."""
+    base, alt, X, y = _dodge_compare_models()
+    chart = ferrum.shap_bar_chart(base, X, y, compare={"alt": alt})
+    _check_golden(chart.to_svg(), "compare_shap_bar_two_models")
