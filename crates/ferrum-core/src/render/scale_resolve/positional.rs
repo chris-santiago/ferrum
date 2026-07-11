@@ -297,24 +297,21 @@ pub(in crate::render) fn build_from_scale_spec(
                 *padding,
             ))
         }
-        // Sequential, Diverging, and Quantize carry a 2-endpoint [min, max] extent
-        // as their `domain`, which is the correct positional linear extent to use.
-        ScaleSpec::Sequential { domain, .. }
-        | ScaleSpec::Diverging { domain, .. }
-        | ScaleSpec::Quantize { domain, .. } => {
-            let (d, r) = resolve_continuous_domain_and_range(domain, &None, None, col.as_ref(), &enc.field, pr)?;
-            ScaleKind::Linear(LinearScale::new_internal(d, r, false, false))
-        }
-        // BinOrdinal, Quantile, and Threshold carry a discrete-binning domain
-        // (a sorted sample list for Quantile, a boundary list for Threshold, or
-        // bin boundaries for BinOrdinal), not a 2-endpoint positional extent.
-        // Passing that list as an explicit linear domain would collapse the axis
-        // to [domain[0], domain[1]], dropping all data points outside that interval.
-        // Instead, derive the linear axis from the data column extent.
-        ScaleSpec::BinOrdinal { .. }
+        // Continuous-degrading variants: whether the spec's `domain` is a
+        // positional extent or a discrete-binning artifact is classified by
+        // ScaleSpec::positional_extent() (exhaustive — see issue #40).
+        //
+        // These discretizing/diverging positional scales degrade to
+        // `ScaleKind::Linear` before minor-tick generation is reached, so
+        // they receive linear-subdivided minor ticks (semantic corner,
+        // archaeology R7).
+        ScaleSpec::Sequential { .. }
+        | ScaleSpec::Diverging { .. }
+        | ScaleSpec::Quantize { .. }
+        | ScaleSpec::BinOrdinal { .. }
         | ScaleSpec::Quantile { .. }
         | ScaleSpec::Threshold { .. } => {
-            let (d, r) = resolve_continuous_domain_and_range(&None, &None, None, col.as_ref(), &enc.field, pr)?;
+            let (d, r) = resolve_continuous_domain_and_range(&scale_spec.positional_extent(), &None, None, col.as_ref(), &enc.field, pr)?;
             ScaleKind::Linear(LinearScale::new_internal(d, r, false, false))
         }
     })

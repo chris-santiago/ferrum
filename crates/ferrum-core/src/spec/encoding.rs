@@ -310,6 +310,57 @@ impl ScaleSpec {
         common.domain = Some(domain);
         common.domain_param = None;
     }
+
+    /// The explicit `[min, max]` extent this spec's `domain` implies for a
+    /// *positional* Linear axis, or `None` to derive the axis from the data
+    /// column instead.
+    ///
+    /// This match is exhaustive **on purpose, with no wildcard arm** — unlike
+    /// the sibling `domain_param`/`set_domain` above, where `None`/no-op is a
+    /// safe default for every variant, a wrong default here silently drops
+    /// marks. Do not "fix" the asymmetry by adding a wildcard: a new
+    /// `ScaleSpec` variant must explicitly decide here whether its `domain`
+    /// is a positional extent or a discrete-binning artifact (a sample list,
+    /// a boundary list, or bin edges). Omitting a variant is a compile error,
+    /// not a silent fallback. See issue #40 (a `Diverging` domain's 3-element
+    /// `[lo, mid, hi]` was truncated to `[lo, mid]` by the domain-as-extent
+    /// path) and the #38 Quantile/Threshold precedent this mirrors.
+    pub(crate) fn positional_extent(&self) -> Option<Vec<f64>> {
+        match self {
+            // Sequential/Diverging/Quantize domains are outer bounds: 2
+            // elements `[min, max]` (Sequential/Quantize) or 3 elements
+            // `[lo, mid, hi]` (Diverging). Either way the positional extent
+            // is the first and last element — mirrors
+            // `color.rs::scale_explicit_domain`.
+            ScaleSpec::Sequential { domain, .. }
+            | ScaleSpec::Diverging { domain, .. }
+            | ScaleSpec::Quantize { domain, .. } => match domain {
+                Some(d) if d.len() >= 2 => Some(vec![d[0], d[d.len() - 1]]),
+                _ => None,
+            },
+
+            // Quantile/Threshold/BinOrdinal domains are binning artifacts
+            // (a sorted sample list, threshold boundaries, or bin edges),
+            // not a positional extent (#38 semantics). Derive the axis from
+            // the data column instead.
+            ScaleSpec::Quantile { .. }
+            | ScaleSpec::Threshold { .. }
+            | ScaleSpec::BinOrdinal { .. } => None,
+
+            // The 7 continuous variants already carry an explicit extent in
+            // `common.domain`.
+            ScaleSpec::Linear { common, .. }
+            | ScaleSpec::Log { common, .. }
+            | ScaleSpec::Time { common, .. }
+            | ScaleSpec::Symlog { common, .. }
+            | ScaleSpec::Pow { common, .. }
+            | ScaleSpec::Sqrt { common }
+            | ScaleSpec::Utc { common, .. } => common.domain.clone(),
+
+            // Categorical variants have no continuous extent.
+            ScaleSpec::Ordinal { .. } | ScaleSpec::Band { .. } | ScaleSpec::Point { .. } => None,
+        }
+    }
 }
 
 fn default_log_base() -> f64 {

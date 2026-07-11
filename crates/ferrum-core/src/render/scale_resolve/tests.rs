@@ -4439,3 +4439,121 @@ fn d10preb_shared_size_extent_seeds_scale_through_seam() {
     assert_eq!(shared_size.min_px(), base_size.min_px());
     assert_eq!(shared_size.max_px(), base_size.max_px());
 }
+
+// --- Issue #40: positional Diverging scale must not truncate to [lo, mid] ---
+
+/// A `Diverging` `ScaleSpec` on a positional (x) channel must resolve to a
+/// Linear scale spanning the full `[lo, hi]` extent — not `[lo, mid]`, which
+/// is what `DivergingScale::new`'s 3-element `[lo, mid, hi]` domain
+/// collapses to if it is passed straight through as an explicit 2-endpoint
+/// linear domain (issue #40).
+#[test]
+fn positional_diverging_scale_uses_full_lo_hi_extent_not_lo_mid() {
+    use crate::spec::encoding::ScaleSpec;
+    let mut s = make_spec_with_color();
+    s.encoding.x.as_mut().unwrap().scale = Some(ScaleSpec::Diverging {
+        scheme: None,
+        domain: Some(vec![1.0, 2.5, 4.0]),
+        domain_mid: None,
+    });
+    let b = make_batch_q_q_n();
+    let theme = ThemeInputs::default();
+    let (scales, _) = resolve_scales(&s, &b, (0.0, 100.0), (0.0, 80.0), &theme).unwrap();
+    match scales.x {
+        ScaleKind::Linear(l) => {
+            let [lo, hi] = l.domain_pair();
+            assert_eq!(lo, 1.0);
+            assert_eq!(hi, 4.0, "positional Diverging axis must not truncate to [lo, mid]");
+        }
+        other => panic!("expected Linear, got {other:?}"),
+    }
+}
+
+mod positional_extent_classification {
+    use crate::spec::encoding::{ContinuousScaleCommon, ScaleSpec};
+
+    fn common_with_domain(domain: Option<Vec<f64>>) -> ContinuousScaleCommon {
+        ContinuousScaleCommon {
+            domain,
+            range: None,
+            clamp: false,
+            padding: None,
+            scheme: None,
+            domain_param: None,
+        }
+    }
+
+    #[test]
+    fn diverging_three_elem_domain_extracts_lo_hi() {
+        let spec = ScaleSpec::Diverging {
+            scheme: None,
+            domain: Some(vec![1.0, 2.5, 4.0]),
+            domain_mid: None,
+        };
+        assert_eq!(spec.positional_extent(), Some(vec![1.0, 4.0]));
+    }
+
+    #[test]
+    fn sequential_two_elem_domain_is_identity() {
+        let spec = ScaleSpec::Sequential { scheme: None, domain: Some(vec![0.0, 10.0]), reverse: false };
+        assert_eq!(spec.positional_extent(), Some(vec![0.0, 10.0]));
+    }
+
+    #[test]
+    fn quantize_domain_extracts_outer_bounds() {
+        let spec = ScaleSpec::Quantize { domain: Some(vec![0.0, 5.0, 10.0]), range: None };
+        assert_eq!(spec.positional_extent(), Some(vec![0.0, 10.0]));
+    }
+
+    #[test]
+    fn quantile_domain_is_none_binning_artifact() {
+        let spec = ScaleSpec::Quantile { domain: Some(vec![1.0, 2.0, 3.0, 4.0]), range: None };
+        assert_eq!(spec.positional_extent(), None);
+    }
+
+    #[test]
+    fn threshold_domain_is_none_binning_artifact() {
+        let spec = ScaleSpec::Threshold { domain: Some(vec![10.0, 20.0]), range: None };
+        assert_eq!(spec.positional_extent(), None);
+    }
+
+    #[test]
+    fn bin_ordinal_is_always_none() {
+        let spec = ScaleSpec::BinOrdinal { bins: Some(vec![0.0, 1.0, 2.0]), scheme: None };
+        assert_eq!(spec.positional_extent(), None);
+    }
+
+    #[test]
+    fn diverging_domain_none_is_none() {
+        let spec = ScaleSpec::Diverging { scheme: None, domain: None, domain_mid: None };
+        assert_eq!(spec.positional_extent(), None);
+    }
+
+    #[test]
+    fn diverging_empty_domain_is_none_no_panic() {
+        let spec = ScaleSpec::Diverging { scheme: None, domain: Some(vec![]), domain_mid: None };
+        assert_eq!(spec.positional_extent(), None);
+    }
+
+    #[test]
+    fn sequential_single_elem_domain_is_none_no_panic() {
+        let spec = ScaleSpec::Sequential { scheme: None, domain: Some(vec![5.0]), reverse: false };
+        assert_eq!(spec.positional_extent(), None);
+    }
+
+    #[test]
+    fn linear_common_domain_passes_through() {
+        let spec = ScaleSpec::Linear {
+            common: common_with_domain(Some(vec![0.0, 100.0])),
+            nice: false,
+            zero: false,
+        };
+        assert_eq!(spec.positional_extent(), Some(vec![0.0, 100.0]));
+    }
+
+    #[test]
+    fn ordinal_has_no_continuous_extent() {
+        let spec = ScaleSpec::Ordinal { domain: None, range: None, padding: 0.0 };
+        assert_eq!(spec.positional_extent(), None);
+    }
+}

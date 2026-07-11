@@ -218,7 +218,7 @@ Surfaced by 4 parallel auditors (scene-pipeline, theme-wiring, pyo3-binding, int
 | R4 | S1 | Stale `render_svg`/`render_png` `theme` param docstrings in `binding.rs` — abbreviated key list, never listed the full §3.13 set, now also omits the per-level grid keys. Real contract is `ThemeOverridesSpec` (`deny_unknown_fields`). | **Fixing on this branch** (one-line pointer) |
 | R5 | S3 | **WASM colorbar-in-inset id collision** — JS `_buildIdMap` namespaces by literal id per loadScene, so an outer colorbar gradient (`ferrum-colorbar-0`, hardcoded in `legend.rs:58`) and an inset chart that *also* has a colorbar collapse to one namespaced id → the inset's (or outer's) colorbar renders with the wrong gradient. Narrow trigger (continuous-color chart + `.inset()` of another continuous-color chart) but a genuine wrong-render. The only confirmed correctness issue across all reviews. | ✅ **Fixed `0b57b61`** — `legend.rs` merges the colorbar `<defs>`+`<rect>` into one self-contained Raw fragment (removing the only cross-fragment id ref; static SVG byte-identical); `ferrum-anywidget.js` switches to per-fragment id namespacing (`ferrum-raw-{loadIdx}-{fragIdx}-{id}`), now collision-free + reference-complete. Regression test pins old-collapses-to-1 vs new-2-distinct. |
 | R6 | S2 | Interactive text-vs-raw z-order flips on the first zoom tick (`_placeTextSvg` re-append moves labels above the raw overlay groups). Cosmetic; rarely-overlapping content. `ferrum-anywidget.js`. | Deferred — follow-up |
-| R7 | S2 | Discretizing *positional* scales (`Quantize`/`BinOrdinal`/`Sequential`/`Diverging` declared on an x/y axis) resolve to `ScaleKind::Linear` in `positional.rs` before `minor_ticks_internal` is reached, so they would get *linear-subdivided* minors rather than empty. Unreachable in practice (these are color/size specs); semantic corner only. | Deferred — add a clarifying comment when next touching `positional.rs` |
+| R7 | S2 | Discretizing *positional* scales (`Quantize`/`BinOrdinal`/`Sequential`/`Diverging` declared on an x/y axis) resolve to `ScaleKind::Linear` in `positional.rs` before `minor_ticks_internal` is reached, so they would get *linear-subdivided* minors rather than empty. Unreachable in practice (these are color/size specs); semantic corner only. | ⚠️ **"Unreachable in practice" was wrong for `Diverging`** — a 3-element `DivergingScale(domain=[lo, mid, hi])` on x/y *is* reachable and truncated the axis to `[lo, mid]`, silently dropping marks above mid (issue #40, fixed 2026-07-10). The deferred clarifying comment is being added to `positional.rs` as part of that fix. Regression guard: `tests/test_scale_spec_parity.py::TestPositionalExtent::test_diverging_positional_all_marks_render`. |
 
 ---
 
@@ -550,3 +550,30 @@ but would not catch a schema-rebuild elsewhere in the pipeline that never
 calls `apply_dodge_ordinal` at all. Anyone touching batch/schema
 reconstruction in the render pipeline should know this invariant depends on
 metadata surviving by reference, not on any structural schema shape.
+
+## 2026-07-10 — issue #40 resolved (`fix/40-diverging-positional-extent`) + deferred follow-up
+
+GH #40 (Diverging 3-element `[lo, mid, hi]` domain truncated to `[lo, mid]`
+on positional channels) is fixed: `ScaleSpec::positional_extent()`
+(`crates/ferrum-core/src/spec/encoding.rs`) now classifies every variant's
+`domain` as positional extent vs discrete-binning artifact in a single
+exhaustive match with no wildcard arm, and `build_from_scale_spec`
+(`render/scale_resolve/positional.rs`) consumes it in one merged
+continuous-fallback arm. A new `ScaleSpec` variant is a compile error until
+classified. See the updated R7 row above. Regression guards:
+`tests/test_scale_spec_parity.py::TestPositionalExtent::test_diverging_positional_all_marks_render`
+plus the `positional_extent_classification` Rust module in
+`render/scale_resolve/tests.rs`.
+
+**Deferred follow-up (separable):** the outer-bounds extraction rule
+(`[d[0], d[d.len()-1]]` for Sequential/Diverging domains) now exists in two
+places — `positional_extent()` and the color path's `scale_explicit_domain`
+(`render/scale_resolve/color.rs`). Both design reviews judged a shared
+helper not worth it at two call sites; if a third outer-bounds consumer
+appears, extract `fn outer_bounds(domain: &[f64]) -> Option<(f64, f64)>`
+and route both through it. The larger north star from the #40 defense —
+splitting extent-vs-binning domain semantics into distinct types on the
+`ScaleSpec` enum itself (composes with FA-10's typed-domain idea) — remains
+deliberately unbuilt: it would require custom serde to keep the wire
+contract byte-stable across all 15+ variants for enforcement the total
+method already provides at the single consumption site.

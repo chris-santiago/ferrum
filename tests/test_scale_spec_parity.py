@@ -391,12 +391,17 @@ class TestEncodeSmoke:
 
 
 class TestPositionalExtent:
-    """Regression guard for the SPEC-04 positional-channel truncation fix (issue #38).
+    """Regression guard for the SPEC-04 positional-channel truncation fix (issue #38)
+    and the same bug class in DivergingScale (issue #40).
 
     Before the fix in positional.rs, QuantileScale and ThresholdScale on x/y channels
     were routed through the domain-as-extent arm, which collapsed the axis to domain[0..1]
     and silently dropped data points outside that unit interval.  Only 2 of 4 marks
     rendered.  These tests lock the corrected behavior at exactly 4/4.
+
+    DivergingScale(domain=[lo, mid, hi]) on a positional channel hits the same
+    domain-as-extent arm: the axis truncates to [lo, mid] instead of [lo, hi],
+    dropping marks above mid (issue #40).
     """
 
     @pytest.fixture()
@@ -456,4 +461,29 @@ class TestPositionalExtent:
             f"Expected 4 rendered marks (one per row), got {mark_count}. "
             "SPEC-04 positional truncation regression: ThresholdScale on x may be "
             "routing through domain-as-extent again (issue #38)."
+        )
+
+    def test_diverging_positional_all_marks_render(self, num_df: pl.DataFrame):
+        """Regression: DivergingScale(domain=[lo, mid, hi]) positionally routed
+        through the domain-as-extent arm, truncating the axis to [lo, mid] and
+        silently dropping marks above mid (issue #40). Before this fix the
+        count was 2/4; it must be 4/4 now.
+        """
+        chart = (
+            fr.Chart(num_df)
+            .mark_point()
+            .encode(
+                x=fr.X(
+                    "a",
+                    scale=fr.DivergingScale(domain=[1.0, 2.5, 4.0]),
+                ),
+                y="b",
+            )
+        )
+        svg = chart.to_svg()
+        mark_count = len(re.findall(r"<circle|<path", svg))
+        assert mark_count == 4, (
+            f"Expected 4 rendered marks (one per row), got {mark_count}. "
+            "DivergingScale 3-element domain on x truncated to [lo, mid] — "
+            "issue #40 regression."
         )

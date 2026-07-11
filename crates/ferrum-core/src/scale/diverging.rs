@@ -10,6 +10,9 @@ use crate::spec::encoding::ScaleSpec;
 /// ``mid`` is a neutral value (often zero or the mean). Colors interpolate
 /// from one extreme through a neutral center to the other extreme.
 ///
+/// On a positional (x/y) channel the domain collapses to its outer bounds
+/// ``[lo, hi]``; the midpoint only affects color mapping.
+///
 /// Parameters
 /// ----------
 /// scheme : str, optional
