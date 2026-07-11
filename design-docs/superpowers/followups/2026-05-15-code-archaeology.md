@@ -515,3 +515,38 @@ subsystem), #53 (Joint/ClusterMap native resolve=). Full reports:
 | S1 | shap family | `is_faceted` computed once in beeswarm vs recomputed inline in bar/waterfall. |
 | S2 | wasm/svg parity | LayoutScale anisotropy (sx≠sy, joint/clustermap marginals only): SVG scales per-axis, WASM bakes geometric-mean scalars (D4a-accepted approximation) — the divergence is BETWEEN the two render paths at marginal panels; re-inspect both paths together if marginal mark fidelity is ever questioned. |
 | — | adjudicated | 72h python-design S3 "explicit child scale silently defeats resolve=shared" does NOT stand: spec §6's locked decision (explicit `enc.scale` wins) with LEAF-SCOPED exclusion — verified empirically (3-child: pinned keeps domain, other two union). Remedied as documentation (share_scale docstring + composition guide). |
+
+---
+
+## 2026-07-10 — dodge-by-model compare= (#42) fragility note
+
+Not a bug — a known-fragile invariant surfaced while shipping GH #42
+(`importance_chart`/`shap_bar_chart`/`cv_scores_chart` dodge-by-model
+`compare=` layouts). The dodge band-extent narrowing contract reads the
+per-batch group count from the `__dodge_n_groups__` Arrow schema-metadata
+key (`DODGE_N_GROUPS_KEY`, `crates/ferrum-core/src/render/position.rs`),
+stamped by `apply_dodge_ordinal` alongside the `__pos_x_offset__`/
+`__pos_y_offset__` offset columns it emits. `n_dodge_groups` reads this key
+back; `bar.rs`, `rect.rs`, and `tick.rs` all call `n_dodge_groups` to shrink
+each category's per-group extent to `extent / n_dodge_groups` rather than
+inferring the group count by counting distinct offset values (jitter-shaped
+offsets without the metadata key correctly report `1`, not the distinct
+count).
+
+**Fragility:** the group count lives on `RecordBatch::schema().metadata()`,
+which is carried by reference (`Arc<Schema>`) through the render pipeline
+today. A future `scene_build.rs` (or transform-pipeline) refactor that
+rebuilds the batch's schema from scratch — e.g. via `Schema::new(fields)`
+instead of cloning/extending the existing `Arc<Schema>` — would silently
+drop the metadata map and every dodge-narrowing consumer would fall back to
+its `n_dodge_groups() == 1` no-op path: dodge offsets would still shift bars
+apart, but the per-group width would revert to the full undivided band,
+producing overlapping (not narrowed) marks with no error or warning. A
+guard test exists Rust-side
+(`n_dodge_groups_end_to_end_via_apply_dodge_ordinal`, `position.rs`) that
+drives the real `apply_dodge_ordinal` producer and asserts the group count
+round-trips — it would catch a regression in `apply_dodge_ordinal` itself,
+but would not catch a schema-rebuild elsewhere in the pipeline that never
+calls `apply_dodge_ordinal` at all. Anyone touching batch/schema
+reconstruction in the render pipeline should know this invariant depends on
+metadata surviving by reference, not on any structural schema shape.
