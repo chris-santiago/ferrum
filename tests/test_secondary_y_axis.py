@@ -22,9 +22,10 @@ import json
 import re
 
 import polars as pl
+import pytest
 
 import ferrum as fm
-from ferrum.composition import LayerChart
+from ferrum.composition import HConcatChart, LayerChart, _lower_composite
 from tests._svg_extents import y_axis_extents
 
 
@@ -321,3 +322,133 @@ def test_default_shared_y_layer_chart_unaffected():
     # the wire spec for either layer.
     lowered = LayerChart(a, b)._composite_tree(auto_tooltips=False)
     assert lowered.tree["resolve"]["y"] == "shared"
+
+
+# ---------------------------------------------------------------------------
+# Task 5: nesting -- independent-y LayerChart inside a composite lowers as
+# ONE leaf carrying its per-layer slots (spec §4 "Nesting").
+# ---------------------------------------------------------------------------
+
+
+def _dual_axis_layer_chart(df):
+    bars = fm.Chart(df).mark_bar().encode(x="x", y="y")
+    line = fm.Chart(df).mark_line().encode(x="x", y="y2")
+    return LayerChart(bars, line, resolve={"y": "independent"})
+
+
+def test_independent_y_layer_chart_nested_in_hconcat_lowers_to_one_leaf():
+    """A dual-axis LayerChart nested inside HConcat lowers as ONE leaf, not a
+    nested overlay composite tree -- it carries its per-layer slots via the
+    merged flat spec (GH #52 spec §4 "Nesting")."""
+    df = pl.DataFrame(
+        {"x": [1, 2, 3, 4], "y": [1.0, 2.0, 3.0, 4.0], "y2": [100.0, 200.0, 150.0, 300.0]}
+    )
+    other = fm.Chart(df).mark_point().encode(x="x", y="y")
+    dual = _dual_axis_layer_chart(df)
+
+    composite = HConcatChart([other, dual])
+    lowered = _lower_composite(composite, auto_tooltips=False)
+
+    kinds = [c["kind"] for c in lowered.tree["children"]]
+    assert kinds == ["leaf", "leaf"], (
+        f"dual-axis LayerChart must nest as ONE leaf, not a nested composite; got {kinds}"
+    )
+
+
+def test_independent_y_layer_chart_nested_in_hconcat_renders():
+    """The composite renders without raising; the plain sibling panel's one
+    y-axis and the dual-axis panel's two y-axes are both present."""
+    df = pl.DataFrame(
+        {"x": [1, 2, 3, 4], "y": [1.0, 2.0, 3.0, 4.0], "y2": [100.0, 200.0, 150.0, 300.0]}
+    )
+    other = fm.Chart(df).mark_point().encode(x="x", y="y")
+    dual = _dual_axis_layer_chart(df)
+
+    svg = (other | dual).to_svg()
+    extents = y_axis_extents(svg)
+    assert len(extents) == 3, (
+        f"expected 1 (plain panel) + 2 (dual-axis panel) y-axis tick columns, got {extents}"
+    )
+
+
+def test_independent_y_layer_chart_nested_in_hconcat_interactive_renders():
+    """The interactive scene render survives nesting an independent-y
+    LayerChart in an HConcat: two scene panels, no raise."""
+    df = pl.DataFrame(
+        {"x": [1, 2, 3, 4], "y": [1.0, 2.0, 3.0, 4.0], "y2": [100.0, 200.0, 150.0, 300.0]}
+    )
+    other = fm.Chart(df).mark_point().encode(x="x", y="y")
+    dual = _dual_axis_layer_chart(df)
+
+    scene_json, packed_data = (other | dual)._render_interactive()
+    scene = json.loads(scene_json)
+    assert len(scene["panels"]) == 2
+    assert isinstance(packed_data, (bytes, bytearray))
+
+
+def test_parent_explicit_shared_y_over_independent_y_layer_raises():
+    """An explicit parent resolve={"y": "shared"} over a subtree containing
+    a dual-axis LayerChart is contradictory: the leaf's per-layer y slots
+    don't participate in cross-panel sharing (spec §6 errors)."""
+    df = pl.DataFrame(
+        {"x": [1, 2, 3, 4], "y": [1.0, 2.0, 3.0, 4.0], "y2": [100.0, 200.0, 150.0, 300.0]}
+    )
+    other = fm.Chart(df).mark_point().encode(x="x", y="y")
+    dual = _dual_axis_layer_chart(df)
+
+    composite = HConcatChart([other, dual], resolve={"y": "shared"})
+    with pytest.raises(ValueError, match=r"HConcatChart:.*'y'.*'shared'.*independent-y"):
+        composite.to_svg()
+
+
+def test_parent_shared_x_over_independent_y_layer_does_not_raise():
+    """x sharing is unaffected by a nested independent-y LayerChart -- only
+    an explicit y:"shared" conflicts with it."""
+    df = pl.DataFrame(
+        {"x": [1, 2, 3, 4], "y": [1.0, 2.0, 3.0, 4.0], "y2": [100.0, 200.0, 150.0, 300.0]}
+    )
+    other = fm.Chart(df).mark_point().encode(x="x", y="y")
+    dual = _dual_axis_layer_chart(df)
+
+    composite = HConcatChart([other, dual], resolve={"x": "shared"})
+    svg = composite.to_svg()  # must not raise
+    assert svg
+
+
+# ---------------------------------------------------------------------------
+# Task 5: multi-y-layer non-first member under independent y raises (Task
+# 4 quality-review follow-up) -- the per-layer boolean wire cannot group a
+# member's internal layers into one right-axis slot.
+# ---------------------------------------------------------------------------
+
+
+def test_multi_y_layer_non_first_member_raises():
+    df = pl.DataFrame(
+        {"x": [1, 2, 3, 4], "y": [1.0, 2.0, 3.0, 4.0], "y2": [100.0, 200.0, 150.0, 300.0]}
+    )
+    primary = fm.Chart(df).mark_bar().encode(x="x", y="y")
+    a = fm.Chart(df).mark_line().encode(x="x", y="y2")
+    b = fm.Chart(df).mark_point().encode(x="x", y="y2")
+    multi_layer_member = a + b  # merges into one Chart with two y-bearing layers
+
+    layered = LayerChart(primary, multi_layer_member, resolve={"y": "independent"})
+    with pytest.raises(ValueError, match=r"LayerChart:.*position 1.*2 y-bearing layers"):
+        layered.to_svg()
+
+
+def test_multi_layer_primary_member_is_fine():
+    """The primary (first) member chart may be multi-layer -- only non-first
+    members are restricted to a single y-bearing layer under independent y."""
+    df = pl.DataFrame(
+        {"x": [1, 2, 3, 4], "y": [1.0, 2.0, 3.0, 4.0], "y2": [100.0, 200.0, 150.0, 300.0]}
+    )
+    a = fm.Chart(df).mark_bar().encode(x="x", y="y")
+    b = fm.Chart(df).mark_point().encode(x="x", y="y")
+    multi_layer_primary = a + b  # two layers, both y-bearing, both primary (shared)
+    secondary = fm.Chart(df).mark_line().encode(x="x", y="y2")
+
+    layered = LayerChart(multi_layer_primary, secondary, resolve={"y": "independent"})
+    svg = layered.to_svg()  # must not raise
+
+    extents = y_axis_extents(svg)
+    assert len(extents) == 2, f"expected 1 (shared primary) + 1 (secondary) axis, got {extents}"

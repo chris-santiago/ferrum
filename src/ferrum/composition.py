@@ -489,6 +489,28 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> _LoweredTree:
     )
 
 
+def _contains_independent_y_layer(node) -> bool:
+    """Return whether *node* is, or nests, an independent-y ``LayerChart``.
+
+    Used by :func:`_lower_any` to detect a parent composite's explicit
+    ``resolve={"y": "shared"}`` colliding with a dual-axis ``LayerChart``
+    (``resolve={"y": "independent"}``) anywhere in its subtree (GH #52 spec
+    §4 "Nesting"). An independent-y layer chart lowers to one leaf whose
+    per-layer y-scale slots are resolved leaf-locally in Rust -- it does not
+    participate in cross-panel y sharing, so an explicit ask to share y
+    across a subtree containing one is contradictory and must raise rather
+    than silently drop the caller's request. Recurses through every
+    composite form's ``.charts`` (HConcat/VConcat/wrap children, JointChart/
+    RepeatChart/ClusterMapChart cells, LayerChart layers) to catch the
+    conflict at any nesting depth, not just an immediate child.
+    """
+    if isinstance(node, LayerChart) and node._y_independent():
+        return True
+    if isinstance(node, _ChartLike):
+        return any(_contains_independent_y_layer(child) for child in node.charts)
+    return False
+
+
 def _lower_any(
     node,
     *,
@@ -543,6 +565,27 @@ def _lower_any(
         assert leaf is not None  # allow_hole=True: empty data lowers to a sized hole
         return leaf
 
+    if isinstance(node, LayerChart) and node._y_independent():
+        # An independent-y (dual-axis) LayerChart nested inside a composite
+        # does not fit the overlay composite tree (a composite panel carries
+        # no per-layer y-scale-slot concept -- see _composite_tree's
+        # docstring), so it lowers through the SAME merged flat leaf path
+        # to_svg()/._render_interactive() use at the tree root (GH #52 spec
+        # §4 "Nesting"): one leaf ChartSpec whose layers carry the
+        # independent_y flags, resolved leaf-locally by Rust. The leaf does
+        # not participate in cross-panel y sharing -- see the resolve="y":
+        # "shared" conflict check below.
+        leaf = _lower_leaf_node(
+            node._build_merged(),
+            auto_tooltips=auto_tooltips,
+            payloads=payloads,
+            leaf_inputs=leaf_inputs,
+            leaf_nodes=leaf_nodes,
+            allow_hole=True,
+        )
+        assert leaf is not None  # allow_hole=True: empty data lowers to a sized hole
+        return leaf
+
     if isinstance(node, (JointChart, ClusterMapChart, RepeatChart, LayerChart)):
         sub = node._composite_tree(auto_tooltips=auto_tooltips, is_root=is_root)
         return _splice_lowered_subtree(
@@ -562,6 +605,16 @@ def _lower_any(
             "a composite nested inside another composition"
         )
     resolve = _composite_resolve_field(getattr(node, "_resolve", None), kind=kind)
+    if resolve.get("y") == "shared" and any(
+        _contains_independent_y_layer(child) for child in node.charts
+    ):
+        raise ValueError(
+            f"{kind}: resolve={{'y': 'shared'}} conflicts with a nested independent-y "
+            "LayerChart (resolve={'y': 'independent'}) in this subtree -- a dual-axis "
+            "LayerChart's per-layer y-scale slots do not participate in cross-panel y "
+            "sharing (GH #52 spec §4 'Nesting'); drop the nested LayerChart's "
+            "independent-y resolve or remove this composite's explicit y sharing"
+        )
     children: list = []
     for child in node.charts:
         child = node._inject_parent_config(child)
@@ -2628,14 +2681,14 @@ class LayerChart(_ChartLike):
         ``resolve=`` on other supported channels (``color``/``size``) rides the
         same tree resolve field (see :func:`_composite_resolve_field`).
 
-        This is exclusively the shared-y path: :meth:`to_svg` never calls
-        this method when ``resolve`` marks ``y`` ``"independent"`` -- it
-        routes through :meth:`_build_merged` instead (GH #52), because a
-        composite panel carries no per-layer y-scale-slot concept. A
-        y-independent ``LayerChart`` nested as a *child* of another
-        composite still lowers through this method today (the forced
-        ``"shared"`` below applies), which is a known gap closed by a
-        later task, not this one.
+        This is exclusively the shared-y path: neither :meth:`to_svg` nor
+        :func:`_lower_any` calls this method when ``resolve`` marks ``y``
+        ``"independent"`` -- both route through :meth:`_build_merged`
+        instead (GH #52), because a composite panel carries no per-layer
+        y-scale-slot concept. A y-independent ``LayerChart`` nested as a
+        *child* of another composite lowers via :func:`_lower_any`'s
+        dedicated branch (one merged flat leaf, per-layer slots resolved
+        leaf-locally), not through this overlay-tree method at all.
 
         Composition-level configure layers are pushed onto each layer via
         :meth:`_ChartLike._inject_parent_config` before lowering, so they need
@@ -2668,10 +2721,10 @@ class LayerChart(_ChartLike):
         # "independent" for x (GH #55), so this can never silently override
         # an x request the caller actually made; it only fills in the
         # default when self._resolve left x unset. y is forced "shared"
-        # too because to_svg() never reaches this method when y is
-        # "independent" (see this method's docstring) -- callers that DO
-        # reach here (default share, or a nested child -- known gap, see
-        # docstring) always want a shared y.
+        # too because neither to_svg() nor _lower_any reaches this method
+        # when y is "independent" (both route via _build_merged; see this
+        # method's docstring) -- callers that DO reach here always want a
+        # shared y.
         resolve_field["x"] = "shared"
         resolve_field["y"] = "shared"
 
@@ -2805,18 +2858,41 @@ class LayerChart(_ChartLike):
         ``"independent"``, not ``"shared"``), so no union domain is
         injected for it -- each independent layer resolves natively in
         Rust.
+
+        A non-primary member chart that itself decomposes into MORE THAN
+        ONE y-bearing layer (e.g. a composite-mark boxplot member, whose
+        box/whisker/outlier layers each encode ``y``) raises instead of
+        silently flagging every one of those layers ``independent_y=True``:
+        the per-layer boolean wire has no way to group a member's internal
+        layers into a single right-axis slot, so it would render one right
+        axis per internal layer instead of one grouped axis (a tracked
+        follow-up, not this task's scope). The primary (first) member chart
+        is exempt -- it always owns the single left axis regardless of how
+        many layers it contributes.
         """
         y_independent = self._y_independent()
         result = self._charts[0]
         n_before = len(result._layers) if result._layers is not None else 1
-        for chart in self._charts[1:]:
+        for member_index, chart in enumerate(self._charts[1:], start=1):
             result = result + chart
             if y_independent:
                 layers = list(result._layers)
-                for i in range(n_before, len(layers)):
-                    layer = layers[i]
-                    if layer.encoding.get("y") is not None:
-                        layers[i] = replace(layer, independent_y=True)
+                y_bearing = [
+                    i
+                    for i in range(n_before, len(layers))
+                    if layers[i].encoding.get("y") is not None
+                ]
+                if len(y_bearing) > 1:
+                    raise ValueError(
+                        f"LayerChart: member chart at position {member_index} contributes "
+                        f"{len(y_bearing)} y-bearing layers under resolve={{'y': 'independent'}} "
+                        "-- member charts under independent y must be a single y-layer chart "
+                        "(grouping a member's internal layers into one right-axis slot is a "
+                        "tracked follow-up); only the primary (first) member chart may be "
+                        "multi-layer"
+                    )
+                for i in y_bearing:
+                    layers[i] = replace(layers[i], independent_y=True)
                 result._layers = layers
             n_before = len(result._layers)
         if self._resolve:
