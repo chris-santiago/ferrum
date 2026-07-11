@@ -623,7 +623,7 @@ mod bug_hunt_tests {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
             clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
             grid: vec![],
             marks: vec![MarkBatch {
                 kind: MarkBatchKind::Point,
@@ -640,6 +640,7 @@ mod bug_hunt_tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -709,7 +710,7 @@ mod bug_hunt_tests {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
             clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
             grid: vec![],
             marks: vec![],  // no marks
             axes: vec![],
@@ -808,7 +809,7 @@ mod bug_hunt_tests {
                 id: 0,
                 plot_area: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
                 clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
-                coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+                coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
                 grid: vec![], axes: vec![], annotations: vec![], strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
@@ -817,13 +818,14 @@ mod bug_hunt_tests {
                     data_indices: Some(vec![0]), tooltips: None, hrefs: None, keys: None,
                     blend: BlendMode::Normal, descriptions: None,
                     stroke_cap: None, stroke_join: None, packed_instances: None,
+                    y_slot: 0,
                 }],
             },
             Panel {
                 id: 1,
                 plot_area: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
                 clip: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
-                coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+                coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
                 grid: vec![], axes: vec![], annotations: vec![], strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
                 marks: vec![MarkBatch {
@@ -832,6 +834,7 @@ mod bug_hunt_tests {
                     data_indices: Some(vec![10]), tooltips: None, hrefs: None, keys: None,
                     blend: BlendMode::Normal, descriptions: None,
                     stroke_cap: None, stroke_join: None, packed_instances: None,
+                    y_slot: 0,
                 }],
             },
         ];
@@ -905,7 +908,7 @@ mod bug_hunt_tests {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
             clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
             grid: vec![],
             marks: vec![],
             axes: vec![],
@@ -924,6 +927,7 @@ mod bug_hunt_tests {
             blend: BlendMode::Normal,
             descriptions: None,
             stroke_cap: None, stroke_join: None, packed_instances: None,
+            y_slot: 0,
         };
         assert!(hit_test_batch(&batch, &panel, 50.0, 95.0).is_some(),
             "Tick batch must route to hit_test_lines and return a hit");
@@ -960,7 +964,7 @@ mod bug_hunt_tests {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
             clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
             grid: vec![],
             marks: vec![],
             axes: vec![],
@@ -980,6 +984,7 @@ mod bug_hunt_tests {
             blend: BlendMode::Normal,
             descriptions: None,
             stroke_cap: None, stroke_join: None, packed_instances: None,
+            y_slot: 0,
         };
         assert!(hit_test_batch(&batch, &panel, 100.0, 100.0).is_some(),
             "Text batch must route to hit_test_texts and return a hit on anchor");
@@ -1044,7 +1049,7 @@ mod bug_hunt_tests {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
             clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
             grid: vec![],
             marks: vec![],
             axes: vec![],
@@ -1071,6 +1076,7 @@ mod bug_hunt_tests {
             blend: BlendMode::Normal,
             descriptions: None,
             stroke_cap: None, stroke_join: None, packed_instances: None,
+            y_slot: 0,
         };
         assert!(hit_test_batch(&batch, &panel, 100.0, 50.0).is_some(),
             "Ribbon batch must hit inside filled closed path");
@@ -1096,7 +1102,7 @@ mod bug_hunt_tests {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
             clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
             grid: vec![],
             marks: vec![],
             axes: vec![],
@@ -1115,6 +1121,7 @@ mod bug_hunt_tests {
             blend: BlendMode::Normal,
             descriptions: None,
             stroke_cap: None, stroke_join: None, packed_instances: None,
+            y_slot: 0,
         };
         assert!(hit_test_batch(&batch, &panel, 105.0, 105.0).is_some(),
             "Segment batch must route to hit_test_lines and return a hit near midpoint");
@@ -1152,7 +1159,7 @@ mod bug_hunt_tests {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
             clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true, y_domains: Vec::new() },
             grid: vec![],
             marks: vec![],
             axes: vec![],
@@ -1173,6 +1180,7 @@ mod bug_hunt_tests {
             blend: BlendMode::Normal,
             descriptions: None,
             stroke_cap: None, stroke_join: None, packed_instances: None,
+            y_slot: 0,
         };
         assert!(hit_test_batch(&batch, &panel, 150.0, 125.0).is_some(),
             "Image batch must route to hit_test_images and return a hit inside bbox");
@@ -1218,6 +1226,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -1232,6 +1241,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -1265,6 +1275,7 @@ mod tests {
                 clip: Rect { x: 0.0, y: 0.0, w: 200.0, h: 500.0 },
                 coord: CoordKind::Cartesian {
                     x_domain: None, y_domain: None, expand: true, clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![],  // no marks in panel 0
@@ -1279,6 +1290,7 @@ mod tests {
                 clip: Rect { x: 250.0, y: 0.0, w: 200.0, h: 500.0 },
                 coord: CoordKind::Cartesian {
                     x_domain: None, y_domain: None, expand: true, clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -1293,6 +1305,7 @@ mod tests {
                     stroke_cap: None,
                     stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -1495,6 +1508,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![],
@@ -1520,6 +1534,7 @@ mod tests {
             stroke_cap: None,
             stroke_join: None,
             packed_instances: None,
+            y_slot: 0,
         };
         // Click on the label anchor — must hit (routes to hit_test_texts).
         assert!(
@@ -1545,6 +1560,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -1559,6 +1575,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -1641,6 +1658,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -1655,6 +1673,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],

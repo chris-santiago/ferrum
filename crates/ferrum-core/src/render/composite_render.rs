@@ -1172,6 +1172,83 @@ mod tests {
         }
     }
 
+    // -- dual-axis (#52) leaf builders ---------------------------------------
+
+    /// A dual-axis LayerChart spec: layer 0 shares the primary y, layer 1 is
+    /// `independent_y` (its own right-axis slot). Mirrors scene_build's
+    /// `two_layer_dual_y_spec(true)` — the canonical secondary-y fixture.
+    fn dual_axis_spec() -> ChartSpec {
+        use crate::spec::layer::Layer;
+        let y_layer = |field: &str, independent_y: bool| Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                y: Some(EncodingSpec { field: field.into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y,
+        };
+        ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: Some(vec![y_layer("y0", false), y_layer("y1", true)]),
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            params: Vec::new(),
+            chart_description: None,
+        }
+    }
+
+    /// Matching batch: `y0 ∈ [1,3]` (small, primary slot) and `y1 ∈ [100,300]`
+    /// (large, independent slot) so the two slots are clearly separable.
+    fn dual_axis_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y0", DataType::Float64, false),
+            Field::new("y1", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![100.0, 200.0, 300.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn dual_axis_hold() -> LeafHold {
+        LeafHold {
+            spec: dual_axis_spec(),
+            batch: dual_axis_batch(),
+            theme: ThemeInputs::default(),
+            config: RenderConfig::default(),
+            chart_config: ChartConfig::default(),
+        }
+    }
+
+    fn dual_leaf_node(data: usize) -> CompositeNode {
+        CompositeNode::Leaf { spec: Box::new(dual_axis_spec()), data, label: None }
+    }
+
     // -- layout math ----------------------------------------------------------
 
     fn placed_stub(w: f64, h: f64) -> Placed {
@@ -1446,6 +1523,69 @@ mod tests {
         // Second panel baked to the right of the first (identity ls, translated).
         assert!(scene.panels[1].layout_scale.is_identity());
         assert!(scene.panels[1].plot_area.x > scene.panels[0].plot_area.x + 300.0);
+    }
+
+    /// Cross-task verification (#52): a dual-axis LayerChart leaf nested inside a
+    /// composite (an `overlay` under an `hconcat`) must keep its per-slot
+    /// secondary-y state through the flatten/place/merge path — the final
+    /// `SceneGraph` panel for that leaf still carries a non-empty `y_domains`
+    /// (one entry per slot) and its mark batches still bind their layer's
+    /// `y_slot`. If the composite placement stripped either, the WASM
+    /// secondary-y relabel/rescale seam would silently degrade to a single axis
+    /// for any dual-axis chart used inside a composition.
+    #[test]
+    fn nested_dual_axis_leaf_retains_y_domains_and_slotted_batches() {
+        // hconcat([ overlay([dual_axis_leaf]), scatter_leaf ]) — the dual leaf is
+        // two composite levels deep. Pre-order leaves: [dual, scatter].
+        let inner = composite(CompositeLayout::Overlay, vec![dual_leaf_node(0)]);
+        let tree = composite(CompositeLayout::Hconcat, vec![inner, leaf_node(1)]);
+
+        let dh = dual_axis_hold();
+        let sh = hold();
+        let leaves = [leaf_input(&dh, 600.0, 400.0), leaf_input(&sh, 300.0, 400.0)];
+        let (scene, _warnings) =
+            render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        // Exactly one panel (the dual-axis leaf) carries per-slot y-domains; the
+        // scatter leaf's coord leaves the list empty.
+        let dual_panels: Vec<&ferrum_scene::Panel> = scene
+            .panels
+            .iter()
+            .filter(|p| match &p.coord {
+                ferrum_scene::CoordKind::Cartesian { y_domains, .. } => !y_domains.is_empty(),
+                _ => false,
+            })
+            .collect();
+        assert_eq!(
+            dual_panels.len(),
+            1,
+            "exactly one nested panel must retain per-slot y_domains, got {}",
+            dual_panels.len()
+        );
+
+        let dual = dual_panels[0];
+        match &dual.coord {
+            ferrum_scene::CoordKind::Cartesian { y_domains, .. } => {
+                assert_eq!(
+                    y_domains.len(),
+                    2,
+                    "dual-axis leaf must keep one y-domain per slot through placement"
+                );
+                let (_, slot0_hi) = y_domains[0].expect("slot 0 domain preserved");
+                let (slot1_lo, _) = y_domains[1].expect("slot 1 domain preserved");
+                assert!(slot0_hi < 50.0, "slot 0 must stay the small y0 domain");
+                assert!(slot1_lo > 50.0, "slot 1 must stay the large independent y1 domain");
+            }
+            other => panic!("expected Cartesian coord, got {other:?}"),
+        }
+
+        // The independent layer's mark batch still binds slot 1 after the merge.
+        assert_eq!(dual.marks.len(), 2, "one mark batch per layer");
+        let slots: Vec<usize> = dual.marks.iter().map(|b| b.y_slot).collect();
+        assert!(
+            slots.contains(&0) && slots.contains(&1),
+            "mark batches must retain both slot 0 (primary) and slot 1 (independent), got {slots:?}"
+        );
     }
 
     #[test]

@@ -127,7 +127,7 @@ pub struct MarkBatch {
     pub y_slot: usize,
 }
 
-fn is_zero_usize(v: &usize) -> bool { *v == 0 }
+pub(crate) fn is_zero_usize(v: &usize) -> bool { *v == 0 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

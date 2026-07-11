@@ -59,7 +59,17 @@ export class WasmRenderer {
      * `panel_id` identifies the panel to zoom (0-indexed); `k` is the uniform
      * scale factor; `tx`/`ty` are the translation offsets.
      * This replaces any accumulated per-panel zoom/pan state and is the sole
-     * entry point for HTML-export zoom driven by D3's `d3.zoom()`.
+     * entry point for HTML-export zoom driven by D3's `d3.zoom()`, including
+     * the dblclick-to-identity reset gesture.
+     *
+     * Secondary-y-axis (#52): resetting a panel's zoom/pan transform also
+     * resets every per-slot rescale affine that panel owns
+     * (`self.slot_rescales`) back to identity. Without this, a
+     * domainParam/brush rescale on an independent-y layer
+     * (`apply_reactive_rescale`) survives a view reset and keeps distorting
+     * that layer even though the panel affine itself is back at identity. A
+     * single-y panel owns exactly one slot, so this is a no-op there
+     * (byte-stable).
      *
      * Returns updated text-element JSON so the JS overlay can reposition labels.
      */

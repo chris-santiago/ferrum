@@ -672,6 +672,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -686,6 +687,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -758,6 +760,7 @@ mod tests {
             clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
             coord: CoordKind::Cartesian {
                 x_domain: None, y_domain: None, expand: true, clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -772,6 +775,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -906,6 +910,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -943,6 +948,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -1040,6 +1046,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -1057,6 +1064,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -1145,6 +1153,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -1162,6 +1171,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -1293,6 +1303,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -1311,6 +1322,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -1569,6 +1581,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -1588,6 +1601,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -1656,6 +1670,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -1675,6 +1690,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -1982,6 +1998,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -2003,6 +2020,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -2075,6 +2093,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -2092,6 +2111,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -2179,6 +2199,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -2193,6 +2214,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -2297,6 +2319,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -2311,6 +2334,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -2405,6 +2429,7 @@ mod tests {
             clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
             coord: CoordKind::Cartesian {
                 x_domain: None, y_domain: None, expand: true, clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![
@@ -2417,6 +2442,7 @@ mod tests {
                     blend: BlendMode::Normal,
                     descriptions: None, stroke_cap: None, stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 },
                 // Batch 1: non-packed (1 circle in nodes).
                 MarkBatch {
@@ -2429,6 +2455,7 @@ mod tests {
                     blend: BlendMode::Normal,
                     descriptions: None, stroke_cap: None, stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 },
             ],
             axes: vec![],
@@ -2548,6 +2575,7 @@ mod tests {
             clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
             coord: CoordKind::Cartesian {
                 x_domain: None, y_domain: None, expand: true, clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![
@@ -2562,6 +2590,7 @@ mod tests {
                     blend: BlendMode::Normal,
                     descriptions: None, stroke_cap: None, stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 },
                 // Batch 1 (scene order 1): packed, 3 circles.
                 MarkBatch {
@@ -2572,6 +2601,7 @@ mod tests {
                     blend: BlendMode::Normal,
                     descriptions: None, stroke_cap: None, stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 },
             ],
             axes: vec![],
@@ -2685,6 +2715,7 @@ mod tests {
             clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
             coord: CoordKind::Cartesian {
                 x_domain: None, y_domain: None, expand: true, clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![
@@ -2699,6 +2730,7 @@ mod tests {
                     blend: BlendMode::Normal,
                     descriptions: None, stroke_cap: None, stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 },
                 // Batch 1 (scene order): packed, 3 circles.
                 MarkBatch {
@@ -2709,6 +2741,7 @@ mod tests {
                     blend: BlendMode::Normal,
                     descriptions: None, stroke_cap: None, stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 },
             ],
             axes: vec![],
@@ -2807,6 +2840,7 @@ mod tests {
             clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
             coord: CoordKind::Cartesian {
                 x_domain: None, y_domain: None, expand: true, clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -2821,6 +2855,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],

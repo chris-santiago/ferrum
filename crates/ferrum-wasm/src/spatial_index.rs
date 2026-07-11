@@ -422,6 +422,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: batches,
@@ -445,6 +446,7 @@ mod tests {
             stroke_cap: None,
             stroke_join: None,
             packed_instances: None,
+            y_slot: 0,
         }
     }
 
@@ -461,6 +463,7 @@ mod tests {
             stroke_cap: None,
             stroke_join: None,
             packed_instances: None,
+            y_slot: 0,
         }
     }
 
@@ -477,6 +480,7 @@ mod tests {
             stroke_cap: None,
             stroke_join: None,
             packed_instances: None,
+            y_slot: 0,
         }
     }
 
@@ -950,6 +954,7 @@ mod tests {
             stroke_cap: None,
             stroke_join: None,
             packed_instances: None,
+            y_slot: 0,
         };
         let panels = make_panels(vec![line_batch]);
         let idx = SpatialIndex::build(&panels);
@@ -1133,6 +1138,7 @@ mod tests {
             draw_commands: vec![],
             mark_mesh_panels: vec![],
             panel_count: 1,
+            panel_slot_counts: vec![1],
         };
 
         let idx = SpatialIndex::build_with_packed(&panels, Some(&data));
@@ -1201,6 +1207,7 @@ mod tests {
             draw_commands: vec![],
             mark_mesh_panels: vec![],
             panel_count: 1,
+            panel_slot_counts: vec![1],
         };
 
         let idx = SpatialIndex::build_with_packed(&panels, Some(&data));
@@ -1262,6 +1269,7 @@ mod tests {
             draw_commands: vec![],
             mark_mesh_panels: vec![],
             panel_count: 1,
+            panel_slot_counts: vec![1],
         };
 
         let idx = SpatialIndex::build_with_packed(&panels, Some(&data));

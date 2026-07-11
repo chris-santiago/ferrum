@@ -182,7 +182,17 @@ impl Default for InteractionConfig {
 pub struct PanelTickLevels {
     pub panel_id: usize,
     pub x_levels: Vec<TickLevel>,
+    /// Primary (slot 0 / left-axis) y tick levels.
     pub y_levels: Vec<TickLevel>,
+    /// Per-secondary-slot y tick levels (secondary-y-axis, GH #52), one entry
+    /// per independent-y layer's right axis in slot order (`[0]` = slot 1, the
+    /// first right axis; `[1]` = slot 2; …). Each entry mirrors `y_levels`'
+    /// zoom-breakpoint structure but is generated from that slot's own y-scale,
+    /// so the runtime can recognize and reposition right-axis tick labels under
+    /// zoom exactly as it does the left axis. Empty for single-axis charts —
+    /// omitted from JSON so every pre-#52 tick-levels blob is byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub y_slot_levels: Vec<Vec<TickLevel>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -307,6 +317,7 @@ mod tests {
                 role: BindingRole::Domain,
                 panel: Some(0),
                 channel: Some("x".into()),
+                y_slot: 0,
             }],
             ..InteractionConfig::default()
         };

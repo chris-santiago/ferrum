@@ -176,10 +176,17 @@ pub struct SceneData {
     /// Panels that contributed no mesh geometry (e.g. only packed
     /// circle/rect instances) are absent from this list.
     pub mark_mesh_panels: Vec<MarkMeshPanel>,
-    /// Number of panels in the source scene graph. `GpuBuffers` allocates one
-    /// per-panel transform slot for each, so any `panel_id` recorded on a mark
-    /// draw command or mesh panel has a slot to bind. Always `>= 1`.
+    /// Number of panels in the source scene graph. Always `>= 1`.
     pub panel_count: usize,
+    /// Per-panel y-scale slot count (secondary-y-axis, GH #52), indexed by
+    /// `panel_id`. `1` for every single-y panel; `n` for a panel resolving `n`
+    /// independent-y layers. `GpuBuffers` allocates one mark-transform slot per
+    /// (panel, slot) pair — `sum(panel_slot_counts)` total — and the render loop
+    /// binds each mark draw's `(panel_id, y_slot)` composed affine via
+    /// [`transform_slot_index`]. A single-y scene has every count `== 1`, so the
+    /// mapping is `index == panel_id` and the allocation is byte-identical to
+    /// the former per-panel one.
+    pub panel_slot_counts: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -300,19 +307,73 @@ pub struct DrawCommand {
     /// or translate sibling panels' marks. Meaningless (always 0) for non-mark
     /// commands, which always draw with the identity transform.
     pub panel_id: usize,
+    /// Y-scale slot these instances map through (secondary-y-axis, GH #52),
+    /// copied from the owning `MarkBatch::y_slot`. `0` = the primary/left-axis
+    /// scale — the byte-stable default for every single-y chart. Lets the render
+    /// loop compose this layer's per-slot rescale affine with the panel affine.
+    /// Meaningless for non-mark commands (always 0).
+    pub y_slot: usize,
 }
 
-/// Per-panel mark-mesh draw range.
+/// The number of distinct y-scale slots a panel's marks map through
+/// (secondary-y-axis, GH #52): the length of the per-slot y-domain list, or `1`
+/// for every single-y panel (empty `y_domains` — the byte-stable default).
+pub fn panel_slot_count(coord: &ferrum_scene::CoordKind) -> usize {
+    match coord {
+        ferrum_scene::CoordKind::Cartesian { y_domains, .. } => y_domains.len().max(1),
+        _ => 1,
+    }
+}
+
+/// Flat transform-slot index for one `(panel, y_slot)` pair, given each panel's
+/// slot count. Panels' slots are laid out consecutively: slot `s` of panel `p`
+/// sits at `sum(counts[..p]) + min(s, counts[p] - 1)`. A single-y scene (every
+/// count `== 1`) yields `index == panel`, so the transform-slot vector matches
+/// the former per-panel one exactly — the byte-stability anchor. An out-of-range
+/// `y_slot` clamps to the panel's last slot rather than indexing past it.
+pub fn transform_slot_index(panel_slot_counts: &[usize], panel: usize, y_slot: usize) -> usize {
+    let base: usize = panel_slot_counts.iter().take(panel).sum();
+    let count = panel_slot_counts.get(panel).copied().unwrap_or(1).max(1);
+    base + y_slot.min(count - 1)
+}
+
+/// Total number of transform slots for a scene = the sum of per-panel slot
+/// counts (always `>= 1`). `GpuBuffers` allocates this many mark-transform
+/// uniform buffers.
+pub fn total_transform_slots(panel_slot_counts: &[usize]) -> usize {
+    panel_slot_counts.iter().sum::<usize>().max(1)
+}
+
+/// The contiguous transform-slot range one panel owns (secondary-y-axis,
+/// GH #52): `[base, base + count)` where `base = sum(counts[..panel])` and
+/// `count = counts[panel]` (`1` when `panel` is out of range, mirroring
+/// [`transform_slot_index`]'s clamp-safe default). A single-y panel's range
+/// is exactly `panel..panel + 1`, matching the flat per-panel index.
 ///
-/// Captures the contiguous slice of the mark-mesh index buffer that belongs
-/// to one panel, together with that panel's plot area. `render_frame` iterates
-/// this list to scissor each panel's mesh draw to its own plot area, preventing
-/// zoomed/panned geometry from bleeding into axis margins or adjacent panels.
+/// Used to reset every slot a panel owns together when its zoom/pan
+/// transform resets (`WasmRenderer::set_transform`), so a per-layer
+/// domainParam/brush rescale parked in `slot_rescales` does not survive a
+/// view reset for that panel.
+pub fn panel_slot_range(panel_slot_counts: &[usize], panel: usize) -> std::ops::Range<usize> {
+    let base: usize = panel_slot_counts.iter().take(panel).sum();
+    let count = panel_slot_counts.get(panel).copied().unwrap_or(1).max(1);
+    base..(base + count)
+}
+
+/// Per-(panel, y-slot) mark-mesh draw range.
+///
+/// Captures the contiguous slice of the mark-mesh index buffer contributed by
+/// one mesh-bearing mark batch, together with the owning panel's plot area and
+/// the batch's y-scale slot. `render_frame` iterates this list to scissor each
+/// slice to its panel's plot area (preventing zoomed/panned geometry from
+/// bleeding into axis margins or adjacent panels) and to bind that (panel, slot)
+/// pair's affine. Single-y charts record one slot-0 entry per mesh batch, so
+/// the rendered geometry is byte-identical to the pre-#52 per-panel recording.
 #[derive(Clone, Debug)]
 pub struct MarkMeshPanel {
-    /// First index in the flat mark-mesh index buffer for this panel.
+    /// First index in the flat mark-mesh index buffer for this slice.
     pub index_start: u32,
-    /// Number of indices (triangle soup) belonging to this panel.
+    /// Number of indices (triangle soup) belonging to this slice.
     pub index_count: u32,
     /// Plot area `[x, y, w, h]` in canvas pixels.
     pub plot_area: [f32; 4],
@@ -320,6 +381,10 @@ pub struct MarkMeshPanel {
     /// this panel's own affine transform so a non-uniform domain-rescale on a
     /// sibling panel does not shear or translate this panel's mesh.
     pub panel_id: usize,
+    /// Y-scale slot this mesh slice maps through (secondary-y-axis, GH #52),
+    /// copied from the owning `MarkBatch::y_slot`. `0` = the primary/left-axis
+    /// scale — the byte-stable default for every single-y chart.
+    pub y_slot: usize,
 }
 
 /// Accumulator for one full scene-load pass.
@@ -403,13 +468,20 @@ impl SceneCollector {
             batch_cap,
             batch_join,
         );
-        self.emit(false, false, None, 0);
+        self.emit(false, false, None, 0, 0);
     }
 
     /// Collect `nodes` into the mark mesh (mark batches: lines, areas, paths,
     /// polygons, polylines) and immediately emit draw commands for any new
-    /// circle/rect instances with the given blend mode, plot area, and owning
-    /// panel index.
+    /// circle/rect instances with the given blend mode, plot area, owning panel
+    /// index, and y-scale slot.
+    ///
+    /// The trailing parameters (`batch_cap`/`batch_join`/`y_slot`) are per-batch
+    /// attributes forwarded straight from the source `MarkBatch`; grouping them
+    /// would only add an intermediate struct without reducing the fan-out at the
+    /// single call site, so the arg count is allowed here (matching
+    /// `render::upload_transform_and_render`).
+    #[allow(clippy::too_many_arguments)]
     pub fn collect_mark(
         &mut self,
         nodes: &[SceneNode],
@@ -418,6 +490,7 @@ impl SceneCollector {
         panel_id: usize,
         batch_cap: Option<StrokeCap>,
         batch_join: Option<StrokeJoin>,
+        y_slot: usize,
     ) {
         collect_nodes(
             nodes,
@@ -430,7 +503,7 @@ impl SceneCollector {
             batch_cap,
             batch_join,
         );
-        self.emit(additive, true, plot_area, panel_id);
+        self.emit(additive, true, plot_area, panel_id, y_slot);
     }
 
     /// Collect `nodes` into the annotation mesh.
@@ -460,20 +533,22 @@ impl SceneCollector {
         );
         // Emit draw commands for any Circle/Rect annotation nodes so they
         // appear at the correct z-order (after mark batches).
-        self.emit(false, false, None, 0);
+        self.emit(false, false, None, 0, 0);
     }
 
     /// Emit draw commands for any circles/rects added since the last snapshot.
     ///
-    /// `panel_id` is only meaningful for mark commands (`is_mark == true`); the
-    /// render loop binds that panel's affine. Non-mark commands always draw
-    /// with the identity transform, so callers pass `0`.
+    /// `panel_id`/`y_slot` are only meaningful for mark commands
+    /// (`is_mark == true`); the render loop composes that (panel, slot) pair's
+    /// affine. Non-mark commands always draw with the identity transform, so
+    /// callers pass `0` for both.
     fn emit(
         &mut self,
         additive: bool,
         is_mark: bool,
         plot_area: Option<[f32; 4]>,
         panel_id: usize,
+        y_slot: usize,
     ) {
         let new_c = self.circles.len();
         if new_c > self.prev_c {
@@ -485,6 +560,7 @@ impl SceneCollector {
                 is_mark,
                 plot_area,
                 panel_id,
+                y_slot,
             });
         }
         self.prev_c = new_c;
@@ -499,6 +575,7 @@ impl SceneCollector {
                 is_mark,
                 plot_area,
                 panel_id,
+                y_slot,
             });
         }
         self.prev_r = new_r;
@@ -518,6 +595,7 @@ impl SceneCollector {
         index_end_after: u32,
         plot_area: [f32; 4],
         panel_id: usize,
+        y_slot: usize,
     ) {
         let index_count = index_end_after - index_start_before;
         if index_count > 0 {
@@ -526,6 +604,7 @@ impl SceneCollector {
                 index_count,
                 plot_area,
                 panel_id,
+                y_slot,
             });
         }
     }
@@ -1007,10 +1086,6 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         ];
         let panel_plot_area = Some(panel_plot_area_arr);
 
-        // Snapshot the mark-mesh index count before processing this panel's
-        // mark batches so we can record the contiguous range afterward.
-        let mesh_index_start_before = collector.mesh.indices.len() as u32;
-
         for (batch_idx, batch) in panel.marks.iter().enumerate() {
             let additive = batch_uses_additive_blend(batch.blend);
 
@@ -1029,9 +1104,15 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                     is_mark: true,
                     plot_area: panel_plot_area,
                     panel_id: panel_idx,
+                    y_slot: batch.y_slot,
                 });
             } else {
-                // Mark batches → mark mesh (zoom transform)
+                // Mark batches → mark mesh (zoom transform). Record this
+                // batch's mesh index range tagged with its y-slot so the render
+                // loop can bind the (panel, slot) affine (secondary-y, #52).
+                // Single-y charts emit one slot-0 range per mesh batch, which
+                // draws byte-identically to the former per-panel recording.
+                let mesh_start = collector.mesh.indices.len() as u32;
                 let scaled_nodes = maybe_transform_nodes(&batch.nodes, ls);
                 collector.collect_mark(
                     &scaled_nodes,
@@ -1040,20 +1121,18 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
                     panel_idx,
                     batch.stroke_cap,
                     batch.stroke_join,
+                    batch.y_slot,
+                );
+                let mesh_end = collector.mesh.indices.len() as u32;
+                collector.record_mark_mesh_panel(
+                    mesh_start,
+                    mesh_end,
+                    panel_plot_area_arr,
+                    panel_idx,
+                    batch.y_slot,
                 );
             }
         }
-
-        // Record this panel's mark-mesh index range. Panels that contributed
-        // no mesh geometry (e.g. only packed instances) produce a zero-count
-        // range and are skipped by `record_mark_mesh_panel`.
-        let mesh_index_end_after = collector.mesh.indices.len() as u32;
-        collector.record_mark_mesh_panel(
-            mesh_index_start_before,
-            mesh_index_end_after,
-            panel_plot_area_arr,
-            panel_idx,
-        );
 
         // Axes, strip titles: non-mark → static mesh
         collector.collect_static(&maybe_transform_nodes(&panel.axes, ls), None, None);
@@ -1083,6 +1162,11 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> SceneDa
         draw_commands: collector.draw_commands,
         mark_mesh_panels: collector.mark_mesh_panels,
         panel_count: scene.panels.len().max(1),
+        panel_slot_counts: scene
+            .panels
+            .iter()
+            .map(|p| panel_slot_count(&p.coord))
+            .collect(),
     }
 }
 
@@ -1681,6 +1765,171 @@ pub(crate) fn stroke_dash_index(dash: &Option<Vec<f64>>) -> f32 {
 mod tests {
     use super::*;
 
+    // ── #52: per-(panel, y-slot) transform-slot index mapping ────────────
+
+    #[test]
+    fn panel_slot_count_single_y_is_one() {
+        let coord = ferrum_scene::CoordKind::Cartesian {
+            x_domain: None,
+            y_domain: Some((0.0, 1.0)),
+            expand: true,
+            clip: true,
+            y_domains: Vec::new(),
+        };
+        assert_eq!(panel_slot_count(&coord), 1, "empty y_domains → 1 slot");
+    }
+
+    #[test]
+    fn panel_slot_count_dual_axis_matches_domain_list() {
+        let coord = ferrum_scene::CoordKind::Cartesian {
+            x_domain: None,
+            y_domain: Some((0.0, 1.0)),
+            expand: true,
+            clip: true,
+            y_domains: vec![Some((0.0, 1.0)), Some((0.0, 9.0)), None],
+        };
+        assert_eq!(panel_slot_count(&coord), 3, "one slot per y_domains entry");
+    }
+
+    #[test]
+    fn transform_slot_index_single_y_is_panel_id() {
+        // Every panel single-y (count == 1): the flat index is the panel id,
+        // so the transform-slot vector matches the former per-panel one.
+        let counts = vec![1, 1, 1];
+        assert_eq!(transform_slot_index(&counts, 0, 0), 0);
+        assert_eq!(transform_slot_index(&counts, 1, 0), 1);
+        assert_eq!(transform_slot_index(&counts, 2, 0), 2);
+        assert_eq!(total_transform_slots(&counts), 3);
+    }
+
+    #[test]
+    fn transform_slot_index_lays_slots_consecutively() {
+        // Panel 0: 1 slot (idx 0). Panel 1: 2 slots (idx 1,2). Panel 2: 1 (idx 3).
+        let counts = vec![1, 2, 1];
+        assert_eq!(transform_slot_index(&counts, 0, 0), 0);
+        assert_eq!(transform_slot_index(&counts, 1, 0), 1);
+        assert_eq!(transform_slot_index(&counts, 1, 1), 2);
+        assert_eq!(transform_slot_index(&counts, 2, 0), 3);
+        assert_eq!(total_transform_slots(&counts), 4);
+    }
+
+    #[test]
+    fn transform_slot_index_clamps_out_of_range_slot() {
+        // An out-of-range y_slot clamps to the panel's last slot rather than
+        // indexing past the panel's block.
+        let counts = vec![2, 2];
+        assert_eq!(transform_slot_index(&counts, 0, 5), 1, "clamp to panel 0's last slot");
+        assert_eq!(transform_slot_index(&counts, 1, 9), 3, "clamp to panel 1's last slot");
+    }
+
+    #[test]
+    fn panel_slot_range_single_y_is_one_slot_per_panel() {
+        let counts = vec![1, 1, 1];
+        assert_eq!(panel_slot_range(&counts, 0), 0..1);
+        assert_eq!(panel_slot_range(&counts, 1), 1..2);
+        assert_eq!(panel_slot_range(&counts, 2), 2..3);
+    }
+
+    #[test]
+    fn panel_slot_range_covers_every_slot_of_a_multi_slot_panel() {
+        // Panel 0: 1 slot (0..1). Panel 1: 2 slots (1..3). Panel 2: 1 (3..4).
+        let counts = vec![1, 2, 1];
+        assert_eq!(panel_slot_range(&counts, 0), 0..1);
+        assert_eq!(panel_slot_range(&counts, 1), 1..3);
+        assert_eq!(panel_slot_range(&counts, 2), 3..4);
+    }
+
+    #[test]
+    fn panel_slot_range_out_of_range_panel_defaults_to_one_slot() {
+        let counts = vec![2, 2];
+        assert_eq!(panel_slot_range(&counts, 5), 4..5);
+    }
+
+    /// Discriminating test for the `set_transform` reset fix (#52 Task 9c):
+    /// mirrors `WasmRenderer::set_transform`'s reset loop
+    /// (`for slot in &mut self.slot_rescales[panel_slot_range(...)] { *slot =
+    /// Affine2::identity(); }`) against a 3-panel scene where panel 1 has two
+    /// independent-y slots. A domainParam rescale on panel 1's secondary
+    /// layer (slot 1) must return to identity when panel 1's view resets,
+    /// while a sibling panel's own rescaled slot is left untouched.
+    #[test]
+    fn panel_slot_range_reset_clears_only_the_owning_panels_slots() {
+        use crate::zoom_pan::Affine2;
+
+        // panel 0: 1 slot (idx 0). panel 1: 2 slots (idx 1,2). panel 2: 1 (idx 3).
+        let counts = vec![1, 2, 1];
+        let mut slot_rescales = vec![Affine2::identity(); total_transform_slots(&counts)];
+
+        // Simulate two independent rescales: panel 1's secondary-y layer
+        // (slot idx 2) via a domainParam brush, and panel 2 (slot idx 3) via
+        // its own independent rescale.
+        slot_rescales[2] = Affine2 { sx: 1.0, sy: 2.5, tx: 0.0, ty: -10.0 };
+        slot_rescales[3] = Affine2 { sx: 1.0, sy: 4.0, tx: 0.0, ty: 5.0 };
+
+        // Reset panel 1 (as `set_transform(1, ...)` would): only its owned
+        // range (1..3) resets to identity.
+        for slot in &mut slot_rescales[panel_slot_range(&counts, 1)] {
+            *slot = Affine2::identity();
+        }
+
+        assert_eq!(slot_rescales[0].sy, 1.0, "panel 0's untouched slot stays identity");
+        assert_eq!(slot_rescales[1].sy, 1.0, "panel 1's primary slot was already identity");
+        assert_eq!(
+            slot_rescales[2].sy, 1.0,
+            "panel 1's rescaled secondary-y slot must reset to identity"
+        );
+        assert_eq!(
+            slot_rescales[2].ty, 0.0,
+            "panel 1's rescaled secondary-y slot must reset to identity"
+        );
+        assert_eq!(
+            slot_rescales[3].sy, 4.0,
+            "panel 2's own rescale must survive panel 1's reset"
+        );
+    }
+
+    /// Discriminating test for the out-of-range `panel_id` fix (#52 Task 9e):
+    /// `WasmRenderer::set_transform` now bounds the reset loop via
+    /// `self.slot_rescales.get_mut(slot_range)` instead of indexing the
+    /// range directly. `panel_slot_range` returns `total..total+1` for a
+    /// panel past the end of `panel_slot_counts` (see
+    /// `panel_slot_range_out_of_range_panel_defaults_to_one_slot` above),
+    /// which is out of bounds for a `slot_rescales` of length `total` — a
+    /// direct index there panics and aborts the WASM module. This mirrors
+    /// that lookup pattern and asserts it must not panic and must leave
+    /// every in-range slot untouched.
+    #[test]
+    fn panel_slot_range_reset_out_of_range_panel_is_noop() {
+        use crate::zoom_pan::Affine2;
+
+        let counts = vec![1, 2, 1];
+        let mut slot_rescales = vec![Affine2::identity(); total_transform_slots(&counts)];
+        slot_rescales[2] = Affine2 { sx: 1.0, sy: 2.5, tx: 0.0, ty: -10.0 };
+        slot_rescales[3] = Affine2 { sx: 1.0, sy: 4.0, tx: 0.0, ty: 5.0 };
+
+        let out_of_range_slot_range = panel_slot_range(&counts, 5);
+        assert_eq!(out_of_range_slot_range, 4..5, "sanity: past the end of slot_rescales (len 4)");
+
+        // Bounded reset: must not panic, and must leave every existing slot
+        // untouched since panel 5 owns none of them.
+        if let Some(slots) = slot_rescales.get_mut(out_of_range_slot_range) {
+            for slot in slots {
+                *slot = Affine2::identity();
+            }
+        }
+
+        assert_eq!(slot_rescales[0].sy, 1.0);
+        assert_eq!(slot_rescales[1].sy, 1.0);
+        assert_eq!(
+            slot_rescales[2].sy, 2.5,
+            "panel 1's rescaled secondary-y slot must survive an out-of-range reset"
+        );
+        assert_eq!(
+            slot_rescales[3].sy, 4.0,
+            "panel 2's own rescale must survive an out-of-range reset"
+        );
+    }
+
     // ── sRGB-to-linear conversion ────────────────────────────────────
 
     #[test]
@@ -1916,6 +2165,7 @@ mod tests {
                     y_domain: None,
                     expand: true,
                     clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -1930,6 +2180,7 @@ mod tests {
                     stroke_cap: None,
                     stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -2022,6 +2273,7 @@ mod tests {
                     y_domain: None,
                     expand: true,
                     clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -2036,6 +2288,7 @@ mod tests {
                     stroke_cap: None,
                     stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -2145,6 +2398,7 @@ mod tests {
                     y_domain: None,
                     expand: true,
                     clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -2159,6 +2413,7 @@ mod tests {
                     stroke_cap: None,
                     stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -2219,6 +2474,7 @@ mod tests {
                     y_domain: None,
                     expand: true,
                     clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -2233,6 +2489,7 @@ mod tests {
                     stroke_cap: None,
                     stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -2514,6 +2771,7 @@ mod tests {
                     y_domain: None,
                     expand: true,
                     clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -2528,6 +2786,7 @@ mod tests {
                     stroke_cap: None,
                     stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -3083,6 +3342,7 @@ mod tests {
                     y_domain: None,
                     expand: true,
                     clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![
@@ -3098,6 +3358,7 @@ mod tests {
                         stroke_cap: None,
                         stroke_join: None,
                         packed_instances: None,
+                        y_slot: 0,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Bar,
@@ -3111,6 +3372,7 @@ mod tests {
                         stroke_cap: None,
                         stroke_join: None,
                         packed_instances: None,
+                        y_slot: 0,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Rule,
@@ -3124,6 +3386,7 @@ mod tests {
                         stroke_cap: None,
                         stroke_join: None,
                         packed_instances: None,
+                        y_slot: 0,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Area,
@@ -3137,6 +3400,7 @@ mod tests {
                         stroke_cap: None,
                         stroke_join: None,
                         packed_instances: None,
+                        y_slot: 0,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Polygon,
@@ -3150,6 +3414,7 @@ mod tests {
                         stroke_cap: None,
                         stroke_join: None,
                         packed_instances: None,
+                        y_slot: 0,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Line,
@@ -3163,6 +3428,7 @@ mod tests {
                         stroke_cap: None,
                         stroke_join: None,
                         packed_instances: None,
+                        y_slot: 0,
                     },
                 ],
                 axes: vec![],
@@ -3387,6 +3653,7 @@ mod tests {
                     y_domain: None,
                     expand: true,
                     clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -3401,6 +3668,7 @@ mod tests {
                     stroke_cap: None,
                     stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -4073,7 +4341,7 @@ mod tests {
         }];
 
         let mut collector = SceneCollector::new();
-        collector.collect_mark(&nodes, false, None, 0, None, None);
+        collector.collect_mark(&nodes, false, None, 0, None, None, 0);
 
         assert_eq!(collector.circles.len(), 1);
         // fill_color alpha must reflect fill_opacity (0.5), not overall opacity (1.0).
@@ -4121,7 +4389,7 @@ mod tests {
         }];
 
         let mut collector = SceneCollector::new();
-        collector.collect_mark(&nodes, false, None, 0, None, None);
+        collector.collect_mark(&nodes, false, None, 0, None, None, 0);
 
         assert_eq!(collector.rects.len(), 1);
         assert!(
@@ -4206,6 +4474,7 @@ mod tests {
                     y_domain: None,
                     expand: true,
                     clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![
@@ -4221,6 +4490,7 @@ mod tests {
                         stroke_cap: None,
                         stroke_join: None,
                         packed_instances: None,
+                        y_slot: 0,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Point,
@@ -4234,6 +4504,7 @@ mod tests {
                         stroke_cap: None,
                         stroke_join: None,
                         packed_instances: None,
+                        y_slot: 0,
                     },
                 ],
                 axes: vec![],
@@ -4403,6 +4674,7 @@ mod tests {
                     y_domain: None,
                     expand: true,
                     clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -4417,6 +4689,7 @@ mod tests {
                     stroke_cap: None,
                     stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -4648,6 +4921,7 @@ mod tests {
                     y_domain: None,
                     expand: true,
                     clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![
@@ -4663,6 +4937,7 @@ mod tests {
                         stroke_cap: None,
                         stroke_join: None,
                         packed_instances: None,
+                        y_slot: 0,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Bar,
@@ -4676,6 +4951,7 @@ mod tests {
                         stroke_cap: None,
                         stroke_join: None,
                         packed_instances: None,
+                        y_slot: 0,
                     },
                     MarkBatch {
                         kind: MarkBatchKind::Area,
@@ -4689,6 +4965,7 @@ mod tests {
                         stroke_cap: None,
                         stroke_join: None,
                         packed_instances: None,
+                        y_slot: 0,
                     },
                 ],
                 axes: vec![],
@@ -4834,6 +5111,7 @@ mod tests {
                     y_domain: None,
                     expand: true,
                     clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![grid_line],
                 marks: vec![MarkBatch {
@@ -4848,6 +5126,7 @@ mod tests {
                     stroke_cap: None,
                     stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 }],
                 axes: vec![],
                 annotations: vec![annotation_line],
@@ -4994,6 +5273,7 @@ mod tests {
                         y_domain: None,
                         expand: true,
                         clip: true,
+                        y_domains: Vec::new(),
                     },
                     grid: vec![],
                     marks: vec![MarkBatch {
@@ -5008,6 +5288,7 @@ mod tests {
                         stroke_cap: None,
                         stroke_join: None,
                         packed_instances: None,
+                        y_slot: 0,
                     }],
                     axes: vec![],
                     annotations: vec![],
@@ -5033,6 +5314,7 @@ mod tests {
                         y_domain: None,
                         expand: true,
                         clip: true,
+                        y_domains: Vec::new(),
                     },
                     grid: vec![],
                     marks: vec![MarkBatch {
@@ -5047,6 +5329,7 @@ mod tests {
                         stroke_cap: None,
                         stroke_join: None,
                         packed_instances: None,
+                        y_slot: 0,
                     }],
                     axes: vec![],
                     annotations: vec![],
@@ -5121,14 +5404,14 @@ mod tests {
         let mut collector = SceneCollector::new();
 
         // Record a non-zero range for panel 0.
-        collector.record_mark_mesh_panel(0, 30, [10.0, 20.0, 200.0, 150.0], 0);
+        collector.record_mark_mesh_panel(0, 30, [10.0, 20.0, 200.0, 150.0], 0, 0);
         assert_eq!(collector.mark_mesh_panels.len(), 1);
         assert_eq!(collector.mark_mesh_panels[0].index_start, 0);
         assert_eq!(collector.mark_mesh_panels[0].index_count, 30);
         assert_eq!(collector.mark_mesh_panels[0].panel_id, 0);
 
         // Record a zero-count range — must be dropped.
-        collector.record_mark_mesh_panel(30, 30, [10.0, 200.0, 200.0, 150.0], 1);
+        collector.record_mark_mesh_panel(30, 30, [10.0, 200.0, 200.0, 150.0], 1, 0);
         assert_eq!(
             collector.mark_mesh_panels.len(),
             1,
@@ -5136,7 +5419,7 @@ mod tests {
         );
 
         // Record a second non-zero range that follows the first (panel 2).
-        collector.record_mark_mesh_panel(30, 55, [220.0, 20.0, 200.0, 150.0], 2);
+        collector.record_mark_mesh_panel(30, 55, [220.0, 20.0, 200.0, 150.0], 2, 0);
         assert_eq!(collector.mark_mesh_panels.len(), 2);
         assert_eq!(collector.mark_mesh_panels[1].index_start, 30);
         assert_eq!(collector.mark_mesh_panels[1].index_count, 25);
@@ -5215,6 +5498,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -5243,6 +5527,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -5870,6 +6155,7 @@ mod tests {
                     y_domain: None,
                     expand: true,
                     clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -5884,6 +6170,7 @@ mod tests {
                     stroke_cap: None,
                     stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 }],
                 axes: vec![],
                 annotations: vec![],
@@ -6029,6 +6316,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -6048,6 +6336,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -6179,6 +6468,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -6198,6 +6488,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -6266,6 +6557,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![],
@@ -6323,6 +6615,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -6342,6 +6635,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -6840,6 +7134,7 @@ mod bug_hunt_tests {
                     y_domain: None,
                     expand: true,
                     clip: true,
+                    y_domains: Vec::new(),
                 },
                 grid: vec![],
                 marks: vec![MarkBatch {
@@ -6854,6 +7149,7 @@ mod bug_hunt_tests {
                     stroke_cap: None,
                     stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 }],
                 axes: vec![],
                 annotations: vec![node],

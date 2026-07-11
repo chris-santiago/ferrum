@@ -67,6 +67,16 @@ pub struct ParamBinding {
     /// Channel wire name ("x"/"y"/"color"/…) for `Domain` bindings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<String>,
+    /// Y-scale slot this `Domain` binding rescales (secondary-y-axis, GH #52).
+    /// `0` = the primary/left-axis scale — the byte-stable default, omitted from
+    /// JSON so every existing binding is untouched. A `domainParam`/brush bound
+    /// to an `independent_y` layer's `y` encoding carries that layer's slot
+    /// index (`k` = k-th independent layer), so the runtime composes the rescale
+    /// into that slot's affine and rescales only that layer's marks. Ignored for
+    /// `x`/`Filter`/`Legend` bindings (the x-scale and crossfilter are shared
+    /// across layers).
+    #[serde(default, skip_serializing_if = "crate::types::is_zero_usize")]
+    pub y_slot: usize,
 }
 
 #[cfg(test)]
@@ -122,6 +132,7 @@ mod tests {
             role: BindingRole::Domain,
             panel: Some(0),
             channel: Some("x".into()),
+            y_slot: 0,
         };
         let json = serde_json::to_string(&binding).unwrap();
         assert_eq!(
@@ -139,11 +150,34 @@ mod tests {
             role: BindingRole::Filter,
             panel: Some(2),
             channel: None,
+            y_slot: 0,
         };
         let json = serde_json::to_string(&binding).unwrap();
         assert_eq!(json, r#"{"param":"brush","role":"filter","panel":2}"#);
         let parsed: ParamBinding = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, binding);
+    }
+
+    #[test]
+    fn domain_binding_carries_nonzero_y_slot() {
+        // Secondary-y (#52): a domainParam bound to an independent-y layer
+        // serializes its slot index and round-trips; slot 0 stays omitted (see
+        // `domain_binding_round_trips`) so pre-#52 bindings are byte-identical.
+        let binding = ParamBinding {
+            param: "d".into(),
+            role: BindingRole::Domain,
+            panel: Some(0),
+            channel: Some("y".into()),
+            y_slot: 1,
+        };
+        let json = serde_json::to_string(&binding).unwrap();
+        assert_eq!(
+            json,
+            r#"{"param":"d","role":"domain","panel":0,"channel":"y","y_slot":1}"#
+        );
+        let parsed: ParamBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, binding);
+        assert_eq!(parsed.y_slot, 1);
     }
 
     #[test]
@@ -153,6 +187,7 @@ mod tests {
             role: BindingRole::Legend,
             panel: None,
             channel: None,
+            y_slot: 0,
         };
         let json = serde_json::to_string(&binding).unwrap();
         assert_eq!(json, r#"{"param":"sel","role":"legend"}"#);

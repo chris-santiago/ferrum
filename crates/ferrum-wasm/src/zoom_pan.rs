@@ -131,6 +131,33 @@ pub(crate) fn select_panel_transform(transforms: &[Affine2], panel_id: usize) ->
         .unwrap_or_else(Affine2::identity)
 }
 
+/// Compose a panel's zoom/pan affine with one y-scale slot's rescale affine
+/// (secondary-y-axis, GH #52).
+///
+/// The panel affine (`panel`) is the per-panel zoom/pan gesture transform that
+/// moves every layer together. The slot affine (`slot_y`) is a **y-only**
+/// rescale a `domainParam`/brush bound to one independent-y layer writes; its
+/// `sx`/`tx` are identity and only `sy`/`ty` are meaningful. The composition
+/// applies the slot rescale first, then the panel affine, so a layer's marks
+/// map through `panel ∘ slot`:
+///
+/// ```text
+/// screen_y = panel.sy * (slot.sy * y + slot.ty) + panel.ty
+/// ```
+///
+/// x is the panel affine's x untouched (the x-scale is shared across layers).
+/// An identity slot rescale returns the panel affine unchanged, so at rest and
+/// under pure zoom/pan every slot composes to the panel affine — the
+/// byte-stability anchor and the "layers move together" invariant (spec §8.5).
+pub(crate) fn compose_panel_slot(panel: Affine2, slot_y: Affine2) -> Affine2 {
+    Affine2 {
+        sx: panel.sx,
+        tx: panel.tx,
+        sy: panel.sy * slot_y.sy,
+        ty: panel.sy * slot_y.ty + panel.ty,
+    }
+}
+
 pub(crate) fn tick_level_for_zoom(zoom: f64) -> usize {
     if zoom < 0.5 {
         0
@@ -473,6 +500,49 @@ mod tests {
     /// At rest (all panels identity) the per-panel selection yields identity
     /// for every slot, so the rendered affine matches the former single-uniform
     /// path exactly — the byte-stability anchor.
+    // ── #52: per-(panel, slot) affine composition ───────────────────────────
+
+    /// An identity slot rescale must leave the panel affine unchanged, so a
+    /// single-y chart and any layer under pure zoom/pan compose to exactly the
+    /// panel affine — the byte-stability anchor.
+    #[test]
+    fn compose_panel_slot_identity_slot_is_panel_affine() {
+        let panel = Affine2 { sx: 2.0, sy: 3.0, tx: 10.0, ty: -5.0 };
+        let c = compose_panel_slot(panel, Affine2::identity());
+        assert!((c.sx - 2.0).abs() < 1e-12);
+        assert!((c.sy - 3.0).abs() < 1e-12);
+        assert!((c.tx - 10.0).abs() < 1e-12);
+        assert!((c.ty - (-5.0)).abs() < 1e-12);
+    }
+
+    /// A y-only slot rescale must touch only y; x stays the panel affine's x,
+    /// so overlaid layers never shear apart horizontally.
+    #[test]
+    fn compose_panel_slot_y_rescale_leaves_x_untouched() {
+        let panel = Affine2::identity();
+        let slot = Affine2 { sx: 1.0, sy: 4.0, tx: 0.0, ty: -30.0 };
+        let c = compose_panel_slot(panel, slot);
+        assert!((c.sx - 1.0).abs() < 1e-12, "x scale must stay the panel's");
+        assert!((c.tx - 0.0).abs() < 1e-12, "x offset must stay the panel's");
+        assert!((c.sy - 4.0).abs() < 1e-12, "y scale must be the slot rescale");
+        assert!((c.ty - (-30.0)).abs() < 1e-12, "y offset must be the slot rescale");
+    }
+
+    /// Full composition order: panel affine applied after the slot rescale.
+    /// A point y maps through `panel.sy * (slot.sy*y + slot.ty) + panel.ty`.
+    #[test]
+    fn compose_panel_slot_applies_slot_then_panel() {
+        let panel = Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 100.0 };
+        let slot = Affine2 { sx: 1.0, sy: 3.0, tx: 0.0, ty: 5.0 };
+        let c = compose_panel_slot(panel, slot);
+        // sy = 2*3 = 6; ty = 2*5 + 100 = 110.
+        assert!((c.sy - 6.0).abs() < 1e-12);
+        assert!((c.ty - 110.0).abs() < 1e-12);
+        // A concrete point y=10: slot → 3*10+5=35; panel → 2*35+100=170.
+        let (_, y) = c.apply(0.0, 10.0);
+        assert!((y - 170.0).abs() < 1e-9, "composed y={y}, expected 170");
+    }
+
     #[test]
     fn select_panel_transform_identity_at_rest() {
         let transforms = vec![Affine2::identity(); 3];

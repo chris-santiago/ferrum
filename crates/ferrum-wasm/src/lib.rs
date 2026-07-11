@@ -64,6 +64,15 @@ pub struct WasmRenderer {
     selections: Vec<ferrum_scene::SelectionSpec>,
     interaction_state: InteractionState,
     zoom: ZoomPanState,
+    /// Per-(panel, y-slot) domain-rescale affines (secondary-y-axis, GH #52),
+    /// flat-indexed by `scene_load::transform_slot_index`. A `domainParam`/brush
+    /// bound to an independent-y layer's `y` writes a y-only rescale into that
+    /// layer's slot here; the render upload composes it with the per-panel
+    /// zoom/pan affine (`compose_panel_slot`). Identity for every slot at rest
+    /// and for every single-y scene, so the composed transform is exactly the
+    /// panel affine — byte-stable. Kept separate from `zoom.transforms` so a
+    /// per-layer domain rescale never disturbs the shared zoom/pan gesture.
+    slot_rescales: Vec<crate::zoom_pan::Affine2>,
     interaction: ferrum_scene::InteractionConfig,
     spatial_index: Option<SpatialIndex>,
 }
@@ -107,6 +116,7 @@ impl WasmRenderer {
             selections: Vec::new(),
             interaction_state: InteractionState::new(&[]),
             zoom: ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default()),
+            slot_rescales: Vec::new(),
             interaction: ferrum_scene::InteractionConfig::default(),
             spatial_index: None,
         })
@@ -132,6 +142,14 @@ impl WasmRenderer {
         self.interaction_state = InteractionState::new(&self.selections);
         self.interaction = scene.interaction.clone();
         self.zoom = ZoomPanState::new(scene.panels.len(), &self.interaction);
+        // Per-(panel, y-slot) domain-rescale affines (secondary-y-axis, #52),
+        // one per allocated transform slot, all identity until a per-layer
+        // domainParam/brush rescales one. For a single-y scene this is one
+        // identity per panel — the byte-stable default.
+        self.slot_rescales = vec![
+            crate::zoom_pan::Affine2::identity();
+            scene_load::total_transform_slots(&data.panel_slot_counts)
+        ];
         // Build spatial index over all panels for O(log n) hit-testing.
         // Pass scene data so packed instances (>= 1000 marks) are also indexed.
         self.spatial_index = Some(SpatialIndex::build_with_packed(&baked_panels, Some(&data)));
@@ -224,6 +242,7 @@ impl WasmRenderer {
                 draw_commands: tr.new_data.draw_commands.clone(),
                 mark_mesh_panels: tr.new_data.mark_mesh_panels.clone(),
                 panel_count: tr.new_data.panel_count,
+                panel_slot_counts: tr.new_data.panel_slot_counts.clone(),
             };
             let buffers = GpuBuffers::from_scene(&self.gpu, &self.pipelines, &lerped_data);
             render::render_frame(&self.gpu, &self.pipelines, &buffers, lerped_data.background)
@@ -383,14 +402,35 @@ impl WasmRenderer {
     /// `panel_id` identifies the panel to zoom (0-indexed); `k` is the uniform
     /// scale factor; `tx`/`ty` are the translation offsets.
     /// This replaces any accumulated per-panel zoom/pan state and is the sole
-    /// entry point for HTML-export zoom driven by D3's `d3.zoom()`.
+    /// entry point for HTML-export zoom driven by D3's `d3.zoom()`, including
+    /// the dblclick-to-identity reset gesture.
+    ///
+    /// Secondary-y-axis (#52): resetting a panel's zoom/pan transform also
+    /// resets every per-slot rescale affine that panel owns
+    /// (`self.slot_rescales`) back to identity. Without this, a
+    /// domainParam/brush rescale on an independent-y layer
+    /// (`apply_reactive_rescale`) survives a view reset and keeps distorting
+    /// that layer even though the panel affine itself is back at identity. A
+    /// single-y panel owns exactly one slot, so this is a no-op there
+    /// (byte-stable).
     ///
     /// Returns updated text-element JSON so the JS overlay can reposition labels.
     #[wasm_bindgen(js_name = "setTransform")]
     pub fn set_transform(&mut self, panel_id: u32, k: f32, tx: f32, ty: f32) -> Result<String, JsValue> {
-        let Some(_loaded) = &self.loaded else { return Ok("[]".to_string()); };
-        self.zoom.set_absolute(panel_id as usize, k as f64, tx as f64, ty as f64);
-        self.upload_transform_and_render(panel_id as usize)
+        let panel = panel_id as usize;
+        let Some(loaded) = &self.loaded else { return Ok("[]".to_string()); };
+        let slot_range = scene_load::panel_slot_range(&loaded.data.panel_slot_counts, panel);
+        self.zoom.set_absolute(panel, k as f64, tx as f64, ty as f64);
+        // Out-of-range `panel_id` must be a no-op (mirrors `set_absolute`'s
+        // `get_mut` above): `panel_slot_range` always returns a range past
+        // the end of `slot_rescales` for an out-of-range panel, so indexing
+        // it directly would panic and abort the WASM module (#52 Task 9e).
+        if let Some(slots) = self.slot_rescales.get_mut(slot_range) {
+            for slot in slots {
+                *slot = crate::zoom_pan::Affine2::identity();
+            }
+        }
+        self.upload_transform_and_render(panel)
     }
 
     #[wasm_bindgen(js_name = "maxTextureSize")]
@@ -653,13 +693,17 @@ impl WasmRenderer {
             // domain. Most crossfilters share the x-domain; try x first, then y.
             let mut x_range = None;
             let mut y_range = None;
+            // Cross-panel crossfilter shares the primary scale group; the
+            // per-layer y-slot (secondary-y, #52) is a within-panel concept and
+            // same-panel targets are skipped above, so this inverts through
+            // slot 0 — byte-identical to the pre-#52 crossfilter path.
             if let Some(r) = reproject_extent(
-                brush_x, &src.plot_area, &src.coord, &tgt.plot_area, &tgt.coord, Axis::X,
+                brush_x, &src.plot_area, &src.coord, &tgt.plot_area, &tgt.coord, Axis::X, 0,
             ) {
                 x_range = Some(r);
             }
             if let Some(r) = reproject_extent(
-                brush_y, &src.plot_area, &src.coord, &tgt.plot_area, &tgt.coord, Axis::Y,
+                brush_y, &src.plot_area, &src.coord, &tgt.plot_area, &tgt.coord, Axis::Y, 0,
             ) {
                 y_range = Some(r);
             }
@@ -712,7 +756,7 @@ impl WasmRenderer {
     ) -> Option<(usize, String)> {
         use crate::param_runtime::{rescale_affine_cross_panel, Axis};
 
-        let bindings: Vec<(usize, Axis, (f64, f64))> = self
+        let bindings: Vec<(usize, Axis, (f64, f64), usize)> = self
             .interaction
             .param_bindings
             .iter()
@@ -724,7 +768,9 @@ impl WasmRenderer {
                     Axis::X => brush_x,
                     Axis::Y => brush_y,
                 };
-                Some((panel, axis, brush))
+                // `y_slot` selects the independent-y layer a y-domainParam is
+                // bound to (secondary-y, #52); 0 = the primary scale group.
+                Some((panel, axis, brush, b.y_slot))
             })
             .collect();
 
@@ -735,7 +781,7 @@ impl WasmRenderer {
         let zoom_range = self.zoom.zoom_range;
         let loaded = self.loaded.as_ref()?;
         let mut rendered_panel = None;
-        for (panel, axis, brush) in bindings {
+        for (panel, axis, brush, y_slot) in bindings {
             // Baked geometry (D4a amendment addendum): `src.plot_area`/
             // `src.coord` feed `rescale_affine_cross_panel`'s pixel-space
             // reprojection below.
@@ -746,10 +792,10 @@ impl WasmRenderer {
                 continue;
             };
             // Reproject the brush from source-panel pixel space through the
-            // shared data domain into target-panel pixel space before building
-            // the affine. This is the correct path for `hconcat(overview,
-            // detail)` where source and target occupy different pixel regions.
-            // When both panels share the same plot area (single-panel
+            // owning layer's y-slot domain into target-panel pixel space before
+            // building the affine. This is the correct path for `hconcat(
+            // overview, detail)` where source and target occupy different pixel
+            // regions; when both panels share the same plot area (single-panel
             // self-rescale) the reprojection is a no-op, preserving existing
             // behavior. See `param_runtime::rescale_affine_cross_panel`.
             let Some((scale, offset)) = rescale_affine_cross_panel(
@@ -759,20 +805,35 @@ impl WasmRenderer {
                 &tgt.plot_area,
                 &tgt.coord,
                 axis,
+                y_slot,
             ) else {
                 continue;
             };
-            // Drive the target panel's affine directly (not set_absolute, which
-            // forces sy == sx): a domain param rescales only the bound axis. The
-            // single-uniform render layer (see render.rs) applies one transform
-            // per draw, so the rescaled target panel is the one re-rendered
-            // below. Reuses the existing Affine2 + transform render path.
-            //
             // Fix 2: writing sx/sy directly bypasses set_absolute's clamp, so we
             // re-apply the same per-axis zoom_range clamp here. A narrow brush
             // must not exceed the 50x cap the wheel/D3-zoom path enforces.
             let scale = scale.clamp(zoom_range.0, zoom_range.1);
-            if let Some(t) = self.zoom.transforms.get_mut(panel) {
+            // Route the rescale (secondary-y, #52). A y-domainParam on a panel
+            // with independent-y layers rescales ONLY that layer's slot: it
+            // writes a y-only affine into `slot_rescales`, which the render
+            // upload composes with the shared per-panel zoom/pan affine
+            // (`compose_panel_slot`), so overlaid layers stay locked under
+            // zoom/pan while this one layer's marks move. Every other case (x on
+            // any panel; y on a single-y panel) keeps the per-panel affine path,
+            // byte-identical to the pre-#52 behavior.
+            let slotted = axis == Axis::Y
+                && loaded.data.panel_slot_counts.get(panel).copied().unwrap_or(1) > 1;
+            if slotted {
+                let idx = crate::scene_load::transform_slot_index(
+                    &loaded.data.panel_slot_counts,
+                    panel,
+                    y_slot,
+                );
+                if let Some(r) = self.slot_rescales.get_mut(idx) {
+                    r.sy = scale;
+                    r.ty = offset;
+                }
+            } else if let Some(t) = self.zoom.transforms.get_mut(panel) {
                 match axis {
                     Axis::X => {
                         t.sx = scale;
@@ -809,6 +870,7 @@ impl WasmRenderer {
             &loaded.baked_panels,
             &self.interaction,
             &self.zoom.transforms,
+            &self.slot_rescales,
             panel_id,
         )
         .map_err(JsValue::from)
@@ -962,6 +1024,7 @@ mod tests {
             clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
             coord: CoordKind::Cartesian {
                 x_domain: None, y_domain: None, expand: true, clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -976,6 +1039,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -1030,6 +1094,7 @@ mod tests {
             draw_commands: vec![],
             mark_mesh_panels: vec![],
             panel_count: 1,
+            panel_slot_counts: vec![1],
         };
 
         // Build spatial index with packed data.

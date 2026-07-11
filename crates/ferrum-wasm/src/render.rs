@@ -23,12 +23,18 @@ struct PanelTransformSlot {
 }
 
 pub struct GpuBuffers {
-    /// One mark-transform slot per panel, indexed by `panel_id`. A mark draw
-    /// binds `mark_transform_slots[panel_id]`; out-of-range ids fall back to
-    /// the identity bind group. Allocated for every panel in the scene (see
-    /// `SceneData::panel_count`), so at-rest every slot holds identity and the
-    /// rendered pixels match the former single-uniform path exactly.
+    /// One mark-transform slot per (panel, y-slot) pair (secondary-y-axis,
+    /// GH #52), flat-indexed by [`scene_load::transform_slot_index`]. A mark
+    /// draw binds the slot for its `(panel_id, y_slot)`; out-of-range indices
+    /// fall back to the identity bind group. `sum(panel_slot_counts)` slots are
+    /// allocated. A single-y scene has one slot per panel (every count `== 1`),
+    /// so the index is `panel_id` and this is byte-identical to the former
+    /// per-panel allocation — at rest every slot holds identity.
     mark_transform_slots: Vec<PanelTransformSlot>,
+    /// Per-panel y-slot count (secondary-y-axis, GH #52), cloned from
+    /// `SceneData::panel_slot_counts`. Drives the `(panel_id, y_slot) →` flat
+    /// transform-slot index mapping for both upload and bind-group selection.
+    panel_slot_counts: Vec<usize>,
     /// Identity-transform uniform buffer used for non-mark elements (axes,
     /// gridlines, legend, title) so they stay fixed during zoom/pan.
     /// Prefixed with underscore because the field is only read indirectly
@@ -124,11 +130,13 @@ impl GpuBuffers {
         pipelines: &RenderPipelines,
         scene: &SceneData,
     ) -> Self {
-        // One mark-transform slot per panel. Every slot starts at identity, so
-        // a freshly loaded scene renders identically to the former
-        // single-uniform path until a zoom/pan/rescale uploads a non-identity
-        // affine into a specific panel's slot.
-        let mark_transform_slots: Vec<PanelTransformSlot> = (0..scene.panel_count)
+        // One mark-transform slot per (panel, y-slot) pair. Every slot starts
+        // at identity, so a freshly loaded scene renders identically to the
+        // former per-panel path until a zoom/pan/rescale uploads a non-identity
+        // affine into a specific slot. `total_transform_slots` == `panel_count`
+        // for single-y scenes, preserving byte-stable allocation.
+        let total_slots = crate::scene_load::total_transform_slots(&scene.panel_slot_counts);
+        let mark_transform_slots: Vec<PanelTransformSlot> = (0..total_slots)
             .map(|_| {
                 let uniforms = Uniforms::identity(scene.width, scene.height);
                 let buffer =
@@ -257,6 +265,7 @@ impl GpuBuffers {
 
         Self {
             mark_transform_slots,
+            panel_slot_counts: scene.panel_slot_counts.clone(),
             _identity_uniform_buffer: identity_uniform_buffer,
             identity_uniform_bind_group,
             quad_vertex_buffer,
@@ -281,44 +290,68 @@ impl GpuBuffers {
 }
 
 impl GpuBuffers {
-    /// Upload every panel's affine into its own mark-transform slot.
+    /// Upload every (panel, y-slot) composed affine into its own mark-transform
+    /// slot (secondary-y-axis, GH #52).
     ///
-    /// `zoom_transforms[i]` is panel `i`'s affine; panels beyond the slice
-    /// (or beyond the allocated slot count) keep identity. Each mark draw later
-    /// binds its owning panel's slot, so a non-uniform rescale on one panel no
-    /// longer leaks into siblings. Call this on every frame that consumes the
-    /// zoom/pan state.
+    /// `zoom_transforms[p]` is panel `p`'s per-panel zoom/pan affine (moves all
+    /// layers together); `slot_rescales[idx]` is the y-only rescale a
+    /// `domainParam`/brush bound to one independent-y layer wrote into that
+    /// slot, identity otherwise. Each slot's uploaded uniform is
+    /// `compose_panel_slot(panel_affine, slot_rescale)`, so a non-uniform
+    /// rescale on one panel — or one layer — never leaks into siblings. For a
+    /// single-y scene every slot rescale is identity, so each slot receives
+    /// exactly the panel affine — byte-identical to the former per-panel upload.
     pub fn upload_panel_transforms(
         &self,
         gpu: &GpuContext,
         canvas_w: f32,
         canvas_h: f32,
         zoom_transforms: &[crate::zoom_pan::Affine2],
+        slot_rescales: &[crate::zoom_pan::Affine2],
     ) {
-        for (panel_id, slot) in self.mark_transform_slots.iter().enumerate() {
-            let transform = select_panel_transform(zoom_transforms, panel_id);
-            let uniforms = Uniforms {
-                canvas_w,
-                canvas_h,
-                _canvas_pad: [0.0; 2],
-                sx: transform.sx as f32,
-                sy: transform.sy as f32,
-                tx: transform.tx as f32,
-                ty: transform.ty as f32,
-            };
-            gpu.queue
-                .write_buffer(&slot.buffer, 0, bytemuck::bytes_of(&uniforms));
+        use crate::zoom_pan::compose_panel_slot;
+        for (panel_id, &count) in self.panel_slot_counts.iter().enumerate() {
+            let panel_affine = select_panel_transform(zoom_transforms, panel_id);
+            for y_slot in 0..count.max(1) {
+                let idx = crate::scene_load::transform_slot_index(
+                    &self.panel_slot_counts,
+                    panel_id,
+                    y_slot,
+                );
+                let Some(slot) = self.mark_transform_slots.get(idx) else {
+                    continue;
+                };
+                let rescale = slot_rescales
+                    .get(idx)
+                    .copied()
+                    .unwrap_or_else(crate::zoom_pan::Affine2::identity);
+                let transform = compose_panel_slot(panel_affine, rescale);
+                let uniforms = Uniforms {
+                    canvas_w,
+                    canvas_h,
+                    _canvas_pad: [0.0; 2],
+                    sx: transform.sx as f32,
+                    sy: transform.sy as f32,
+                    tx: transform.tx as f32,
+                    ty: transform.ty as f32,
+                };
+                gpu.queue
+                    .write_buffer(&slot.buffer, 0, bytemuck::bytes_of(&uniforms));
+            }
         }
     }
 
-    /// The bind group carrying panel `panel_id`'s mark transform.
+    /// The bind group carrying the `(panel_id, y_slot)` pair's composed mark
+    /// transform (secondary-y-axis, GH #52).
     ///
-    /// Falls back to the identity bind group when `panel_id` is out of range,
-    /// matching `select_panel_transform`'s identity fallback so an out-of-range
-    /// mesh/instance command draws at identity rather than panicking.
-    fn mark_bind_group(&self, panel_id: usize) -> &wgpu::BindGroup {
+    /// Falls back to the identity bind group when the mapped index is out of
+    /// range, matching `select_panel_transform`'s identity fallback so an
+    /// out-of-range mesh/instance command draws at identity rather than
+    /// panicking. Single-y scenes map `(panel_id, 0) → panel_id`.
+    fn mark_bind_group(&self, panel_id: usize, y_slot: usize) -> &wgpu::BindGroup {
+        let idx = crate::scene_load::transform_slot_index(&self.panel_slot_counts, panel_id, y_slot);
         self.mark_transform_slots
-            .get(panel_id)
+            .get(idx)
             .map(|slot| &slot.bind_group)
             .unwrap_or(&self.identity_uniform_bind_group)
     }
@@ -615,7 +648,7 @@ pub fn render_frame(
                 pass.set_pipeline(&pipelines.mesh);
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                pass.set_bind_group(0, buffers.mark_bind_group(0), &[]);
+                pass.set_bind_group(0, buffers.mark_bind_group(0, 0), &[]);
                 pass.draw_indexed(0..buffers.mesh_index_count, 0, 0..1);
             } else {
                 for panel in &buffers.mark_mesh_panels {
@@ -633,9 +666,14 @@ pub fn render_frame(
                     pass.set_pipeline(&pipelines.mesh);
                     pass.set_vertex_buffer(0, vb.slice(..));
                     pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                    // Bind this panel's own affine so a non-uniform rescale on a
-                    // sibling panel does not shear this panel's mesh.
-                    pass.set_bind_group(0, buffers.mark_bind_group(panel.panel_id), &[]);
+                    // Bind this (panel, y-slot) pair's composed affine so a
+                    // non-uniform rescale on a sibling panel — or a domainParam
+                    // on another layer's y — does not shear this mesh slice.
+                    pass.set_bind_group(
+                        0,
+                        buffers.mark_bind_group(panel.panel_id, panel.y_slot),
+                        &[],
+                    );
                     let range = panel.index_start..(panel.index_start + panel.index_count);
                     pass.draw_indexed(range, 0, 0..1);
                 }
@@ -648,9 +686,9 @@ pub fn render_frame(
             for img in &buffers.image_draws {
                 pass.set_pipeline(&pipelines.textured);
                 // Images (heatmap rasters) carry no panel association yet (W4); bind
-                // panel 0's transform, matching the single-panel common case the
-                // former single mark uniform served.
-                pass.set_bind_group(0, buffers.mark_bind_group(0), &[]);
+                // panel 0's slot-0 transform, matching the single-panel common case
+                // the former single mark uniform served.
+                pass.set_bind_group(0, buffers.mark_bind_group(0, 0), &[]);
                 pass.set_bind_group(1, &img.bind_group, &[]);
                 pass.set_vertex_buffer(0, img.vertex_buffer.slice(..));
                 pass.draw(0..4, 0..1);
@@ -677,8 +715,8 @@ pub fn render_frame(
             ensure_scissor!(desired);
 
             let bind_group = if cmd.is_mark {
-                // Mark instances follow their owning panel's affine.
-                buffers.mark_bind_group(cmd.panel_id)
+                // Mark instances follow their owning (panel, y-slot) affine.
+                buffers.mark_bind_group(cmd.panel_id, cmd.y_slot)
             } else {
                 // Axes, gridlines, legend, title: fixed under zoom/pan.
                 &buffers.identity_uniform_bind_group
@@ -764,19 +802,53 @@ pub(crate) fn upload_transform_and_render(
     scene_panels: &[ferrum_scene::Panel],
     interaction: &ferrum_scene::InteractionConfig,
     zoom_transforms: &[crate::zoom_pan::Affine2],
+    slot_rescales: &[crate::zoom_pan::Affine2],
     panel_id: usize,
 ) -> Result<String, crate::error::WasmRenderError> {
-    // Upload EVERY panel's affine into its own slot, not just `panel_id`'s.
-    // A reactive domain-rescale writes a non-uniform affine into one panel's
-    // transform while leaving siblings at identity; each mark draw binds its
-    // own slot, so uploading the full vector keeps every panel correct in a
-    // single frame regardless of which panel triggered the render.
-    buffers.upload_panel_transforms(gpu, scene_data.width, scene_data.height, zoom_transforms);
+    // Upload EVERY (panel, y-slot) composed affine into its own slot, not just
+    // `panel_id`'s. A reactive domain-rescale writes a non-uniform affine into
+    // one panel's — or one layer's slot's — transform while leaving the rest at
+    // identity; each mark draw binds its own slot, so uploading the full set
+    // keeps every panel and layer correct in a single frame regardless of which
+    // triggered the render.
+    buffers.upload_panel_transforms(
+        gpu,
+        scene_data.width,
+        scene_data.height,
+        zoom_transforms,
+        slot_rescales,
+    );
     render_frame(gpu, pipelines, buffers, scene_data.background)?;
 
     // `panel_id` still selects which panel's labels are re-placed for the
     // text-overlay JSON below (the GPU upload above already covers all panels).
     let transform = select_panel_transform(zoom_transforms, panel_id);
+    // Per-right-axis composed affines for the secondary-y relabel path (#52 /
+    // criterion 8): the right axis of rank `r` (0-based, stacking outward) maps
+    // through y-slot `r + 1`, so its labels relabel via `panel ∘ slot_rescale`.
+    // Slot 0 is the primary/left axis (handled by the shared panel affine).
+    // Empty for single-y panels (count == 1) → the text path falls back to the
+    // panel affine, byte-identical to pre-#52.
+    let panel_slot_count = scene_data
+        .panel_slot_counts
+        .get(panel_id)
+        .copied()
+        .unwrap_or(1)
+        .max(1);
+    let secondary_affines: Vec<crate::zoom_pan::Affine2> = (1..panel_slot_count)
+        .map(|y_slot| {
+            let idx = crate::scene_load::transform_slot_index(
+                &scene_data.panel_slot_counts,
+                panel_id,
+                y_slot,
+            );
+            let rescale = slot_rescales
+                .get(idx)
+                .copied()
+                .unwrap_or_else(crate::zoom_pan::Affine2::identity);
+            crate::zoom_pan::compose_panel_slot(transform, rescale)
+        })
+        .collect();
     let plot_area = scene_panels.get(panel_id).map(|p| {
         (p.plot_area.x, p.plot_area.y, p.plot_area.w, p.plot_area.h)
     });
@@ -785,6 +857,7 @@ pub(crate) fn upload_transform_and_render(
         interaction,
         panel_id,
         &transform,
+        &secondary_affines,
         plot_area,
     );
     Ok(text_json)

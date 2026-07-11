@@ -49,20 +49,37 @@ impl Axis {
     }
 }
 
-/// The data domain `(lo, hi)` for the given axis of a Cartesian/Fixed panel.
+/// The data domain `(lo, hi)` for the given axis of a Cartesian/Fixed panel,
+/// reading the y-axis through a specific scale slot (secondary-y-axis, #52).
 ///
 /// Returns `None` for non-cartesian coords (polar/geo) or when the domain is
 /// unset (auto-inferred — no static domain captured), in which case pixel↔data
 /// conversion is undefined and the caller skips the binding.
-pub(crate) fn axis_domain(coord: &CoordKind, axis: Axis) -> Option<(f64, f64)> {
-    let (xd, yd) = match coord {
-        CoordKind::Cartesian { x_domain, y_domain, .. }
-        | CoordKind::Fixed { x_domain, y_domain, .. } => (*x_domain, *y_domain),
-        CoordKind::Polar { .. } | CoordKind::Geo { .. } => return None,
-    };
+///
+/// The x-axis is shared across every layer, so `y_slot` is ignored for `X`. For
+/// `Y`, slot `k`'s domain is `y_domains[k]` when the per-slot list is populated;
+/// slot 0 also mirrors the legacy `y_domain`. When `y_domains` is empty (every
+/// single-y chart — the byte-stable default, slot 0) or the requested slot is
+/// out of range, this falls back to `y_domain`. A `None` slot entry
+/// (ordinal/band scale) yields `None`, handled by callers exactly like a `None`
+/// primary domain (pixel↔data conversion undefined; the binding is skipped).
+pub(crate) fn axis_domain_slot(coord: &CoordKind, axis: Axis, y_slot: usize) -> Option<(f64, f64)> {
     match axis {
-        Axis::X => xd,
-        Axis::Y => yd,
+        Axis::X => match coord {
+            CoordKind::Cartesian { x_domain, .. } | CoordKind::Fixed { x_domain, .. } => *x_domain,
+            CoordKind::Polar { .. } | CoordKind::Geo { .. } => None,
+        },
+        Axis::Y => match coord {
+            CoordKind::Cartesian { y_domain, y_domains, .. } => match y_domains.get(y_slot) {
+                // Guard note (Task 8 review): when slots are present, slot 0's
+                // resolved domain lives in `y_domains[0]` and may diverge from
+                // the legacy `y_domain`; prefer the slotted value.
+                Some(slotted) => *slotted,
+                None => *y_domain,
+            },
+            CoordKind::Fixed { y_domain, .. } => *y_domain,
+            CoordKind::Polar { .. } | CoordKind::Geo { .. } => None,
+        },
     }
 }
 
@@ -143,9 +160,13 @@ pub(crate) fn reproject_extent(
     target_plot_area: &Rect,
     target_coord: &CoordKind,
     axis: Axis,
+    y_slot: usize,
 ) -> Option<(f64, f64)> {
-    let source_domain = axis_domain(source_coord, axis)?;
-    let target_domain = axis_domain(target_coord, axis)?;
+    // A brush bound to one layer inverts through that layer's y-slot on both
+    // ends (the x-axis is shared, so `y_slot` is ignored for `Axis::X`). Slot 0
+    // is the byte-stable default: single-y charts read `y_domain` as before.
+    let source_domain = axis_domain_slot(source_coord, axis, y_slot)?;
+    let target_domain = axis_domain_slot(target_coord, axis, y_slot)?;
     let (px_lo, px_hi) = normalize(brush_px.0, brush_px.1);
     let d0 = pixel_to_data(px_lo, source_plot_area, source_domain, axis);
     let d1 = pixel_to_data(px_hi, source_plot_area, source_domain, axis);
@@ -217,11 +238,20 @@ pub(crate) fn rescale_affine_cross_panel(
     target_plot_area: &Rect,
     target_coord: &CoordKind,
     axis: Axis,
+    y_slot: usize,
 ) -> Option<(f64, f64)> {
     // Reproject the brush from source pixels → data domain → target pixels.
     // `reproject_extent` handles the Y-axis screen flip and normalises lo<=hi.
-    let target_brush_px =
-        reproject_extent(brush_px, source_plot_area, source_coord, target_plot_area, target_coord, axis)?;
+    // `y_slot` selects the layer's y-scale for a dual-axis panel (ignored for x).
+    let target_brush_px = reproject_extent(
+        brush_px,
+        source_plot_area,
+        source_coord,
+        target_plot_area,
+        target_coord,
+        axis,
+        y_slot,
+    )?;
     // The reprojected brush is now in target pixel space. Build the affine so
     // that target marks in `[target_brush_px.0, target_brush_px.1]` are
     // stretched to fill the full target plot area. Pass target_plot_area as
@@ -240,6 +270,7 @@ mod tests {
             y_domain: yd,
             expand: true,
             clip: true,
+            y_domains: Vec::new(),
         }
     }
 
@@ -264,14 +295,83 @@ mod tests {
             inner_radius: 0.0,
             outer_radius: 1.0,
         };
-        assert_eq!(axis_domain(&polar, Axis::X), None);
+        assert_eq!(axis_domain_slot(&polar, Axis::X, 0), None);
     }
 
     #[test]
     fn axis_domain_reads_cartesian() {
         let c = cart(Some((0.0, 100.0)), Some((-5.0, 5.0)));
-        assert_eq!(axis_domain(&c, Axis::X), Some((0.0, 100.0)));
-        assert_eq!(axis_domain(&c, Axis::Y), Some((-5.0, 5.0)));
+        assert_eq!(axis_domain_slot(&c, Axis::X, 0), Some((0.0, 100.0)));
+        assert_eq!(axis_domain_slot(&c, Axis::Y, 0), Some((-5.0, 5.0)));
+    }
+
+    /// A dual-axis panel: slot 0 reads the primary y-domain, slot 1 reads the
+    /// independent layer's own domain (secondary-y, #52). x is slot-agnostic.
+    #[test]
+    fn axis_domain_slot_reads_per_slot_y() {
+        let coord = CoordKind::Cartesian {
+            x_domain: Some((0.0, 10.0)),
+            y_domain: Some((0.0, 100.0)),
+            expand: true,
+            clip: true,
+            y_domains: vec![Some((0.0, 100.0)), Some((-3.0, 3.0))],
+        };
+        assert_eq!(axis_domain_slot(&coord, Axis::Y, 0), Some((0.0, 100.0)));
+        assert_eq!(axis_domain_slot(&coord, Axis::Y, 1), Some((-3.0, 3.0)));
+        // x ignores the slot.
+        assert_eq!(axis_domain_slot(&coord, Axis::X, 1), Some((0.0, 10.0)));
+    }
+
+    /// Slot 0 prefers `y_domains[0]` over the legacy `y_domain` when slots are
+    /// present (Task 8 guard note); an out-of-range slot falls back to
+    /// `y_domain`; a `None` slot entry (ordinal scale) yields `None`.
+    #[test]
+    fn axis_domain_slot_guard_and_fallbacks() {
+        let coord = CoordKind::Cartesian {
+            x_domain: None,
+            y_domain: Some((0.0, 100.0)), // legacy, divergent from slot 0
+            expand: true,
+            clip: true,
+            y_domains: vec![Some((5.0, 50.0)), None],
+        };
+        // Guard: slot 0 uses the resolved slotted domain, not the legacy field.
+        assert_eq!(axis_domain_slot(&coord, Axis::Y, 0), Some((5.0, 50.0)));
+        // Ordinal/band slot → None.
+        assert_eq!(axis_domain_slot(&coord, Axis::Y, 1), None);
+        // Out-of-range slot falls back to the legacy y_domain.
+        assert_eq!(axis_domain_slot(&coord, Axis::Y, 9), Some((0.0, 100.0)));
+    }
+
+    /// Empty `y_domains` (every single-y chart) makes slot 0 read the legacy
+    /// `y_domain` — the byte-stable default.
+    #[test]
+    fn axis_domain_slot_empty_slots_is_legacy_y_domain() {
+        let coord = cart(Some((0.0, 10.0)), Some((-5.0, 5.0)));
+        assert_eq!(axis_domain_slot(&coord, Axis::Y, 0), Some((-5.0, 5.0)));
+        // Even a non-zero slot degrades to the legacy domain (no slots present).
+        assert_eq!(axis_domain_slot(&coord, Axis::Y, 2), Some((-5.0, 5.0)));
+    }
+
+    /// Reprojecting a y-brush through slot 1's domain must invert through that
+    /// layer's scale, not the primary's.
+    #[test]
+    fn reproject_extent_uses_owning_y_slot() {
+        // Source == target (single-panel dual-axis self-rescale).
+        let pa = rect(0.0, 0.0, 100.0, 100.0); // y screen [0, 100]
+        let coord = CoordKind::Cartesian {
+            x_domain: None,
+            y_domain: Some((0.0, 100.0)),
+            expand: true,
+            clip: true,
+            y_domains: vec![Some((0.0, 100.0)), Some((0.0, 10.0))],
+        };
+        // Brush the top half of the plot: screen y [0, 50].
+        // Through slot 1's domain [0,10] (screen-flipped): y=0→10, y=50→5.
+        // Reprojected back to the same panel's pixels for data [5,10] → [0,50].
+        let out = reproject_extent((0.0, 50.0), &pa, &coord, &pa, &coord, Axis::Y, 1)
+            .expect("slot-1 domain present");
+        assert!((out.0 - 0.0).abs() < 1e-6, "lo={}", out.0);
+        assert!((out.1 - 50.0).abs() < 1e-6, "hi={}", out.1);
     }
 
     #[test]
@@ -314,7 +414,7 @@ mod tests {
         let src = cart(Some((0.0, 100.0)), None);
         let tgt = cart(Some((0.0, 100.0)), None);
         // Brush the left half of the source [0, 100]px → data [0, 50].
-        let out = reproject_extent((0.0, 100.0), &src_pa, &src, &tgt_pa, &tgt, Axis::X)
+        let out = reproject_extent((0.0, 100.0), &src_pa, &src, &tgt_pa, &tgt, Axis::X, 0)
             .expect("cartesian domains present");
         // data [0, 50] on target [300, 700]px for domain [0, 100] → [300, 500].
         assert!((out.0 - 300.0).abs() < 1e-6, "lo={}", out.0);
@@ -327,7 +427,7 @@ mod tests {
         let tgt_pa = rect(0.0, 0.0, 200.0, 100.0);
         let src = cart(None, None); // no captured domain
         let tgt = cart(Some((0.0, 100.0)), None);
-        assert!(reproject_extent((0.0, 100.0), &src_pa, &src, &tgt_pa, &tgt, Axis::X).is_none());
+        assert!(reproject_extent((0.0, 100.0), &src_pa, &src, &tgt_pa, &tgt, Axis::X, 0).is_none());
     }
 
     #[test]
@@ -394,7 +494,7 @@ mod tests {
         let brush = (340.0_f64, 624.0_f64);
 
         let (scale, offset) = rescale_affine_cross_panel(
-            brush, &src_pa, &src_coord, &tgt_pa, &tgt_coord, Axis::X,
+            brush, &src_pa, &src_coord, &tgt_pa, &tgt_coord, Axis::X, 0,
         )
         .expect("cartesian domains present, brush non-degenerate");
 
@@ -444,7 +544,7 @@ mod tests {
         let brush = (40.0, 140.0); // left 100px of the 200px span
 
         let (scale_cross, offset_cross) =
-            rescale_affine_cross_panel(brush, &pa, &coord, &pa, &coord, Axis::X)
+            rescale_affine_cross_panel(brush, &pa, &coord, &pa, &coord, Axis::X, 0)
                 .expect("same-panel cross-panel rescale");
         let (scale_direct, offset_direct) =
             rescale_affine(brush, &pa, &pa, Axis::X).expect("direct rescale");
@@ -485,6 +585,7 @@ mod tests {
             &tgt_pa,
             &tgt_coord,
             Axis::X,
+            0,
         );
         // The domains [0,50] and [100,200] share no data, so the reprojected
         // target pixels will be outside [600,1100]. rescale_affine will clamp
@@ -519,6 +620,7 @@ mod tests {
             &tgt_pa,
             &tgt_coord,
             Axis::X,
+            0,
         )
         .expect("overlapping domains, non-degenerate brush");
 

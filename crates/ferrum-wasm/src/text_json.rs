@@ -89,11 +89,23 @@ pub(crate) fn build_text_json_from(all_text: &[TextElementData]) -> String {
 /// Labels whose transformed position falls outside the panel's `plot_area`
 /// are filtered out to prevent tick labels from extending past the plot
 /// boundary during zoom.
+///
+/// Secondary right-axis labels (#52 / criterion 8) relabel through their own
+/// composed affine, not the shared panel affine: `secondary_affines[r]` is the
+/// `panel ∘ slot-rescale` for the right axis of rank `r` (0-based, stacking
+/// outward from the plot edge → y-slot `r + 1`). A `domainParam`/brush bound to
+/// one independent-y layer writes a y-only rescale into that layer's slot, so
+/// its axis labels must move even when the shared panel affine is identity —
+/// symmetric with the primary axis, which relabels through its own domainParam
+/// via the panel affine. `secondary_affines` is empty for single-y panels and
+/// under pure zoom/pan every entry equals the panel affine, so the output is
+/// byte-identical to the primary-only path.
 pub(crate) fn build_zoomed_text_json(
     all_text: &[TextElementData],
     interaction: &ferrum_scene::InteractionConfig,
     panel_id: usize,
     transform: &crate::zoom_pan::Affine2,
+    secondary_affines: &[crate::zoom_pan::Affine2],
     plot_area: Option<(f64, f64, f64, f64)>,
 ) -> String {
     use std::collections::{HashMap, HashSet};
@@ -115,6 +127,15 @@ pub(crate) fn build_zoomed_text_json(
     let y_tick_labels: HashSet<&str> = ptl
         .y_levels
         .iter()
+        .flat_map(|lvl| lvl.ticks.iter().map(|t| t.label.as_str()))
+        .collect();
+    // Secondary-y (#52): the union of every right axis's tick strings. Empty for
+    // single-axis charts (`y_slot_levels` omitted), so the secondary-relabel
+    // branch below never fires and the output is byte-identical to pre-#52.
+    let y_slot_tick_labels: HashSet<&str> = ptl
+        .y_slot_levels
+        .iter()
+        .flatten()
         .flat_map(|lvl| lvl.ticks.iter().map(|t| t.label.as_str()))
         .collect();
 
@@ -147,6 +168,44 @@ pub(crate) fn build_zoomed_text_json(
         .max_by_key(|(_, c)| *c)
         .map(|(k, _)| k as f64 / 10.0);
 
+    // --- Identify secondary right-axis columns (#52) ------------------------
+    // Each `independent_y` layer's right axis sits at its own x column, stacked
+    // outward beyond the plot. Recognize a column as any rounded-x shared by ≥2
+    // secondary-labeled elements (an axis has multiple ticks; a stray text
+    // matching a tick string does not). Empty for single-axis charts.
+    let mut y2_x_freq: HashMap<i64, usize> = HashMap::new();
+    for te in all_text
+        .iter()
+        .filter(|te| y_slot_tick_labels.contains(te.content.as_str()))
+    {
+        *y2_x_freq.entry((te.x * 10.0) as i64).or_insert(0) += 1;
+    }
+    let y2_columns: HashSet<i64> = y2_x_freq
+        .into_iter()
+        .filter(|(_, c)| *c >= 2)
+        .map(|(k, _)| k)
+        .collect();
+
+    // Rank the secondary columns outward from the plot's right edge (ascending
+    // rounded-x). Right axes stack outward in y-slot order (slot 1 = innermost
+    // right axis, per `LayoutResult.secondary_y_axes`), so the k-th column from
+    // the plot edge relabels through `secondary_affines[k]` — that axis's
+    // `panel ∘ slot-rescale`. The primary/left column is excluded so a tick
+    // string shared between the left axis and a right axis never shifts the
+    // ranking. This position-based mapping is robust to right axes that share
+    // label strings (which a set-membership mapping could not disambiguate).
+    let mut ranked_cols: Vec<i64> = y2_columns.iter().copied().collect();
+    if let Some(ax) = y_axis_x {
+        let primary = (ax * 10.0) as i64;
+        ranked_cols.retain(|&c| c != primary);
+    }
+    ranked_cols.sort_unstable();
+    let col_rank: HashMap<i64, usize> = ranked_cols
+        .iter()
+        .enumerate()
+        .map(|(rank, &c)| (c, rank))
+        .collect();
+
     // 1 px tolerance covers label_font_size / 3.0 baseline offset and rounding.
     const COORD_TOL: f64 = 1.5;
 
@@ -161,6 +220,15 @@ pub(crate) fn build_zoomed_text_json(
             && y_axis_x
                 .map(|ax| (te.x - ax).abs() < COORD_TOL)
                 .unwrap_or(false)
+    };
+    // Secondary-y (#52): a right-axis tick sits in a recognized secondary column
+    // and its string belongs to some slot's tick set. Zoom/pan is panel-level
+    // (spec §8.5), so — like the left axis — its y coordinate moves under the
+    // SAME panel affine; only the column (x) differs. Never matches on a
+    // single-axis chart (`y2_columns` empty).
+    let is_secondary_y_tick = |te: &TextElementData| {
+        y_slot_tick_labels.contains(te.content.as_str())
+            && y2_columns.contains(&((te.x * 10.0) as i64))
     };
 
     let mut elements: Vec<serde_json::Value> = Vec::new();
@@ -195,6 +263,37 @@ pub(crate) fn build_zoomed_text_json(
                 new_y,
                 &te.content,
                 "end",
+                Some(&te.style),
+            ));
+        } else if is_secondary_y_tick(te) {
+            // Right-axis label: reposition its y through THIS axis's composed
+            // affine (`panel ∘ its slot rescale`, #52 / criterion 8), so a
+            // domainParam/brush bound to only this layer relabels it even when
+            // the shared panel affine is identity. The stacked column (x) stays
+            // fixed; the label keeps its own anchor (right-axis labels are
+            // `start`-anchored, not `end`). Falls back to the panel affine when
+            // no per-slot affine was supplied (pure zoom/pan or single-y),
+            // byte-identical to the pre-9d panel-affine path.
+            let rank = col_rank
+                .get(&((te.x * 10.0) as i64))
+                .copied()
+                .unwrap_or(0);
+            let aff = secondary_affines
+                .get(rank)
+                .or_else(|| secondary_affines.last())
+                .copied()
+                .unwrap_or(*transform);
+            let new_y = te.y * aff.sy + aff.ty;
+            if let Some((_px, py, _pw, ph)) = plot_area {
+                if new_y < py || new_y > py + ph {
+                    continue;
+                }
+            }
+            elements.push(tick_label_json(
+                te.x,
+                new_y,
+                &te.content,
+                text_anchor_str(&te.style.anchor),
                 Some(&te.style),
             ));
         } else {
@@ -398,6 +497,7 @@ mod tests {
                         pixel: 200.0,
                     }],
                 }],
+                y_slot_levels: vec![],
             }],
         };
 
@@ -417,7 +517,7 @@ mod tests {
 
         let plot_area = Some((50.0, 50.0, 400.0, 300.0));
 
-        let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, plot_area);
+        let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], plot_area);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
 
         // The two x-tick labels should be clipped out (transformed to 0 and 600,
@@ -477,6 +577,7 @@ mod tests {
                     ],
                 }],
                 y_levels: vec![],
+                y_slot_levels: vec![],
             }],
         };
 
@@ -495,7 +596,7 @@ mod tests {
 
         let plot_area = Some((0.0, 0.0, 500.0, 500.0));
 
-        let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, plot_area);
+        let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], plot_area);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
 
         let contents: Vec<&str> = parsed
@@ -505,6 +606,322 @@ mod tests {
 
         assert!(contents.contains(&"A"), "label 'A' should be kept");
         assert!(contents.contains(&"B"), "label 'B' should be kept");
+    }
+
+    #[test]
+    fn secondary_y_tick_labels_reposition_under_panel_affine() {
+        // Secondary-y (#52): right-axis labels (in `y_slot_levels`, sitting at
+        // their own right-side column) reposition their y under the panel affine
+        // exactly as the left axis does — criterion 7.
+        let interaction = ferrum_scene::InteractionConfig {
+            zoom_enabled: false,
+            pan_enabled: false,
+            conditionals: vec![],
+            linked_panels: vec![],
+            toolbar: true,
+            params: vec![],
+            param_bindings: vec![],
+            tick_levels: vec![ferrum_scene::PanelTickLevels {
+                panel_id: 0,
+                x_levels: vec![],
+                // Primary (left) axis tick.
+                y_levels: vec![ferrum_scene::TickLevel {
+                    min_zoom: 1.0,
+                    max_zoom: 10.0,
+                    ticks: vec![ferrum_scene::Tick {
+                        value: 10.0,
+                        label: "L".to_string(),
+                        pixel: 100.0,
+                    }],
+                }],
+                // One right axis with two ticks.
+                y_slot_levels: vec![vec![ferrum_scene::TickLevel {
+                    min_zoom: 1.0,
+                    max_zoom: 10.0,
+                    ticks: vec![
+                        ferrum_scene::Tick {
+                            value: 1.0,
+                            label: "R1".to_string(),
+                            pixel: 100.0,
+                        },
+                        ferrum_scene::Tick {
+                            value: 2.0,
+                            label: "R2".to_string(),
+                            pixel: 200.0,
+                        },
+                    ],
+                }]],
+            }],
+        };
+
+        let all_text = vec![
+            make_text(40.0, 100.0, "L"),   // left-axis tick (column x=40)
+            make_text(460.0, 100.0, "R1"), // right-axis tick (column x=460)
+            make_text(460.0, 200.0, "R2"), // right-axis tick (column x=460)
+        ];
+
+        // Panel zoom: sy=2.0 moves every y-position; both axes track together.
+        let transform = crate::zoom_pan::Affine2 {
+            sx: 1.0,
+            sy: 2.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
+        let plot_area = Some((0.0, 0.0, 500.0, 500.0));
+
+        // Regression (criterion 8, case 2): under a pure panel zoom every
+        // right axis composes to the panel affine (identity slot rescale), so
+        // all columns relabel exactly as the primary axis does — the pre-9d
+        // behavior. Pass the composed affine to exercise the real path.
+        let secondary = [crate::zoom_pan::compose_panel_slot(
+            transform,
+            crate::zoom_pan::Affine2::identity(),
+        )];
+        let json_str =
+            build_zoomed_text_json(&all_text, &interaction, 0, &transform, &secondary, plot_area);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
+
+        let y_of = |content: &str| -> f64 {
+            parsed
+                .iter()
+                .find(|v| v["content"] == content)
+                .and_then(|v| v["y"].as_f64())
+                .unwrap_or_else(|| panic!("{content} present"))
+        };
+        // Left axis relabels through the panel affine: 100 * 2 = 200.
+        assert_eq!(y_of("L"), 200.0);
+        // Right axis relabels the SAME way (panel-level zoom): 100*2, 200*2.
+        assert_eq!(y_of("R1"), 200.0);
+        assert_eq!(y_of("R2"), 400.0);
+        // The right column x stays fixed (only y moves under zoom/pan).
+        let x_of = |content: &str| -> f64 {
+            parsed
+                .iter()
+                .find(|v| v["content"] == content)
+                .and_then(|v| v["x"].as_f64())
+                .unwrap()
+        };
+        assert_eq!(x_of("R1"), 460.0);
+    }
+
+    #[test]
+    fn single_axis_chart_ignores_secondary_slot_path() {
+        // Byte-stability: with `y_slot_levels` empty, a right-column label that
+        // happens to match no primary tick string is left untouched (emitted at
+        // its original position), identical to pre-#52 behavior.
+        let interaction = ferrum_scene::InteractionConfig {
+            zoom_enabled: false,
+            pan_enabled: false,
+            conditionals: vec![],
+            linked_panels: vec![],
+            toolbar: true,
+            params: vec![],
+            param_bindings: vec![],
+            tick_levels: vec![ferrum_scene::PanelTickLevels {
+                panel_id: 0,
+                x_levels: vec![],
+                y_levels: vec![ferrum_scene::TickLevel {
+                    min_zoom: 1.0,
+                    max_zoom: 10.0,
+                    ticks: vec![ferrum_scene::Tick {
+                        value: 10.0,
+                        label: "L".to_string(),
+                        pixel: 100.0,
+                    }],
+                }],
+                y_slot_levels: vec![],
+            }],
+        };
+        let all_text = vec![
+            make_text(40.0, 100.0, "L"),
+            make_text(460.0, 100.0, "R1"),
+        ];
+        let transform = crate::zoom_pan::Affine2 {
+            sx: 1.0,
+            sy: 2.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
+        let json_str =
+            build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], Some((0.0, 0.0, 500.0, 500.0)));
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
+        let y_of = |content: &str| -> f64 {
+            parsed
+                .iter()
+                .find(|v| v["content"] == content)
+                .and_then(|v| v["y"].as_f64())
+                .unwrap()
+        };
+        // Left axis still relabels; the unrelated right label stays put.
+        assert_eq!(y_of("L"), 200.0);
+        assert_eq!(y_of("R1"), 100.0);
+    }
+
+    /// Shared builder for the two-right-axis dual-axis fixture the criterion-8
+    /// tests below exercise: left axis "L" at column x=40, an inner right axis
+    /// (slot 1) at x=460 with ticks A1/A2, an outer right axis (slot 2) at x=500
+    /// with ticks B1/B2, and one x-tick "X".
+    fn dual_axis_fixture() -> (ferrum_scene::InteractionConfig, Vec<TextElementData>) {
+        let interaction = ferrum_scene::InteractionConfig {
+            zoom_enabled: false,
+            pan_enabled: false,
+            conditionals: vec![],
+            linked_panels: vec![],
+            toolbar: true,
+            params: vec![],
+            param_bindings: vec![],
+            tick_levels: vec![ferrum_scene::PanelTickLevels {
+                panel_id: 0,
+                x_levels: vec![ferrum_scene::TickLevel {
+                    min_zoom: 1.0,
+                    max_zoom: 10.0,
+                    ticks: vec![ferrum_scene::Tick {
+                        value: 1.0,
+                        label: "X".to_string(),
+                        pixel: 100.0,
+                    }],
+                }],
+                y_levels: vec![ferrum_scene::TickLevel {
+                    min_zoom: 1.0,
+                    max_zoom: 10.0,
+                    ticks: vec![ferrum_scene::Tick {
+                        value: 10.0,
+                        label: "L".to_string(),
+                        pixel: 100.0,
+                    }],
+                }],
+                // Two right axes in slot order: inner (slot 1) then outer (slot 2).
+                y_slot_levels: vec![
+                    vec![ferrum_scene::TickLevel {
+                        min_zoom: 1.0,
+                        max_zoom: 10.0,
+                        ticks: vec![
+                            ferrum_scene::Tick {
+                                value: 1.0,
+                                label: "A1".to_string(),
+                                pixel: 100.0,
+                            },
+                            ferrum_scene::Tick {
+                                value: 2.0,
+                                label: "A2".to_string(),
+                                pixel: 200.0,
+                            },
+                        ],
+                    }],
+                    vec![ferrum_scene::TickLevel {
+                        min_zoom: 1.0,
+                        max_zoom: 10.0,
+                        ticks: vec![
+                            ferrum_scene::Tick {
+                                value: 1.0,
+                                label: "B1".to_string(),
+                                pixel: 100.0,
+                            },
+                            ferrum_scene::Tick {
+                                value: 2.0,
+                                label: "B2".to_string(),
+                                pixel: 200.0,
+                            },
+                        ],
+                    }],
+                ],
+            }],
+        };
+        let all_text = vec![
+            make_text(40.0, 100.0, "L"),   // left axis (column x=40)
+            make_text(100.0, 360.0, "X"),  // x-axis tick (row y=360)
+            make_text(460.0, 100.0, "A1"), // inner right axis, slot 1 (x=460)
+            make_text(460.0, 200.0, "A2"),
+            make_text(500.0, 100.0, "B1"), // outer right axis, slot 2 (x=500)
+            make_text(500.0, 200.0, "B2"),
+        ];
+        (interaction, all_text)
+    }
+
+    #[test]
+    fn secondary_slot_only_rescale_moves_secondary_not_primary() {
+        // Criterion 8, case 1: a domainParam/brush bound to ONE right-axis layer
+        // writes a y-only slot rescale while the shared panel affine stays
+        // identity. Only that layer's axis labels move; the primary (left) axis
+        // and the x axis are untouched. The two right axes carry DIFFERENT
+        // rescales, discriminating the per-column slot mapping.
+        let (interaction, all_text) = dual_axis_fixture();
+        let panel = crate::zoom_pan::Affine2::identity();
+        // Slot 1 (inner, x=460): sy=2, ty=0. Slot 2 (outer, x=500): sy=1, ty=50.
+        let secondary = [
+            crate::zoom_pan::compose_panel_slot(
+                panel,
+                crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 },
+            ),
+            crate::zoom_pan::compose_panel_slot(
+                panel,
+                crate::zoom_pan::Affine2 { sx: 1.0, sy: 1.0, tx: 0.0, ty: 50.0 },
+            ),
+        ];
+        let json = build_zoomed_text_json(
+            &all_text,
+            &interaction,
+            0,
+            &panel,
+            &secondary,
+            None,
+        );
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).expect("valid JSON");
+        let pos = |content: &str| -> (f64, f64) {
+            let v = parsed
+                .iter()
+                .find(|v| v["content"] == content)
+                .unwrap_or_else(|| panic!("{content} present"));
+            (v["x"].as_f64().unwrap(), v["y"].as_f64().unwrap())
+        };
+        // Primary axis and x axis do NOT move (panel affine is identity).
+        assert_eq!(pos("L"), (40.0, 100.0), "left axis frozen under slot-only rescale");
+        assert_eq!(pos("X"), (100.0, 360.0), "x axis frozen under slot-only rescale");
+        // Inner right axis (slot 1) relabels: 100*2=200, 200*2=400.
+        assert_eq!(pos("A1"), (460.0, 200.0));
+        assert_eq!(pos("A2"), (460.0, 400.0));
+        // Outer right axis (slot 2) relabels with its OWN rescale: +50.
+        assert_eq!(pos("B1"), (500.0, 150.0));
+        assert_eq!(pos("B2"), (500.0, 250.0));
+    }
+
+    #[test]
+    fn secondary_slot_rescale_and_panel_zoom_compose() {
+        // Criterion 8, case 3: a panel zoom AND a per-slot rescale compose. The
+        // inner right axis relabels through `panel ∘ slot`, the outer through
+        // the panel affine alone (identity slot), and the primary axes through
+        // the panel affine — proving the composition is per column.
+        let (interaction, all_text) = dual_axis_fixture();
+        let panel = crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 10.0 };
+        let slot1 = crate::zoom_pan::Affine2 { sx: 1.0, sy: 3.0, tx: 0.0, ty: 5.0 };
+        let secondary = [
+            crate::zoom_pan::compose_panel_slot(panel, slot1),
+            crate::zoom_pan::compose_panel_slot(panel, crate::zoom_pan::Affine2::identity()),
+        ];
+        let json = build_zoomed_text_json(
+            &all_text,
+            &interaction,
+            0,
+            &panel,
+            &secondary,
+            None,
+        );
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).expect("valid JSON");
+        let y_of = |content: &str| -> f64 {
+            parsed
+                .iter()
+                .find(|v| v["content"] == content)
+                .and_then(|v| v["y"].as_f64())
+                .unwrap_or_else(|| panic!("{content} present"))
+        };
+        // Primary axis relabels through the panel affine: 100*2+10 = 210.
+        assert_eq!(y_of("L"), 210.0);
+        // Inner right axis (slot 1) composes: sy=2*3=6, ty=2*5+10=20 → 100*6+20.
+        assert_eq!(y_of("A1"), 620.0);
+        assert_eq!(y_of("A2"), 1220.0);
+        // Outer right axis (slot 2, identity slot) tracks the panel affine only.
+        assert_eq!(y_of("B1"), 210.0);
+        assert_eq!(y_of("B2"), 410.0);
     }
 
     #[test]
@@ -530,6 +947,7 @@ mod tests {
                     }],
                 }],
                 y_levels: vec![],
+                y_slot_levels: vec![],
             }],
         };
 
@@ -544,7 +962,7 @@ mod tests {
         };
 
         let json_str =
-            build_zoomed_text_json(&all_text, &interaction, 0, &transform, None);
+            build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
 
         let contents: Vec<&str> = parsed
@@ -685,7 +1103,7 @@ mod tests {
         let transform = crate::zoom_pan::Affine2 {
             sx: 2.0, sy: 2.0, tx: 0.0, ty: 0.0,
         };
-        let result = build_zoomed_text_json(&texts, &interaction, 99, &transform, None);
+        let result = build_zoomed_text_json(&texts, &interaction, 99, &transform, &[], None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         // Must contain all text elements (no zoom-specific filtering).
         assert_eq!(parsed.len(), 1);

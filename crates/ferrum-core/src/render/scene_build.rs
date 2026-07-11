@@ -44,6 +44,12 @@ pub fn build_scene(
 
     let mut panels: Vec<Panel> = Vec::new();
     let mut tick_levels: Vec<PanelTickLevels> = Vec::new();
+    // Layer→slot map resolved for the domainParam binding pass (secondary-y,
+    // GH #52). The mapping is structural (driven by `independent_y` flags), so
+    // it is identical across panels; capture it once from the first panel that
+    // resolves. Stays `None` — collapsing to the shared slot-0 path — when every
+    // panel is empty (no marks, hence no bindings to route anyway).
+    let mut resolved_y_slots: Option<scale_resolve::YScaleSlots> = None;
 
     // Heuristic text metrics for per-panel independent axis layout rebuilds.
     // Constructed once outside the panel loop; FontdueMetrics has no mutable
@@ -127,6 +133,9 @@ pub fn build_scene(
         )?;
 
         tick_levels.push(build_tick_levels(&scales, panel_idx));
+        if resolved_y_slots.is_none() {
+            resolved_y_slots = Some(scales.y_slots.clone());
+        }
 
         // Per-panel axes — collected from the globally-computed layout.
         // When a facet channel requests independent scale resolution, the global
@@ -433,7 +442,9 @@ pub fn build_scene(
     // Param→scene bindings (D6, 5e-2a). Computed from the ORIGINAL `spec`,
     // which still carries `domainParam`/transform `param`/selection `bind`:
     // the static resolver only mutated per-panel clones.
-    let param_bindings = collect_param_bindings(spec, layout.panels.len());
+    let y_slots = resolved_y_slots.unwrap_or_default();
+    let param_bindings =
+        collect_param_bindings(spec, &prep.layers, &y_slots, layout.panels.len());
 
     let interaction = InteractionConfig {
         zoom_enabled: !spec.selections.is_empty(),
@@ -1106,9 +1117,21 @@ fn resolve_param_domains(spec: &mut ChartSpec) {
 /// - **Legend:** each declared parameter whose `bind` is the string `"legend"`
 ///   → one panel-free binding (the selection name).
 ///
+/// A `domainParam` on an `independent_y` layer's `y` encoding (secondary-y-axis,
+/// GH #52) additionally emits one binding per panel tagged with that layer's
+/// y-slot (`y_slots.slot_for_layer` — Task 2's contract, never re-derived), so
+/// the WASM runtime rescales only that layer's marks. Charts with no
+/// independent-y layer skip this walk entirely, so their bindings are
+/// byte-identical to the pre-#52 chart-level-only collection.
+///
 /// Returns an empty vec when no markers apply, preserving param-free
 /// byte-stability.
-fn collect_param_bindings(spec: &ChartSpec, n_panels: usize) -> Vec<ParamBinding> {
+fn collect_param_bindings(
+    spec: &ChartSpec,
+    layers: &[super::prepare::LayerPrepared],
+    y_slots: &scale_resolve::YScaleSlots,
+    n_panels: usize,
+) -> Vec<ParamBinding> {
     use crate::transform::core::TransformSpec;
 
     let mut bindings: Vec<ParamBinding> = Vec::new();
@@ -1133,6 +1156,33 @@ fn collect_param_bindings(spec: &ChartSpec, n_panels: usize) -> Vec<ParamBinding
                 role: BindingRole::Domain,
                 panel: Some(panel),
                 channel: Some(wire_name.to_owned()),
+                y_slot: 0,
+            });
+        }
+    }
+
+    // Secondary-y (#52): a `domainParam` on an `independent_y` layer's own `y`
+    // encoding drives that layer's right-axis scale, not the shared primary. The
+    // chart-level walk above only sees the primary/left `y`, so these bindings
+    // are additive and only ever produced by dual-axis charts (charts with no
+    // `independent_y` layer never enter this loop → byte-identical wire). Each
+    // carries the layer's slot so the runtime routes the rescale into that
+    // slot's affine, moving only that layer's marks.
+    for (layer_idx, layer) in layers.iter().enumerate() {
+        if !layer.independent_y {
+            continue;
+        }
+        let Some(y_channel) = layer.encoding.y.as_ref() else { continue };
+        let Some(scale) = y_channel.scale.as_ref() else { continue };
+        let Some(param) = scale.domain_param() else { continue };
+        let slot = y_slots.slot_for_layer(layer_idx);
+        for panel in 0..panel_count {
+            bindings.push(ParamBinding {
+                param: param.to_owned(),
+                role: BindingRole::Domain,
+                panel: Some(panel),
+                channel: Some("y".to_owned()),
+                y_slot: slot,
             });
         }
     }
@@ -1147,6 +1197,7 @@ fn collect_param_bindings(spec: &ChartSpec, n_panels: usize) -> Vec<ParamBinding
                     role: BindingRole::Filter,
                     panel: Some(panel),
                     channel: None,
+                    y_slot: 0,
                 });
             }
         }
@@ -1160,6 +1211,7 @@ fn collect_param_bindings(spec: &ChartSpec, n_panels: usize) -> Vec<ParamBinding
                 role: BindingRole::Legend,
                 panel: None,
                 channel: None,
+                y_slot: 0,
             });
         }
     }
@@ -1299,19 +1351,37 @@ pub fn build_tick_levels(
         })
         .collect();
 
-    let y_levels: Vec<TickLevel> = ZOOM_BREAKPOINTS
+    let tick_levels_for = |scale: &scale_resolve::ScaleKind| -> Vec<TickLevel> {
+        ZOOM_BREAKPOINTS
+            .iter()
+            .map(|&(min_z, max_z, count)| TickLevel {
+                min_zoom: min_z,
+                max_zoom: max_z,
+                ticks: scale.tick_data(count),
+            })
+            .collect()
+    };
+
+    let y_levels = tick_levels_for(&scales.y);
+
+    // Secondary-y (#52): one tick-level list per right axis, generated from the
+    // SAME `y_slots` ScaleKinds the axes and marks resolved against (one
+    // resolution site, spec §6). `slots()[0]` mirrors the primary `y` already
+    // emitted as `y_levels`, so skip it. Empty on the shared path → the
+    // `skip_serializing_if` on `y_slot_levels` keeps the blob byte-identical.
+    let y_slot_levels: Vec<Vec<TickLevel>> = scales
+        .y_slots
+        .slots()
         .iter()
-        .map(|&(min_z, max_z, count)| TickLevel {
-            min_zoom: min_z,
-            max_zoom: max_z,
-            ticks: scales.y.tick_data(count),
-        })
+        .skip(1)
+        .map(tick_levels_for)
         .collect();
 
     PanelTickLevels {
         panel_id: panel_idx,
         x_levels,
         y_levels,
+        y_slot_levels,
     }
 }
 
@@ -2198,7 +2268,7 @@ mod tests {
             bind: None,
             select: None,
         }]);
-        let bindings = collect_param_bindings(&spec, 1);
+        let bindings = collect_param_bindings(&spec, &[], &scale_resolve::YScaleSlots::default(), 1);
         assert_eq!(bindings.len(), 1);
         let b = &bindings[0];
         assert_eq!(b.param, "d");
@@ -2216,7 +2286,7 @@ mod tests {
             bind: None,
             select: None,
         }]);
-        let bindings = collect_param_bindings(&spec, 3);
+        let bindings = collect_param_bindings(&spec, &[], &scale_resolve::YScaleSlots::default(), 3);
         assert_eq!(bindings.len(), 3);
         assert_eq!(
             bindings.iter().filter_map(|b| b.panel).collect::<Vec<_>>(),
@@ -2239,7 +2309,7 @@ mod tests {
                 param: Some("brush".into()),
             },
         )];
-        let bindings = collect_param_bindings(&spec, 1);
+        let bindings = collect_param_bindings(&spec, &[], &scale_resolve::YScaleSlots::default(), 1);
         assert_eq!(bindings.len(), 1);
         let b = &bindings[0];
         assert_eq!(b.param, "brush");
@@ -2258,7 +2328,7 @@ mod tests {
             select: None,
         }]);
         spec.encoding.x = None;
-        let bindings = collect_param_bindings(&spec, 1);
+        let bindings = collect_param_bindings(&spec, &[], &scale_resolve::YScaleSlots::default(), 1);
         assert_eq!(bindings.len(), 1);
         let b = &bindings[0];
         assert_eq!(b.param, "sel");
@@ -2275,7 +2345,88 @@ mod tests {
         // binding because the reference exists. Strip it to assert true emptiness.
         let mut bare = spec;
         bare.encoding.x = None;
-        assert!(collect_param_bindings(&bare, 1).is_empty());
+        assert!(collect_param_bindings(&bare, &[], &scale_resolve::YScaleSlots::default(), 1).is_empty());
+    }
+
+    /// Build a minimal `LayerPrepared` carrying a `y` domainParam scale.
+    fn layer_with_y_domain_param(name: &str, independent_y: bool) -> crate::render::prepare::LayerPrepared {
+        crate::render::prepare::LayerPrepared {
+            mark: Mark::Line,
+            encoding: crate::spec::encoding::Encoding {
+                y: Some(EncodingSpec {
+                    field: "w".into(),
+                    scale: Some(linear_domain_param(name)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            independent_y,
+        }
+    }
+
+    #[test]
+    fn collect_param_bindings_independent_y_layer_carries_slot() {
+        // Secondary-y (#52): a domainParam on an `independent_y` layer's y
+        // encoding emits a Domain binding tagged with that layer's slot, so the
+        // WASM runtime rescales only that layer's marks.
+        let mut spec = spec_with_x_domain_param(Vec::new());
+        spec.encoding.x = None; // isolate the layer binding.
+        let layers = [
+            layer_with_y_domain_param("primary", false),
+            layer_with_y_domain_param("d2", true),
+        ];
+        // slot_for_layer only reads `layer_slot`; an empty `slots` list is
+        // sufficient for this isolated collection test.
+        let y_slots = scale_resolve::YScaleSlots::new(Vec::new(), vec![0, 1]);
+        let bindings = collect_param_bindings(&spec, &layers, &y_slots, 1);
+        // Layer 0 is not independent → skipped; only the independent layer emits.
+        assert_eq!(bindings.len(), 1);
+        let b = &bindings[0];
+        assert_eq!(b.param, "d2");
+        assert_eq!(b.role, BindingRole::Domain);
+        assert_eq!(b.channel.as_deref(), Some("y"));
+        assert_eq!(b.panel, Some(0));
+        assert_eq!(b.y_slot, 1);
+    }
+
+    #[test]
+    fn collect_param_bindings_shared_y_layers_emit_no_slot_bindings() {
+        // Byte-stability gate: with no `independent_y` layer, the per-layer walk
+        // emits nothing — bindings are identical to the pre-#52 chart-level pass.
+        let mut spec = spec_with_x_domain_param(Vec::new());
+        spec.encoding.x = None;
+        let layers = [
+            layer_with_y_domain_param("a", false),
+            layer_with_y_domain_param("b", false),
+        ];
+        let bindings =
+            collect_param_bindings(&spec, &layers, &scale_resolve::YScaleSlots::default(), 1);
+        assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn collect_param_bindings_independent_y_layer_per_panel() {
+        // The slot binding fans out one-per-panel like the chart-level domain
+        // bindings, so faceted dual-axis charts route every panel.
+        let mut spec = spec_with_x_domain_param(Vec::new());
+        spec.encoding.x = None;
+        let layers = [
+            layer_with_y_domain_param("primary", false),
+            layer_with_y_domain_param("d2", true),
+        ];
+        let y_slots = scale_resolve::YScaleSlots::new(Vec::new(), vec![0, 1]);
+        let bindings = collect_param_bindings(&spec, &layers, &y_slots, 3);
+        assert_eq!(bindings.len(), 3);
+        assert_eq!(
+            bindings.iter().filter_map(|b| b.panel).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(bindings.iter().all(|b| b.y_slot == 1 && b.channel.as_deref() == Some("y")));
     }
 
     fn layout_with_subtitle(subtitle: &str) -> LayoutResult {
@@ -2574,6 +2725,37 @@ mod tests {
         // Every layer draws through the one primary y-scale.
         assert_eq!(scales.y_for_layer(0).data_domain(), scales.y.data_domain());
         assert_eq!(scales.y_for_layer(1).data_domain(), scales.y.data_domain());
+    }
+
+    /// Secondary-y (#52): `build_tick_levels` emits one `y_slot_levels` entry per
+    /// right axis, generated from that slot's own scale, so the WASM overlay can
+    /// recognize and reposition right-axis tick labels under zoom.
+    #[test]
+    fn build_tick_levels_emits_secondary_slot_levels() {
+        let (spec, batch) = two_layer_dual_y_spec(true);
+        let scales = resolve_dual_y(&spec, &batch);
+        let ptl = build_tick_levels(&scales, 0);
+
+        assert_eq!(ptl.y_slot_levels.len(), 1, "one independent slot → one right-axis tick list");
+        // Same zoom-breakpoint structure as `y_levels`, with populated ticks.
+        assert_eq!(ptl.y_slot_levels[0].len(), ptl.y_levels.len());
+        assert!(
+            ptl.y_slot_levels[0].iter().any(|lvl| !lvl.ticks.is_empty()),
+            "the secondary slot must contribute tick labels"
+        );
+    }
+
+    /// Byte-stability: a shared-y chart leaves `y_slot_levels` empty, so the
+    /// `skip_serializing_if` keeps the tick-levels blob identical to pre-#52.
+    #[test]
+    fn build_tick_levels_shared_y_omits_slot_levels() {
+        let (spec, batch) = two_layer_dual_y_spec(false);
+        let scales = resolve_dual_y(&spec, &batch);
+        let ptl = build_tick_levels(&scales, 0);
+        assert!(ptl.y_slot_levels.is_empty(), "shared-y chart emits no secondary slot levels");
+
+        let json = serde_json::to_string(&ptl).unwrap();
+        assert!(!json.contains("y_slot_levels"), "empty slot levels must be omitted from JSON");
     }
 
     // ── #52 Task 3: layout + axis emission for independent-y layers ─────────

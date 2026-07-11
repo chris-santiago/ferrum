@@ -792,6 +792,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -811,6 +812,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -1424,6 +1426,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -1448,6 +1451,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -1549,6 +1553,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -1581,6 +1586,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
@@ -1666,6 +1672,7 @@ mod tests {
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             },
             grid: vec![],
             marks: vec![MarkBatch {
@@ -1694,6 +1701,7 @@ mod tests {
                 stroke_cap: None,
                 stroke_join: None,
                 packed_instances: None,
+                y_slot: 0,
             }],
             axes: vec![],
             annotations: vec![],
