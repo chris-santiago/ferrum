@@ -562,9 +562,21 @@ pub fn prepare_render_inputs(
 
     // Derive both axis inputs + their tick counts (SPINE-08/SPINE-12). The
     // rendering encoding is post-CoordFlip; the spec-level encoding (whose
-    // explicit title wins) is threaded through for the title 3-way.
-    let (axes, x_tick_count, y_tick_count) =
-        build_axes(spec, &rendering_encoding, &provisional_scales, theme)?;
+    // explicit title wins) is threaded through for the title 3-way. Also
+    // derives the provisional secondary y-axis inputs (secondary-y-axis, GH
+    // #52) from `layers`/`transformed`/`transform_outputs`, pushing any scale
+    // warnings into `scale_warnings` alongside the primary's.
+    let mut scale_warnings = scale_warnings;
+    let (axes, x_tick_count, y_tick_count) = build_axes(
+        spec,
+        &rendering_encoding,
+        &provisional_scales,
+        theme,
+        &layers,
+        &transformed,
+        &transform_outputs,
+        &mut scale_warnings,
+    )?;
 
     let facet_groups = if let Some(fspec) = &spec.facet {
         if let Some(row_field) = &fspec.row {
@@ -754,11 +766,16 @@ fn build_layers(spec: &ChartSpec, coord_flipped: bool) -> Vec<LayerPrepared> {
 /// resolution. The per-channel derivation runs once each through
 /// [`build_axis_input`], with [`Channel`] carrying the orient default and the
 /// non-ordinal-y reversal. Returns `(axes, x_tick_count, y_tick_count)`.
+#[allow(clippy::too_many_arguments)]
 fn build_axes(
     spec: &ChartSpec,
     rendering_encoding: &crate::spec::encoding::Encoding,
     provisional_scales: &ResolvedScales,
     theme: &crate::layout::ThemeInputs,
+    layers: &[LayerPrepared],
+    transformed: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    warnings: &mut Vec<RenderWarning>,
 ) -> Result<(AxesInput, usize, usize), RenderError> {
     // D3 (flexibility campaign): per-channel `Axis(tick_count=N)` controls the
     // target tick count for continuous + temporal axes (default 10). Limiting it
@@ -787,8 +804,92 @@ fn build_axes(
         )?,
         show_x: spec.axis_x.unwrap_or(true),
         show_y: spec.axis_y.unwrap_or(true),
+        secondary_y: build_secondary_y_axis_inputs(
+            spec,
+            layers,
+            transformed,
+            transform_outputs,
+            theme,
+            warnings,
+        )?,
     };
     Ok((axes, x_tick_count, y_tick_count))
+}
+
+/// Provisional secondary y-axis inputs, one per `independent_y` layer in layer
+/// order (secondary-y-axis, GH #52). Mirrors the primary y axis's
+/// provisional-then-final pattern directly above: each independent layer's own
+/// y-scale is resolved against the full (pre-panel) batch with a `(0.0, 1.0)`
+/// placeholder pixel range, using the SAME per-layer encoding merge (chart
+/// encoding overlaid by the layer's own, `layers: None` so the y-domain isn't
+/// re-unioned with sibling layers) that
+/// [`render::scene_build::resolve_layer_y_scale`](crate::render::scene_build)
+/// (Task 2) applies per-panel later. Domain-derived tick labels/fractions do
+/// not depend on the placeholder pixel range, so the two resolutions agree —
+/// one logical scale, computed twice only because layout must run before
+/// panels exist. `compute_layout` (Task 3) reserves one right-side margin band
+/// per returned axis and places it stacked outward from the primary.
+///
+/// Empty when no layer sets `independent_y` — the byte-stable gate mirrors
+/// `resolve_panel_scales`'s Task 2 gate exactly, so `AxesInput.secondary_y`
+/// stays empty and layout/scene output for the shared path is unchanged.
+fn build_secondary_y_axis_inputs(
+    spec: &ChartSpec,
+    layers: &[LayerPrepared],
+    transformed: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    theme: &crate::layout::ThemeInputs,
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<Vec<AxisInput>, RenderError> {
+    if !layers.iter().skip(1).any(|l| l.independent_y) {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for layer in layers.iter().skip(1) {
+        if !layer.independent_y {
+            continue;
+        }
+        let layer_batch: &RecordBatch = match &layer.data_source {
+            Some(name) => transform_outputs
+                .get(name)
+                .expect("layer.data_source validated by prepare_render_inputs"),
+            None => transformed,
+        };
+        // Same per-layer encoding merge `resolve_layer_y_scale` (scene_build.rs,
+        // Task 2) uses: the layer's own encoding overlays the chart-level
+        // encoding, and `layers: None` stops the y-domain union from re-unioning
+        // sibling layers' fields so this slot spans exactly its own data.
+        let mut layer_encoding = spec.encoding.clone();
+        layer_encoding.overlay_from(&layer.encoding);
+        let layer_spec = ChartSpec {
+            mark: layer.mark,
+            encoding: layer_encoding.clone(),
+            layers: None,
+            ..spec.clone()
+        };
+        let (layer_scales, layer_warnings) =
+            crate::render::scale_resolve::resolve_scales_with_leaf_context(
+                &layer_spec,
+                layer_batch,
+                transform_outputs,
+                (0.0, 1.0),
+                (0.0, 1.0),
+                theme,
+                None,
+            )?;
+        warnings.extend(layer_warnings);
+        let y_tick_count = encoding_axis_tick_count(layer_encoding.y.as_ref()).unwrap_or(10);
+        let axis_input = build_axis_input(
+            Channel::Y,
+            layer_encoding.y.as_ref(),
+            layer_encoding.y.as_ref(),
+            &layer_scales.y,
+            y_tick_count,
+            theme,
+        )?;
+        out.push(axis_input);
+    }
+    Ok(out)
 }
 
 /// D10: fill missing (group × x-value) combinations in the batch with a constant y value.
@@ -3906,6 +4007,143 @@ mod tests {
         // ever thread, and only for a numeric format string.
         assert_eq!(shared_threaded, None);
         assert_eq!(indep_threaded, None);
+    }
+
+    // ── #52 Task 3: provisional secondary y-axis inputs ──────────────────────
+
+    /// `prepare_render_inputs` derives one `AxesInput.secondary_y` entry per
+    /// `independent_y` layer, titled from that layer's own y encoding and
+    /// carrying tick labels resolved against ITS OWN domain — not the
+    /// primary's (secondary-y-axis, GH #52 Task 3; the layout stage this feeds
+    /// reserves one right-side band + emits one axis per entry).
+    #[test]
+    fn prepare_render_inputs_independent_y_layer_produces_secondary_axis_input() {
+        use crate::spec::layer::Layer;
+
+        let primary = Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                y: Some(EncodingSpec { field: "y0".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+        };
+        let secondary = Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                y: Some(EncodingSpec {
+                    field: "y1".into(),
+                    title: Some("Secondary Title".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: true,
+        };
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: Some(vec![primary, secondary]),
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y0", DataType::Float64, false),
+            Field::new("y1", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![100.0, 200.0, 300.0])),
+            ],
+        )
+        .unwrap();
+
+        let theme = crate::layout::ThemeInputs::default();
+        let prep = prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
+
+        assert_eq!(prep.axes.secondary_y.len(), 1, "one independent_y layer → one secondary axis input");
+        let secondary_axis = &prep.axes.secondary_y[0];
+        assert_eq!(secondary_axis.title.as_deref(), Some("Secondary Title"));
+        assert_ne!(
+            secondary_axis.tick_labels, prep.axes.y.tick_labels,
+            "the secondary axis resolves its OWN domain, not the primary's"
+        );
+    }
+
+    /// Wire back-compat: no layer sets `independent_y` → `secondary_y` stays
+    /// empty. Byte-stable gate mirroring the scene_build.rs Task 2 gate.
+    #[test]
+    fn prepare_render_inputs_no_independent_y_layer_leaves_secondary_y_empty() {
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+            ],
+        )
+        .unwrap();
+
+        let theme = crate::layout::ThemeInputs::default();
+        let prep = prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
+        assert!(prep.axes.secondary_y.is_empty());
     }
 }
 

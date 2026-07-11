@@ -57,6 +57,14 @@ pub struct LayoutResult {
     pub chart_title: Option<ChartTitleLayout>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<LayoutWarning>,
+    /// Secondary y-axis layouts, one per `independent_y` layer per panel,
+    /// orient `Right` and stacked outward beyond the primary's band
+    /// (secondary-y-axis, GH #52 — see `AxesInput.secondary_y`). Flat across
+    /// all panels like `axes`, filtered by `panel_index` at consumption time.
+    /// Empty (the default) when the chart has no independent-y layer —
+    /// byte-identical to the pre-#52 shared path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secondary_y_axes: Vec<AxisLayout>,
 }
 
 /// Clamp a dynamically-estimated axis margin band to the per-axis
@@ -684,15 +692,17 @@ fn reserve_legends(
 }
 
 /// 400 stage 3 — reserve the x/y axis margin bands off `inner_after_legend`,
-/// returning the shrunk plot region and the `x_label_band` (also needed for the
-/// inter-row facet gutter). Pure extraction of the former inline gutter/band/clamp
-/// block; arithmetic unchanged.
+/// returning the shrunk plot region, the `x_label_band` (also needed for the
+/// inter-row facet gutter), and the per-secondary-y-axis band widths
+/// (secondary-y-axis, GH #52; empty when `axes.secondary_y` is empty, the
+/// pre-#52 default). Pure extraction of the former inline gutter/band/clamp
+/// block; arithmetic unchanged for the primary x/y bands.
 fn reserve_axis_bands(
     inner_after_legend: Rect,
     axes: &AxesInput,
     theme: &ThemeInputs,
     metrics: &dyn TextMetrics,
-) -> (Rect, f64) {
+) -> (Rect, f64, Vec<f64>) {
     let y_title_gutter = axis::compute_y_title_width(
         &axes.y,
         theme.typography.title_font_size,
@@ -763,6 +773,39 @@ fn reserve_axis_bands(
         axes.y.overrides.max_band,
     );
 
+    // Secondary y-axis margin bands (secondary-y-axis, GH #52): one right-side
+    // band per `independent_y` layer, stacked outward beyond the primary's own
+    // band (spec §6 slot contract — slot 0 stays the primary/left axis
+    // regardless of `y_on_right`; slots 1..n always render right). Each band
+    // is that axis's own label band + title gutter, honoring its own
+    // `label_font_size`/`title_font_size`/`title_padding` overrides exactly
+    // like the primary's reservation above, and — mirroring the primary
+    // `y_band` clamp above — its own `min_band`/`max_band` overrides too
+    // (quality review finding: these were silently dropped for secondary
+    // axes even though `build_axis_input` populates them per layer). Empty
+    // `axes.secondary_y` (the pre-#52 default) makes `secondary_y_total`
+    // zero, so the shrink below is a no-op and default output stays
+    // byte-identical.
+    let secondary_y_bands: Vec<f64> = axes
+        .secondary_y
+        .iter()
+        .map(|a| {
+            let label_font_size = a
+                .overrides
+                .label_font_size
+                .unwrap_or(theme.typography.label_font_size);
+            let label_band = axis::compute_y_label_band_width(a, label_font_size, metrics);
+            let title_gutter = axis::compute_y_title_width(
+                a,
+                theme.typography.title_font_size,
+                theme.padding.axis_title_padding,
+                metrics,
+            );
+            clamp_axis_band(label_band + title_gutter, a.overrides.min_band, a.overrides.max_band)
+        })
+        .collect();
+    let secondary_y_total: f64 = secondary_y_bands.iter().sum();
+
     // Orient (B5): reserve each axis's band on its chosen side. x defaults to the
     // bottom (Bottom orient) but moves to the top for `orient="top"`; y defaults
     // to the left (Left orient) but moves to the right for `orient="right"`. The
@@ -772,12 +815,12 @@ fn reserve_axis_bands(
     let y_on_right = matches!(axes.y.orient, AxisOrient::Right);
     let plot_region = inner_after_legend.shrink(Inset {
         top: if x_on_top { x_band } else { 0.0 },
-        right: if y_on_right { y_band } else { 0.0 },
+        right: (if y_on_right { y_band } else { 0.0 }) + secondary_y_total,
         bottom: if x_on_top { 0.0 } else { x_band },
         left: if y_on_right { 0.0 } else { y_band },
     });
 
-    (plot_region, x_label_band)
+    (plot_region, x_label_band, secondary_y_bands)
 }
 
 /// 400 stage 4 — split `plot_region` into facet cells (or a single panel),
@@ -909,6 +952,7 @@ fn split_panels(
 /// elision). 840: column + row strip bands are the shared `strip_band`. Pure
 /// extraction of the former per-panel loop; arithmetic + warning/axis push order
 /// unchanged.
+#[allow(clippy::too_many_arguments)]
 fn layout_panel_axes(
     panel_rects: Vec<PanelRect>,
     spec: &crate::spec::chart::ChartSpec,
@@ -916,9 +960,16 @@ fn layout_panel_axes(
     theme: &ThemeInputs,
     metrics: &dyn TextMetrics,
     strip_band: f64,
-) -> (Vec<PanelLayout>, Vec<AxisLayout>, Vec<LayoutWarning>) {
+    secondary_y_bands: &[f64],
+) -> (Vec<PanelLayout>, Vec<AxisLayout>, Vec<AxisLayout>, Vec<LayoutWarning>) {
     let mut panels: Vec<PanelLayout> = Vec::new();
     let mut axis_layouts: Vec<AxisLayout> = Vec::new();
+    // Secondary y-axis layouts, one per `independent_y` layer per panel
+    // (secondary-y-axis, GH #52). Kept separate from `axis_layouts` (the
+    // primary x/y list every other consumer already filters by orient) so
+    // adding slots 1..n cannot perturb any existing `.find()`/`.filter()` over
+    // `axis_layouts` — the shared-path byte-stability invariant.
+    let mut secondary_y_axis_layouts: Vec<AxisLayout> = Vec::new();
     let mut warnings: Vec<LayoutWarning> = Vec::new();
 
     // 840: column-strip and row-header-strip bands are the same shared size; the
@@ -1080,6 +1131,42 @@ fn layout_panel_axes(
                 axis_layouts.push(y_axis);
             }
 
+            // Secondary y-axes (secondary-y-axis, GH #52): one per
+            // `independent_y` layer, orient forced `Right` and stacked
+            // outward beyond the primary's own band. Slot k's `translate`
+            // offset is the sum of the PRECEDING slots' band widths, so slot 1
+            // sits flush against `rect`'s right edge (the plot area is already
+            // shrunk to reserve every slot's band) and each later slot sits
+            // beyond the previous one's band — reusing the same
+            // `translate`-shift render mechanism (B5) axis style overrides
+            // already use, rather than a bespoke placement path. A user-set
+            // `translate` on that layer's own `Axis(...)` composes additively
+            // on top. Independent of `axes.show_y` (that toggle only
+            // suppresses the primary/left axis); gated only on the panel rect
+            // being non-degenerate, mirroring the primary y/x guards above.
+            let mut cumulative_offset = 0.0_f64;
+            for (slot_idx, secondary_input) in axes.secondary_y.iter().enumerate() {
+                let mut sec_input = secondary_input.clone();
+                sec_input.orient = AxisOrient::Right;
+                let existing_translate = sec_input.overrides.translate.unwrap_or(0.0);
+                sec_input.overrides.translate = Some(cumulative_offset + existing_translate);
+                let sec_label_fs = sec_input
+                    .overrides
+                    .label_font_size
+                    .unwrap_or(theme.typography.label_font_size);
+                let sec_axis = axis::layout_y_axis(
+                    &sec_input,
+                    rect,
+                    panel_index,
+                    sec_label_fs,
+                    theme.typography.title_font_size,
+                    theme.padding.axis_title_padding,
+                    metrics,
+                );
+                secondary_y_axis_layouts.push(sec_axis);
+                cumulative_offset += secondary_y_bands.get(slot_idx).copied().unwrap_or(0.0);
+            }
+
             if axes.show_x {
                 // Suppress x-axis title on non-bottom-row facet panels to
                 // avoid duplicating "Feature value" (or similar) in every
@@ -1117,7 +1204,7 @@ fn layout_panel_axes(
         }
     }
 
-    (panels, axis_layouts, warnings)
+    (panels, axis_layouts, secondary_y_axis_layouts, warnings)
 }
 
 pub fn compute_layout(
@@ -1191,8 +1278,11 @@ pub fn compute_layout(
     );
 
     // 4 + 5. Reserve the x/y axis margin bands, yielding the plot region. The
-    //    `x_label_band` is also needed for the inter-row facet gutter below.
-    let (plot_region, x_label_band) = reserve_axis_bands(inner_after_legend, axes, theme, metrics);
+    //    `x_label_band` is also needed for the inter-row facet gutter below;
+    //    `secondary_y_bands` (secondary-y-axis, GH #52) is one band width per
+    //    `axes.secondary_y` entry, threaded to per-panel placement below.
+    let (plot_region, x_label_band, secondary_y_bands) =
+        reserve_axis_bands(inner_after_legend, axes, theme, metrics);
 
     // 6 + 7. Split into facet cells, then lay out each panel's strips + axes.
     //    840: compute the strip band size once and thread it to both stages.
@@ -1206,8 +1296,9 @@ pub fn compute_layout(
         axes.show_x,
         strip_band,
     );
-    let (panels, axis_layouts, panel_warnings) =
-        layout_panel_axes(panel_rects, spec, axes, theme, metrics, strip_band);
+    let (panels, axis_layouts, secondary_y_axes, panel_warnings) = layout_panel_axes(
+        panel_rects, spec, axes, theme, metrics, strip_band, &secondary_y_bands,
+    );
 
     // Assemble warnings in the original push order: legend overflow first, then
     // the facet stage (dropped panels / empty cells), then the per-panel stage
@@ -1227,6 +1318,7 @@ pub fn compute_layout(
         aux_legends,
         chart_title: chart_title_layout,
         warnings,
+        secondary_y_axes,
     })
 }
 
@@ -1244,12 +1336,14 @@ mod tests {
             aux_legends: vec![],
             chart_title: None,
             warnings: vec![],
+            secondary_y_axes: vec![],
         };
         let json = serde_json::to_string(&r).unwrap();
         let parsed: LayoutResult = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, r);
         assert!(!json.contains("legend"));
         assert!(!json.contains("warnings"));
+        assert!(!json.contains("secondary_y_axes"));
     }
 
     #[test]
@@ -1327,6 +1421,7 @@ mod tests {
             ),
             show_x: true,
             show_y: true,
+            secondary_y: Vec::new(),
         }
     }
 
@@ -1361,6 +1456,246 @@ mod tests {
         assert_eq!(result.axes.len(), 2);
         assert!(result.legend.is_none());
         assert!(result.warnings.is_empty());
+
+        let panel = &result.panels[0];
+        assert!(panel.plot_area.w > 0.0 && panel.plot_area.h > 0.0);
+        assert_eq!(panel.row, 0);
+        assert_eq!(panel.col, 0);
+        assert!(panel.facet_key.is_none());
+    }
+
+    // ── #52 Task 3: secondary y-axis layout + axis emission ──────────────────
+
+    /// Build `n` secondary `AxisInput`s, each with the SAME 3-char-max tick
+    /// labels (`"0"`, `"50"`, `"100"`) and a title, so every slot reserves an
+    /// identical, precisely-computable band under `MockMetrics`'s fixed
+    /// per-char width. Distinguishable via `AxisInput.title` (`"Sec1"..`) for
+    /// per-axis assertions.
+    fn n_secondary_axes(n: usize) -> Vec<AxisInput> {
+        (1..=n)
+            .map(|i| {
+                AxisInput::new(
+                    AxisOrient::Right,
+                    Some(format!("Sec{i}")),
+                    vec!["0".into(), "50".into(), "100".into()],
+                    None,
+                )
+            })
+            .collect()
+    }
+
+    /// The exact per-secondary-axis band width `MockMetrics { measure:
+    /// fixed_width(8.0), line_h_factor: 1.2 }` produces for [`n_secondary_axes`]:
+    /// label band (`"100"` = 3 chars * 8px) + title gutter
+    /// (`title_font_size * line_h_factor + axis_title_padding`), using
+    /// `ThemeInputs::default()`'s `title_font_size` (13.0) and
+    /// `axis_title_padding` (8.0).
+    fn expected_secondary_band(theme: &ThemeInputs) -> f64 {
+        let label_band = 3.0 * 8.0;
+        let title_gutter = theme.typography.title_font_size * 1.2 + theme.padding.axis_title_padding;
+        label_band + title_gutter
+    }
+
+    /// Band math for n=1,2,3 secondaries: each additional independent-y layer
+    /// narrows the plot area by exactly one more axis's band width, and
+    /// `secondary_y_axes.len()` matches the slot count (GH #52 Task 3).
+    #[test]
+    fn compute_layout_secondary_y_band_math_n1_n2_n3() {
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 800.0, height: 400.0 };
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+        let band = expected_secondary_band(&theme);
+
+        let run = |n: usize| {
+            let mut axes = dummy_axes();
+            axes.secondary_y = n_secondary_axes(n);
+            compute_layout(
+                &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
+                &legend::LegendOverrides::default(), &[],
+            )
+            .expect("layout should succeed with secondary y axes")
+        };
+
+        let r0 = run(0);
+        let r1 = run(1);
+        let r2 = run(2);
+        let r3 = run(3);
+
+        assert!(r0.secondary_y_axes.is_empty(), "n=0 has no secondary axes");
+        assert_eq!(r1.secondary_y_axes.len(), 1);
+        assert_eq!(r2.secondary_y_axes.len(), 2);
+        assert_eq!(r3.secondary_y_axes.len(), 3);
+
+        let w0 = r0.panels[0].plot_area.w;
+        let w1 = r1.panels[0].plot_area.w;
+        let w2 = r2.panels[0].plot_area.w;
+        let w3 = r3.panels[0].plot_area.w;
+
+        // Each additional secondary axis narrows the plot area by exactly one
+        // more band width — no overdraw, no double-reservation.
+        assert!((w0 - w1 - band).abs() < 1e-6, "n=0→1 shrink: {w0} - {w1} should be {band}");
+        assert!((w1 - w2 - band).abs() < 1e-6, "n=1→2 shrink: {w1} - {w2} should be {band}");
+        assert!((w2 - w3 - band).abs() < 1e-6, "n=2→3 shrink: {w2} - {w3} should be {band}");
+    }
+
+    /// Every secondary y-axis renders `Right`-orient and stacks outward: slot
+    /// k's `translate` offset is the sum of the PRECEDING slots' band widths
+    /// (0, band, 2*band for three identical-width axes), so consecutive axes
+    /// never overlap (no plot-area overdraw) — GH #52 Task 3.
+    #[test]
+    fn compute_layout_secondary_y_orient_right_and_stacked_translate_offsets() {
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 800.0, height: 400.0 };
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+        let band = expected_secondary_band(&theme);
+
+        let mut axes = dummy_axes();
+        axes.secondary_y = n_secondary_axes(3);
+        let result = compute_layout(
+            &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[],
+        )
+        .unwrap();
+
+        assert_eq!(result.secondary_y_axes.len(), 3);
+        for axis in &result.secondary_y_axes {
+            assert_eq!(axis.orient, AxisOrient::Right, "every secondary axis renders on the right");
+        }
+        let offsets: Vec<f64> = result.secondary_y_axes.iter().map(|a| a.translate.unwrap_or(0.0)).collect();
+        assert!((offsets[0] - 0.0).abs() < 1e-6, "slot 1 has no preceding band: {offsets:?}");
+        assert!((offsets[1] - band).abs() < 1e-6, "slot 2 stacks past slot 1's band: {offsets:?}");
+        assert!((offsets[2] - 2.0 * band).abs() < 1e-6, "slot 3 stacks past slots 1+2: {offsets:?}");
+
+        // Titles thread through per axis (spec §4: each axis titled from its
+        // own layer's y field/title).
+        let titles: Vec<&str> = result.secondary_y_axes.iter()
+            .map(|a| a.title.as_ref().unwrap().text.as_str())
+            .collect();
+        assert_eq!(titles, vec!["Sec1", "Sec2", "Sec3"]);
+    }
+
+    /// A secondary axis's `min_band` override must widen its OWN reserved band
+    /// (not the primary's), narrowing the plot area and pushing every
+    /// subsequent slot's stacked offset outward by the same delta — mirroring
+    /// the primary y-axis's `min_band_reserves_larger_left_band` behavior.
+    /// Regression test for the silently-dropped-override bug found in the
+    /// secondary-y-axis-design (#52) quality review: `clamp_axis_band` was
+    /// applied to the primary y band but not per-secondary-axis bands.
+    #[test]
+    fn compute_layout_secondary_y_min_band_widens_its_own_band_and_shifts_offsets() {
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 800.0, height: 400.0 };
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+        let band = expected_secondary_band(&theme);
+
+        let mut baseline_axes = dummy_axes();
+        baseline_axes.secondary_y = n_secondary_axes(2);
+        let baseline = compute_layout(
+            &spec, &theme, viewport, &baseline_axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[],
+        )
+        .unwrap();
+
+        let widened_min = band + 100.0;
+        let mut widened_axes = dummy_axes();
+        widened_axes.secondary_y = n_secondary_axes(2);
+        widened_axes.secondary_y[0].overrides.min_band = Some(widened_min);
+        let widened = compute_layout(
+            &spec, &theme, viewport, &widened_axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[],
+        )
+        .unwrap();
+
+        let delta = widened_min - band;
+        let base_w = baseline.panels[0].plot_area.w;
+        let wide_w = widened.panels[0].plot_area.w;
+        assert!(
+            (base_w - wide_w - delta).abs() < 1e-6,
+            "min_band on slot 0 must narrow the plot area by exactly the delta: base={base_w}, widened={wide_w}, delta={delta}"
+        );
+
+        let base_offsets: Vec<f64> = baseline.secondary_y_axes.iter().map(|a| a.translate.unwrap_or(0.0)).collect();
+        let wide_offsets: Vec<f64> = widened.secondary_y_axes.iter().map(|a| a.translate.unwrap_or(0.0)).collect();
+        assert!((wide_offsets[0] - base_offsets[0]).abs() < 1e-6, "slot 0's own offset is unaffected by its own min_band");
+        assert!(
+            (wide_offsets[1] - base_offsets[1] - delta).abs() < 1e-6,
+            "slot 1 must stack past slot 0's WIDENED band: base={base_offsets:?}, widened={wide_offsets:?}, delta={delta}"
+        );
+    }
+
+    /// The `max_band` mirror: capping a secondary axis's band below its
+    /// natural width narrows the reservation (and subsequent offsets shrink
+    /// by the same delta), never affecting the primary y-axis's own band.
+    #[test]
+    fn compute_layout_secondary_y_max_band_caps_its_own_band_and_shifts_offsets() {
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 800.0, height: 400.0 };
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+        let theme = default_theme_inputs();
+        let band = expected_secondary_band(&theme);
+
+        let mut baseline_axes = dummy_axes();
+        baseline_axes.secondary_y = n_secondary_axes(2);
+        let baseline = compute_layout(
+            &spec, &theme, viewport, &baseline_axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[],
+        )
+        .unwrap();
+
+        let capped_max = (band - 20.0).max(1.0);
+        let mut capped_axes = dummy_axes();
+        capped_axes.secondary_y = n_secondary_axes(2);
+        capped_axes.secondary_y[0].overrides.max_band = Some(capped_max);
+        let capped = compute_layout(
+            &spec, &theme, viewport, &capped_axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[],
+        )
+        .unwrap();
+
+        let delta = band - capped_max;
+        let base_w = baseline.panels[0].plot_area.w;
+        let capped_w = capped.panels[0].plot_area.w;
+        assert!(
+            (capped_w - base_w - delta).abs() < 1e-6,
+            "max_band on slot 0 must widen the plot area by exactly the delta: base={base_w}, capped={capped_w}, delta={delta}"
+        );
+
+        let base_offsets: Vec<f64> = baseline.secondary_y_axes.iter().map(|a| a.translate.unwrap_or(0.0)).collect();
+        let capped_offsets: Vec<f64> = capped.secondary_y_axes.iter().map(|a| a.translate.unwrap_or(0.0)).collect();
+        assert!(
+            (base_offsets[1] - capped_offsets[1] - delta).abs() < 1e-6,
+            "slot 1 must stack past slot 0's CAPPED (narrower) band: base={base_offsets:?}, capped={capped_offsets:?}, delta={delta}"
+        );
+    }
+
+    /// Byte-stability: `axes.secondary_y` empty (the pre-#52 wire default) is
+    /// the exact same `AxesInput` [`compute_layout_single_chart_no_facet_no_legend`]
+    /// exercises, and reproduces every one of its assertions plus an empty
+    /// `secondary_y_axes` — the new field is additive, not a behavior change,
+    /// on the shared path.
+    #[test]
+    fn compute_layout_no_secondary_y_is_byte_stable_with_pre_52_shape() {
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let axes = dummy_axes();
+        assert!(axes.secondary_y.is_empty(), "dummy_axes() default has no secondary axes");
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+
+        let result = compute_layout(
+            &spec, &default_theme_inputs(), viewport, &axes, &[], &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[],
+        )
+        .expect("layout should succeed on minimal spec");
+
+        assert_eq!(result.viewport, viewport.into_rect());
+        assert_eq!(result.panels.len(), 1);
+        assert_eq!(result.axes.len(), 2);
+        assert!(result.legend.is_none());
+        assert!(result.warnings.is_empty());
+        assert!(result.secondary_y_axes.is_empty());
 
         let panel = &result.panels[0];
         assert!(panel.plot_area.w > 0.0 && panel.plot_area.h > 0.0);
@@ -1781,6 +2116,7 @@ mod tests {
             ),
             show_x: true,
             show_y: true,
+            secondary_y: Vec::new(),
         };
         let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
 
@@ -1855,6 +2191,7 @@ mod tests {
             ),
             show_x: true,
             show_y: true,
+            secondary_y: Vec::new(),
         };
 
         // Long labels with -45° override: "ABCDEFGHIJ"=100px. Angle override forces
@@ -1874,6 +2211,7 @@ mod tests {
             ),
             show_x: true,
             show_y: true,
+            secondary_y: Vec::new(),
         };
 
         let short_result = compute_layout(
@@ -1919,6 +2257,7 @@ mod tests {
             y: AxisInput::new(AxisOrient::Left, None, vec!["0".into(), "5".into()], None),
             show_x: false,
             show_y: false,
+            secondary_y: Vec::new(),
         };
         let axes_with_x = AxesInput {
             show_x: true,
@@ -2237,6 +2576,7 @@ mod tests {
             y: AxisInput::new(AxisOrient::Left, Some("y".into()), vec!["0".into(), "5".into()], None),
             show_x: true,
             show_y: true,
+            secondary_y: Vec::new(),
         };
         let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
 

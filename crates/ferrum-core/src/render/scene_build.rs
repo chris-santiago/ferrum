@@ -148,6 +148,16 @@ pub fn build_scene(
             .find(|a| matches!(a.orient,
                 crate::layout::AxisOrient::Left | crate::layout::AxisOrient::Right));
 
+        // Secondary y-axes for this panel (secondary-y-axis, GH #52): one per
+        // `independent_y` layer, orient Right, stacked outward. Empty
+        // `layout.secondary_y_axes` (the pre-#52 default) keeps this empty —
+        // byte-identical to the shared path.
+        let panel_secondary_y: Vec<&crate::layout::AxisLayout> = layout
+            .secondary_y_axes
+            .iter()
+            .filter(|a| a.panel_index == panel_idx)
+            .collect();
+
         // Independent-axis rebuild (MOD-09): owns the per-panel layouts so the
         // effective references below stay valid for the rest of the block.
         let panel_axes = resolve_panel_axes(
@@ -185,6 +195,7 @@ pub fn build_scene(
             &panel_axes_layout,
             panel_x_axis,
             panel_y_axis,
+            &panel_secondary_y,
             panel_axes.x_independent,
             panel_axes.y_independent,
             theme,
@@ -527,6 +538,7 @@ fn resolve_panel_scales(
                 panel,
                 theme,
                 leaf_scales,
+                warnings,
             )?;
             slots.push(y_scale);
             layer_slot[li] = slots.len() - 1;
@@ -548,10 +560,11 @@ fn resolve_panel_scales(
 /// and its `mark` drives mark-dependent rules (e.g. bar zero-anchor). Only the
 /// resolved `.y` is kept.
 ///
-/// Warnings from this resolution are discarded: they concern channels other than
-/// y (color/size/x) that the slot never consumes, and the primary pass already
-/// surfaces the layer-0 channel warnings. A genuine y-field error still
-/// propagates as `Err`.
+/// Warnings from this resolution ARE propagated into `warnings` — they can
+/// concern the y channel itself (e.g. a non-finite/degenerate domain on this
+/// layer's own field), which nothing else surfaces: the primary pass only
+/// warns about layer-0's channels, and this slot's y-field is independent of
+/// layer 0's. A genuine y-field error still propagates as `Err`.
 #[allow(clippy::too_many_arguments)]
 fn resolve_layer_y_scale(
     spec: &ChartSpec,
@@ -561,6 +574,7 @@ fn resolve_layer_y_scale(
     panel: &crate::layout::PanelLayout,
     theme: &ThemeInputs,
     leaf_scales: Option<&LeafScaleContext>,
+    warnings: &mut Vec<RenderWarning>,
 ) -> Result<scale_resolve::ScaleKind, RenderError> {
     let mut layer_encoding = spec.encoding.clone();
     layer_encoding.overlay_from(&layer.encoding);
@@ -575,7 +589,7 @@ fn resolve_layer_y_scale(
     };
     resolve_param_domains(&mut layer_spec);
 
-    let (layer_scales, _warns) = scale_resolve::resolve_scales_with_leaf_context(
+    let (layer_scales, layer_warnings) = scale_resolve::resolve_scales_with_leaf_context(
         &layer_spec,
         layer_batch,
         &prep.transform_outputs,
@@ -584,6 +598,7 @@ fn resolve_layer_y_scale(
         theme,
         leaf_scales,
     )?;
+    warnings.extend(layer_warnings);
     Ok(layer_scales.y)
 }
 
@@ -761,6 +776,13 @@ fn route_panel_axes_and_grid(
     panel_axes_layout: &[&AxisLayout],
     panel_x_axis: Option<&AxisLayout>,
     panel_y_axis: Option<&AxisLayout>,
+    // Secondary y-axes for this panel (secondary-y-axis, GH #52): one per
+    // `independent_y` layer, orient Right, stacked outward beyond the
+    // primary. Routed above/below marks the same way every other axis is
+    // (via `draws_above_marks()`); never contributes gridlines — slot 0 (the
+    // primary `panel_y_axis`) is the only gridline source, so these are never
+    // passed to `build_grid`. Empty on the shared path — byte-identical.
+    panel_secondary_y: &[&AxisLayout],
     x_independent: bool,
     y_independent: bool,
     theme: &ThemeInputs,
@@ -836,6 +858,12 @@ fn route_panel_axes_and_grid(
             for axis in panel_axes_layout {
                 route_axis(axis, &mut axes_above, &mut axes_below);
             }
+        }
+        // Secondary y-axes (secondary-y-axis, GH #52): emitted after the
+        // primary x/y so they draw outward of (never occlude) the primary
+        // axis. Same above/below zindex routing as every other axis.
+        for axis in panel_secondary_y {
+            route_axis(axis, &mut axes_above, &mut axes_below);
         }
     }
 
@@ -2251,6 +2279,7 @@ mod tests {
                 anchor: crate::layout::TextAnchor::Start,
             }),
             warnings: Vec::new(),
+            secondary_y_axes: Vec::new(),
         }
     }
 
@@ -2530,5 +2559,125 @@ mod tests {
         // Every layer draws through the one primary y-scale.
         assert_eq!(scales.y_for_layer(0).data_domain(), scales.y.data_domain());
         assert_eq!(scales.y_for_layer(1).data_domain(), scales.y.data_domain());
+    }
+
+    // ── #52 Task 3: layout + axis emission for independent-y layers ─────────
+
+    /// Secondary y-axes never contribute gridlines — only slot 0 (the primary
+    /// `panel_y_axis`) does (spec §4: "Right axes render ticks and labels but
+    /// no gridlines"). A secondary `AxisLayout` with `show_grid: true` and a
+    /// tick count that DIFFERS from the primary's must not change the emitted
+    /// grid at all, while its own axis nodes (ticks/labels/domain line/title)
+    /// DO appear in the routed axis list — one axis per slot.
+    #[test]
+    fn secondary_y_axes_do_not_contribute_gridlines_but_emit_their_own_axis_nodes() {
+        use crate::layout::text_metrics::{fixed_width, MockMetrics};
+        use crate::layout::{AxisInput, AxisOrient};
+
+        let (spec, batch) = two_layer_dual_y_spec(true);
+        let scales = resolve_dual_y(&spec, &batch);
+        let panel = crate::layout::PanelLayout {
+            plot_area: crate::layout::Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 },
+            ..Default::default()
+        };
+        let theme = ThemeInputs::default();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        let m = MockMetrics { measure: fixed_width(8.0), line_h_factor: 1.2 };
+
+        let primary_y = crate::layout::axis::layout_y_axis(
+            &AxisInput::new(
+                AxisOrient::Left,
+                Some("Primary".into()),
+                vec!["0".into(), "5".into(), "10".into()],
+                None,
+            ),
+            panel.plot_area, 0, 11.0, 13.0, 8.0, &m,
+        );
+
+        let mut secondary_input = AxisInput::new(
+            AxisOrient::Right,
+            Some("Secondary".into()),
+            // Deliberately a DIFFERENT tick count than the primary's 3 — if the
+            // grid leaked this axis's ticks, the counts below would diverge.
+            vec!["0".into(), "25".into(), "50".into(), "75".into(), "100".into()],
+            None,
+        );
+        secondary_input.show_grid = true; // deliberately try to leak into the grid
+        let secondary_y = crate::layout::axis::layout_y_axis(
+            &secondary_input, panel.plot_area, 0, 11.0, 13.0, 8.0, &m,
+        );
+
+        // Baseline: grid + axis nodes built from the primary alone.
+        let baseline = route_panel_axes_and_grid(
+            &spec, &scales, &panel, &[], None, Some(&primary_y), &[],
+            false, false, &theme, &chart_config,
+        );
+        // With the secondary axis routed in alongside the primary.
+        let with_secondary = route_panel_axes_and_grid(
+            &spec, &scales, &panel, &[], None, Some(&primary_y), &[&secondary_y],
+            false, false, &theme, &chart_config,
+        );
+
+        assert_eq!(
+            with_secondary.grid.len(), baseline.grid.len(),
+            "a secondary y-axis must not add or alter gridlines, even with show_grid=true"
+        );
+        // But it DOES contribute its own axis nodes (ticks + domain + labels +
+        // title) — one axis per slot.
+        let baseline_axis_nodes = baseline.axes_below.len() + baseline.axes_above.len();
+        let with_secondary_axis_nodes = with_secondary.axes_below.len() + with_secondary.axes_above.len();
+        assert!(
+            with_secondary_axis_nodes > baseline_axis_nodes,
+            "secondary axis must emit its own scene nodes: baseline={baseline_axis_nodes}, with={with_secondary_axis_nodes}"
+        );
+    }
+
+    /// End-to-end (`render_svg`): a dual-axis LayerChart reserves BOTH margin
+    /// bands (no plot-area overdraw — the plot area is strictly narrower than
+    /// the shared-y equivalent at the same viewport), emits one Right-orient
+    /// secondary axis, and titles it from layer 1's own y field — spec §4/§9
+    /// acceptance criterion 1.
+    #[test]
+    fn render_svg_independent_y_reserves_right_band_and_emits_secondary_axis() {
+        let theme = ThemeInputs::default();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let config = super::super::config::RenderConfig::default();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+
+        let (shared_spec, shared_batch) = two_layer_dual_y_spec(false);
+        let shared = super::super::render_svg(
+            &shared_spec, &shared_batch, &theme, viewport, &config, &chart_config,
+        )
+        .unwrap();
+        assert!(
+            shared.layout.secondary_y_axes.is_empty(),
+            "the shared-y chart must not reserve any secondary axis"
+        );
+
+        let (dual_spec, dual_batch) = two_layer_dual_y_spec(true);
+        let dual = super::super::render_svg(
+            &dual_spec, &dual_batch, &theme, viewport, &config, &chart_config,
+        )
+        .unwrap();
+
+        assert_eq!(dual.layout.secondary_y_axes.len(), 1, "one secondary axis for the one independent_y layer");
+        let secondary = &dual.layout.secondary_y_axes[0];
+        assert_eq!(secondary.orient, crate::layout::AxisOrient::Right);
+        // No explicit title on layer 1's y encoding → falls back to the field
+        // name ("y1"), same 3-way title resolution the primary axis uses.
+        assert_eq!(secondary.title.as_ref().unwrap().text, "y1");
+
+        // No plot-area overdraw: the dual-axis plot area is strictly narrower
+        // than the shared-y plot area at the identical viewport — the right
+        // band is genuinely reserved, not drawn over.
+        let shared_w = shared.layout.panels[0].plot_area.w;
+        let dual_w = dual.layout.panels[0].plot_area.w;
+        assert!(
+            dual_w < shared_w,
+            "dual-axis plot area ({dual_w}) must be narrower than the shared-y plot area ({shared_w})"
+        );
+
+        // The secondary axis's title text renders into the SVG.
+        assert!(dual.bytes.contains(">y1<"), "secondary axis title must appear in the SVG");
     }
 }

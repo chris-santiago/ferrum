@@ -107,6 +107,7 @@ pub fn compute_layout(
         y: AxisInput::new(AxisOrient::Left, y_title, y_tick_labels, None),
         show_x: true,
         show_y: true,
+        secondary_y: Vec::new(),
     };
 
     let groups: Vec<FacetGroup> = facet_groups

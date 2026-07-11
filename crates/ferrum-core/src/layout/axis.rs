@@ -305,6 +305,13 @@ pub struct AxesInput {
     pub show_x: bool,
     /// Y-axis variant of `show_x`. Default `true`.
     pub show_y: bool,
+    /// Secondary y-axis inputs, one per `independent_y` layer, in layer order
+    /// (secondary-y-axis, GH #52). Each renders on the right, stacked outward
+    /// beyond `y`'s band (slot 0 stays `y`, driving the left axis and
+    /// gridlines — see spec §6 slot contract). Empty (the default) means the
+    /// chart has no independent-y layer, so layout reserves no extra band and
+    /// emits no extra axis — byte-identical to the pre-#52 shared path.
+    pub secondary_y: Vec<AxisInput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
