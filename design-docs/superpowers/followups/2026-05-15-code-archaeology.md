@@ -498,8 +498,9 @@ next touch of each subsystem.~~ **ALL RESOLVED 2026-07-05** on
 (interactive warning emission) fixed outright, the temporal `_column_minmax`
 bug fixed (not deferred to #52), the polars `ColumnNotFoundError` catch gap
 closed, and shap_bar aligned to the global-feature-set principle. Remaining
-open by explicit user scoping: #51 (upstream wgpu), #52 (secondary-axis
-subsystem), #53 (Joint/ClusterMap native resolve=). Full reports:
+open by explicit user scoping: #51 (upstream wgpu), ~~#52 (secondary-axis
+subsystem)~~ **RESOLVED 2026-07-11** (see the 2026-07-11 section below),
+#53 (Joint/ClusterMap native resolve=). Full reports:
 `.claude/output/phase-b-close/` + `.claude/output/72h-review/`.
 
 | Sev | Area | Item |
@@ -509,7 +510,7 @@ subsystem), #53 (Joint/ClusterMap native resolve=). Full reports:
 | S1 | rust interaction | `merge_children` AND-folds zoom/pan across children but hardcodes `toolbar: true`. |
 | S2 | python scene | `_scene.py::_empty_scene_json` is a hand-maintained scene-schema mirror (flat-path bootstrap). Consider a Rust-emitted empty scene. |
 | S2 | python lowering | `_rebuild_with_charts` sibling signature drift: base + 3 forms carry `resolve=_RESOLVE_UNCHANGED`, Joint/Repeat/ClusterMap don't (unreachable today — Repeat has a semantically-identical bespoke `share_scale`; collapse it onto the base sugar when next touched). `_build_grid_tree` has a 12-parameter signature; composite-node dict construction is triplicated across the lowering sites (unvalidated tree contract — a tiny builder/validator would pin it). |
-| S2 | python overlay | LayerChart static (Rust overlay tree) vs interactive (merged flat chart) shared color/size math can diverge (raw-column vs transform-aware unions) — single remaining injection seam, documented; real fix rides GH #52 (secondary axis / per-layer scale slots). |
+| S2 | python overlay | LayerChart static (Rust overlay tree) vs interactive (merged flat chart) shared color/size math can diverge (raw-column vs transform-aware unions) — single remaining injection seam, documented; real fix rides GH #52 (secondary axis / per-layer scale slots). ✅ **RESOLVED 2026-07-11** for the independent-y path: `resolve={"y": "independent"}` (and its `SecondaryY` sugar) now routes BOTH static and interactive through the identical merged-flat single-panel spec (CLAUDE.md "Composite rendering" amendment), so there is no separate overlay-tree computation to diverge from for that case. The general raw-column-vs-transform-aware `compute_union_domain` divergence for DEFAULT (`resolve={"y": "shared"}`) shared x/color/size scales across the two paths is unrelated to per-layer y slots and remains open (unaffected by this work; see `compute_union_domain`'s own docstring in `composition.py`). |
 | — | wasm | wgpu 29.0.3 scissor workaround sunset: tracked in GH #51. |
 | S2 | shap family | `shap_bar` per-class feature selection is class-blind (`head(max_display * n_unique)` over a global sort) — beeswarm and (since #46) waterfall both follow the global-feature-set-per-class principle; bar is the lone outlier. Align when the shap family is next touched. (72h review, 2026-07-05.) |
 | S1 | shap family | `is_faceted` computed once in beeswarm vs recomputed inline in bar/waterfall. |
@@ -577,3 +578,30 @@ splitting extent-vs-binning domain semantics into distinct types on the
 deliberately unbuilt: it would require custom serde to keep the wire
 contract byte-stable across all 15+ variants for enforcement the total
 method already provides at the single consumption site.
+
+## 2026-07-11 — secondary y-axis (#52) resolved + new follow-ups
+
+GH #52 (secondary y-axis / per-layer independent y-scales) is resolved on
+`feat/secondary-y-axis`, per
+`design-docs/superpowers/specs/2026-07-11-secondary-y-axis-design.md`.
+`LayerChart(..., resolve={"y": "independent"})` now renders a real dual-axis
+chart (layer 0 left, subsequent independent layers stacked right, unbounded
+n) through one merged flat single-panel pipeline shared by static SVG and
+interactive output; `fm.SecondaryY` is re-based onto the same mechanism
+(desugars to an appended independent-y layer at `Chart.__add__` time) and
+its former standalone silo (`SecondaryYSpec` / `StructuralSpec::SecondaryY`,
+`render/secondary_axis.rs`) no longer exists in the crate. The S2
+"python overlay" row above is marked resolved for the independent-y case.
+`ferrum-spec.md` §3.12 documents the mechanism and `SecondaryY`; `CLAUDE.md`
+"Composite rendering" documents the both-kinds merged-flat routing.
+
+New follow-ups discovered during the run (none blocking #52's close):
+
+| ID | Sev | Item |
+|---|---|---|
+| SY-1 | S2 | **Intra-member slot grouping.** The per-layer `independent_y` bool wire has no way to group a multi-layer member chart's internal layers into ONE secondary axis slot. A non-first `LayerChart` member that itself decomposes into more than one y-bearing layer — including composite-mark shorthands like `mark_line(point=True)`, which expands to a line layer + point layer both inheriting the chart-level `y` — raises a typed `ValueError` under `resolve={"y": "independent"}` rather than silently rendering one right axis per internal layer. The primary (first) member is exempt (always the left axis regardless of layer count). Fix requires a slot-group id in the wire contract (grouping N layers to 1 axis slot), not just the current bool. `src/ferrum/composition.py::LayerChart._build_merged`. |
+| SY-2 | S1 | **RepeatChart `resolve={"y":"shared"}` over an independent-y template bypasses the composite conflict raise.** The typed `ValueError` for "parent composite `y: shared` over a subtree containing an independent-y layered leaf" is enforced at `_composite_tree`/`_lower_any`'s ordinary composite-node walk; a `RepeatChart` carrying its own `resolve={"y": "shared"}` over an independent-y template chart routes through `_build_grid_tree` instead, which does not run that guard. Exotic (no test currently exercises it); log only, not a live bug. |
+| SY-3 | S2 | **Field-based linked selection suppresses per-layer auto-tooltips.** A layered chart with a field-based `selection_point`/`selection_interval` linked tooltip takes the chart-level selection-tooltip injection path, which early-returns before the new per-layer auto-tooltip walk runs — so a selection-bound layered chart still shows one shared tooltip field set rather than per-layer fields. Not a regression (this behavior predates #52); just a narrower scope than the unconditional per-layer case documented in `ferrum-spec.md`'s auto-tooltips note. `src/ferrum/_spec_build.py`. |
+| SY-4 | S3 | **Explicit `Axis(orient="left")` on a secondary layer is silently forced `Right`.** Spec-compliant (§4 "Axes": secondary layers always render right), but repo precedent elsewhere favors surfacing a contradictory explicit request (warning or typed error) rather than silently overriding it. User decision pending on whether to add one; not a bug today. `crates/ferrum-core/src/render/prepare/mod.rs` (`build_secondary_y_axis_inputs`). |
+| SY-5 | S2 | **`text_json` right-axis relabel needs ≥2 ticks per secondary axis.** The WASM `text_json` right-axis column-recognition heuristic ranks candidate columns by ascending-x layout geometry; a degenerate single-tick right axis (e.g. a secondary layer whose y-domain collapses to one value) doesn't produce enough ticks for the heuristic to recognize the column, so it won't relabel on zoom/pan. Documented at Task 9's quality-review carry-forward; no crash, just a missed relabel in a narrow domain-collapse case. `crates/ferrum-wasm/src/text_json.rs`. |
+| SY-6 | S1 | **`build_structural_nodes`'s `StructuralOutput` 4-tuple has two permanently-empty slots.** With `StructuralSpec::SecondaryY` deleted (Task 7), only `BreakAxis`/`Inset` remain, and neither populates the `extra_axes` / `extra_mark_batches` locals (only `extra_annotations` and `break_results` are ever mutated) — those two locals were changed from `let mut` to `let` to silence clippy, but the 4-tuple `StructuralOutput` return shape was deliberately left as-is (a future structural variant could repopulate them). Tidy candidate — collapse to the 2 live fields, or re-justify the 4-tuple with a comment — when this function is next touched. `crates/ferrum-core/src/render/scene_build.rs` (`build_structural_nodes`). |

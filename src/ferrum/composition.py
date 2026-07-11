@@ -157,8 +157,11 @@ def compute_union_domain(charts, channel: str) -> Optional[dict]:
     divergence is real and intentional for now: ``_build_merged`` renders
     through the flat single-Chart entry (the interactive one-panel
     contract), which has no composite tree to carry a resolve field, so
-    this raw-column union is the only mechanism available there. See
-    GH #52 for closing that gap.
+    this raw-column union is the only mechanism available there. This is
+    unrelated to the per-layer independent-y mechanism GH #52 shipped
+    (2026-07-11, secondary y-axis) -- that work left x/color/size shared
+    resolution on this raw-column path unchanged -- and remains open; see
+    the "python overlay" S2 row in the code archaeology followups doc.
 
     Parameters
     ----------

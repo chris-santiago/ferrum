@@ -173,6 +173,25 @@ Chart(data=None, *, width=None, height=None, title=None, description=None)
 > `.save(path, *, ..., toolbar: bool = True)` — for HTML format, `toolbar`
 > controls whether the toolbar appears in the exported file. Defaults to `True`.
 > Has no effect on SVG/PNG/JSON output.
+
+> **2026-07-11 (secondary y-axis, #52 close-out):** auto-tooltips on a
+> **layered** chart (`LayerChart`, or any chart with `+`-appended layers
+> such as `SecondaryY`) now report each hovered layer's *own* encoded
+> channels, not the chart's first/primary layer's channels for every
+> layer. This was a pre-existing gap in the auto-tooltip injection path
+> (`_inject_auto_tooltips` and the Rust `MetadataColumns::from_ctx` builder
+> were both chart-level-only, collecting one shared field set) that
+> surfaced while building per-layer independent y-scales, and the fix is a
+> root cause fix applying to **every** layered chart, not just dual-axis
+> ones — hovering a non-primary layer's marks now always shows that
+> layer's fields. An explicit chart-level `tooltip=` encoding still wins
+> for every layer (unchanged, takes precedence over auto-injection as
+> documented above). One documented non-regression: a field-based linked
+> selection on a layered chart still short-circuits per-layer
+> auto-tooltip injection for the selection-driven tooltip content (the
+> chart-level selection-tooltip path returns early before the per-layer
+> walk) — not a regression, just a narrower auto-tooltip scope than the
+> unconditional per-layer case.
 - `.show()` — Display in current environment (notebook, terminal sixel, or browser).
 - `.to_spec()` — Return the internal `ChartSpec` dataclass (serializable).
 - `.to_json()` — Return JSON string of the chart spec.
@@ -943,6 +962,19 @@ Annotations are lightweight overlays that don't participate in scale domain calc
 | `ConcatChart(*charts, columns=None)` | General wrapping concatenation | `spacing`, `resolve`, `columns` |
 | `RepeatChart(spec, row=None, column=None, layer=None)` | Repeat across field lists | `spacing`, `columns`, `resolve` |
 
+> **2026-07-11 (secondary y-axis, #52):** the `LayerChart(*charts)` row's
+> "same axes" description is the default (`resolve={"y": "shared"}`, the
+> byte-stable pre-#52 path) but is no longer the *only* behavior.
+> `LayerChart(a, b, resolve={"y": "independent"})` now renders a real
+> dual-axis chart: layer 0's y-scale drives the left axis and gridlines,
+> and each subsequent independent layer resolves its own y-scale and
+> gets its own right-side axis (stacked outward, unbounded layer count).
+> One implementation serves both static SVG and interactive output (the
+> merged flat single-panel path — see CLAUDE.md "Composite rendering").
+> `x` stays shared across every layer regardless of `resolve`; per-layer
+> independent x (dual-x) remains a typed `ValueError` naming GH #55. See
+> `SecondaryY` below for the sugar built on top of this mechanism.
+
 #### `JointChart`
 
 Compound view with a center plot and optional marginal distribution plots sharing the center's x-axis (top) and y-axis (right). The marginals are independent `Chart` objects, typically `mark_histogram` or `mark_density`.
@@ -1002,6 +1034,45 @@ JointChart(center, *, top=None, right=None, ratio=5, spacing=10.0)
 > dropped the diagonal template.
 
 Most users construct `JointChart` via `ferrum.jointplot(...)`.
+
+#### `SecondaryY`
+
+```
+SecondaryY(field, mark="line", axis=None, color=None, opacity=None, scale=None)
+```
+
+`chart + SecondaryY(...)` adds a second, independent y-axis to `chart`.
+`field`: data field mapped to the secondary y axis (required). `mark`:
+mark type for the secondary series (default `"line"`). `axis`: per-axis
+`Axis` config applied to the right-side y2 axis. `color` / `opacity`:
+literal mark styling for the secondary series. `scale`: `Scale` config for
+the secondary y axis. The base chart must carry an `x` encoding for the
+secondary layer to inherit; adding `SecondaryY` to a chart with no `x`
+raises `ValueError`.
+
+> **2026-07-11 (secondary y-axis, #52):** `chart + SecondaryY(...)`
+> desugars, at `Chart.__add__` time, to one appended layer on `chart` —
+> mark `mark`, `y` encoding on `field` (carrying `axis`/`scale`), `x`
+> inherited from the base chart's own x encoding, color literal `color`,
+> opacity `opacity` — flagged as an independent-y layer using the same
+> per-layer y-scale-slot mechanism `resolve={"y": "independent"}` uses
+> above. The base chart's own layer(s) are unchanged: a layered base
+> chart keeps its existing layers sharing the left axis while only the
+> appended `SecondaryY` layer gets its own right axis; adding multiple
+> `SecondaryY` instances stacks multiple right axes outward, same as
+> stacking multiple independent layers directly.
+>
+> This re-bases `SecondaryY` off its former standalone Rust mechanism
+> (`SecondaryYSpec` / `StructuralSpec::SecondaryY`, which rendered in the
+> static overlay path only and was inert in interactive output) — that
+> Rust mechanism no longer exists in the crate. One secondary-axis
+> mechanism remains. Behavior deltas from the pre-#52 renderer: (1) the
+> secondary series' plot area now genuinely narrows to reserve a
+> right-side margin band, rather than the axis overdrawing the plot; (2)
+> the secondary axis is fully interactive (tooltips, zoom/pan,
+> hit-testing) like any other layer; (3) `color`, when omitted, no longer
+> falls back to a hardcoded `#E45756` — the secondary mark defaults like
+> any other mark (theme default).
 
 All compound views accept `.theme()`, `.properties()`, `.save()`, `.show()`.
 

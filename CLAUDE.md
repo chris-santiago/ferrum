@@ -207,6 +207,24 @@ flat path) because selections/hit-testing require overlays to be ONE scene
 panel. Deliberate behavior change: an all-empty composition (e.g. zero-row
 pairplot) raises instead of rendering a blank grid.
 
+**Independent-y LayerChart extends this exception to BOTH kinds (secondary
+y-axis, 2026-07-11, #52).** `LayerChart(a, b, resolve={"y": "independent"})`
+(and its `SecondaryY` sugar, which desugars to an appended independent-y
+layer) routes **static `to_svg` and interactive `.interactive()` both**
+through the merged flat path — not just interactive. This is a documented,
+symmetric extension of the interactive-only exception above: since the
+overlay composite tree cannot serve interactive's one-panel contract, a
+composite-side implementation of per-layer y-scales would mean two
+mechanisms for one feature, so both output kinds resolve per-layer y-scale
+slots from the same single-panel spec. This resolves, for the
+independent-y case specifically, the former S2 archaeology finding that
+static (Rust overlay tree) vs. interactive (merged flat chart) shared
+color/size math could diverge — see
+`design-docs/superpowers/followups/2026-05-15-code-archaeology.md`. Default
+and `resolve={"y": "shared"}` LayerChart output is unaffected: static still
+renders via the composite overlay tree, interactive via the merged flat
+path, unchanged from before.
+
 ---
 
 ## Known open gaps (code archaeology)

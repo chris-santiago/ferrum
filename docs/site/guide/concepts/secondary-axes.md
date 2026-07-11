@@ -4,6 +4,27 @@
 series reads from the same DataFrame as the primary chart but maps to a different field and
 a different y scale. The secondary y axis appears on the right side of the plot.
 
+`chart + SecondaryY(...)` is sugar over ferrum's general per-layer independent-y
+mechanism: `LayerChart(a, b, resolve={"y": "independent"})` renders the same kind
+of dual axis directly, and `SecondaryY` desugars to exactly that — an appended
+layer flagged independent-y. Reach for `SecondaryY` when adding one secondary
+series to an existing chart with `+`; reach for `resolve={"y": "independent"}`
+directly when building a `LayerChart` from scratch, or when you need more than
+one independent layer stacked on the right (each additional independent layer,
+whether from another `SecondaryY` or a directly-constructed `LayerChart`, gets
+its own right-side axis, stacked outward — there is no hard cap). Only the
+y-axis can be independent this way today; per-layer independent x (dual x-axis)
+is tracked separately as [GH #55](https://github.com/chris-santiago/ferrum/issues/55)
+and remains unsupported.
+
+The secondary series is a real chart layer, not a cosmetic overlay: its plot area
+genuinely reserves a right-side margin band for the secondary axis (the primary
+plot area narrows to make room, rather than the secondary axis overdrawing it),
+and the secondary series is fully interactive — tooltips, zoom/pan, and
+hit-testing all work on it like any other layer. If `color` is omitted, the
+secondary mark falls through to its own per-theme default color rather than a
+hardcoded fallback.
+
 ---
 
 ## Basic usage
