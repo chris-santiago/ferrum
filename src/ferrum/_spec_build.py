@@ -25,6 +25,48 @@ from ferrum._facet import (
 from ferrum.encoding.base import ChannelBase, _PendingAggregate, _PendingBin
 from ferrum._layer_transforms import _infer_agg_groupby
 
+# Channels excluded from auto-tooltip field derivation: tooltip/tooltip_fields
+# are the explicit-tooltip escape hatch (handled by the caller before this
+# runs), and detail/key/href/description/url each have their own dedicated
+# purpose that isn't "show this raw value on hover".
+_AUTO_TOOLTIP_SKIP = frozenset(("tooltip", "detail", "key", "href", "description", "url"))
+
+
+def _auto_tooltip_fields(enc: dict) -> list[dict]:
+    """Derive auto-tooltip ``{"field": ...}`` entries from one encoding dict.
+
+    Shared by :meth:`SpecBuildMixin._inject_auto_tooltips`'s chart-level and
+    per-layer injection (GH #52 Task 10f bug #2) so both derive fields the
+    same way from whichever encoding dict they're given -- the chart-level
+    ``kw["encoding"]`` or one layer's own ``kw["layers"][i]["encoding"]``.
+
+    Parameters
+    ----------
+    enc : dict
+        A parsed-JSON encoding dict (channel name -> ``{"field": ..., ...}``).
+
+    Returns
+    -------
+    list of dict
+        ``[{"field": name}, ...]`` in ``_RENDERER_HONORED_CHANNELS`` order,
+        deduplicated by field name.
+    """
+    from ferrum.chart import _RENDERER_HONORED_CHANNELS
+
+    auto_fields: list[dict] = []
+    seen: set[str] = set()
+    for ch_name in _RENDERER_HONORED_CHANNELS:
+        if ch_name in _AUTO_TOOLTIP_SKIP:
+            continue
+        ch_dict = enc.get(ch_name)
+        if ch_dict is None:
+            continue
+        field = ch_dict.get("field") if isinstance(ch_dict, dict) else None
+        if field and isinstance(field, str) and field not in seen:
+            auto_fields.append({"field": field})
+            seen.add(field)
+    return auto_fields
+
 
 class SpecBuildMixin:
     """Spec-building helper methods consumed by ``Chart.to_spec``.
@@ -627,6 +669,24 @@ class SpecBuildMixin:
         SVG/PNG renders skip it to avoid bloating the output with tooltip data.
         Explicit ``tooltip=`` or ``tooltip_fields=`` encodings always win.
 
+        Layered charts also get PER-LAYER tooltip fields (GH #52 Task 10f bug
+        #2): each ``kw["layers"][i]`` gets its own ``encoding.tooltip_fields``
+        derived from that layer's own merged encoding (``kw["layers"][i]
+        ["encoding"]``, already populated per layer by
+        :meth:`_build_layers_list`), not the chart-level fields. Without this,
+        every non-primary layer's tooltip reports the PRIMARY layer's fields
+        (confirmed via headless WASM capture -- hovering a secondary-y-axis
+        layer's mark showed the primary layer's ``x``/``revenue`` instead of
+        its own field). An explicit chart-level ``tooltip``/``tooltip_fields``
+        short-circuits BOTH injections (explicit always wins, for every
+        layer); otherwise the chart-level auto-injection is kept alongside
+        the per-layer one: Rust prefers a layer's own tooltip fields for
+        that layer's batch and falls back to the chart-level ones when a
+        layer carries none (seam contract with the paired Rust-side fix).
+        Unlayered and single-layer charts emit the exact same wire as
+        before this fix (no ``kw["layers"]`` key, or a layers list whose
+        entries already carry no distinct-from-chart-level fields to add).
+
         Parameters
         ----------
         kw : dict
@@ -636,27 +696,25 @@ class SpecBuildMixin:
         Returns
         -------
         dict
-            The same dict with ``encoding.tooltip_fields`` added when
-            applicable.
+            The same dict with ``encoding.tooltip_fields`` added at the chart
+            level and, for layered charts, on each layer's own encoding.
         """
-        from ferrum.chart import _RENDERER_HONORED_CHANNELS
-
         enc = kw.get("encoding") or {}
         if "tooltip" in enc or "tooltip_fields" in enc:
+            # Explicit chart-level tooltip wins for every layer (a layer's
+            # own explicit tooltip still beats it in Rust's inherit_from
+            # merge). Skipping per-layer auto-injection here preserves the
+            # pre-fix behavior for explicitly-tooltipped layered charts.
             return kw
-        _TOOLTIP_SKIP = frozenset(("tooltip", "detail", "key", "href", "description", "url"))
-        auto_fields: list[dict] = []
-        seen_auto: set[str] = set()
-        for _ch_name in _RENDERER_HONORED_CHANNELS:
-            if _ch_name in _TOOLTIP_SKIP:
-                continue
-            ch_dict = enc.get(_ch_name)
-            if ch_dict is None:
-                continue
-            field = ch_dict.get("field") if isinstance(ch_dict, dict) else None
-            if field and isinstance(field, str) and field not in seen_auto:
-                auto_fields.append({"field": field})
-                seen_auto.add(field)
+        auto_fields = _auto_tooltip_fields(enc)
         if auto_fields:
             kw.setdefault("encoding", {})["tooltip_fields"] = auto_fields
+
+        for layer in kw.get("layers") or []:
+            layer_enc = layer.get("encoding") or {}
+            if "tooltip" in layer_enc or "tooltip_fields" in layer_enc:
+                continue
+            layer_auto_fields = _auto_tooltip_fields(layer_enc)
+            if layer_auto_fields:
+                layer.setdefault("encoding", {})["tooltip_fields"] = layer_auto_fields
         return kw

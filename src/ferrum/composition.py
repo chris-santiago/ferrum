@@ -2869,11 +2869,33 @@ class LayerChart(_ChartLike):
         follow-up, not this task's scope). The primary (first) member chart
         is exempt -- it always owns the single left axis regardless of how
         many layers it contributes.
+
+        Composite-mark shorthands applied before ``.encode()`` (e.g.
+        ``mark_line(point=True)``, which does ``line_chart + point_chart``
+        *inside* :meth:`~ferrum.chart.Chart.mark_line` before the caller's
+        ``.encode(y=...)`` runs) arrive here with ``chart._layers`` already
+        set but every one of those layers' OWN ``encoding`` snapshot empty --
+        the subsequent ``.encode(y=...)`` only ever writes ``chart._encoding``
+        at the chart level. Each such layer still renders using that
+        chart-level ``y`` (an empty per-layer encoding falls back to the
+        chart-level encoding at draw time -- confirmed by the non-independent
+        default render, where both the line and point layers correctly track
+        one shared y-scale despite carrying no per-layer ``y`` of their own).
+        So for y-bearing-layer counting purposes each layer without its own
+        ``y`` still counts as y-bearing when the member chart carries a
+        chart-level ``y`` -- otherwise this composite-mark shape would
+        silently join the primary scale (GH #52 Task 10f bug #1) instead of
+        hitting the same multi-y-layer guard a pre-merge ``a + b`` (each side
+        encoded before ``+``) already hits.
         """
         y_independent = self._y_independent()
         result = self._charts[0]
         n_before = len(result._layers) if result._layers is not None else 1
         for member_index, chart in enumerate(self._charts[1:], start=1):
+            # A pre-merged composite-mark member (``chart._layers is not
+            # None``) inherits its chart-level ``y`` onto every layer that
+            # carries no ``y`` of its own -- see docstring above.
+            inherited_y = chart._encoding.get("y") if chart._layers is not None else None
             result = result + chart
             if y_independent:
                 layers = list(result._layers)
@@ -2881,13 +2903,16 @@ class LayerChart(_ChartLike):
                     i
                     for i in range(n_before, len(layers))
                     if layers[i].encoding.get("y") is not None
+                    or (inherited_y is not None and layers[i].encoding.get("y") is None)
                 ]
                 if len(y_bearing) > 1:
                     raise ValueError(
                         f"LayerChart: member chart at position {member_index} contributes "
                         f"{len(y_bearing)} y-bearing layers under resolve={{'y': 'independent'}} "
                         "-- member charts under independent y must be a single y-layer chart "
-                        "(grouping a member's internal layers into one right-axis slot is a "
+                        "(this includes composite-mark shorthands like mark_line(point=True), "
+                        "whose merged line+point layers both inherit the chart-level y; "
+                        "grouping a member's internal layers into one right-axis slot is a "
                         "tracked follow-up); only the primary (first) member chart may be "
                         "multi-layer"
                     )

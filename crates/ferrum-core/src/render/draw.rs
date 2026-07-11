@@ -322,6 +322,18 @@ impl MetadataColumns {
     /// tooltip `EncodingSpec` are honored (matching the same logic as text
     /// mark labels). If no format is specified, the default behavior trims
     /// trailing zeros (e.g. `1.5` not `1.5000`).
+    ///
+    /// `ctx.spec.encoding` reads as "the chart-level encoding" only for a
+    /// single-layer (unlayered) chart. For a multi-layer chart, the per-layer
+    /// draw loop (`build_panel_mark_batches` in `scene_build.rs`) builds a
+    /// **synthetic per-layer `ChartSpec`** whose `encoding` is that layer's
+    /// own merged encoding (`LayerPrepared.encoding`, already chart-merged via
+    /// `Encoding::inherit_from` — a layer's own `tooltip_fields` wins when
+    /// set; only an unset layer inherits the chart-level fallback). So this
+    /// function does not need its own per-layer branch: reading
+    /// `ctx.spec.encoding.tooltip_fields` here already resolves to the
+    /// correct layer's tooltip fields, by construction of the caller's `ctx`
+    /// (GH #52 Task 10f).
     pub fn from_ctx(ctx: &DrawCtx) -> Self {
         use crate::render::format::{format_numeric, format_time, format_with_spec};
 

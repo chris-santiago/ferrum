@@ -2663,6 +2663,155 @@ mod tests {
         (spec, batch)
     }
 
+    // ── #52 Task 10f: per-layer tooltip metadata ─────────────────────────────
+
+    /// Variant of [`two_layer_dual_y_spec`] (always `layer1_independent =
+    /// true`) that additionally sets `tooltip_fields` overrides at the chart
+    /// level and on each layer's own encoding, so tests can exercise the
+    /// per-layer tooltip-metadata contract without duplicating the whole
+    /// two-layer fixture. `None` leaves that encoding's `tooltip_fields` unset
+    /// (so it inherits per [`crate::spec::encoding::Encoding::inherit_from`]).
+    fn two_layer_dual_y_spec_with_tooltips(
+        chart_tooltip_field: Option<&str>,
+        layer0_tooltip_field: Option<&str>,
+        layer1_tooltip_field: Option<&str>,
+    ) -> (ChartSpec, RecordBatch) {
+        use crate::spec::encoding::EncodingSpec;
+
+        let (mut spec, batch) = two_layer_dual_y_spec(true);
+        let mk_fields = |f: Option<&str>| {
+            f.map(|field| vec![EncodingSpec { field: field.into(), ..Default::default() }])
+        };
+        spec.encoding.tooltip_fields = mk_fields(chart_tooltip_field);
+        let layers = spec.layers.as_mut().expect("two_layer_dual_y_spec always sets layers");
+        layers[0].encoding.tooltip_fields = mk_fields(layer0_tooltip_field);
+        layers[1].encoding.tooltip_fields = mk_fields(layer1_tooltip_field);
+        (spec, batch)
+    }
+
+    /// Run the full `prepare → layout → build_scene` pipeline for an
+    /// arbitrary `(spec, batch)` pair. Generalizes [`build_dual_y_scene`]
+    /// (which is hardcoded to [`two_layer_dual_y_spec`]) for tests that need
+    /// a customized spec.
+    fn build_scene_for(spec: &ChartSpec, batch: &RecordBatch) -> ferrum_scene::SceneGraph {
+        let theme = ThemeInputs::default();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let config = super::super::config::RenderConfig::default();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+
+        let prep = super::super::prepare::prepare_render_inputs(spec, batch, &theme, None).unwrap();
+        let mut warnings = prep.warnings.clone();
+        let metrics = super::super::font::FontdueMetrics::new();
+        let layout = crate::layout::compute_layout(
+            spec, &theme, viewport,
+            &prep.axes, &prep.facet_groups, &prep.legend_entries,
+            prep.legend_title.clone(), prep.colorbar.as_ref(), &metrics,
+            &crate::layout::legend::LegendOverrides::default(), &prep.aux_legends,
+        ).unwrap();
+
+        build_scene(spec, &prep, &layout, &theme, &config, &mut warnings, &chart_config, None).unwrap()
+    }
+
+    /// A non-primary layer's mark batch must carry ITS OWN tooltip_fields —
+    /// not the chart-level (auto-injected-from-the-primary-layer) fields.
+    /// Regression test for GH #52 Task 10f: hovering the secondary layer used
+    /// to show the primary layer's tooltip content
+    /// (`.git/sdd/task-10-report.md` BUG FINDING #2). Each layer's own
+    /// `tooltip_fields`, once Python emits them per layer, already flows
+    /// through `LayerPrepared::from_chart_and_layer`'s
+    /// `Encoding::inherit_from` merge and the per-layer synthetic `ChartSpec`
+    /// built in `build_panel_mark_batches` — this test locks that contract in.
+    #[test]
+    fn layer_tooltip_metadata_uses_each_layers_own_fields() {
+        let (spec, batch) =
+            two_layer_dual_y_spec_with_tooltips(Some("y0"), Some("y0"), Some("y1"));
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+        assert_eq!(panel.marks.len(), 2, "one mark batch per layer");
+
+        let layer0 = panel.marks[0].tooltips.as_ref().expect("layer 0 must have tooltips");
+        assert_eq!(layer0[0].fields.len(), 1);
+        assert_eq!(layer0[0].fields[0].name, "y0");
+        assert_eq!(layer0[0].fields[0].value, "1");
+
+        let layer1 = panel.marks[1].tooltips.as_ref().expect("layer 1 must have tooltips");
+        assert_eq!(layer1[0].fields.len(), 1);
+        assert_eq!(
+            layer1[0].fields[0].name, "y1",
+            "layer 1's tooltip must report its OWN field (y1), not the primary layer's (y0)"
+        );
+        assert_eq!(layer1[0].fields[0].value, "100");
+    }
+
+    /// When neither layer carries its own `tooltip_fields` (legacy /
+    /// auto-injected chart-level-only tooltips), every layer must still fall
+    /// back to the chart-level `tooltip_fields` — today's
+    /// `Encoding::inherit_from` behavior, preserved unchanged by the Task 10f
+    /// fix (which only adds per-layer *preference*, never removes the
+    /// fallback).
+    #[test]
+    fn layer_without_own_tooltip_fields_falls_back_to_chart_level() {
+        let (spec, batch) = two_layer_dual_y_spec_with_tooltips(Some("y0"), None, None);
+        let scene = build_scene_for(&spec, &batch);
+        let panel = &scene.panels[0];
+
+        for (i, mark_batch) in panel.marks.iter().enumerate() {
+            let tooltips = mark_batch.tooltips.as_ref()
+                .unwrap_or_else(|| panic!("layer {i} must have tooltips via chart-level fallback"));
+            assert_eq!(
+                tooltips[0].fields[0].name, "y0",
+                "layer {i} without its own tooltip_fields must fall back to the chart-level field"
+            );
+        }
+    }
+
+    /// A single-layer (unlayered) chart's tooltip resolution must be
+    /// completely unaffected by the Task 10f per-layer tooltip fix: same
+    /// content, and byte-identical scene JSON across two independent builds
+    /// of the identical spec/batch.
+    #[test]
+    fn unlayered_chart_tooltip_scene_json_byte_identical() {
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), ..Default::default() }),
+                tooltip_fields: Some(vec![EncodingSpec { field: "y".into(), ..Default::default() }]),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
+            position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![10.0, 20.0])),
+        ]).unwrap();
+
+        let scene_a = build_scene_for(&spec, &batch);
+        let scene_b = build_scene_for(&spec, &batch);
+        assert_eq!(
+            serde_json::to_string(&scene_a).unwrap(),
+            serde_json::to_string(&scene_b).unwrap(),
+            "identical inputs must produce byte-identical scene JSON"
+        );
+
+        let tooltips = scene_a.panels[0].marks[0].tooltips.as_ref().expect("must have tooltips");
+        assert_eq!(tooltips[0].fields[0].name, "y");
+        assert_eq!(tooltips[0].fields[0].value, "10");
+    }
+
     fn resolve_dual_y(spec: &ChartSpec, batch: &RecordBatch) -> scale_resolve::ResolvedScales {
         let theme = ThemeInputs::default();
         let prep = super::super::prepare::prepare_render_inputs(spec, batch, &theme, None).unwrap();

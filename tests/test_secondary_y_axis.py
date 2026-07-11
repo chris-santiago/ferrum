@@ -452,3 +452,72 @@ def test_multi_layer_primary_member_is_fine():
 
     extents = y_axis_extents(svg)
     assert len(extents) == 2, f"expected 1 (shared primary) + 1 (secondary) axis, got {extents}"
+
+
+# ---------------------------------------------------------------------------
+# Task 10f bug #1: mark_line(point=True) merges its line+point layers via
+# ``+`` BEFORE ``.encode()`` runs, so each layer's OWN encoding snapshot is
+# empty and the chart-level y only lives on the composite chart's
+# ``_encoding``. A non-first member built this way must hit the same
+# multi-y-layer guard as the pre-merge ``a + b`` idiom (test above), not
+# silently join the primary scale.
+# ---------------------------------------------------------------------------
+
+
+def test_point_line_composite_mark_non_first_member_raises():
+    df = pl.DataFrame(
+        {"x": [1, 2, 3, 4], "y": [1.0, 2.0, 3.0, 4.0], "y2": [100.0, 200.0, 150.0, 300.0]}
+    )
+    primary = fm.Chart(df).mark_bar().encode(x="x", y="y")
+    secondary = fm.Chart(df).mark_line(point=True).encode(x="x", y="y2")
+
+    layered = LayerChart(primary, secondary, resolve={"y": "independent"})
+    with pytest.raises(ValueError, match=r"LayerChart:.*position 1.*2 y-bearing layers"):
+        layered.to_svg()
+
+    # The interactive path shares the same _build_merged -- must raise too.
+    with pytest.raises(ValueError, match=r"LayerChart:.*position 1.*2 y-bearing layers"):
+        layered._render_interactive()
+
+
+def test_point_line_composite_mark_single_layer_member_unaffected():
+    """A single-layer member (no ``point=True``) with chart-level y keeps
+    working -- ``_expand_layers`` already backfills the chart-level encoding
+    onto the layer's own snapshot before the y-bearing count runs."""
+    df = pl.DataFrame(
+        {"x": [1, 2, 3, 4], "y": [1.0, 2.0, 3.0, 4.0], "y2": [100.0, 200.0, 150.0, 300.0]}
+    )
+    bars = fm.Chart(df).mark_bar().encode(x="x", y="y")
+    line = fm.Chart(df).mark_line().encode(x="x", y="y2")
+
+    layered = LayerChart(bars, line, resolve={"y": "independent"})
+    svg = layered.to_svg()  # must not raise
+
+    extents = y_axis_extents(svg)
+    assert len(extents) == 2, f"expected two y-axes (primary + secondary), got {extents}"
+
+
+def test_point_line_composite_mark_default_shared_y_unaffected():
+    """A default/shared LayerChart whose member uses mark_line(point=True)
+    is unaffected by the y-bearing count -- that guard only fires under
+    resolve={"y": "independent"}. Default and explicit resolve={"y":
+    "shared"} must render byte-identically (mirrors
+    ``test_default_shared_y_layer_chart_unaffected`` above), and the merged
+    flat path (``resolve={"y": "independent"}``'s guard) must never be
+    consulted for this shared-y render."""
+    df = pl.DataFrame({"x": [1, 2, 3, 4], "y": [1.0, 2.0, 3.0, 4.0]})
+    bars = fm.Chart(df).mark_bar().encode(x="x", y="y")
+    point_line = fm.Chart(df).mark_line(point=True).encode(x="x", y="y")
+
+    default_svg = LayerChart(bars, point_line).to_svg()  # must not raise
+    explicit_shared_svg = LayerChart(bars, point_line, resolve={"y": "shared"}).to_svg()
+    assert default_svg == explicit_shared_svg
+
+    # The shared/default composite overlay tree renders one axis title per
+    # TOP-LEVEL member chart (each member is its own overlay leaf, regardless
+    # of how many internal layers a composite-mark member like
+    # mark_line(point=True) carries -- confirmed above that point_line alone
+    # renders exactly one "y" title). Two members (bars, point_line) -> two
+    # "y" titles; no duplication introduced by the composite-mark shape.
+    titles = [t for _, t in _rotated_text(default_svg)]
+    assert titles == ["y", "y"], f"expected one title per member chart, got {titles}"
