@@ -23,7 +23,10 @@ class SecondaryY:
     layer gets its own right axis; adding multiple ``SecondaryY`` instances
     stacks multiple right axes outward. The base chart must carry an ``x``
     encoding for the secondary layer to inherit — adding ``SecondaryY`` to
-    a chart with no ``x`` raises ``ValueError``.
+    a chart with no ``x`` raises ``ValueError``. ``field`` is read from the
+    base chart's own table (the desugar performs no data merge), so a
+    ``field`` that is not a column of the base data also raises
+    ``ValueError`` at ``+`` time.
 
     This re-bases the feature onto ferrum's per-layer independent-y
     subsystem: unlike the original overlay-only renderer, the secondary

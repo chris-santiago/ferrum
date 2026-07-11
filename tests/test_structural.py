@@ -420,3 +420,13 @@ class TestSecondaryYDesugar:
         base = fm.Chart(df).mark_point().encode(y="y")
         with pytest.raises(ValueError, match="x encoding"):
             base + SecondaryY("revenue")
+
+    def test_secondary_y_unknown_field_raises_at_add_time(self):
+        """SecondaryY reads its field from the base chart's own table (the
+        desugar performs no data merge); a field that is not a column raises
+        a boundary ValueError at ``+`` time instead of a downstream Rust
+        column error."""
+        df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3]})
+        base = fm.Chart(df).mark_point().encode(x="x", y="y")
+        with pytest.raises(ValueError, match=r"'reevnue'.*not a column"):
+            base + SecondaryY("reevnue")

@@ -197,6 +197,18 @@ def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
             "SecondaryY: the base chart must have an x encoding to inherit "
             "-- call .encode(x=...) before adding SecondaryY(...)."
         )
+    # SecondaryY reads its field from the base chart's own table (no data
+    # merge happens in this desugar), so validate it here with the same
+    # boundary-error courtesy as the x-encoding check above instead of
+    # letting a typo surface as a downstream Rust column error.
+    if new._data is not None:
+        columns = getattr(new._data, "columns", None)
+        if columns is not None and feature.field not in columns:
+            raise ValueError(
+                f"SecondaryY: field {feature.field!r} is not a column of the "
+                "base chart's data (SecondaryY draws from the same table as "
+                f"the base chart); available columns: {list(columns)}"
+            )
 
     y_kwargs: dict = {}
     if feature.axis is not None:

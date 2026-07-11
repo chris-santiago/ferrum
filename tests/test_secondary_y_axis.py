@@ -436,6 +436,23 @@ def test_multi_y_layer_non_first_member_raises():
         layered.to_svg()
 
 
+def test_multi_y_layer_non_first_member_raises_on_interactive_entry_too():
+    """The multi-y-bearing-member guard lives in ``_build_merged``, which is
+    shared by both render entries — prove it fires through the interactive
+    path as well, not just ``to_svg``."""
+    df = pl.DataFrame(
+        {"x": [1, 2, 3, 4], "y": [1.0, 2.0, 3.0, 4.0], "y2": [100.0, 200.0, 150.0, 300.0]}
+    )
+    primary = fm.Chart(df).mark_bar().encode(x="x", y="y")
+    a = fm.Chart(df).mark_line().encode(x="x", y="y2")
+    b = fm.Chart(df).mark_point().encode(x="x", y="y2")
+    multi_layer_member = a + b
+
+    layered = LayerChart(primary, multi_layer_member, resolve={"y": "independent"})
+    with pytest.raises(ValueError, match=r"LayerChart:.*position 1.*2 y-bearing layers"):
+        layered._render_interactive()
+
+
 def test_multi_layer_primary_member_is_fine():
     """The primary (first) member chart may be multi-layer -- only non-first
     members are restricted to a single y-bearing layer under independent y."""
