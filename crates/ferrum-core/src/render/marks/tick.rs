@@ -22,6 +22,10 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     // Common setup shared by all four tick modes.
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+    // Under an ordinal-band Dodge, band-fraction ticks (boxplot median line,
+    // whisker caps) must shrink to their sub-band so adjacent dodge groups don't
+    // overlap. No Dodge → n_groups == 1 → byte-identical to the non-dodged tick.
+    let n_groups = crate::render::position::n_dodge_groups(ctx.batch) as f64;
     let stroke_color = ctx.mark_style.paint.stroke.unwrap_or(ctx.mark_style.paint.fill);
     let default_stroke_width = ctx.mark_style.paint.stroke_width.max(1.0);
 
@@ -63,7 +67,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     for v in ys.iter().flatten() { set.insert(v.as_str()); }
                     set.len().max(1)
                 };
-                let tick_half = (panel.w / n_cats as f64) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+                let tick_half = (panel.w / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
                 let baseline_x = panel.x;
                 let mut acc = MarkNodes::with_capacity(ys.len());
                 for i in 0..ys.len() {
@@ -129,7 +133,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 for v in xs.iter().flatten() { set.insert(v.as_str()); }
                 set.len().max(1)
             };
-            let tick_half = (panel.w / n_cats as f64) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+            let tick_half = (panel.w / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
             let mut acc = MarkNodes::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -169,7 +173,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 for v in ys.iter().flatten() { set.insert(v.as_str()); }
                 set.len().max(1)
             };
-            let tick_half = (panel.h / n_cats as f64) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+            let tick_half = (panel.h / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
             let mut acc = MarkNodes::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -210,7 +214,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             for v in xs.iter().flatten() { set.insert(v.as_str()); }
             set.len().max(1)
         };
-        let tick_half = (panel.h / n_cats as f64) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+        let tick_half = (panel.h / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
         let baseline_y = panel.y + panel.h;
         let mut acc = MarkNodes::with_capacity(xs.len());
         for i in 0..xs.len() {
@@ -792,5 +796,121 @@ mod tests {
         }).collect();
         assert_eq!(opacities, vec![1.0, default_opacity, 0.3],
             "tick opacity must clamp >1 to 1.0, fall NaN to default, pass in-range through");
+    }
+
+    // ── Dodge band-narrowing (Task 3c remediation) ───────────────────────────
+
+    /// Ordinal-x + quantitative-y tick spec (boxplot median line), plus a batch
+    /// that optionally carries the synthetic `__pos_x_offset__` /
+    /// `__pos_y_offset__` columns and the `__dodge_n_groups__` schema-metadata
+    /// key. Two categories (a, b), two dodge groups per category (4 rows).
+    fn ordinal_tick_offset_batch(
+        x_offsets: Option<Vec<f64>>,
+        n_groups_metadata: Option<usize>,
+    ) -> (ChartSpec, arrow::record_batch::RecordBatch) {
+        use crate::spec::encoding::DataType as SDT;
+        use arrow::array::StringArray;
+        use std::collections::HashMap;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "median".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let mut fields = vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("median", DataType::Float64, false),
+        ];
+        let mut cols: Vec<arrow::array::ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            Arc::new(Float64Array::from(vec![3.0, 4.0, 5.0, 6.0])),
+        ];
+        if let Some(xo) = x_offsets {
+            fields.push(Field::new("__pos_x_offset__", DataType::Float64, false));
+            fields.push(Field::new("__pos_y_offset__", DataType::Float64, false));
+            cols.push(Arc::new(Float64Array::from(xo.clone())));
+            cols.push(Arc::new(Float64Array::from(vec![0.0; xo.len()])));
+        }
+        let mut schema = Schema::new(fields);
+        if let Some(n) = n_groups_metadata {
+            let mut metadata = HashMap::new();
+            metadata.insert(crate::render::position::DODGE_N_GROUPS_KEY.to_string(), n.to_string());
+            schema = schema.with_metadata(metadata);
+        }
+        let batch = arrow::record_batch::RecordBatch::try_new(Arc::new(schema), cols).unwrap();
+        (spec, batch)
+    }
+
+    fn tick_horizontal_extents(spec: &ChartSpec, batch: &arrow::record_batch::RecordBatch) -> Vec<(f64, f64)> {
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(spec, batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let ctx = DrawCtx { spec, panel: &panel, theme: &theme, scales: &scales, batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Line { x1, x2, .. } = n { Some((x1.min(*x2), x1.max(*x2))) } else { None }
+        }).collect()
+    }
+
+    #[test]
+    fn tick_ordinal_x_dodge_narrows_extent_by_group_count() {
+        // Task 3c: a dodged boxplot median tick must shrink its band-dimension
+        // extent (width) by the dodge group count, driven by the explicit
+        // `__dodge_n_groups__` metadata Dodge stamps — not by counting distinct
+        // offset values. panel.w=100, 2 cats → bandwidth 50, 2 groups →
+        // sub_band 25 → offsets -12.5 / +12.5; tick_half = (100/2/2)*0.3 = 7.5,
+        // so each tick spans 15.0.
+        let (spec, batch) = ordinal_tick_offset_batch(Some(vec![-12.5, 12.5, -12.5, 12.5]), Some(2));
+        let extents = tick_horizontal_extents(&spec, &batch);
+        assert_eq!(extents.len(), 4, "expected 4 dodged ticks");
+        for (lo, hi) in &extents {
+            assert!(((hi - lo) - 15.0).abs() < 1e-9, "dodged tick width must be 15.0 (narrowed by 2 groups); got {}", hi - lo);
+        }
+        // Adjacent dodge groups within a category must not overlap in x.
+        let mut sorted = extents.clone();
+        sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        for w in sorted.windows(2) {
+            assert!(w[0].1 <= w[1].0 + 1e-9, "dodged tick intervals must not overlap: {:?} vs {:?}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn tick_ordinal_x_jitter_offsets_without_dodge_metadata_not_narrowed() {
+        // Regression for the quality-review bug: an ordinal-axis Jitter
+        // (mark_tick is jitter-eligible per src/ferrum/position.py) writes
+        // per-row noise into the SAME __pos_x_offset__/__pos_y_offset__ columns
+        // Dodge uses, but never stamps __dodge_n_groups__. Four distinct
+        // per-row noise values (which the old to_bits-distinct heuristic would
+        // have misread as 4 dodge groups) must NOT narrow the tick: with no
+        // metadata, n_dodge_groups returns 1, so tick_half = (100/2/1)*0.3 = 15.0
+        // and each tick spans the full un-narrowed 30.0 width.
+        let (spec, batch) = ordinal_tick_offset_batch(Some(vec![3.1, -7.4, 0.9, -2.2]), None);
+        let extents = tick_horizontal_extents(&spec, &batch);
+        assert_eq!(extents.len(), 4);
+        for (lo, hi) in &extents {
+            assert!(((hi - lo) - 30.0).abs() < 1e-9,
+                "jitter-only tick width must stay 30.0 (no dodge narrowing); got {}", hi - lo);
+        }
+    }
+
+    #[test]
+    fn tick_ordinal_x_no_offsets_no_metadata_unchanged() {
+        // Baseline regression: no offset columns, no metadata → n_groups == 1 →
+        // tick_half = (100/2)*0.3 = 15.0, byte-identical to pre-Task-3c.
+        let (spec, batch) = ordinal_tick_offset_batch(None, None);
+        let extents = tick_horizontal_extents(&spec, &batch);
+        assert_eq!(extents.len(), 4);
+        for (lo, hi) in &extents {
+            assert!(((hi - lo) - 30.0).abs() < 1e-9, "non-dodged tick width must be 30.0; got {}", hi - lo);
+        }
     }
 }

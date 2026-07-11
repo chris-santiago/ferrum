@@ -217,7 +217,12 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
         let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return empty_result() };
         if xs.len() != ys.len() || y2s.len() != ys.len() { return empty_result(); }
-        let box_w = (panel.w / n_categories as f64) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
+        // Under an ordinal-band Dodge, shrink each box body to its sub-band so
+        // adjacent dodge groups don't overlap. No Dodge → n_groups == 1 →
+        // byte-identical to the non-dodged box width.
+        let n_groups = crate::render::position::n_dodge_groups(ctx.batch);
+        let box_w = (panel.w / n_categories as f64 / n_groups as f64)
+            * ctx.mark_style.misc.band_size.unwrap_or(0.6);
 
         for i in 0..xs.len() {
             let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -290,7 +295,12 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
         let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return empty_result() };
         if ys.len() != xs.len() || x2s.len() != xs.len() { return empty_result(); }
-        let box_h = (panel.h / n_categories as f64) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
+        // Under an ordinal-band Dodge (CoordFlip orientation), shrink each box
+        // body to its sub-band so adjacent dodge groups don't overlap. No Dodge
+        // → n_groups == 1 → byte-identical to the non-dodged box height.
+        let n_groups = crate::render::position::n_dodge_groups(ctx.batch);
+        let box_h = (panel.h / n_categories as f64 / n_groups as f64)
+            * ctx.mark_style.misc.band_size.unwrap_or(0.6);
 
         for i in 0..ys.len() {
             let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
@@ -1601,5 +1611,104 @@ mod tests {
         assert_eq!(t1, "tip_c",
             "node 1 tooltip must be row 2's ('tip_c'), not row 1's ('tip_b'); \
              got '{t1}'. Fails on pre-migration code using build_metadata(ctx).");
+    }
+
+    // ── Dodge box-body narrowing (Task 3c) ───────────────────────────────────
+
+    /// Ordinal-x box-body spec (`mark_boxplot(position=Dodge(...))`) plus a batch
+    /// that already carries the synthetic Dodge offset columns and (optionally)
+    /// the `__dodge_n_groups__` schema-metadata key `n_dodge_groups` reads.
+    /// `x_offsets` supplies `__pos_x_offset__`; `__pos_y_offset__` is all-zero.
+    fn ordinal_box_dodge_ctx_batch(
+        x_offsets: Option<Vec<f64>>,
+        n_groups_metadata: Option<usize>,
+    ) -> (ChartSpec, arrow::record_batch::RecordBatch) {
+        use arrow::array::Float64Array;
+        use std::collections::HashMap;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "q1".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "q3".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        // Two categories (a, b), two dodge groups per category (4 rows).
+        let mut fields = vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("q1", DataType::Float64, false),
+            Field::new("q3", DataType::Float64, false),
+        ];
+        let mut cols: Vec<arrow::array::ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            Arc::new(Float64Array::from(vec![2.0, 3.0, 2.5, 3.5])),
+            Arc::new(Float64Array::from(vec![6.0, 7.0, 6.5, 7.5])),
+        ];
+        if let Some(xo) = x_offsets {
+            fields.push(Field::new("__pos_x_offset__", DataType::Float64, false));
+            fields.push(Field::new("__pos_y_offset__", DataType::Float64, false));
+            cols.push(Arc::new(Float64Array::from(xo.clone())));
+            cols.push(Arc::new(Float64Array::from(vec![0.0; xo.len()])));
+        }
+        let mut schema = Schema::new(fields);
+        if let Some(n) = n_groups_metadata {
+            let mut metadata = HashMap::new();
+            metadata.insert(crate::render::position::DODGE_N_GROUPS_KEY.to_string(), n.to_string());
+            schema = schema.with_metadata(metadata);
+        }
+        let batch = arrow::record_batch::RecordBatch::try_new(Arc::new(schema), cols).unwrap();
+        (spec, batch)
+    }
+
+    fn box_widths(spec: &ChartSpec, batch: &arrow::record_batch::RecordBatch) -> Vec<(f64, f64)> {
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(spec, batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx = DrawCtx { spec, panel: &panel, theme: &theme, scales: &scales, batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { x, w, .. } = n { Some((*x, *w)) } else { None }
+        }).collect()
+    }
+
+    #[test]
+    fn rect_ordinal_box_dodge_narrows_width_by_group_count() {
+        // Task 3c: a dodged box body must shrink its band-dimension extent
+        // (width) by the dodge group count. panel.w=100, 2 cats → bandwidth 50,
+        // 2 groups → sub_band 25 → offsets -12.5 / +12.5; box_w = (100 / 2 / 2)
+        // * band_size(0.6) = 15.0. Narrowing is driven by the explicit
+        // __dodge_n_groups__ metadata (Some(2)), not distinct offset values.
+        let (spec, batch) = ordinal_box_dodge_ctx_batch(Some(vec![-12.5, 12.5, -12.5, 12.5]), Some(2));
+        let rects = box_widths(&spec, &batch);
+        assert_eq!(rects.len(), 4, "expected 4 dodged box bodies");
+        for (_, w) in &rects {
+            assert!((w - 15.0).abs() < 1e-9, "dodged box width must be 15.0 (narrowed by 2 groups); got {w}");
+        }
+        // Adjacent dodge groups must not overlap in x.
+        let mut ivals: Vec<(f64, f64)> = rects.iter().map(|(x, w)| (*x, *x + *w)).collect();
+        ivals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        for pair in ivals.windows(2) {
+            assert!(pair[0].1 <= pair[1].0 + 1e-9,
+                "dodged box intervals must not overlap: {:?} vs {:?}", pair[0], pair[1]);
+        }
+    }
+
+    #[test]
+    fn rect_ordinal_box_no_dodge_width_unchanged() {
+        // Regression: no offset columns → n_groups == 1 → box_w is the full band
+        // fraction (100 / 2) * 0.6 = 30.0, byte-identical to pre-Task-3c.
+        let (spec, batch) = ordinal_box_dodge_ctx_batch(None, None);
+        let rects = box_widths(&spec, &batch);
+        assert_eq!(rects.len(), 4);
+        for (_, w) in &rects {
+            assert!((w - 30.0).abs() < 1e-9, "non-dodged box width must be 30.0; got {w}");
+        }
     }
 }

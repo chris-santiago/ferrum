@@ -1193,6 +1193,25 @@ with ferrum.theme_context(my_theme):
 > matrix and wrap no per-model `ModelSource`; algorithm/method
 > comparison is tracked in #43.
 
+> **2026-07-10 (dodge-by-model compare= layout, #42):** for the
+> dodge-eligible diagnostics, `compare=` now renders a **single
+> shared-axis panel** with marks grouped (dodged) by model — the
+> canonical seaborn/yellowbrick comparison plot — instead of the
+> 2026-06-27 small-multiples `ConcatChart`. **Landed:** `importance_chart`
+> returns one `Chart` whose bars are dodged by model within each feature
+> band, with a model legend and error rules / value labels dodged
+> alongside their bars; features are ranked once globally across models
+> (mean *absolute* importance, descending — mirrors shap_bar's
+> `_shap_order_features` magnitude ranking) and the shared top-`top_k` set
+> is used for every model; the value-axis domain is computed over the
+> combined frame.
+> `orient="horizontal"` (default) uses the vertical desugar form plus
+> `CoordFlip`; `orient="vertical"` renders the dodged layout directly.
+> `shap_bar_chart` (`per_class=False`) and `cv_scores_chart`
+> (`kind="box"`/`"strip"`) join this layout in follow-up tasks under the
+> same issue; the remaining explanation / model-selection charts keep the
+> 2026-06-27 small-multiples layout. Single-model output is unchanged.
+
 > **2026-07-02 (explicit scales survive composite-mark desugar, #45):**
 > an explicit `scale=` on a chart-level positional channel (`x`/`y`) now
 > propagates onto the layers a composite mark desugars into — previously

@@ -145,7 +145,7 @@ pub(crate) fn apply_position(
     match p {
         PositionAdjust::Identity => Ok(batch.clone()),
         PositionAdjust::Dodge { by, padding } => {
-            apply_dodge(batch, by.as_deref(), *padding, scales, encoding, warnings)
+            apply_dodge(batch, by.as_deref(), *padding, scales, encoding, coord_flipped, warnings)
         }
         PositionAdjust::Jitter { axis, width, seed } => {
             apply_jitter(batch, axis, *width, *seed, scales, encoding)
@@ -244,6 +244,7 @@ fn apply_dodge(
     padding: f64,
     scales: &ResolvedScales,
     encoding: &crate::spec::encoding::Encoding,
+    coord_flipped: bool,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<RecordBatch, crate::render::RenderError> {
     // Resolve the `by` grouping channel to per-row category strings under the
@@ -253,30 +254,44 @@ fn apply_dodge(
         return Ok(batch.clone());
     };
 
-    // Resolve x column (the axis being dodged).
-    let x_field = encoding.x.as_ref().ok_or_else(|| {
-        crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: "x encoding required".into() }
+    // Dodge offsets marks along the categorical BAND axis. Under CoordFlip,
+    // prepare.rs has swapped x/y in the encoding, so the band axis lives in
+    // encoding.y with its ordinal scale in scales.y; the value axis is in
+    // encoding.x. When not flipped the band axis is encoding.x / scales.x. We
+    // select the band axis once and apply every downstream computation (ordinal
+    // sub-band offset, continuous column rewrite) to it — mirroring how
+    // `apply_stack` swaps the value/category channels under `coord_flipped`.
+    let (band_enc, band_scale) = if coord_flipped {
+        (encoding.y.as_ref(), &scales.y)
+    } else {
+        (encoding.x.as_ref(), &scales.x)
+    };
+
+    // Resolve the band column (the axis being dodged).
+    let band_field = band_enc.ok_or_else(|| {
+        crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: "band-axis encoding required".into() }
     })?;
-    let x_col_idx = batch.schema().index_of(&x_field.field).map_err(|_| {
-        crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: format!("x column '{}' not found",
-            x_field.field) }
+    let band_col_idx = batch.schema().index_of(&band_field.field).map_err(|_| {
+        crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: format!("band column '{}' not found",
+            band_field.field) }
     })?;
-    let is_ordinal_x = batch.schema().field(x_col_idx).data_type() != &DataType::Float64;
-    if is_ordinal_x {
-        return apply_dodge_ordinal(batch, &by_cats, padding, scales);
+    let is_ordinal_band = batch.schema().field(band_col_idx).data_type() != &DataType::Float64;
+    if is_ordinal_band {
+        return apply_dodge_ordinal(batch, &by_cats, padding, band_scale, coord_flipped);
     }
-    let x_arr = batch
-        .column(x_col_idx)
+    let band_arr = batch
+        .column(band_col_idx)
         .as_any()
         .downcast_ref::<Float64Array>()
         .ok_or_else(|| {
-            crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: "x must be Float64".into() }
+            crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: "band axis must be Float64".into() }
         })?;
 
-    // 1. Compute median spacing of unique x values (bandwidth proxy for continuous x).
-    let mut uniques: Vec<f64> = (0..x_arr.len())
-        .filter(|i| !x_arr.is_null(*i))
-        .map(|i| x_arr.value(i))
+    // 1. Compute median spacing of unique band values (bandwidth proxy for a
+    //    continuous band axis).
+    let mut uniques: Vec<f64> = (0..band_arr.len())
+        .filter(|i| !band_arr.is_null(*i))
+        .map(|i| band_arr.value(i))
         .collect();
     uniques.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     uniques.dedup();
@@ -304,37 +319,43 @@ fn apply_dodge(
     let pad_total = bandwidth * padding * 2.0;
     let sub_band = (bandwidth - pad_total) / n_groups as f64;
 
-    let mut new_x = Vec::with_capacity(x_arr.len());
+    let mut new_band = Vec::with_capacity(band_arr.len());
     for (i, g) in by_cats.iter().enumerate() {
         let group_idx = *seen.get(g).unwrap();
         let offset =
             -bandwidth / 2.0 + bandwidth * padding + sub_band * (group_idx as f64 + 0.5);
-        new_x.push(x_arr.value(i) + offset);
+        new_band.push(band_arr.value(i) + offset);
     }
 
     let mut cols: Vec<ArrayRef> = batch.columns().to_vec();
-    cols[x_col_idx] = Arc::new(Float64Array::from(new_x));
+    cols[band_col_idx] = Arc::new(Float64Array::from(new_band));
     let schema = batch.schema();
     RecordBatch::try_new(schema, cols)
         .map_err(|e| crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: format!("{e}") })
 }
 
-/// Ordinal-x Dodge — operates in pixel space because the categorical x cannot
-/// be rewritten in data space. Injects two synthetic Float64 columns named
-/// `__pos_x_offset__` and `__pos_y_offset__` (the latter is always 0 for Dodge).
+/// Ordinal-band Dodge — operates in pixel space because the categorical band
+/// axis cannot be rewritten in data space. Injects two synthetic Float64
+/// columns named `__pos_x_offset__` and `__pos_y_offset__`. The sub-band offset
+/// is emitted into the axis that carries the categorical band: `__pos_x_offset__`
+/// when not flipped (band axis = x), `__pos_y_offset__` when `coord_flipped`
+/// (prepare.rs put the band axis in y). The other column is always 0.
 /// Mark drawers (bar/point/box/swarm/violin/errorbar/errorband/ribbon) read
 /// these columns post-scale-resolve and add them to the rendered position.
 ///
 /// `by_cats` is the per-row grouping category resolved by
 /// [`resolve_group_channel`] (one entry per row; null group rows are `""`).
+/// `band_scale` is the ordinal scale of the band axis (scales.x unflipped,
+/// scales.y flipped) and supplies the pixel bandwidth.
 fn apply_dodge_ordinal(
     batch: &RecordBatch,
     by_cats: &[String],
     padding: f64,
-    scales: &ResolvedScales,
+    band_scale: &ScaleKind,
+    coord_flipped: bool,
 ) -> Result<RecordBatch, crate::render::RenderError> {
     let schema = batch.schema();
-    let bandwidth_px = match &scales.x {
+    let bandwidth_px = match band_scale {
         ScaleKind::Ordinal(s) => s.bandwidth(),
         _ => return Ok(batch.clone()),
     };
@@ -361,8 +382,15 @@ fn apply_dodge_ordinal(
     for g in by_cats {
         let gi = *group_idx.get(g).unwrap();
         let off = -bandwidth_px / 2.0 + bandwidth_px * padding + sub_band * (gi as f64 + 0.5);
-        x_offsets.push(off);
-        y_offsets.push(0.0);
+        // Emit the sub-band offset into whichever axis carries the categorical
+        // band: y under CoordFlip (prepare.rs swapped x/y), x otherwise.
+        if coord_flipped {
+            x_offsets.push(0.0);
+            y_offsets.push(off);
+        } else {
+            x_offsets.push(off);
+            y_offsets.push(0.0);
+        }
     }
 
     let mut cols: Vec<ArrayRef> = batch.columns().to_vec();
@@ -372,7 +400,17 @@ fn apply_dodge_ordinal(
     let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
     fields.push(Field::new("__pos_x_offset__", DataType::Float64, false));
     fields.push(Field::new("__pos_y_offset__", DataType::Float64, false));
-    let new_schema = Arc::new(Schema::new(fields));
+
+    // Stamp the dodge group count as explicit schema metadata (Task 3c
+    // remediation). `n_dodge_groups` reads this key rather than inferring the
+    // group count from distinct offset values: Jitter's ordinal branch
+    // (`apply_jitter`) writes per-row noise into these SAME
+    // `__pos_x_offset__` / `__pos_y_offset__` columns, so a distinct-value
+    // heuristic would misread jitter noise as ≈row-count dodge groups. Only
+    // this function (the ordinal-band Dodge path) ever sets this key.
+    let mut metadata = schema.metadata().clone();
+    metadata.insert(DODGE_N_GROUPS_KEY.to_string(), n_groups.to_string());
+    let new_schema = Arc::new(Schema::new(fields).with_metadata(metadata));
 
     RecordBatch::try_new(new_schema, cols)
         .map_err(|e| crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", reason: format!("ordinal: {e}") })
@@ -803,6 +841,124 @@ mod tests {
         let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(xa.value(0), 1.0);
         assert_eq!(xa.value(1), 2.0);
+    }
+
+    // ---- Ordinal-band Dodge + CoordFlip (Task 3b) ---------------------------
+
+    /// ResolvedScales with one ordinal axis (2 bands over pixel range [0,100],
+    /// so `bandwidth() == 50`) and the other axis Linear. `ordinal_on_x` selects
+    /// which visual axis carries the categorical band.
+    fn scales_one_ordinal(ordinal_on_x: bool) -> ResolvedScales {
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+        let ord = ScaleKind::Ordinal(OrdinalScale::new_internal(
+            vec!["a".into(), "b".into()],
+            vec![0.0, 100.0],
+            0.0,
+        ));
+        let lin = ScaleKind::Linear(LinearScale::new_internal(
+            vec![0.0, 100.0],
+            vec![0.0, 100.0],
+            false,
+            false,
+        ));
+        let (x, y) = if ordinal_on_x { (ord, lin) } else { (lin, ord) };
+        ResolvedScales { x, y, color: None, size: None, shape: None, opacity: None, x2: None, y2: None }
+    }
+
+    /// Batch with a categorical band column `cat`, a numeric value column `val`,
+    /// and a two-level grouping column `grp` (p/q interleaved).
+    fn batch_cat_val_grp() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0])),
+                Arc::new(StringArray::from(vec!["p", "q", "p", "q"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn offset_col(batch: &RecordBatch, name: &str) -> Vec<f64> {
+        let idx = batch.schema().index_of(name).unwrap();
+        let a = batch.column(idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        (0..a.len()).map(|i| a.value(i)).collect()
+    }
+
+    #[test]
+    fn dodge_ordinal_band_x_unflipped_offsets_x_only() {
+        // Baseline (unflipped): band axis = ordinal x. Sub-band offset lands in
+        // __pos_x_offset__; __pos_y_offset__ is all zero. bandwidth=50, 2 groups,
+        // padding=0 → sub_band=25 → offsets -12.5 (p) / +12.5 (q).
+        let b = batch_cat_val_grp();
+        let enc = enc_xy("cat", "val", Some("grp"));
+        let s = scales_one_ordinal(true);
+        let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        assert_eq!(offset_col(&out, "__pos_x_offset__"), vec![-12.5, 12.5, -12.5, 12.5]);
+        assert_eq!(offset_col(&out, "__pos_y_offset__"), vec![0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn dodge_ordinal_band_flipped_offsets_y_matches_unflipped_x() {
+        // Under CoordFlip, prepare.rs swapped x/y: encoding.x = value ("val"),
+        // encoding.y = categorical band ("cat"), band ordinal scale = scales.y.
+        // The sub-band offset must land in __pos_y_offset__ (zero into
+        // __pos_x_offset__), with the SAME magnitudes the unflipped path emits
+        // into __pos_x_offset__.
+        let b = batch_cat_val_grp();
+        let enc = enc_xy("val", "cat", Some("grp"));
+        let s = scales_one_ordinal(false);
+        let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
+        let out = apply_position(&b, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap();
+
+        let y_off = offset_col(&out, "__pos_y_offset__");
+        assert_eq!(y_off, vec![-12.5, 12.5, -12.5, 12.5]);
+        assert_eq!(offset_col(&out, "__pos_x_offset__"), vec![0.0, 0.0, 0.0, 0.0]);
+
+        // Mirror check: flipped y-offset == unflipped x-offset math.
+        let unflipped = apply_position(
+            &b,
+            Some(&pos),
+            &scales_one_ordinal(true),
+            &enc_xy("cat", "val", Some("grp")),
+            false,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(y_off, offset_col(&unflipped, "__pos_x_offset__"));
+    }
+
+    #[test]
+    fn dodge_ordinal_band_flipped_single_group_is_noop() {
+        // n_groups == 1 under flip → no offset columns appended, batch unchanged.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b"])),
+                Arc::new(Float64Array::from(vec![10.0, 30.0])),
+                Arc::new(StringArray::from(vec!["p", "p"])),
+            ],
+        )
+        .unwrap();
+        let enc = enc_xy("val", "cat", Some("grp"));
+        let s = scales_one_ordinal(false);
+        let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
+        let out = apply_position(&b, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap();
+        assert_eq!(out.num_columns(), b.num_columns());
+        assert!(out.schema().index_of("__pos_x_offset__").is_err());
+        assert!(out.schema().index_of("__pos_y_offset__").is_err());
     }
 
     #[test]
@@ -2170,6 +2326,84 @@ mod tests {
         assert_eq!(wd.len(), 1);
         assert_eq!(ws.len(), 1);
     }
+
+    // ── n_dodge_groups (Task 3c, remediated to the metadata contract) ────────
+
+    /// Build a 1-column batch, optionally with `__pos_x_offset__` /
+    /// `__pos_y_offset__` offset columns (jitter-shaped, no metadata) and/or the
+    /// `__dodge_n_groups__` schema-metadata key (the real Dodge producer marker).
+    fn batch_with_offsets_and_metadata(
+        x: Option<Vec<f64>>,
+        y: Option<Vec<f64>>,
+        n_groups_metadata: Option<usize>,
+    ) -> RecordBatch {
+        let n = x.as_ref().map(|v| v.len()).or_else(|| y.as_ref().map(|v| v.len())).unwrap_or(1);
+        let mut fields = vec![Field::new("v", DataType::Float64, false)];
+        let mut cols: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![0.0; n]))];
+        if let Some(xo) = x {
+            fields.push(Field::new("__pos_x_offset__", DataType::Float64, false));
+            cols.push(Arc::new(Float64Array::from(xo)));
+        }
+        if let Some(yo) = y {
+            fields.push(Field::new("__pos_y_offset__", DataType::Float64, false));
+            cols.push(Arc::new(Float64Array::from(yo)));
+        }
+        let mut schema = Schema::new(fields);
+        if let Some(n_groups) = n_groups_metadata {
+            let mut metadata = HashMap::new();
+            metadata.insert(DODGE_N_GROUPS_KEY.to_string(), n_groups.to_string());
+            schema = schema.with_metadata(metadata);
+        }
+        RecordBatch::try_new(Arc::new(schema), cols).unwrap()
+    }
+
+    #[test]
+    fn n_dodge_groups_no_columns_no_metadata_is_one() {
+        // No offset columns, no metadata → no Dodge → 1 (callers stay byte-identical).
+        let b = batch_with_offsets_and_metadata(None, None, None);
+        assert_eq!(n_dodge_groups(&b), 1);
+    }
+
+    #[test]
+    fn n_dodge_groups_reads_explicit_metadata() {
+        // The real Dodge producer contract: `apply_dodge_ordinal` stamps
+        // `__dodge_n_groups__` alongside the offset columns; `n_dodge_groups`
+        // reads that key directly, not the offset values.
+        let b = batch_with_offsets_and_metadata(
+            Some(vec![-12.5, 12.5, -12.5, 12.5]),
+            Some(vec![0.0; 4]),
+            Some(2),
+        );
+        assert_eq!(n_dodge_groups(&b), 2);
+    }
+
+    #[test]
+    fn n_dodge_groups_jitter_shaped_offsets_without_metadata_is_one() {
+        // Regression for the quality-review bug: `apply_jitter`'s ordinal branch
+        // writes per-row noise into the SAME __pos_x_offset__/__pos_y_offset__
+        // columns Dodge uses, but never stamps __dodge_n_groups__. Four DISTINCT
+        // jitter-noise values (one per row — the old to_bits-distinct heuristic
+        // would have read this as 4 dodge groups) must resolve to 1 (no
+        // narrowing) because the metadata key is absent.
+        let b = batch_with_offsets_and_metadata(
+            Some(vec![3.1, -7.4, 0.9, -2.2]),
+            Some(vec![0.0; 4]),
+            None,
+        );
+        assert_eq!(n_dodge_groups(&b), 1);
+    }
+
+    #[test]
+    fn n_dodge_groups_end_to_end_via_apply_dodge_ordinal() {
+        // Integration: drive the real apply_dodge_ordinal producer and confirm
+        // n_dodge_groups reads back the group count it stamped.
+        let b = batch_cat_val_grp();
+        let enc = enc_xy("cat", "val", Some("grp"));
+        let s = scales_one_ordinal(true);
+        let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        assert_eq!(n_dodge_groups(&out), 2, "batch_cat_val_grp has 2 groups (p, q)");
+    }
 }
 
 /// Read per-row pixel offsets from synthetic `__pos_x_offset__` /
@@ -2200,4 +2434,42 @@ pub(crate) fn read_position_offsets(batch: &RecordBatch) -> (Vec<f64>, Vec<f64>)
         })
         .unwrap_or_else(|| vec![0.0; n]);
     (xo, yo)
+}
+
+/// Schema metadata key [`apply_dodge_ordinal`] stamps with the dodge group
+/// count. Read by [`n_dodge_groups`]; never set by `apply_jitter` or any other
+/// position adjustment. `pub(crate)` so mark-renderer tests (`bar.rs`,
+/// `rect.rs`, `tick.rs`) can build dodge-shaped test batches without
+/// hardcoding the string literal.
+pub(crate) const DODGE_N_GROUPS_KEY: &str = "__dodge_n_groups__";
+
+/// Count the number of ordinal-band Dodge groups active on a batch.
+///
+/// Band-dimension marks (bar bodies, box bodies, band-fraction boxplot ticks)
+/// must shrink their per-category extent to `extent / n_dodge_groups`, otherwise
+/// the dodged sub-bands overlap their neighbours. This is the single source of
+/// truth for that group count across `bar.rs`, `rect.rs`, and `tick.rs`.
+///
+/// The count comes from explicit Arrow schema metadata
+/// ([`DODGE_N_GROUPS_KEY`]) stamped by [`apply_dodge_ordinal`], **not** from
+/// inferring it off the `__pos_x_offset__` / `__pos_y_offset__` offset values.
+/// Both `tick` marks (via `apply_jitter`'s ordinal branch) and ordinal-band
+/// Dodge write per-row pixel offsets into those SAME two columns; a
+/// distinct-value heuristic run on a jittered-but-not-dodged batch would
+/// misread per-row jitter noise as ≈row-count dodge groups and collapse the
+/// band extent toward zero. Reading an explicit producer-side marker set only
+/// by Dodge avoids that ambiguity entirely.
+///
+/// Returns 1 when the metadata key is absent (no Dodge → no narrowing), so
+/// callers can divide their band extent by the result unconditionally and stay
+/// byte-identical to the non-dodged (and jitter-only) path (`/ 1.0` is exact in
+/// IEEE-754).
+pub(crate) fn n_dodge_groups(batch: &RecordBatch) -> usize {
+    batch
+        .schema()
+        .metadata()
+        .get(DODGE_N_GROUPS_KEY)
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(1)
 }

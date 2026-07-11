@@ -11,7 +11,8 @@ produces a fully-formed ``Chart``.
 
 Internal-only builders
 ----------------------
-_importance_chart_from_source, _shap_select_class, _shap_order_features,
+_importance_bounds_and_domain, _importance_chart_from_source,
+_importance_chart_compare_from_source, _shap_select_class, _shap_order_features,
 _shap_beeswarm_chart_from_source, _shap_bar_chart_from_source,
 _shap_waterfall_chart_from_source, _pdp_center_curves,
 _pdp_split_kind_both, _pdp_chart_from_source.
@@ -34,6 +35,7 @@ from ferrum.plots._helpers import (
     _require,
     _resolve_source,
     _should_facet_by_class,
+    _stack_compare_frames,
     _validate_choice,
     _warn_deprecated_dispatcher,
 )
@@ -44,11 +46,48 @@ from ferrum.plots._helpers import (
 # ---------------------------------------------------------------------------
 
 _SHAP_ORDER_VALUES: frozenset[str] = frozenset({"abs_mean", "max"})
+_ORIENT_VALUES: frozenset[str] = frozenset({"horizontal", "vertical"})
 
 
 # ---------------------------------------------------------------------------
 # Private builders — feature importance
 # ---------------------------------------------------------------------------
+
+
+def _importance_bounds_and_domain(
+    df: pl.DataFrame, *, show_values: bool
+) -> tuple[pl.DataFrame, tuple[float, float]]:
+    """Add ``imp_lower``/``imp_upper`` (+ optional ``_value_text``) and compute
+    the shared value-axis domain.
+
+    Single source of truth for the bound-column construction, value-label
+    formatting, and domain formula (zero-anchored, 5% headroom past the max
+    upper bound) used by both the single-model and compare-by-model
+    importance builders below.
+
+    Returns
+    -------
+    tuple[pl.DataFrame, tuple[float, float]]
+        The augmented frame and the ``(domain_lo, domain_hi)`` value-axis
+        domain, computed over the *supplied* frame -- callers pass the
+        combined multi-model frame under ``compare=`` so the domain spans
+        every model (spec §6).
+    """
+    df = df.with_columns(
+        (pl.col("importance") - pl.col("std")).alias("imp_lower"),
+        (pl.col("importance") + pl.col("std")).alias("imp_upper"),
+    )
+    if show_values:
+        df = df.with_columns(
+            pl.col("importance")
+            .map_elements(lambda v: f"{v:.3f}", return_dtype=pl.Utf8)
+            .alias("_value_text"),
+        )
+    upper_max = float(df["imp_upper"].max())
+    lower_min = float(df["imp_lower"].min())
+    domain_lo = min(0.0, lower_min)
+    domain_hi = max(upper_max, 0.0) * 1.05 if upper_max > 0 else 1.0
+    return df, (domain_lo, domain_hi)
 
 
 def _importance_chart_from_source(
@@ -78,24 +117,7 @@ def _importance_chart_from_source(
     df = source.importances(method=method, random_state=random_state)
     if top_k is not None:
         df = df.head(top_k)
-    df = df.with_columns(
-        [
-            (pl.col("importance") - pl.col("std")).alias("imp_lower"),
-            (pl.col("importance") + pl.col("std")).alias("imp_upper"),
-        ]
-    )
-
-    if show_values:
-        df = df.with_columns(
-            pl.col("importance")
-            .map_elements(lambda v: f"{v:.3f}", return_dtype=pl.Utf8)
-            .alias("_value_text"),
-        )
-
-    upper_max = float(df["imp_upper"].max())
-    lower_min = float(df["imp_lower"].min())
-    domain_lo = min(0.0, lower_min)
-    domain_hi = max(upper_max, 0.0) * 1.05 if upper_max > 0 else 1.0
+    df, (domain_lo, domain_hi) = _importance_bounds_and_domain(df, show_values=show_values)
 
     chart = ferrum.Chart(df).mark_importance(
         orient=orient,
@@ -125,6 +147,127 @@ def _importance_chart_from_source(
                 name="value_text",
             )
         chart = chart.layer(text_ly)
+
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
+
+
+def _importance_chart_compare_from_source(
+    source: Any,
+    *,
+    method: str = "builtin",
+    top_k: int | None = 20,
+    orient: str = "horizontal",
+    error_bars: bool = True,
+    show_values: bool = True,
+    subtitle: str | None = None,
+    random_state: int | None = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+):
+    """Build a dodge-by-model feature-importance chart from a compare source.
+
+    GH #42: replaces the #35 small-multiples layout with one shared-axis panel
+    whose bars are grouped (dodged) by model. Per-model importances are stacked
+    with a ``model`` column, features are ranked once globally by mean
+    *absolute* importance, the top-``top_k`` set forms the shared categorical
+    axis, and one bar per (feature, model) is drawn with ``color="model"`` +
+    ``Dodge(by="model")``. Error rules and value labels dodge alongside their
+    bars.
+
+    ``orient`` is validated once by the public ``importance_chart`` dispatcher
+    before either builder runs, so ``compare=None`` and ``compare={...}`` raise
+    identically for the same bad input.
+
+    ``orient="horizontal"`` (default) uses the vertical desugar form plus
+    ``CoordFlip`` (spec D2): dodge operates on the ordinal-x band axis, and the
+    flip presents features on the visual y axis. ``orient="vertical"`` renders
+    the same dodged layout without the flip.
+    """
+    import ferrum
+    from ferrum.coord import CoordFlip
+    from ferrum.position import Dodge
+
+    combined = _stack_compare_frames(
+        source,
+        lambda ms: ms.importances(method=method, random_state=random_state),
+    )
+
+    # Global cross-model ranking (spec D4, mirrors _shap_order_features): one
+    # shared top-`top_k` feature set, ordered by mean *absolute* importance
+    # descending across models. A magnitude-blind signed mean would silently
+    # drop a large-magnitude negative importance (e.g. permutation importance)
+    # in favor of small positive ones.
+    ranked = (
+        combined.group_by("feature")
+        .agg(pl.col("importance").abs().mean().alias("_rank_score"))
+        .sort("_rank_score", descending=True)
+    )
+    if top_k is not None:
+        ranked = ranked.head(top_k)
+    feature_order = ranked["feature"].to_list()
+    model_order = source.model_names
+
+    # Order rows (feature-rank, model-registration) so Rust's encounter-order
+    # ordinal domain places features in global-rank order and each band's
+    # sub-bands in registration order.
+    df = (
+        combined.filter(pl.col("feature").is_in(feature_order))
+        .with_columns(
+            pl.col("feature").cast(pl.Enum(feature_order)).alias("_feat_rank"),
+            pl.col("model").cast(pl.Enum(model_order)).alias("_model_rank"),
+        )
+        .sort(["_feat_rank", "_model_rank"])
+        .drop("_feat_rank", "_model_rank")
+    )
+
+    df, (domain_lo, domain_hi) = _importance_bounds_and_domain(df, show_values=show_values)
+
+    # Dodge operates on the ordinal-x band axis, so always desugar in the
+    # vertical form (feature on x, importance on y). `top_k=None` keeps the
+    # mark's data_transform a no-op — features are already globally filtered
+    # above, and passing the real `top_k` would truncate to `top_k` rows
+    # (across all models), not `top_k` features.
+    chart = ferrum.Chart(df).mark_importance(
+        orient="vertical",
+        error_bars=error_bars,
+        top_k=None,
+        color_field="model",
+        position=Dodge(by="model"),
+        x_scale_domain=(domain_lo, domain_hi),
+    )
+    chart = chart.properties(
+        title=ferrum.Title("Feature importance", subtitle=subtitle),
+    )
+
+    if show_values:
+        from ferrum._layer import _Layer
+
+        # Encoding stays in vertical desugar form so the label dodges on the
+        # same ordinal-x band; screen-space placement follows the visual orient
+        # (CoordFlip maps the value axis to visual-x when horizontal).
+        text_kwargs = (
+            {"align": "left", "dx": 4}
+            if orient == "horizontal"
+            else {
+                "baseline": "bottom",
+                "dy": -4,
+            }
+        )
+        text_ly = _Layer(
+            mark="text",
+            encoding={"x": "feature", "y": "importance", "text": "_value_text"},
+            mark_kwargs=text_kwargs,
+            name="value_text",
+        )
+        chart = chart.layer(text_ly)
+
+    if orient == "horizontal":
+        chart = chart.coord(CoordFlip())
 
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
@@ -567,7 +710,7 @@ def importance_chart(
     properties: dict | None = None,
     layers: list | None = None,
     theme: Any = None,
-) -> "Chart | ConcatChart":
+) -> "Chart":
     """Feature-importance bar chart for an estimator.
 
     Extracts feature importances from the model via the selected method
@@ -624,9 +767,10 @@ def importance_chart(
 
     Returns
     -------
-    Chart or ConcatChart
-        Feature-importance bar chart ranked by absolute importance, or a
-        small-multiples ``ConcatChart`` when ``compare=`` is supplied.
+    Chart
+        Feature-importance bar chart ranked by absolute importance. When
+        ``compare=`` is supplied, a single dodge-by-model ``Chart`` (one bar
+        per model within each feature band).
 
     Examples
     --------
@@ -636,11 +780,14 @@ def importance_chart(
 
     Notes
     -----
-    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
-    one panel per model (small multiples, shared x/y scales). Each panel is
-    the single-model importance chart for that model, labeled with the model
-    name. The single-model path (no ``compare=``) is unchanged.
+    When ``compare=`` is supplied (GH #42), returns a single :class:`~ferrum.Chart`
+    with one shared feature axis and bars grouped (dodged) by model, plus a
+    model legend. Features are ranked once globally across models by mean
+    *absolute* importance and the shared top-``top_k`` set is used for every
+    model. Error rules and value labels dodge alongside their bars. The
+    single-model path (no ``compare=``) is unchanged.
     """
+    _validate_choice("importance_chart", "orient", orient, _ORIENT_VALUES)
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
     builder_kwargs = dict(
         method=method,
@@ -657,12 +804,7 @@ def importance_chart(
         theme=theme,
     )
     if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _importance_chart_from_source,
-            builder_kwargs=builder_kwargs,
-            resolve={"x": "shared", "y": "shared"},
-        )
+        return _importance_chart_compare_from_source(source, **builder_kwargs)
     return _importance_chart_from_source(source, **builder_kwargs)
 
 

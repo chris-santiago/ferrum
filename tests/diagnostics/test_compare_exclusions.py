@@ -19,10 +19,11 @@ pooled), and ``residuals_chart`` with a multi-panel ``panels`` value renders one
 full diagnostic grid per model. ``cooks_distance_chart`` likewise renders one
 residuals-vs-leverage panel per model.
 
-Six explanation charts (``importance_chart``, ``shap_beeswarm_chart``,
-``shap_bar_chart``, ``shap_waterfall_chart``, ``shap_chart``, ``pdp_chart``)
-render **small multiples** when ``compare=`` is passed: one panel per model,
-composed as a ``ConcatChart`` with shared x/y scales.
+Five explanation charts (``shap_beeswarm_chart``, ``shap_bar_chart``,
+``shap_waterfall_chart``, ``shap_chart``, ``pdp_chart``) render **small
+multiples** when ``compare=`` is passed: one panel per model, composed as a
+``ConcatChart`` with shared x/y scales. ``importance_chart`` instead renders a
+single **dodge-by-model** panel (GH #42, see ``test_compare_dodge.py``).
 
 Four model-selection charts (``learning_curve_chart``,
 ``validation_curve_chart``, ``cv_scores_chart``, ``alpha_selection_chart``)
@@ -320,12 +321,20 @@ def test_alpha_selection_chart_compare_none_byte_identical():
 # ---------------------------------------------------------------------------
 
 
-def test_importance_chart_compare_renders_small_multiples():
-    """compare= returns a ConcatChart with one panel per model (base + alt)."""
+def test_importance_chart_compare_renders_dodged_single_panel():
+    """compare= returns a single dodge-by-model Chart, not small multiples (GH #42).
+
+    The dodged single-panel contract (one bar per model within each feature
+    band, model legend, dodged error/value layers) is asserted in detail in
+    ``tests/diagnostics/test_compare_dodge.py``; here we guard the return-type
+    switch away from the pre-#42 ConcatChart layout.
+    """
+    from ferrum.chart import Chart
+
     X, y, base, alt = _reg_setup()
     result = ferrum.importance_chart(base, X, y, compare={"alt": alt})
-    assert isinstance(result, ConcatChart)
-    assert len(result.charts) == 2
+    assert isinstance(result, Chart)
+    assert not isinstance(result, ConcatChart)
     assert "<svg" in result.to_svg()
 
 

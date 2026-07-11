@@ -305,20 +305,11 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let n_categories = x_strs.iter().flatten().collect::<std::collections::HashSet<_>>().len().max(1);
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
-    let has_pos_offsets = ctx.batch.schema().index_of("__pos_x_offset__").is_ok();
-    let n_groups = if has_pos_offsets {
-        let mut set: std::collections::HashSet<u64> =
-            x_offsets.iter().map(|v| v.to_bits()).collect();
-        set.remove(&0.0_f64.to_bits());
-        if set.is_empty() { 1 } else { set.len() + if x_offsets.contains(&0.0) { 1 } else { 0 } }
-    } else {
-        1
-    };
-    let bar_width = if has_pos_offsets {
-        ((panel.w / n_categories as f64) / n_groups.max(1) as f64) * 0.8
-    } else {
-        (panel.w / n_categories as f64) * 0.8
-    };
+    // Under an ordinal-band Dodge, shrink each bar to its sub-band so adjacent
+    // dodge groups don't overlap (single source of truth: `n_dodge_groups`).
+    // No Dodge → n_groups == 1 → byte-identical to the non-dodged width.
+    let n_groups = crate::render::position::n_dodge_groups(ctx.batch);
+    let bar_width = (panel.w / n_categories as f64 / n_groups as f64) * 0.8;
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
@@ -433,7 +424,11 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .max(1);
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
-    let bar_height = (panel.h / n_categories as f64) * 0.8;
+    // Under an ordinal-band Dodge, shrink each horizontal bar to its sub-band so
+    // adjacent dodge groups don't overlap (mirrors `build_ordinal`; the band
+    // dimension is height here). No Dodge → n_groups == 1 → byte-identical.
+    let n_groups = crate::render::position::n_dodge_groups(ctx.batch);
+    let bar_height = (panel.h / n_categories as f64 / n_groups as f64) * 0.8;
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
@@ -2064,5 +2059,107 @@ mod tests {
             "bar row 0 fill_opacity must fall back to opacity 0.3; got {}", fos[0]);
         assert!((fos[1] - 0.7).abs() < 1e-9,
             "bar row 1 fill_opacity must fall back to opacity 0.7; got {}", fos[1]);
+    }
+
+    // ── Dodge band-narrowing (Task 3c) ───────────────────────────────────────
+
+    /// Build a horizontal-bar spec (quantitative x, ordinal y) plus a batch that
+    /// already carries the synthetic Dodge offset columns and (optionally) the
+    /// `__dodge_n_groups__` schema-metadata key `n_dodge_groups` reads. `y_offsets`
+    /// supplies the per-row `__pos_y_offset__`; `__pos_x_offset__` is all-zero (the
+    /// unflipped→flipped Dodge writes the sub-band offset into y).
+    fn ordinal_y_dodge_ctx_batch(
+        y_offsets: Option<Vec<f64>>,
+        n_groups_metadata: Option<usize>,
+    ) -> (ChartSpec, arrow::record_batch::RecordBatch) {
+        use std::collections::HashMap;
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "v".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        // Two categories (a, b), two dodge groups per category (4 rows).
+        let mut fields = vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ];
+        let mut cols: Vec<arrow::array::ArrayRef> = vec![
+            Arc::new(Float64Array::from(vec![5.0, 8.0, 6.0, 9.0])),
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+        ];
+        if let Some(yo) = y_offsets {
+            fields.push(Field::new("__pos_x_offset__", DataType::Float64, false));
+            fields.push(Field::new("__pos_y_offset__", DataType::Float64, false));
+            cols.push(Arc::new(Float64Array::from(vec![0.0; yo.len()])));
+            cols.push(Arc::new(Float64Array::from(yo)));
+        }
+        let mut schema = Schema::new(fields);
+        if let Some(n) = n_groups_metadata {
+            let mut metadata = HashMap::new();
+            metadata.insert(crate::render::position::DODGE_N_GROUPS_KEY.to_string(), n.to_string());
+            schema = schema.with_metadata(metadata);
+        }
+        let batch = arrow::record_batch::RecordBatch::try_new(Arc::new(schema), cols).unwrap();
+        (spec, batch)
+    }
+
+    #[test]
+    fn bar_ordinal_y_dodge_narrows_height_by_group_count() {
+        // Task 3c: a dodged horizontal bar must shrink its band-dimension extent
+        // (height) by the dodge group count, else adjacent groups overlap.
+        // panel.h=100, 2 categories → bandwidth 50, 2 groups → sub_band 25 →
+        // offsets -12.5 / +12.5; height = (100 / 2 / 2) * 0.8 = 20.0. The
+        // narrowing is driven by the explicit __dodge_n_groups__ metadata
+        // (Some(2)), not by counting distinct offset values.
+        let (spec, batch) = ordinal_y_dodge_ctx_batch(Some(vec![-12.5, 12.5, -12.5, 12.5]), Some(2));
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let rects: Vec<(f64, f64)> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { y, h, .. } = n { Some((*y, *h)) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 4, "expected 4 dodged bars");
+        for (_, h) in &rects {
+            assert!((h - 20.0).abs() < 1e-9, "dodged bar height must be 20.0 (narrowed by 2 groups); got {h}");
+        }
+        // Adjacent dodge groups within a category must not overlap in y.
+        let mut ivals: Vec<(f64, f64)> = rects.iter().map(|(y, h)| (*y, *y + *h)).collect();
+        ivals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        for w in ivals.windows(2) {
+            assert!(w[0].1 <= w[1].0 + 1e-9,
+                "dodged bar intervals must not overlap: {:?} vs {:?}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn bar_ordinal_y_no_dodge_height_unchanged() {
+        // Regression: no offset columns → n_groups == 1 → height is the full
+        // band fraction (100 / 2) * 0.8 = 40.0, byte-identical to pre-Task-3c.
+        let (spec, batch) = ordinal_y_dodge_ctx_batch(None, None);
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let heights: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { h, .. } = n { Some(*h) } else { None }
+        }).collect();
+        assert_eq!(heights.len(), 4);
+        for h in &heights {
+            assert!((h - 40.0).abs() < 1e-9, "non-dodged bar height must be 40.0; got {h}");
+        }
     }
 }
