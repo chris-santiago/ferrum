@@ -464,44 +464,6 @@ def _compose_compare(
     return ConcatChart(*children, columns=n_cols, resolve=resolve)
 
 
-def _stack_compare_frames(
-    source: Any,
-    frame_fn: Callable[[Any], pl.DataFrame],
-) -> pl.DataFrame:
-    """Stack per-model frames from a ``ComparedModelSource`` into one frame.
-
-    Iterates ``source.items()`` in registration order (``"base"`` first),
-    calls ``frame_fn(model_source)`` to build that model's frame, stamps a
-    ``model`` (Utf8) column with the registration name, and concatenates the
-    frames vertically.
-
-    The shared data-reshaping seam for the dodge-by-model ``compare=`` builders
-    (importance, shap_bar, cv_scores — GH #42). It stays deliberately generic:
-    the per-chart ranking / aggregation lives in ``frame_fn`` and in the caller,
-    never here, so every dodge builder produces its combined frame the same way.
-
-    Parameters
-    ----------
-    source : ComparedModelSource
-        Multi-model wrapper whose ``.items()`` ``(name, source)`` pairs are
-        iterated in registration order.
-    frame_fn : callable
-        ``frame_fn(model_source) -> polars.DataFrame`` — produces one model's
-        rows. The ``model`` column is stamped by this helper, not by *frame_fn*.
-
-    Returns
-    -------
-    polars.DataFrame
-        Vertical concatenation of every model's frame with a trailing
-        ``model`` Utf8 column, rows in registration order.
-    """
-    frames: list[pl.DataFrame] = []
-    for name, model_source in source.items():
-        frame = frame_fn(model_source).with_columns(pl.lit(name, dtype=pl.Utf8).alias("model"))
-        frames.append(frame)
-    return pl.concat(frames, how="vertical_relaxed")
-
-
 def _order_compare_rows(
     df: pl.DataFrame,
     primary_col: str,

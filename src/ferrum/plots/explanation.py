@@ -36,7 +36,6 @@ from ferrum.plots._helpers import (
     _require,
     _resolve_source,
     _should_facet_by_class,
-    _stack_compare_frames,
     _validate_choice,
     _warn_deprecated_dispatcher,
 )
@@ -91,6 +90,32 @@ def _importance_bounds_and_domain(
     return df, (domain_lo, domain_hi)
 
 
+def _importance_value_text_layer(orient: str, *, vertical_form: bool) -> Any:
+    """Build the ``_value_text`` overlay layer shared by both importance builders.
+
+    ``mark_kwargs`` (label alignment/offset) is driven purely by the visual
+    ``orient`` -- it is identical whether or not the chart has been desugared
+    to the vertical dodge form, since ``CoordFlip`` (applied by the caller,
+    not here) remaps the value axis to visual-x for the horizontal case.
+
+    ``vertical_form`` selects the encoding: the single-model builder
+    (``vertical_form=False``) swaps ``x``/``y`` to match ``orient`` directly;
+    the compare-by-model builder (``vertical_form=True``) always desugars to
+    the vertical form (feature on x, importance on y) so the label dodges on
+    the same ordinal-x band as its bar, regardless of ``orient``.
+    """
+    from ferrum._layer import _Layer
+
+    mark_kwargs = (
+        {"align": "left", "dx": 4} if orient == "horizontal" else {"baseline": "bottom", "dy": -4}
+    )
+    if vertical_form or orient == "vertical":
+        encoding = {"x": "feature", "y": "importance", "text": "_value_text"}
+    else:
+        encoding = {"x": "importance", "y": "feature", "text": "_value_text"}
+    return _Layer(mark="text", encoding=encoding, mark_kwargs=mark_kwargs, name="value_text")
+
+
 def _importance_chart_from_source(
     source: Any,
     *,
@@ -131,23 +156,7 @@ def _importance_chart_from_source(
     )
 
     if show_values:
-        from ferrum._layer import _Layer
-
-        if orient == "horizontal":
-            text_ly = _Layer(
-                mark="text",
-                encoding={"x": "importance", "y": "feature", "text": "_value_text"},
-                mark_kwargs={"align": "left", "dx": 4},
-                name="value_text",
-            )
-        else:
-            text_ly = _Layer(
-                mark="text",
-                encoding={"x": "feature", "y": "importance", "text": "_value_text"},
-                mark_kwargs={"baseline": "bottom", "dy": -4},
-                name="value_text",
-            )
-        chart = chart.layer(text_ly)
+        chart = chart.layer(_importance_value_text_layer(orient, vertical_form=False))
 
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
@@ -193,10 +202,7 @@ def _importance_chart_compare_from_source(
     from ferrum.coord import CoordFlip
     from ferrum.position import Dodge
 
-    combined = _stack_compare_frames(
-        source,
-        lambda ms: ms.importances(method=method, random_state=random_state),
-    )
+    combined = source.importances(method=method, random_state=random_state)
 
     # Global cross-model ranking (spec D4, mirrors _shap_order_features): one
     # shared top-`top_k` feature set, ordered by mean *absolute* importance
@@ -243,26 +249,10 @@ def _importance_chart_compare_from_source(
     )
 
     if show_values:
-        from ferrum._layer import _Layer
-
-        # Encoding stays in vertical desugar form so the label dodges on the
-        # same ordinal-x band; screen-space placement follows the visual orient
-        # (CoordFlip maps the value axis to visual-x when horizontal).
-        text_kwargs = (
-            {"align": "left", "dx": 4}
-            if orient == "horizontal"
-            else {
-                "baseline": "bottom",
-                "dy": -4,
-            }
-        )
-        text_ly = _Layer(
-            mark="text",
-            encoding={"x": "feature", "y": "importance", "text": "_value_text"},
-            mark_kwargs=text_kwargs,
-            name="value_text",
-        )
-        chart = chart.layer(text_ly)
+        # This position-less text layer inherits the chart-level Dodge (text is
+        # dodge-eligible; Rust prepare falls back to spec.position), so the
+        # labels dodge alongside their bars.
+        chart = chart.layer(_importance_value_text_layer(orient, vertical_form=True))
 
     if orient == "horizontal":
         chart = chart.coord(CoordFlip())
@@ -472,7 +462,7 @@ def _shap_bar_chart_compare_from_source(
     ``_compose_compare`` path (class is a competing facet dimension).
 
     Per-model SHAP values (post class-selection, pre-aggregation) are stacked
-    via ``_stack_compare_frames``, then ``_shap_order_features`` ranks
+    via ``ComparedModelSource.stack``, then ``_shap_order_features`` ranks
     features once over the *pooled* per-model values -- the same
     global-feature-set principle the single-model builder already applies
     across classes, extended across models (spec D4). Every model shares
@@ -492,9 +482,8 @@ def _shap_bar_chart_compare_from_source(
     from ferrum.position import Dodge
 
     model_order = source.model_names
-    combined_sv = _stack_compare_frames(
-        source,
-        lambda ms: _shap_select_class(ms.shap_values(background=background), per_class=False),
+    combined_sv = source.stack(
+        lambda ms: _shap_select_class(ms.shap_values(background=background), per_class=False)
     )
     keep = _shap_order_features(combined_sv, order=order, max_display=max_display)
 

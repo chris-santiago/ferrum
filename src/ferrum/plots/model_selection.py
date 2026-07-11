@@ -29,7 +29,6 @@ from ferrum.plots._helpers import (
     _order_compare_rows,
     _require,
     _resolve_source,
-    _stack_compare_frames,
 )
 
 
@@ -239,7 +238,7 @@ def _cv_scores_chart_compare_from_source(
     import ferrum
     from ferrum.position import Dodge
 
-    combined = _stack_compare_frames(source, lambda ms: ms.cv_scores(cv=cv, scoring=scoring))
+    combined = source.cv_scores(cv=cv, scoring=scoring)
     if split != "both":
         combined = combined.filter(pl.col("split") == split)
 

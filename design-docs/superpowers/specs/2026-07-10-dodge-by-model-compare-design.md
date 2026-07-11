@@ -128,11 +128,17 @@ DataFrame with the same formula the single-model builder uses (zero-anchored,
 - Single-model output of all three charts is byte-identical to today.
 - Every other diagnostic's `compare=` output is byte-identical to today.
 - Existing dodged charts (catplot, histogram `multiple="dodge"`, …) are
-  byte-identical: text-offset consumption must be zero-effect when offset
-  columns are absent.
+  byte-identical **where the resolved color domain order equals row-encounter
+  order** (true for every golden in the repo, verified by the full suite):
+  text-offset consumption must be zero-effect when offset columns are absent,
+  and dodge sub-band slot order follows the resolved color-scale domain
+  (i.e. the legend order) whenever the dodge grouping field is the color
+  field — a chart whose color domain was explicitly sorted away from
+  encounter order legitimately re-slots (amended 2026-07-10, slot-order fix).
 - Determinism: repeated renders of the same compare call are byte-identical
   (model order = registration order; feature order = global rank; dodge
-  sub-band order = row encounter order).
+  sub-band order = color-domain/legend order, falling back to row encounter
+  order when the dodge field is not the color field).
 - Renders must be visually verified: dodged bars/boxes actually offset,
   labels sit on their bars, legend present. SVG byte-equality alone is
   insufficient (goldens rule, CLAUDE.md).

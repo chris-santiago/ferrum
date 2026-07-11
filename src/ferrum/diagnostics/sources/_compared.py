@@ -13,7 +13,7 @@ bookkeeping.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import polars as pl
 
@@ -97,7 +97,10 @@ class ComparedModelSource:
     descriptors (see ``_collect_compared_proxied_attrs``), so a new public
     property proxies automatically. Accessing ``model`` / ``_model`` raises
     since there is no single estimator. ``model_names`` reports the
-    configured ordering.
+    configured ordering. ``stack`` is the callable-form sibling of the
+    auto-dispatch, for chart builders that need to compose several
+    method calls (e.g. class selection before aggregation) before
+    stacking per-model frames.
 
     Parameters
     ----------
@@ -152,10 +155,39 @@ class ComparedModelSource:
         """
         return list(self._sources.items())
 
-    def _dispatch(self, method: str, *args: Any, **kwargs: Any) -> pl.DataFrame:
+    def _dispatch(self, method: str, /, *args: Any, **kwargs: Any) -> pl.DataFrame:
+        # `method` is positional-only so a dispatched call that itself takes a
+        # `method=` keyword (e.g. `.importances(method="permutation")`) lands
+        # in `**kwargs` instead of colliding with this parameter.
+        return self.stack(lambda src: getattr(src, method)(*args, **kwargs))
+
+    def stack(self, frame_fn: "Callable[[ModelSource], pl.DataFrame]") -> pl.DataFrame:
+        """Build one frame per wrapped model via ``frame_fn`` and stack them.
+
+        The callable-form sibling of the auto-dispatch in ``_dispatch``:
+        ``_dispatch`` calls a fixed ``ModelSource`` method name per model,
+        while ``stack`` accepts an arbitrary per-model callable, for chart
+        builders that need to compose several method calls (e.g. class
+        selection before aggregation) before stacking. Both share the
+        same iteration-and-stamping idiom, in registration order, with a
+        ``model: Utf8`` column recording each source's registered name.
+
+        Parameters
+        ----------
+        frame_fn : callable
+            ``frame_fn(model_source) -> polars.DataFrame`` — produces one
+            model's rows. The ``model`` column is stamped by this method,
+            not by *frame_fn*.
+
+        Returns
+        -------
+        polars.DataFrame
+            Vertical concatenation of every model's frame with a trailing
+            ``model`` Utf8 column, rows in registration order.
+        """
         frames: list[pl.DataFrame] = []
         for name, src in self._sources.items():
-            df = getattr(src, method)(*args, **kwargs)
+            df = frame_fn(src)
             frames.append(df.with_columns(pl.lit(name).alias("model")))
         return pl.concat(frames, how="vertical_relaxed")
 

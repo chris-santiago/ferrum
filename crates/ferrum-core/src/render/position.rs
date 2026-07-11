@@ -2578,6 +2578,100 @@ mod tests {
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
         assert_eq!(n_dodge_groups(&out), 2, "batch_cat_val_grp has 2 groups (p, q)");
     }
+
+    /// Design-gate finding: the two tests above only exercise
+    /// `apply_dodge_ordinal` → `n_dodge_groups` in isolation. Neither drives the
+    /// REAL production seam — `apply_position` → `dispatch_mark_build` — through
+    /// which the `__dodge_n_groups__` schema metadata must survive unmodified
+    /// for dodged bars to render narrowed. This test walks that full seam,
+    /// mirroring `scene_build.rs`'s `build_panel_mark_batches` wiring exactly
+    /// (`apply_position` output batch → `DrawCtx { batch: adjusted, .. }` →
+    /// `dispatch_mark_build`, see scene_build.rs:795-824), so a future pipeline
+    /// change that rebuilds the batch/schema between those two calls and drops
+    /// the metadata fails this test loudly (bars would revert to full
+    /// sub-band-overlapping width) instead of silently regressing.
+    #[test]
+    fn dodge_narrows_bar_width_through_real_apply_position_to_mark_build_seam() {
+        use crate::layout::{PanelLayout, Rect, ThemeInputs};
+        use crate::render::draw::{dispatch_mark_build, resolve_mark_style, DrawCtx};
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::mark::Mark;
+        use ferrum_scene::SceneNode;
+
+        let b = batch_cat_val_grp();
+        let enc = enc_xy("cat", "val", Some("grp"));
+        let s = scales_one_ordinal(true);
+        let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
+
+        // Real producer: same call scene_build.rs makes before mark dispatch.
+        let adjusted = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        assert_eq!(
+            n_dodge_groups(&adjusted), 2,
+            "sanity: real apply_position output must carry the 2-group metadata"
+        );
+
+        let spec = ChartSpec {
+            data: Default::default(),
+            mark: Mark::Bar,
+            encoding: enc,
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: Some(pos),
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        // panel range matches scales_one_ordinal's [0, 100] pixel range.
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None,
+            row_strip_title: None,
+            row_facet_key: None,
+        };
+        let theme = ThemeInputs::default();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+
+        // Real seam: DrawCtx built from the ADJUSTED batch (mirrors
+        // scene_build.rs:795-824), dispatched through the real mark-build entry
+        // point — not bar::build called directly on a hand-built batch.
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &s,
+            batch: &adjusted,
+            mark_style: &mark_style,
+        };
+        let result = dispatch_mark_build(&spec.mark, &ctx);
+
+        let widths: Vec<f64> = result
+            .nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Rect { w, .. } = n { Some(*w) } else { None })
+            .collect();
+        assert_eq!(widths.len(), 4, "expected 4 dodged bars (2 categories x 2 groups)");
+        // panel.w=100, 2 categories, 2 dodge groups -> bar_width = (100/2/2)*0.8 = 20.0.
+        // Full (non-narrowed) width would be (100/2/1)*0.8 = 40.0 — the value this
+        // test would see if the metadata were silently dropped in transit.
+        for w in &widths {
+            assert!(
+                (w - 20.0).abs() < 1e-9,
+                "dodged bar width through the real apply_position -> dispatch_mark_build \
+                 seam must be 20.0 (narrowed by 2 groups); got {w}. A value of 40.0 means \
+                 __dodge_n_groups__ was dropped between the two calls."
+            );
+        }
+    }
 }
 
 /// Read per-row pixel offsets from synthetic `__pos_x_offset__` /

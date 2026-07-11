@@ -256,6 +256,14 @@ def test_importance_compare_ranks_by_absolute_magnitude():
             return self._df
 
     class _FakeComparedSource:
+        """Minimal stand-in for ``ComparedModelSource``'s auto-dispatch surface.
+
+        The builder now calls ``source.importances(...)`` directly (auto-dispatch
+        stacks per-model frames with a ``model`` column), so this fake must
+        implement ``importances`` itself rather than relying on the caller to
+        iterate ``.items()``.
+        """
+
         def __init__(self, sources: dict[str, "_FakeModelSource"]):
             self._sources = sources
 
@@ -265,6 +273,15 @@ def test_importance_compare_ranks_by_absolute_magnitude():
 
         def items(self):
             return list(self._sources.items())
+
+        def importances(self, *, method, random_state):
+            frames = [
+                src.importances(method=method, random_state=random_state).with_columns(
+                    pl.lit(name).alias("model")
+                )
+                for name, src in self._sources.items()
+            ]
+            return pl.concat(frames, how="vertical_relaxed")
 
     source = _FakeComparedSource(
         {
