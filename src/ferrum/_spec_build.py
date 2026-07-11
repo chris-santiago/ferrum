@@ -359,6 +359,11 @@ class SpecBuildMixin:
                 layer_dict["blend"] = layer.blend
             if layer.name is not None:
                 layer_dict["name"] = layer.name
+            # Secondary-y-axis wire flag (GH #52 Task 4). Only emitted when
+            # True -- absent/false deserializes and renders byte-identically
+            # to a pre-#52 spec (see Layer::independent_y in Rust spec/layer.rs).
+            if layer.independent_y:
+                layer_dict["independent_y"] = True
             out.append(layer_dict)
         return out
 

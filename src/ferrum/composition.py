@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json as _json
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -2508,16 +2508,20 @@ class ClusterMapChart(_CompositeBase):
 
 
 def _validate_layer_resolve(resolve: Optional[Dict[str, str]]) -> None:
-    """Raise ``ValueError`` when *resolve* marks ``x`` or ``y`` ``"independent"``.
+    """Raise ``ValueError`` when *resolve* marks ``x`` ``"independent"``.
 
-    ``LayerChart`` overlays share one coordinate space by design (the
-    overlay contract): :meth:`LayerChart._composite_tree` unconditionally
-    forces the tree's ``x``/``y`` resolve entries to ``"shared"`` regardless
-    of what *resolve* says. Accepting an explicit ``"independent"`` request
-    here without raising would mean the rendered axes silently diverge from
-    what the caller asked for — the same drift class this task closes for
-    ``share_scale``. Per-layer independent x/y scales (a secondary axis) are
-    not supported; see GH #52.
+    ``LayerChart`` overlays share one coordinate space along x by design
+    (the overlay contract): a dual-x-axis layered chart is not supported
+    (see GH #55). Accepting an explicit ``"independent"`` request here
+    without raising would mean the rendered axes silently diverge from what
+    the caller asked for — the same drift class this closes for
+    ``share_scale``.
+
+    ``y: "independent"`` is a supported secondary-axis request (GH #52):
+    :meth:`LayerChart.to_svg` and :meth:`LayerChart._render_interactive`
+    both route through :meth:`LayerChart._build_merged` (the merged flat
+    single-panel path) when *resolve* marks ``y`` ``"independent"``, so no
+    validation gate is needed here for that channel.
 
     Parameters
     ----------
@@ -2527,25 +2531,27 @@ def _validate_layer_resolve(resolve: Optional[Dict[str, str]]) -> None:
     """
     if not resolve:
         return
-    for channel in ("x", "y"):
-        if resolve.get(channel) == "independent":
-            raise ValueError(
-                "LayerChart: layers share one coordinate space (overlay contract); "
-                "per-layer independent x/y scales are not supported "
-                "(see GH #52 secondary-axis)"
-            )
+    if resolve.get("x") == "independent":
+        raise ValueError(
+            "LayerChart: layers share one coordinate space (overlay contract); "
+            "per-layer independent x scales are not supported "
+            "(see GH #55 dual-x-axis)"
+        )
 
 
 class LayerChart(_ChartLike):
     """Overlay multiple charts on shared axes (same coordinate space).
 
-    All layers share x/y scales by default (union domain) and this cannot
-    be turned off — the overlay only makes sense with a single shared
-    coordinate space; see :func:`_validate_layer_resolve`.  The charts
-    are merged using the same ``Chart + Chart`` layer-merge logic that
-    the ``+`` operator provides — domain union, null-padded diagonal
-    concat for heterogeneous data, named-transform routing for per-layer
-    transforms.
+    All layers share x scale by default (union domain) and this cannot be
+    turned off — the overlay only makes sense with a single shared x
+    coordinate space; see :func:`_validate_layer_resolve`.  ``y`` shares by
+    default too, but ``resolve={"y": "independent"}`` renders a dual-axis
+    chart instead: layer 0's y-axis on the left, each subsequent layer's own
+    y-axis stacked on the right (GH #52) — see :meth:`_build_merged` and
+    :meth:`to_svg`.  The charts are merged using the same ``Chart + Chart``
+    layer-merge logic that the ``+`` operator provides — domain union,
+    null-padded diagonal concat for heterogeneous data, named-transform
+    routing for per-layer transforms.
 
     Use ``LayerChart`` when you have pre-built ``Chart`` objects and want
     a composition-level overlay without constructing the ``+`` chain
@@ -2558,10 +2564,11 @@ class LayerChart(_ChartLike):
         Two or more charts to overlay.  At least one chart is required.
     resolve : dict, optional
         Per-channel scale-sharing overrides — e.g.
-        ``resolve={"color": "independent"}``.  ``x``/``y`` are always
-        shared (the overlay contract) and marking either ``"independent"``
-        raises; non-positional channels follow the same inheritance rules
-        as ``Chart + Chart``.
+        ``resolve={"color": "independent"}``.  ``x`` is always shared (the
+        overlay contract) and marking it ``"independent"`` raises (see GH
+        #55 dual-x-axis).  ``y: "independent"`` renders a secondary axis
+        per non-primary layer (GH #52).  Non-positional channels follow
+        the same inheritance rules as ``Chart + Chart``.
     title : str, optional
         Title applied to the combined chart via ``.properties(title=...)``.
 
@@ -2569,8 +2576,8 @@ class LayerChart(_ChartLike):
     ------
     ValueError
         If fewer than one chart is provided, if ``resolve`` contains
-        invalid values, or if ``resolve`` marks ``x`` or ``y``
-        ``"independent"`` (see GH #52 secondary-axis).
+        invalid values, or if ``resolve`` marks ``x`` ``"independent"``
+        (see GH #55 dual-x-axis).
 
     Examples
     --------
@@ -2578,6 +2585,7 @@ class LayerChart(_ChartLike):
     >>> scatter = fm.Chart(df).mark_point().encode(x="x", y="y")
     >>> line = fm.Chart(df).mark_line().encode(x="x", y="y")
     >>> fm.LayerChart(scatter, line).save("overlay.svg")
+    >>> fm.LayerChart(scatter, line, resolve={"y": "independent"}).save("dual.svg")
     """
 
     __slots__ = ("_charts", "_resolve", "_title")
@@ -2620,6 +2628,15 @@ class LayerChart(_ChartLike):
         ``resolve=`` on other supported channels (``color``/``size``) rides the
         same tree resolve field (see :func:`_composite_resolve_field`).
 
+        This is exclusively the shared-y path: :meth:`to_svg` never calls
+        this method when ``resolve`` marks ``y`` ``"independent"`` -- it
+        routes through :meth:`_build_merged` instead (GH #52), because a
+        composite panel carries no per-layer y-scale-slot concept. A
+        y-independent ``LayerChart`` nested as a *child* of another
+        composite still lowers through this method today (the forced
+        ``"shared"`` below applies), which is a known gap closed by a
+        later task, not this one.
+
         Composition-level configure layers are pushed onto each layer via
         :meth:`_ChartLike._inject_parent_config` before lowering, so they need
         no separate gate here (mirrors :class:`JointChart`/:class:`ClusterMapChart`).
@@ -2646,11 +2663,15 @@ class LayerChart(_ChartLike):
             is empty.
         """
         resolve_field = _composite_resolve_field(self._resolve, kind="LayerChart")
-        # x/y are always forced "shared" here regardless of self._resolve --
+        # x is always forced "shared" here regardless of self._resolve --
         # __init__'s _validate_layer_resolve already rejects an explicit
-        # "independent" for either channel, so this can never silently
-        # override a request the caller actually made; it only fills in
-        # the default when self._resolve left x/y unset.
+        # "independent" for x (GH #55), so this can never silently override
+        # an x request the caller actually made; it only fills in the
+        # default when self._resolve left x unset. y is forced "shared"
+        # too because to_svg() never reaches this method when y is
+        # "independent" (see this method's docstring) -- callers that DO
+        # reach here (default share, or a nested child -- known gap, see
+        # docstring) always want a shared y.
         resolve_field["x"] = "shared"
         resolve_field["y"] = "shared"
 
@@ -2701,19 +2722,20 @@ class LayerChart(_ChartLike):
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) via the merged single-panel Chart.
 
-        Unlike :meth:`to_svg`, this ALWAYS routes through
-        :meth:`_render_interactive_merged` and never through the composite
-        overlay tree (see :meth:`_composite_tree`). The interactive contract
-        requires LayerChart to produce EXACTLY ONE scene panel: selections,
-        hit-testing, and the WASM interaction runtime all assume every layer
-        of a ``LayerChart`` shares a single panel. The overlay tree gives each
-        layer its own panel that merely shares one *rect* — visually
-        identical to the merged single-panel chart in static SVG (no
-        panel-identity concept there), but a distinct panel in scene JSON,
-        which breaks the one-panel contract. So the static path (``to_svg``)
-        keeps the Task 9 overlay-tree cutover; the interactive path renders
-        the merged single-panel Chart (the FLAT path, not a composition
-        fallback).
+        Unlike :meth:`to_svg`'s default/shared-y path, this ALWAYS routes
+        through :meth:`_render_interactive_merged` and never through the
+        composite overlay tree (see :meth:`_composite_tree`). The
+        interactive contract requires LayerChart to produce EXACTLY ONE
+        scene panel: selections, hit-testing, and the WASM interaction
+        runtime all assume every layer of a ``LayerChart`` shares a single
+        panel. The overlay tree gives each layer its own panel that merely
+        shares one *rect* — visually identical to the merged single-panel
+        chart in static SVG (no panel-identity concept there), but a
+        distinct panel in scene JSON, which breaks the one-panel contract.
+        So the default/shared-y static path (``to_svg``) keeps the Task 9
+        overlay-tree cutover; the interactive path renders the merged
+        single-panel Chart (the FLAT path, not a composition fallback) --
+        the same flat path ``to_svg`` also uses for independent y (GH #52).
         """
         return self._render_interactive_merged()
 
@@ -2729,14 +2751,28 @@ class LayerChart(_ChartLike):
         merged = self._build_merged()
         return _render_scene(merged)
 
+    def _y_independent(self) -> bool:
+        """Return whether ``resolve={"y": "independent"}`` was requested (GH #52)."""
+        return bool(self._resolve) and self._resolve.get("y") == "independent"
+
     def to_svg(self) -> str:
         """Render the layered charts to an SVG string.
+
+        Default/shared-y renders through the composite overlay tree
+        (:meth:`_composite_tree`). ``resolve={"y": "independent"}`` renders
+        a dual-axis chart instead: the overlay tree has no per-layer
+        y-scale-slot concept, so it routes through the same merged flat
+        single-panel path (:meth:`_build_merged`) the interactive output
+        already uses (GH #52) -- one implementation serves both output
+        kinds for independent y.
 
         Returns
         -------
         str
             SVG markup with all layers rendered in a single plot area.
         """
+        if self._y_independent():
+            return self._build_merged().to_svg()
         lowered = self._composite_tree(auto_tooltips=False)
         return lowered.render_svg()
 
@@ -2753,10 +2789,36 @@ class LayerChart(_ChartLike):
         docstrings). Its union semantics for ``color``/``size`` may
         therefore diverge from the static overlay tree's transform-aware
         unions (:meth:`_composite_tree`); see GH #52.
+
+        Secondary y-axis (GH #52): when ``resolve={"y": "independent"}``,
+        every merged wire layer contributed by a non-primary member chart
+        (``self._charts[1:]``) that carries its own ``y`` encoding is
+        marked ``independent_y=True`` -- Rust resolves that layer's y-scale
+        independently and renders it as a stacked right axis (spec §6 slot
+        contract: layer 0 is always the primary/left axis). A non-primary
+        layer with NO ``y`` encoding of its own (e.g. a vertical rule keyed
+        only on ``x``) is left unmarked so it joins the primary scale --
+        Rust cannot resolve a y-scale for a layer with no y encoding, so
+        flagging it would error or produce a phantom axis (spec §4
+        "Degenerate cases"). ``y`` is therefore never a member of the
+        ``shared`` union-domain list below when independent (its mode is
+        ``"independent"``, not ``"shared"``), so no union domain is
+        injected for it -- each independent layer resolves natively in
+        Rust.
         """
+        y_independent = self._y_independent()
         result = self._charts[0]
+        n_before = len(result._layers) if result._layers is not None else 1
         for chart in self._charts[1:]:
             result = result + chart
+            if y_independent:
+                layers = list(result._layers)
+                for i in range(n_before, len(layers)):
+                    layer = layers[i]
+                    if layer.encoding.get("y") is not None:
+                        layers[i] = replace(layer, independent_y=True)
+                result._layers = layers
+            n_before = len(result._layers)
         if self._resolve:
             shared = [ch for ch, mode in self._resolve.items() if mode == "shared"]
             if shared:

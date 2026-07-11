@@ -27,8 +27,9 @@ pub struct Layer {
     /// Whether this layer resolves its own y-scale slot instead of sharing
     /// the primary (layer 0) y-scale. `false` (absent on the wire) = shared,
     /// today's behavior. Layer 0 is always the primary/left axis regardless
-    /// of this flag (spec §6, GH #52).
-    #[serde(default)]
+    /// of this flag (spec §6, GH #52). `false` is omitted when serializing so
+    /// pre-#52 layer wire JSON stays byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub independent_y: bool,
 }
 
@@ -212,6 +213,10 @@ mod tests {
             independent_y: false,
         };
         let json = serde_json::to_string(&layer).unwrap();
+        assert!(
+            !json.contains("independent_y"),
+            "independent_y=false must be omitted from the wire: {json}"
+        );
         let parsed: Layer = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, layer);
         assert!(!parsed.independent_y);

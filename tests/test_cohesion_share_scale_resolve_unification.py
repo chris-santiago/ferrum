@@ -122,9 +122,11 @@ def test_clustermap_share_scale_raises_unsupported():
 
 
 # ---------------------------------------------------------------------------
-# LayerChart: explicit x/y "independent" is a typed error (overlay contract),
-# via both the constructor and the share_scale sugar; color/size independent
-# stays legal.
+# LayerChart: explicit x "independent" is a typed error (overlay contract,
+# dual-x-axis is GH #55), via both the constructor and the share_scale
+# sugar; y "independent" is a supported secondary-axis feature (GH #52,
+# see tests/test_secondary_y_axis.py for its structural coverage) and
+# color/size independent stays legal.
 # ---------------------------------------------------------------------------
 
 
@@ -132,16 +134,19 @@ def test_layer_chart_constructor_rejects_independent_x():
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     a = fm.Chart(df).mark_point().encode(x="x", y="y")
     b = fm.Chart(df).mark_line().encode(x="x", y="y")
-    with pytest.raises(ValueError, match="LayerChart.*overlay contract"):
+    with pytest.raises(ValueError, match="LayerChart.*overlay contract.*#55"):
         LayerChart(a, b, resolve={"x": "independent"})
 
 
-def test_layer_chart_constructor_rejects_independent_y():
+def test_layer_chart_constructor_accepts_independent_y():
+    """resolve={'y': 'independent'} no longer raises -- it renders a dual-axis chart (GH #52)."""
     df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     a = fm.Chart(df).mark_point().encode(x="x", y="y")
     b = fm.Chart(df).mark_line().encode(x="x", y="y")
-    with pytest.raises(ValueError, match="LayerChart.*overlay contract"):
-        LayerChart(a, b, resolve={"y": "independent"})
+    layered = LayerChart(a, b, resolve={"y": "independent"})
+    assert layered._resolve == {"y": "independent"}
+    layered.to_svg()  # must render without raising
+    layered._render_interactive()  # must render without raising
 
 
 def test_layer_chart_share_scale_rejects_independent_x():
@@ -149,8 +154,18 @@ def test_layer_chart_share_scale_rejects_independent_x():
     a = fm.Chart(df).mark_point().encode(x="x", y="y")
     b = fm.Chart(df).mark_line().encode(x="x", y="y")
     layered = LayerChart(a, b)
-    with pytest.raises(ValueError, match="LayerChart.*overlay contract"):
+    with pytest.raises(ValueError, match="LayerChart.*overlay contract.*#55"):
         layered.share_scale(x="independent")
+
+
+def test_layer_chart_share_scale_accepts_independent_y():
+    """share_scale(y='independent') is resolve= sugar -- same rule as the constructor."""
+    df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
+    a = fm.Chart(df).mark_point().encode(x="x", y="y")
+    b = fm.Chart(df).mark_line().encode(x="x", y="y")
+    layered = LayerChart(a, b).share_scale(y="independent")
+    assert layered._resolve == {"y": "independent"}
+    layered.to_svg()
 
 
 def test_layer_chart_color_independent_stays_legal():

@@ -30,6 +30,14 @@ class _Layer:
     data_source: Optional[str] = None
     position: Any = None
     blend: Optional[str] = None
+    # Secondary-y-axis wire flag (GH #52). Set only by
+    # LayerChart._build_merged (ferrum.composition) on non-primary layers
+    # that carry their own `y` encoding; every other producer of `_Layer`
+    # leaves this at its default False (shares the primary y-scale slot).
+    # Chart._build_layers_list serializes it onto the wire layer dict only
+    # when True, so absent/false round-trips byte-identically with
+    # pre-#52 specs.
+    independent_y: bool = False
 
 
 @dataclass(frozen=True)
