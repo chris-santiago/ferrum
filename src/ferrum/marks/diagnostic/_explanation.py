@@ -180,6 +180,8 @@ def desugar_shap_bar(
     y_field: str | None,
     *,
     max_display: int = 20,
+    orient: str = "horizontal",
+    color_field: str | None = None,
     x_scale_domain: tuple[float, float] | list[float] | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
@@ -188,34 +190,43 @@ def desugar_shap_bar(
     Data contract: ``feature`` (Utf8), ``abs_mean_shap`` (Float64) — the
     chart builder aggregates ``ModelSource.shap_values()`` and selects
     the top ``max_display`` features.
+
+    ``orient="horizontal"`` (default) renders value-on-x, ordinal-feature-on-y
+    — the always-horizontal single-model layout. ``orient="vertical"`` swaps
+    the axes (ordinal feature on x, value on y): the ``compare=`` dodge-by-
+    model builder uses this form because dodge requires an ordinal-x band
+    axis, then re-applies ``CoordFlip`` to restore the horizontal visual
+    (spec D2, mirrors ``desugar_importance``).
     """
     del x_field, y_field
     # max_display is wired via data_transform in mark_shap_bar.
     del max_display
     user_kw = _validate("shap_bar", mark_kwargs)
+    if orient not in ("horizontal", "vertical"):
+        raise ValueError(f"mark_shap_bar(orient={orient!r}) — expected 'horizontal' or 'vertical'.")
 
-    def _x_channel(field: str, title: str | None = None) -> Any:
-        from ferrum.encoding import X
+    if orient == "horizontal":
+        value_axis, group_axis = "x", "y"
+    else:
+        value_axis, group_axis = "y", "x"
+    value_field, group_field = "abs_mean_shap", "feature"
 
-        kw: dict[str, Any] = {}
-        if title is not None:
-            kw["title"] = title
+    def _value_channel(field: str) -> Any:
+        from ferrum.encoding import X, Y
+
+        kw: dict[str, Any] = {"title": "Mean |SHAP value|"}
         if x_scale_domain is not None:
             kw["scale"] = {"type": "linear", "domain": list(x_scale_domain)}
-        if kw:
-            return X(field, **kw)
-        return field
+        ch_cls = X if value_axis == "x" else Y
+        return ch_cls(field, **kw)
 
-    layers: list = [
-        _Layer(
-            name="bar",
-            mark="bar",
-            encoding={
-                "x": _x_channel("abs_mean_shap", title="Mean |SHAP value|"),
-                "y": "feature",
-            },
-        ),
-    ]
+    bar_enc: dict[str, Any] = {
+        value_axis: _value_channel(value_field),
+        group_axis: group_field,
+    }
+    if color_field is not None:
+        bar_enc["color"] = color_field
+    layers: list = [_Layer(name="bar", mark="bar", encoding=bar_enc)]
     return MarkDesugarResult(layers=_apply(layers, user_kw))
 
 

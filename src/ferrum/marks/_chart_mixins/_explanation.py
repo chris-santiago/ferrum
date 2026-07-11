@@ -181,7 +181,9 @@ class ExplanationMarksMixin:
     def mark_shap_bar(
         self,
         *,
-        max_display: int = 20,
+        max_display: int | None = 20,
+        orient: str = "horizontal",
+        color_field: str | None = None,
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -195,6 +197,16 @@ class ExplanationMarksMixin:
         ----------
         max_display : int, optional
             Maximum number of top features to show.  Default is ``20``.
+        orient : {"horizontal", "vertical"}, default "horizontal"
+            Bar orientation.  ``"horizontal"`` (default) places the value on
+            x and feature on the ordinal y axis, matching the single-model
+            layout.  ``"vertical"`` swaps the axes (feature on ordinal x,
+            value on y) -- used internally by the ``compare=`` dodge-by-model
+            builder, which requires an ordinal-x band axis and re-applies
+            ``CoordFlip`` to restore the horizontal visual.
+        color_field : str or None, optional
+            Column name driving per-bar colour (e.g. ``"model"`` under
+            ``compare=``).
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -231,7 +243,12 @@ class ExplanationMarksMixin:
         return self._set_composite_mark(
             "shap_bar",
             desugar_shap_bar,
-            {"max_display": max_display, **mark_kwargs},
+            {
+                "max_display": max_display,
+                "orient": orient,
+                "color_field": color_field,
+                **mark_kwargs,
+            },
             placeholder="point",
             position=position,
             data_transform=_shap_bar_filter,

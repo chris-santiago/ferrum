@@ -19,11 +19,13 @@ pooled), and ``residuals_chart`` with a multi-panel ``panels`` value renders one
 full diagnostic grid per model. ``cooks_distance_chart`` likewise renders one
 residuals-vs-leverage panel per model.
 
-Five explanation charts (``shap_beeswarm_chart``, ``shap_bar_chart``,
-``shap_waterfall_chart``, ``shap_chart``, ``pdp_chart``) render **small
-multiples** when ``compare=`` is passed: one panel per model, composed as a
-``ConcatChart`` with shared x/y scales. ``importance_chart`` instead renders a
-single **dodge-by-model** panel (GH #42, see ``test_compare_dodge.py``).
+Four explanation charts (``shap_beeswarm_chart``, ``shap_waterfall_chart``,
+``shap_chart``, ``pdp_chart``) render **small multiples** when ``compare=``
+is passed: one panel per model, composed as a ``ConcatChart`` with shared
+x/y scales. ``importance_chart`` and ``shap_bar_chart`` (``per_class=False``)
+instead render a single **dodge-by-model** panel (GH #42, see
+``test_compare_dodge.py``); ``shap_bar_chart(per_class=True)`` keeps the
+small-multiples layout (class is a competing facet dimension).
 
 Four model-selection charts (``learning_curve_chart``,
 ``validation_curve_chart``, ``cv_scores_chart``, ``alpha_selection_chart``)
@@ -361,10 +363,22 @@ def test_shap_beeswarm_chart_compare_none_byte_identical():
     assert with_kwarg == without_kwarg
 
 
-def test_shap_bar_chart_compare_renders_small_multiples():
-    """compare= returns a ConcatChart with one panel per model."""
+def test_shap_bar_chart_compare_renders_dodge_by_model():
+    """compare= with per_class=False (default) returns a single dodged Chart,
+    not the pre-#42 small-multiples ConcatChart."""
     X, y, base, alt = _reg_setup()
     result = ferrum.shap_bar_chart(base, X, y, compare={"alt": alt})
+    from ferrum.chart import Chart
+
+    assert isinstance(result, Chart)
+    assert not isinstance(result, ConcatChart)
+    assert "<svg" in result.to_svg()
+
+
+def test_shap_bar_chart_compare_per_class_true_still_small_multiples():
+    """compare= with per_class=True keeps the pre-#42 ConcatChart layout."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.shap_bar_chart(base, X, y, per_class=True, compare={"alt": alt})
     assert isinstance(result, ConcatChart)
     assert len(result.charts) == 2
     assert "<svg" in result.to_svg()

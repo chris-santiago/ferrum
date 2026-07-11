@@ -14,8 +14,8 @@ Internal-only builders
 _importance_bounds_and_domain, _importance_chart_from_source,
 _importance_chart_compare_from_source, _shap_select_class, _shap_order_features,
 _shap_beeswarm_chart_from_source, _shap_bar_chart_from_source,
-_shap_waterfall_chart_from_source, _pdp_center_curves,
-_pdp_split_kind_both, _pdp_chart_from_source.
+_shap_bar_chart_compare_from_source, _shap_waterfall_chart_from_source,
+_pdp_center_curves, _pdp_split_kind_both, _pdp_chart_from_source.
 """
 
 from __future__ import annotations
@@ -449,6 +449,91 @@ def _shap_bar_chart_from_source(
     is_faceted = _should_facet_by_class(agg, per_class=per_class)
     if is_faceted:
         chart = chart.facet(col="class_label")
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
+
+
+def _shap_bar_chart_compare_from_source(
+    source: Any,
+    *,
+    max_display: int = 20,
+    order: str = "abs_mean",
+    background: Any = None,
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+):
+    """Build a dodge-by-model SHAP bar chart from a compare source.
+
+    GH #42 (spec D6): replaces the #35 small-multiples layout with one
+    shared-axis panel whose bars are grouped (dodged) by model. Only reached
+    for ``per_class=False`` -- ``per_class=True`` keeps the small-multiples
+    ``_compose_compare`` path (class is a competing facet dimension).
+
+    Per-model SHAP values (post class-selection, pre-aggregation) are stacked
+    via ``_stack_compare_frames``, then ``_shap_order_features`` ranks
+    features once over the *pooled* per-model values -- the same
+    global-feature-set principle the single-model builder already applies
+    across classes, extended across models (spec D4). Every model shares
+    that top-``max_display`` feature set; each model's ``abs_mean_shap`` is
+    aggregated per feature and drawn as one bar per (feature, model) with
+    ``color="model"`` + ``Dodge(by="model")``.
+
+    SHAP bar's single-model layout is always horizontal (value on x, feature
+    on ordinal y); dodge requires an ordinal-x band axis, so this builder
+    renders the vertical desugar form and re-applies ``CoordFlip`` to
+    restore the horizontal visual (spec D2, mirrors the importance compare
+    builder).
+    """
+    _validate_choice("shap_bar_chart", "order", order, _SHAP_ORDER_VALUES)
+    import ferrum
+    from ferrum.coord import CoordFlip
+    from ferrum.position import Dodge
+
+    model_order = source.model_names
+    combined_sv = _stack_compare_frames(
+        source,
+        lambda ms: _shap_select_class(ms.shap_values(background=background), per_class=False),
+    )
+    keep = _shap_order_features(combined_sv, order=order, max_display=max_display)
+
+    expr = pl.col("shap_value").abs()
+    agg_expr = expr.mean() if order == "abs_mean" else expr.max()
+    agg = (
+        combined_sv.filter(pl.col("feature").is_in(keep))
+        .group_by(["feature", "model"])
+        .agg(agg_expr.alias("abs_mean_shap"))
+    )
+
+    # Order rows (feature-rank, model-registration) so Rust's encounter-order
+    # ordinal domain places features in global-rank order and each band's
+    # sub-bands in registration order (mirrors the importance compare builder).
+    df = (
+        agg.with_columns(
+            pl.col("feature").cast(pl.Enum(keep)).alias("_feat_rank"),
+            pl.col("model").cast(pl.Enum(model_order)).alias("_model_rank"),
+        )
+        .sort(["_feat_rank", "_model_rank"])
+        .drop("_feat_rank", "_model_rank")
+    )
+
+    x_max = float(df["abs_mean_shap"].max())
+    domain = (0.0, x_max * 1.05 if x_max > 0 else 1.0)
+
+    chart = (
+        ferrum.Chart(df)
+        .mark_shap_bar(
+            max_display=None,
+            orient="vertical",
+            color_field="model",
+            position=Dodge(by="model"),
+            x_scale_domain=domain,
+        )
+        .coord(CoordFlip())
+    )
     return _finalize_chart(
         chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
     )
@@ -975,8 +1060,10 @@ def shap_bar_chart(
     Returns
     -------
     Chart or ConcatChart
-        SHAP bar chart (features x mean |SHAP|), or a small-multiples
-        ``ConcatChart`` when ``compare=`` is supplied.
+        SHAP bar chart (features x mean |SHAP|). With ``compare=`` and
+        ``per_class=False`` (default), a single dodge-by-model ``Chart``
+        (one bar per model within each feature band). With ``compare=``
+        and ``per_class=True``, a small-multiples ``ConcatChart``.
 
     Examples
     --------
@@ -986,10 +1073,16 @@ def shap_bar_chart(
 
     Notes
     -----
-    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
-    one panel per model (small multiples, shared x/y scales). Each panel is
-    the single-model SHAP bar chart for that model, labeled with the model
-    name. The single-model path (no ``compare=``) is unchanged.
+    When ``compare=`` is supplied (GH #42) with ``per_class=False``, returns a
+    single :class:`~ferrum.Chart` with one shared feature axis and bars
+    grouped (dodged) by model, plus a model legend. SHAP values are stacked
+    across models before ``_shap_order_features`` ranks the pooled values
+    once, globally; the shared top-``max_display`` feature set is used for
+    every model. With ``per_class=True``, ``compare=`` instead returns a
+    :class:`~ferrum.ConcatChart` with one panel per model (small multiples,
+    shared x/y scales) -- class is a competing facet dimension, so it keeps
+    the pre-#42 layout. The single-model path (no ``compare=``) is
+    unchanged.
     """
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
     builder_kwargs = dict(
@@ -1004,12 +1097,15 @@ def shap_bar_chart(
         theme=theme,
     )
     if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _shap_bar_chart_from_source,
-            builder_kwargs=builder_kwargs,
-            resolve={"x": "shared", "y": "shared"},
-        )
+        if per_class:
+            return _compose_compare(
+                source,
+                _shap_bar_chart_from_source,
+                builder_kwargs=builder_kwargs,
+                resolve={"x": "shared", "y": "shared"},
+            )
+        dodge_kwargs = {k: v for k, v in builder_kwargs.items() if k != "per_class"}
+        return _shap_bar_chart_compare_from_source(source, **dodge_kwargs)
     return _shap_bar_chart_from_source(source, **builder_kwargs)
 
 

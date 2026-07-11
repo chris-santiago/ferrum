@@ -1207,8 +1207,15 @@ with ferrum.theme_context(my_theme):
 > combined frame.
 > `orient="horizontal"` (default) uses the vertical desugar form plus
 > `CoordFlip`; `orient="vertical"` renders the dodged layout directly.
-> `shap_bar_chart` (`per_class=False`) and `cv_scores_chart`
-> (`kind="box"`/`"strip"`) join this layout in follow-up tasks under the
+> `shap_bar_chart` (`per_class=False`) likewise returns one dodged `Chart`:
+> per-model SHAP values are stacked before `_shap_order_features` ranks the
+> pooled values once, globally; the shared top-`max_display` feature set is
+> aggregated per model, and the always-horizontal single-model layout uses
+> the same vertical-desugar-plus-`CoordFlip` idiom (`mark_shap_bar` gained
+> an internal `orient=`/`color_field=` pair mirroring `mark_importance`).
+> `shap_bar_chart(per_class=True)` keeps the 2026-06-27 small-multiples
+> `ConcatChart` (class is a competing facet dimension). `cv_scores_chart`
+> (`kind="box"`/`"strip"`) joins this layout in a follow-up task under the
 > same issue; the remaining explanation / model-selection charts keep the
 > 2026-06-27 small-multiples layout. Single-model output is unchanged.
 

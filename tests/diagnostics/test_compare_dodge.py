@@ -386,3 +386,115 @@ def test_importance_compare_none_byte_identical():
     with_kwarg = ferrum.importance_chart(base, X, y, compare=None).to_svg()
     without_kwarg = ferrum.importance_chart(base, X, y).to_svg()
     assert with_kwarg == without_kwarg
+
+
+# ---------------------------------------------------------------------------
+# shap_bar_chart (per_class=False) — dodge-by-model contract
+# ---------------------------------------------------------------------------
+
+
+def test_shap_bar_compare_returns_single_chart():
+    """compare= (per_class=False, the default) returns a single Chart, not a
+    small-multiples ConcatChart."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.shap_bar_chart(base, X, y, compare={"alt": alt})
+    from ferrum.chart import Chart
+
+    assert isinstance(result, Chart)
+    assert not isinstance(result, ConcatChart)
+    assert "<svg" in result.to_svg()
+
+
+def test_shap_bar_compare_data_is_stacked_by_model():
+    """The combined frame carries a model column with one row per (feature, model)."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.shap_bar_chart(base, X, y, max_display=3, compare={"alt": alt})
+    data = result._data
+    assert set(data.columns) >= {"feature", "abs_mean_shap", "model"}
+    assert set(data["model"].unique().to_list()) == {"base", "alt"}
+    assert data.height == 2 * 3  # n_models * max_display
+
+
+def test_shap_bar_compare_global_max_display_shared_feature_set():
+    """Exactly max_display distinct features, shared by every model (spec D4/§6)."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.shap_bar_chart(base, X, y, max_display=3, compare={"alt": alt})
+    data = result._data
+    features = data["feature"].unique().to_list()
+    assert len(features) == 3
+    for model in ("base", "alt"):
+        model_feats = set(data.filter(pl.col("model") == model)["feature"].to_list())
+        assert model_feats == set(features)
+
+
+def test_shap_bar_compare_declares_color_and_dodge():
+    """color='model' + Dodge(by='model') at the chart level."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.shap_bar_chart(base, X, y, max_display=3, compare={"alt": alt})
+    assert result._position == Dodge(by="model")
+    resolved = result._resolve_pending()
+    bar = next(ly for ly in resolved._layers if ly.name == "bar")
+    assert bar.encoding.get("color") == "model"
+
+
+def test_shap_bar_compare_uses_coordflip():
+    """The always-horizontal shap_bar layout renders via the vertical desugar
+    form + CoordFlip under compare= (spec D2, mirrors importance)."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.shap_bar_chart(base, X, y, max_display=3, compare={"alt": alt})
+    assert isinstance(result._coord, CoordFlip)
+
+
+def test_shap_bar_compare_bars_are_dodged():
+    """One bar per (feature, model) at distinct sub-band positions.
+
+    A non-dodged (overlapping) layout would place both models' bars at the
+    same band center, giving only max_display distinct band positions.
+    """
+    n_models, max_display = 2, 3
+    X, y, base, alt = _reg_setup()
+    svg = ferrum.shap_bar_chart(base, X, y, max_display=max_display, compare={"alt": alt}).to_svg()
+    bars = _bar_geoms(svg)
+    assert len(bars) == n_models * max_display
+
+    ordered = sorted(bars, key=lambda b: b[1] + b[3] / 2)
+    centers = [by + bh / 2 for _, by, _, bh, _ in ordered]
+    assert len({round(c, 1) for c in centers}) == n_models * max_display
+
+    bands = [ordered[i : i + n_models] for i in range(0, len(ordered), n_models)]
+    for band in bands:
+        fills = {fill for *_, fill in band}
+        assert len(fills) == n_models, "each feature band must show one bar per model"
+
+
+def test_shap_bar_compare_has_model_legend():
+    """A model legend labels each dodged group by its registration name."""
+    X, y, base, alt = _reg_setup()
+    svg = ferrum.shap_bar_chart(base, X, y, max_display=3, compare={"alt": alt}).to_svg()
+    texts = {t.strip() for _, t in _text_labels(svg)}
+    assert "base" in texts
+    assert "alt" in texts
+
+
+def test_shap_bar_compare_deterministic():
+    """Repeated compare renders are byte-identical (registration + global rank)."""
+    X, y, base, alt = _reg_setup()
+    svgs = {ferrum.shap_bar_chart(base, X, y, compare={"alt": alt}).to_svg() for _ in range(3)}
+    assert len(svgs) == 1
+
+
+def test_shap_bar_compare_none_byte_identical():
+    """compare=None stays byte-identical to the no-compare single-model path."""
+    X, y, base, _ = _reg_setup()
+    with_kwarg = ferrum.shap_bar_chart(base, X, y, compare=None).to_svg()
+    without_kwarg = ferrum.shap_bar_chart(base, X, y).to_svg()
+    assert with_kwarg == without_kwarg
+
+
+def test_shap_bar_compare_per_class_true_keeps_small_multiples():
+    """per_class=True still returns the pre-#42 small-multiples ConcatChart,
+    even under compare= (competing class-facet dimension, spec D6)."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.shap_bar_chart(base, X, y, per_class=True, compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
