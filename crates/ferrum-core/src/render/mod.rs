@@ -25,7 +25,6 @@ pub(crate) mod composite;
 pub(crate) mod composite_render;
 pub(crate) mod scene_build;
 pub(crate) mod svg_walk;
-pub(crate) mod secondary_axis;
 pub(crate) mod break_axis;
 pub(crate) mod inset;
 
@@ -1155,33 +1154,6 @@ fn prepare_and_layout(
     }
     // ChartConfig overrides (configure > theme).
     apply_chart_config(&mut effective_theme, chart_config);
-
-    // Reserve right-side padding for secondary Y axis labels when present.
-    // This block runs for both SVG and scene-JSON paths to ensure layout
-    // accounts for the secondary-axis labels in interactive renders.
-    for structural in &chart_config.structural {
-        if let chart_config::StructuralSpec::SecondaryY(y2_spec) = structural {
-            use crate::layout::TextMetrics;
-            let m = font::FontdueMetrics::new();
-            let y2_label_width = if let Ok(vals) = crate::render::arrow_cast::col_as_f64(prep.final_batch(), &y2_spec.field) {
-                let finite: Vec<f64> = vals.into_iter().filter_map(|v| v.filter(|f| f.is_finite())).collect();
-                if let (Some(&lo), Some(&hi)) = (finite.iter().min_by(|a,b| a.partial_cmp(b).unwrap()), finite.iter().max_by(|a,b| a.partial_cmp(b).unwrap())) {
-                    let step = (hi - lo) / 5.0;
-                    (0..=5).map(|i| {
-                        let v = lo + step * i as f64;
-                        let label = crate::render::format::format_numeric(v);
-                        m.measure_width(&label, effective_theme.typography.label_font_size)
-                    }).fold(0.0_f64, f64::max)
-                } else { 30.0 }
-            } else { 30.0 };
-            let needed = y2_label_width + effective_theme.sizes.tick_size + 8.0;
-            let current = effective_theme.padding.padding_right.unwrap_or(effective_theme.padding.padding);
-            if current < needed {
-                effective_theme.padding.padding_right = Some(needed);
-            }
-            break;
-        }
-    }
 
     // D13 + v0.15.1: legend title override (replaces the default field-name title when Some).
     //

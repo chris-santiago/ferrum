@@ -16,7 +16,7 @@ use super::marks;
 use super::prepare::PreparedInputs;
 use super::scale_resolve::LeafScaleContext;
 use super::{
-    break_axis, inset, secondary_axis,
+    break_axis, inset,
     filter_batch_by_facet, position, scale_resolve, RenderError, RenderWarning, CLIP_ID_PREFIX,
 };
 
@@ -308,17 +308,15 @@ pub fn build_scene(
             }
         };
 
-        // Structural features: secondary Y axis, axis breaks, insets.
+        // Structural features: axis breaks, insets.
         // Only applied to the first panel (non-faceted charts).
         let (structural_axes, structural_marks, structural_annotations, break_results) =
             if panel_idx == 0 && !chart_config.structural.is_empty() {
                 build_structural_nodes(
                     &chart_config.structural,
-                    &panel_batch,
                     &scales,
                     &panel.plot_area,
                     theme,
-                    &rendering_spec_for_panel,
                 )
             } else {
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new())
@@ -1590,11 +1588,11 @@ fn build_polar_axes(
 
 // ── Structural feature processing ────────────────────────────────────────────
 
-/// Process structural feature specs (secondary Y axis, axis breaks, insets).
+/// Process structural feature specs (axis breaks, insets).
 ///
 /// Returns four values:
 /// - `extra_axes` — additional axis scene nodes
-/// - `extra_mark_batches` — additional mark batches (e.g. secondary Y marks)
+/// - `extra_mark_batches` — additional mark batches
 /// - `extra_annotations` — additional annotation nodes (break indicators, insets)
 /// - `break_results` — `(axis, BreakResult)` pairs for each BreakAxis spec, used
 ///   by the caller to remap primary mark pixel coordinates through the broken scale
@@ -1607,68 +1605,17 @@ type StructuralOutput = (
 
 fn build_structural_nodes(
     structural: &[StructuralSpec],
-    batch: &RecordBatch,
     scales: &scale_resolve::ResolvedScales,
     plot_area: &crate::layout::Rect,
     theme: &crate::layout::ThemeInputs,
-    spec: &crate::spec::chart::ChartSpec,
 ) -> StructuralOutput {
-    let mut extra_axes: Vec<SceneNode> = Vec::new();
-    let mut extra_mark_batches: Vec<ferrum_scene::MarkBatch> = Vec::new();
+    let extra_axes: Vec<SceneNode> = Vec::new();
+    let extra_mark_batches: Vec<ferrum_scene::MarkBatch> = Vec::new();
     let mut extra_annotations: Vec<SceneNode> = Vec::new();
     let mut break_results: Vec<(String, break_axis::BreakResult)> = Vec::new();
 
     for item in structural {
         match item {
-            StructuralSpec::SecondaryY(spec_y2) => {
-                // Resolve secondary Y scale from the named field.
-                let y_pixel_range = (plot_area.y, plot_area.y + plot_area.h);
-                let y2_scale = match secondary_axis::resolve_secondary_y_scale(
-                    &spec_y2.field,
-                    batch,
-                    y_pixel_range,
-                ) {
-                    Ok(s) => s,
-                    Err(_) => continue, // missing column — skip silently
-                };
-
-                // Build right-side axis nodes.
-                let axis_nodes =
-                    secondary_axis::build_secondary_axis(&y2_scale, plot_area, theme, spec_y2);
-                extra_axes.extend(axis_nodes);
-
-                // Build secondary marks if there's an x encoding field.
-                if let Some(x_enc) = spec.encoding.x.as_ref() {
-                    let mark_nodes = secondary_axis::build_secondary_marks(
-                        batch,
-                        &x_enc.field,
-                        &scales.x,
-                        &y2_scale,
-                        spec_y2,
-                        plot_area,
-                    );
-                    if !mark_nodes.is_empty() {
-                        extra_mark_batches.push(ferrum_scene::MarkBatch {
-                            kind: ferrum_scene::MarkBatchKind::Line,
-                            nodes: mark_nodes,
-                            data_indices: None,
-                            tooltips: None,
-                            hrefs: None,
-                            descriptions: None,
-                            keys: None,
-                            blend: ferrum_scene::BlendMode::Normal,
-                            stroke_cap: None,
-                            stroke_join: None,
-                            packed_instances: None,
-                            // Legacy `StructuralSpec::SecondaryY` (deleted in
-                            // Task 7) predates the #52 slot mechanism and
-                            // always draws through the primary scale.
-                            y_slot: 0,
-                        });
-                    }
-                }
-            }
-
             StructuralSpec::BreakAxis(spec_brk) => {
                 // Build break indicators and add them to annotations.
                 let pixel_range = if spec_brk.axis == "y" {
