@@ -84,6 +84,11 @@ pub fn to_scene_coord(coord: &CoordKind, outer_radius_px: f64) -> ferrum_scene::
                 y_domain: *y_domain,
                 expand: *expand,
                 clip: *clip,
+                // Per-slot y-domains (secondary-y-axis, GH #52 Task 8) are
+                // injected downstream in `scene_build.rs`, which has access to
+                // the per-panel resolved scales this spec-level conversion
+                // does not see.
+                y_domains: Vec::new(),
             }
         }
         CoordKind::Flip => ferrum_scene::CoordKind::Cartesian {
@@ -91,6 +96,7 @@ pub fn to_scene_coord(coord: &CoordKind, outer_radius_px: f64) -> ferrum_scene::
             y_domain: None,
             expand: true,
             clip: true,
+            y_domains: Vec::new(),
         },
         CoordKind::Fixed { ratio, x_domain, y_domain, expand, clip } => {
             ferrum_scene::CoordKind::Fixed {

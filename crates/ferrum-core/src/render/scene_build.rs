@@ -245,15 +245,16 @@ pub fn build_scene(
                 y_domain: None,
                 expand: true,
                 clip: true,
+                y_domains: Vec::new(),
             });
 
         // Inject computed axis domains into the scene coord so the JS zoom handler
         // can read the actual displayed domain even for auto-scaled charts.
         let scene_coord = match scene_coord {
-            CoordKind::Cartesian { x_domain: None, y_domain: None, expand, clip } => {
+            CoordKind::Cartesian { x_domain: None, y_domain: None, expand, clip, y_domains } => {
                 let x_dom = scales.x.data_domain();
                 let y_dom = scales.y.data_domain();
-                CoordKind::Cartesian { x_domain: x_dom, y_domain: y_dom, expand, clip }
+                CoordKind::Cartesian { x_domain: x_dom, y_domain: y_dom, expand, clip, y_domains }
             }
             CoordKind::Fixed { x_domain: None, y_domain: None, ratio, expand, clip } => {
                 let x_dom = scales.x.data_domain();
@@ -261,6 +262,31 @@ pub fn build_scene(
                 CoordKind::Fixed { x_domain: x_dom, y_domain: y_dom, ratio, expand, clip }
             }
             other => other,
+        };
+
+        // Per-slot y-domains (secondary-y-axis, GH #52 Task 8): one domain per
+        // slot, index = slot (slot 0 mirrors the primary `y_domain` injected
+        // above). Applied as a distinct pass, after domain injection, so it
+        // covers every Cartesian branch above (auto-scaled AND an explicit
+        // `coord=` domain) uniformly. Populated only when this panel resolved
+        // an `independent_y` layer; every other panel's `y_domains` stays
+        // empty — the byte-stable default — so this pass is a no-op for every
+        // existing chart. The interactive runtime (Task 9) reads slot `k`'s
+        // domain to relabel/rescale that layer's own axis independently of the
+        // panel-level zoom/pan affine (spec §6, §8.5).
+        let scene_coord = if scales.y_slots.has_independent() {
+            match scene_coord {
+                CoordKind::Cartesian { x_domain, y_domain, expand, clip, .. } => {
+                    let y_domains = scales.y_slots.slots()
+                        .iter()
+                        .map(|s| s.data_domain())
+                        .collect();
+                    CoordKind::Cartesian { x_domain, y_domain, expand, clip, y_domains }
+                }
+                other => other,
+            }
+        } else {
+            scene_coord
         };
 
         // Annotations: render user-specified annotations on the first panel only.
@@ -835,6 +861,30 @@ fn route_panel_axes_and_grid(
             below.extend(nodes);
         }
     };
+    // Dual-axis scene contract (secondary-y-axis, GH #52 Task 8): when this
+    // panel has one or more independent-y layers, every y-axis's nodes (the
+    // primary left axis AND each stacked right axis) are wrapped in a
+    // `SceneNode::Group` tagged with that axis's slot index (`y_slot` attr,
+    // slot 0 = primary). This mirrors `MarkBatch::y_slot` and
+    // `CoordKind::Cartesian::y_domains` — mesh, axis, and domain state all key
+    // off the same slot number (spec §6) — so the interactive runtime can
+    // relabel/rescale each axis from its own scale. Empty `panel_secondary_y`
+    // (every existing chart) skips this wrapping entirely: y-axis nodes route
+    // through the untagged `route_axis` exactly as before, byte-identical.
+    let dual_axis = !panel_secondary_y.is_empty();
+    let route_y_axis_slotted =
+        |axis: &AxisLayout, slot: usize, above: &mut Vec<SceneNode>, below: &mut Vec<SceneNode>| {
+            let nodes = marks::axis::build_axis(axis, theme);
+            let tagged = vec![SceneNode::Group {
+                attrs: vec![("y_slot".to_string(), slot.to_string())],
+                children: nodes,
+            }];
+            if axis.draws_above_marks() {
+                above.extend(tagged);
+            } else {
+                below.extend(tagged);
+            }
+        };
     if !suppress_axes {
         if x_independent || y_independent {
             // Emit the effective x and y axes (may be independent).
@@ -842,7 +892,11 @@ fn route_panel_axes_and_grid(
                 route_axis(ax, &mut axes_above, &mut axes_below);
             }
             if let Some(ay) = panel_y_axis {
-                route_axis(ay, &mut axes_above, &mut axes_below);
+                if dual_axis {
+                    route_y_axis_slotted(ay, 0, &mut axes_above, &mut axes_below);
+                } else {
+                    route_axis(ay, &mut axes_above, &mut axes_below);
+                }
             }
             // Also emit any other orientations (Top, Right) from the global
             // layout that are not covered by the independent overrides.
@@ -856,14 +910,20 @@ fn route_panel_axes_and_grid(
             }
         } else {
             for axis in panel_axes_layout {
-                route_axis(axis, &mut axes_above, &mut axes_below);
+                if dual_axis && matches!(axis.orient, crate::layout::AxisOrient::Left) {
+                    // The primary y-axis (slot 0) in the shared/global layout.
+                    route_y_axis_slotted(axis, 0, &mut axes_above, &mut axes_below);
+                } else {
+                    route_axis(axis, &mut axes_above, &mut axes_below);
+                }
             }
         }
         // Secondary y-axes (secondary-y-axis, GH #52): emitted after the
         // primary x/y so they draw outward of (never occlude) the primary
-        // axis. Same above/below zindex routing as every other axis.
-        for axis in panel_secondary_y {
-            route_axis(axis, &mut axes_above, &mut axes_below);
+        // axis. Same above/below zindex routing as every other axis; each one
+        // is slot `i + 1` (slot 0 is always the primary, above).
+        for (i, axis) in panel_secondary_y.iter().enumerate() {
+            route_y_axis_slotted(axis, i + 1, &mut axes_above, &mut axes_below);
         }
     }
 
@@ -995,6 +1055,10 @@ fn build_panel_mark_batches(
             stroke_cap: mark_style.line.stroke_cap.as_deref().and_then(draw::parse_stroke_cap),
             stroke_join: mark_style.line.stroke_join.as_deref().and_then(draw::parse_stroke_join),
             packed_instances: None,
+            // Secondary-y-axis (GH #52 Task 8): tag this batch with the same
+            // slot its marks were positioned through above. `0` on every
+            // shared-path layer (the byte-stable default, omitted from JSON).
+            y_slot: scales.y_slots.slot_for_layer(li),
         });
     }
 
@@ -1596,6 +1660,10 @@ fn build_structural_nodes(
                             stroke_cap: None,
                             stroke_join: None,
                             packed_instances: None,
+                            // Legacy `StructuralSpec::SecondaryY` (deleted in
+                            // Task 7) predates the #52 slot mechanism and
+                            // always draws through the primary scale.
+                            y_slot: 0,
                         });
                     }
                 }
@@ -2679,5 +2747,125 @@ mod tests {
 
         // The secondary axis's title text renders into the SVG.
         assert!(dual.bytes.contains(">y1<"), "secondary axis title must appear in the SVG");
+    }
+
+    // ── #52 Task 8: scene contract — per-slot domains ────────────────────────
+
+    /// Run the full `prepare → layout → build_scene` pipeline for
+    /// `two_layer_dual_y_spec(layer1_independent)` and return the resulting
+    /// `SceneGraph`, so tests can inspect the JSON-serializable scene contract
+    /// directly (not just the SVG bytes `render_svg` exposes). Mirrors the
+    /// recipe `scene_graph_path_matches_old_path_scatter` (render/mod.rs) uses
+    /// to build a scene outside the `render_svg` entry point.
+    fn build_dual_y_scene(layer1_independent: bool) -> ferrum_scene::SceneGraph {
+        let (spec, batch) = two_layer_dual_y_spec(layer1_independent);
+        let theme = ThemeInputs::default();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let config = super::super::config::RenderConfig::default();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+
+        let prep = super::super::prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
+        let mut warnings = prep.warnings.clone();
+        let metrics = super::super::font::FontdueMetrics::new();
+        let layout = crate::layout::compute_layout(
+            &spec, &theme, viewport,
+            &prep.axes, &prep.facet_groups, &prep.legend_entries,
+            prep.legend_title.clone(), prep.colorbar.as_ref(), &metrics,
+            &crate::layout::legend::LegendOverrides::default(), &prep.aux_legends,
+        ).unwrap();
+
+        build_scene(&spec, &prep, &layout, &theme, &config, &mut warnings, &chart_config, None).unwrap()
+    }
+
+    /// Find every `("y_slot", value)` attr pair carried by `SceneNode::Group`
+    /// wrappers anywhere in `nodes` (axis nodes are wrapped one group per
+    /// y-axis — see `route_y_axis_slotted`).
+    fn collect_y_slot_group_tags(nodes: &[SceneNode]) -> Vec<String> {
+        nodes.iter().filter_map(|n| {
+            if let SceneNode::Group { attrs, .. } = n {
+                attrs.iter().find(|(k, _)| k == "y_slot").map(|(_, v)| v.clone())
+            } else {
+                None
+            }
+        }).collect()
+    }
+
+    /// The dual-axis panel's coordinate state carries an ordered y-domain list
+    /// (index = slot): slot 0 mirrors the primary (small y0) domain, slot 1
+    /// carries the independent layer's own (large y1) domain — spec §6
+    /// "Scene/WASM contract".
+    #[test]
+    fn scene_coord_dual_axis_carries_ordered_y_domains_per_slot() {
+        let scene = build_dual_y_scene(true);
+        let panel = &scene.panels[0];
+        match &panel.coord {
+            ferrum_scene::CoordKind::Cartesian { y_domain, y_domains, .. } => {
+                assert_eq!(y_domains.len(), 2, "one y-domain per slot (primary + one independent)");
+                let (slot0_lo, slot0_hi) = y_domains[0].expect("slot 0 domain must be Some");
+                let (slot1_lo, slot1_hi) = y_domains[1].expect("slot 1 domain must be Some");
+                assert!(slot0_hi < 50.0, "slot 0 must be the small y0 domain, got {slot0_lo}..{slot0_hi}");
+                assert!(slot1_lo > 50.0, "slot 1 must be the large y1 domain, got {slot1_lo}..{slot1_hi}");
+                // Slot 0 mirrors the panel's primary `y_domain` exactly.
+                assert_eq!(Some((slot0_lo, slot0_hi)), *y_domain);
+            }
+            other => panic!("expected Cartesian coord, got {other:?}"),
+        }
+    }
+
+    /// Shared-path back-compat (spec §7 byte-stability, brief Task 8): a chart
+    /// with no `independent_y` layer must carry an empty `y_domains` list —
+    /// omitted from JSON (`skip_serializing_if`) — and the serialized scene
+    /// must not contain the new `y_domains`/`y_slot` keys anywhere, proving
+    /// the addition is a true no-op for every pre-#52 chart.
+    #[test]
+    fn scene_coord_shared_path_leaves_y_domains_empty_and_byte_identical() {
+        let scene = build_dual_y_scene(false);
+        let panel = &scene.panels[0];
+        match &panel.coord {
+            ferrum_scene::CoordKind::Cartesian { y_domains, .. } => {
+                assert!(y_domains.is_empty(), "shared path must leave the per-slot y-domain list empty");
+            }
+            other => panic!("expected Cartesian coord, got {other:?}"),
+        }
+        for batch in &panel.marks {
+            assert_eq!(batch.y_slot, 0, "every mark batch binds slot 0 on the shared path");
+        }
+        assert!(
+            collect_y_slot_group_tags(&panel.axes).is_empty(),
+            "no axis Group should carry a y_slot tag on the shared path"
+        );
+
+        let json = serde_json::to_string(&scene).expect("serialize shared-path scene");
+        assert!(!json.contains("y_domains"), "shared-path scene JSON must omit y_domains: {json}");
+        assert!(!json.contains("y_slot"), "shared-path scene JSON must omit y_slot: {json}");
+    }
+
+    /// Dual-axis mark meshes carry the slot index their layer's marks were
+    /// positioned through: layer 0 (shared/primary) is batch 0 → slot 0; the
+    /// independent layer 1 is batch 1 → slot 1.
+    #[test]
+    fn mark_batches_carry_their_layers_y_slot() {
+        let scene = build_dual_y_scene(true);
+        let panel = &scene.panels[0];
+        assert_eq!(panel.marks.len(), 2, "one mark batch per layer");
+        assert_eq!(panel.marks[0].y_slot, 0, "layer 0 (primary) binds slot 0");
+        assert_eq!(panel.marks[1].y_slot, 1, "layer 1 (independent) binds slot 1");
+    }
+
+    /// Dual-axis y-axis scene nodes are tagged with their slot index: the
+    /// primary (left) axis is wrapped with `y_slot="0"`, the secondary (right)
+    /// axis with `y_slot="1"` — so the interactive runtime can relabel/rescale
+    /// each axis from its own scale (spec §6).
+    #[test]
+    fn y_axis_scene_nodes_tagged_with_slot_index() {
+        let scene = build_dual_y_scene(true);
+        let panel = &scene.panels[0];
+        let tags = collect_y_slot_group_tags(&panel.axes);
+        let mut sorted_tags = tags.clone();
+        sorted_tags.sort();
+        assert_eq!(
+            sorted_tags, vec!["0".to_string(), "1".to_string()],
+            "expected exactly one y_slot=0 (primary) and one y_slot=1 (secondary) axis group, got {tags:?}"
+        );
     }
 }

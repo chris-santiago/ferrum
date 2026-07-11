@@ -679,18 +679,18 @@ impl YScaleSlots {
     ///
     /// Read by axis emission (Task 3, iterates slots → left axis for slot 0,
     /// stacked right axes for slots 1..n) and the interactive coordinate state
-    /// (Task 8, emits one y-domain per slot). Not yet consumed in the Task 2
+    /// (Task 8, `scene_build.rs` emits one y-domain per slot into
+    /// `CoordKind::Cartesian::y_domains`). Not consumed by the Task 2
     /// resolution/binding path, which routes through [`ResolvedScales::y_for_layer`].
-    #[allow(dead_code)]
     pub fn slots(&self) -> &[ScaleKind] {
         &self.slots
     }
 
     /// Whether any independent y-slot exists beyond the primary.
     ///
-    /// Read by axis-band layout (Task 3) to decide whether a right axis band must
-    /// be reserved. Not yet consumed in the Task 2 resolution/binding path.
-    #[allow(dead_code)]
+    /// Read by axis-band layout (Task 3) and the per-slot scene-coord pass
+    /// (Task 8) to decide whether there is dual-axis state to emit. Not
+    /// consumed by the Task 2 resolution/binding path.
     pub fn has_independent(&self) -> bool {
         self.slots.len() > 1
     }

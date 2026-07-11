@@ -116,7 +116,18 @@ pub struct MarkBatch {
     /// Format: raw `CircleInstance` or `RectInstance` bytes (Pod-cast-safe).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub packed_instances: Option<String>,
+    /// Y-scale slot this batch's marks map through (secondary-y-axis, GH #52
+    /// Task 8). `0` = the primary/left-axis scale — the byte-stable default,
+    /// omitted from JSON so every existing batch is untouched. A layer resolved
+    /// against an `independent_y` slot carries that slot's index (`k` = k-th
+    /// independent layer, matching [`crate::CoordKind::Cartesian`]'s
+    /// `y_domains` list) so the interactive runtime can compose that layer's
+    /// own per-slot rescale affine with the panel zoom/pan affine.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub y_slot: usize,
 }
+
+fn is_zero_usize(v: &usize) -> bool { *v == 0 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -411,6 +422,16 @@ pub enum CoordKind {
         y_domain: Option<(f64, f64)>,
         expand: bool,
         clip: bool,
+        /// Per-slot y-domain list (secondary-y-axis, GH #52 Task 8), index =
+        /// slot (slot 0 mirrors `y_domain` — the primary/left axis). Empty on
+        /// every chart with no independent-y layer — the byte-stable default,
+        /// omitted from JSON so existing scenes are untouched. Populated only
+        /// when the panel resolves one or more `independent_y` layers, so the
+        /// interactive runtime can read each slot's own domain for per-slot
+        /// rescale, zoom relabeling, and tooltip readout without recomputing
+        /// scale resolution client-side (design spec §6 "Scene/WASM contract").
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        y_domains: Vec<Option<(f64, f64)>>,
     },
     Fixed {
         ratio: f64,

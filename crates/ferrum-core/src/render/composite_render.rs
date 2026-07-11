@@ -1352,7 +1352,10 @@ mod tests {
             id: 0,
             plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
             clip: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
-            coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: false, clip: false },
+            coord: CoordKind::Cartesian {
+                x_domain: None, y_domain: None, expand: false, clip: false,
+                y_domains: Vec::new(),
+            },
             grid: Vec::new(),
             marks: Vec::new(),
             axes: Vec::new(),

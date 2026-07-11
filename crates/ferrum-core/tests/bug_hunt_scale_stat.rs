@@ -45,6 +45,7 @@ fn make_panel(marks: Vec<MarkBatch>) -> Panel {
             y_domain: Some((0.0, 10.0)),
             expand: true,
             clip: true,
+            y_domains: Vec::new(),
         },
         grid: vec![],
         marks,
@@ -239,6 +240,7 @@ fn rect_negative_height_round_trips() {
 fn cartesian_no_domains_round_trips() {
     let coord = CoordKind::Cartesian {
         x_domain: None, y_domain: None, expand: true, clip: true,
+        y_domains: Vec::new(),
     };
     let json = serde_json::to_string(&coord).expect("serialize no-domain Cartesian");
     let back: CoordKind = serde_json::from_str(&json).expect("deserialize");
@@ -257,6 +259,7 @@ fn cartesian_inverted_domain_round_trips() {
         x_domain: Some((10.0, 0.0)),
         y_domain: Some((100.0, -100.0)),
         expand: false, clip: false,
+        y_domains: Vec::new(),
     };
     let json = serde_json::to_string(&coord).expect("serialize inverted domain");
     let back: CoordKind = serde_json::from_str(&json).expect("deserialize");
@@ -478,6 +481,7 @@ fn panel_with_strip_title_round_trips() {
             x_domain: Some((0.0, 10.0)),
             y_domain: Some((0.0, 10.0)),
             expand: true, clip: true,
+            y_domains: Vec::new(),
         },
         grid: vec![], marks: vec![], axes: vec![],
         annotations: vec![], strip_title: vec![strip],
@@ -499,6 +503,7 @@ fn panel_one_pixel_plot_area_round_trips() {
             x_domain: Some((0.0, 1e6)),
             y_domain: Some((0.0, 1e6)),
             expand: false, clip: true,
+            y_domains: Vec::new(),
         },
         grid: vec![],
         marks: vec![MarkBatch {
@@ -511,6 +516,7 @@ fn panel_one_pixel_plot_area_round_trips() {
             blend: BlendMode::Normal,
             stroke_cap: None, stroke_join: None,
             packed_instances: None,
+            y_slot: 0,
         }],
         axes: vec![], annotations: vec![], strip_title: vec![],
         layout_scale: LayoutScale::identity(),
@@ -536,6 +542,7 @@ fn mark_batch_tooltips_without_nodes_round_trips() {
         blend: BlendMode::Normal,
         stroke_cap: None, stroke_join: None,
         packed_instances: None,
+        y_slot: 0,
     };
     let json = serde_json::to_string(&batch).expect("serialize tooltips-without-nodes");
     let back: MarkBatch = serde_json::from_str(&json).expect("deserialize");
@@ -676,6 +683,7 @@ fn cartesian_degenerate_domain_round_trips() {
         x_domain: Some((5.0, 5.0)),
         y_domain: Some((0.0, 0.0)),
         expand: true, clip: true,
+        y_domains: Vec::new(),
     };
     let json = serde_json::to_string(&coord).expect("serialize");
     let back: CoordKind = serde_json::from_str(&json).expect("deserialize");
@@ -765,6 +773,7 @@ fn mark_batch_empty_nodes_round_trips() {
         blend: BlendMode::Normal,
         stroke_cap: None, stroke_join: None,
         packed_instances: None,
+        y_slot: 0,
     };
     let json = serde_json::to_string(&batch).expect("serialize empty batch");
     let back: MarkBatch = serde_json::from_str(&json).expect("deserialize");

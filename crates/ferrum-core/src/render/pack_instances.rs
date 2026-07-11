@@ -508,7 +508,10 @@ mod tests {
                 id: 0,
                 plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 400.0 },
                 clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 400.0 },
-                coord: CoordKind::Cartesian { x_domain: None, y_domain: None, expand: true, clip: true },
+                coord: CoordKind::Cartesian {
+                    x_domain: None, y_domain: None, expand: true, clip: true,
+                    y_domains: Vec::new(),
+                },
                 grid: vec![],
                 marks: vec![MarkBatch {
                     kind, nodes,
@@ -516,6 +519,7 @@ mod tests {
                     descriptions: None, keys: None,
                     blend: BlendMode::Normal, stroke_cap: None, stroke_join: None,
                     packed_instances: None,
+                    y_slot: 0,
                 }],
                 axes: vec![], annotations: vec![], strip_title: vec![],
                 layout_scale: LayoutScale::identity(),
