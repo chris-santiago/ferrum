@@ -430,3 +430,22 @@ class TestSecondaryYDesugar:
         base = fm.Chart(df).mark_point().encode(x="x", y="y")
         with pytest.raises(ValueError, match=r"'reevnue'.*not a column"):
             base + SecondaryY("reevnue")
+
+    def test_secondary_y_pyarrow_table_valid_field_accepted(self):
+        """`Chart._data` is stored raw, and pyarrow's ``.columns`` yields
+        column OBJECTS, not names — the field guard must be type-aware, so a
+        VALID field on a pyarrow ``Table`` base must not be rejected."""
+        import pyarrow as pa
+
+        table = pa.table({"x": [1, 2, 3], "y": [1, 2, 3], "rev": [10, 20, 30]})
+        base = fm.Chart(table).mark_bar().encode(x="x", y="y")
+        layered = base + SecondaryY("rev")  # must not raise
+        assert layered._layers[-1].independent_y
+
+    def test_secondary_y_pyarrow_table_unknown_field_raises(self):
+        import pyarrow as pa
+
+        table = pa.table({"x": [1, 2, 3], "y": [1, 2, 3]})
+        base = fm.Chart(table).mark_bar().encode(x="x", y="y")
+        with pytest.raises(ValueError, match=r"'rev'.*not a column"):
+            base + SecondaryY("rev")

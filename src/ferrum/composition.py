@@ -2609,11 +2609,12 @@ class LayerChart(_ChartLike):
     null-padded diagonal concat for heterogeneous data, named-transform
     routing for per-layer transforms.
 
-    Render routing (one predicate, three routes): ``_y_independent()``
-    selects the path.  (1) static shared/default y → the Phase B overlay
-    composite tree (:meth:`_composite_tree`); (2) static independent y →
-    the merged flat single-panel chart (:meth:`_build_merged` →
-    ``to_svg``); (3) interactive (either resolve) → the merged flat chart
+    Render routing (three routes): the ``_y_independent()`` predicate
+    selects the static path — (1) static shared/default y → the Phase B
+    overlay composite tree (:meth:`_composite_tree`); (2) static
+    independent y → the merged flat single-panel chart
+    (:meth:`_build_merged` → ``to_svg``) — while (3) the interactive
+    entry point ALWAYS uses the merged flat chart regardless of resolve
     (:meth:`_render_interactive_merged`) because selections/hit-testing
     require overlays to be ONE scene panel.  Nested lowering follows the
     same predicate in ``_lower_any``.

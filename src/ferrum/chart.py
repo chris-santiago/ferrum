@@ -168,6 +168,42 @@ def _rename_encoding_fields(encoding: dict, renames: dict[str, str]) -> dict:
     return out
 
 
+def _column_names_for_validation(data) -> "Optional[list]":
+    """Return *data*'s column names for a cheap boundary check, or ``None``.
+
+    ``Chart._data`` is stored raw (polars/pandas frame, pyarrow
+    ``Table``/``RecordBatch``, dict-of-arrays, list-of-records, ndarray), so
+    name extraction must be type-aware: pyarrow's ``.columns`` yields column
+    OBJECTS, not names. Returns ``None`` for inputs without a cheap name
+    listing — callers should then skip validation rather than materialize
+    an Arrow table just to check a name.
+    """
+    if data is None:
+        return None
+    try:
+        import pyarrow as pa
+
+        if isinstance(data, pa.Table):
+            return list(data.column_names)
+        if isinstance(data, pa.RecordBatch):
+            return list(data.schema.names)
+    except ImportError:
+        pass
+    try:
+        import polars as pl
+
+        if isinstance(data, pl.DataFrame):
+            return list(data.columns)
+        if isinstance(data, pl.LazyFrame):
+            return list(data.collect_schema().names())
+    except ImportError:
+        pass
+    columns = getattr(data, "columns", None)
+    if columns is not None and all(isinstance(c, str) for c in columns):
+        return list(columns)
+    return None
+
+
 def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
     """Desugar ``chart + SecondaryY(...)`` into an appended independent-y layer (GH #52).
 
@@ -200,15 +236,18 @@ def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
     # SecondaryY reads its field from the base chart's own table (no data
     # merge happens in this desugar), so validate it here with the same
     # boundary-error courtesy as the x-encoding check above instead of
-    # letting a typo surface as a downstream Rust column error.
-    if new._data is not None:
-        columns = getattr(new._data, "columns", None)
-        if columns is not None and feature.field not in columns:
-            raise ValueError(
-                f"SecondaryY: field {feature.field!r} is not a column of the "
-                "base chart's data (SecondaryY draws from the same table as "
-                f"the base chart); available columns: {list(columns)}"
-            )
+    # letting a typo surface as a downstream Rust column error. Column
+    # names are extracted type-aware (pyarrow's `.columns` is column
+    # OBJECTS, not names — see the isinstance dispatch used for temporal
+    # inference above); inputs without a cheap name listing (dict-of-arrays,
+    # list-of-records, ndarray) skip the check and keep render-time errors.
+    column_names = _column_names_for_validation(new._data)
+    if column_names is not None and feature.field not in column_names:
+        raise ValueError(
+            f"SecondaryY: field {feature.field!r} is not a column of the "
+            "base chart's data (SecondaryY draws from the same table as "
+            f"the base chart); available columns: {list(column_names)}"
+        )
 
     y_kwargs: dict = {}
     if feature.axis is not None:
