@@ -1371,6 +1371,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
+            independent_y: false,
         };
         ChartSpec {
             encoding: chart_enc,

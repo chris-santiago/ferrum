@@ -861,8 +861,8 @@ mod tests {
         use crate::spec::layer::Layer;
         let mut spec = minimal_scatter();
         spec.layers = Some(vec![
-            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None, blend: None, name: None },
-            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None, blend: None, name: None },
+            Layer { mark: Mark::Point, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None, blend: None, name: None, independent_y: false },
+            Layer { mark: Mark::Line, encoding: Encoding::default(), transforms: Vec::new(), mark_style: None, data_source: None, position: None, blend: None, name: None, independent_y: false },
         ]);
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains(r#""layers":["#));
@@ -999,5 +999,78 @@ mod tests {
         assert!(json.contains(r##""mark_style":{"size":100.0,"stroke":"#ff0000""##));
         let parsed: ChartSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, spec);
+    }
+
+    // -- coerce_layers: independent_y wire flag (GH #52 Task 1) -------------
+
+    #[test]
+    fn coerce_layers_independent_y_absent_defaults_false() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            use pyo3::types::{PyDict, PyList};
+            let layer_dict = PyDict::new(py);
+            layer_dict.set_item("mark", "point").unwrap();
+            let list = PyList::new(py, [layer_dict]).unwrap();
+
+            let layers = coerce_layers(list.as_any()).unwrap();
+            assert_eq!(layers.len(), 1);
+            assert!(!layers[0].independent_y, "absent key must default to false");
+        });
+    }
+
+    #[test]
+    fn coerce_layers_independent_y_true_from_py_dict() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            use pyo3::types::{PyDict, PyList};
+            let layer_dict = PyDict::new(py);
+            layer_dict.set_item("mark", "line").unwrap();
+            layer_dict.set_item("independent_y", true).unwrap();
+            let list = PyList::new(py, [layer_dict]).unwrap();
+
+            let layers = coerce_layers(list.as_any()).unwrap();
+            assert_eq!(layers.len(), 1);
+            assert!(layers[0].independent_y);
+        });
+    }
+
+    #[test]
+    fn coerce_layers_independent_y_false_from_py_dict() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            use pyo3::types::{PyDict, PyList};
+            let layer_dict = PyDict::new(py);
+            layer_dict.set_item("mark", "bar").unwrap();
+            layer_dict.set_item("independent_y", false).unwrap();
+            let list = PyList::new(py, [layer_dict]).unwrap();
+
+            let layers = coerce_layers(list.as_any()).unwrap();
+            assert_eq!(layers.len(), 1);
+            assert!(!layers[0].independent_y);
+        });
+    }
+
+    #[test]
+    fn coerce_layers_mixed_independent_y_preserves_per_layer_flag() {
+        // Layer 0 shared, layer 1 independent — the mixed shape the
+        // SecondaryY desugar (spec §6) and resolve={"y": "independent"}
+        // both rely on.
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            use pyo3::types::{PyDict, PyList};
+            let base = PyDict::new(py);
+            base.set_item("mark", "bar").unwrap();
+
+            let secondary = PyDict::new(py);
+            secondary.set_item("mark", "line").unwrap();
+            secondary.set_item("independent_y", true).unwrap();
+
+            let list = PyList::new(py, [base, secondary]).unwrap();
+
+            let layers = coerce_layers(list.as_any()).unwrap();
+            assert_eq!(layers.len(), 2);
+            assert!(!layers[0].independent_y);
+            assert!(layers[1].independent_y);
+        });
     }
 }

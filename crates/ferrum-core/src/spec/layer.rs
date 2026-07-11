@@ -24,6 +24,12 @@ pub struct Layer {
     pub blend: Option<ferrum_scene::BlendMode>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
+    /// Whether this layer resolves its own y-scale slot instead of sharing
+    /// the primary (layer 0) y-scale. `false` (absent on the wire) = shared,
+    /// today's behavior. Layer 0 is always the primary/left axis regardless
+    /// of this flag (spec §6, GH #52).
+    #[serde(default)]
+    pub independent_y: bool,
 }
 
 #[cfg(test)]
@@ -39,7 +45,7 @@ mod tests {
             transforms: Vec::new(),
             mark_style: None,
             data_source: None,
-        position: None, blend: None, name: None,
+        position: None, blend: None, name: None, independent_y: false,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -62,6 +68,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
+            independent_y: false,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -83,6 +90,7 @@ mod tests {
             position: None,
             blend: None,
             name: None,
+            independent_y: false,
         };
         let json = serde_json::to_string(&layer).unwrap();
         let parsed: Layer = serde_json::from_str(&json).unwrap();
@@ -97,7 +105,7 @@ mod tests {
             transforms: Vec::new(),
             mark_style: None,
             data_source: Some("box".into()),
-            position: None, blend: None, name: None,
+            position: None, blend: None, name: None, independent_y: false,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(
@@ -120,6 +128,7 @@ mod tests {
             position: Some(PositionAdjust::Dodge { by: Some("g".into()), padding: 0.05 }),
             blend: None,
             name: None,
+            independent_y: false,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(json.contains(r#""position""#));
@@ -135,7 +144,7 @@ mod tests {
             transforms: Vec::new(),
             mark_style: None,
             data_source: None,
-            position: None, blend: None, name: None,
+            position: None, blend: None, name: None, independent_y: false,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(!json.contains("position"), "position=None must be omitted: {json}");
@@ -149,12 +158,62 @@ mod tests {
             transforms: Vec::new(),
             mark_style: None,
             data_source: None,
-        position: None, blend: None, name: None,
+        position: None, blend: None, name: None, independent_y: false,
         };
         let json = serde_json::to_string(&layer).unwrap();
         assert!(
             !json.contains("data_source"),
             "data_source=None must be omitted: {json}"
         );
+    }
+
+    #[test]
+    fn layer_independent_y_defaults_false_when_absent_on_wire() {
+        // Deserializing a pre-#52 layer dict (no `independent_y` key at all)
+        // must default to false — absolute wire back-compat.
+        let json = r#"{"mark":"point"}"#;
+        let layer: Layer = serde_json::from_str(json).unwrap();
+        assert!(!layer.independent_y);
+    }
+
+    #[test]
+    fn layer_independent_y_round_trips_true() {
+        let layer = Layer {
+            mark: Mark::Line,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: true,
+        };
+        let json = serde_json::to_string(&layer).unwrap();
+        assert!(
+            json.contains(r#""independent_y":true"#),
+            "expected independent_y:true in JSON: {json}"
+        );
+        let parsed: Layer = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, layer);
+    }
+
+    #[test]
+    fn layer_independent_y_round_trips_false() {
+        let layer = Layer {
+            mark: Mark::Point,
+            encoding: Encoding::default(),
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+        };
+        let json = serde_json::to_string(&layer).unwrap();
+        let parsed: Layer = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, layer);
+        assert!(!parsed.independent_y);
     }
 }
