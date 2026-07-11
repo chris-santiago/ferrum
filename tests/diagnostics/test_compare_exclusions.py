@@ -27,11 +27,15 @@ instead render a single **dodge-by-model** panel (GH #42, see
 ``test_compare_dodge.py``); ``shap_bar_chart(per_class=True)`` keeps the
 small-multiples layout (class is a competing facet dimension).
 
-Four model-selection charts (``learning_curve_chart``,
-``validation_curve_chart``, ``cv_scores_chart``, ``alpha_selection_chart``)
-also render **small multiples** when ``compare=`` is passed: one panel per
-model, composed as a ``ConcatChart`` with shared x/y scales. The internal
-train/test coloring is preserved per panel.
+Three model-selection charts (``learning_curve_chart``,
+``validation_curve_chart``, ``alpha_selection_chart``) render **small
+multiples** when ``compare=`` is passed: one panel per model, composed as a
+``ConcatChart`` with shared x/y scales. The internal train/test coloring is
+preserved per panel. ``cv_scores_chart`` instead renders a **dodge-by-model**
+single panel for ``kind="box"``/``"strip"`` (GH #42, see
+``test_compare_dodge.py``); ``kind="bar"`` keeps the small-multiples layout
+(fold x split x model is three grouping dimensions, no coherent single
+dodge).
 
 The remaining charts across clustering stay excluded and reject with
 ``ValueError``.
@@ -275,10 +279,34 @@ def test_validation_curve_chart_compare_none_byte_identical():
     assert with_kwarg == without_kwarg
 
 
-def test_cv_scores_chart_compare_renders_small_multiples():
-    """compare= returns a ConcatChart with one panel per model (base + alt)."""
+def test_cv_scores_chart_compare_kind_box_renders_dodged_single_chart():
+    """compare= with kind="box" (default) returns a single dodge-by-model
+    Chart, not a small-multiples ConcatChart (GH #42, spec D3)."""
+    from ferrum.chart import Chart
+
     X, y, base, alt = _reg_setup()
     result = ferrum.cv_scores_chart(base, X, y, cv=3, compare={"alt": alt})
+    assert isinstance(result, Chart)
+    assert not isinstance(result, ConcatChart)
+    assert "<svg" in result.to_svg()
+
+
+def test_cv_scores_chart_compare_kind_strip_renders_dodged_single_chart():
+    """compare= with kind="strip" also returns a single dodge-by-model Chart."""
+    from ferrum.chart import Chart
+
+    X, y, base, alt = _reg_setup()
+    result = ferrum.cv_scores_chart(base, X, y, cv=3, kind="strip", compare={"alt": alt})
+    assert isinstance(result, Chart)
+    assert not isinstance(result, ConcatChart)
+    assert "<svg" in result.to_svg()
+
+
+def test_cv_scores_chart_compare_kind_bar_renders_small_multiples():
+    """kind="bar" keeps the #35 small-multiples layout under compare= --
+    fold x split x model is three grouping dimensions (spec D3)."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.cv_scores_chart(base, X, y, cv=3, kind="bar", compare={"alt": alt})
     assert isinstance(result, ConcatChart)
     assert len(result.charts) == 2
     assert "<svg" in result.to_svg()
@@ -288,6 +316,13 @@ def test_cv_scores_chart_compare_none_byte_identical():
     X, y, base, _ = _reg_setup()
     with_kwarg = ferrum.cv_scores_chart(base, X, y, cv=3, compare=None).to_svg()
     without_kwarg = ferrum.cv_scores_chart(base, X, y, cv=3).to_svg()
+    assert with_kwarg == without_kwarg
+
+
+def test_cv_scores_chart_compare_kind_bar_none_byte_identical():
+    X, y, base, _ = _reg_setup()
+    with_kwarg = ferrum.cv_scores_chart(base, X, y, cv=3, kind="bar", compare=None).to_svg()
+    without_kwarg = ferrum.cv_scores_chart(base, X, y, cv=3, kind="bar").to_svg()
     assert with_kwarg == without_kwarg
 
 

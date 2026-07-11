@@ -12,9 +12,13 @@ is the set of rendered ``<text>`` tick labels, parsed via the shared
 
 What is RED-provable vs parity here
 -----------------------------------
-- **Parity** — ``cv_scores_chart(compare=)`` panels are single ``Chart``s, so
-  they already shared via the old ConcatChart ``_apply_resolve`` injection.  The
-  test locks that the *new* wrap path keeps the shared-y union.
+- **Parity** — ``cv_scores_chart(compare=, kind="bar")`` panels are single
+  ``Chart``s, so they already shared via the old ConcatChart ``_apply_resolve``
+  injection.  The test locks that the *new* wrap path keeps the shared-y union.
+  (``kind="box"``/``"strip"``, the default, instead render a single
+  dodge-by-model ``Chart`` under ``compare=`` per GH #42 -- no ConcatChart to
+  lower, so this parity test exercises the ``kind="bar"`` small-multiples
+  carve-out that still routes through ``_compose_compare``.)
 - **GREEN (GH #45)** — position-wise sharing across *composite* children.
   ``residuals`` compare panels are titled *composites* (each a ``VConcat`` with
   ``child.properties(title=name)``).  The composite wire now lowers a non-root
@@ -172,11 +176,12 @@ def test_concat_wrap_geometry_grows_height_with_rows():
 
 
 def test_cv_scores_compare_lowers_and_shares_y():
-    """PARITY: cv_scores compare panels are single Charts → lower to wrap leaves,
-    and the shared-y union renders equal per-panel y extents.
+    """PARITY: cv_scores compare (kind="bar", the small-multiples carve-out --
+    GH #42 D3) panels are single Charts → lower to wrap leaves, and the
+    shared-y union renders equal per-panel y extents.
     """
     base, alt, X, y = _regression_models()
-    chart = fm.cv_scores_chart(base, X, y, cv=3, compare={"alt": alt})
+    chart = fm.cv_scores_chart(base, X, y, cv=3, kind="bar", compare={"alt": alt})
 
     lowered = _lower_composite(chart, auto_tooltips=False)
     assert lowered is not None, "single-Chart compare panels must lower to the wrap path"
@@ -190,9 +195,10 @@ def test_cv_scores_compare_lowers_and_shares_y():
 
 
 def test_cv_scores_compare_preserves_model_titles():
-    """The per-model chart title (base/alt) survives the wrap-path cutover."""
+    """The per-model chart title (base/alt) survives the wrap-path cutover
+    on the kind="bar" small-multiples carve-out."""
     base, alt, X, y = _regression_models()
-    svg = fm.cv_scores_chart(base, X, y, cv=3, compare={"alt": alt}).to_svg()
+    svg = fm.cv_scores_chart(base, X, y, cv=3, kind="bar", compare={"alt": alt}).to_svg()
     assert "base" in svg and "alt" in svg
 
 

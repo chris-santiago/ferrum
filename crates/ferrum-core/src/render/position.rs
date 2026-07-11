@@ -238,6 +238,71 @@ fn resolve_group_channel(
     }
 }
 
+/// Order the distinct dodge groups present in `by_cats` into left→right
+/// sub-band slot order.
+///
+/// When `domain_order` is `Some` — the dodge grouping field IS the color field
+/// and the color scale is categorical — groups are ordered by their position in
+/// that domain (the resolved color-scale domain == legend order), so dodged
+/// sub-bands read left→right in the same order the legend lists them. Any group
+/// present in the data but absent from the domain falls after all domain groups,
+/// in first-appearance order.
+///
+/// When `domain_order` is `None` — the dodge field is not the color field, or
+/// there is no categorical color domain — pure first-appearance (row-encounter)
+/// order is used. This is the pre-fix behavior; for raw-data layers encounter
+/// order already equals the color domain order, so those goldens stay
+/// byte-identical.
+fn ordered_dodge_groups(by_cats: &[String], domain_order: Option<&[String]>) -> Vec<String> {
+    // Distinct groups in first-appearance order. Group counts are tiny
+    // (sub-band count), so linear membership scans are cheaper than a set.
+    let mut encounter: Vec<String> = Vec::new();
+    for g in by_cats {
+        if !encounter.iter().any(|e| e == g) {
+            encounter.push(g.clone());
+        }
+    }
+
+    let Some(domain) = domain_order else {
+        return encounter;
+    };
+
+    let mut ordered: Vec<String> = Vec::with_capacity(encounter.len());
+    // Domain-present groups first, in domain order.
+    for d in domain {
+        if encounter.iter().any(|g| g == d) {
+            ordered.push(d.clone());
+        }
+    }
+    // Groups absent from the domain trail after, in first-appearance order.
+    for g in &encounter {
+        if !domain.iter().any(|d| d == g) {
+            ordered.push(g.clone());
+        }
+    }
+    ordered
+}
+
+/// Resolve the color-scale domain order to use for dodge slot assignment.
+///
+/// Returns `Some(domain)` only when the dodge grouping field is the color field
+/// (either `by_field` is `None`, so the group field *is* the color field, or
+/// `by_field` names the same column as `encoding.color`) AND the resolved color
+/// scale is categorical. In every other case returns `None`, which
+/// `ordered_dodge_groups` treats as "keep first-appearance order".
+fn dodge_slot_domain<'a>(
+    by_field: Option<&str>,
+    scales: &'a ResolvedScales,
+    encoding: &crate::spec::encoding::Encoding,
+) -> Option<&'a [String]> {
+    let color_enc = encoding.color.as_ref()?;
+    let group_is_color = by_field.is_none_or(|bf| bf == color_enc.field);
+    if !group_is_color {
+        return None;
+    }
+    scales.color.as_ref()?.categorical_domain()
+}
+
 fn apply_dodge(
     batch: &RecordBatch,
     by_field: Option<&str>,
@@ -253,6 +318,12 @@ fn apply_dodge(
     let Some(by_cats) = resolve_group_channel(batch, by_field, encoding, "dodge", warnings) else {
         return Ok(batch.clone());
     };
+
+    // Sub-band slot order: match the legend when the dodge grouping field is the
+    // color field and the color scale is categorical; otherwise first-appearance
+    // order (the pre-fix behavior). Resolved once and threaded through both the
+    // continuous-band and ordinal-band paths.
+    let slot_domain = dodge_slot_domain(by_field, scales, encoding);
 
     // Dodge offsets marks along the categorical BAND axis. Under CoordFlip,
     // prepare.rs has swapped x/y in the encoding, so the band axis lives in
@@ -277,7 +348,7 @@ fn apply_dodge(
     })?;
     let is_ordinal_band = batch.schema().field(band_col_idx).data_type() != &DataType::Float64;
     if is_ordinal_band {
-        return apply_dodge_ordinal(batch, &by_cats, padding, band_scale, coord_flipped);
+        return apply_dodge_ordinal(batch, &by_cats, padding, band_scale, coord_flipped, slot_domain);
     }
     let band_arr = batch
         .column(band_col_idx)
@@ -302,14 +373,13 @@ fn apply_dodge(
     diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let bandwidth = diffs[diffs.len() / 2];
 
-    // 2. Determine group order from the resolved category strings (first-appearance).
-    let mut groups_in_order: Vec<String> = Vec::new();
+    // 2. Determine group→slot order: legend order when the dodge field is the
+    //    categorical color field, else first-appearance order (see
+    //    `ordered_dodge_groups`).
+    let groups_in_order = ordered_dodge_groups(&by_cats, slot_domain);
     let mut seen: HashMap<String, usize> = HashMap::new();
-    for g in &by_cats {
-        if !seen.contains_key(g) {
-            seen.insert(g.clone(), groups_in_order.len());
-            groups_in_order.push(g.clone());
-        }
+    for (idx, g) in groups_in_order.iter().enumerate() {
+        seen.insert(g.clone(), idx);
     }
     let n_groups = groups_in_order.len();
     if n_groups <= 1 {
@@ -346,13 +416,16 @@ fn apply_dodge(
 /// `by_cats` is the per-row grouping category resolved by
 /// [`resolve_group_channel`] (one entry per row; null group rows are `""`).
 /// `band_scale` is the ordinal scale of the band axis (scales.x unflipped,
-/// scales.y flipped) and supplies the pixel bandwidth.
+/// scales.y flipped) and supplies the pixel bandwidth. `slot_domain` is the
+/// color-scale domain order threaded from [`apply_dodge`]: `Some` orders
+/// sub-band slots by legend order, `None` keeps first-appearance order.
 fn apply_dodge_ordinal(
     batch: &RecordBatch,
     by_cats: &[String],
     padding: f64,
     band_scale: &ScaleKind,
     coord_flipped: bool,
+    slot_domain: Option<&[String]>,
 ) -> Result<RecordBatch, crate::render::RenderError> {
     let schema = batch.schema();
     let bandwidth_px = match band_scale {
@@ -360,13 +433,10 @@ fn apply_dodge_ordinal(
         _ => return Ok(batch.clone()),
     };
 
-    let mut group_order: Vec<String> = Vec::new();
+    let group_order = ordered_dodge_groups(by_cats, slot_domain);
     let mut group_idx: HashMap<String, usize> = HashMap::new();
-    for g in by_cats {
-        if !group_idx.contains_key(g) {
-            group_idx.insert(g.clone(), group_order.len());
-            group_order.push(g.clone());
-        }
+    for (idx, g) in group_order.iter().enumerate() {
+        group_idx.insert(g.clone(), idx);
     }
     let n_groups = group_order.len();
     if n_groups <= 1 {
@@ -729,6 +799,7 @@ pub(crate) fn apply_stack(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::scale_resolve::ColorScale;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::position::{JitterAxis, PositionAdjust, StackAnchor, StackOffset};
     use arrow::array::{Float64Array, StringArray};
@@ -959,6 +1030,109 @@ mod tests {
         assert_eq!(out.num_columns(), b.num_columns());
         assert!(out.schema().index_of("__pos_x_offset__").is_err());
         assert!(out.schema().index_of("__pos_y_offset__").is_err());
+    }
+
+    // ---- Dodge sub-band slot order matches legend (Task 5b) ----------------
+
+    /// Ordinal-x ResolvedScales carrying a categorical color scale whose domain
+    /// is `color_domain` (== legend order). bandwidth stays 50 (2 bands over
+    /// [0,100]).
+    fn scales_ordinal_x_with_color(color_domain: &[&str]) -> ResolvedScales {
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+        let ord = ScaleKind::Ordinal(OrdinalScale::new_internal(
+            vec!["a".into(), "b".into()],
+            vec![0.0, 100.0],
+            0.0,
+        ));
+        let lin = ScaleKind::Linear(LinearScale::new_internal(
+            vec![0.0, 100.0],
+            vec![0.0, 100.0],
+            false,
+            false,
+        ));
+        let color = ColorScale::Categorical {
+            domain: color_domain.iter().map(|s| s.to_string()).collect(),
+            palette: std::borrow::Cow::Owned(vec![
+                crate::render::color::from_rgb(0x00, 0x00, 0x00),
+                crate::render::color::from_rgb(0xFF, 0xFF, 0xFF),
+            ]),
+        };
+        ResolvedScales {
+            x: ord,
+            y: lin,
+            color: Some(color),
+            size: None,
+            shape: None,
+            opacity: None,
+            x2: None,
+            y2: None,
+        }
+    }
+
+    /// Batch with an ordinal band `cat`, a numeric `val`, and a two-level model
+    /// column whose rows arrive in *sorted* key order ["alt", "base"] — the
+    /// order a BTreeMap-bucketing transform (e.g. BoxStats) emits.
+    fn batch_cat_val_model_sorted() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("model", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a"])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0])),
+                Arc::new(StringArray::from(vec!["alt", "base"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn dodge_ordinal_slot0_follows_color_domain_not_encounter_order() {
+        // (a) Rows arrive sorted-key ["alt","base"] (BoxStats bucketing), but the
+        // color domain is ["base","alt"] (registration order). The dodge field IS
+        // the color field, so slot 0 must be "base" (the domain-order leftmost),
+        // not "alt" (the encounter-order first). bandwidth=50, padding=0, 2 groups
+        // → sub_band=25 → slot0=-12.5, slot1=+12.5. So base→-12.5, alt→+12.5.
+        let b = batch_cat_val_model_sorted();
+        let enc = enc_xy("cat", "val", Some("model"));
+        let s = scales_ordinal_x_with_color(&["base", "alt"]);
+        let pos = PositionAdjust::Dodge { by: Some("model".into()), padding: 0.0 };
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        // row0 = "alt" → slot 1 → +12.5; row1 = "base" → slot 0 → -12.5.
+        assert_eq!(offset_col(&out, "__pos_x_offset__"), vec![12.5, -12.5]);
+    }
+
+    #[test]
+    fn dodge_ordinal_non_color_field_keeps_encounter_order() {
+        // (b) Regression: dodge by "grp" while the color channel is a DIFFERENT
+        // field ("cat"). A categorical color domain exists but must be ignored
+        // because the dodge field is not the color field → first-appearance order.
+        // grp encounter = [p, q] → p=slot0 (-12.5), q=slot1 (+12.5).
+        let b = batch_cat_val_grp();
+        let enc = enc_xy("cat", "val", Some("cat"));
+        // Color domain deliberately reversed relative to encounter order; it must
+        // have no effect because "grp" != "cat".
+        let s = scales_ordinal_x_with_color(&["q", "p"]);
+        let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        assert_eq!(offset_col(&out, "__pos_x_offset__"), vec![-12.5, 12.5, -12.5, 12.5]);
+    }
+
+    #[test]
+    fn dodge_ordinal_no_color_scale_keeps_encounter_order() {
+        // (c) Regression: dodge by the color field ("grp") but there is NO
+        // resolved color scale → first-appearance order. grp encounter = [p, q]
+        // → p=slot0 (-12.5), q=slot1 (+12.5).
+        let b = batch_cat_val_grp();
+        let enc = enc_xy("cat", "val", Some("grp"));
+        let s = scales_one_ordinal(true); // color: None
+        let pos = PositionAdjust::Dodge { by: None, padding: 0.0 };
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        assert_eq!(offset_col(&out, "__pos_x_offset__"), vec![-12.5, 12.5, -12.5, 12.5]);
     }
 
     #[test]

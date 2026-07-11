@@ -137,6 +137,7 @@ class SelectionMarksMixin:
         *,
         kind: str = "box",
         split: str = "both",
+        color_field: str | None = None,
         position=None,
         **mark_kwargs,
     ) -> "Chart":
@@ -154,6 +155,16 @@ class SelectionMarksMixin:
             Summary plot type.
         split : {"train", "test", "both"}, default "both"
             Which CV split(s) to display.
+        color_field : str or None, optional
+            Column to drive per-group colour (and, for ``kind="box"``, the
+            transform groupby).  ``None`` (default) keeps the single-model
+            behaviour: box groups by ``split`` alone; strip colours by
+            ``split`` and jitters within its band.  Passing a distinct
+            column (e.g. ``"model"``, the GH #42 compare= dodge path)
+            groups box stats by ``(split, color_field)`` and, for
+            ``kind="strip"``, drops the default jitter so a chart-level
+            ``position=Dodge(...)`` can offset points instead (position
+            adjustments are not composable).
         position : Position, optional
             Position adjustment.
         **mark_kwargs
@@ -176,7 +187,7 @@ class SelectionMarksMixin:
         return self._set_composite_mark(
             "cv_scores",
             desugar_cv_scores,
-            {"kind": kind, "split": split, **mark_kwargs},
+            {"kind": kind, "split": split, "color_field": color_field, **mark_kwargs},
             placeholder="point",
             position=position,
         )

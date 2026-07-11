@@ -502,6 +502,51 @@ def _stack_compare_frames(
     return pl.concat(frames, how="vertical_relaxed")
 
 
+def _order_compare_rows(
+    df: pl.DataFrame,
+    primary_col: str,
+    primary_order: list,
+    model_order: list,
+) -> pl.DataFrame:
+    """Sort a stacked ``compare=`` frame by ``(primary_col rank, model rank)``.
+
+    Shared row-ordering idiom for the dodge-by-model ``compare=`` builders
+    (importance, shap_bar, cv_scores — GH #42). Casts ``primary_col`` and
+    ``"model"`` to ``pl.Enum`` domains fixed by ``primary_order`` /
+    ``model_order``, then sorts by ``(primary rank, model rank)`` so Rust's
+    encounter-order ordinal domains place ``primary_col``'s bands in
+    ``primary_order`` (e.g. global feature rank, or split order) and each
+    band's model sub-groups in ``model_order`` (compare registration order,
+    ``"base"`` first). The two temporary rank columns are dropped before
+    returning.
+
+    Parameters
+    ----------
+    df : polars.DataFrame
+        The stacked per-model frame to reorder. Any pre-filtering (e.g. to
+        a global top-k feature set) must already be applied by the caller.
+    primary_col : str
+        The band-axis column whose domain order is fixed (e.g. ``"feature"``
+        or ``"split"``).
+    primary_order : list
+        The desired domain order for ``primary_col``.
+    model_order : list
+        The desired domain order for ``"model"`` (compare registration
+        order).
+
+    Returns
+    -------
+    polars.DataFrame
+        ``df`` sorted by ``(primary_col, model)`` rank, with no extra
+        columns.
+    """
+    ranked = df.with_columns(
+        pl.col(primary_col).cast(pl.Enum(primary_order)).alias("_primary_rank"),
+        pl.col("model").cast(pl.Enum(model_order)).alias("_model_rank"),
+    )
+    return ranked.sort(["_primary_rank", "_model_rank"]).drop("_primary_rank", "_model_rank")
+
+
 def _resolve_source(
     model: Any,
     X: Any = None,

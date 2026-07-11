@@ -1215,9 +1215,22 @@ with ferrum.theme_context(my_theme):
 > an internal `orient=`/`color_field=` pair mirroring `mark_importance`).
 > `shap_bar_chart(per_class=True)` keeps the 2026-06-27 small-multiples
 > `ConcatChart` (class is a competing facet dimension). `cv_scores_chart`
-> (`kind="box"`/`"strip"`) joins this layout in a follow-up task under the
-> same issue; the remaining explanation / model-selection charts keep the
-> 2026-06-27 small-multiples layout. Single-model output is unchanged.
+> (`kind="box"`/`"strip"`, the default) likewise returns one dodged `Chart`
+> (spec D3): `split` (`train`/`test`, filtered by `split=` exactly as
+> today) stays the shared categorical axis, and each split band gets one
+> box/strip group per model, dodged and colored by model — the seaborn
+> `hue` convention, since `split` already has ≤ 2 levels and reads as
+> x-categories (facet-by-split would reintroduce panels to solve a problem
+> two bands don't have). `kind="strip"` drops the single-model jitter
+> under dodge (position adjustments are not composable — same rule
+> catplot already records); `desugar_cv_scores` gained a `color_field=`
+> parameter (`mark_cv_scores(color_field=...)`) that threads into
+> `desugar_boxplot`'s groupby for `"box"` and replaces the jittered point
+> layer's color for `"strip"`. `kind="bar"` keeps the 2026-06-27
+> small-multiples `ConcatChart` (fold x split x model is three grouping
+> dimensions — no coherent single dodge). The remaining explanation /
+> model-selection charts keep the 2026-06-27 small-multiples layout.
+> Single-model output is unchanged.
 
 > **2026-07-02 (explicit scales survive composite-mark desugar, #45):**
 > an explicit `scale=` on a chart-level positional channel (`x`/`y`) now

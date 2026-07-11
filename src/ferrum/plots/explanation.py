@@ -32,6 +32,7 @@ from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
     _compose_compare,
     _finalize_chart,
+    _order_compare_rows,
     _require,
     _resolve_source,
     _should_facet_by_class,
@@ -215,14 +216,11 @@ def _importance_chart_compare_from_source(
     # Order rows (feature-rank, model-registration) so Rust's encounter-order
     # ordinal domain places features in global-rank order and each band's
     # sub-bands in registration order.
-    df = (
-        combined.filter(pl.col("feature").is_in(feature_order))
-        .with_columns(
-            pl.col("feature").cast(pl.Enum(feature_order)).alias("_feat_rank"),
-            pl.col("model").cast(pl.Enum(model_order)).alias("_model_rank"),
-        )
-        .sort(["_feat_rank", "_model_rank"])
-        .drop("_feat_rank", "_model_rank")
+    df = _order_compare_rows(
+        combined.filter(pl.col("feature").is_in(feature_order)),
+        "feature",
+        feature_order,
+        model_order,
     )
 
     df, (domain_lo, domain_hi) = _importance_bounds_and_domain(df, show_values=show_values)
@@ -511,14 +509,7 @@ def _shap_bar_chart_compare_from_source(
     # Order rows (feature-rank, model-registration) so Rust's encounter-order
     # ordinal domain places features in global-rank order and each band's
     # sub-bands in registration order (mirrors the importance compare builder).
-    df = (
-        agg.with_columns(
-            pl.col("feature").cast(pl.Enum(keep)).alias("_feat_rank"),
-            pl.col("model").cast(pl.Enum(model_order)).alias("_model_rank"),
-        )
-        .sort(["_feat_rank", "_model_rank"])
-        .drop("_feat_rank", "_model_rank")
-    )
+    df = _order_compare_rows(agg, "feature", keep, model_order)
 
     x_max = float(df["abs_mean_shap"].max())
     domain = (0.0, x_max * 1.05 if x_max > 0 else 1.0)

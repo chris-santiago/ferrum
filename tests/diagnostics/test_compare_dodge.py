@@ -9,7 +9,8 @@ error rules / value labels. Each assertion fails on the pre-#42
 small-multiples layout.
 
 Task 3 covers ``importance_chart``; ``shap_bar_chart`` (Task 4) and
-``cv_scores_chart`` (Task 5) extend this file as they land.
+``cv_scores_chart`` (Task 5, ``kind="box"``/``"strip"`` only -- ``kind="bar"``
+keeps the small-multiples layout per spec D3) extend this file as they land.
 """
 
 from __future__ import annotations
@@ -112,6 +113,67 @@ def _error_rule_x_positions(svg: str) -> list[float]:
             if x1 is not None:
                 positions.append(float(x1))
     return positions
+
+
+def _non_background_rect_geoms(svg: str) -> list[tuple[float, float, float, float, str]]:
+    """Return ``(x, y, width, height, fill)`` for every palette rect, excluding
+    the full-canvas background.
+
+    ``_bar_rects``/``_bar_geoms`` discriminate bars from the background by fill
+    frequency (a fill used more than once); that heuristic degenerates to zero
+    matches when a ``split=`` filter leaves only one box per model (each fill
+    then appears exactly once). This helper instead excludes only the
+    known-position full-canvas background rect (rendered at ``x="0" y="0"``),
+    so it stays correct regardless of how many bars share a fill.
+    """
+    rects = re.findall(r"<rect[^>]*>", svg)
+
+    def attr(r: str, a: str) -> str | None:
+        m = re.search(a + r'="([^"]+)"', r)
+        return m.group(1) if m else None
+
+    out: list[tuple[float, float, float, float, str]] = []
+    for r in rects:
+        fill = attr(r, "fill")
+        x, y, w, h = attr(r, "x"), attr(r, "y"), attr(r, "width"), attr(r, "height")
+        if not (fill and x and y and w and h):
+            continue
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", fill):
+            continue
+        if x == "0" and y == "0":
+            continue  # full-canvas background rect
+        out.append((float(x), float(y), float(w), float(h), fill))
+    return out
+
+
+def _point_geoms(svg: str) -> list[tuple[float, float, str]]:
+    """Return ``(cx, cy, fill)`` for every data point-mark circle.
+
+    Point marks and legend swatches both render as ``<circle>`` elements
+    (unlike bar/box rects, whose legend swatches are always circles too --
+    see ``_bar_rects``'s docstring), so fill-count discrimination doesn't
+    separate them here: a data point's fill also appears on its legend
+    swatch. Legend swatches instead carry a fixed ``r="4"`` regardless of
+    the mark's own point size (observed on every colour-legend chart in
+    this suite), distinct from a data point's size-derived radius -- for
+    ``cv_scores_chart``'s default point size that is ``r="3.385"``.
+    Filtering out ``r="4"`` isolates the actual data marks.
+    """
+    circles = re.findall(r"<circle[^>]*/>", svg)
+
+    def attr(c: str, a: str) -> str | None:
+        m = re.search(a + r'="([^"]+)"', c)
+        return m.group(1) if m else None
+
+    out: list[tuple[float, float, str]] = []
+    for c in circles:
+        fill = attr(c, "fill")
+        r = attr(c, "r")
+        cx = attr(c, "cx")
+        cy = attr(c, "cy")
+        if fill and r != "4" and re.fullmatch(r"#[0-9a-fA-F]{6}", fill) and cx and cy:
+            out.append((float(cx), float(cy), fill))
+    return out
 
 
 def _text_labels(svg: str) -> list[tuple[float, str]]:
@@ -498,3 +560,179 @@ def test_shap_bar_compare_per_class_true_keeps_small_multiples():
     result = ferrum.shap_bar_chart(base, X, y, per_class=True, compare={"alt": alt})
     assert isinstance(result, ConcatChart)
     assert len(result.charts) == 2
+
+
+# ---------------------------------------------------------------------------
+# cv_scores_chart (kind="box"/"strip") — dodge-by-model contract (spec D3)
+# ---------------------------------------------------------------------------
+
+
+def test_cv_scores_compare_kind_box_returns_single_chart():
+    """compare= with kind="box" (default) returns a single Chart, not a
+    small-multiples ConcatChart."""
+    from ferrum.chart import Chart
+
+    X, y, base, alt = _reg_setup()
+    result = ferrum.cv_scores_chart(base, X, y, cv=3, compare={"alt": alt})
+    assert isinstance(result, Chart)
+    assert not isinstance(result, ConcatChart)
+    assert "<svg" in result.to_svg()
+
+
+def test_cv_scores_compare_kind_strip_returns_single_chart():
+    """compare= with kind="strip" also returns a single dodge-by-model Chart."""
+    from ferrum.chart import Chart
+
+    X, y, base, alt = _reg_setup()
+    result = ferrum.cv_scores_chart(base, X, y, cv=3, kind="strip", compare={"alt": alt})
+    assert isinstance(result, Chart)
+    assert not isinstance(result, ConcatChart)
+    assert "<svg" in result.to_svg()
+
+
+def test_cv_scores_compare_kind_bar_still_small_multiples():
+    """kind="bar" keeps the #35 small-multiples layout under compare= (spec
+    D3 carve-out: fold x split x model is three grouping dimensions, no
+    coherent single dodge)."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.cv_scores_chart(base, X, y, cv=3, kind="bar", compare={"alt": alt})
+    assert isinstance(result, ConcatChart)
+    assert len(result.charts) == 2
+    assert "<svg" in result.to_svg()
+
+
+def test_cv_scores_compare_declares_color_and_dodge():
+    """color='model' + Dodge(by='model') at the chart level; the box's IQR
+    layer inherits the colour encoding."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.cv_scores_chart(base, X, y, cv=3, compare={"alt": alt})
+    assert result._position == Dodge(by="model")
+    resolved = result._resolve_pending()
+    box_layer = next(ly for ly in resolved._layers if ly.name == "box")
+    assert box_layer.encoding.get("color") == "model"
+
+
+def test_cv_scores_compare_box_dodged_per_split_band():
+    """One box per (split, model) at distinct sub-band x positions.
+
+    A non-dodged (overlapping) layout would place both models' boxes at the
+    same split-band center, giving only n_splits distinct centers.
+    """
+    n_models, n_splits = 2, 2
+    X, y, base, alt = _reg_setup()
+    svg = ferrum.cv_scores_chart(base, X, y, cv=3, compare={"alt": alt}).to_svg()
+    boxes = _bar_geoms(svg)
+    assert len(boxes) == n_models * n_splits
+
+    ordered = sorted(boxes, key=lambda b: b[0] + b[2] / 2)
+    centers = [b[0] + b[2] / 2 for b in ordered]
+    assert len({round(c, 1) for c in centers}) == n_models * n_splits
+
+    bands = [ordered[i : i + n_models] for i in range(0, len(ordered), n_models)]
+    for band in bands:
+        fills = {b[4] for b in band}
+        assert len(fills) == n_models, "each split band must show one box per model"
+
+
+def test_cv_scores_compare_strip_dodged_per_split_band():
+    """One strip sub-band per (split, model); the ``cv`` fold points inside a
+    sub-band collapse onto that sub-band's dodged x (no jitter -- spec D3
+    single-position rule, verified separately in the jitter-drop test below).
+    """
+    n_models, n_splits, cv = 2, 2, 3
+    X, y, base, alt = _reg_setup()
+    svg = ferrum.cv_scores_chart(base, X, y, cv=cv, kind="strip", compare={"alt": alt}).to_svg()
+    points = _point_geoms(svg)
+    assert len(points) == n_models * n_splits * cv
+
+    by_x: dict[float, list[str]] = {}
+    for x, _, fill in points:
+        by_x.setdefault(round(x, 1), []).append(fill)
+    assert len(by_x) == n_models * n_splits  # one dodged sub-band per (split, model)
+    for fills in by_x.values():
+        assert len(set(fills)) == 1  # each sub-band is single-model
+        assert len(fills) == cv  # every fold point shares its group's x
+
+
+def test_cv_scores_compare_strip_drops_jitter():
+    """Discriminating: a jittered layout scatters a (split, model) group's
+    ``cv`` fold points across a range of x positions; dropping jitter under
+    dodge (spec D3) collapses them onto exactly one x per group instead of
+    up to ``cv`` distinct positions per group.
+    """
+    n_models, n_splits, cv = 2, 2, 3
+    X, y, base, alt = _reg_setup()
+    svg = ferrum.cv_scores_chart(base, X, y, cv=cv, kind="strip", compare={"alt": alt}).to_svg()
+    points = _point_geoms(svg)
+    assert len(points) == n_models * n_splits * cv
+    distinct_x = {round(x, 1) for x, _, _ in points}
+    assert len(distinct_x) == n_models * n_splits, (
+        "expected exactly one x per (split, model) group -- jitter would spread "
+        "the group's fold points across additional x positions"
+    )
+
+
+def test_cv_scores_compare_has_model_legend():
+    """A model legend labels each dodged group by its registration name."""
+    X, y, base, alt = _reg_setup()
+    svg = ferrum.cv_scores_chart(base, X, y, cv=3, compare={"alt": alt}).to_svg()
+    texts = {t.strip() for _, t in _text_labels(svg)}
+    assert "base" in texts
+    assert "alt" in texts
+
+
+def test_cv_scores_compare_split_filter_train():
+    """split="train" filters to a single split band under compare=, matching
+    the single-model split= contract; only one dodged band (n_models boxes)
+    remains."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.cv_scores_chart(base, X, y, cv=3, split="train", compare={"alt": alt})
+    assert set(result._data["split"].unique().to_list()) == {"train"}
+    boxes = _non_background_rect_geoms(result.to_svg())
+    assert len(boxes) == 2  # n_models, one split band only
+
+
+def test_cv_scores_compare_split_filter_test():
+    """split="test" likewise filters to a single split band under compare=."""
+    X, y, base, alt = _reg_setup()
+    result = ferrum.cv_scores_chart(base, X, y, cv=3, split="test", compare={"alt": alt})
+    assert set(result._data["split"].unique().to_list()) == {"test"}
+    boxes = _non_background_rect_geoms(result.to_svg())
+    assert len(boxes) == 2  # n_models, one split band only
+
+
+def test_cv_scores_compare_deterministic():
+    """Repeated compare renders are byte-identical (registration + row order)."""
+    X, y, base, alt = _reg_setup()
+    svgs = {
+        ferrum.cv_scores_chart(base, X, y, cv=3, compare={"alt": alt}).to_svg() for _ in range(3)
+    }
+    assert len(svgs) == 1
+
+
+def test_cv_scores_compare_strip_deterministic():
+    """Repeated kind="strip" compare renders are byte-identical."""
+    X, y, base, alt = _reg_setup()
+    svgs = {
+        ferrum.cv_scores_chart(base, X, y, cv=3, kind="strip", compare={"alt": alt}).to_svg()
+        for _ in range(3)
+    }
+    assert len(svgs) == 1
+
+
+def test_cv_scores_compare_none_byte_identical():
+    """compare=None stays byte-identical to the no-compare single-model path
+    (kind="box", the default)."""
+    X, y, base, _ = _reg_setup()
+    with_kwarg = ferrum.cv_scores_chart(base, X, y, cv=3, compare=None).to_svg()
+    without_kwarg = ferrum.cv_scores_chart(base, X, y, cv=3).to_svg()
+    assert with_kwarg == without_kwarg
+
+
+def test_cv_scores_compare_strip_none_byte_identical():
+    """compare=None stays byte-identical to the no-compare path for
+    kind="strip" too -- the jitter-drop only fires when color_field is set."""
+    X, y, base, _ = _reg_setup()
+    with_kwarg = ferrum.cv_scores_chart(base, X, y, cv=3, kind="strip", compare=None).to_svg()
+    without_kwarg = ferrum.cv_scores_chart(base, X, y, cv=3, kind="strip").to_svg()
+    assert with_kwarg == without_kwarg

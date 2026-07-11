@@ -179,6 +179,7 @@ def desugar_cv_scores(
     *,
     kind: str = "box",
     split: str = "both",
+    color_field: str | None = None,
     **mark_kwargs: Any,
 ) -> MarkDesugarResult:
     """Per-fold CV score distribution.
@@ -189,6 +190,16 @@ def desugar_cv_scores(
     ``kind="bar"`` the builder pre-aggregates to mean score per split;
     for ``kind="strip"`` the builder leaves raw rows and Jitter spreads
     them along the categorical axis.
+
+    ``color_field`` (GH #42) defaults to ``None``, which keeps the
+    single-model behaviour: ``kind="box"`` groups by ``split`` alone and
+    ``kind="strip"`` colours by ``split`` with a jittered x position.
+    Passing a distinct column (the compare= dodge path stamps ``"model"``)
+    groups the box stats by ``(split, color_field)`` and colours every
+    layer by it; for ``kind="strip"`` it also drops the default jitter so
+    a chart-level ``position=Dodge(...)`` can offset the points instead —
+    position adjustments are not composable (single-position rule, same
+    as catplot's dodge-overrides-jitter).
     """
     del x_field, y_field
     # split is consumed upstream by the chart builder (filters DataFrame
@@ -200,7 +211,7 @@ def desugar_cv_scores(
     if kind == "box":
         from ferrum.marks.composite import desugar_boxplot
 
-        box_result = desugar_boxplot("split", "score")
+        box_result = desugar_boxplot("split", "score", color_field=color_field)
         layers = list(box_result.layers)
         # Override layer-0's y field-name (BoxStats output column) with a
         # titled channel so the chart's y-axis reads "score" rather than
@@ -229,16 +240,23 @@ def desugar_cv_scores(
         ]
         return MarkDesugarResult(layers=_apply(layers, user_kw))
     if kind == "strip":
-        from ferrum.position import Jitter
+        color_ch = color_field if color_field is not None else "split"
+        point_enc = {"x": "split", "y": Y("score", title="score"), "color": color_ch}
+        if color_field is not None:
+            # Compare/dodge path: the chart-level position=Dodge(by=color_field)
+            # set by mark_cv_scores(...) handles the offset; no per-layer position.
+            layers = [_Layer(name="point", mark="point", encoding=point_enc)]
+        else:
+            from ferrum.position import Jitter
 
-        layers = [
-            _Layer(
-                name="point",
-                mark="point",
-                encoding={"x": "split", "y": Y("score", title="score"), "color": "split"},
-                position=Jitter(axis="x", width=0.3, seed=42),
-            ),
-        ]
+            layers = [
+                _Layer(
+                    name="point",
+                    mark="point",
+                    encoding=point_enc,
+                    position=Jitter(axis="x", width=0.3, seed=42),
+                ),
+            ]
         return MarkDesugarResult(layers=_apply(layers, user_kw))
     raise ValueError(f"mark_cv_scores(kind={kind!r}) — expected 'box', 'bar', or 'strip'.")
 

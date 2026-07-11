@@ -26,8 +26,10 @@ from ferrum.plots._helpers import (
     _compose_compare,
     _dedupe_aggregated,
     _finalize_chart,
+    _order_compare_rows,
     _require,
     _resolve_source,
+    _stack_compare_frames,
 )
 
 
@@ -198,6 +200,59 @@ def _cv_scores_chart_from_source(
         # Broadcast per-split mean so the rule layer draws one line per split.
         df = df.with_columns(pl.col("score").mean().over("split").alias("_mean_score"))
     chart = ferrum.Chart(df).mark_cv_scores(kind=kind, split=split)
+    chart = chart.encode(y=Y("score", title="Score"))
+    chart = chart.properties(title=ferrum.Title("Cross-Validation Scores"))
+    return _finalize_chart(
+        chart, mark=mark, encode=encode, properties=properties, layers=layers, theme=theme
+    )
+
+
+def _cv_scores_chart_compare_from_source(
+    source: Any,
+    *,
+    cv: int = 5,
+    scoring: Any = None,
+    kind: str = "box",
+    split: str = "both",
+    mark: dict | None = None,
+    encode: dict | None = None,
+    properties: dict | None = None,
+    layers: list | None = None,
+    theme: Any = None,
+):
+    """Build a dodge-by-model CV-scores chart from a compare source.
+
+    GH #42 (spec D3): only reached for ``kind="box"``/``"strip"`` -- the
+    single-dodge decision. ``split`` stays the shared categorical axis
+    (``train``/``test``, filtered exactly as the single-model path);
+    within each split band, one box/strip group per model is drawn with
+    ``color="model"`` + ``Dodge(by="model")``. ``kind="bar"`` never reaches
+    this builder -- the public dispatcher keeps it on the #35
+    small-multiples ``_compose_compare`` path (fold x split x model is
+    three grouping dimensions, no coherent single dodge).
+
+    Rows are ordered (split-domain order, then model-registration order)
+    so Rust's encounter-order ordinal domains place the split bands in the
+    same order as the single-model chart and each band's model sub-groups
+    in registration order ("base" first).
+    """
+    import ferrum
+    from ferrum.position import Dodge
+
+    combined = _stack_compare_frames(source, lambda ms: ms.cv_scores(cv=cv, scoring=scoring))
+    if split != "both":
+        combined = combined.filter(pl.col("split") == split)
+
+    split_order = combined["split"].unique(maintain_order=True).to_list()
+    model_order = source.model_names
+    df = _order_compare_rows(combined, "split", split_order, model_order)
+
+    chart = ferrum.Chart(df).mark_cv_scores(
+        kind=kind,
+        split=split,
+        color_field="model",
+        position=Dodge(by="model"),
+    )
     chart = chart.encode(y=Y("score", title="Score"))
     chart = chart.properties(title=ferrum.Title("Cross-Validation Scores"))
     return _finalize_chart(
@@ -595,8 +650,11 @@ def cv_scores_chart(
     Returns
     -------
     Chart or ConcatChart
-        Per-fold CV score distribution chart, or a small-multiples
-        ``ConcatChart`` when ``compare=`` is supplied.
+        Per-fold CV score distribution chart. With ``compare=`` and
+        ``kind="box"``/``"strip"`` (default), a single dodge-by-model
+        ``Chart`` (one box/strip group per model within each split band).
+        With ``compare=`` and ``kind="bar"``, a small-multiples
+        ``ConcatChart``.
 
     Examples
     --------
@@ -606,10 +664,16 @@ def cv_scores_chart(
 
     Notes
     -----
-    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
-    one panel per model (small multiples, shared x/y scales). Each panel is
-    the single-model CV score chart for that model, labeled with the model
-    name. The single-model path (no ``compare=``) is unchanged.
+    When ``compare=`` is supplied (GH #42) with ``kind="box"`` or
+    ``"strip"``, returns a single :class:`~ferrum.Chart` with ``split`` as
+    the shared categorical axis and one box/strip group per model, dodged
+    within each split band, plus a model legend; ``kind="strip"`` drops the
+    single-model jitter under dodge (position adjustments are not
+    composable). With ``kind="bar"``, ``compare=`` instead returns a
+    :class:`~ferrum.ConcatChart` with one panel per model (small multiples,
+    shared x/y scales) -- fold x split x model is three grouping
+    dimensions, so it keeps the pre-#42 layout. The single-model path (no
+    ``compare=``) is unchanged.
     """
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
     builder_kwargs = dict(
@@ -624,12 +688,14 @@ def cv_scores_chart(
         theme=theme,
     )
     if isinstance(source, ComparedModelSource):
-        return _compose_compare(
-            source,
-            _cv_scores_chart_from_source,
-            builder_kwargs=builder_kwargs,
-            resolve={"x": "shared", "y": "shared"},
-        )
+        if kind == "bar":
+            return _compose_compare(
+                source,
+                _cv_scores_chart_from_source,
+                builder_kwargs=builder_kwargs,
+                resolve={"x": "shared", "y": "shared"},
+            )
+        return _cv_scores_chart_compare_from_source(source, **builder_kwargs)
     return _cv_scores_chart_from_source(source, **builder_kwargs)
 
 

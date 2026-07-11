@@ -488,6 +488,16 @@ impl ColorScale {
         }
     }
 
+    /// Categorical domain order (== legend category order), if this is a
+    /// categorical scale. `None` for continuous scales. Used by the dodge
+    /// position adjustment to order sub-band slots so they match the legend.
+    pub(crate) fn categorical_domain(&self) -> Option<&[String]> {
+        match self {
+            Self::Categorical { domain, .. } => Some(domain),
+            Self::Continuous { .. } => None,
+        }
+    }
+
     /// Sample at numeric value (Continuous variant only). Returns None for
     /// Categorical scales.
     pub fn lookup_f64(&self, value: f64) -> Option<Color> {
