@@ -168,6 +168,64 @@ def _rename_encoding_fields(encoding: dict, renames: dict[str, str]) -> dict:
     return out
 
 
+def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
+    """Desugar ``chart + SecondaryY(...)`` into an appended independent-y layer (GH #52).
+
+    Per the secondary-y-axis design spec §4: the base chart's existing
+    layer(s) are unchanged (a multi-layer base keeps its internal sharing),
+    plus one appended layer — mark ``feature.mark``, ``y`` encoding on
+    ``feature.field`` (with ``feature.axis``/``feature.scale`` attached),
+    ``x`` inherited from the base chart, color literal ``feature.color``,
+    opacity ``feature.opacity`` — flagged ``independent_y=True`` so Rust
+    resolves its y-scale independently and renders it as a stacked right
+    axis (slot contract: layer 0 is always the primary/left axis).
+
+    Mirrors the same "expand-then-append" pattern ``Chart.__add__`` uses for
+    ``Chart + Chart``: pending marks are resolved, the base is expanded into
+    its layer list (a single-mark chart becomes a one-element list), and the
+    chart-level transforms are replaced with ``_expand_layers``'s filtered
+    top-level list so an encoding-implicit aggregate does not double-run
+    once the chart carries ``_layers``.
+    """
+    from ferrum.encoding.positional import Y as _Y
+
+    resolved = chart._resolve_pending()
+    new = resolved._clone()
+    x_encoding = new._encoding.get("x")
+    if x_encoding is None:
+        raise ValueError(
+            "SecondaryY: the base chart must have an x encoding to inherit "
+            "-- call .encode(x=...) before adding SecondaryY(...)."
+        )
+
+    y_kwargs: dict = {}
+    if feature.axis is not None:
+        y_kwargs["axis"] = feature.axis
+    if feature.scale is not None:
+        y_kwargs["scale"] = feature.scale
+    y_encoding = _Y(feature.field, **y_kwargs)
+
+    mark_overrides: dict = {}
+    if feature.color is not None:
+        mark_overrides["color"] = feature.color
+    if feature.opacity is not None:
+        mark_overrides["opacity"] = feature.opacity
+    mark_kwargs = (
+        MarkBase(feature.mark, **mark_overrides).to_mark_kwargs_dict() if mark_overrides else None
+    )
+
+    secondary_layer = _Layer(
+        mark=feature.mark,
+        encoding={"x": x_encoding, "y": y_encoding},
+        mark_kwargs=mark_kwargs,
+        independent_y=True,
+    )
+    existing_layers, top_xforms = _expand_layers(new)
+    new._transforms = top_xforms
+    new._layers = existing_layers + [secondary_layer]
+    return new
+
+
 def _append_unique_by_name(seq: list, item: object) -> None:
     """Append *item* to *seq* if no element with the same ``.name`` is present.
 
@@ -419,7 +477,7 @@ class Chart(
         "_render_config",
         "_configure",  # list[Configure] — accumulated configure layers
         "_annotations",  # list[Annotate] — accumulated annotation layers
-        "_structural",  # list — accumulated structural features (SecondaryY, BreakAxis, Inset)
+        "_structural",  # list — accumulated structural features (BreakAxis, Inset)
         "_overrides",  # dict — spec-path override kwargs
         "_annotation_primitive",  # optional annotation primitive for annotate_* helpers
         "_mark_zero",  # bool — False when mark_bar(zero=False) suppresses the y zero-anchor
@@ -1354,7 +1412,12 @@ class Chart(
         - ``Chart`` — overlay as a multi-layer composite with shared scales
         - ``Configure`` — append chart-level configuration
         - ``Annotate`` or annotation primitive — append annotation layer
-        - ``SecondaryY``, ``BreakAxis``, ``Inset`` — append structural feature
+        - ``SecondaryY`` — desugar to an appended independent-y layer (GH #52):
+          same mark/x/color/opacity/axis/scale semantics as before, but now
+          renders through the real per-layer independent-y subsystem (band
+          reservation, real axis layout, interactivity) instead of the
+          legacy overlay-only ``secondary_axis`` renderer.
+        - ``BreakAxis``, ``Inset`` — append structural feature
 
         When composing two ``Chart`` objects, data-merging uses diagonal
         concatenation with null-padding for non-overlapping columns.
@@ -1424,8 +1487,13 @@ class Chart(
             new._annotations = new._annotations + [Annotate(other)]
             return new
 
+        # Dispatch: SecondaryY — desugars to an appended independent-y layer
+        # (GH #52), not a structural-spec entry. See _desugar_secondary_y.
+        if isinstance(other, SecondaryY):
+            return _desugar_secondary_y(self, other)
+
         # Dispatch: structural features
-        if isinstance(other, (SecondaryY, BreakAxis, Inset)):
+        if isinstance(other, (BreakAxis, Inset)):
             new = self._clone()
             new._structural = new._structural + [other]
             return new

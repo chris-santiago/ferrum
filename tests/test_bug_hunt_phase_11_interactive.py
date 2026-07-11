@@ -266,7 +266,13 @@ def test_annotation_plus_configure_padding():
 
 
 def test_secondary_y_interactive_no_crash():
-    """SecondaryY structural feature must not crash interactive pipeline."""
+    """SecondaryY desugars to a real independent-y layer in the interactive
+    scene (GH #52) -- not just a no-crash smoke test. The one-panel scene
+    must carry both a ``y_slot=0`` (primary/left) and ``y_slot=1``
+    (secondary/right) axis group, proving the secondary axis actually
+    renders through the per-layer independent-y subsystem rather than being
+    silently dropped by the interactive pipeline (as the legacy
+    ``secondary_axis.rs`` overlay-only renderer did)."""
     from ferrum.structural import SecondaryY
 
     df = pl.DataFrame(
@@ -280,8 +286,20 @@ def test_secondary_y_interactive_no_crash():
         field="y2", mark="line", color="red"
     )
     scene, _ = _scene(chart)
-    assert len(scene["panels"]) >= 1
+    assert len(scene["panels"]) == 1
     assert "NaN" not in json.dumps(scene)
+
+    axes = scene["panels"][0]["axes"]
+    y_slots = {
+        attr[1]
+        for node in axes
+        if node.get("type") == "group"
+        for attr in node.get("attrs", [])
+        if attr[0] == "y_slot"
+    }
+    assert y_slots == {"0", "1"}, (
+        f"expected a left (slot 0) and right (slot 1) y axis group; got {y_slots}"
+    )
 
 
 def test_break_axis_interactive_no_crash():

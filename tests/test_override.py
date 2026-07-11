@@ -266,10 +266,16 @@ class TestAddDispatch:
         assert base_chart._annotations == []
 
     def test_secondary_y_dispatch(self, base_chart):
-        sy = SecondaryY(field="y")
+        """GH #52: SecondaryY desugars to an appended independent-y layer,
+        not a ``_structural`` entry (that silo is reserved for BreakAxis/Inset)."""
+        sy = SecondaryY(field="x")
         c = base_chart + sy
-        assert len(c._structural) == 1
-        assert c._structural[0] is sy
+        assert c._structural == []
+        assert c._layers is not None
+        assert len(c._layers) == 2
+        secondary_layer = c._layers[-1]
+        assert secondary_layer.independent_y is True
+        assert secondary_layer.encoding["y"].field == "x"
 
     def test_break_axis_dispatch(self, base_chart):
         ba = BreakAxis(axis="y", gap=(50, 100))
@@ -286,9 +292,14 @@ class TestAddDispatch:
         assert c._structural[0] is inset
 
     def test_structural_does_not_mutate_original(self, base_chart):
-        sy = SecondaryY(field="y")
-        _ = base_chart + sy
+        ba = BreakAxis(axis="y", gap=(50, 100))
+        _ = base_chart + ba
         assert base_chart._structural == []
+
+    def test_secondary_y_does_not_mutate_original(self, base_chart):
+        sy = SecondaryY(field="x")
+        _ = base_chart + sy
+        assert base_chart._layers is None
 
     def test_chart_plus_chart_still_works(self, base_chart):
         df = pl.DataFrame({"x": [1, 2, 3], "y": [7, 8, 9]})

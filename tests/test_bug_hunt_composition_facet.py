@@ -180,14 +180,16 @@ def test_configure_override_conflict_in_merge():
 
 
 def test_secondary_y_preserved_through_layer():
-    """SecondaryY added via + should persist in the layered chart's _structural.
-
-    Targets __add__ lines 4138-4139 in chart.py: rhs._structural merge.
+    """SecondaryY added via + desugars to an appended independent-y layer
+    (GH #52) -- it no longer accumulates in ``_structural`` (that silo is
+    reserved for BreakAxis/Inset). See ``_desugar_secondary_y`` in chart.py.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]})
     c = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z", color="red")
-    assert len(c._structural) == 1
-    assert isinstance(c._structural[0], SecondaryY)
+    assert c._structural == []
+    assert c._layers is not None
+    assert len(c._layers) == 2
+    assert c._layers[-1].independent_y is True
     svg = c.to_svg()
     _assert_valid_svg(svg)
 
@@ -216,17 +218,20 @@ def test_inset_preserved_through_layer():
 
 
 def test_structural_features_merge_from_both_sides():
-    """Structural features from both sides of + should accumulate.
+    """BreakAxis/Inset from both sides of + accumulate in ``_structural``.
 
-    Targets __add__ lines 4138-4139: rhs._structural merge.
+    ``SecondaryY`` on the LHS instead desugars to an appended independent-y
+    layer (GH #52) that survives the chart+chart merge like any other layer.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]})
     c1 = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z")
     c2 = Chart(df).mark_line().encode(x="x", y="y") + BreakAxis(axis="y", gap=(3, 5))
     combined = c1 + c2
-    assert len(combined._structural) == 2
-    assert isinstance(combined._structural[0], SecondaryY)
-    assert isinstance(combined._structural[1], BreakAxis)
+    assert len(combined._structural) == 1
+    assert isinstance(combined._structural[0], BreakAxis)
+    # c1's base layer + its SecondaryY layer, then c2's mark layer.
+    assert len(combined._layers) == 3
+    assert combined._layers[1].independent_y is True
 
 
 def test_chart_with_configure_and_structural_renders():
@@ -1515,14 +1520,20 @@ def test_resolve_chart_config_annotations_serialized():
 def test_resolve_chart_config_structural_serialized():
     """_resolve_chart_config includes structural features.
 
-    Targets _render.py _resolve_chart_config lines 294-295.
+    SecondaryY (GH #52) desugars to a layer rather than a structural entry,
+    so it does not appear in ``merged["structural"]``; BreakAxis still does.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [7.0, 8.0, 9.0]})
-    c = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z")
+    c = (
+        Chart(df).mark_point().encode(x="x", y="y")
+        + SecondaryY("z")
+        + BreakAxis(axis="y", gap=(3, 5))
+    )
     merged = c._resolve_chart_config()
     assert "structural" in merged
     assert len(merged["structural"]) == 1
-    assert merged["structural"][0]["type"] == "secondary_y"
+    assert merged["structural"][0]["type"] == "break_axis"
+    assert c._layers[-1].independent_y is True
 
 
 # ---------------------------------------------------------------------------
@@ -2336,23 +2347,26 @@ def test_structural_in_vconcat_sub_chart_renders():
 
 
 def test_structural_survives_theme_on_composition():
-    """Structural features on sub-charts survive .theme() on the composition.
+    """A sub-chart's SecondaryY layer survives .theme() on the composition.
 
-    Targets _rebuild_with_charts -> Chart._clone which copies _structural.
+    Targets _rebuild_with_charts -> Chart._clone which copies ``_layers``.
+    SecondaryY (GH #52) desugars to a layer, so this now pins the layer
+    (not a ``_structural`` entry) surviving the rebuild.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]})
     c1 = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z")
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     hc = c1 | c2
     themed = hc.theme(fr.themes.dark)
-    assert len(themed.charts[0]._structural) == 1
-    assert isinstance(themed.charts[0]._structural[0], SecondaryY)
+    assert themed.charts[0]._structural == []
+    assert len(themed.charts[0]._layers) == 2
+    assert themed.charts[0]._layers[-1].independent_y is True
     svg = themed.to_svg()
     _assert_valid_svg(svg)
 
 
 def test_structural_survives_properties_on_composition():
-    """Structural features survive .properties() on a composition.
+    """A sub-chart's SecondaryY layer survives .properties() on a composition.
 
     Targets _rebuild_with_charts -> Chart.properties which calls _clone.
     """
@@ -2361,7 +2375,8 @@ def test_structural_survives_properties_on_composition():
     c2 = Chart(df).mark_bar().encode(x="x", y="y")
     vc = c1 & c2
     updated = vc.properties(width=800)
-    assert len(updated.charts[0]._structural) == 1
+    assert len(updated.charts[0]._layers) == 2
+    assert updated.charts[0]._layers[-1].independent_y is True
     svg = updated.to_svg()
     _assert_valid_svg(svg)
 
@@ -2566,8 +2581,10 @@ def test_legend_config_valid_orients_accepted():
 def test_chart_with_all_three_config_domains_renders():
     """A chart with configure + annotation + structural should render correctly.
 
-    Targets _resolve_chart_config which merges all three domains into the
-    chart_config dict passed to render_svg.
+    Targets _resolve_chart_config which merges configure/annotation/structural
+    into the chart_config dict passed to render_svg. SecondaryY (GH #52)
+    desugars to a layer rather than a structural entry, so BreakAxis carries
+    the "structural" assertion here.
     """
     from ferrum.annotation.primitives import text
 
@@ -2576,10 +2593,12 @@ def test_chart_with_all_three_config_domains_renders():
         Chart(df).mark_point().encode(x="x", y="y").configure(axis=AxisConfig(label_angle=-45))
         + text(2.0, 5.0, "Peak")
         + SecondaryY("z", color="red")
+        + BreakAxis(axis="y", gap=(3, 5))
     )
     assert len(c._configure) == 1
     assert len(c._annotations) == 1
     assert len(c._structural) == 1
+    assert c._layers[-1].independent_y is True
     merged = c._resolve_chart_config()
     assert "axis" in merged
     assert "annotations" in merged
@@ -3057,36 +3076,34 @@ def test_inset_shadow_and_background_serialized():
 
 
 def test_secondary_y_serialization_all_fields():
-    """SecondaryY serialization includes color and opacity when set.
+    """SecondaryY with color/opacity desugars to a layer carrying both (GH #52).
 
-    Targets _render.py _serialize_structural: SecondaryY branch.
+    ``_serialize_structural`` no longer has a SecondaryY branch -- the
+    feature is intercepted at ``Chart.__add__`` time and desugared into an
+    appended layer (see ``_desugar_secondary_y`` in chart.py) before it ever
+    reaches structural-feature serialization.
     """
-    from ferrum._render import _RenderMixin
-
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [7.0, 8.0, 9.0]})
     feat = SecondaryY("z", mark="bar", color="red", opacity=0.5)
-    d = _RenderMixin._serialize_structural(feat)
-    assert d["type"] == "secondary_y"
-    assert d["field"] == "z"
-    assert d["mark"] == "bar"
-    assert d["color"] == "red"
-    assert d["opacity"] == 0.5
+    c = Chart(df).mark_point().encode(x="x", y="y") + feat
+    layer = c._layers[-1]
+    assert layer.mark == "bar"
+    assert layer.encoding["y"].field == "z"
+    assert layer.independent_y is True
+    # "bar" is fill-primary, so color= resolves to "fill".
+    assert layer.mark_kwargs == {"fill": "red", "opacity": 0.5}
 
 
 def test_secondary_y_minimal_serialization():
-    """SecondaryY with only field should omit color and opacity.
-
-    Targets _render.py _serialize_structural: color/opacity are only
-    set when not None.
-    """
-    from ferrum._render import _RenderMixin
-
+    """SecondaryY with only field omits mark_kwargs (no color/opacity set)."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [7.0, 8.0, 9.0]})
     feat = SecondaryY("z")
-    d = _RenderMixin._serialize_structural(feat)
-    assert d["type"] == "secondary_y"
-    assert d["field"] == "z"
-    assert d["mark"] == "line"  # default
-    assert "color" not in d
-    assert "opacity" not in d
+    c = Chart(df).mark_point().encode(x="x", y="y") + feat
+    layer = c._layers[-1]
+    assert layer.mark == "line"  # default
+    assert layer.encoding["y"].field == "z"
+    assert layer.independent_y is True
+    assert layer.mark_kwargs is None
 
 
 # ---------------------------------------------------------------------------

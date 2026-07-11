@@ -224,17 +224,15 @@ class _RenderMixin:
 
     @staticmethod
     def _serialize_structural(feat) -> dict:
-        """Convert a structural feature dataclass to its dict form for the Rust binding."""
-        from ferrum.structural import BreakAxis, Inset, SecondaryY
+        """Convert a structural feature dataclass to its dict form for the Rust binding.
 
-        if isinstance(feat, SecondaryY):
-            d: dict = {"type": "secondary_y", "field": feat.field, "mark": feat.mark}
-            if feat.color is not None:
-                d["color"] = feat.color
-            if feat.opacity is not None:
-                d["opacity"] = feat.opacity
-            return d
-        elif isinstance(feat, BreakAxis):
+        ``SecondaryY`` is not handled here — it desugars to an appended
+        independent-y layer at ``Chart.__add__`` time (GH #52,
+        ``_desugar_secondary_y``) rather than accumulating in ``_structural``.
+        """
+        from ferrum.structural import BreakAxis, Inset
+
+        if isinstance(feat, BreakAxis):
             gaps = feat.gap
             # Normalize single (start, end) tuple to a list of [start, end] pairs.
             if (

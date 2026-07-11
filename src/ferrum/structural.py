@@ -14,6 +14,25 @@ _VALID_CONNECT_STYLES = frozenset({"bracket", "lines", "none"})
 class SecondaryY:
     """A secondary y-axis encoding overlaid on a chart.
 
+    ``chart + SecondaryY(...)`` desugars to an appended layer on *chart*: mark
+    ``mark``, ``y`` encoding on ``field`` (carrying ``axis``/``scale``), ``x``
+    inherited from the base chart, color literal ``color``, opacity
+    ``opacity`` — flagged as an independent-y layer (GH #52). The base
+    chart's own layer(s) are unchanged, so ``layered_chart + SecondaryY(...)``
+    keeps the base layers sharing the left axis while only the appended
+    layer gets its own right axis; adding multiple ``SecondaryY`` instances
+    stacks multiple right axes outward. The base chart must carry an ``x``
+    encoding for the secondary layer to inherit — adding ``SecondaryY`` to
+    a chart with no ``x`` raises ``ValueError``.
+
+    This re-bases the feature onto ferrum's per-layer independent-y
+    subsystem: unlike the original overlay-only renderer, the secondary
+    series now reserves its own right-side margin band (so the plot area
+    narrows to make room for it, rather than the axis overdrawing the plot),
+    gets a real axis (ticks, labels, per-encoding ``Axis(...)`` config), and
+    is fully interactive (tooltips, zoom/pan, hit-testing) like any other
+    layer.
+
     Parameters
     ----------
     field : str

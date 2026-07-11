@@ -199,26 +199,32 @@ class TestInset:
 
 
 class TestStructuralSerialization:
-    def test_secondary_y_serialization(self, base_chart):
+    def test_secondary_y_desugars_to_independent_layer(self, base_chart):
+        """GH #52: SecondaryY no longer accumulates in ``_structural`` -- it
+        desugars to an appended layer flagged ``independent_y=True`` (see
+        ``_desugar_secondary_y`` in ``ferrum.chart``)."""
         chart = base_chart + SecondaryY("revenue")
         cfg = chart._resolve_chart_config()
-        assert "structural" in cfg
-        assert len(cfg["structural"]) == 1
-        s = cfg["structural"][0]
-        assert s["type"] == "secondary_y"
-        assert s["field"] == "revenue"
-        assert s["mark"] == "line"
-        # Optional fields omitted when None
-        assert "color" not in s
-        assert "opacity" not in s
+        assert "structural" not in cfg
+        assert chart._layers is not None
+        assert len(chart._layers) == 2
+        secondary_layer = chart._layers[-1]
+        assert secondary_layer.independent_y is True
+        assert secondary_layer.mark == "line"
+        assert secondary_layer.encoding["y"].field == "revenue"
+        # x is inherited from the base chart's own x encoding.
+        assert secondary_layer.encoding["x"].field == "x"
+        # Optional fields omitted when None.
+        assert secondary_layer.mark_kwargs is None
 
     def test_secondary_y_with_optional_fields(self, base_chart):
         chart = base_chart + SecondaryY("revenue", mark="bar", color="#e45756", opacity=0.7)
-        cfg = chart._resolve_chart_config()
-        s = cfg["structural"][0]
-        assert s["mark"] == "bar"
-        assert s["color"] == "#e45756"
-        assert s["opacity"] == 0.7
+        secondary_layer = chart._layers[-1]
+        assert secondary_layer.mark == "bar"
+        assert secondary_layer.independent_y is True
+        # "bar" is a fill-primary mark, so color= resolves to "fill" (MarkBase
+        # convention -- see marks/base.py _STROKE_PRIMARY_MARKS).
+        assert secondary_layer.mark_kwargs == {"fill": "#e45756", "opacity": 0.7}
 
     def test_break_axis_single_gap_serialization(self, base_chart):
         chart = base_chart + BreakAxis(axis="y", gap=(50, 200))
@@ -283,12 +289,14 @@ class TestStructuralSerialization:
         assert s["background"] is None
 
     def test_multiple_structural_features(self, base_chart):
+        """SecondaryY desugars to a layer; only BreakAxis remains structural."""
         chart = base_chart + SecondaryY("revenue") + BreakAxis(axis="y", gap=(10, 90))
         cfg = chart._resolve_chart_config()
         assert "structural" in cfg
-        assert len(cfg["structural"]) == 2
-        types = {s["type"] for s in cfg["structural"]}
-        assert types == {"secondary_y", "break_axis"}
+        assert len(cfg["structural"]) == 1
+        assert cfg["structural"][0]["type"] == "break_axis"
+        assert chart._layers is not None
+        assert chart._layers[-1].independent_y is True
 
     def test_no_structural_key_when_empty(self, base_chart):
         cfg = base_chart._resolve_chart_config()
@@ -299,9 +307,10 @@ class TestStructuralSerialization:
 
         chart = base_chart + Configure(axis=AxisConfig(grid=True)) + SecondaryY("revenue")
         cfg = chart._resolve_chart_config()
-        assert "structural" in cfg
-        assert cfg["structural"][0]["type"] == "secondary_y"
-        # Configure entry is also present
+        # SecondaryY desugars to a layer, not a structural entry.
+        assert "structural" not in cfg
+        assert chart._layers[-1].independent_y is True
+        # Configure entry is still present.
         assert "axis" in cfg
 
 
@@ -333,3 +342,81 @@ class TestStructuralRendering:
         chart = base_chart + Configure(axis=AxisConfig(grid=True)) + SecondaryY("revenue")
         svg = chart.to_svg()
         assert svg.startswith("<svg")
+
+
+# ---------------------------------------------------------------------------
+# SecondaryY desugar (GH #52) -- appends an independent-y layer
+# ---------------------------------------------------------------------------
+
+
+class TestSecondaryYDesugar:
+    """Pins the GH #52 re-basing: SecondaryY appends a layer flagged
+    ``independent_y=True`` rather than accumulating a structural spec entry.
+    """
+
+    def test_layered_base_plus_secondary_y_keeps_base_sharing(self, dual_field_df):
+        """A two-layer base built via ``a + b`` keeps its own layers sharing
+        the left axis; only the appended SecondaryY layer becomes
+        independent-y (the base is unrestricted by the desugar)."""
+        a = fm.Chart(dual_field_df).mark_point().encode(x="x", y="y")
+        b = fm.Chart(dual_field_df).mark_line().encode(x="x", y="y")
+        layered = a + b
+        chart = layered + SecondaryY("revenue", mark="bar")
+
+        assert len(chart._layers) == 3
+        base_layer_0, base_layer_1, secondary_layer = chart._layers
+        assert base_layer_0.independent_y is False
+        assert base_layer_1.independent_y is False
+        assert secondary_layer.independent_y is True
+        assert secondary_layer.mark == "bar"
+        assert secondary_layer.encoding["y"].field == "revenue"
+        # x is inherited from the base chart, not re-specified per SecondaryY.
+        assert secondary_layer.encoding["x"].field == "x"
+
+        svg = chart.to_svg()
+        assert svg.startswith("<svg")
+
+    def test_multiple_secondary_y_stack_right_axes(self, dual_field_df):
+        """Multiple ``+ SecondaryY(...)`` additions append multiple
+        independent-y layers, in order (slot contract: layer 0 is always
+        primary; each subsequent independent layer stacks another right
+        axis)."""
+        base = fm.Chart(dual_field_df).mark_point().encode(x="x", y="y")
+        chart = base + SecondaryY("revenue") + SecondaryY("revenue", mark="point")
+
+        assert len(chart._layers) == 3
+        assert chart._layers[0].independent_y is False
+        assert chart._layers[1].independent_y is True
+        assert chart._layers[2].independent_y is True
+
+        svg = chart.to_svg()
+        assert svg.startswith("<svg")
+
+    def test_secondary_y_reserves_right_margin_band(self, dual_field_df):
+        """The dual-axis render narrows the plot area vs. the base chart
+        alone -- the upgrade over the legacy overlay-only renderer, which
+        drew the secondary axis over the plot area without reserving space
+        for it."""
+        import re
+
+        base = fm.Chart(dual_field_df).mark_point().encode(x="x", y="y")
+        svg_without = base.to_svg()
+        svg_with = (base + SecondaryY("revenue")).to_svg()
+
+        def rightmost_x_tick(svg: str) -> float:
+            m = re.search(
+                r'<text x="([0-9.]+)" y="[^"]+"[^>]*text-anchor="middle"[^>]*>5</text>',
+                svg,
+            )
+            assert m, "could not find x-axis tick label '5'"
+            return float(m.group(1))
+
+        assert rightmost_x_tick(svg_with) < rightmost_x_tick(svg_without)
+
+    def test_secondary_y_requires_base_x_encoding(self):
+        """SecondaryY's x is inherited from the base chart; a base chart with
+        no x encoding cannot be desugared."""
+        df = pl.DataFrame({"y": [1, 2, 3], "revenue": [10, 20, 30]})
+        base = fm.Chart(df).mark_point().encode(y="y")
+        with pytest.raises(ValueError, match="x encoding"):
+            base + SecondaryY("revenue")
