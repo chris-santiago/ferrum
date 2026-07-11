@@ -410,8 +410,8 @@ fn apply_dodge(
 /// is emitted into the axis that carries the categorical band: `__pos_x_offset__`
 /// when not flipped (band axis = x), `__pos_y_offset__` when `coord_flipped`
 /// (prepare.rs put the band axis in y). The other column is always 0.
-/// Mark drawers (bar/point/box/swarm/violin/errorbar/errorband/ribbon) read
-/// these columns post-scale-resolve and add them to the rendered position.
+/// All positional mark drawers read these columns post-scale-resolve via
+/// [`read_position_offsets`] and add them to the rendered position.
 ///
 /// `by_cats` is the per-row grouping category resolved by
 /// [`resolve_group_channel`] (one entry per row; null group rows are `""`).
