@@ -1239,7 +1239,7 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 60.0], vec![300.0, 0.0], false, false)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -1329,7 +1329,7 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 20.0], vec![300.0, 0.0], false, false)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -1433,7 +1433,7 @@ mod tests {
         let scales = ResolvedScales {
             x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 20.0], vec![300.0, 0.0], false, false)),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
@@ -1685,7 +1685,7 @@ mod tests {
             y: ScaleKind::Linear(LinearScale::new_internal(
                 vec![0.0, 30.0], vec![300.0, 0.0], false, false,
             )),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
         };
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
         let ctx = crate::render::draw::DrawCtx {

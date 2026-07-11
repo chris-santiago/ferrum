@@ -646,7 +646,63 @@ impl OpacityScale {
     pub fn max_opacity(&self) -> f64 { self.inner.pixel_range().1 }
 }
 
-#[derive(Debug)]
+/// Per-layer independent y-scale slots (secondary-y-axis, GH #52).
+///
+/// `slots[0]` is always the primary y-scale — identical to
+/// [`ResolvedScales::y`] — driving the left axis and gridlines. Each later
+/// entry is an independent layer's own resolved y-scale, in the order the
+/// independent layers appear (slot `k` = k-th `independent_y` layer, drawn on
+/// the right, stacked outward). `layer_slot[i]` is the slot layer `i`'s marks
+/// map through; shared layers map to slot 0.
+///
+/// The default (empty `slots`, empty `layer_slot`) means the chart has no
+/// independent-y layer: every layer uses [`ResolvedScales::y`] and consumers
+/// resolve byte-identically to the pre-#52 shared path. Axis emission (Task 3)
+/// and the interactive coordinate state (Task 8) read these same slots so mark
+/// geometry, ticks, and domain state agree by construction.
+#[derive(Debug, Clone, Default)]
+pub struct YScaleSlots {
+    slots: Vec<ScaleKind>,
+    layer_slot: Vec<usize>,
+}
+
+impl YScaleSlots {
+    /// Build slots from an ordered `slots` list (index 0 = primary) and a
+    /// `layer_slot` map (layer index → slot index). Callers guarantee slot 0 is
+    /// the primary y and that every `layer_slot` entry indexes into `slots`.
+    pub fn new(slots: Vec<ScaleKind>, layer_slot: Vec<usize>) -> Self {
+        Self { slots, layer_slot }
+    }
+
+    /// Ordered y-scales, `slots[0]` the primary/left axis. Empty when the chart
+    /// has no independent-y layer.
+    ///
+    /// Read by axis emission (Task 3, iterates slots → left axis for slot 0,
+    /// stacked right axes for slots 1..n) and the interactive coordinate state
+    /// (Task 8, emits one y-domain per slot). Not yet consumed in the Task 2
+    /// resolution/binding path, which routes through [`ResolvedScales::y_for_layer`].
+    #[allow(dead_code)]
+    pub fn slots(&self) -> &[ScaleKind] {
+        &self.slots
+    }
+
+    /// Whether any independent y-slot exists beyond the primary.
+    ///
+    /// Read by axis-band layout (Task 3) to decide whether a right axis band must
+    /// be reserved. Not yet consumed in the Task 2 resolution/binding path.
+    #[allow(dead_code)]
+    pub fn has_independent(&self) -> bool {
+        self.slots.len() > 1
+    }
+
+    /// Slot index a layer's marks map through. Shared layers — and every layer
+    /// when the chart has no independent slot — map to slot 0.
+    pub fn slot_for_layer(&self, layer_idx: usize) -> usize {
+        self.layer_slot.get(layer_idx).copied().unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ResolvedScales {
     pub x: ScaleKind,
     pub y: ScaleKind,
@@ -661,6 +717,22 @@ pub struct ResolvedScales {
     // off `ResolvedScales` without re-walking the spec encoding.
     pub x2: Option<String>,
     pub y2: Option<String>,
+    /// Per-layer independent y-scale slots (secondary-y-axis, GH #52). Default
+    /// (empty) means every layer shares the primary `y` — the byte-stable
+    /// pre-#52 path. See [`YScaleSlots`].
+    pub y_slots: YScaleSlots,
+}
+
+impl ResolvedScales {
+    /// The y-scale a given layer's marks map through. Layers that share the
+    /// primary y (the default, and every layer on a chart with no independent
+    /// slot) get `y`; an independent layer gets its own slot scale.
+    pub fn y_for_layer(&self, layer_idx: usize) -> &ScaleKind {
+        let slot = self.y_slots.slot_for_layer(layer_idx);
+        // `slots` is empty on the shared path; slot 0 mirrors `y`, so fall back
+        // to `y` whenever the slot list is not populated.
+        self.y_slots.slots.get(slot).unwrap_or(&self.y)
+    }
 }
 
 // ── Shared helpers used by sub-modules ──────────────────────────────────────
@@ -974,7 +1046,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
                 x: dummy_unit_scale(x_pixel_range, true),
                 y: dummy_unit_scale(y_pixel_range, false),
                 color: None, size: None, shape: None, opacity: None,
-                x2: None, y2: None,
+                x2: None, y2: None, y_slots: YScaleSlots::default(),
             },
             warnings,
         ));
@@ -997,6 +1069,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
             return Ok((ResolvedScales {
                 x, y: dummy_unit_scale(y_pixel_range, false),
                 color, size, shape, opacity, x2: None, y2: None,
+                y_slots: YScaleSlots::default(),
             }, warnings));
         }
         if !has_x && has_y {
@@ -1009,6 +1082,7 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
             return Ok((ResolvedScales {
                 x: dummy_unit_scale(x_pixel_range, true), y,
                 color, size, shape, opacity, x2: None, y2: None,
+                y_slots: YScaleSlots::default(),
             }, warnings));
         }
     }
@@ -1077,6 +1151,10 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
             opacity,
             x2: x2_field_name,
             y2: y2_field_name,
+            // Per-slot y resolution is layered/layer-aware and lives in
+            // `scene_build::resolve_panel_scales`, which has the layer list.
+            // The single-batch resolver always yields the shared (empty) default.
+            y_slots: YScaleSlots::default(),
         },
         warnings,
     ))

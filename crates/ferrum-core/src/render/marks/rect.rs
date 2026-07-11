@@ -798,6 +798,7 @@ mod tests {
             }),
             x2: None,
             y2: None,
+            y_slots: Default::default(),
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
@@ -864,6 +865,7 @@ mod tests {
                 inner: ScaleKind::Linear(LinearScale::new_internal(vec![0.2, 0.9], vec![0.2, 0.9], false, false)),
             }),
             x2: None, y2: None,
+            y_slots: Default::default(),
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
@@ -1184,7 +1186,7 @@ mod tests {
                 vec![150.0],
                 0.0,
             )),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
@@ -1493,7 +1495,7 @@ mod tests {
                 vec![150.0],
                 0.0,
             )),
-            color: None, size: None, shape: None, opacity: None, x2: None, y2: None,
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
         };
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);

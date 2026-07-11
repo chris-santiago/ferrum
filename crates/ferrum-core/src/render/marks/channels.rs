@@ -196,6 +196,7 @@ mod tests {
             opacity: None,
             x2: None,
             y2: None,
+            y_slots: Default::default(),
         }
     }
 

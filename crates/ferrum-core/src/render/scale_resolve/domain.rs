@@ -447,6 +447,14 @@ pub(in crate::render) fn numeric_domain_union(
     // the shared scale domain spans both layers' data ranges.
     if let Some(layers) = &spec.layers {
         for layer in layers {
+            // An `independent_y` layer resolves its own y-slot (secondary-y-axis,
+            // GH #52) and must not widen the primary/shared y domain — that would
+            // couple the left axis to a scale it does not own. Its x stays shared,
+            // so only the y channel skips. Byte-stable for all-shared charts: the
+            // flag defaults false, so this never fires without an independent layer.
+            if channel == "y" && layer.independent_y {
+                continue;
+            }
             let layer_field = match channel {
                 "x" => layer.encoding.x.as_ref().map(|e| e.field.as_str()),
                 "y" => layer.encoding.y.as_ref().map(|e| e.field.as_str()),

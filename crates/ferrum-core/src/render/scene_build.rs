@@ -119,6 +119,7 @@ pub fn build_scene(
             prep,
             panel,
             &panel_batch,
+            &layer_batches,
             theme,
             chart_config,
             warnings,
@@ -461,6 +462,10 @@ fn resolve_panel_scales(
     prep: &PreparedInputs,
     panel: &crate::layout::PanelLayout,
     panel_batch: &RecordBatch,
+    // Per-panel layer batches (one per `prep.layers`, facet-filtered). Slot 0 /
+    // the primary y resolves against `panel_batch` exactly as before; each
+    // independent layer's y-slot resolves against its own batch here.
+    layer_batches: &[RecordBatch],
     theme: &ThemeInputs,
     chart_config: &super::chart_config::ChartConfig,
     warnings: &mut Vec<RenderWarning>,
@@ -501,7 +506,85 @@ fn resolve_panel_scales(
         super::apply_color_config_to_color_scale(&mut scales.color, cfg);
     }
 
+    // Per-layer independent y-scale slots (secondary-y-axis, GH #52). Byte-stable
+    // gate: only build slots when some non-primary layer requests `independent_y`;
+    // otherwise leave `scales.y_slots` at its empty default so shared and
+    // `y:"shared"` charts resolve exactly as before. Slot 0 stays the primary `y`
+    // resolved above (against layer 0's / the panel batch), unchanged.
+    if prep.layers.iter().skip(1).any(|l| l.independent_y) {
+        let mut slots: Vec<scale_resolve::ScaleKind> = vec![scales.y.clone()];
+        let mut layer_slot: Vec<usize> = vec![0; prep.layers.len()];
+        for (li, layer) in prep.layers.iter().enumerate() {
+            // Layer 0 is always the primary/left axis regardless of its flag.
+            if li == 0 || !layer.independent_y {
+                continue;
+            }
+            let y_scale = resolve_layer_y_scale(
+                spec,
+                layer,
+                &layer_batches[li],
+                prep,
+                panel,
+                theme,
+                leaf_scales,
+            )?;
+            slots.push(y_scale);
+            layer_slot[li] = slots.len() - 1;
+        }
+        scales.y_slots = scale_resolve::YScaleSlots::new(slots, layer_slot);
+    }
+
     Ok((rendering_spec_for_panel, scales))
+}
+
+/// Resolve one independent layer's y-scale slot (secondary-y-axis, GH #52).
+///
+/// Reuses the exact per-layer resolution path the primary y uses: the layer's
+/// encoding overlays the chart encoding, `domainParam` references are
+/// substituted, and [`scale_resolve::resolve_scales_with_leaf_context`] applies
+/// every rule the primary gets — explicit `scale=` on the layer's y encoding
+/// wins, bar zero-anchor, y2 domain extension, nice-ing, and every `ScaleSpec`
+/// type. The layer's own batch (its data + transform outputs) seeds the domain,
+/// and its `mark` drives mark-dependent rules (e.g. bar zero-anchor). Only the
+/// resolved `.y` is kept.
+///
+/// Warnings from this resolution are discarded: they concern channels other than
+/// y (color/size/x) that the slot never consumes, and the primary pass already
+/// surfaces the layer-0 channel warnings. A genuine y-field error still
+/// propagates as `Err`.
+#[allow(clippy::too_many_arguments)]
+fn resolve_layer_y_scale(
+    spec: &ChartSpec,
+    layer: &super::prepare::LayerPrepared,
+    layer_batch: &RecordBatch,
+    prep: &PreparedInputs,
+    panel: &crate::layout::PanelLayout,
+    theme: &ThemeInputs,
+    leaf_scales: Option<&LeafScaleContext>,
+) -> Result<scale_resolve::ScaleKind, RenderError> {
+    let mut layer_encoding = spec.encoding.clone();
+    layer_encoding.overlay_from(&layer.encoding);
+    let mut layer_spec = ChartSpec {
+        mark: layer.mark,
+        encoding: layer_encoding,
+        // Resolve this slot from ITS OWN field only: dropping `layers` stops
+        // `numeric_domain_union` from re-unioning sibling layers' y fields, so an
+        // independent layer's y-scale spans exactly its own data.
+        layers: None,
+        ..spec.clone()
+    };
+    resolve_param_domains(&mut layer_spec);
+
+    let (layer_scales, _warns) = scale_resolve::resolve_scales_with_leaf_context(
+        &layer_spec,
+        layer_batch,
+        &prep.transform_outputs,
+        (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
+        (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
+        theme,
+        leaf_scales,
+    )?;
+    Ok(layer_scales.y)
 }
 
 /// Per-panel axis layouts for the independent-resolve facet case (MOD-09).
@@ -787,6 +870,23 @@ fn build_panel_mark_batches(
         if layer_batch.num_rows() == 0 {
             continue;
         }
+
+        // Bind this layer to its y-slot (secondary-y-axis, GH #52). Shared layers
+        // (and every layer on a chart with no independent slot) draw through the
+        // primary `scales` unchanged — byte-stable. An independent layer draws
+        // through a clone whose `.y` is its own slot scale, so mark geometry and
+        // position adjustment map data → pixels through that layer's y-scale
+        // without touching any mark renderer (all read `ctx.scales.y`).
+        let layer_scales_owned: Option<scale_resolve::ResolvedScales> =
+            if scales.y_slots.slot_for_layer(li) != 0 {
+                let mut s = scales.clone();
+                s.y = scales.y_for_layer(li).clone();
+                Some(s)
+            } else {
+                None
+            };
+        let scales: &scale_resolve::ResolvedScales =
+            layer_scales_owned.as_ref().unwrap_or(scales);
 
         // Position adjustment — always call apply_position; it is the
         // single authority for all adjustments (explicit layer.position
@@ -2275,12 +2375,14 @@ mod tests {
         };
 
         let mut warnings = Vec::new();
+        // One implicit layer → one layer batch (the whole panel batch).
+        let layer_batches = vec![batch.clone()];
         let (_spec_a, scales_a) = resolve_panel_scales(
-            &spec, &prep, &panel_narrow, &batch, &theme, &chart_config, &mut warnings, None,
+            &spec, &prep, &panel_narrow, &batch, &layer_batches, &theme, &chart_config, &mut warnings, None,
         )
         .unwrap();
         let (_spec_b, scales_b) = resolve_panel_scales(
-            &spec, &prep, &panel_wide, &batch, &theme, &chart_config, &mut warnings, None,
+            &spec, &prep, &panel_wide, &batch, &layer_batches, &theme, &chart_config, &mut warnings, None,
         )
         .unwrap();
 
@@ -2294,5 +2396,139 @@ mod tests {
             (a_hi - a_lo - (b_hi - b_lo)).abs() > 1e-6,
             "per-panel x pixel ranges must differ ({a_lo}..{a_hi} vs {b_lo}..{b_hi})"
         );
+    }
+
+    // ── #52 Task 2: per-slot y-scale resolution ──────────────────────────────
+
+    /// Build a two-layer ChartSpec sharing x, with layer 0 on `y0` and layer 1
+    /// on `y1`, and a batch carrying `x`/`y0`/`y1`. `layer1_independent` sets the
+    /// flag on the appended layer. Returns `(spec, batch)`.
+    fn two_layer_dual_y_spec(layer1_independent: bool) -> (ChartSpec, RecordBatch) {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use std::sync::Arc;
+
+        let y_enc = |field: &str| Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                y: Some(EncodingSpec { field: field.into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: false,
+        };
+        let mut layer1 = y_enc("y1");
+        layer1.independent_y = layer1_independent;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: Some(vec![y_enc("y0"), layer1]),
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y0", DataType::Float64, false),
+            Field::new("y1", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                // y0 ∈ [1,3] (small); y1 ∈ [100,300] (large) — clearly separable.
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![100.0, 200.0, 300.0])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    fn resolve_dual_y(spec: &ChartSpec, batch: &RecordBatch) -> scale_resolve::ResolvedScales {
+        let theme = ThemeInputs::default();
+        let prep = super::super::prepare::prepare_render_inputs(spec, batch, &theme, None).unwrap();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        let panel = crate::layout::PanelLayout {
+            plot_area: crate::layout::Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 },
+            ..Default::default()
+        };
+        // Both layers read the whole panel batch (no per-layer data_source).
+        let layer_batches = vec![batch.clone(), batch.clone()];
+        let mut warnings = Vec::new();
+        let (_spec, scales) = resolve_panel_scales(
+            spec, &prep, &panel, batch, &layer_batches, &theme, &chart_config, &mut warnings, None,
+        )
+        .unwrap();
+        scales
+    }
+
+    /// An `independent_y` layer resolves its OWN y-slot from its own data: slot 0
+    /// keeps the primary (layer-0) domain, slot 1 carries layer 1's much larger
+    /// domain, and `y_for_layer` routes each layer to its slot.
+    #[test]
+    fn independent_y_layer_resolves_its_own_slot_domain() {
+        let (spec, batch) = two_layer_dual_y_spec(true);
+        let scales = resolve_dual_y(&spec, &batch);
+
+        assert!(scales.y_slots.has_independent(), "independent layer must create a second slot");
+        assert_eq!(scales.y_slots.slots().len(), 2, "one primary slot + one independent slot");
+        assert_eq!(scales.y_slots.slot_for_layer(0), 0, "layer 0 is always the primary slot");
+        assert_eq!(scales.y_slots.slot_for_layer(1), 1, "the independent layer binds slot 1");
+
+        let (lo0, hi0) = scales.y_for_layer(0).data_domain().expect("primary y is continuous");
+        let (lo1, hi1) = scales.y_for_layer(1).data_domain().expect("slot-1 y is continuous");
+
+        // Slot 0 is the small y0 range; slot 1 is the large y1 range. Padding/nice
+        // widen the exact bounds, so compare against a separating midpoint.
+        assert!(hi0 < 50.0, "slot 0 must be layer 0's small y0 domain, got {lo0}..{hi0}");
+        assert!(lo1 > 50.0, "slot 1 must be layer 1's large y1 domain, got {lo1}..{hi1}");
+
+        // Slot 0 mirrors the primary `y` exactly (byte-stable primary resolution).
+        assert_eq!(
+            scales.y.data_domain(),
+            scales.y_for_layer(0).data_domain(),
+            "slot 0 must equal the primary y-scale"
+        );
+    }
+
+    /// With both layers sharing y (flag false), no independent slot is built: the
+    /// slot list stays empty and every layer maps through the primary `y` — the
+    /// byte-stable pre-#52 path.
+    #[test]
+    fn shared_y_layers_leave_slots_empty_and_bind_primary() {
+        let (spec, batch) = two_layer_dual_y_spec(false);
+        let scales = resolve_dual_y(&spec, &batch);
+
+        assert!(!scales.y_slots.has_independent(), "no independent layer → no extra slot");
+        assert!(scales.y_slots.slots().is_empty(), "shared path leaves the slot list empty");
+        assert_eq!(scales.y_slots.slot_for_layer(1), 0, "shared layers bind slot 0");
+
+        // Every layer draws through the one primary y-scale.
+        assert_eq!(scales.y_for_layer(0).data_domain(), scales.y.data_domain());
+        assert_eq!(scales.y_for_layer(1).data_domain(), scales.y.data_domain());
     }
 }

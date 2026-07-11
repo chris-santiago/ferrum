@@ -820,6 +820,7 @@ mod tests {
             opacity: None,
             x2: None,
             y2: None,
+            y_slots: Default::default(),
         }
     }
 
@@ -934,7 +935,7 @@ mod tests {
             false,
         ));
         let (x, y) = if ordinal_on_x { (ord, lin) } else { (lin, ord) };
-        ResolvedScales { x, y, color: None, size: None, shape: None, opacity: None, x2: None, y2: None }
+        ResolvedScales { x, y, color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default() }
     }
 
     /// Batch with a categorical band column `cat`, a numeric value column `val`,
@@ -1067,6 +1068,7 @@ mod tests {
             opacity: None,
             x2: None,
             y2: None,
+            y_slots: Default::default(),
         }
     }
 
