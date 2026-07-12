@@ -7,16 +7,24 @@ today, plus the ``"legend"`` sub-object emitted on the composite node's wire
 resolution and can be forced back to per-panel with
 ``legend={"color": "independent"}``.
 
-The actual figure-level legend RENDERING (one legend drawn instead of N
-per-panel legends) is Rust-side work landing in later tasks of this phase —
-this file tests only what Task 4 owns: ``Resolve`` normalization, the wire
-shape ``_lower_composite`` produces, the validation matrix's typed
-``ValueError``s, and back-compat with the flat-dict ``resolve=`` form. See
-``design-docs/superpowers/specs/2026-07-12-composite-shared-legend-design.md``
-§4/§6 for the semantic rule this file locks in.
+Task 4 (above) covers ``Resolve`` normalization, the wire shape
+``_lower_composite`` produces, the validation matrix's typed ``ValueError``s,
+and back-compat with the flat-dict ``resolve=`` form.
+
+Task 5 adds the end-to-end regression suite for the flagship outcome: the
+Rust-side figure-level legend band is now landed and ``pairplot(hue=)`` /
+``jointplot(hue=)`` render exactly ONE legend. The tests below assert on
+rendered SVG text-node counts (see ``_legend_texts`` below) to discriminate
+one-figure-legend output from N-per-panel-legend output, covering spec §9.1
+(pairplot/jointplot one-legend), §9.5 (opt-out still shows N per-panel
+legends — this also documents pre-feature/main behavior), §9.7 (explicit
+leaf scale keeps its own legend), §9.8 (``legend=None`` leaf handling), and
+§9.12 (``markers=`` shape collapse into the single color legend).
 """
 
 from __future__ import annotations
+
+import re
 
 import polars as pl
 import pytest
@@ -25,10 +33,22 @@ import ferrum as fm
 from ferrum.composition import (
     HConcatChart,
     LayerChart,
+    RepeatChart,
     Resolve,
     _composite_resolve_field,
     _lower_composite,
 )
+
+
+def _legend_texts(svg: str) -> list[str]:
+    """Extract all SVG ``<text>`` node contents, in document order.
+
+    Shared helper for the one-legend-vs-N-panel-legend assertions below —
+    counting occurrences of a field's title/category-label text is the
+    discriminating signal between a single figure-level legend and one
+    legend rendered per participating panel.
+    """
+    return re.findall(r"<text[^>]*>([^<]+)</text>", svg)
 
 
 # ---------------------------------------------------------------------------
@@ -374,3 +394,261 @@ def test_repeatchart_spec_flat_dict_resolve_unchanged(df_a):
     rc = fm.RepeatChart(template, row=["x", "y"], column=["x", "y"], resolve=flat)
     assert rc.spec["resolve"] == {"color": "shared"}
     assert rc.spec["resolve"] is flat  # back-compat: pass-through, not a copy
+
+
+# ---------------------------------------------------------------------------
+# Task 5 fixtures — small hue-bearing DataFrames for pairplot/jointplot.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def pairplot_df() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "y": [2.0, 1.0, 4.0, 3.0, 6.0, 5.0],
+            "z": [1.0, 3.0, 2.0, 5.0, 4.0, 6.0],
+            "grp": ["a", "b", "a", "b", "a", "b"],
+        }
+    )
+
+
+@pytest.fixture
+def joint_df() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "y": [2.0, 1.0, 4.0, 3.0, 6.0, 5.0],
+            "grp": ["a", "b", "a", "b", "a", "b"],
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# §9.1 — pairplot(hue=)/jointplot(hue=) render exactly ONE figure legend.
+# ---------------------------------------------------------------------------
+
+
+def test_pairplot_hue_renders_exactly_one_legend_title(pairplot_df):
+    """Acceptance criterion 1: one legend group, not one per panel.
+
+    Symmetric grid over 3 vars is 3x3=9 panels (6 off-diagonal + 3 diagonal);
+    every panel carries the ``color`` channel on the shared ``grp`` field.
+    Pre-feature (see the opt-out test below), this rendered 9 separate
+    ``grp`` legend titles — one per panel. The figure-level legend band
+    collapses that to exactly 1.
+    """
+    svg = fm.pairplot(pairplot_df, vars=["x", "y", "z"], hue="grp").to_svg()
+    texts = _legend_texts(svg)
+    assert texts.count("grp") == 1, f"expected exactly one 'grp' legend title; got texts: {texts}"
+
+
+def test_pairplot_hue_legend_swatches_render_once_not_per_panel(pairplot_df):
+    """Per-category swatch labels appear once, not once per participating panel."""
+    svg = fm.pairplot(pairplot_df, vars=["x", "y", "z"], hue="grp").to_svg()
+    texts = _legend_texts(svg)
+    assert texts.count("a") == 1, f"expected exactly one 'a' swatch label; got texts: {texts}"
+    assert texts.count("b") == 1, f"expected exactly one 'b' swatch label; got texts: {texts}"
+
+
+def test_pairplot_corner_hue_renders_exactly_one_legend_title(pairplot_df):
+    """Regression for the hole-cell fix: corner=True leaves a Hole in the
+    upper-right triangle (pairplot's empty corner). The grid union/band
+    placement must still collapse to one legend, not raise or duplicate.
+    """
+    svg = fm.pairplot(pairplot_df, vars=["x", "y", "z"], hue="grp", corner=True).to_svg()
+    texts = _legend_texts(svg)
+    assert texts.count("grp") == 1, (
+        f"corner=True must still collapse to one 'grp' legend title; got texts: {texts}"
+    )
+
+
+def test_jointplot_hue_renders_exactly_one_legend_title(joint_df):
+    """Acceptance criterion 9: jointplot(hue=) renders one legend.
+
+    jointplot's grid has a Hole in the empty top-right corner (no cell
+    between the top and right marginals) — the same hole-cell fix this
+    regression covers for pairplot's corner=True.
+    """
+    svg = fm.jointplot(joint_df, x="x", y="y", hue="grp").to_svg()
+    texts = _legend_texts(svg)
+    assert texts.count("grp") == 1, f"expected exactly one 'grp' legend title; got texts: {texts}"
+    assert texts.count("a") == 1, f"expected exactly one 'a' swatch label; got texts: {texts}"
+    assert texts.count("b") == 1, f"expected exactly one 'b' swatch label; got texts: {texts}"
+
+
+# ---------------------------------------------------------------------------
+# §9.5 — opt-out (legend=independent) still shows N per-panel legends.
+#
+# This is the RED-proof: the feature ships as committed Rust+Python, so a
+# regression test can't be run against unpatched Rust directly. Instead, the
+# opt-out path exercises the *pre-feature* rendering contract (shared scale,
+# independent legend) that pairplot/jointplot used to always produce, and
+# which the default-legend-follows-scale behavior above replaces. If the
+# figure-legend band regressed to always-suppress (over-eager) or
+# always-per-panel (under-eager), one of this pair of tests would catch it.
+# ---------------------------------------------------------------------------
+
+
+def test_pairplot_legend_independent_opt_out_shows_per_panel_titles(pairplot_df):
+    """Acceptance criterion 5, applied to pairplot's grid.
+
+    Builds the equivalent RepeatChart directly (same template/diagonal/row/
+    column/corner that ``pairplot(hue=)`` produces) but with
+    ``Resolve(scale={"color": "shared"}, legend={"color": "independent"})``
+    — the explicit opt-out. Every one of the 9 panels keeps its own 'grp'
+    legend title: this is the pre-feature (main) rendering contract,
+    documented here as a permanent regression guard.
+    """
+    shared = fm.pairplot(pairplot_df, vars=["x", "y", "z"], hue="grp")
+    n_panels = len(shared.row) * len(shared.column)
+    opt_out = RepeatChart(
+        shared.template,
+        row=shared.row,
+        column=shared.column,
+        diagonal=shared.diagonal,
+        corner=shared.corner,
+        resolve=Resolve(scale={"color": "shared"}, legend={"color": "independent"}),
+    )
+    svg = opt_out.to_svg()
+    texts = _legend_texts(svg)
+    assert texts.count("grp") == n_panels, (
+        f"legend=independent must render one 'grp' title per panel "
+        f"({n_panels} panels); got texts: {texts}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# §9.7 — explicit leaf Color(..., scale=...) keeps its own legend; others dedupe.
+# ---------------------------------------------------------------------------
+
+
+def test_leaf_with_explicit_scale_keeps_own_legend_others_dedupe():
+    """Two shared-scale leaves dedupe into 1 figure legend; the third leaf,
+    which carries an explicit ``Color(..., scale=OrdinalScale(...))``, is
+    excluded from the domain union (spec §4/§7) and keeps its own panel
+    legend — so the total 'grp' title count is 2, not 1 and not 3.
+    """
+    df_a = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0], "grp": ["p", "q", "p"]})
+    df_b = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "grp": ["p", "q", "q"]})
+    df_c = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [7.0, 8.0, 9.0], "grp": ["p", "q", "p"]})
+
+    a = fm.Chart(df_a).mark_point().encode(x="x", y="y", color="grp")
+    b = fm.Chart(df_b).mark_point().encode(x="x", y="y", color="grp")
+    c = (
+        fm.Chart(df_c)
+        .mark_point()
+        .encode(
+            x="x",
+            y="y",
+            color=fm.Color("grp", scale=fm.OrdinalScale(domain=["p", "q"], range=["red", "blue"])),
+        )
+    )
+
+    combo = fm.HConcatChart([a, b, c], resolve={"color": "shared"})
+    texts = _legend_texts(combo.to_svg())
+    assert texts.count("grp") == 2, (
+        f"expected 1 figure legend (a+b) + 1 leaf legend (c, explicit scale); got texts: {texts}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# §9.8 — legend=None leaf: participates in the domain union, never captured;
+# all-disabled leaves emit no figure legend.
+# ---------------------------------------------------------------------------
+
+
+def test_leaf_legend_none_participates_in_union_but_not_capture():
+    """One leaf disables its legend; the other (still enabled) leaf's bundle
+    is captured for the single figure legend, so the title still appears
+    exactly once (not zero, not two).
+    """
+    df_a = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0], "grp": ["p", "q", "p"]})
+    df_b = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "grp": ["p", "q", "q"]})
+
+    a = fm.Chart(df_a).mark_point().encode(x="x", y="y", color="grp")
+    b_disabled = (
+        fm.Chart(df_b).mark_point().encode(x="x", y="y", color=fm.Color("grp", legend=None))
+    )
+
+    combo = fm.HConcatChart([a, b_disabled], resolve={"color": "shared"})
+    texts = _legend_texts(combo.to_svg())
+    assert texts.count("grp") == 1, (
+        f"one enabled + one legend=None leaf must still render exactly one "
+        f"'grp' legend title (from the enabled leaf); got texts: {texts}"
+    )
+
+
+def test_all_leaves_legend_none_emits_no_figure_legend():
+    """All participating leaves disabled -> no figure legend at all."""
+    df_a = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0], "grp": ["p", "q", "p"]})
+    df_b = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "grp": ["p", "q", "q"]})
+
+    a_disabled = (
+        fm.Chart(df_a).mark_point().encode(x="x", y="y", color=fm.Color("grp", legend=None))
+    )
+    b_disabled = (
+        fm.Chart(df_b).mark_point().encode(x="x", y="y", color=fm.Color("grp", legend=None))
+    )
+
+    combo = fm.HConcatChart([a_disabled, b_disabled], resolve={"color": "shared"})
+    svg = combo.to_svg()
+    texts = _legend_texts(svg)
+    assert "grp" not in texts, f"all-disabled leaves must emit no figure legend; got texts: {texts}"
+    assert "p" not in texts and "q" not in texts, (
+        f"all-disabled leaves must render no swatch labels either; got texts: {texts}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# §9.12 — pairplot(hue=, markers=): shape glyphs collapse into the color legend.
+# ---------------------------------------------------------------------------
+
+
+def test_pairplot_hue_with_markers_collapses_shape_into_color_legend(pairplot_df):
+    """``markers=`` maps hue levels to point shapes via the same ``grp`` field
+    as ``color``. Same-field color+shape collapse (already covered per-panel
+    by the flexibility campaign) must hold at the figure level too: still
+    exactly one 'grp' legend title, not a second one for the shape channel.
+    """
+    svg = fm.pairplot(
+        pairplot_df, vars=["x", "y"], hue="grp", markers=["circle", "square"]
+    ).to_svg()
+    texts = _legend_texts(svg)
+    assert texts.count("grp") == 1, (
+        f"shape must collapse into the single color legend, not add a second "
+        f"'grp' title; got texts: {texts}"
+    )
+    # Sanity: the markers actually varied per hue level (not silently ignored).
+    assert svg.count("<rect") > 0 and svg.count("<circle") > 0, (
+        "expected a mix of circle and square (rect) point glyphs from markers="
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task 5 item 6 — jointplot public surface: _internal_resolve stays private.
+# ---------------------------------------------------------------------------
+
+
+def test_jointplot_with_hue_share_scale_still_raises(joint_df):
+    """``_internal_resolve`` must not have broken the ``_unsupported_resolve_error``
+    gate: ``share_scale()`` on a hue-colored ``jointplot`` still raises.
+    """
+    joint = fm.jointplot(joint_df, x="x", y="y", hue="grp")
+    with pytest.raises(ValueError, match="resolve="):
+        joint.share_scale(x="shared")
+
+
+def test_internal_resolve_not_in_jointplot_public_docstring():
+    assert "_internal_resolve" not in (fm.jointplot.__doc__ or "")
+
+
+def test_internal_resolve_not_in_jointchart_public_docstring():
+    assert "_internal_resolve" not in (fm.JointChart.__doc__ or "")
+
+
+def test_internal_resolve_not_in_jointplot_signature():
+    import inspect
+
+    sig = inspect.signature(fm.jointplot)
+    assert "_internal_resolve" not in sig.parameters

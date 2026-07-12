@@ -1828,6 +1828,7 @@ class JointChart(_CompositeBase):
         right=None,
         ratio: int = 5,
         spacing: float = 10.0,
+        _internal_resolve: ResolveArg = None,
     ) -> None:
         if ratio <= 0:
             raise ValueError(f"ratio must be > 0; got {ratio}")
@@ -1836,6 +1837,15 @@ class JointChart(_CompositeBase):
         self.right = right
         self.ratio = ratio
         self.spacing = spacing
+        # Not a public parameter: JointChart has no user-facing resolve=
+        # (its panel alignment is fixed layout geometry -- see
+        # _unsupported_resolve_error), but ``jointplot(hue=...)`` needs a
+        # way to opt the grid it builds into the shared-color legend band
+        # (spec §8.6) without exposing share_scale()/resolve= to callers.
+        # Deliberately NOT named ``_resolve``: the base ``share_scale()``
+        # gates on ``hasattr(self, "_resolve")``, and JointChart must keep
+        # failing that gate.
+        self._internal_resolve = _internal_resolve
         self._init_figure_chrome()
 
     @property
@@ -1882,6 +1892,7 @@ class JointChart(_CompositeBase):
             right=self.right,
             ratio=self.ratio,
             spacing=self.spacing,
+            _internal_resolve=self._internal_resolve,
         )
         self._carry_figure_chrome(result)
         return result
@@ -1900,6 +1911,7 @@ class JointChart(_CompositeBase):
             right=(fn(self.right) if self.right is not None else None),
             ratio=self.ratio,
             spacing=self.spacing,
+            _internal_resolve=self._internal_resolve,
         )
         self._carry_figure_chrome(new)
         return new
@@ -1937,6 +1949,15 @@ class JointChart(_CompositeBase):
         ``is_root`` is ``False`` when this JointChart is itself a cell nested
         inside another composite: the figure title then lowers to a per-child
         ``"label"`` and a subtitle/caption declines (root-only chrome).
+
+        ``self._internal_resolve`` (set by ``jointplot(hue=...)``, never a
+        public constructor argument) lowers onto this grid node's resolve
+        field via :func:`_composite_resolve_field`, exactly like
+        :class:`RepeatChart`'s public ``resolve=`` -- the Rust resolve pass
+        then unions the center/top/right color domains and, when the
+        effective legend mode is ``"shared"`` (the default once scale is
+        shared), the compositor renders one figure-level legend instead of
+        one per panel (spec §8.6).
 
         Returns
         -------
@@ -1993,6 +2014,8 @@ class JointChart(_CompositeBase):
             row_ratios = None
             col_ratios = None
 
+        resolve_field = _composite_resolve_field(self._internal_resolve, kind=type(self).__name__)
+
         return _build_grid_tree(
             cells,
             nrows=nrows,
@@ -2001,6 +2024,7 @@ class JointChart(_CompositeBase):
             col_ratios=col_ratios,
             spacing=self.spacing,
             auto_tooltips=auto_tooltips,
+            resolve=resolve_field or None,
             chrome=_RootChrome(
                 kind=type(self).__name__,
                 is_root=is_root,

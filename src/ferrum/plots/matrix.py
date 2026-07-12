@@ -278,11 +278,14 @@ def _pairplot_build(
     enc: dict = {"x": Repeat.column, "y": Repeat.row}
     if hue is not None:
         enc["color"] = hue
-    # markers as list: map each hue level to a shape via Shape encoding.
+    # markers as list: map each hue level to a shape via Shape encoding. The
+    # scale dict needs an explicit "type": "ordinal" -- without it, a
+    # string-only range (no domain) makes the Rust scale resolver assume a
+    # quantitative (f64) domain and reject the marker-name strings.
     if markers is not None and isinstance(markers, list) and hue is not None and kind == "scatter":
         from ferrum.encoding import Shape as _Shape
 
-        enc["shape"] = _Shape(hue, scale={"range": markers})
+        enc["shape"] = _Shape(hue, scale={"type": "ordinal", "range": markers})
     enc.update(encode_kwargs)
     off = off.encode(**enc)
 
@@ -328,11 +331,9 @@ def _pairplot_build(
             diagonal = diagonal.theme(theme)
 
     # When hue is set, unify the color scale domain across all cells so
-    # every panel maps the same category → color (consistent colors).
-    # Note: per-panel legend rendering remains — a single shared legend
-    # rendered once outside the grid would require compositor layout work
-    # beyond resolve=; consistent color domain is shipped here, one legend
-    # per panel is the known residual.
+    # every panel maps the same category → color (consistent colors). The
+    # compositor's shared-legend band (GH #16) then reads this resolve to
+    # render exactly one figure-level legend instead of one per panel.
     rc_resolve = {"color": "shared"} if hue is not None else None
     rc = RepeatChart(
         off,
@@ -1283,12 +1284,20 @@ def _jointplot_build(
         top = top.theme(theme)
         right = right.theme(theme)
 
+    # When hue is set, unify the color scale domain across center/top/right
+    # and opt this grid into the compositor's shared-color legend band (GH
+    # #16) so jointplot renders exactly one figure-level legend instead of
+    # one per panel. JointChart has no user-facing resolve= (its panel
+    # alignment is fixed layout geometry), so this rides the private
+    # _internal_resolve constructor argument rather than a public knob.
+    joint_resolve = {"color": "shared"} if hue is not None else None
     result = JointChart(
         center,
         top=top,
         right=right,
         ratio=ratio,
         spacing=space,
+        _internal_resolve=joint_resolve,
     )
     result = _finalize_chart(
         result, mark=mark, encode=encode, properties=properties, layers=layers, theme=None
