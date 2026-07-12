@@ -214,6 +214,13 @@ pub struct PreparedInputs {
     /// raw tick values that produced the current labels.
     pub x_tick_count: usize,
     pub y_tick_count: usize,
+    /// The structural layer→y-slot plan (secondary-y-axis, GH #52 / #72),
+    /// derived once from the layers' `independent_y` flags. The single source
+    /// for the layer→slot mapping: the prepare axis-input builder, per-panel
+    /// [`crate::render::scale_resolve::YScaleSlots`] resolution, and the axis
+    /// router all read it instead of re-deriving the mapping. Empty (default)
+    /// for every chart with no independent-y layer — the byte-stable path.
+    pub y_slot_plan: crate::render::scale_resolve::YSlotPlan,
 }
 
 /// Per-encoding legend style overrides extracted from `encoding.color.legend.*`.
@@ -524,6 +531,14 @@ pub fn prepare_render_inputs(
     let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
     let layers = build_layers(spec, coord_flipped);
 
+    // Layer→y-slot plan (secondary-y-axis, GH #52 / #72): derive the mapping
+    // ONCE here from the layers' `independent_y` flags, then hand it to every
+    // consumer (axis-input builder below, per-panel scale resolution, axis
+    // router). Empty for every chart with no independent-y layer.
+    let y_slot_plan = crate::render::scale_resolve::YSlotPlan::from_layer_flags(
+        layers.iter().map(|l| l.independent_y),
+    );
+
     // Validate every layer's data_source resolves to a known transform output.
     // Fail-fast here so the per-panel render loop can unconditionally `.get()`.
     for (i, layer) in layers.iter().enumerate() {
@@ -578,6 +593,7 @@ pub fn prepare_render_inputs(
         &provisional_scales,
         theme,
         &layers,
+        &y_slot_plan,
         &transformed,
         &transform_outputs,
         &mut scale_warnings,
@@ -625,6 +641,7 @@ pub fn prepare_render_inputs(
         aux_legends,
         x_tick_count,
         y_tick_count,
+        y_slot_plan,
     })
 }
 
@@ -778,6 +795,7 @@ fn build_axes(
     provisional_scales: &ResolvedScales,
     theme: &crate::layout::ThemeInputs,
     layers: &[LayerPrepared],
+    y_slot_plan: &crate::render::scale_resolve::YSlotPlan,
     transformed: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     warnings: &mut Vec<RenderWarning>,
@@ -812,6 +830,7 @@ fn build_axes(
         secondary_y: build_secondary_y_axis_inputs(
             spec,
             layers,
+            y_slot_plan,
             transformed,
             transform_outputs,
             theme,
@@ -835,25 +854,24 @@ fn build_axes(
 /// panels exist. `compute_layout` (Task 3) reserves one right-side margin band
 /// per returned axis and places it stacked outward from the primary.
 ///
-/// Empty when no layer sets `independent_y` — the byte-stable gate mirrors
-/// `resolve_panel_scales`'s Task 2 gate exactly, so `AxesInput.secondary_y`
-/// stays empty and layout/scene output for the shared path is unchanged.
+/// Empty when the plan carries no independent-y layer — the byte-stable path,
+/// so `AxesInput.secondary_y` stays empty and layout/scene output for the shared
+/// path is unchanged. Iterates the plan's `secondary_layers` (layer order,
+/// slot 1..n) so the axis-band order matches the per-panel [`YScaleSlots`] slot
+/// order and the axis router's slot ids by construction, not by parallel
+/// re-derivation (GH #72).
 fn build_secondary_y_axis_inputs(
     spec: &ChartSpec,
     layers: &[LayerPrepared],
+    y_slot_plan: &crate::render::scale_resolve::YSlotPlan,
     transformed: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     theme: &crate::layout::ThemeInputs,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<AxisInput>, RenderError> {
-    if !layers.iter().skip(1).any(|l| l.independent_y) {
-        return Ok(Vec::new());
-    }
     let mut out = Vec::new();
-    for layer in layers.iter().skip(1) {
-        if !layer.independent_y {
-            continue;
-        }
+    for &layer_idx in y_slot_plan.secondary_layers() {
+        let layer = &layers[layer_idx];
         let layer_batch: &RecordBatch = match &layer.data_source {
             Some(name) => transform_outputs
                 .get(name)

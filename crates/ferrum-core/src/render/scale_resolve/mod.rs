@@ -750,6 +750,99 @@ impl YScaleSlots {
     }
 }
 
+/// The structural layer→y-slot plan (secondary-y-axis, GH #52 / #72), computed
+/// **once** at prepare time from the layers' `independent_y` flags and stored on
+/// [`crate::render::prepare::PreparedInputs`].
+///
+/// Before #72 the same layer→slot mapping was re-derived independently at three
+/// sites — the prepare axis-input push loop, the per-panel [`YScaleSlots`] slot
+/// loop, and the axis router's position-inference (`i + 1`) — plus two
+/// order-coupled consumers. A change to one loop silently desynced axis labels,
+/// mark placement, and interactive `y_domains` with no compile-time signal
+/// (design-review S3-2). This plan is the single derivation: every site reads
+/// [`slot_for_layer`](Self::slot_for_layer) / [`secondary_layers`](Self::secondary_layers)
+/// instead of walking the layers itself.
+///
+/// Mirrors the #16 [`LegendBandPlan`](crate::render::composite_render) compute-
+/// once/consume-later pattern and its **index-keying** rationale: the plan keys
+/// slots by layer *index* (structural, re-derivable from the layer list's shape)
+/// rather than by any per-panel resolved artifact, so it stays valid across the
+/// prepare→scene_build stage boundary and across panels without re-computation.
+///
+/// `slots` follow GH #63's split indexing convention untouched: `slot_for_layer`
+/// returns 0 for the primary/left axis and layer, and `1..=n` for the n
+/// independent-y layers in layer order (the 1-based secondary numbering that
+/// `y_slot_levels`/`secondary_affines` also use). The default (empty) plan means
+/// no independent-y layer — the byte-stable pre-#52 shared path.
+#[derive(Debug, Clone, Default)]
+pub struct YSlotPlan {
+    /// layer index → slot index. Empty on the shared path (no independent-y
+    /// layer); otherwise one entry per layer, `0` for the primary/shared layers
+    /// and `1..=n` for the independent-y layers in layer order.
+    layer_slot: Vec<usize>,
+    /// The layer indices that own a secondary (right-axis) slot, in slot order:
+    /// `secondary_layers[k]` is the layer drawn on slot `k + 1`. Length = number
+    /// of independent-y layers. Empty on the shared path.
+    secondary_layers: Vec<usize>,
+}
+
+impl YSlotPlan {
+    /// Derive the plan from each layer's `independent_y` flag, in layer order.
+    /// Layer 0 is always the primary/left axis regardless of its flag; each
+    /// later layer whose flag is set takes the next secondary slot. Returns the
+    /// empty (default) plan when no such layer exists, so the shared path is
+    /// byte-identical to pre-#52.
+    ///
+    /// This is the ONE place the `skip(1).filter(independent_y)` derivation
+    /// lives; every consumer reads the resulting map.
+    pub fn from_layer_flags<I: IntoIterator<Item = bool>>(flags: I) -> Self {
+        let mut layer_slot: Vec<usize> = Vec::new();
+        let mut secondary_layers: Vec<usize> = Vec::new();
+        for (layer_idx, flag) in flags.into_iter().enumerate() {
+            // Layer 0 is always the primary/left axis; only later flagged layers
+            // take a secondary slot. `secondary_layers.len()` after the push is
+            // the 1-based slot index (slot 1 = first independent layer).
+            let slot = if layer_idx != 0 && flag {
+                secondary_layers.push(layer_idx);
+                secondary_layers.len()
+            } else {
+                0
+            };
+            layer_slot.push(slot);
+        }
+        if secondary_layers.is_empty() {
+            // Byte-stable shared path: an empty plan mirrors `YScaleSlots::default`.
+            return Self::default();
+        }
+        Self { layer_slot, secondary_layers }
+    }
+
+    /// Whether any independent y-slot exists beyond the primary.
+    pub fn has_independent(&self) -> bool {
+        !self.secondary_layers.is_empty()
+    }
+
+    /// Slot index a layer's marks map through. Shared layers — and every layer
+    /// when the chart has no independent slot — map to slot 0.
+    pub fn slot_for_layer(&self, layer_idx: usize) -> usize {
+        self.layer_slot.get(layer_idx).copied().unwrap_or(0)
+    }
+
+    /// The layer indices owning a secondary slot, in slot order: index `k` is the
+    /// layer drawn on slot `k + 1`. Consumed by the prepare axis-input builder,
+    /// the per-panel [`YScaleSlots`] resolution, and the axis router — all in
+    /// this one order.
+    pub fn secondary_layers(&self) -> &[usize] {
+        &self.secondary_layers
+    }
+
+    /// The full layer→slot map, for handing to [`YScaleSlots::new`] so the
+    /// per-panel resolved slots carry this plan's map rather than re-deriving it.
+    pub fn layer_slot(&self) -> &[usize] {
+        &self.layer_slot
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedScales {
     pub x: ScaleKind,

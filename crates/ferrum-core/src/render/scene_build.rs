@@ -64,6 +64,18 @@ pub fn build_scene(
     // there — byte-identical to the pre-#70 behavior.
     let reference_plot_area = layout.panels.first().map(|p| p.plot_area);
 
+    // Slot id for each secondary (right) y-axis, in axis-band order (GH #72).
+    // Read from the one layer→slot plan rather than inferred from the axis's
+    // position in the band list, so the axis router cannot drift from the slot
+    // the marks and `y_domains` resolved against. Identical for every panel
+    // (structural), so computed once here. Empty on the shared path.
+    let secondary_slots: Vec<usize> = prep
+        .y_slot_plan
+        .secondary_layers()
+        .iter()
+        .map(|&layer_idx| prep.y_slot_plan.slot_for_layer(layer_idx))
+        .collect();
+
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
             warnings.push(RenderWarning::EmptyPanel { panel_index: panel_idx });
@@ -222,6 +234,7 @@ pub fn build_scene(
             panel_x_axis,
             panel_y_axis,
             &panel_secondary_y,
+            &secondary_slots,
             panel_axes.x_independent,
             panel_axes.y_independent,
             theme,
@@ -586,22 +599,22 @@ fn resolve_panel_scales(
     }
 
     // Per-layer independent y-scale slots (secondary-y-axis, GH #52). Byte-stable
-    // gate: only build slots when some non-primary layer requests `independent_y`;
-    // otherwise leave `scales.y_slots` at its empty default so shared and
+    // gate: only build slots when the prepared plan carries an independent-y
+    // layer; otherwise leave `scales.y_slots` at its empty default so shared and
     // `y:"shared"` charts resolve exactly as before. Slot 0 stays the primary `y`
-    // resolved above (against layer 0's / the panel batch), unchanged.
-    if prep.layers.iter().skip(1).any(|l| l.independent_y) {
+    // resolved above (against layer 0's / the panel batch), unchanged. The
+    // layer→slot map is NOT re-derived here — it comes straight from
+    // `prep.y_slot_plan` (GH #72), so this per-panel resolution, the axis-band
+    // order, and the axis router cannot drift. Slots are pushed in the plan's
+    // `secondary_layers` order, so `slots[k + 1]` is `secondary_layers[k]`,
+    // matching `layer_slot`.
+    if prep.y_slot_plan.has_independent() {
         let mut slots: Vec<scale_resolve::ScaleKind> = vec![scales.y.clone()];
-        let mut layer_slot: Vec<usize> = vec![0; prep.layers.len()];
-        for (li, layer) in prep.layers.iter().enumerate() {
-            // Layer 0 is always the primary/left axis regardless of its flag.
-            if li == 0 || !layer.independent_y {
-                continue;
-            }
+        for &layer_idx in prep.y_slot_plan.secondary_layers() {
             let y_scale = resolve_layer_y_scale(
                 spec,
-                layer,
-                &layer_batches[li],
+                &prep.layers[layer_idx],
+                &layer_batches[layer_idx],
                 prep,
                 panel,
                 theme,
@@ -610,9 +623,9 @@ fn resolve_panel_scales(
                 warnings,
             )?;
             slots.push(y_scale);
-            layer_slot[li] = slots.len() - 1;
         }
-        scales.y_slots = scale_resolve::YScaleSlots::new(slots, layer_slot);
+        scales.y_slots =
+            scale_resolve::YScaleSlots::new(slots, prep.y_slot_plan.layer_slot().to_vec());
     }
 
     Ok((rendering_spec_for_panel, scales))
@@ -860,6 +873,11 @@ fn route_panel_axes_and_grid(
     // primary `panel_y_axis`) is the only gridline source, so these are never
     // passed to `build_grid`. Empty on the shared path — byte-identical.
     panel_secondary_y: &[&AxisLayout],
+    // The y-slot id for each entry in `panel_secondary_y`, in the same order
+    // (GH #72). Sourced from the one layer→slot plan so this router consumes the
+    // slot rather than inferring it from the axis's list position. Same length
+    // as `panel_secondary_y` (both follow the plan's `secondary_layers` order).
+    secondary_slots: &[usize],
     x_independent: bool,
     y_independent: bool,
     theme: &ThemeInputs,
@@ -971,10 +989,12 @@ fn route_panel_axes_and_grid(
         }
         // Secondary y-axes (secondary-y-axis, GH #52): emitted after the
         // primary x/y so they draw outward of (never occlude) the primary
-        // axis. Same above/below zindex routing as every other axis; each one
-        // is slot `i + 1` (slot 0 is always the primary, above).
-        for (i, axis) in panel_secondary_y.iter().enumerate() {
-            route_y_axis_slotted(axis, i + 1, &mut axes_above, &mut axes_below);
+        // axis. Same above/below zindex routing as every other axis. Each axis's
+        // slot comes from `secondary_slots` (the layer→slot plan, GH #72), not
+        // from its position in the band list — so mesh, axis, and `y_domains`
+        // key off the same slot number by construction.
+        for (axis, &slot) in panel_secondary_y.iter().zip(secondary_slots) {
+            route_y_axis_slotted(axis, slot, &mut axes_above, &mut axes_below);
         }
     }
 
@@ -2695,6 +2715,80 @@ mod tests {
         (spec, batch)
     }
 
+    /// Three layers, layers 1 AND 2 independent-y (two secondary axes). Each
+    /// slot's data is on a clearly separable magnitude — y0 ∈ [1,3],
+    /// y1 ∈ [100,300], y2 ∈ [1000,3000] — so a slot cross-wire is observable in
+    /// the resolved domain. Used to prove the ONE layer→slot plan (GH #72) keeps
+    /// the prepare axis inputs, the per-panel slots, and the axis-group tags in
+    /// lock-step for more than a single secondary axis.
+    fn three_layer_two_independent_spec() -> (ChartSpec, RecordBatch) {
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use crate::spec::layer::Layer;
+        use std::sync::Arc;
+
+        let y_layer = |field: &str, independent: bool| Layer {
+            mark: Mark::Line,
+            encoding: Encoding {
+                y: Some(EncodingSpec { field: field.into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            mark_style: None,
+            data_source: None,
+            position: None,
+            blend: None,
+            name: None,
+            independent_y: independent,
+        };
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Line,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: Some(vec![
+                y_layer("y0", false),
+                y_layer("y1", true),
+                y_layer("y2", true),
+            ]),
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y0", DataType::Float64, false),
+            Field::new("y1", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![100.0, 200.0, 300.0])),
+                Arc::new(Float64Array::from(vec![1000.0, 2000.0, 3000.0])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
     // ── #52 Task 10f: per-layer tooltip metadata ─────────────────────────────
 
     /// Variant of [`two_layer_dual_y_spec`] (always `layer1_independent =
@@ -2988,12 +3082,12 @@ mod tests {
 
         // Baseline: grid + axis nodes built from the primary alone.
         let baseline = route_panel_axes_and_grid(
-            &spec, &scales, &panel, &[], None, Some(&primary_y), &[],
+            &spec, &scales, &panel, &[], None, Some(&primary_y), &[], &[],
             false, false, &theme, &chart_config,
         );
-        // With the secondary axis routed in alongside the primary.
+        // With the secondary axis routed in alongside the primary (slot 1).
         let with_secondary = route_panel_axes_and_grid(
-            &spec, &scales, &panel, &[], None, Some(&primary_y), &[&secondary_y],
+            &spec, &scales, &panel, &[], None, Some(&primary_y), &[&secondary_y], &[1],
             false, false, &theme, &chart_config,
         );
 
@@ -3179,6 +3273,86 @@ mod tests {
             sorted_tags, vec!["0".to_string(), "1".to_string()],
             "expected exactly one y_slot=0 (primary) and one y_slot=1 (secondary) axis group, got {tags:?}"
         );
+    }
+
+    /// #72 de-risking (design-review S3-2): with TWO independent-y layers, the
+    /// ONE layer→slot plan keeps every consumer in lock-step. For each secondary
+    /// slot `k ∈ {1, 2}`: the prepared axis input `prep.axes.secondary_y[k-1]`,
+    /// the resolved slot scale `y_slots.slots()[k]`, the scene `y_domains[k]`,
+    /// the `y_slot="k"` axis-group tag, and the mark batch for that layer
+    /// (`marks[k].y_slot`) all reference the SAME slot — proving the prepare
+    /// axis-band order, the per-panel slots, and the axis-router tags cannot
+    /// drift when there is more than one secondary axis.
+    #[test]
+    fn two_independent_layers_keep_all_slot_consumers_in_lockstep() {
+        let (spec, batch) = three_layer_two_independent_spec();
+        let theme = ThemeInputs::default();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let config = super::super::config::RenderConfig::default();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+
+        let prep =
+            super::super::prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
+
+        // The plan itself: two secondary layers (indices 1, 2) on slots 1, 2.
+        assert!(prep.y_slot_plan.has_independent());
+        assert_eq!(prep.y_slot_plan.secondary_layers(), &[1, 2]);
+        assert_eq!(prep.y_slot_plan.slot_for_layer(0), 0);
+        assert_eq!(prep.y_slot_plan.slot_for_layer(1), 1);
+        assert_eq!(prep.y_slot_plan.slot_for_layer(2), 2);
+
+        // Prepare built one axis input per secondary layer, in slot order.
+        assert_eq!(prep.axes.secondary_y.len(), 2, "one axis input per secondary slot");
+
+        let mut warnings = prep.warnings.clone();
+        let metrics = super::super::font::FontdueMetrics::new();
+        let layout = crate::layout::compute_layout(
+            &spec, &theme, viewport,
+            &prep.axes, &prep.facet_groups, &prep.legend_entries,
+            prep.legend_title.clone(), prep.colorbar.as_ref(), &metrics,
+            &crate::layout::legend::LegendOverrides::default(), &prep.aux_legends,
+            crate::layout::legend::LegendSuppression::default(),
+        ).unwrap();
+
+        assert_eq!(
+            layout.secondary_y_axes.len(), 2,
+            "layout reserved one right band per secondary slot"
+        );
+
+        let scene = build_scene(
+            &spec, &prep, &layout, &theme, &config, &mut warnings, &chart_config, None,
+        ).unwrap();
+        let panel = &scene.panels[0];
+
+        // Every layer's mark batch binds its plan slot.
+        assert_eq!(panel.marks.len(), 3, "one mark batch per layer");
+        assert_eq!(panel.marks[0].y_slot, 0, "layer 0 (primary) binds slot 0");
+        assert_eq!(panel.marks[1].y_slot, 1, "layer 1 binds slot 1");
+        assert_eq!(panel.marks[2].y_slot, 2, "layer 2 binds slot 2");
+
+        // One axis group per slot, tagged by slot id (primary + two secondary).
+        let mut tags = collect_y_slot_group_tags(&panel.axes);
+        tags.sort();
+        assert_eq!(
+            tags, vec!["0".to_string(), "1".to_string(), "2".to_string()],
+            "expected exactly one axis group per slot 0/1/2"
+        );
+
+        // The per-slot scene y-domains: slot k carries slot-k's own magnitude
+        // (y0 ∈ [1,3] < y1 ∈ [100,300] < y2 ∈ [1000,3000]). A slot cross-wire
+        // between any consumer would land a domain on the wrong slot.
+        match &panel.coord {
+            ferrum_scene::CoordKind::Cartesian { y_domains, .. } => {
+                assert_eq!(y_domains.len(), 3, "one y-domain per slot");
+                let (_, hi0) = y_domains[0].expect("slot 0 domain");
+                let (lo1, hi1) = y_domains[1].expect("slot 1 domain");
+                let (lo2, _) = y_domains[2].expect("slot 2 domain");
+                assert!(hi0 < 50.0, "slot 0 is the small y0 domain, got ..{hi0}");
+                assert!(lo1 > 50.0 && hi1 < 500.0, "slot 1 is the y1 domain, got {lo1}..{hi1}");
+                assert!(lo2 > 500.0, "slot 2 is the large y2 domain, got {lo2}..");
+            }
+            other => panic!("expected Cartesian coord, got {other:?}"),
+        }
     }
 
     /// #72 discriminating (spec §9.3): for a param-bound secondary (independent-y)

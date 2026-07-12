@@ -4557,3 +4557,43 @@ mod positional_extent_classification {
         assert_eq!(spec.positional_extent(), None);
     }
 }
+
+// ── YSlotPlan derivation (GH #72) ────────────────────────────────────────────
+
+#[test]
+fn yslot_plan_empty_when_no_layer_independent() {
+    // The shared path: no layer flagged → the default (empty) plan, matching the
+    // byte-stable pre-#52 behavior.
+    let plan = YSlotPlan::from_layer_flags([false, false, false]);
+    assert!(!plan.has_independent());
+    assert!(plan.secondary_layers().is_empty());
+    assert!(plan.layer_slot().is_empty());
+    // Every layer maps through slot 0.
+    assert_eq!(plan.slot_for_layer(0), 0);
+    assert_eq!(plan.slot_for_layer(2), 0);
+}
+
+#[test]
+fn yslot_plan_layer0_flag_is_ignored() {
+    // Layer 0 is always the primary/left axis regardless of its flag, so a set
+    // flag on layer 0 alone leaves the plan empty.
+    let plan = YSlotPlan::from_layer_flags([true, false]);
+    assert!(!plan.has_independent());
+    assert_eq!(plan.slot_for_layer(0), 0);
+}
+
+#[test]
+fn yslot_plan_assigns_slots_in_layer_order() {
+    // Layers 1 and 3 independent → slots 1 and 2, in layer order; layer 2
+    // (shared) stays on slot 0.
+    let plan = YSlotPlan::from_layer_flags([false, true, false, true]);
+    assert!(plan.has_independent());
+    assert_eq!(plan.secondary_layers(), &[1, 3]);
+    assert_eq!(plan.layer_slot(), &[0, 1, 0, 2]);
+    assert_eq!(plan.slot_for_layer(0), 0);
+    assert_eq!(plan.slot_for_layer(1), 1);
+    assert_eq!(plan.slot_for_layer(2), 0);
+    assert_eq!(plan.slot_for_layer(3), 2);
+    // Out-of-range layer indices fall back to the primary slot.
+    assert_eq!(plan.slot_for_layer(9), 0);
+}
