@@ -288,12 +288,22 @@ pub(in crate::render) fn build_from_scale_spec(
                     .with_explicit_range(explicit),
             )
         }
-        ScaleSpec::Point { domain, padding, range, .. } => {
+        ScaleSpec::Point { domain, padding, range, reverse, .. } => {
             let mut d = match domain {
                 Some(d) => d.clone(),
                 None => distinct_positional_categories(batch, &enc.field)?,
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
+            // PointScale(reverse=True) reverses the resolved domain order (GH #65).
+            // Domain reversal — not a pixel-range flip — so axis tick labels
+            // (domain-order via tick_labels/uniform_center) and explicit-range band
+            // centers follow the marks automatically. In this symmetric band model
+            // ((i + 0.5) * step centers) it is pixel-identical to the pyclass
+            // facade's mirror-about-range-midpoint (scale/point.rs). Applied after
+            // sort: "sort, then reverse", matching d3/Vega composition.
+            if *reverse {
+                d.reverse();
+            }
             let (point_range, explicit) = band_point_pixel_range(range.as_deref(), pr);
             ScaleKind::Ordinal(
                 OrdinalScale::new_internal(d, point_range, *padding)
@@ -580,5 +590,96 @@ mod tests {
             false,
         ));
         assert_eq!(scale.explicit_band_extent(), None);
+    }
+
+    // ── PointScale(reverse=True) domain reversal (GH #65) ──
+
+    /// Builds a one-column string batch and a `ScaleSpec::Point` for it, then
+    /// resolves via the real `build_from_scale_spec` arm — the same seam
+    /// `build_axis_scale` calls when an encoding carries an explicit `scale`.
+    fn resolve_point_scale(
+        explicit_domain: Vec<String>,
+        range: Option<Vec<f64>>,
+        reverse: bool,
+    ) -> ScaleKind {
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("cat", ArrowDataType::Utf8, false)]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(explicit_domain.clone()))],
+        )
+        .unwrap();
+
+        let scale_spec = crate::spec::encoding::ScaleSpec::Point {
+            domain: Some(explicit_domain),
+            padding: 0.0,
+            align: 0.5,
+            reverse,
+            range,
+        };
+        let enc = crate::spec::encoding::EncodingSpec {
+            field: "cat".into(),
+            type_: None,
+            ..Default::default()
+        };
+        let sort_ctx = super::SortContext {
+            category_field: "cat",
+            batch: &batch,
+            x_field: None,
+            y_field: None,
+        };
+        let mut warnings = Vec::new();
+        super::build_from_scale_spec(&scale_spec, &enc, &batch, (0.0, 500.0), &sort_ctx, &mut warnings)
+            .unwrap()
+    }
+
+    /// GH #65: `reverse=True` reverses the resolved domain order, so the
+    /// *first* category of the original domain lands on the *last* band
+    /// center (and vice versa) — a domain-vector reversal, not a pixel-range
+    /// flip.
+    #[test]
+    fn point_scale_reverse_true_reverses_domain_order() {
+        let domain = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
+        let scale = resolve_point_scale(domain, None, true);
+        let ScaleKind::Ordinal(ordinal) = scale else { panic!("expected Ordinal scale") };
+
+        // Panel-extent range (0.0, 500.0), 4 categories → step = 125.0,
+        // centers at 62.5, 187.5, 312.5, 437.5. Non-reversed, "a" would sit
+        // at the first center (62.5); reversed, it sits at the last (437.5).
+        assert_eq!(ordinal.scale_internal("a"), Some(437.5));
+        assert_eq!(ordinal.scale_internal("d"), Some(62.5));
+    }
+
+    /// GH #65: `reverse=True` composes with an explicit pixel range —
+    /// centers for original domain `[a, b, c, d]` over range `[40, 260]`
+    /// come out as `[232.5, 177.5, 122.5, 67.5]`.
+    #[test]
+    fn point_scale_reverse_true_composes_with_explicit_range() {
+        let domain = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
+        let scale = resolve_point_scale(domain, Some(vec![40.0, 260.0]), true);
+        let ScaleKind::Ordinal(ordinal) = scale else { panic!("expected Ordinal scale") };
+
+        assert_eq!(ordinal.scale_internal("a"), Some(232.5));
+        assert_eq!(ordinal.scale_internal("b"), Some(177.5));
+        assert_eq!(ordinal.scale_internal("c"), Some(122.5));
+        assert_eq!(ordinal.scale_internal("d"), Some(67.5));
+    }
+
+    /// GH #65 regression: `reverse=False` (the pre-fix default) is
+    /// unchanged — domain order is preserved and band centers ascend in
+    /// original domain order.
+    #[test]
+    fn point_scale_reverse_false_preserves_domain_order() {
+        let domain = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
+        let scale = resolve_point_scale(domain, Some(vec![40.0, 260.0]), false);
+        let ScaleKind::Ordinal(ordinal) = scale else { panic!("expected Ordinal scale") };
+
+        assert_eq!(ordinal.scale_internal("a"), Some(67.5));
+        assert_eq!(ordinal.scale_internal("b"), Some(122.5));
+        assert_eq!(ordinal.scale_internal("c"), Some(177.5));
+        assert_eq!(ordinal.scale_internal("d"), Some(232.5));
     }
 }

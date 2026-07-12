@@ -115,7 +115,7 @@ pub struct ContinuousScaleCommon {
 /// | `Sqrt` | `ScaleKind::Pow(0.5)` |
 /// | `Ordinal` | `ScaleKind::Ordinal` |
 /// | `Band` | `ScaleKind::Ordinal` (`padding_inner` as effective padding) |
-/// | `Point` | `ScaleKind::Ordinal` (outer `padding`) |
+/// | `Point` | `ScaleKind::Ordinal` (outer `padding`; `reverse` reverses the resolved domain order post-sort, GH #65; `align` is unwired — inert in this band model) |
 /// | `Sequential`, `Diverging`, `Quantize` | `ScaleKind::Linear` (positional fallback) |
 /// | `BinOrdinal` | `ScaleKind::Linear` |
 ///

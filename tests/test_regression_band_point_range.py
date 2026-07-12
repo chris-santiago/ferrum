@@ -21,6 +21,11 @@ absent). These tests check four things:
    and categorical axis tick placement derive from the resolved scale's
    explicit range rather than the panel extent, so marks nest within the
    range and the axis agrees with the marks.
+5. **PointScale reverse=** (issue #65) — ``fr.PointScale(reverse=True)`` rendered
+   byte-identical SVG to ``reverse=False``; the positional resolver read the
+   ``reverse`` field off the wire but never applied it. The fix reverses the
+   resolved domain after sort, so marks and axis tick labels flip together and
+   the flip composes with an explicit ``range=``.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ import json
 import re
 
 import polars as pl
+import pytest
 
 import ferrum as fr
 
@@ -499,3 +505,144 @@ def test_dodged_bars_non_overlapping_within_explicit_range():
     intervals.sort()
     for (x0, x1), (nx0, nx1) in zip(intervals, intervals[1:]):
         assert x1 <= nx0 + _TOL, f"Dodged sub-bars overlap: [{x0}, {x1}] vs [{nx0}, {nx1}]"
+
+
+# ---------------------------------------------------------------------------
+# 5. PointScale reverse= (GH #65)
+#
+#    fr.PointScale(reverse=True) rendered byte-identical SVG to reverse=False
+#    -- the positional resolver read the `reverse` field off the wire but
+#    never applied it, so both marks and axis tick labels ignored the flag.
+#    The fix reverses the resolved domain *after* sort, so marks and axis
+#    tick labels flip together and the flip composes with an explicit
+#    range=. These tests pin: (1) mark order flips, (2) axis labels flip in
+#    lockstep with the marks (the uniform_center path), (3) the flip
+#    composes with an explicit range, and (4) reverse=False is a true no-op.
+# ---------------------------------------------------------------------------
+
+POINT_DOMAIN = ["x", "y", "z"]
+
+
+def _point_scale_svg(*, reverse: bool, range_: list[float] | None = None) -> str:
+    """Render a 3-category mark_point chart on a PointScale x-axis.
+
+    Shared builder for the reverse= tests below: only ``reverse`` and the
+    optional explicit ``range_`` vary between calls.
+    """
+    df = pl.DataFrame({"cat": POINT_DOMAIN, "val": [5.0, 10.0, 15.0]})
+    scale = (
+        fr.PointScale(domain=POINT_DOMAIN, reverse=reverse)
+        if range_ is None
+        else fr.PointScale(domain=POINT_DOMAIN, reverse=reverse, range=range_)
+    )
+    chart = (
+        fr.Chart(df)
+        .mark_point()
+        .encode(x=fr.X("cat", scale=scale), y="val")
+        .properties(width=600, height=400)
+    )
+    return chart.to_svg()
+
+
+def test_point_scale_reverse_flips_mark_order():
+    """PointScale(reverse=True) reorders mark positions relative to
+    reverse=False, using the same set of slot positions.
+
+    Regression: issue #65 -- reverse=True was silently dropped by the
+    positional resolver, so the reverse and forward SVGs rendered
+    byte-identical. This checks three things that together discriminate the
+    bug from a false positive: the two SVGs differ, the *set* of slot
+    positions is unchanged (reverse permutes marks across slots, it does not
+    move or resize the slots themselves), and the axis tick label "x" moves
+    to the slot where "z" sat in the forward render (i.e. the mark order and
+    axis order both invert together).
+    """
+    svg_forward = _point_scale_svg(reverse=False)
+    svg_reverse = _point_scale_svg(reverse=True)
+    assert svg_forward != svg_reverse, (
+        "PointScale(reverse=True) rendered byte-identical SVG to reverse=False "
+        "-- the reverse flag is being dropped by the positional resolver"
+    )
+
+    cxs_forward = _circle_cxs(svg_forward)
+    cxs_reverse = _circle_cxs(svg_reverse)
+    assert len(cxs_forward) == 3 and len(cxs_reverse) == 3, (
+        f"Expected 3 points in each render, got {len(cxs_forward)} forward / "
+        f"{len(cxs_reverse)} reverse"
+    )
+    assert cxs_forward == pytest.approx(cxs_reverse, abs=_TOL), (
+        f"reverse=True should permute marks across the same slot positions, "
+        f"not move the slots: forward sorted cx {cxs_forward} vs reverse "
+        f"sorted cx {cxs_reverse}"
+    )
+
+    forward_z_pos = _axis_tick_label_pos(svg_forward, "z", coord="x")
+    reverse_x_pos = _axis_tick_label_pos(svg_reverse, "x", coord="x")
+    assert reverse_x_pos == pytest.approx(forward_z_pos, abs=_TOL), (
+        f"reverse=True should move category 'x' to the slot 'z' occupies in "
+        f"the forward render (x={forward_z_pos}), got x={reverse_x_pos}"
+    )
+
+
+def test_point_scale_reverse_flips_axis_labels():
+    """PointScale(reverse=True) axis tick labels follow the reversed domain
+    order: 'x' at the rightmost slot, 'z' at the leftmost.
+
+    Regression: issue #65 -- this is the axis-consistency half of the fix
+    (the uniform_center tick-placement path must resolve from the same
+    reversed domain the positional resolver uses for marks), so a fix that
+    only reversed mark positions but left axis labels forward-ordered would
+    still fail this test.
+    """
+    svg = _point_scale_svg(reverse=True)
+    x_pos = _axis_tick_label_pos(svg, "x", coord="x")
+    y_pos = _axis_tick_label_pos(svg, "y", coord="x")
+    z_pos = _axis_tick_label_pos(svg, "z", coord="x")
+    assert x_pos > y_pos > z_pos, (
+        f"reverse=True should place tick labels in reversed domain order "
+        f"('x' rightmost, 'z' leftmost); got x={x_pos}, y={y_pos}, z={z_pos}"
+    )
+
+
+def test_point_scale_reverse_composes_with_explicit_range():
+    """PointScale(reverse=True, range=[40, 260]) composes the reversal with
+    the explicit range: reversed centers are the forward centers assigned to
+    the domain in reverse order, and every mark stays inside the range.
+
+    Regression: issue #65 -- with 3 categories over range=[40, 260], step =
+    (260-40)/3 = 73.333 and forward centers are [76.667, 150.0, 223.333]
+    (range[0] + step*(i+0.5)); reversed, category "x" takes the last slot
+    (~223.333) instead of the first.
+    """
+    svg = _point_scale_svg(reverse=True, range_=BAND_RANGE)
+    cxs = _circle_cxs(svg)
+    assert len(cxs) == 3, f"Expected 3 points, got {len(cxs)}: {cxs}"
+    for cx in cxs:
+        assert BAND_RANGE[0] - _TOL <= cx <= BAND_RANGE[1] + _TOL, (
+            f"Circle cx={cx} falls outside PointScale range {BAND_RANGE}: {cxs!r}"
+        )
+
+    x_pos = _axis_tick_label_pos(svg, "x", coord="x")
+    assert x_pos == pytest.approx(223.333, abs=_TOL), (
+        f"reverse=True should place 'x' at the last forward slot (~223.333) "
+        f"under range={BAND_RANGE}, got x={x_pos}"
+    )
+
+
+def test_point_scale_reverse_false_unchanged():
+    """PointScale(reverse=False) renders byte-identical to omitting the
+    kwarg entirely, guarding the default (non-reversed) path against the
+    #65 fix.
+    """
+    svg_explicit = _point_scale_svg(reverse=False)
+    df = pl.DataFrame({"cat": POINT_DOMAIN, "val": [5.0, 10.0, 15.0]})
+    chart_default = (
+        fr.Chart(df)
+        .mark_point()
+        .encode(x=fr.X("cat", scale=fr.PointScale(domain=POINT_DOMAIN)), y="val")
+        .properties(width=600, height=400)
+    )
+    svg_default = chart_default.to_svg()
+    assert svg_explicit == svg_default, (
+        "PointScale(reverse=False) should render identically to omitting reverse= entirely"
+    )
