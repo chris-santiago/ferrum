@@ -2270,10 +2270,10 @@ class RepeatChart(_CompositeBase):
         ``RepeatChart`` exposes its resolve field as the public ``resolve``
         attribute (unlike the other forms' private ``_resolve``) so it can
         appear in :attr:`spec`. This read-only alias lets the base
-        :meth:`_ChartLike.share_scale`'s ``hasattr(self, "_resolve")`` gate
-        and merge logic (:func:`_resolve_scale_modes`) work for
-        ``RepeatChart`` unchanged, so :meth:`share_scale` needs no bespoke
-        override.
+        :meth:`_ChartLike.share_scale` (gated by ``_supports_user_resolve``)
+        read ``self._resolve`` and run its merge logic
+        (:func:`_resolve_scale_modes`) for ``RepeatChart`` unchanged, so
+        :meth:`share_scale` needs no bespoke override.
         """
         return self.resolve
 
@@ -2721,10 +2721,10 @@ class ClusterMapChart(_CompositeBase):
 
     def _rebuild_with_charts(self, fn, *, resolve=_RESOLVE_UNCHANGED):
         if resolve is not _RESOLVE_UNCHANGED:
-            # Unreachable via the public share_scale() sugar (its hasattr
-            # guard raises the same error before ever reaching here, since
-            # ClusterMapChart carries no _resolve/resolve field) -- kept as a
-            # defensive typed error for any direct caller, for signature
+            # Unreachable via the public share_scale() sugar (its
+            # _supports_user_resolve gate raises the same error before ever
+            # reaching here, since ClusterMapChart keeps it False) -- kept as
+            # a defensive typed error for any direct caller, for signature
             # uniformity with the other _rebuild_with_charts forms.
             raise _unsupported_resolve_error(type(self).__name__)
         new = ClusterMapChart(
