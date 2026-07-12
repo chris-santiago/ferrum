@@ -72,14 +72,14 @@ pub struct BandScale {
 impl BandScale {
     /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
     ///
-    /// Two faithful-reproduction traps from the legacy `_scale_to_dict`:
-    /// 1. It emitted `paddingInner`/`paddingOuter`/`align` but **no** top-level
-    ///    `padding`, so on deserialize `ScaleSpec::Band.padding` took its serde
-    ///    default (`default_band_padding` = 0.1) regardless of the constructor's
-    ///    `padding` shorthand. We reproduce that default here.
-    /// 2. `ScaleSpec::Band` has no `range` field; the legacy dict's `range` key
-    ///    was dropped on deserialize, so the user's pixel range is intentionally
-    ///    not carried into the wire form.
+    /// One remaining faithful-reproduction trap from the legacy `_scale_to_dict`:
+    /// it emitted `paddingInner`/`paddingOuter`/`align` but **no** top-level
+    /// `padding`, so on deserialize `ScaleSpec::Band.padding` took its serde
+    /// default (`default_band_padding` = 0.1) regardless of the constructor's
+    /// `padding` shorthand. We reproduce that default here.
+    ///
+    /// The explicit `range` (`BandScale(..., range=[lo, hi])`) IS carried into
+    /// the wire form (issue #39 fix, previously silently dropped).
     pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
         ScaleSpec::Band {
             domain: if self.data.domain.is_empty() {
@@ -91,6 +91,7 @@ impl BandScale {
             padding_inner: Some(self.data.padding_inner),
             padding_outer: Some(self.data.padding_outer),
             align: self.data.align,
+            range: self.range.map(|r| r.to_vec()),
         }
     }
 }

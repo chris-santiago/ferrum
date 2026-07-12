@@ -272,7 +272,7 @@ pub(in crate::render) fn build_from_scale_spec(
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr)?;
             ScaleKind::Time(TimeScale::new_internal(d, r, common.clamp, *nice))
         }
-        ScaleSpec::Band { domain, padding, padding_inner, .. } => {
+        ScaleSpec::Band { domain, padding, padding_inner, range, .. } => {
             let mut d = match domain {
                 Some(d) => d.clone(),
                 None => distinct_positional_categories(batch, &enc.field)?,
@@ -281,11 +281,11 @@ pub(in crate::render) fn build_from_scale_spec(
             let effective_padding = padding_inner.unwrap_or(*padding);
             ScaleKind::Ordinal(OrdinalScale::new_internal(
                 d,
-                vec![pr.0, pr.1],
+                band_point_pixel_range(range.as_deref(), pr),
                 effective_padding,
             ))
         }
-        ScaleSpec::Point { domain, padding, .. } => {
+        ScaleSpec::Point { domain, padding, range, .. } => {
             let mut d = match domain {
                 Some(d) => d.clone(),
                 None => distinct_positional_categories(batch, &enc.field)?,
@@ -293,7 +293,7 @@ pub(in crate::render) fn build_from_scale_spec(
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
             ScaleKind::Ordinal(OrdinalScale::new_internal(
                 d,
-                vec![pr.0, pr.1],
+                band_point_pixel_range(range.as_deref(), pr),
                 *padding,
             ))
         }
@@ -334,6 +334,17 @@ fn ordinal_pixel_range(
             if nums.is_empty() { vec![pr.0, pr.1] } else { nums }
         }
         None => vec![pr.0, pr.1],
+    }
+}
+
+/// Resolve the pixel-coordinate range for a `ScaleSpec::Band`/`ScaleSpec::Point`.
+///
+/// Explicit numeric pixel range for band/point scales; falls back to the
+/// panel extent when absent or degenerate (fewer than 2 entries).
+fn band_point_pixel_range(range: Option<&[f64]>, pr: (f64, f64)) -> Vec<f64> {
+    match range {
+        Some(r) if r.len() >= 2 => vec![r[0], r[1]],
+        _ => vec![pr.0, pr.1],
     }
 }
 
@@ -421,5 +432,34 @@ pub(in crate::render) fn apply_coord_domain_overrides(
                 d, vec![y_pixel_range.1, y_pixel_range.0], false, false,
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::band_point_pixel_range;
+
+    /// Issue #39: an explicit two-entry range is honored verbatim.
+    #[test]
+    fn band_point_pixel_range_honors_explicit_range() {
+        let range = vec![40.0, 260.0];
+        assert_eq!(band_point_pixel_range(Some(&range), (0.0, 500.0)), vec![40.0, 260.0]);
+    }
+
+    /// Issue #39: an absent range falls back to the panel extent.
+    #[test]
+    fn band_point_pixel_range_falls_back_when_absent() {
+        assert_eq!(band_point_pixel_range(None, (0.0, 500.0)), vec![0.0, 500.0]);
+    }
+
+    /// Issue #39: a degenerate (fewer than 2 entries) range falls back to the
+    /// panel extent rather than panicking on out-of-bounds indexing.
+    #[test]
+    fn band_point_pixel_range_falls_back_when_too_short() {
+        let range = vec![40.0];
+        assert_eq!(band_point_pixel_range(Some(&range), (0.0, 500.0)), vec![0.0, 500.0]);
+
+        let empty: Vec<f64> = vec![];
+        assert_eq!(band_point_pixel_range(Some(&empty), (0.0, 500.0)), vec![0.0, 500.0]);
     }
 }

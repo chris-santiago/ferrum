@@ -154,6 +154,9 @@ def test_reverse_serialized_point_scale():
     d = _scale_to_dict(s)
     assert d.get("type") == "point"
     assert d.get("reverse") is True, "reverse was not serialized for PointScale"
+    # Regression: issue #39 — PointScale range was silently dropped from the
+    # wire dict (ScaleSpec::Point had no range field).
+    assert d.get("range") == [0.0, 300.0], "range was not serialized for PointScale"
 
 
 def test_reverse_serialized_sequential_scale():

@@ -70,9 +70,9 @@ pub struct PointScale {
 impl PointScale {
     /// Canonical `ScaleSpec` for this scale (SPEC-04 single-source bridge).
     ///
-    /// `ScaleSpec::Point` has no `range` field; the legacy `_scale_to_dict`
-    /// emitted a `range` key that the deserialiser dropped, so the user's pixel
-    /// range is intentionally not carried into the wire form.
+    /// The explicit `range` (`PointScale(..., range=[lo, hi])`) IS carried into
+    /// the wire form (issue #39 fix, previously silently dropped by the legacy
+    /// `_scale_to_dict` deserialiser).
     pub(crate) fn to_scale_spec(&self) -> ScaleSpec {
         ScaleSpec::Point {
             domain: if self.data.domain.is_empty() {
@@ -83,6 +83,7 @@ impl PointScale {
             padding: self.data.padding,
             align: self.data.align,
             reverse: self.data.reverse,
+            range: self.range.map(|r| r.to_vec()),
         }
     }
 }

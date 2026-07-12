@@ -219,6 +219,11 @@ pub enum ScaleSpec {
         padding_outer: Option<f64>,
         #[serde(default = "default_band_align")]
         align: f64,
+        /// Explicit pixel range `[lo, hi]`. Defaults to the plot extent when
+        /// absent (issue #39 fix — previously always dropped at the wire
+        /// boundary regardless of what the user passed).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<f64>>,
     },
     Point {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -229,6 +234,11 @@ pub enum ScaleSpec {
         align: f64,
         #[serde(default)]
         reverse: bool,
+        /// Explicit pixel range `[lo, hi]`. Defaults to the plot extent when
+        /// absent (issue #39 fix — previously always dropped at the wire
+        /// boundary regardless of what the user passed).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        range: Option<Vec<f64>>,
     },
     Sequential {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1282,11 +1292,12 @@ mod tests {
         let json = r#"{"type":"band"}"#;
         let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
         match parsed {
-            ScaleSpec::Band { padding, align, padding_inner, padding_outer, .. } => {
+            ScaleSpec::Band { padding, align, padding_inner, padding_outer, range, .. } => {
                 assert_eq!(padding, 0.1);
                 assert_eq!(align, 0.5);
                 assert_eq!(padding_inner, None);
                 assert_eq!(padding_outer, None);
+                assert_eq!(range, None);
             }
             _ => panic!("expected Band variant"),
         }
@@ -1297,13 +1308,80 @@ mod tests {
         let json = r#"{"type":"point"}"#;
         let parsed: ScaleSpec = serde_json::from_str(json).unwrap();
         match parsed {
-            ScaleSpec::Point { padding, align, reverse, .. } => {
+            ScaleSpec::Point { padding, align, reverse, range, .. } => {
                 assert_eq!(padding, 0.5);
                 assert_eq!(align, 0.5);
                 assert!(!reverse);
+                assert_eq!(range, None);
             }
             _ => panic!("expected Point variant"),
         }
+    }
+
+    /// Issue #39: `ScaleSpec::Band { range }` round-trips through JSON when
+    /// present, and the wire form carries the explicit pixel range key.
+    #[test]
+    fn scale_spec_band_range_round_trip() {
+        let spec = ScaleSpec::Band {
+            domain: None,
+            padding: default_band_padding(),
+            padding_inner: None,
+            padding_outer: None,
+            align: default_band_align(),
+            range: Some(vec![40.0, 260.0]),
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""range":[40.0,260.0]"#), "json={json}");
+        let re_parsed: ScaleSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(re_parsed, spec);
+    }
+
+    /// Issue #39: with `range: None`, the JSON contains no `"range"` key
+    /// (byte-identity guard — absent range must not perturb existing wire output).
+    #[test]
+    fn scale_spec_band_range_absent_omits_key() {
+        let spec = ScaleSpec::Band {
+            domain: None,
+            padding: default_band_padding(),
+            padding_inner: None,
+            padding_outer: None,
+            align: default_band_align(),
+            range: None,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("\"range\""), "json={json}");
+    }
+
+    /// Issue #39: `ScaleSpec::Point { range }` round-trips through JSON when
+    /// present, and the wire form carries the explicit pixel range key.
+    #[test]
+    fn scale_spec_point_range_round_trip() {
+        let spec = ScaleSpec::Point {
+            domain: None,
+            padding: default_point_padding(),
+            align: default_band_align(),
+            reverse: false,
+            range: Some(vec![40.0, 260.0]),
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains(r#""range":[40.0,260.0]"#), "json={json}");
+        let re_parsed: ScaleSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(re_parsed, spec);
+    }
+
+    /// Issue #39: with `range: None`, the JSON contains no `"range"` key
+    /// (byte-identity guard — absent range must not perturb existing wire output).
+    #[test]
+    fn scale_spec_point_range_absent_omits_key() {
+        let spec = ScaleSpec::Point {
+            domain: None,
+            padding: default_point_padding(),
+            align: default_band_align(),
+            reverse: false,
+            range: None,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("\"range\""), "json={json}");
     }
 
     #[test]
