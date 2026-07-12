@@ -34,10 +34,12 @@ from ferrum.plots._helpers import (
     _finalize_chart,
     _order_compare_rows,
     _require,
+    _require_positive,
     _resolve_source,
     _should_facet_by_class,
     _validate_choice,
     _warn_deprecated_dispatcher,
+    _zero_anchored_domain,
 )
 
 
@@ -71,7 +73,11 @@ def _importance_bounds_and_domain(
         The augmented frame and the ``(domain_lo, domain_hi)`` value-axis
         domain, computed over the *supplied* frame -- callers pass the
         combined multi-model frame under ``compare=`` so the domain spans
-        every model (spec §6).
+        every model (spec §6). Non-finite (``inf``/``nan``) importances are
+        excluded from the domain aggregate (GH #76) via
+        :func:`~ferrum.plots._helpers._zero_anchored_domain`, so a single
+        infinite value cannot push the domain to infinity and break
+        spec-JSON serialization; the row's own value is left untouched.
     """
     df = df.with_columns(
         (pl.col("importance") - pl.col("std")).alias("imp_lower"),
@@ -83,11 +89,8 @@ def _importance_bounds_and_domain(
             .map_elements(lambda v: f"{v:.3f}", return_dtype=pl.Utf8)
             .alias("_value_text"),
         )
-    upper_max = float(df["imp_upper"].max())
-    lower_min = float(df["imp_lower"].min())
-    domain_lo = min(0.0, lower_min)
-    domain_hi = max(upper_max, 0.0) * 1.05 if upper_max > 0 else 1.0
-    return df, (domain_lo, domain_hi)
+    domain = _zero_anchored_domain(df["imp_lower"], df["imp_upper"])
+    return df, domain
 
 
 def _importance_value_text_layer(orient: str, *, vertical_form: bool) -> Any:
@@ -209,10 +212,20 @@ def _importance_chart_compare_from_source(
     # descending across models. A magnitude-blind signed mean would silently
     # drop a large-magnitude negative importance (e.g. permutation importance)
     # in favor of small positive ones.
+    #
+    # GH #76: `.abs().mean()` propagates NaN when any model's importance for a
+    # feature is NaN; `fill_nan(None)` + `nulls_last=True` sorts that feature
+    # below every real score instead of letting a NaN-scored feature sort
+    # above everything (polars sorts NaN above real values, descending) and
+    # hijack the #1 rank. `group_by(maintain_order=True)` plus a `feature`
+    # secondary sort key make the tied-score ordering fully deterministic
+    # (unordered group_by + an unstable sort previously produced a different
+    # feature order on every identical build).
     ranked = (
-        combined.group_by("feature")
+        combined.group_by("feature", maintain_order=True)
         .agg(pl.col("importance").abs().mean().alias("_rank_score"))
-        .sort("_rank_score", descending=True)
+        .with_columns(pl.col("_rank_score").fill_nan(None))
+        .sort(["_rank_score", "feature"], descending=[True, False], nulls_last=True)
     )
     if top_k is not None:
         ranked = ranked.head(top_k)
@@ -287,14 +300,25 @@ def _shap_order_features(
     order: str,
     max_display: int,
 ) -> list[str]:
-    """Return the top-`max_display` feature names ordered by `order`."""
+    """Return the top-`max_display` feature names ordered by `order`.
+
+    GH #76: shared by the single-model beeswarm/bar/waterfall builders and
+    the compare-by-model bar builder. ``group_by(maintain_order=True)`` plus
+    a ``feature`` secondary sort key make the tied-score ordering fully
+    deterministic (an unordered ``group_by`` + unstable ``sort`` previously
+    produced a different feature order -- and therefore a different
+    top-``max_display`` cut -- on every identical build). ``fill_nan(None)``
+    + ``nulls_last=True`` sorts a NaN-scored feature below every real score
+    instead of letting it hijack the top rank.
+    """
     _validate_choice("shap_order_features", "order", order, _SHAP_ORDER_VALUES)
     expr = pl.col("shap_value").abs()
     agg = expr.mean() if order == "abs_mean" else expr.max()
     ranked = (
-        sv.group_by("feature")
+        sv.group_by("feature", maintain_order=True)
         .agg(agg.alias("score"))
-        .sort("score", descending=True)
+        .with_columns(pl.col("score").fill_nan(None))
+        .sort(["score", "feature"], descending=[True, False], nulls_last=True)
         .head(max_display)
     )
     return ranked["feature"].to_list()
@@ -428,8 +452,7 @@ def _shap_bar_chart_from_source(
         .sort("_feature_order")
         .drop("_feature_order")
     )
-    x_max = float(agg["abs_mean_shap"].max())
-    domain = (0.0, x_max * 1.05 if x_max > 0 else 1.0)
+    domain = _zero_anchored_domain(pl.Series([0.0]), agg["abs_mean_shap"])
     chart = ferrum.Chart(agg).mark_shap_bar(
         max_display=max_display,
         x_scale_domain=domain,
@@ -500,8 +523,7 @@ def _shap_bar_chart_compare_from_source(
     # sub-bands in registration order (mirrors the importance compare builder).
     df = _order_compare_rows(agg, "feature", keep, model_order)
 
-    x_max = float(df["abs_mean_shap"].max())
-    domain = (0.0, x_max * 1.05 if x_max > 0 else 1.0)
+    domain = _zero_anchored_domain(pl.Series([0.0]), df["abs_mean_shap"])
 
     chart = (
         ferrum.Chart(df)
@@ -853,6 +875,7 @@ def importance_chart(
     single-model path (no ``compare=``) is unchanged.
     """
     _validate_choice("importance_chart", "orient", orient, _ORIENT_VALUES)
+    _require_positive("importance_chart", "top_k", top_k)
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
     builder_kwargs = dict(
         method=method,
@@ -956,6 +979,7 @@ def shap_beeswarm_chart(
     the single-model beeswarm chart for that model, labeled with the model
     name. The single-model path (no ``compare=``) is unchanged.
     """
+    _require_positive("shap_beeswarm_chart", "max_display", max_display)
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
     builder_kwargs = dict(
         max_display=max_display,
@@ -1064,6 +1088,7 @@ def shap_bar_chart(
     the pre-#42 layout. The single-model path (no ``compare=``) is
     unchanged.
     """
+    _require_positive("shap_bar_chart", "max_display", max_display)
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
     builder_kwargs = dict(
         max_display=max_display,
@@ -1173,6 +1198,7 @@ def shap_waterfall_chart(
     the single-model waterfall chart for that model and sample, labeled with
     the model name. The single-model path (no ``compare=``) is unchanged.
     """
+    _require_positive("shap_waterfall_chart", "max_display", max_display)
     source = _resolve_source(model, X, y, compare=compare, random_state=random_state)
     builder_kwargs = dict(
         sample_idx=sample_idx,
@@ -1301,6 +1327,7 @@ def shap_chart(
     ``compare=``) is unchanged.
     """
     _validate_choice("shap_chart", "kind", kind, {"beeswarm", "bar", "waterfall"})
+    _require_positive("shap_chart", "max_display", max_display)
     _warn_deprecated_dispatcher(
         "shap_chart",
         "kind",

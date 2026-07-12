@@ -173,6 +173,25 @@ def _color_field_for(df: pl.DataFrame, default: str | None) -> str | None:
     return "model" if "model" in df.columns else default
 
 
+def _field_name(value: Any) -> str | None:
+    """Extract the plain column-name string from a ``str`` or encoding object.
+
+    Several figure-level builders document a parameter (typically ``hue``)
+    as accepting ``str or encoding`` (e.g. ``fm.Color("grp")``), then need
+    the bare column name to thread into a transform's ``groupby=`` kwarg —
+    which rejects anything but ``None``, a ``str``, or a ``list[str]``.
+    Passing the raw encoding object through silently drops the group (or
+    raises, depending on the transform) instead of honoring the documented
+    contract. Mirrors the ad hoc ``hue.field if hasattr(hue, "field") else
+    str(hue)`` pattern already used by ``lmplot`` (``regression.py``);
+    pulled out here as the one shared extraction point for ``pairplot`` and
+    ``jointplot`` (``matrix.py``).
+    """
+    if value is None:
+        return None
+    return value.field if hasattr(value, "field") else str(value)
+
+
 def _reject_compare(compare: dict | None, *, chart: str, reason: str) -> None:
     """Raise a clear ``ValueError`` when ``compare=`` is passed to a chart whose
     builder cannot render a multi-model :class:`ComparedModelSource`.
@@ -304,6 +323,45 @@ def _coerce_to_polars(data: Any) -> pl.DataFrame:
     if arr.ndim == 2:
         return pl.DataFrame({f"col_{j}": arr[:, j].tolist() for j in range(arr.shape[1])})
     return _to_polars(data)
+
+
+def _zero_anchored_domain(lower: pl.Series, upper: pl.Series) -> tuple[float, float]:
+    """Compute a zero-anchored value-axis domain with 5% headroom above the max.
+
+    Shared domain formula for bar-style diagnostic charts (feature importance,
+    SHAP bar) whose value axis conventionally starts at zero. The low end is
+    ``min(0.0, lower.min())``; the high end is ``upper.max() * 1.05`` when
+    positive, else ``1.0`` (an all-zero or all-negative frame still needs a
+    non-zero-width domain). Previously duplicated at three call sites
+    (GH #76).
+
+    Non-finite (``inf``/``-inf``/``nan``) entries in either series are excluded from
+    both aggregates -- a single infinite importance/SHAP value must not push
+    the domain to infinity, which breaks spec-JSON serialization (Rust's
+    serde rejects the bare ``Infinity`` token). The offending row's own value
+    is left untouched by this function; it renders at (or just past) the
+    finite domain edge. When a series has no finite entries at all, its
+    aggregate falls back to ``0.0``.
+    """
+    finite_lower = lower.filter(lower.is_finite())
+    finite_upper = upper.filter(upper.is_finite())
+    lower_min = float(finite_lower.min()) if finite_lower.len() > 0 else 0.0
+    upper_max = float(finite_upper.max()) if finite_upper.len() > 0 else 0.0
+    domain_lo = min(0.0, lower_min)
+    domain_hi = upper_max * 1.05 if upper_max > 0 else 1.0
+    return domain_lo, domain_hi
+
+
+def _require_positive(func_name: str, param: str, value: int | None) -> None:
+    """Raise ``ValueError`` when an optional positive-integer parameter is < 1.
+
+    ``None`` means "no limit" and passes through unchanged. This only rejects
+    an explicit non-positive value (e.g. ``top_k=0``), which would otherwise
+    empty the frame and crash a downstream ``.max()``/``.min()`` aggregate on
+    an empty series with an unhelpfully generic ``TypeError`` (GH #76).
+    """
+    if value is not None and value < 1:
+        raise ValueError(f"{func_name}: {param} must be >= 1 or None; got {value!r}.")
 
 
 def _validate_choice(
@@ -566,6 +624,13 @@ def _resolve_source(
         if not isinstance(compare, dict):
             raise TypeError(
                 f"compare= must be dict[str, model] or None; got {type(compare).__name__}."
+            )
+        if "base" in compare:
+            raise ValueError(
+                "compare= must not use the key 'base' -- it is reserved for the "
+                "primary model= argument. A compare={'base': ...} entry would "
+                "silently overwrite the primary model with no error (GH #76); "
+                "rename this entry (e.g. compare={'rival': ...}) instead."
             )
         models = {"base": model, **compare}
         return ferrum.ModelSource.compare(

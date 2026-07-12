@@ -103,7 +103,12 @@ _REG_FEATURES = ["f0", "f1", "f2", "f3", "f4"]
 
 def _reg_setup():
     df = load_dataset("regression")
-    return df.select(_REG_FEATURES), df["y"], load_fixture("regression_ridge"), load_fixture("regression_rf")
+    return (
+        df.select(_REG_FEATURES),
+        df["y"],
+        load_fixture("regression_ridge"),
+        load_fixture("regression_rf"),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -124,9 +129,11 @@ def test_nan_importance_compare_renders_without_nan_token():
     assert "NaN" not in svg
 
 
-# BUG: a feature whose importance is NaN gets a NaN _rank_score; polars sorts
-# NaN above every real score in the descending rank sort, so the NaN feature
-# hijacks the #1 slot and displaces a real feature ('small') from top_k=2.
+# FIXED (GH #76): a feature whose importance was NaN got a NaN _rank_score;
+# polars sorts NaN above every real score in a descending rank sort, so the
+# NaN feature hijacked the #1 slot and displaced a real feature ('small')
+# from top_k=2. Fixed by fill_nan(None) + nulls_last=True in
+# _importance_chart_compare_from_source's ranking (explanation.py).
 def test_nan_importance_must_not_displace_real_features_in_top_k():
     """Global ranking (explanation.py:212-219) uses ``abs().mean()`` which
     propagates NaN; a NaN-scored feature must not outrank real features."""
@@ -161,15 +168,35 @@ def test_cv_scores_compare_nan_score_renders_without_nan_token():
 # ---------------------------------------------------------------------------
 
 
-# BUG: top_k=0 empties the frame before _importance_bounds_and_domain
-# (explanation.py:86: float(df["imp_upper"].max()) -> float(None)), raising
-# `TypeError: float() argument must be ... not 'NoneType'` instead of a
-# legible ValueError. The single-model path (explanation.py:145-146) fails
-# the same way.
+# FIXED (GH #76): top_k=0 used to empty the frame before
+# _importance_bounds_and_domain (explanation.py:86: float(df["imp_upper"].max())
+# -> float(None)), raising `TypeError: float() argument must be ... not
+# 'NoneType'` instead of a legible ValueError. Fixed by validating
+# top_k >= 1 (or None) once in importance_chart() -- the shared choke point
+# for both the single-model and compare-by-model builder paths -- via
+# _require_positive (plots/_helpers.py).
 def test_importance_compare_top_k_zero_raises_legible_error():
     cms = _importance_cms(a={"f1": (0.1, 0.0)}, b={"f1": (0.2, 0.0)})
     with pytest.raises(ValueError):
         ferrum.importance_chart(cms, top_k=0)
+
+
+# FIXED (GH #76 cohesion gate): max_display=0 on the SHAP entries used to
+# crash pre-#76 and would have silently rendered an empty chart post-#76
+# (once _zero_anchored_domain tolerated an empty series) -- asymmetric with
+# the top_k=0 guard above. All four public SHAP entries now validate
+# max_display >= 1 (or None) via the same _require_positive choke point.
+def test_shap_max_display_zero_raises_legible_error():
+    X, y, ridge, _ = _reg_setup()
+    for func in (
+        ferrum.shap_bar_chart,
+        ferrum.shap_beeswarm_chart,
+        ferrum.shap_chart,
+    ):
+        with pytest.raises(ValueError, match="max_display"):
+            func(ridge, X, y, max_display=0)
+    with pytest.raises(ValueError, match="max_display"):
+        ferrum.shap_waterfall_chart(ridge, X, y, sample_idx=0, max_display=0)
 
 
 def test_empty_compare_dict_renders_single_model_dodge_chart():
@@ -241,11 +268,13 @@ def test_text_dodge_single_group_renders_labels():
 # ---------------------------------------------------------------------------
 
 
-# BUG: an infinite importance makes domain_hi = inf*1.05 = inf
-# (explanation.py:89); the inf lands in the X channel's scale domain and the
-# spec JSON, where serde rejects the bare `Infinity` token at render time
-# with the cryptic `ValueError: layers[0]: expected value at line 1 column
-# 130` instead of rendering or raising a legible error.
+# FIXED (GH #76): an infinite importance used to make domain_hi = inf*1.05 =
+# inf (explanation.py:89); the inf landed in the X channel's scale domain and
+# the spec JSON, where serde rejected the bare `Infinity` token at render
+# time with the cryptic `ValueError: layers[0]: expected value at line 1
+# column 130`. Fixed by excluding non-finite bound values from the domain
+# aggregate in _zero_anchored_domain (plots/_helpers.py) -- the offending
+# row's own value is left untouched and renders at the finite domain edge.
 def test_inf_importance_compare_renders_or_flags_infinity():
     cms = _importance_cms(
         a={"f1": (float("inf"), 0.0), "f2": (0.5, 0.1)},
@@ -349,10 +378,12 @@ def test_mismatched_feature_sets_render_union_not_intersection():
     assert "NaN" not in svg
 
 
-# BUG: _resolve_source builds `{"base": model, **compare}` (helpers.py:570),
-# so compare={"base": other} silently OVERWRITES the primary model — the
-# chart renders only `other`'s importances labeled "base" and the model the
-# user passed positionally is discarded without any warning or error.
+# FIXED (GH #76): _resolve_source used to build `{"base": model, **compare}`
+# (helpers.py:570), so compare={"base": other} silently OVERWROTE the primary
+# model -- the chart rendered only `other`'s importances labeled "base" and
+# the model the user passed positionally was discarded without any warning
+# or error. Fixed by rejecting the reserved "base" compare= key with a
+# legible ValueError in _resolve_source.
 def test_compare_base_key_collision_must_not_silently_discard_primary():
     X, y, ridge, rf = _reg_setup()
     with pytest.raises(ValueError):
@@ -380,13 +411,14 @@ def test_cv_scores_compare_mismatched_fold_counts_render():
 # ---------------------------------------------------------------------------
 
 
-# BUG: the global feature ranking (explanation.py:212-216) is
-# group_by("feature") (unordered, hash-partitioned) followed by an unstable
-# sort on "_rank_score"; with tied scores the top_k cut and the feature-axis
-# order differ run to run (observed: 6 distinct orders in 6 builds),
-# violating the determinism contract the suite pins elsewhere
+# FIXED (GH #76): the global feature ranking (explanation.py:212-216) used to
+# be group_by("feature") (unordered, hash-partitioned) followed by an
+# unstable sort on "_rank_score"; with tied scores the top_k cut and the
+# feature-axis order differed run to run (observed: 6 distinct orders in 6
+# builds), violating the determinism contract the suite pins elsewhere
 # (test_importance_compare_deterministic passes only because real fixture
-# data has no ties).
+# data has no ties). Fixed by group_by(maintain_order=True) plus a
+# feature-name secondary sort key, so tied scores resolve to a fixed order.
 def test_importance_compare_tied_scores_deterministic_feature_order():
     orders = set()
     for _ in range(8):
@@ -401,10 +433,13 @@ def test_importance_compare_tied_scores_deterministic_feature_order():
     )
 
 
-# BUG: same unstable group_by + sort idiom in _shap_order_features
-# (explanation.py:294-299) — tied |SHAP| scores make the shared top-k feature
-# set and axis order nondeterministic (observed: 8 distinct orders in 8
-# builds of the shap_bar compare chart).
+# FIXED (GH #76): same unstable group_by + sort idiom in
+# _shap_order_features (explanation.py:294-299) -- tied |SHAP| scores made
+# the shared top-k feature set and axis order nondeterministic (observed: 8
+# distinct orders in 8 builds of the shap_bar compare chart). Fixed by the
+# same group_by(maintain_order=True) + feature-name-tiebreak sort as the
+# importance ranking above (this helper is shared by the single-model
+# beeswarm/bar/waterfall builders too).
 def test_shap_bar_compare_tied_scores_deterministic_feature_order():
     orders = set()
     for _ in range(8):
