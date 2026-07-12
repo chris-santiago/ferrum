@@ -256,6 +256,23 @@ impl ScaleKind {
         }
     }
 
+    /// Absolute band-center pixels, one per category in `tick_labels` (domain)
+    /// order, for an ordinal positional scale whose pixel range was **explicitly
+    /// supplied** by the user (`BandScale`/`PointScale`/positional `OrdinalScale`
+    /// `range=`); `None` for every other scale kind and for the panel-extent
+    /// fallback (band-geometry unification design §6). These are the same pixels
+    /// [`to_pixel_str`](Self::to_pixel_str) yields for marks, so a categorical
+    /// axis that places its tick labels/grid lines here agrees with the marks
+    /// (spec §7). Consumed by [`crate::layout::axis`] as `categorical_positions`
+    /// on the [`AxisInput`](crate::layout::AxisInput), in place of the
+    /// `uniform_center` fallback; the `None` case leaves that path byte-identical.
+    pub(in crate::render) fn explicit_band_centers(&self) -> Option<Vec<f64>> {
+        match self {
+            ScaleKind::Ordinal(s) => s.explicit_band_centers(),
+            _ => None,
+        }
+    }
+
     /// Continuous-axis scale-projection support (continuous-axis tick design,
     /// 2026-05-30). Returns, for each major tick, its **domain fraction**
     /// `t ∈ [0, 1]` — the scale's normalized projection of the tick value,

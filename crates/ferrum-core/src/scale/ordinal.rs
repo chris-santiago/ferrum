@@ -240,6 +240,22 @@ impl OrdinalScale {
         Some(r1 - r0)
     }
 
+    /// Absolute band-center pixels, one per domain category in order, but only
+    /// when [`with_explicit_range`](Self::with_explicit_range) recorded this
+    /// scale's range as user-supplied (GH #39 phase 2, band-geometry
+    /// unification). These are the same pixels [`scale_internal`](Self::scale_internal)
+    /// yields for each category — i.e. the pixels marks are placed at — so a
+    /// categorical axis that consumes them agrees with its marks. `None` for the
+    /// panel-extent fallback, keeping the layout `uniform_center` path (and thus
+    /// every no-range golden) byte-identical. Explicitness is recorded at
+    /// construction, never inferred by comparing floats.
+    pub(crate) fn explicit_band_centers(&self) -> Option<Vec<f64>> {
+        if !self.explicit_pixel_range {
+            return None;
+        }
+        Some(self.data.domain.iter().map(|c| self.data.scale_str(c)).collect())
+    }
+
     /// Crate-internal lookup. Returns `None` if `value` is not in the domain.
     pub(crate) fn scale_internal(&self, value: &str) -> Option<f64> {
         let v = self.data.scale_str(value);
@@ -446,6 +462,57 @@ mod tests {
     fn ordinal_unknown_category_returns_nan() {
         let s = d(vec!["a"], vec![0.0, 10.0], 0.0);
         assert!(s.scale_str("z").is_nan());
+    }
+
+    // ── explicit_band_centers (GH #39 phase 2) ───────────────────────────────
+
+    /// An explicit range reports absolute band centers, one per category in
+    /// domain order — the same pixels `scale_internal` yields for marks. The
+    /// canonical oracle: domain [a,b,c,d] over [40, 260] → step 55 → centers
+    /// 67.5 / 122.5 / 177.5 / 232.5.
+    #[test]
+    fn explicit_band_centers_match_scale_internal_oracle() {
+        let scale = OrdinalScale::new_internal(
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![40.0, 260.0],
+            0.0,
+        )
+        .with_explicit_range(true);
+        let centers = scale.explicit_band_centers().expect("explicit → Some");
+        assert_eq!(centers, vec![67.5, 122.5, 177.5, 232.5]);
+        // Each center equals the mark pixel for that category.
+        for (cat, c) in ["a", "b", "c", "d"].iter().zip(&centers) {
+            assert_eq!(scale.scale_internal(cat), Some(*c));
+        }
+    }
+
+    /// The panel-extent fallback (never marked explicit) reports `None`, so the
+    /// layout `uniform_center` path stays byte-identical.
+    #[test]
+    fn explicit_band_centers_none_without_explicit_flag() {
+        let scale = OrdinalScale::new_internal(
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![0.0, 220.0],
+            0.0,
+        );
+        assert_eq!(scale.explicit_band_centers(), None);
+    }
+
+    /// A reversed explicit range `[hi, lo]` is passed through as-is: band centers
+    /// descend, matching the mark placement (`scale_internal`).
+    #[test]
+    fn explicit_band_centers_honor_reversed_range() {
+        let scale = OrdinalScale::new_internal(
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            vec![260.0, 40.0],
+            0.0,
+        )
+        .with_explicit_range(true);
+        let centers = scale.explicit_band_centers().expect("explicit → Some");
+        assert_eq!(centers, vec![232.5, 177.5, 122.5, 67.5]);
+        for (cat, c) in ["a", "b", "c", "d"].iter().zip(&centers) {
+            assert_eq!(scale.scale_internal(cat), Some(*c));
+        }
     }
 
     // ── OrdinalRangeValue round-trip tests ───────────────────────────────────

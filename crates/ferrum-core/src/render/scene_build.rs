@@ -719,6 +719,11 @@ fn resolve_panel_axes(
         );
         x_input.tick_labels = new_x_labels;
         x_input.tick_projection = x_projection;
+        // Re-derive the explicit-range ordinal band centers from THIS panel's
+        // scale (GH #39 phase 2): an explicit-range categorical facet axis places
+        // its labels at the scale's band centers, matching the marks. `None` for
+        // every other scale — keeps the global uniform-slot placement.
+        x_input.categorical_positions = scales.x.explicit_band_centers();
         let x_label_fs = x_input
             .overrides
             .label_font_size
@@ -759,6 +764,9 @@ fn resolve_panel_axes(
         );
         y_input.tick_labels = new_y_labels;
         y_input.tick_projection = y_projection;
+        // Same explicit-range ordinal band-center carrier as the x path above,
+        // from THIS panel's y scale (GH #39 phase 2).
+        y_input.categorical_positions = scales.y.explicit_band_centers();
         let y_label_fs = y_input
             .overrides
             .label_font_size

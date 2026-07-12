@@ -222,6 +222,19 @@ pub struct AxisInput {
     /// uniform-slot placement byte-identically. Presence of this field — not the
     /// scale type — drives the placement branch. See [`TickProjection`].
     pub tick_projection: Option<TickProjection>,
+    /// Absolute band-center pixels for a **categorical** axis whose ordinal scale
+    /// carries an explicit pixel range (GH #39 phase 2, band-geometry
+    /// unification). One entry per category in [`tick_labels`](Self::tick_labels)
+    /// order; each is the same pixel the mark for that category is placed at, so
+    /// tick labels and grid lines agree with the marks (spec §7). `Some` only for
+    /// an explicit-range ordinal axis; `None` for continuous axes (which use
+    /// [`tick_projection`](Self::tick_projection)) and for ordinal axes without an
+    /// explicit range (which keep the `uniform_center` slot placement,
+    /// byte-identically). Mutually exclusive with `tick_projection` — an ordinal
+    /// scale yields no projection. Unlike projected fractions, these are absolute
+    /// pixels used **directly** by `layout_*_axis`, not mapped through the
+    /// panel-extent padding inset.
+    pub categorical_positions: Option<Vec<f64>>,
     /// Per-axis style/positioning overrides (B5). See [`AxisStyleOverrides`].
     pub overrides: AxisStyleOverrides,
 }
@@ -271,6 +284,7 @@ impl AxisInput {
             tick_format: None,
             tick_format_type: None,
             tick_projection: None,
+            categorical_positions: None,
             overrides: AxisStyleOverrides {
                 label_angle,
                 ..AxisStyleOverrides::default()
@@ -880,14 +894,20 @@ pub fn layout_y_axis(
         input,
         (panel_area.y + panel_area.h, panel_area.y),
     );
+    // Explicit-range ordinal axes (GH #39 phase 2): place each tick at the
+    // scale's absolute band center — the same pixel its mark gets — so labels and
+    // grid lines agree with the marks. Absent (`None`) → the uniform-slot formula,
+    // byte-identical to before.
+    let band_centers = input.categorical_positions.as_deref();
     let ticks: Vec<TickLayout> = input
         .tick_labels
         .iter()
         .enumerate()
         .map(|(i, label)| TickLayout {
-            position: match &projected {
-                Some(px) => px[i],
-                None => slot_axis.uniform_center(i, slot_h),
+            position: match (&projected, band_centers) {
+                (Some(px), _) => px[i],
+                (None, Some(centers)) => centers[i],
+                (None, None) => slot_axis.uniform_center(i, slot_h),
             },
             label: label.clone(),
             label_angle: 0.0,
@@ -1353,10 +1373,16 @@ pub fn layout_x_axis(
     // axes (no projected fractions) keep the uniform-slot center. The closure
     // resolves a tick's position by index against whichever placement applies.
     let projected = project_tick_positions(input, (panel_area.x, panel_area.x + panel_area.w));
+    // Explicit-range ordinal axes (GH #39 phase 2): place each tick at the scale's
+    // absolute band center — the same pixel its mark gets — so labels and grid
+    // lines agree with the marks. Absent (`None`) → the uniform-slot formula,
+    // byte-identical to before.
+    let band_centers = input.categorical_positions.as_deref();
     let tick_position = |i: usize| -> f64 {
-        match &projected {
-            Some(px) => px[i],
-            None => slot_axis.uniform_center(i, slot_w),
+        match (&projected, band_centers) {
+            (Some(px), _) => px[i],
+            (None, Some(centers)) => centers[i],
+            (None, None) => slot_axis.uniform_center(i, slot_w),
         }
     };
     // The collision cascade judges label fit against the available horizontal
@@ -1364,9 +1390,14 @@ pub fn layout_x_axis(
     // continuous axes the spacing is non-uniform (log/pow/symlog), so use the
     // *minimum* adjacent gap between projected positions — the worst case — to
     // avoid under-counting collisions where ticks bunch toward one end.
-    let cascade_slot_w = match &projected {
-        Some(px) => min_adjacent_gap(px).unwrap_or(slot_w),
-        None => slot_w,
+    // An explicit-range ordinal axis packs its bands into `[a, b]`, so the per-tick
+    // budget is the band step, not the full-panel `slot_w` — use the min adjacent
+    // gap between band centers so label collisions are judged against the true
+    // (tighter) spacing.
+    let cascade_slot_w = match (&projected, band_centers) {
+        (Some(px), _) => min_adjacent_gap(px).unwrap_or(slot_w),
+        (None, Some(centers)) => min_adjacent_gap(centers).unwrap_or(slot_w),
+        (None, None) => slot_w,
     };
 
     let (ticks, warning) = if let Some(override_angle) = input.overrides.label_angle {
@@ -1815,6 +1846,82 @@ mod tests {
         let title = axis.title.unwrap();
         assert_eq!(title.text, "Price");
         assert!((title.angle - (-90.0)).abs() < 1e-9);
+    }
+
+    // ── explicit-range ordinal band centers (GH #39 phase 2) ────────────────
+
+    /// When `categorical_positions` is set (an explicit-range ordinal axis), the
+    /// x-axis places each tick at the absolute band center — NOT the panel-uniform
+    /// slot center. Discriminating: over panel_area `x=100, w=300` the uniform
+    /// slots would be 137.5 / 212.5 / 287.5 / 362.5, far from the band centers.
+    #[test]
+    fn x_axis_uses_categorical_positions_when_present() {
+        let mut input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            None,
+        );
+        input.categorical_positions = Some(vec![67.5, 122.5, 177.5, 232.5]);
+        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let m = MockMetrics { measure: fixed_width(4.0), line_h_factor: 1.2 };
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
+        assert_eq!(got, vec![67.5, 122.5, 177.5, 232.5]);
+    }
+
+    /// Without `categorical_positions` (the default `None`), the x-axis keeps the
+    /// uniform-slot formula, byte-identical to before this seam.
+    #[test]
+    fn x_axis_falls_back_to_uniform_center_without_categorical_positions() {
+        let input = AxisInput::new(
+            AxisOrient::Bottom,
+            None,
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            None,
+        );
+        assert!(input.categorical_positions.is_none());
+        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let m = MockMetrics { measure: fixed_width(4.0), line_h_factor: 1.2 };
+        let (axis, _) = layout_x_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, 8, 4.0, &m);
+        let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
+        assert_eq!(got, vec![137.5, 212.5, 287.5, 362.5]);
+    }
+
+    /// The y-axis honors `categorical_positions` too — ordinal y is NOT reversed,
+    /// so band centers map to labels in domain order (top → bottom). Discriminating
+    /// against the panel-uniform slots (75 / 125 / 175 / 225 over `y=50, h=200`).
+    #[test]
+    fn y_axis_uses_categorical_positions_when_present() {
+        let mut input = AxisInput::new(
+            AxisOrient::Left,
+            None,
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            None,
+        );
+        input.categorical_positions = Some(vec![67.5, 122.5, 177.5, 232.5]);
+        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let m = mock(10.0);
+        let axis = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
+        assert_eq!(got, vec![67.5, 122.5, 177.5, 232.5]);
+    }
+
+    /// Without `categorical_positions`, the y-axis keeps uniform-slot placement.
+    #[test]
+    fn y_axis_falls_back_to_uniform_center_without_categorical_positions() {
+        let input = AxisInput::new(
+            AxisOrient::Left,
+            None,
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            None,
+        );
+        assert!(input.categorical_positions.is_none());
+        let panel_area = Rect { x: 100.0, y: 50.0, w: 300.0, h: 200.0 };
+        let m = mock(10.0);
+        let axis = layout_y_axis(&input, panel_area, 0, 11.0, 13.0, 4.0, &m);
+        let got: Vec<f64> = axis.ticks.iter().map(|t| t.position).collect();
+        assert_eq!(got, vec![75.0, 125.0, 175.0, 225.0]);
     }
 
     // ── B5 unit 2: orient-aware axis_line + title_orient ────────────────────

@@ -476,6 +476,11 @@ fn build_axis_input(
         tick_format: None, // already applied above
         tick_format_type: None,
         tick_projection,
+        // Explicit-range ordinal axes (GH #39 phase 2): carry the scale's absolute
+        // band centers so layout places tick labels/grid lines at the same pixels
+        // the marks get. `None` for continuous axes and for ordinal axes without an
+        // explicit range — the latter keeps `uniform_center`, byte-identical.
+        categorical_positions: scale.explicit_band_centers(),
         overrides,
     })
 }
