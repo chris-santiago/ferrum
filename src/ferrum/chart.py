@@ -149,7 +149,20 @@ from ferrum.composition import (
 
 
 def _rename_encoding_fields(encoding: dict, renames: dict[str, str]) -> dict:
-    """Return a copy of *encoding* with field names replaced per *renames*."""
+    """Return a copy of *encoding* with field names replaced per *renames*.
+
+    *renames* maps original column names to their internal collision-rename
+    (e.g. the ``__rhs_<n>`` suffix ``Chart.__add__`` applies to a RHS column
+    that collides with an LHS one). The renamed field is required for
+    correct data lookup, but the internal sentinel must never be what the
+    user sees -- so whenever a channel's field is renamed AND the caller has
+    not already set an explicit ``title=``, the ORIGINAL field name is
+    stamped on as the channel's presentation title. An explicit user
+    ``title=`` is left untouched (it already wins over the field-name
+    default). Channels that don't honor ``title`` (e.g. ``Tooltip``) simply
+    ignore the stamped kwarg at serialization time -- see
+    ``ChannelBase.to_encoding_spec_dict``.
+    """
     from ferrum.encoding.base import ChannelBase
 
     out = {}
@@ -158,8 +171,11 @@ def _rename_encoding_fields(encoding: dict, renames: dict[str, str]) -> dict:
             if val.field in renames:
                 import copy
 
+                original_field = val.field
                 val = copy.copy(val)
-                val.field = renames[val.field]
+                val.field = renames[original_field]
+                if "title" not in val._kwargs:
+                    val._kwargs = {**val._kwargs, "title": original_field}
         elif isinstance(val, str):
             bare, _, suffix = val.partition(":")
             if bare in renames:
@@ -1639,7 +1655,27 @@ class Chart(
                 from ferrum._core import PyIdentity as _RustIdentity
                 from dataclasses import replace as _dc_replace
 
-                suffix = f"__rhs_{id(other) & 0xFFFFFFFF:08x}"
+                # Deterministic, collision-free per-merge suffix (GH #71 defect 2).
+                # Start from the number of layers already accumulated on the LHS at
+                # this point in the `__add__` chain -- a structural property of the
+                # chart, not a runtime identity like `id(other)`, so it is
+                # reproducible byte-for-byte across repeated runs of the same
+                # chart-building code. That starting index alone is NOT
+                # collision-free, though: a right-associated chain (`a + (b + c)`)
+                # can derive the SAME starting index for two different merges --
+                # the inner `b + c` and the outer `a + (b + c)` each see an LHS
+                # with exactly one accumulated layer -- so the outer merge's
+                # rename target can already exist as a real column in the (already
+                # renamed) inner merge's frame, and polars' `rename` raises
+                # `DuplicateError`. The while loop bumps the index until every
+                # renamed target is absent from BOTH frames' current columns,
+                # which is what actually guarantees no collision; the layer count
+                # only supplies a deterministic starting point.
+                n = len(lhs_layers)
+                existing_cols = set(lhs_df.columns) | set(rhs_df.columns)
+                while any(f"{c}__rhs_{n:04d}" in existing_cols for c in overlap):
+                    n += 1
+                suffix = f"__rhs_{n:04d}"
                 col_renames = {c: f"{c}{suffix}" for c in overlap}
                 rhs_df = rhs_df.rename(col_renames)
 

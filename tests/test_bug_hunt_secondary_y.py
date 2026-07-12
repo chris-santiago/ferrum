@@ -474,15 +474,15 @@ def test_facet_with_secondary_y_renders_right_axis_per_panel():
     assert titles.count("z") == 2, f"expected a right z-axis on each of 2 panels, got {titles}"
 
 
-# Chart.__add__'s column-collision suffix (chart.py ~line 1623) becomes
+# Chart.__add__'s column-collision suffix (chart.py ~line 1658) becomes
 # user-visible under independent y because the flagged slot titles its axis
 # from the layer's own (renamed) field.
-def test_heterogeneous_data_secondary_axis_title_has_no_rhs_sentinel():  # BUG: internal "__rhs_<hex>" rename rendered as the secondary axis title
+def test_heterogeneous_data_secondary_axis_title_has_no_rhs_sentinel():  # FIXED (GH #71): _rename_encoding_fields now stamps the ORIGINAL field name back on as the channel's title whenever a rename occurs and no explicit title= was set, so the internal "__rhs_<n>" sentinel is only ever used for data lookup, never shown to the user
     """Two members with DIFFERENT data but overlapping column names:
-    __add__ renames the RHS columns to '{col}__rhs_{hex}' before the
+    __add__ renames the RHS columns to '{col}__rhs_{n}' before the
     diagonal concat. Under resolve={"y": "independent"} the renamed field
-    becomes the right axis's title. Internal sentinels must never reach
-    the rendered SVG."""
+    used to leak into the right axis's title -- internal sentinels must
+    never reach the rendered SVG."""
     df_a = _df()
     df_b = pl.DataFrame({"x": [1, 2, 3, 4], "y": [10.0, 20.0, 30.0, 40.0]})
     bars = fm.Chart(df_a).mark_bar().encode(x="x", y="y")
@@ -490,6 +490,103 @@ def test_heterogeneous_data_secondary_axis_title_has_no_rhs_sentinel():  # BUG: 
     svg = LayerChart(bars, line, resolve={"y": "independent"}).to_svg()
     assert "__rhs_" not in svg, (
         f"internal RHS-rename sentinel leaked into the SVG (axis titles: {_rotated_titles(svg)})"
+    )
+
+
+def test_heterogeneous_dual_axis_explicit_title_wins_over_stamped_original_name():
+    """An explicit user ``title=`` on the renamed RHS channel must survive the
+    collision rename untouched: `_rename_encoding_fields` stamps the ORIGINAL
+    field name as the display title only when the user set none (the
+    ``"title" not in val._kwargs`` guard). Pins precedence: user title >
+    stamped original name > renamed field."""
+    df_a = _df()
+    df_b = pl.DataFrame({"x": [1, 2, 3, 4], "y": [10.0, 20.0, 30.0, 40.0]})
+    bars = fm.Chart(df_a).mark_bar().encode(x="x", y="y")
+    line = fm.Chart(df_b).mark_line().encode(x="x", y=fm.Y("y", title="Revenue"))
+    svg = LayerChart(bars, line, resolve={"y": "independent"}).to_svg()
+    assert "Revenue" in svg, "explicit user title= must survive the RHS collision rename"
+    assert "__rhs_" not in svg
+
+
+def test_rhs_rename_suffix_is_deterministic_across_repeated_builds():
+    """The internal `__rhs_<n>` collision-rename suffix (chart.py ~line 1658)
+    must derive from a structural per-merge index -- the count of layers
+    already accumulated on the LHS -- not `id(other)`. An id()-derived
+    suffix makes the merged chart's internal data-column names (and
+    therefore anything downstream that keys off them) vary nondeterministically
+    across repeated builds of the identical chart, even within one process."""
+
+    def _merged_rhs_columns() -> list[str]:
+        df_a = _df()
+        df_b = pl.DataFrame({"x": [1, 2, 3, 4], "y": [10.0, 20.0, 30.0, 40.0]})
+        bars = fm.Chart(df_a).mark_bar().encode(x="x", y="y")
+        line = fm.Chart(df_b).mark_line().encode(x="x", y="y")
+        merged = bars + line
+        return sorted(c for c in merged._data.columns if "__rhs_" in c)
+
+    cols_1 = _merged_rhs_columns()
+    cols_2 = _merged_rhs_columns()
+    assert cols_1 == cols_2, (
+        f"internal RHS-rename column names differ across repeated builds of "
+        f"the identical chart: {cols_1} vs {cols_2} -- the suffix must be "
+        "deterministic, not id()-derived"
+    )
+
+
+def test_right_associated_triple_merge_with_shared_columns_does_not_collide():
+    """Regression: a right-associated chain (`a + (b + c)`) where every member
+    shares the same column names must not raise polars' `DuplicateError`.
+
+    The inner `b + c` merge and the outer `a + (b + c)` merge each see an LHS
+    with exactly one already-accumulated layer, so a rename suffix derived
+    ONLY from the LHS layer count (`len(lhs_layers)`) picks the SAME index for
+    both merges -- the outer merge would then try to rename its RHS's
+    (`b + c`'s) own `x`/`y` columns to `x__rhs_0001`/`y__rhs_0001`, which
+    already exist in that frame from the inner merge. `Chart.__add__`'s
+    collision-rename must bump past any name already present in either frame,
+    not just derive a structural index and stop."""
+    df_a = pl.DataFrame({"x": [1, 2], "y": [1.0, 2.0]})
+    df_b = pl.DataFrame({"x": [1, 2], "y": [3.0, 4.0]})
+    df_c = pl.DataFrame({"x": [1, 2], "y": [5.0, 6.0]})
+    a = fm.Chart(df_a).mark_bar().encode(x="x", y="y")
+    b = fm.Chart(df_b).mark_line().encode(x="x", y="y")
+    c = fm.Chart(df_c).mark_point().encode(x="x", y="y")
+
+    merged = a + (b + c)  # must not raise polars.exceptions.DuplicateError
+
+    columns = merged._data.columns
+    assert len(columns) == len(set(columns)), f"merged frame has duplicate columns: {columns}"
+    svg = merged.to_svg()
+    assert svg.strip().startswith("<svg")
+
+
+def test_heterogeneous_dual_axis_auto_tooltip_carries_original_field_as_title():  # FIXED (GH #71): _auto_tooltip_fields (_spec_build.py) now carries a "title" key -- sourced from the channel's own stamped title -- mirroring the shape the explicit multi-field Tooltip(*fields) path already emits
+    """Interactive auto-tooltip injection (``SpecBuildMixin._auto_tooltip_fields``)
+    must carry the ORIGINAL column name as the tooltip entry's display title for
+    a renamed secondary-layer field: ``field`` legitimately stays the renamed
+    column (Rust reads the actual data by that name), but ``title`` is
+    presentation-only and must never show the internal ``__rhs_<n>`` sentinel.
+
+    This pins the Python-side ChartSpec contract. The Rust half of the chain
+    landed in the same sweep unit: ``MetadataColumns::from_ctx``
+    (``crates/ferrum-core/src/render/draw.rs``) now prefers ``.title`` over
+    ``.field`` for ``TooltipField.name`` (pinned by its own Rust unit test,
+    ``tooltip_name_prefers_title_over_field_when_title_set``), so the
+    rendered interactive scene shows the original name end to end.
+    """
+    df_a = _df()
+    df_b = pl.DataFrame({"x": [1, 2, 3, 4], "y": [10.0, 20.0, 30.0, 40.0]})
+    bars = fm.Chart(df_a).mark_bar().encode(x="x", y="y")
+    line = fm.Chart(df_b).mark_line().encode(x="x", y="y")
+    merged = LayerChart(bars, line, resolve={"y": "independent"})._build_merged()
+
+    spec, _data, _viewport, _theme, _cfg = merged._render_inputs(_auto_tooltips=True)
+    layers = json.loads(spec.to_json())["layers"]
+    secondary_fields = layers[1]["encoding"]["tooltip_fields"]
+    y_entry = next(f for f in secondary_fields if f["field"].startswith("y__rhs_"))
+    assert y_entry.get("title") == "y", (
+        f"secondary layer's auto-injected tooltip field must display the "
+        f"original column name 'y' as its title, not the renamed field: {y_entry}"
     )
 
 
@@ -530,9 +627,7 @@ def test_aggregate_shorthand_on_secondary_member_renders():
     """encode(y="mean(z)") on the secondary member: the _PendingAggregate
     resolves per-layer and the flagged slot must scale off the aggregated
     output column."""
-    df = pl.DataFrame(
-        {"x": [1, 1, 2, 2], "y": [1.0, 2.0, 3.0, 4.0], "z": [10.0, 20.0, 30.0, 40.0]}
-    )
+    df = pl.DataFrame({"x": [1, 1, 2, 2], "y": [1.0, 2.0, 3.0, 4.0], "z": [10.0, 20.0, 30.0, 40.0]})
     primary = fm.Chart(df).mark_bar().encode(x="x", y="y")
     agg = fm.Chart(df).mark_line().encode(x="x", y="mean(z)")
     svg = LayerChart(primary, agg, resolve={"y": "independent"}).to_svg()

@@ -392,7 +392,14 @@ impl MetadataColumns {
             .filter_map(|e| {
                 let fmt = e.format.as_deref();
                 let fmt_type = e.format_type.as_deref();
-                read_col_with_spec(&e.field, fmt, fmt_type).map(|col| (e.field.clone(), col))
+                // The tooltip's DISPLAYED name prefers the channel's `title`
+                // over its `field`. This matters when `field` is an internal
+                // rename sentinel (e.g. `Chart.__add__`'s `__rhs_<n>` collision
+                // suffix, GH #71): the original column name is stamped onto
+                // `title` for presentation, while `field` must stay the
+                // renamed column so the read below still finds the right data.
+                let name = e.title.clone().unwrap_or_else(|| e.field.clone());
+                read_col_with_spec(&e.field, fmt, fmt_type).map(|col| (name, col))
             })
             .collect();
 
@@ -1173,6 +1180,89 @@ mod tests {
         assert!(
             !formatted.contains("0000"),
             "default tooltip format must trim trailing zeros; got: '{formatted}'"
+        );
+    }
+
+    /// GH #71 residual: `MetadataColumns::from_ctx` must build each tooltip's
+    /// DISPLAYED name from the channel's `title` when one is set, not always
+    /// from `field`. This matters for internal rename sentinels: `field` must
+    /// stay the actual (renamed) data column so the value lookup still works,
+    /// but the name shown in the rendered tooltip must be the original column
+    /// name stamped onto `title` (`chart._rename_encoding_fields`). Covers both
+    /// the `tooltip_fields` (auto-injected multi-field) path and the single
+    /// `tooltip` (explicit `Tooltip(...)`) path, since both feed the same
+    /// `tooltip_specs` collection above.
+    #[test]
+    fn tooltip_name_prefers_title_over_field_when_title_set() {
+        use crate::layout::{PanelLayout, Rect};
+        use crate::render::scale_resolve::resolve_scales;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::data_ref::DataRef;
+        use crate::spec::encoding::{DataType as SDT, Encoding, EncodingSpec};
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                tooltip_fields: Some(vec![
+                    EncodingSpec {
+                        field: "y__rhs_0001".into(),
+                        type_: Some(SDT::Quantitative),
+                        title: Some("y".into()),
+                        ..Default::default()
+                    },
+                    EncodingSpec {
+                        field: "x".into(),
+                        type_: Some(SDT::Quantitative),
+                        ..Default::default()
+                    },
+                ]),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None, coord: None, mark_style: None,
+            position: None, title: None, axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(), chart_description: None, params: Vec::new(),
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y__rhs_0001", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0])),
+            Arc::new(Float64Array::from(vec![2.0])),
+            Arc::new(Float64Array::from(vec![10.0])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+
+        let meta = MetadataColumns::from_ctx(&ctx);
+        assert_eq!(meta.tooltip_cols.len(), 2, "expected 2 tooltip columns");
+
+        let (renamed_name, _) = &meta.tooltip_cols[0];
+        assert_eq!(
+            renamed_name, "y",
+            "tooltip name must prefer title ('y') over the internal rename sentinel field ('y__rhs_0001'); got: '{renamed_name}'"
+        );
+        assert!(
+            !renamed_name.contains("__rhs_"),
+            "internal rename sentinel must never appear in the tooltip's displayed name; got: '{renamed_name}'"
+        );
+
+        let (untitled_name, _) = &meta.tooltip_cols[1];
+        assert_eq!(
+            untitled_name, "x",
+            "when no title is set, tooltip name must fall back to field, unchanged from prior behavior"
         );
     }
 

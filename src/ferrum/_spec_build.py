@@ -49,7 +49,15 @@ def _auto_tooltip_fields(enc: dict) -> list[dict]:
     -------
     list of dict
         ``[{"field": name}, ...]`` in ``_RENDERER_HONORED_CHANNELS`` order,
-        deduplicated by field name.
+        deduplicated by field name. When the channel's serialized dict
+        carries an explicit ``title`` -- either user-set, or stamped by
+        ``Chart.__add__``'s collision-rename to preserve the original
+        column name (see ``chart._rename_encoding_fields``, GH #71) -- the
+        entry also carries a ``"title"`` display key, mirroring the shape
+        the explicit multi-field ``Tooltip(*fields)`` path already emits in
+        :meth:`SpecBuildMixin._build_encoding_specs`. ``field`` always stays
+        the (possibly renamed) column used for the actual value lookup;
+        ``title`` is presentation-only.
     """
     from ferrum.chart import _RENDERER_HONORED_CHANNELS
 
@@ -63,7 +71,11 @@ def _auto_tooltip_fields(enc: dict) -> list[dict]:
             continue
         field = ch_dict.get("field") if isinstance(ch_dict, dict) else None
         if field and isinstance(field, str) and field not in seen:
-            auto_fields.append({"field": field})
+            entry: dict = {"field": field}
+            title = ch_dict.get("title")
+            if title:
+                entry["title"] = title
+            auto_fields.append(entry)
             seen.add(field)
     return auto_fields
 
