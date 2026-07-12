@@ -129,16 +129,6 @@ pub(crate) fn build_zoomed_text_json(
         .iter()
         .flat_map(|lvl| lvl.ticks.iter().map(|t| t.label.as_str()))
         .collect();
-    // Secondary-y (#52): the union of every right axis's tick strings. Empty for
-    // single-axis charts (`y_slot_levels` omitted), so the secondary-relabel
-    // branch below never fires and the output is byte-identical to pre-#52.
-    let y_slot_tick_labels: HashSet<&str> = ptl
-        .y_slot_levels
-        .iter()
-        .flatten()
-        .flat_map(|lvl| lvl.ticks.iter().map(|t| t.label.as_str()))
-        .collect();
-
     // --- Identify x-axis tick row ------------------------------------------
     // All x-axis tick labels share the same y coordinate.  Find the most
     // common rounded-y among elements whose content is a known x-tick label.
@@ -168,44 +158,6 @@ pub(crate) fn build_zoomed_text_json(
         .max_by_key(|(_, c)| *c)
         .map(|(k, _)| k as f64 / 10.0);
 
-    // --- Identify secondary right-axis columns (#52) ------------------------
-    // Each `independent_y` layer's right axis sits at its own x column, stacked
-    // outward beyond the plot. Recognize a column as any rounded-x shared by ≥2
-    // secondary-labeled elements (an axis has multiple ticks; a stray text
-    // matching a tick string does not). Empty for single-axis charts.
-    let mut y2_x_freq: HashMap<i64, usize> = HashMap::new();
-    for te in all_text
-        .iter()
-        .filter(|te| y_slot_tick_labels.contains(te.content.as_str()))
-    {
-        *y2_x_freq.entry((te.x * 10.0) as i64).or_insert(0) += 1;
-    }
-    let y2_columns: HashSet<i64> = y2_x_freq
-        .into_iter()
-        .filter(|(_, c)| *c >= 2)
-        .map(|(k, _)| k)
-        .collect();
-
-    // Rank the secondary columns outward from the plot's right edge (ascending
-    // rounded-x). Right axes stack outward in y-slot order (slot 1 = innermost
-    // right axis, per `LayoutResult.secondary_y_axes`), so the k-th column from
-    // the plot edge relabels through `secondary_affines[k]` — that axis's
-    // `panel ∘ slot-rescale`. The primary/left column is excluded so a tick
-    // string shared between the left axis and a right axis never shifts the
-    // ranking. This position-based mapping is robust to right axes that share
-    // label strings (which a set-membership mapping could not disambiguate).
-    let mut ranked_cols: Vec<i64> = y2_columns.iter().copied().collect();
-    if let Some(ax) = y_axis_x {
-        let primary = (ax * 10.0) as i64;
-        ranked_cols.retain(|&c| c != primary);
-    }
-    ranked_cols.sort_unstable();
-    let col_rank: HashMap<i64, usize> = ranked_cols
-        .iter()
-        .enumerate()
-        .map(|(rank, &c)| (c, rank))
-        .collect();
-
     // 1 px tolerance covers label_font_size / 3.0 baseline offset and rounding.
     const COORD_TOL: f64 = 1.5;
 
@@ -221,15 +173,18 @@ pub(crate) fn build_zoomed_text_json(
                 .map(|ax| (te.x - ax).abs() < COORD_TOL)
                 .unwrap_or(false)
     };
-    // Secondary-y (#52): a right-axis tick sits in a recognized secondary column
-    // and its string belongs to some slot's tick set. Zoom/pan is panel-level
-    // (spec §8.5), so — like the left axis — its y coordinate moves under the
-    // SAME panel affine; only the column (x) differs. Never matches on a
-    // single-axis chart (`y2_columns` empty).
-    let is_secondary_y_tick = |te: &TextElementData| {
-        y_slot_tick_labels.contains(te.content.as_str())
-            && y2_columns.contains(&((te.x * 10.0) as i64))
-    };
+    // Secondary-y (#52/#60/#73): a right-axis tick is identified by its
+    // explicit `slot` tag (`Some(k)`, k >= 1 — slot 0 is the primary axis,
+    // per the `MarkBatch::y_slot` convention `route_y_axis_slotted` mirrors),
+    // not by column-frequency inference. This retires the `c >= 2` column
+    // heuristic: untagged text (`slot: None`) — titles, legends, or a stray
+    // label that happens to match a tick string — is *never* treated as an
+    // axis label, which is a STRONGER structural guarantee than the
+    // frequency filter it replaces (spec §7). A single-tick right axis
+    // (degenerate/constant secondary domain) now relabels exactly like a
+    // multi-tick one, since recognition no longer depends on counting
+    // repeated column occupants.
+    let is_secondary_y_tick = |te: &TextElementData| matches!(te.slot, Some(slot) if slot >= 1);
 
     let mut elements: Vec<serde_json::Value> = Vec::new();
     for te in all_text {
@@ -271,15 +226,17 @@ pub(crate) fn build_zoomed_text_json(
             // domainParam/brush bound to only this layer relabels it even when
             // the shared panel affine is identity. The stacked column (x) stays
             // fixed; the label keeps its own anchor (right-axis labels are
-            // `start`-anchored, not `end`). Falls back to the panel affine when
-            // no per-slot affine was supplied (pure zoom/pan or single-y),
-            // byte-identical to the pre-9d panel-affine path.
-            let rank = col_rank
-                .get(&((te.x * 10.0) as i64))
-                .copied()
-                .unwrap_or(0);
+            // `start`-anchored, not `end`). The explicit slot tag indexes
+            // `secondary_affines` directly (GH #63: 1-based — slot 1 is
+            // `secondary_affines[0]`), so no column-position ranking is
+            // needed. Falls back to `secondary_affines.last()` when a slot
+            // has no corresponding entry (documented degradation, same as the
+            // retired ranking-based fallback), and to the panel affine when no
+            // secondary affines were supplied at all (pure zoom/pan or
+            // single-y), byte-identical to the pre-9d panel-affine path.
+            let slot = te.slot.unwrap_or(1); // guarded by is_secondary_y_tick (>= 1)
             let aff = secondary_affines
-                .get(rank)
+                .get(slot - 1)
                 .or_else(|| secondary_affines.last())
                 .copied()
                 .unwrap_or(*transform);
@@ -403,6 +360,13 @@ mod bug_hunt_interactive_slots {
         TextElementData { x, y, content: content.to_string(), style: style(), slot: None }
     }
 
+    /// A tick-label text node explicitly tagged with its y-scale slot (GH
+    /// #60/#73), as `route_y_axis_slotted`/`build_axis` emit for a dual-axis
+    /// panel: slot 0 = primary, slot `k >= 1` = the k-th stacked right axis.
+    fn text_slot(x: f64, y: f64, content: &str, slot: usize) -> TextElementData {
+        TextElementData { x, y, content: content.to_string(), style: style(), slot: Some(slot) }
+    }
+
     fn tick(label: &str, pixel: f64) -> ferrum_scene::Tick {
         ferrum_scene::Tick { value: pixel, label: label.to_string(), pixel }
     }
@@ -448,17 +412,17 @@ mod bug_hunt_interactive_slots {
             .unwrap_or_else(|| panic!("{content} must be present"))
     }
 
-    /// A secondary right axis with a SINGLE tick is never recognized as a
-    /// column (the `c >= 2` frequency filter in `build_zoomed_text_json`), so
-    /// its label does NOT reposition under a slot-only rescale — while a
-    /// single-tick PRIMARY axis relabels fine (the primary column has no
-    /// `>= 2` filter). A degenerate secondary domain (all values identical)
-    /// can legitimately produce one tick, and its axis then freezes under a
-    /// domainParam/brush rescale.
+    /// A secondary right axis with a SINGLE tick now relabels via its
+    /// explicit slot tag (GH #60/#73) rather than the retired `c >= 2`
+    /// column-frequency filter, which never recognized a 1-tick column as a
+    /// secondary axis — asymmetric with the primary axis, which relabels
+    /// fine with 1 tick. A degenerate secondary domain (all values identical)
+    /// can legitimately produce one tick, and its axis must not freeze under
+    /// a domainParam/brush rescale.
     #[test]
-    fn bug_hunt_single_tick_secondary_axis_relabels_under_slot_rescale() { // BUG: `c >= 2` column filter means a 1-tick right axis never repositions; asymmetric with the primary axis which relabels with 1 tick
+    fn bug_hunt_single_tick_secondary_axis_relabels_under_slot_rescale() {
         let cfg = interaction(&[("L", 100.0)], vec![vec![level(&[("R99", 120.0)])]]);
-        let all_text = vec![text(40.0, 100.0, "L"), text(460.0, 120.0, "R99")];
+        let all_text = vec![text(40.0, 100.0, "L"), text_slot(460.0, 120.0, "R99", 1)];
         let panel = crate::zoom_pan::Affine2::identity();
         let secondary = [crate::zoom_pan::compose_panel_slot(
             panel,
@@ -473,9 +437,51 @@ mod bug_hunt_interactive_slots {
         );
     }
 
-    /// Sanity control for the failing test above: the SAME setup with TWO
-    /// ticks on the right axis does reposition — proving the failure is the
-    /// column-recognition threshold, not the affine plumbing.
+    /// Regression (#73, §7 stray-label guarantee): the retired `c >= 2`
+    /// column-frequency heuristic existed to stop a NON-axis text node that
+    /// happens to match a right-axis tick string from being repositioned by
+    /// the secondary rescale. Slot tagging makes that guarantee structural,
+    /// not statistical: an untagged node (`slot: None`) is never an axis
+    /// label regardless of its content or column, so even a stray label whose
+    /// text and column BOTH collide with a genuine slot-1 tick must stay put
+    /// under an active slot rescale. Old code with a `c >= 1` relaxation (the
+    /// tempting shortcut) would have relabeled it; this pins that it does not.
+    #[test]
+    fn untagged_node_matching_a_secondary_tick_string_is_not_rescaled() {
+        let cfg = interaction(&[("L", 100.0)], vec![vec![level(&[("R99", 120.0)])]]);
+        let all_text = vec![
+            text(40.0, 100.0, "L"),
+            text_slot(460.0, 120.0, "R99", 1),
+            // A stray, UNtagged data label that collides with the slot-1 tick
+            // string "R99" and sits in the same right-hand column x=460.
+            text(460.0, 300.0, "R99"),
+        ];
+        let panel = crate::zoom_pan::Affine2::identity();
+        let secondary = [crate::zoom_pan::compose_panel_slot(
+            panel,
+            crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 },
+        )];
+        let parsed = parse(&build_zoomed_text_json(&all_text, &cfg, 0, &panel, &secondary, None));
+        // The genuine tagged tick rescales (120 * 2 = 240); the untagged stray,
+        // sharing content "R99", must remain at its original y=300, never 600.
+        let ys: Vec<f64> = parsed
+            .iter()
+            .filter(|v| v["content"] == "R99")
+            .filter_map(|v| v["y"].as_f64())
+            .collect();
+        assert!(
+            ys.contains(&240.0) && ys.contains(&300.0),
+            "expected the tagged tick at 240 and the untagged stray held at 300, got {ys:?}"
+        );
+        assert!(
+            !ys.contains(&600.0),
+            "untagged stray was wrongly rescaled (300 * 2 = 600): {ys:?}"
+        );
+    }
+
+    /// Sanity control: the SAME setup with TWO ticks on the right axis
+    /// reposition identically to the single-tick case above — proving slot
+    /// identity, not tick count, drives recognition.
     #[test]
     fn bug_hunt_two_tick_secondary_axis_relabels_under_slot_rescale() {
         let cfg = interaction(
@@ -484,8 +490,8 @@ mod bug_hunt_interactive_slots {
         );
         let all_text = vec![
             text(40.0, 100.0, "L"),
-            text(460.0, 120.0, "R1"),
-            text(460.0, 200.0, "R2"),
+            text_slot(460.0, 120.0, "R1", 1),
+            text_slot(460.0, 200.0, "R2", 1),
         ];
         let panel = crate::zoom_pan::Affine2::identity();
         let secondary = [crate::zoom_pan::compose_panel_slot(
@@ -509,8 +515,8 @@ mod bug_hunt_interactive_slots {
         );
         let all_text = vec![
             text(40.0, 100.0, "L"),
-            text(460.0, 100.0, "R1"),
-            text(460.0, 200.0, "R2"),
+            text_slot(460.0, 100.0, "R1", 1),
+            text_slot(460.0, 200.0, "R2", 1),
         ];
         let panel = crate::zoom_pan::Affine2::identity();
         // Slot rescale moves everything down by 500 px — outside (0,0,500,400).
@@ -532,9 +538,9 @@ mod bug_hunt_interactive_slots {
         assert!(contents.contains(&"L"), "unmoved primary label must survive");
     }
 
-    /// Two right axes but only ONE secondary affine supplied: the outer column
-    /// (rank 1) must fall back to `secondary_affines.last()` — the documented
-    /// degradation — not to the panel affine and not panic.
+    /// Two right axes (slot 1, slot 2) but only ONE secondary affine
+    /// supplied: slot 2 must fall back to `secondary_affines.last()` — the
+    /// documented degradation — not to the panel affine and not panic.
     #[test]
     fn bug_hunt_more_columns_than_affines_falls_back_to_last() {
         let cfg = interaction(
@@ -546,10 +552,10 @@ mod bug_hunt_interactive_slots {
         );
         let all_text = vec![
             text(40.0, 100.0, "L"),
-            text(460.0, 100.0, "A1"),
-            text(460.0, 200.0, "A2"),
-            text(500.0, 100.0, "B1"),
-            text(500.0, 200.0, "B2"),
+            text_slot(460.0, 100.0, "A1", 1),
+            text_slot(460.0, 200.0, "A2", 1),
+            text_slot(500.0, 100.0, "B1", 2),
+            text_slot(500.0, 200.0, "B2", 2),
         ];
         let panel = crate::zoom_pan::Affine2::identity();
         let only = crate::zoom_pan::compose_panel_slot(
@@ -557,16 +563,16 @@ mod bug_hunt_interactive_slots {
             crate::zoom_pan::Affine2 { sx: 1.0, sy: 3.0, tx: 0.0, ty: 0.0 },
         );
         let parsed = parse(&build_zoomed_text_json(&all_text, &cfg, 0, &panel, &[only], None));
-        // Rank 0 (x=460) uses affines[0]; rank 1 (x=500) has no affines[1] and
+        // Slot 1 (x=460) uses affines[0]; slot 2 (x=500) has no affines[1] and
         // must degrade to `last()` — the same ×3 rescale.
         assert_eq!(y_of(&parsed, "A1"), 300.0);
-        assert_eq!(y_of(&parsed, "B1"), 300.0, "outer column must fall back to last affine");
+        assert_eq!(y_of(&parsed, "B1"), 300.0, "slot 2 must fall back to last affine");
         assert_eq!(y_of(&parsed, "B2"), 600.0);
     }
 
-    /// Two right axes sharing an identical tick STRING ("5") must each relabel
-    /// through their own column's affine — the position-based ranking, not a
-    /// string-set mapping, disambiguates them.
+    /// Two right axes (slot 1, slot 2) sharing an identical tick STRING ("5")
+    /// must each relabel through their own slot's affine — the explicit slot
+    /// tag, not a string-set/column mapping, disambiguates them.
     #[test]
     fn bug_hunt_shared_tick_string_across_two_right_axes_uses_column_position() {
         let cfg = interaction(
@@ -578,10 +584,10 @@ mod bug_hunt_interactive_slots {
         );
         let all_text = vec![
             text(40.0, 100.0, "L"),
-            text(460.0, 100.0, "5"), // inner axis, slot 1
-            text(460.0, 200.0, "7"),
-            text(500.0, 100.0, "5"), // outer axis, slot 2 — same label string
-            text(500.0, 200.0, "9"),
+            text_slot(460.0, 100.0, "5", 1), // inner axis, slot 1
+            text_slot(460.0, 200.0, "7", 1),
+            text_slot(500.0, 100.0, "5", 2), // outer axis, slot 2 — same label string
+            text_slot(500.0, 200.0, "9", 2),
         ];
         let panel = crate::zoom_pan::Affine2::identity();
         let secondary = [
@@ -652,6 +658,18 @@ mod tests {
             content: content.to_string(),
             style: make_style(),
             slot: None,
+        }
+    }
+
+    /// A tick-label text node explicitly tagged with its y-scale slot (GH
+    /// #60/#73): slot 0 = primary, slot `k >= 1` = the k-th stacked right axis.
+    fn make_text_slot(x: f64, y: f64, content: &str, slot: usize) -> TextElementData {
+        TextElementData {
+            x,
+            y,
+            content: content.to_string(),
+            style: make_style(),
+            slot: Some(slot),
         }
     }
 
@@ -898,9 +916,9 @@ mod tests {
         };
 
         let all_text = vec![
-            make_text(40.0, 100.0, "L"),   // left-axis tick (column x=40)
-            make_text(460.0, 100.0, "R1"), // right-axis tick (column x=460)
-            make_text(460.0, 200.0, "R2"), // right-axis tick (column x=460)
+            make_text(40.0, 100.0, "L"),        // left-axis tick (column x=40)
+            make_text_slot(460.0, 100.0, "R1", 1), // right-axis tick, slot 1 (x=460)
+            make_text_slot(460.0, 200.0, "R2", 1), // right-axis tick, slot 1 (x=460)
         ];
 
         // Panel zoom: sy=2.0 moves every y-position; both axes track together.
@@ -1071,12 +1089,12 @@ mod tests {
             }],
         };
         let all_text = vec![
-            make_text(40.0, 100.0, "L"),   // left axis (column x=40)
-            make_text(100.0, 360.0, "X"),  // x-axis tick (row y=360)
-            make_text(460.0, 100.0, "A1"), // inner right axis, slot 1 (x=460)
-            make_text(460.0, 200.0, "A2"),
-            make_text(500.0, 100.0, "B1"), // outer right axis, slot 2 (x=500)
-            make_text(500.0, 200.0, "B2"),
+            make_text(40.0, 100.0, "L"),          // left axis (column x=40)
+            make_text(100.0, 360.0, "X"),          // x-axis tick (row y=360)
+            make_text_slot(460.0, 100.0, "A1", 1), // inner right axis, slot 1 (x=460)
+            make_text_slot(460.0, 200.0, "A2", 1),
+            make_text_slot(500.0, 100.0, "B1", 2), // outer right axis, slot 2 (x=500)
+            make_text_slot(500.0, 200.0, "B2", 2),
         ];
         (interaction, all_text)
     }
