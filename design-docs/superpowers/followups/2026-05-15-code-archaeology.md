@@ -256,7 +256,7 @@ All FA follow-ups and five cross-cutting synthesis items (SYNTHESIS §C-D) fixed
 | C1 | 2bfe629 | `title=None` AND `Axis(title="")` truly suppress (no reserved margin, no phantom `<text>`); empty title resolves to None at the prepare boundary (Python forwards `""`, Rust skips the field fallback). |
 | C2 | 7dfb0c9 | annotations anchor to categorical/ordinal axes (non-ISO strings → ordinal category coords, not force-parsed temporal); `fm.annotate_*` accept `fm.px`/`fm.norm`; unresolved category warns before center-fallback. |
 | C3 | d731f07 | typed continuous scales (Linear/Log/Pow/Sqrt/Symlog) accept optional `domain` and auto-infer from data like the dict form. |
-| C4 | 3a2ee59 | `resolve=` on `vconcat`/`hconcat`; `pairplot(hue=)` shares one color domain. **Residual:** a single deduped legend rendered once outside the grid needs compositor layout work — domain is unified, per-panel legends remain (documented in `matrix.py`). |
+| C4 | 3a2ee59 | `resolve=` on `vconcat`/`hconcat`; `pairplot(hue=)` shares one color domain. **Residual resolved (2026-07-12, [#16](https://github.com/chris-santiago/ferrum/issues/16)):** the compositor renders one figure-level legend band when color/size resolve shared (per-panel legends suppressed at layout; band reuses the panel legend primitives); `fm.Resolve(scale=, legend=)` ships the opt-out, `jointplot(hue=)` opts in, and the fix also repaired hole-cell grids (`corner=True`, jointplot) silently skipping domain union. |
 | C5 | 5e2dd63 | 2-D density splits by categorical hue (`Kde2D groupby` → per-group surfaces; `Contour` iterates surfaces; `jointplot(kind='kde', hue=)` + `mark_contour(groupby=)`). **Note:** grouped contours render as isolines colored by group; filled per-group isobands are blocked by per-group `level_id` collision (group A and B both start `level_id=0` → polygon renderer merges them). |
 | FA-1 | 059a050 | `mark_arc(theta:N, radius:Q)` renders an equal-band Nightingale coxcomb (was blank). |
 | FA-2 | 2480b08 | polar bars render equal full-circle angular bands (was narrow upper-arc petals — root cause a double polar transform on `MarkBatchKind::Arc` geometry). |
@@ -351,7 +351,7 @@ below.
 | [#13](https://github.com/chris-santiago/ferrum/issues/13) | FA-8 | enhancement (grouped-contour level_id namespacing) |
 | [#14](https://github.com/chris-santiago/ferrum/issues/14) | B5-followup | enhancement (chart-level label_flush) |
 | [#15](https://github.com/chris-santiago/ferrum/issues/15) | Task 37 | enhancement (per-cell quantitative color contour/hex) |
-| [#16](https://github.com/chris-santiago/ferrum/issues/16) | C4-residual | enhancement (figure-level deduped legend) |
+| [#16](https://github.com/chris-santiago/ferrum/issues/16) | C4-residual | enhancement (figure-level deduped legend) — **resolved 2026-07-12** on `feat/composite-shared-legend` |
 | [#17](https://github.com/chris-santiago/ferrum/issues/17) | #20 | enhancement (share_x/y dead-API cleanup) |
 | [#18](https://github.com/chris-santiago/ferrum/issues/18) | R7 | documentation (positional discretizing-scale comment) |
 | [#19](https://github.com/chris-santiago/ferrum/issues/19) | FA-19 | question (browser-verify MSAA fix; code landed) |

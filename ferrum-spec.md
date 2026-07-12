@@ -151,7 +151,7 @@ Chart(data=None, *, width=None, height=None, title=None, description=None)
 - `.properties(**kwargs)` — Set chart-level metadata (title, width, height, description).
 - `.theme(theme)` — Apply a `Theme` object.
 - `.interactive(*, toolbar: bool = True)` — Switch render target to WASM. Returns `InteractiveChart`.
-- `.resolve(scale=None, axis=None, legend=None)` — Override shared/independent resolution in compound views.
+- `.resolve(scale=None, legend=None)` — Override shared/independent resolution in compound views (see §3.9; `axis=` narrowed out 2026-07-12, tracked as a follow-up).
 - `.save(path, *, format=None, scale=2.0, backend=None, **render_kwargs)` — Render and write to disk. `format` inferred from extension if `None`. `backend` overrides auto-selection. `scale` applies to raster backends only.
 
 > **2026-05-22 (feat/rtree-toolbar — Toolbar & Auto-tooltips):**
@@ -855,10 +855,24 @@ RepeatSpec(spec, *, row=None, column=None, layer=None, spacing=None, columns=Non
 #### Resolution
 
 ```
-Resolve(scale=None, axis=None, legend=None)
+Resolve(scale=None, legend=None)
 ```
 
-`scale` / `axis` / `legend` each accept a dict mapping channel name (`"x"`, `"y"`, `"color"`, etc.) to `"shared"` or `"independent"`.
+`scale` / `legend` each accept a dict mapping channel name to `"shared"` or
+`"independent"`. `scale` spans `"x"`, `"y"`, `"color"`, `"size"`; `legend`
+spans `"color"` and `"size"` only (the channels whose scales can be shared).
+
+> **2026-07-12 (#16):** the `legend` resolution axis is implemented: legend
+> resolution **defaults to following scale resolution** — a composite whose
+> color/size scale resolves shared renders **one figure-level legend**
+> outside the panel grid (per-panel legends suppressed), and
+> `legend={"color": "independent"}` opts back into per-panel legends.
+> `legend={ch: "shared"}` over a non-shared scale raises `ValueError` at
+> lowering. `pairplot(hue=)` and `jointplot(hue=)` get the shared legend by
+> default. A plain dict passed to `resolve=` keeps meaning scale resolution
+> (back-compat). The originally-declared third axis, `axis=`, is **not
+> implemented** and has been narrowed out of this signature; shared axis
+> rendering across composite panels is tracked as its own follow-up issue.
 
 ---
 
