@@ -24,8 +24,6 @@ leaf scale keeps its own legend), §9.8 (``legend=None`` leaf handling), and
 
 from __future__ import annotations
 
-import re
-
 import polars as pl
 import pytest
 
@@ -38,18 +36,7 @@ from ferrum.composition import (
     _composite_resolve_field,
     _lower_composite,
 )
-
-
-def _legend_texts(svg: str) -> list[str]:
-    """Extract all SVG ``<text>`` node contents, in document order.
-
-    Shared helper for the one-legend-vs-N-panel-legend assertions below —
-    counting occurrences of a field's title/category-label text is the
-    discriminating signal between a single figure-level legend and one
-    legend rendered per participating panel.
-    """
-    return re.findall(r"<text[^>]*>([^<]+)</text>", svg)
-
+from tests._snapshots import legend_texts as _legend_texts
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -397,20 +384,11 @@ def test_repeatchart_spec_flat_dict_resolve_unchanged(df_a):
 
 
 # ---------------------------------------------------------------------------
-# Task 5 fixtures — small hue-bearing DataFrames for pairplot/jointplot.
+# Task 5 fixture — small hue-bearing DataFrame for jointplot.
+#
+# ``pairplot_df`` is defined in ``tests/conftest.py`` (shared with
+# ``test_composite_shared_legend_goldens.py``).
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def pairplot_df() -> pl.DataFrame:
-    return pl.DataFrame(
-        {
-            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-            "y": [2.0, 1.0, 4.0, 3.0, 6.0, 5.0],
-            "z": [1.0, 3.0, 2.0, 5.0, 4.0, 6.0],
-            "grp": ["a", "b", "a", "b", "a", "b"],
-        }
-    )
 
 
 @pytest.fixture

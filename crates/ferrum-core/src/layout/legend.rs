@@ -257,8 +257,11 @@ const LEGEND_ENTRY_ROW_PAD: f64 = 4.0;
 const LEGEND_TITLE_GAP: f64 = 8.0;
 /// Base gap between the plot area and the legend strip so data points near the
 /// axis edge don't visually merge with legend text. The per-legend `offset`
-/// (B5 unit 6a) adds to this.
-const LEGEND_PLOT_GAP: f64 = 8.0;
+/// (B5 unit 6a) adds to this. `render::composite_render` reuses this same
+/// constant as the figure-band's base gap off the panel grid (see
+/// `draw_legend_band`) so the two legend-rendering paths share one gap
+/// definition rather than drifting.
+pub(crate) const LEGEND_PLOT_GAP: f64 = 8.0;
 /// Vertical gap (px) between consecutive stacked auxiliary (size / shape) legend
 /// blocks. Promoted to the module-const block (390) from a `layout_aux_legends`
 /// local so all legend spacing constants live together.

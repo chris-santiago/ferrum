@@ -705,6 +705,26 @@ fn legend_overrides_from_prep(prep: &prepare::PreparedInputs) -> LegendOverrides
     }
 }
 
+/// Resolve the effective legend title from a [`prepare::PreparedInputs`].
+///
+/// Three-way resolution (D13 + v0.15.1), shared by `prepare_and_layout`
+/// (single-chart path) and `composite_render::capture_leaf_bundle`
+/// (figure-legend seam, design §6): mirrors the axis-title contract in
+/// `prepare.rs`.
+///   - `legend_overrides.title` absent (`None`)   → fall through to field-name default
+///   - `legend_overrides.title = Some("")`        → explicit suppress; no text node, no margin
+///   - `legend_overrides.title = Some("Foo")`     → render "Foo" verbatim
+///
+/// Python forwards `""` only when `Legend(title=None)` is explicitly passed,
+/// so `Some("")` here is always the caller's intentional suppress sentinel.
+pub(crate) fn effective_legend_title(prep: &prepare::PreparedInputs) -> Option<String> {
+    match prep.legend_overrides.title.as_deref() {
+        Some(s) if s.trim().is_empty() => None, // explicit suppress — no fallback
+        Some(s) => Some(s.to_owned()),           // explicit non-empty title
+        None => prep.legend_title.clone(),       // absent — fall through to field-name default
+    }
+}
+
 /// Apply `ChartConfig.legend` fields to a `LegendOverrides`.
 ///
 /// Per-encoding `legend=Legend(...)` overrides (level 2) are already in the
@@ -1156,19 +1176,7 @@ fn prepare_and_layout(
     apply_chart_config(&mut effective_theme, chart_config);
 
     // D13 + v0.15.1: legend title override (replaces the default field-name title when Some).
-    //
-    // Three-way resolution mirrors the axis-title contract in prepare.rs:
-    //   - legend_overrides.title absent (None)   → fall through to field-name default
-    //   - legend_overrides.title = Some("")      → explicit suppress; no text node, no margin
-    //   - legend_overrides.title = Some("Foo")   → render "Foo" verbatim
-    //
-    // Python forwards `""` only when `Legend(title=None)` is explicitly passed,
-    // so `Some("")` here is always the caller's intentional suppress sentinel.
-    let effective_legend_title = match prep.legend_overrides.title.as_deref() {
-        Some(s) if s.trim().is_empty() => None, // explicit suppress — no fallback
-        Some(s) => Some(s.to_owned()),           // explicit non-empty title
-        None => prep.legend_title.clone(),       // absent — fall through to field-name default
-    };
+    let title_for_layout = effective_legend_title(&prep);
 
     let mut legend_overrides = legend_overrides_from_prep(&prep);
     // Apply configure_legend overrides (level 3) — only fills in None fields.
@@ -1192,7 +1200,7 @@ fn prepare_and_layout(
         &prep.axes,
         &prep.facet_groups,
         &prep.legend_entries,
-        effective_legend_title,
+        title_for_layout,
         prep.colorbar.as_ref(),
         &metrics,
         &legend_overrides,

@@ -5,7 +5,21 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+import polars as pl
 import pytest
+
+
+@pytest.fixture
+def pairplot_df() -> pl.DataFrame:
+    """Small hue-bearing DataFrame shared by the composite-shared-legend tests."""
+    return pl.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "y": [2.0, 1.0, 4.0, 3.0, 6.0, 5.0],
+            "z": [1.0, 3.0, 2.0, 5.0, 4.0, 6.0],
+            "grp": ["a", "b", "a", "b", "a", "b"],
+        }
+    )
 
 
 # umap removed from Python deps in Phase 11d — handled at Rust level (manifolds-rs).

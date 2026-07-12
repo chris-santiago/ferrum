@@ -35,7 +35,6 @@ an explicit failure, not a silent skip.
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 
 import polars as pl
@@ -43,7 +42,7 @@ import pytest
 
 import ferrum as fm
 from ferrum.composition import Resolve
-from tests._snapshots import assert_svg_eq, regen_and_verify
+from tests._snapshots import assert_svg_eq, legend_texts as _legend_texts, regen_and_verify
 
 
 GOLDENS_DIR = Path(__file__).parent / "goldens" / "composite_shared_legend"
@@ -53,16 +52,6 @@ UPDATE = os.environ.get("FERRUM_UPDATE_GOLDENS") == "1"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _legend_texts(svg: str) -> list[str]:
-    """Extract all SVG ``<text>`` node contents, in document order.
-
-    The discriminating signal between a single figure-level legend and one
-    legend rendered per participating panel: count occurrences of a field's
-    title/category-label text.
-    """
-    return re.findall(r"<text[^>]*>([^<]+)</text>", svg)
 
 
 def _check_or_update(name: str, svg: str) -> None:
@@ -93,19 +82,10 @@ def _check_or_update(name: str, svg: str) -> None:
 
 # ---------------------------------------------------------------------------
 # Deterministic fixtures
+#
+# ``pairplot_df`` is defined in ``tests/conftest.py`` (shared with
+# ``test_composite_shared_legend.py``).
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def pairplot_df() -> pl.DataFrame:
-    return pl.DataFrame(
-        {
-            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-            "y": [2.0, 1.0, 4.0, 3.0, 6.0, 5.0],
-            "z": [1.0, 3.0, 2.0, 5.0, 4.0, 6.0],
-            "grp": ["a", "b", "a", "b", "a", "b"],
-        }
-    )
 
 
 @pytest.fixture

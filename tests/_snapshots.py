@@ -7,9 +7,21 @@ what a golden actually renders as.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Iterable
+
+
+def legend_texts(svg: str) -> list[str]:
+    """Extract all SVG ``<text>`` node contents, in document order.
+
+    Shared probe for legend-dedup assertions: counting occurrences of a
+    field's title/category-label text is the discriminating signal between
+    a single figure-level legend and one legend rendered per participating
+    panel.
+    """
+    return re.findall(r"<text[^>]*>([^<]+)</text>", svg)
 
 
 def assert_svg_eq(actual: str, expected: str, *, name: str, regen_hint: str) -> None:

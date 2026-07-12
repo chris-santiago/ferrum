@@ -69,7 +69,7 @@ use arrow::record_batch::RecordBatch;
 use ferrum_scene::{LayoutScale, MarkBatch, Panel, Rect, SceneGraph, SceneNode};
 
 use crate::layout::facet::ResolveMode;
-use crate::layout::legend::{layout_aux_legends, layout_color_legend, LEGEND_OUTER_PAD};
+use crate::layout::legend::{layout_aux_legends, layout_color_legend, LEGEND_OUTER_PAD, LEGEND_PLOT_GAP};
 use crate::layout::text_metrics::TextMetrics;
 use crate::layout::{
     AuxLegendInput, ColorbarInput, LegendEntry, LegendLayout, LegendOrient, LegendOverrides,
@@ -403,14 +403,7 @@ fn capture_leaf_bundle(
     )?;
     let mut overrides = super::legend_overrides_from_prep(&po.prep);
     super::apply_chart_config_to_legend_overrides(&mut overrides, leaf.chart_config);
-    // Three-way legend-title resolution, identical to `prepare_and_layout`'s:
-    // explicit-empty suppresses (no title), explicit-non-empty wins, absent falls
-    // through to the prepared field-name default.
-    let title = match po.prep.legend_overrides.title.as_deref() {
-        Some(s) if s.trim().is_empty() => None,
-        Some(s) => Some(s.to_owned()),
-        None => po.prep.legend_title.clone(),
-    };
+    let title = super::effective_legend_title(&po.prep);
     Ok(LeafLegendBundle {
         entries: po.prep.legend_entries.clone(),
         colorbar: po.prep.colorbar.clone(),
@@ -439,11 +432,6 @@ fn leaf_merges_color_size(spec: &ChartSpec) -> bool {
 // ---------------------------------------------------------------------------
 // Figure-level shared legend (GH #16)
 // ---------------------------------------------------------------------------
-
-/// Base gap (px) between the panel grid and a figure-level legend band, matching
-/// the single-chart `LEGEND_PLOT_GAP` so a shared legend sits the same distance
-/// off the plot as a per-panel one.
-const LEGEND_BAND_GAP: f64 = 8.0;
 
 /// A sandbox `inner` extent the band legend is measured in. Large enough that the
 /// legend-strip carve (which caps a strip at half the inner extent) never clips
@@ -687,7 +675,7 @@ fn draw_legend_band(scene: &mut SceneGraph, bundle: &LeafLegendBundle, flags: Ba
     // existing merged content over to make room (mirroring `apply_chrome_band`'s
     // header shift); Right/Bottom simply grow the far edge. Either way, the band's
     // OUTER edge — the one that borders the canvas boundary rather than the
-    // `LEGEND_BAND_GAP` toward the panels — gets `LEGEND_OUTER_PAD` of trailing
+    // `LEGEND_PLOT_GAP` toward the panels — gets `LEGEND_OUTER_PAD` of trailing
     // safety margin: `legend_layouts_extent` measures glyph *advance* widths via
     // `TextMetrics::measure_width`, which does not include the terminal glyph's
     // right side-bearing/ink overhang, so an exact-fit grow clips that sliver at
@@ -696,16 +684,16 @@ fn draw_legend_band(scene: &mut SceneGraph, bundle: &LeafLegendBundle, flags: Ba
     // legend content on every side (layout/legend.rs) — reused here rather than
     // inventing a second margin constant.
     let (target_x, target_y) = match orient {
-        LegendOrient::Right => (old_w + LEGEND_BAND_GAP, 0.0),
+        LegendOrient::Right => (old_w + LEGEND_PLOT_GAP, 0.0),
         LegendOrient::Left => {
-            shift_scene(scene, LEGEND_OUTER_PAD + content_w + LEGEND_BAND_GAP, 0.0);
+            shift_scene(scene, LEGEND_OUTER_PAD + content_w + LEGEND_PLOT_GAP, 0.0);
             (LEGEND_OUTER_PAD, 0.0)
         }
         LegendOrient::Top => {
-            shift_scene(scene, 0.0, LEGEND_OUTER_PAD + content_h + LEGEND_BAND_GAP);
+            shift_scene(scene, 0.0, LEGEND_OUTER_PAD + content_h + LEGEND_PLOT_GAP);
             (0.0, LEGEND_OUTER_PAD)
         }
-        LegendOrient::Bottom => (0.0, old_h + LEGEND_BAND_GAP),
+        LegendOrient::Bottom => (0.0, old_h + LEGEND_PLOT_GAP),
     };
     let dx = target_x - min_x;
     let dy = target_y - min_y;
@@ -722,12 +710,12 @@ fn draw_legend_band(scene: &mut SceneGraph, bundle: &LeafLegendBundle, flags: Ba
 
     match orient {
         LegendOrient::Right | LegendOrient::Left => {
-            scene.width = old_w + LEGEND_BAND_GAP + content_w + LEGEND_OUTER_PAD;
+            scene.width = old_w + LEGEND_PLOT_GAP + content_w + LEGEND_OUTER_PAD;
             scene.height = old_h.max(content_h);
         }
         LegendOrient::Top | LegendOrient::Bottom => {
             scene.width = old_w.max(content_w);
-            scene.height = old_h + LEGEND_BAND_GAP + content_h + LEGEND_OUTER_PAD;
+            scene.height = old_h + LEGEND_PLOT_GAP + content_h + LEGEND_OUTER_PAD;
         }
     }
     scene.legend.extend(nodes);
@@ -3287,10 +3275,10 @@ mod tests {
 
             let grown = match orient {
                 LegendOrient::Right | LegendOrient::Left => {
-                    scene.width - 300.0 - LEGEND_BAND_GAP
+                    scene.width - 300.0 - LEGEND_PLOT_GAP
                 }
                 LegendOrient::Top | LegendOrient::Bottom => {
-                    scene.height - 200.0 - LEGEND_BAND_GAP
+                    scene.height - 200.0 - LEGEND_PLOT_GAP
                 }
             };
             let content = match orient {
@@ -3329,7 +3317,7 @@ mod tests {
         )
         .expect("colorbar band content must measure non-empty");
         let content_h = max_y - min_y;
-        let grown = scene.height - 200.0 - LEGEND_BAND_GAP;
+        let grown = scene.height - 200.0 - LEGEND_PLOT_GAP;
         assert!(
             grown >= content_h + LEGEND_OUTER_PAD - 1e-9,
             "bottom colorbar band must reserve at least LEGEND_OUTER_PAD ({LEGEND_OUTER_PAD}) \
