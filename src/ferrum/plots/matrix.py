@@ -22,6 +22,7 @@ from typing import Any
 
 from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
 from ferrum.plots._helpers import (
+    _field_name,
     _finalize_chart,
     _merge_layers,
     _to_polars,
@@ -37,6 +38,10 @@ _VALID_PAIR_KINDS = {"scatter", "kde", "hist", "reg"}
 _VALID_DIAG_KINDS = {"auto", "hist", "kde", None, "none"}
 _VALID_CENTER_KINDS = {"scatter", "kde", "hist", "hex", "reg"}
 _VALID_MARGINAL_KINDS = {"hist", "kde", "rug", "box"}
+# jointplot center kinds whose color channel is genuinely bound to hue (as
+# opposed to "hist"/"hex", whose center color is a computed bin/hex
+# aggregate) -- see the shared-color resolve wiring in _jointplot_build.
+_JOINT_HUE_ON_CENTER_KINDS = {"scatter", "kde", "reg"}
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +279,14 @@ def _pairplot_build(
     elif kind == "hist":
         off = Chart(data).mark_histogram()
     elif kind == "reg":
-        off = Chart(data).mark_smooth(method="lm")
+        # mark_smooth has no color-encoding auto-groupby injection (unlike
+        # density/histogram) -- thread groupby explicitly, mirroring
+        # lmplot(hue=...), so the per-hue fit lines retain the hue column
+        # instead of Smooth dropping it from the fit-grid output.
+        reg_kwargs: dict = {}
+        if hue is not None:
+            reg_kwargs["groupby"] = _field_name(hue)
+        off = Chart(data).mark_smooth(method="lm", **reg_kwargs)
     enc: dict = {"x": Repeat.column, "y": Repeat.row}
     if hue is not None:
         enc["color"] = hue
@@ -306,19 +318,14 @@ def _pairplot_build(
         if hue is not None:
             diag_enc["color"] = hue
         if effective_diag_kind == "hist":
-            # When hue is set, thread groupby so Bin emits per-(bin, hue) rows
-            # preserving the hue column for color encoding.
-            hist_kwargs: dict = {}
-            if hue is not None:
-                hist_kwargs["groupby"] = hue
-            diagonal = Chart(data).mark_histogram(**hist_kwargs).encode(**diag_enc)
+            # No explicit groupby needed: histogram's _prep_groupby_from_color
+            # (marks/_desugar dispatch table) auto-derives Bin's groupby from
+            # the color encoding set below, extracting the plain field name
+            # whether hue is a str or an encoding object (e.g. fm.Color(...)).
+            diagonal = Chart(data).mark_histogram().encode(**diag_enc)
         elif effective_diag_kind == "kde":
-            # When hue is set, thread groupby so Kde emits per-group density
-            # curves preserving the hue column for color encoding.
-            kde_kwargs: dict = {}
-            if hue is not None:
-                kde_kwargs["groupby"] = hue
-            diagonal = Chart(data).mark_density(**kde_kwargs).encode(**diag_enc)
+            # Same auto-injection for density -- see above.
+            diagonal = Chart(data).mark_density().encode(**diag_enc)
 
         # Apply same panel sizing to diagonal template.
         if height is not None:
@@ -1204,13 +1211,18 @@ def _jointplot_build(
     if kind == "scatter":
         center = Chart(data).mark_point(**jk).encode(**enc_center)
     elif kind == "kde":
-        # When hue is set, thread it as groupby so the bivariate KDE splits per
-        # group. desugar_density routes groupby into desugar_contour on the 2D
-        # path, which configures Kde2D(groupby=hue) and produces per-group
-        # isoline contours colored by the group field.
+        # When hue is set, thread it as groupby so the bivariate KDE splits
+        # per group -- desugar_density routes groupby into desugar_contour on
+        # the 2D path, which configures Kde2D(groupby=hue) and produces
+        # per-group isoline contours colored by the group field.
+        # _field_name() extracts the plain column name whether hue is a str
+        # or an encoding object (e.g. fm.Color(...)): desugar_density's
+        # bivariate branch only forwards a groupby that `isinstance(..., str)`
+        # (marks/statistical.py), so passing the raw encoding object through
+        # silently drops the split instead of honoring it.
         kde_jk = dict(jk)
         if hue is not None:
-            kde_jk["groupby"] = hue
+            kde_jk["groupby"] = _field_name(hue)
         center = Chart(data).mark_density(**kde_jk).encode(**enc_center)
     elif kind == "hist":
         # Use Bin2D + mark_rect for 2D histogram.
@@ -1227,20 +1239,68 @@ def _jointplot_build(
             Chart(data).transform(Bin2D(x=x, y=y, **bin2d_kwargs)).mark_rect().encode(**hist_enc)
         )
     elif kind == "hex":
-        center = Chart(data).mark_hex(**jk).encode(**enc_center)
+        # Hex aggregates each hexagonal bin to a single value (Hex has no
+        # groupby); binding hue to the center's color channel doesn't split
+        # the aggregation, it just mislabels the count legend with the hue
+        # field's name. Drop it here -- the hue legend still comes from the
+        # marginals (see the shared-color handling below), and the center
+        # keeps its own (title-less) count-aggregate color scale.
+        hex_enc = {k: v for k, v in enc_center.items() if k != "color"}
+        center = Chart(data).mark_hex(**jk).encode(**hex_enc)
     elif kind == "reg":
-        # Layered: scatter + smoothed regression line.
-        scatter = Chart(data).mark_point(**jk).encode(**enc_center)
-        reg_enc: dict = {"x": x, "y": y}
-        if xlim is not None:
-            reg_enc["x"] = _X(x, scale={"domain": list(xlim)})
-        if ylim is not None:
-            reg_enc["y"] = _Y(y, scale={"domain": list(ylim)})
-        fit = Chart(data).mark_smooth(method="lm", ci=None).encode(**reg_enc)
-        center = _merge_layers(scatter, fit, scatter_name="scatter", fit_name="fit")
+        # Layered: scatter + smoothed regression line, chained on ONE chart
+        # via mark_point().mark_smooth() -- the canonical prior-mark
+        # composition (marks/_chart_methods_statistical.mark_smooth +
+        # _desugar._prep_smooth_force_name/_resolve_pending_impl). This
+        # auto-names the Smooth transform "smooth" and routes the fit layer
+        # through data_source="smooth", keeping the scatter layer on the raw
+        # batch. A manual _merge_layers(scatter, fit) of two independently
+        # built charts hits _merge_layers' fallback branch instead, which
+        # leaves the Smooth transform unnamed -- it then silently becomes the
+        # shared "main" batch every data_source-less layer reads, so the
+        # scatter layer loses its raw x/y columns (GH #75: "unknown column").
+        smooth_kwargs: dict = {}
+        if hue is not None:
+            smooth_kwargs["groupby"] = _field_name(hue)
+        center = (
+            Chart(data)
+            .mark_point(**jk)
+            .encode(**enc_center)
+            .mark_smooth(method="lm", ci=None, **smooth_kwargs)
+        )
 
     # Build top marginal (over x).
     mk = dict(marginal_kws or {})
+
+    # desugar_boxplot requires BOTH a categorical axis and a numeric value
+    # axis; a marginal only encodes one positional channel. Bind the
+    # categorical side to a synthetic single-level column so BoxStats draws
+    # one box for the whole distribution -- or, when hue is set, one box per
+    # hue level (color=hue on the marginal's own encode() auto-derives
+    # BoxStats' groupby via _prep_color_field, extending it to [cat, hue]),
+    # dodged apart since every level shares that same synthetic category.
+    from ferrum.position import Dodge
+
+    box_cat_col = "_joint_box_cat"
+    box_data = None
+    if marginal_kind == "box":
+        import polars as pl
+
+        box_data = _to_polars(data)
+        # Guard against a user column that happens to share the synthetic
+        # name -- with_columns() would otherwise silently overwrite it with
+        # the constant placeholder, corrupting that column's real data
+        # (e.g. collapsing a genuine hue split down to one level) rather
+        # than raising or renaming. Uniquify with an incrementing suffix
+        # (mirrors the collision-avoidance intent of chart.py's "__rhs_"
+        # renaming for merged-layer columns, adapted to a single-frame,
+        # single-name check).
+        suffix = 0
+        while box_cat_col in box_data.columns:
+            suffix += 1
+            box_cat_col = f"_joint_box_cat_{suffix}"
+        box_data = box_data.with_columns(pl.lit("").alias(box_cat_col))
+
     enc_top: dict = {"x": x}
     if xlim is not None:
         enc_top["x"] = _X(x, scale={"domain": list(xlim)})
@@ -1253,7 +1313,21 @@ def _jointplot_build(
     elif marginal_kind == "rug":
         top = Chart(data).mark_tick(**mk).encode(**enc_top)
     elif marginal_kind == "box":
-        top = Chart(data).mark_boxplot(**mk).encode(**enc_top)
+        # horizontal=True: value (x, shared with the center's x scale) spreads
+        # along x; the synthetic category sits on y. Setting color= here
+        # (rather than passing color_field= as a mark kwarg) lets
+        # _prep_color_field auto-derive BoxStats' groupby from the chart-level
+        # encoding -- the same encoding the figure-legend title is read from,
+        # so the marginal's box legend gets a real "hue" title instead of a
+        # blank one.
+        box_top_enc: dict = {"x": enc_top["x"], "y": box_cat_col}
+        box_top_kwargs = dict(mk)
+        if hue is not None:
+            box_top_enc["color"] = hue
+            # Every hue level shares the same synthetic category, so without
+            # dodging the boxes stack fully on top of each other.
+            box_top_kwargs.setdefault("position", Dodge(by=_field_name(hue)))
+        top = Chart(box_data).mark_boxplot(horizontal=True, **box_top_kwargs).encode(**box_top_enc)
 
     # Build right marginal — oriented horizontally so bars/density grow along
     # the marginal's x-axis while the binned data dimension stays on the
@@ -1271,10 +1345,14 @@ def _jointplot_build(
         # Tick mark has no bin/density direction — the y-binding is enough.
         right = Chart(data).mark_tick(**mk).encode(**enc_right)
     elif marginal_kind == "box":
-        # Boxplot is intrinsically asymmetric across the categorical axis;
-        # JointChart uses the default vertical orientation with the data on x
-        # (composite-mark orientation work tracked separately).
-        right = Chart(data).mark_boxplot(**mk).encode(x=y)
+        # Default (non-horizontal) orientation: value (y, shared with the
+        # center's y scale) spreads along y; the synthetic category sits on x.
+        box_right_enc: dict = {"x": box_cat_col, "y": enc_right["y"]}
+        box_right_kwargs = dict(mk)
+        if hue is not None:
+            box_right_enc["color"] = hue
+            box_right_kwargs.setdefault("position", Dodge(by=_field_name(hue)))
+        right = Chart(box_data).mark_boxplot(**box_right_kwargs).encode(**box_right_enc)
 
     if height is not None:
         center = center.properties(width=height, height=height)
@@ -1290,7 +1368,39 @@ def _jointplot_build(
     # one per panel. JointChart has no user-facing resolve= (its panel
     # alignment is fixed layout geometry), so this rides the private
     # _resolve constructor argument rather than a public knob.
-    joint_resolve = {"color": "shared"} if hue is not None else None
+    #
+    # "hist"/"hex" bind the center's color channel to a computed aggregate
+    # (bin count), not hue -- unioning it into the same shared-color resolve
+    # as the hue-carrying marginals corrupts the whole union (a quantitative
+    # count domain mixed with a nominal hue domain), which silently breaks
+    # even the marginals' own legend collapse, not just the center's (GH
+    # #75). Give top/right an identical explicit hue domain instead and
+    # suppress one panel's legend so exactly one hue legend renders, leaving
+    # the center's own (independent) aggregate color scale untouched.
+    #
+    # This manual per-panel domain/legend match is a workaround, not a
+    # second mechanism competing with the compositor's shared-color resolve
+    # -- resolve has no way to union "some panels" for one channel while
+    # leaving others out, so a real center-color/hue mismatch like this one
+    # is simply inexpressible via _resolve today. GH #68 (Resolve(axis=) /
+    # a legend-suppression knob) is the tracked follow-up for a single
+    # mechanism that could subsume this fork; revisit this branch if/when
+    # that lands.
+    if hue is not None and kind not in _JOINT_HUE_ON_CENTER_KINDS:
+        from ferrum.encoding import Color as _Color
+
+        hue_field = _field_name(hue)
+        hue_domain = sorted(_to_polars(data)[hue_field].drop_nulls().unique().to_list())
+        # "type": "ordinal" is required here -- a string-only domain with no
+        # explicit scale type makes the Rust scale resolver assume a
+        # quantitative (f64) domain and reject the category strings (same
+        # caveat as the markers=list Shape encoding above in _pairplot_build).
+        hue_scale = {"type": "ordinal", "domain": hue_domain}
+        top = top.encode(color=_Color(hue_field, scale=hue_scale))
+        right = right.encode(color=_Color(hue_field, scale=hue_scale, legend=None))
+        joint_resolve = None
+    else:
+        joint_resolve = {"color": "shared"} if hue is not None else None
     result = JointChart(
         center,
         top=top,

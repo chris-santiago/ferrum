@@ -642,7 +642,7 @@ def test_jointplot_hue_survives_properties_width():
     )
 
 
-def test_jointplot_hue_marginal_box_drops_hue_on_right_still_one_legend():  # BUG: jointplot(marginal_kind='box') raises "mark_boxplot() requires .encode(x=..., y=...)" at render — the top marginal encodes x only, which desugar_boxplot rejects; 'box' is in _VALID_MARGINAL_KINDS but is entirely unrenderable (fails with or without hue)
+def test_jointplot_hue_marginal_box_drops_hue_on_right_still_one_legend():  # FIXED (GH #75): both marginals now bind a synthetic single-level categorical column so desugar_boxplot's x-and-y requirement is met, and color=hue is set via .encode() (not a color_field= mark kwarg) so both the BoxStats groupby and the figure-legend title resolve from the same chart-level encoding
     """marginal_kind='box' builds the RIGHT marginal with encode(x=y) only —
     the hue color encoding is silently dropped for that panel
     (matrix.py _jointplot_build box branch).  The shared union then spans

@@ -203,7 +203,7 @@ def test_pairplot_numeric_hue_also_in_vars_renders(df):
     assert "NaN" not in svg
 
 
-def test_pairplot_color_channel_object_hue_renders():  # BUG: ValueError "groupby must be None, a str, or a list[str]" — docstring says hue accepts "str or encoding", but _pairplot_build threads the raw hue object into Kde/Bin groupby
+def test_pairplot_color_channel_object_hue_renders():  # FIXED (GH #75): _pairplot_build's diag hist/kde branches no longer thread the raw hue object into groupby -- they now rely on the existing _prep_groupby_from_color auto-injection (marks/_desugar dispatch table), which already extracts the plain field name from a str or an encoding object
     """pairplot docstring: ``hue : str or encoding``. Passing fm.Color("grp")
     must render like the string form (matrix.py L279/L307/L313/L320 pass hue
     verbatim into enc['color'] AND transform groupby kwargs)."""
@@ -218,7 +218,7 @@ def test_pairplot_color_channel_object_hue_renders():  # BUG: ValueError "groupb
     assert _legend_texts(svg).count("grp") == 1
 
 
-def test_jointplot_color_channel_object_hue_kde_one_legend(df):  # BUG: renders 3 per-panel 'grp' legends — Color-object hue skips Kde2D groupby (isinstance(groupby, str) gate) and the figure-legend band does not collapse
+def test_jointplot_color_channel_object_hue_kde_one_legend(df):  # FIXED (GH #75): _jointplot_build's kde branch no longer sets kde_jk["groupby"] = hue explicitly (which bypassed density's isinstance(groupby, str) gate for Color objects) -- it now relies on _prep_groupby_from_color's auto-injection from the already-correct color encoding
     """jointplot docstring: ``hue : str or encoding``. The Color-object form
     must produce the same single figure legend the string form does
     (_jointplot_build L1210-1214 threads hue into kde groupby only when str)."""
@@ -253,7 +253,7 @@ def test_pairplot_kind_hist_hue_one_legend(df):
     assert _legend_texts(svg).count("grp") == 1
 
 
-def test_pairplot_kind_reg_with_hue_renders():  # BUG: ValueError "unknown column 'grp' referenced by an encoding" — mark_smooth off-diagonal template never threads hue into Smooth groupby (unlike lmplot), so the fit output drops the hue column
+def test_pairplot_kind_reg_with_hue_renders():  # FIXED (GH #75): the off-diagonal mark_smooth(method="lm") template now threads groupby=_field_name(hue), mirroring lmplot(hue=...), so the fit output retains the hue column instead of dropping it
     """pairplot(kind='reg', hue=...) — the off-diagonal template is
     mark_smooth(method='lm') with color=hue (matrix.py L277+L280); it must
     render per-hue fits like lmplot(hue=) does (regression.py threads
@@ -270,7 +270,7 @@ def test_pairplot_kind_reg_with_hue_renders():  # BUG: ValueError "unknown colum
     assert _legend_texts(svg).count("grp") == 1
 
 
-def test_jointplot_kind_reg_renders():  # BUG: ValueError "failed to render composite leaf leaf #1: unknown column 'a'" — _merge_layers(scatter, fit) leaves the Smooth transform unnamed so the scatter layer reads the fit-grid batch, which lacks the raw x column; kind="reg" crashes for EVERY input
+def test_jointplot_kind_reg_renders():  # FIXED (GH #75): kind="reg" now chains .mark_point().mark_smooth() on ONE chart (the canonical prior-mark composition), which auto-names the Smooth transform and routes the fit layer via data_source="smooth" -- instead of _merge_layers(scatter, fit) on two independently-built charts, which left the Smooth transform unnamed and let it silently clobber the shared main batch the scatter layer read
     """jointplot(kind='reg') builds center via _merge_layers(scatter, fit)
     (matrix.py L1233-1240). The documented kind must render end-to-end —
     existing tests only inspect jc.center.to_spec(), never .to_svg()."""
@@ -284,7 +284,7 @@ def test_jointplot_kind_reg_renders():  # BUG: ValueError "failed to render comp
     assert "<svg" in svg
 
 
-def test_jointplot_marginal_kind_box_renders():  # BUG: ValueError "mark_boxplot() requires .encode(x=..., y=...)" — the top marginal encodes only x (matrix.py L1256) and the right only x=y (L1277), so the documented marginal_kind="box" crashes for EVERY input
+def test_jointplot_marginal_kind_box_renders():  # FIXED (GH #75): both marginals now bind a synthetic single-level categorical column (alongside the real numeric field) so desugar_boxplot's x-and-y requirement is satisfied -- horizontal=True on top (value on x), the default orientation on right (value on y)
     """'box' is in _VALID_MARGINAL_KINDS (matrix.py L39) and documented in the
     jointplot docstring; it must render, not crash at desugar time."""
     df = pl.DataFrame(
@@ -297,7 +297,50 @@ def test_jointplot_marginal_kind_box_renders():  # BUG: ValueError "mark_boxplot
     assert "<svg" in svg
 
 
-def test_jointplot_kind_hist_hue_one_figure_legend(df):  # BUG: renders 2 'grp' legend titles — kind="hist" sets center color="count" (quantitative) while marginals carry nominal hue; _jointplot_build still opts into {"color": "shared"} (L1293) and the band fails to collapse the marginals' legends
+def test_jointplot_marginal_kind_box_hue_column_named_joint_box_cat_survives():
+    """matrix.py materializes a synthetic single-level category column named
+    ``_joint_box_cat`` for the box marginal (desugar_boxplot needs both a
+    categorical AND a numeric axis; a marginal only encodes one). If the
+    caller's own hue column happens to share that exact name, a naive
+    ``with_columns(pl.lit("").alias(...))`` would silently overwrite it with
+    the constant placeholder BEFORE the marginal reads it for color/groupby.
+
+    Because the CENTER panel (default kind="scatter") still reads the
+    untouched original ``data`` for its own color=hue encoding, the figure
+    legend alone doesn't discriminate this bug (the center leaks the real
+    'p'/'q' domain into the shared legend regardless of what happens to the
+    marginals' internal copy). The decisive check is the marginal's OWN
+    BoxStats groupby: collided, the synthetic category IS the hue column, so
+    ``resolve_color_groupby`` treats color as redundant with the categorical
+    axis and drops the split (a 1-entry groupby, the corrupted constant
+    "" as the only group); uniquified, cat and hue are distinct columns and
+    groupby keeps both entries.
+    """
+    df = pl.DataFrame(
+        {
+            "a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "b": [2.0, 1.0, 4.0, 3.0, 6.0, 5.0],
+            "_joint_box_cat": ["p", "q", "p", "q", "p", "q"],
+        }
+    )
+    jc = fm.jointplot(df, x="a", y="b", marginal_kind="box", hue="_joint_box_cat")
+    top_spec = json.loads(jc.top.to_spec().to_json())
+    box_stats = next(t for t in top_spec["transforms"] if t["type"] == "box_stats")
+    assert len(box_stats["groupby"]) == 2, (
+        "box marginal's synthetic category and the hue column must stay "
+        f"distinct groupby keys, not collapsed into one; got {box_stats['groupby']}"
+    )
+    assert "_joint_box_cat" in box_stats["groupby"], (
+        f"the caller's real hue column must survive as its own groupby key; got {box_stats['groupby']}"
+    )
+
+    svg = jc.to_svg()
+    assert "<svg" in svg
+    texts = _legend_texts(svg)
+    assert texts.count("_joint_box_cat") == 1 and "p" in texts and "q" in texts
+
+
+def test_jointplot_kind_hist_hue_one_figure_legend(df):  # FIXED (GH #75): kind="hist"/"hex" (whose center color is a computed aggregate, not hue) no longer opt into the whole-grid {"color": "shared"} resolve -- top/right instead get an identical explicit ordinal hue domain with the legend suppressed on one, collapsing to one legend without corrupting the (mismatched-domain) union
     """jointplot(hue=) contract (spec §9.1, GH #16): exactly ONE figure-level
     legend. Must hold for every center kind, not just 'scatter'."""
     svg = fm.jointplot(df, x="a", y="b", hue="grp", kind="hist").to_svg()
@@ -305,7 +348,7 @@ def test_jointplot_kind_hist_hue_one_figure_legend(df):  # BUG: renders 2 'grp' 
     assert texts.count("grp") == 1, f"expected one figure legend for kind='hist'; got {texts}"
 
 
-def test_jointplot_kind_hex_hue_one_figure_legend(df):  # BUG: renders 3 per-panel 'grp' legends — hue is silently unsupported by the hex center (count-aggregated color) yet the shared-color resolve is still requested; neither one legend nor a typed rejection
+def test_jointplot_kind_hex_hue_one_figure_legend(df):  # FIXED (GH #75): the hex center no longer inherits hue onto its color channel (Hex has no groupby, so it only mislabeled the count legend with the hue field's name) -- the hue legend now comes solely from the marginals, matched onto one explicit domain like the "hist" fix above
     """jointplot(kind='hex', hue=): hue must either collapse to one figure
     legend or be rejected with a typed error — never N per-panel legends."""
     svg = fm.jointplot(df, x="a", y="b", hue="grp", kind="hex").to_svg()
