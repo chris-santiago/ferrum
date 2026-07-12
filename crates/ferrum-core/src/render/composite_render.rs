@@ -79,7 +79,8 @@ use crate::spec::chart::ChartSpec;
 
 use super::chart_config::ChartConfig;
 use super::composite::{
-    congruent, flatten_leaf_specs, resolve_composite_scales, CompositeResolveError, LeafResolveInput,
+    congruent_non_hole, flatten_leaf_specs, resolve_composite_scales, CompositeResolveError,
+    LeafResolveInput,
 };
 use super::scale_resolve::{ColorScale, LeafScaleContext};
 use super::svg::uniquify_clip_ids;
@@ -571,7 +572,13 @@ fn plan_legend_walk(
         }
         CompositeNode::Hole { .. } => {}
         CompositeNode::Composite { children, resolve, .. } => {
-            let congruent_children = children.iter().all(|c| congruent(&children[0], c));
+            // Must agree bit-for-bit with `resolve_channel`'s congruence
+            // gate (composite.rs): the band attaches at exactly the node
+            // where the resolve pass unions the domain, and a `Hole` cell
+            // (pairplot's corner triangle, jointplot's empty corner) must
+            // not disqualify the node's real cells from sharing (see
+            // `congruent_non_hole`'s doc).
+            let congruent_children = congruent_non_hole(children);
             let (color_next, color_band) = descend_channel(
                 resolve.color,
                 resolve.effective_color_legend(),
@@ -3522,5 +3529,113 @@ mod tests {
             scene.panels[1].plot_area.y,
         );
         assert_eq!(scene.panels.len(), 3, "band must not add or drop panels");
+    }
+
+    // -- figure-level shared legend + `Hole` cells (GH #16 hole fix) ---------
+
+    /// A `Grid`-layout node with the given `nrows`/`ncols` and color resolve
+    /// mode — mirrors `color_hconcat`'s shape for the `Grid` layout kind
+    /// `pairplot`/`jointplot` actually lower to (a flat grid whose direct
+    /// children mix real cells with `Hole` placeholders).
+    fn color_grid(children: Vec<CompositeNode>, nrows: u32, ncols: u32, color: RM) -> CompositeNode {
+        let mut node = composite(CompositeLayout::Grid, children);
+        if let CompositeNode::Composite { resolve, nrows: nr, ncols: nc, .. } = &mut node {
+            resolve.color = color;
+            *nr = Some(nrows);
+            *nc = Some(ncols);
+        }
+        node
+    }
+
+    #[test]
+    fn grid_with_hole_shares_color_and_bands_once() {
+        // The pairplot(corner=True) / jointplot shape: a grid whose direct
+        // children mix real color leaves with a `Hole` placeholder (the
+        // upper-triangle / empty-corner cell). Before the fix,
+        // `congruent_children` compared every child against a literal
+        // `children[0]` reference, and a `Hole` is congruent only with
+        // another `Hole` (`congruent`'s doc) — so ANY hole among a grid's
+        // direct cells made the whole node "non-congruent", disabling the
+        // domain union entirely: no band, every participating leaf kept its
+        // own per-panel legend (the reported #16 bug — pairplot(corner=True)
+        // rendered 3 legends instead of 1).
+        let cells = || {
+            vec![
+                color_leaf(0),
+                CompositeNode::Hole { width: None, height: None },
+                color_leaf(1),
+                color_leaf(2),
+            ]
+        };
+        let h0 = color_hold(&["a", "b", "a"]);
+        let h1 = color_hold(&["a", "b", "a"]);
+        let h2 = color_hold(&["a", "b", "a"]);
+        let leaves = [
+            leaf_input(&h0, 300.0, 200.0),
+            leaf_input(&h1, 300.0, 200.0),
+            leaf_input(&h2, 300.0, 200.0),
+        ];
+
+        let shared = color_grid(cells(), 2, 2, RM::Shared);
+        let (scene, _) = render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
+
+        let indep = color_grid(cells(), 2, 2, RM::Independent);
+        let (indep_scene, _) = render_composite_scene(&indep, &leaves, &ThemeInputs::default()).unwrap();
+
+        assert_eq!(scene.panels.len(), 3, "the hole must not claim a panel");
+        assert!(
+            !scene.legend.is_empty(),
+            "shared color across a grid with a hole must still emit one figure legend"
+        );
+        assert!(
+            scene.legend.len() < indep_scene.legend.len(),
+            "one figure legend ({}) must draw fewer nodes than three per-panel legends ({}) — \
+             the real cells must still be recognized as sharing and suppressed",
+            scene.legend.len(),
+            indep_scene.legend.len(),
+        );
+    }
+
+    #[test]
+    fn hole_before_leaf_does_not_misalign_suppression() {
+        // A hole at position 0 — `children[0]` IS the hole. The pre-fix
+        // `congruent_children` compared every OTHER child against
+        // `children[0]` directly, so a LEADING hole would disqualify the
+        // whole node regardless of how many real cells followed it: the
+        // sharpest form of the cursor/pairing-misalignment risk this fix
+        // guards against. The two real leaves at positions 1 and 2 must
+        // still union and band EXACTLY as the same two leaves do with no
+        // hole present at all — same panel count, same legend content — so
+        // the suppression flags provably land on the two real leaves, not
+        // on the wrong (or no) leaves.
+        let with_hole = color_grid(
+            vec![
+                CompositeNode::Hole { width: None, height: None },
+                color_leaf(0),
+                color_leaf(1),
+            ],
+            1,
+            3,
+            RM::Shared,
+        );
+        let h0 = color_hold(&["a", "b", "a"]);
+        let h1 = color_hold(&["a", "b", "a"]);
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let (hole_scene, _) = render_composite_scene(&with_hole, &leaves, &ThemeInputs::default()).unwrap();
+
+        let no_hole = color_hconcat(2, RM::Shared, None);
+        let (baseline_scene, _) = render_composite_scene(&no_hole, &leaves, &ThemeInputs::default()).unwrap();
+
+        assert_eq!(hole_scene.panels.len(), 2, "the leading hole must not claim a panel");
+        assert!(
+            !hole_scene.legend.is_empty(),
+            "the two real leaves after a leading hole must still band"
+        );
+        assert_eq!(
+            hole_scene.legend.len(),
+            baseline_scene.legend.len(),
+            "a leading hole must not change which leaves get suppressed: legend content must \
+             match the hole-free baseline exactly",
+        );
     }
 }

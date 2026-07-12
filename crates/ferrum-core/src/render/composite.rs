@@ -243,6 +243,34 @@ pub(crate) fn congruent(a: &CompositeNode, b: &CompositeNode) -> bool {
     }
 }
 
+/// True when a composite node's DIRECT children qualify for tree-path domain
+/// pairing: every non-hole child is congruent to the first non-hole child.
+/// [`Hole`](CompositeNode::Hole) placeholders are transparent to this
+/// check — a grid mixing real cells and holes (the corner triangle of
+/// `pairplot(corner=True)`, a `jointplot`'s empty 2×2 corner) still qualifies
+/// its real cells for pairing, so a shared channel unions across them exactly
+/// as a hole-free grid would. This is deliberately narrower than requiring
+/// literal `children.iter().all(|c| congruent(&children[0], c))`: that
+/// formulation treats one interspersed hole as disqualifying the WHOLE node
+/// (a hole is congruent only with another hole, by design — see
+/// [`congruent`]'s doc), which is correct for a hole *nested inside* a
+/// composite subtree (that mismatch is still caught by `congruent`'s
+/// recursive Composite-vs-Composite comparison, since neither sibling
+/// subtree is itself a `Hole` at ITS parent's level) but wrong for a hole
+/// that is one of THIS node's own direct cells, which has no domain to pair
+/// and should simply be skipped. Vacuously `true` for an all-hole child list
+/// (nothing to pair, nothing to union).
+///
+/// Both [`resolve_channel`] (this module) and the figure-legend planner
+/// (`composite_render::plan_legend_walk`, GH #16) call this — the legend
+/// band must attach at exactly the node where the resolve pass unions the
+/// domain, so the two congruence gates must agree bit-for-bit.
+pub(crate) fn congruent_non_hole(children: &[CompositeNode]) -> bool {
+    let mut real = children.iter().filter(|c| !matches!(c, CompositeNode::Hole { .. }));
+    let Some(first) = real.next() else { return true };
+    real.all(|c| congruent(first, c))
+}
+
 /// Resolve one channel for `node`, whose leaves occupy global indices `leaf_span`
 /// (in pre-order). At a `Shared` node the children's domains are unioned by
 /// congruent tree-path pairing; at an `Independent` node (or a non-congruent
@@ -270,14 +298,28 @@ fn resolve_channel(
 
     let shared = resolve_mode(resolve, channel) == ResolveMode::Shared;
 
-    let congruent_children = children.iter().all(|c| congruent(&children[0], c));
+    let congruent_children = congruent_non_hole(children);
 
     if shared && congruent_children {
-        // Congruent share: pair leaf i of each child (tree-path pairing). All
-        // children have the same leaf count, so each subspan has equal length.
-        let leaves_per_child = leaf_count(&children[0]);
+        // Congruent share: pair leaf i of each NON-HOLE child (tree-path
+        // pairing). Every non-hole child has the same leaf count
+        // (`congruent_non_hole` guarantees it), so `leaves_per_child` is
+        // read off the first one; a `Hole` child's subspan is empty
+        // (`leaf_count` 0) and is filtered out of each position's group
+        // below rather than indexed, so a grid mixing real cells and holes
+        // (pairplot's corner triangle, jointplot's empty corner) still
+        // unions its real cells' domains.
+        let leaves_per_child = children
+            .iter()
+            .find(|c| !matches!(c, CompositeNode::Hole { .. }))
+            .map(leaf_count)
+            .unwrap_or(0);
         for pos in 0..leaves_per_child {
-            let group: Vec<usize> = subspans.iter().map(|s| s[pos]).collect();
+            let group: Vec<usize> = subspans
+                .iter()
+                .filter(|s| pos < s.len())
+                .map(|s| s[pos])
+                .collect();
             resolve_group(&group, channel, leaves, out)?;
         }
         Ok(())
