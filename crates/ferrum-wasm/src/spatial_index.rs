@@ -182,19 +182,21 @@ impl SpatialIndex {
         Self { trees }
     }
 
-    /// Nearest indexed mark to `(x, y)` in the given panel.
+    /// Nearest indexed mark to `(x, y)` in the given panel, in scene space.
     ///
     /// Returns `Some((entry, distance))` when a mark exists within
     /// [`SNAP_DISTANCE`] scene-space pixels; returns `None` when the panel
     /// index does not exist, the tree is empty, or all marks are farther
     /// than the snap threshold.
+    ///
+    /// This is the identity-slot entry point: it delegates to
+    /// [`nearest_slot_aware`](Self::nearest_slot_aware) with an identity panel
+    /// affine and no slot rescales, which reduces exactly to a plain scene-space
+    /// query (`compose_panel_slot(identity, identity) == identity`). One
+    /// implementation serves both; a single-y scene (`y_slot == 0`) reads
+    /// identically here and through the slot-aware path.
     pub fn nearest(&self, panel_id: usize, x: f64, y: f64) -> Option<(MarkEntry, f64)> {
-        let panel_idx = self.trees.get(panel_id)?;
-        let (entry, dist) = panel_idx.nearest(x, y)?;
-        if dist > SNAP_DISTANCE {
-            return None;
-        }
-        Some((entry.clone(), dist))
+        self.nearest_slot_aware(panel_id, x, y, crate::zoom_pan::Affine2::identity(), &[], &[])
     }
 
     /// All entries whose bounding box overlaps the given AABB in a panel.
@@ -207,14 +209,20 @@ impl SpatialIndex {
         panel_idx.in_envelope(aabb).collect()
     }
 
-    /// Exact hit-test at `(x, y)` using a small envelope query followed by
-    /// per-geometry containment checks.
+    /// Exact hit-test at scene-space `(x, y)` using a small envelope query
+    /// followed by per-geometry containment checks.
     ///
     /// `tolerance` expands the query envelope on each side.  A typical value
     /// for interactive use is `5.0` (scene-space pixels).
     ///
     /// Returns the first entry that geometrically contains `(x, y)` (with
     /// tolerance), or `None`.
+    ///
+    /// This is the identity-slot entry point: it delegates to
+    /// [`hit_test_slot_aware`](Self::hit_test_slot_aware) with an identity panel
+    /// affine and no slot rescales, which reduces exactly to a plain scene-space
+    /// hit-test (`compose_panel_slot(identity, identity) == identity`). One
+    /// implementation serves both.
     pub fn hit_test(
         &self,
         panel_id: usize,
@@ -222,14 +230,15 @@ impl SpatialIndex {
         y: f64,
         tolerance: f64,
     ) -> Option<MarkEntry> {
-        let aabb = AABB::from_corners([x - tolerance, y - tolerance], [x + tolerance, y + tolerance]);
-        let candidates = self.in_envelope(panel_id, aabb);
-        for entry in candidates {
-            if geometry_contains(entry, x, y, tolerance) {
-                return Some(entry.clone());
-            }
-        }
-        None
+        self.hit_test_slot_aware(
+            panel_id,
+            x,
+            y,
+            tolerance,
+            crate::zoom_pan::Affine2::identity(),
+            &[],
+            &[],
+        )
     }
 
     /// Slot-aware exact hit-test at display-space click `(x, y)`
@@ -344,9 +353,9 @@ fn composed_slot_affine(
 /// Used by both `collect_batch_entries` (scene-graph path) and
 /// `collect_packed_entries` (packed instance path) so the AABB convention and
 /// center computation are defined in one place.
-fn circle_entry(cx: f64, cy: f64, r: f64, batch_idx: usize, node_idx: usize, data_idx: Option<usize>) -> MarkEntry {
+fn circle_entry(cx: f64, cy: f64, r: f64, batch_idx: usize, node_idx: usize, data_idx: Option<usize>, y_slot: usize) -> MarkEntry {
     let aabb = AABB::from_corners([cx - r, cy - r], [cx + r, cy + r]);
-    MarkEntry { point: [cx, cy], batch_idx, node_idx, data_idx, y_slot: 0, geom: MarkGeom::Circle { r }, aabb }
+    MarkEntry { point: [cx, cy], batch_idx, node_idx, data_idx, y_slot, geom: MarkGeom::Circle { r }, aabb }
 }
 
 /// Build a [`MarkEntry`] for a rect node.
@@ -354,11 +363,12 @@ fn circle_entry(cx: f64, cy: f64, r: f64, batch_idx: usize, node_idx: usize, dat
 /// Used by both `collect_batch_entries` (scene-graph path) and
 /// `collect_packed_entries` (packed instance path) so the AABB convention and
 /// center computation are defined in one place.
-fn rect_entry(x: f64, y: f64, w: f64, h: f64, batch_idx: usize, node_idx: usize, data_idx: Option<usize>) -> MarkEntry {
+#[allow(clippy::too_many_arguments)]
+fn rect_entry(x: f64, y: f64, w: f64, h: f64, batch_idx: usize, node_idx: usize, data_idx: Option<usize>, y_slot: usize) -> MarkEntry {
     let cx = x + w / 2.0;
     let cy = y + h / 2.0;
     let aabb = AABB::from_corners([x, y], [x + w, y + h]);
-    MarkEntry { point: [cx, cy], batch_idx, node_idx, data_idx, y_slot: 0, geom: MarkGeom::Rect, aabb }
+    MarkEntry { point: [cx, cy], batch_idx, node_idx, data_idx, y_slot, geom: MarkGeom::Rect, aabb }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -396,14 +406,10 @@ fn collect_batch_entries(batch: &MarkBatch, batch_idx: usize, out: &mut Vec<Mark
 
         match node {
             SceneNode::Circle { cx, cy, r, .. } => {
-                let mut entry = circle_entry(*cx, *cy, *r, batch_idx, node_idx, data_idx);
-                entry.y_slot = batch.y_slot;
-                out.push(entry);
+                out.push(circle_entry(*cx, *cy, *r, batch_idx, node_idx, data_idx, batch.y_slot));
             }
             SceneNode::Rect { x, y, w, h, .. } => {
-                let mut entry = rect_entry(*x, *y, *w, *h, batch_idx, node_idx, data_idx);
-                entry.y_slot = batch.y_slot;
-                out.push(entry);
+                out.push(rect_entry(*x, *y, *w, *h, batch_idx, node_idx, data_idx, batch.y_slot));
             }
             _ => {}
         }
@@ -435,16 +441,15 @@ fn collect_packed_entries(
                         .as_ref()
                         .and_then(|dis| dis.get(i))
                         .map(|&di| di as usize);
-                    let mut entry = circle_entry(
+                    out.push(circle_entry(
                         ci.center[0] as f64,
                         ci.center[1] as f64,
                         ci.radius as f64,
                         batch_idx,
                         i,
                         data_idx,
-                    );
-                    entry.y_slot = batch.y_slot;
-                    out.push(entry);
+                        batch.y_slot,
+                    ));
                 }
             }
             DrawKind::Rect => {
@@ -455,7 +460,7 @@ fn collect_packed_entries(
                         .as_ref()
                         .and_then(|dis| dis.get(i))
                         .map(|&di| di as usize);
-                    let mut entry = rect_entry(
+                    out.push(rect_entry(
                         ri.position[0] as f64,
                         ri.position[1] as f64,
                         ri.size[0] as f64,
@@ -463,9 +468,8 @@ fn collect_packed_entries(
                         batch_idx,
                         i,
                         data_idx,
-                    );
-                    entry.y_slot = batch.y_slot;
-                    out.push(entry);
+                        batch.y_slot,
+                    ));
                 }
             }
         }
@@ -1434,15 +1438,17 @@ mod tests {
 
     // ── WASM-09: circle_entry / rect_entry constructors ──────────────────────
 
-    /// `circle_entry` must set center, geometry, AABB, and pass through indices.
+    /// `circle_entry` must set center, geometry, AABB, and pass through indices
+    /// (including the y-slot).
     #[test]
     fn circle_entry_sets_correct_fields() {
-        let e = circle_entry(10.0, 20.0, 5.0, 1, 2, Some(99));
+        let e = circle_entry(10.0, 20.0, 5.0, 1, 2, Some(99), 3);
         assert_eq!(e.point, [10.0, 20.0], "center must be (cx, cy)");
         assert_eq!(e.geom, MarkGeom::Circle { r: 5.0 }, "geom must be Circle{{r}}");
         assert_eq!(e.batch_idx, 1);
         assert_eq!(e.node_idx, 2);
         assert_eq!(e.data_idx, Some(99));
+        assert_eq!(e.y_slot, 3, "y_slot must be set by the constructor");
         // AABB must enclose (cx±r, cy±r).
         let lower = e.aabb.lower();
         let upper = e.aabb.upper();
@@ -1455,7 +1461,7 @@ mod tests {
     /// `circle_entry` with `data_idx: None` passes None through.
     #[test]
     fn circle_entry_none_data_idx() {
-        let e = circle_entry(0.0, 0.0, 1.0, 0, 0, None);
+        let e = circle_entry(0.0, 0.0, 1.0, 0, 0, None, 0);
         assert_eq!(e.data_idx, None);
     }
 
@@ -1465,13 +1471,14 @@ mod tests {
     fn rect_entry_sets_correct_fields() {
         // Rect at (10, 20), 40 wide, 30 tall.
         // Center = (10 + 20, 20 + 15) = (30, 35).
-        let e = rect_entry(10.0, 20.0, 40.0, 30.0, 3, 4, Some(7));
+        let e = rect_entry(10.0, 20.0, 40.0, 30.0, 3, 4, Some(7), 2);
         assert!((e.point[0] - 30.0).abs() < 1e-10, "center x = x + w/2 = 30");
         assert!((e.point[1] - 35.0).abs() < 1e-10, "center y = y + h/2 = 35");
         assert_eq!(e.geom, MarkGeom::Rect, "rect entry must have geom Rect");
         assert_eq!(e.batch_idx, 3);
         assert_eq!(e.node_idx, 4);
         assert_eq!(e.data_idx, Some(7));
+        assert_eq!(e.y_slot, 2, "y_slot must be set by the constructor");
         let lower = e.aabb.lower();
         let upper = e.aabb.upper();
         assert!((lower[0] - 10.0).abs() < 1e-10, "AABB lower x = x");
@@ -1483,7 +1490,7 @@ mod tests {
     /// `rect_entry` with `data_idx: None` passes None through.
     #[test]
     fn rect_entry_none_data_idx() {
-        let e = rect_entry(0.0, 0.0, 10.0, 10.0, 0, 0, None);
+        let e = rect_entry(0.0, 0.0, 10.0, 10.0, 0, 0, None, 0);
         assert_eq!(e.data_idx, None);
     }
 
@@ -1491,7 +1498,7 @@ mod tests {
     /// point as inside (distance 0) when it lies within the circle's radius.
     #[test]
     fn circle_entry_distance_inside_is_zero() {
-        let e = circle_entry(50.0, 50.0, 10.0, 0, 0, None);
+        let e = circle_entry(50.0, 50.0, 10.0, 0, 0, None, 0);
         // Query at center — distance must be 0.
         assert!((e.distance_2(&[50.0, 50.0])).abs() < 1e-10);
         // Query at surface edge — distance must be 0 (inside or on boundary).
@@ -1502,7 +1509,7 @@ mod tests {
     /// the AABB as distance 0.
     #[test]
     fn rect_entry_distance_inside_is_zero() {
-        let e = rect_entry(10.0, 10.0, 20.0, 20.0, 0, 0, None);
+        let e = rect_entry(10.0, 10.0, 20.0, 20.0, 0, 0, None, 0);
         // Center (20, 20) is inside the rect.
         assert!((e.distance_2(&[20.0, 20.0])).abs() < 1e-10);
     }
@@ -1518,7 +1525,7 @@ mod tests {
     /// pins the corrected *classification* without changing observable distance.
     #[test]
     fn zero_radius_circle_classified_as_circle() {
-        let e = circle_entry(50.0, 50.0, 0.0, 0, 0, None);
+        let e = circle_entry(50.0, 50.0, 0.0, 0, 0, None, 0);
         assert_eq!(e.geom, MarkGeom::Circle { r: 0.0 }, "zero-radius circle must stay a circle");
         // Distance to center is 0; distance to a point 10px away is 10.
         assert!((e.distance_2(&[50.0, 50.0])).abs() < 1e-10);

@@ -79,7 +79,8 @@ use crate::spec::chart::ChartSpec;
 
 use super::chart_config::ChartConfig;
 use super::composite::{
-    flatten_leaf_specs, resolve_composite_scales, CompositeResolveError, LeafResolveInput,
+    effective_share, flatten_leaf_specs, resolve_composite_scales, CompositeResolveError,
+    LeafResolveInput,
 };
 use super::scale_resolve::{ColorScale, LeafScaleContext};
 use super::svg::uniquify_clip_ids;
@@ -614,9 +615,8 @@ fn plan_legend_walk(
 /// `node_scale` is the node's explicit color/size resolve (`None` = unset,
 /// inherit — spec §6, GH #74); `legend_override` is its explicit
 /// `resolve.legend` entry for the channel (`None` = follow the effective
-/// scale mode). The effective scale mode is `node_scale.unwrap_or(inherited)`,
-/// and this node is the outermost effective-shared node exactly when that mode
-/// is `Shared` while the inherited mode is not — the same gate
+/// scale mode). The effective scale mode and outermost-shared flag both come
+/// from [`effective_share`](super::composite::effective_share) — the same gate
 /// [`super::composite::resolve_nonpositional`] uses to place its union, so band
 /// and union always coincide.
 fn descend_channel(
@@ -624,13 +624,13 @@ fn descend_channel(
     legend_override: Option<ResolveMode>,
     cur: ChannelWalk,
 ) -> (ChannelWalk, bool) {
-    let scale_eff = node_scale.unwrap_or(cur.scale_inherited);
+    // Outermost effective-shared scale node for the channel: the resolve pass
+    // unions the domain here, so this is the only node that may band it. Shared
+    // with `resolve_nonpositional` through `effective_share` so band and union
+    // always coincide.
+    let (scale_eff, is_scale_resolver) = effective_share(node_scale, cur.scale_inherited);
     // Legend follows the effective scale mode unless explicitly overridden.
     let legend_eff = legend_override.unwrap_or(scale_eff);
-    // Outermost effective-shared scale node for the channel: the resolve pass
-    // unions the domain here, so this is the only node that may band it.
-    let is_scale_resolver =
-        scale_eff == ResolveMode::Shared && cur.scale_inherited != ResolveMode::Shared;
     // A shared legend over a non-shared effective scale is rejected at lowering
     // (design §4, the Python `_lower_composite` guard) — a normal caller can
     // never build it. `CompositeNode::validate` does not re-check it Rust-side,
@@ -2604,6 +2604,101 @@ mod tests {
         // the discriminator against per-leaf independent resolution.
         assert!(d0.0 <= 1.0, "shared lower extent expected ~1.0, got {}", d0.0);
         assert!(d0.1 >= 30.0, "shared upper extent expected ~30.0, got {}", d0.1);
+    }
+
+    // -- GH #74 lockstep cross-check ------------------------------------------
+
+    /// Build a composite node with an explicit `resolve.color` mode.
+    fn composite_color(
+        children: Vec<CompositeNode>,
+        color: Option<ResolveMode>,
+    ) -> CompositeNode {
+        let mut node = composite(CompositeLayout::Hconcat, children);
+        if let CompositeNode::Composite { resolve, .. } = &mut node {
+            resolve.color = color;
+        }
+        node
+    }
+
+    /// Reference model of `composite.rs::resolve_nonpositional`'s color-union
+    /// gate and recursion: records the pre-order composite-node index (the same
+    /// numbering `plan_legend_walk` assigns via its `node_cursor`) at every node
+    /// where the union fires. Shares the production `effective_share` helper, so
+    /// this pins the *traversal structure* (how `inherited` threads down, where
+    /// nodes are counted) rather than re-deriving the gate.
+    fn collect_color_union_nodes(
+        node: &CompositeNode,
+        inherited: ResolveMode,
+        cursor: &mut usize,
+        acc: &mut Vec<usize>,
+    ) {
+        let CompositeNode::Composite { children, resolve, .. } = node else {
+            return;
+        };
+        let node_idx = *cursor;
+        *cursor += 1;
+        let (eff, is_outermost) = effective_share(resolve.color, inherited);
+        if is_outermost {
+            acc.push(node_idx);
+        }
+        for child in children {
+            collect_color_union_nodes(child, eff, cursor, acc);
+        }
+    }
+
+    /// The set of nodes where the resolve pass fires a color union must equal
+    /// the set where the legend pass attaches a color band (GH #74). Both walks
+    /// gate through the shared `effective_share`; this exercises them on ONE
+    /// nested tree and asserts the two node-sets coincide.
+    ///
+    /// Tree (color resolve in parens):
+    /// ```text
+    /// root(Shared) ┬ A(unset → inherits Shared) ┬ leaf ┬ leaf
+    ///              ├ B(Independent) ─ G(Shared)  ┬ leaf ┬ leaf
+    ///              └ leaf
+    /// ```
+    /// Pre-order composite indices: root=0, A=1, B=2, G=3. The union fires at
+    /// the two outermost effective-shared nodes: root (0) and the re-sharing G
+    /// (3) beneath B's independent boundary.
+    #[test]
+    fn color_union_nodes_equal_band_attach_nodes() {
+        let tree = composite_color(
+            vec![
+                composite_color(vec![leaf_node(0), leaf_node(1)], None),
+                composite_color(
+                    vec![composite_color(
+                        vec![leaf_node(2), leaf_node(3)],
+                        Some(ResolveMode::Shared),
+                    )],
+                    Some(ResolveMode::Independent),
+                ),
+                leaf_node(4),
+            ],
+            Some(ResolveMode::Shared),
+        );
+
+        // Reference union-fire set (mirrors resolve_nonpositional).
+        let mut union_nodes = Vec::new();
+        let mut cursor = 0usize;
+        collect_color_union_nodes(&tree, ResolveMode::Independent, &mut cursor, &mut union_nodes);
+        union_nodes.sort_unstable();
+
+        // Real band-attach set from the production legend planner.
+        let mut contexts = vec![LeafScaleContext::default(); 5];
+        let plan = plan_legend_bands(&tree, &mut contexts);
+        let mut band_nodes: Vec<usize> = plan
+            .band_nodes
+            .iter()
+            .filter(|(_, flags)| flags.color)
+            .map(|(idx, _)| *idx)
+            .collect();
+        band_nodes.sort_unstable();
+
+        assert_eq!(union_nodes, vec![0, 3], "outermost effective-shared nodes");
+        assert_eq!(
+            union_nodes, band_nodes,
+            "resolve-union nodes must equal legend-band nodes (GH #74 lockstep)"
+        );
     }
 
     // -- gap-fix additions: clip uniquification / typed errors / overlay z-order

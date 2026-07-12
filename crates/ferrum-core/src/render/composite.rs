@@ -156,6 +156,34 @@ fn channel_resolve(
     }
 }
 
+/// THE single source of the non-positional (color/size) effective-mode gate
+/// (spec §6, GH #74).
+///
+/// Given a node's *explicit* resolve for a channel (`node_scale`: `None` = unset,
+/// inherit) and the effective mode `inherited` from its ancestors, returns
+/// `(eff, is_outermost)` where:
+///
+/// - `eff = node_scale.unwrap_or(inherited)` is the node's effective mode, threaded
+///   down to its children.
+/// - `is_outermost` is `true` exactly when this node is the *outermost*
+///   effective-shared node for the channel (`eff == Shared` while
+///   `inherited != Shared`).
+///
+/// Both walks over the composite tree must agree bit-for-bit on this gate: the
+/// resolve pass ([`resolve_nonpositional`]) unions the channel's domain at every
+/// `is_outermost` node, and the legend-band pass
+/// ([`super::composite_render::plan_legend_walk`]'s `descend_channel`) attaches a
+/// figure legend band at exactly the same nodes. Sharing one function makes that
+/// lockstep compile-time, not a mirrored predicate maintained by discipline.
+pub(crate) fn effective_share(
+    node_scale: Option<ResolveMode>,
+    inherited: ResolveMode,
+) -> (ResolveMode, bool) {
+    let eff = node_scale.unwrap_or(inherited);
+    let is_outermost = eff == ResolveMode::Shared && inherited != ResolveMode::Shared;
+    (eff, is_outermost)
+}
+
 /// Resolve shared domains across a composite tree, for both positional (x/y) and
 /// non-positional (color/size) channels.
 ///
@@ -379,8 +407,9 @@ fn resolve_channel(
 ///
 /// This is the resolve-side half of the bit-for-bit contract with
 /// [`super::composite_render::plan_legend_walk`]: the figure legend band
-/// attaches at exactly this outermost effective-shared node (see that walk's
-/// `descend_channel`, which computes the identical `eff`/`inherited` gate).
+/// attaches at exactly this outermost effective-shared node. Both walks compute
+/// the gate through the shared [`effective_share`] helper, so the lockstep is
+/// compile-time, not a mirrored predicate.
 fn resolve_nonpositional(
     node: &CompositeNode,
     leaf_span: &[usize],
@@ -392,9 +421,9 @@ fn resolve_nonpositional(
     let CompositeNode::Composite { children, resolve, .. } = node else {
         return Ok(()); // Leaf/Hole: assignment is decided by an ancestor.
     };
-    let eff = channel_resolve(resolve, channel).unwrap_or(inherited);
+    let (eff, is_outermost) = effective_share(channel_resolve(resolve, channel), inherited);
 
-    if eff == ResolveMode::Shared && inherited != ResolveMode::Shared {
+    if is_outermost {
         // Outermost effective-shared node: union every descendant leaf whose
         // effective mode stays shared (excluding explicit-independent
         // subtrees, which `collect_shared_leaves` skips and the recursion
