@@ -180,6 +180,34 @@ pub struct LegendEntryLayout {
 
 use super::text_metrics::TextMetrics;
 
+/// Compositor legend suppression signal (composite-shared-legend design §6
+/// seam contract, 2026-07-12). Threaded into [`super::compute_layout`] via a
+/// leaf's [`crate::render::scale_resolve::LeafScaleContext`] so a composite
+/// can render one figure-level legend for a channel it resolved as shared:
+/// when a flag is `true`, [`super::compute_layout`] reserves no gutter and
+/// draws no legend nodes for that channel, while `prepare_render_inputs`
+/// still builds the channel's legend bundle (entries/colorbar/title/aux/style
+/// overrides) in full, so the compositor can capture it as the figure
+/// legend's content. This is distinct from a user `legend={"disabled": true}`,
+/// which suppresses at the *prepare* stage (empty bundle) — see
+/// `render::prepare::legend::build_color_legend`.
+///
+/// `color` and `size` suppress independently; a shape aux legend is never
+/// compositor-suppressed (only a user `legend=None` on `shape` empties it, at
+/// prepare time). `Default` (both `false`) reproduces today's per-panel
+/// legend rendering byte-for-byte — every standalone (non-composite) render
+/// and every composite leaf the compositor doesn't explicitly suppress.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LegendSuppression {
+    /// Suppress the color legend (categorical entries or continuous colorbar).
+    pub color: bool,
+    /// Suppress the size aux legend block. A same-field color+size merge (see
+    /// `build_color_legend`) already folded color into the size block's
+    /// entries at prepare time, so suppressing `size` alone also hides that
+    /// merged content — callers that share both channels suppress both.
+    pub size: bool,
+}
+
 /// Per-chart legend overrides extracted from `encoding.color.legend` dict.
 /// These are applied on top of `ThemeInputs` defaults at layout time.
 ///

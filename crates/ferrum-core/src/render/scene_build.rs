@@ -2715,6 +2715,7 @@ mod tests {
             &prep.axes, &prep.facet_groups, &prep.legend_entries,
             prep.legend_title.clone(), prep.colorbar.as_ref(), &metrics,
             &crate::layout::legend::LegendOverrides::default(), &prep.aux_legends,
+            crate::layout::legend::LegendSuppression::default(),
         ).unwrap();
 
         build_scene(spec, &prep, &layout, &theme, &config, &mut warnings, &chart_config, None).unwrap()
@@ -3058,6 +3059,7 @@ mod tests {
             &prep.axes, &prep.facet_groups, &prep.legend_entries,
             prep.legend_title.clone(), prep.colorbar.as_ref(), &metrics,
             &crate::layout::legend::LegendOverrides::default(), &prep.aux_legends,
+            crate::layout::legend::LegendSuppression::default(),
         ).unwrap();
 
         build_scene(&spec, &prep, &layout, &theme, &config, &mut warnings, &chart_config, None).unwrap()

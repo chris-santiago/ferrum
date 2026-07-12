@@ -452,7 +452,7 @@ mod axis_style_fill_from_tests {
 // Task 20 — render_svg full pipeline orchestration (spec §6).
 // ---------------------------------------------------------------------------
 
-use crate::layout::{compute_layout, LegendDirection, LegendOrient, LegendOverrides, TextAnchor, ThemeInputs, Viewport};
+use crate::layout::{compute_layout, LegendDirection, LegendOrient, LegendOverrides, LegendSuppression, TextAnchor, ThemeInputs, Viewport};
 use crate::spec::chart::ChartSpec;
 use arrow::record_batch::RecordBatch;
 use chart_config::{AxisConfigSpec, ChartConfig};
@@ -1174,6 +1174,17 @@ fn prepare_and_layout(
     // Apply configure_legend overrides (level 3) — only fills in None fields.
     apply_chart_config_to_legend_overrides(&mut legend_overrides, chart_config);
     let metrics = font::FontdueMetrics::new();
+    // Composite-shared-legend seam (design §6, 2026-07-12): a composite
+    // threads per-channel legend suppression through the same `leaf_scales`
+    // context it already uses for shared-domain resolution (D4b). `prep`
+    // above was built from the SAME `leaf_scales`, so its legend bundle
+    // (`legend_entries`/`colorbar`/`legend_title`/`aux_legends`/overrides) is
+    // always fully populated here regardless of suppression — only this
+    // layout call's reservation/draw behavior is gated. `None` (every
+    // standalone render) reproduces today's layout byte-for-byte.
+    let legend_suppression = leaf_scales
+        .map(|ctx| LegendSuppression { color: ctx.suppress_color_legend, size: ctx.suppress_size_legend })
+        .unwrap_or_default();
     let layout = compute_layout(
         spec,
         &effective_theme,
@@ -1186,6 +1197,7 @@ fn prepare_and_layout(
         &metrics,
         &legend_overrides,
         &prep.aux_legends,
+        legend_suppression,
     )
     .map_err(|e| RenderError::LayoutFailed(e.to_string()))?;
     for w in &layout.warnings {
@@ -1514,6 +1526,7 @@ mod orchestration_tests {
             effective_legend_title, prep.colorbar.as_ref(), &metrics,
             &legend_overrides,
             &prep.aux_legends,
+            LegendSuppression::default(),
         ).unwrap();
         for w in &layout.warnings {
             warnings.push(RenderWarning::Layout(w.clone()));
@@ -1544,6 +1557,119 @@ mod orchestration_tests {
                 old_svg.len(), new_svg.len(),
             );
         }
+    }
+
+    // ── composite-shared-legend seam (design §6, 2026-07-12) ─────────────────
+
+    /// x/y + a categorical `species` color encoding, 3 rows / 2 categories —
+    /// enough for `prepare_render_inputs` to build a non-empty color legend
+    /// bundle. `color_disabled` wires `legend={"disabled": true}` onto the
+    /// color encoding to exercise the PREPARE-stage (user) suppression path,
+    /// as opposed to the LAYOUT-stage (compositor) suppression under test.
+    fn species_scatter(color_disabled: bool) -> (ChartSpec, RecordBatch) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("species", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "a"])),
+            ],
+        )
+        .unwrap();
+        let legend = color_disabled.then(|| {
+            Box::new(crate::render::chart_config::LegendStyleSpec {
+                disabled: Some(true),
+                ..Default::default()
+            })
+        });
+        let spec = ChartSpec {
+            data: DataRef::default(),
+            mark: Mark::Point,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "x".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "y".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "species".into(), type_: None, legend, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: None,
+            title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        (spec, batch)
+    }
+
+    /// The core seam contract: a leaf rendered with `suppress_color_legend`
+    /// set on its `LeafScaleContext` reserves no gutter and draws no legend
+    /// node for that channel, yet `prepare_render_inputs`' legend bundle
+    /// (entries/title here — colorbar/aux/overrides follow the same code
+    /// path) stays fully populated and reachable off `PipelineOutput::prep`,
+    /// exactly as a later task needs to capture it for a figure-level legend.
+    #[test]
+    fn prepare_and_layout_color_suppression_keeps_bundle_but_skips_layout() {
+        let (spec, batch) = species_scatter(false);
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let chart_config = ChartConfig::default();
+
+        let ctx = scale_resolve::LeafScaleContext {
+            suppress_color_legend: true,
+            ..Default::default()
+        };
+        let suppressed = prepare_and_layout(&spec, &batch, &theme, viewport, &chart_config, Some(&ctx))
+            .expect("prepare_and_layout must succeed with a suppressed color legend");
+
+        // Bundle: populated regardless of suppression.
+        assert!(
+            !suppressed.prep.legend_entries.is_empty(),
+            "legend bundle must stay populated under layout-stage suppression"
+        );
+        assert_eq!(suppressed.prep.legend_title.as_deref(), Some("species"));
+
+        // Layout: no gutter reserved, nothing drawn.
+        assert!(suppressed.layout.legend.is_none(), "suppressed color legend must not be laid out/drawn");
+
+        // Contrast against the same leaf with no suppression context (today's
+        // behavior, and what every non-composite render already does).
+        let baseline = prepare_and_layout(&spec, &batch, &theme, viewport, &chart_config, None)
+            .expect("prepare_and_layout must succeed without suppression");
+        assert!(baseline.layout.legend.is_some(), "unsuppressed baseline legend must be laid out");
+        assert!(
+            suppressed.layout.panels[0].plot_area.w > baseline.layout.panels[0].plot_area.w,
+            "suppressing the legend must reclaim the gutter the baseline reserved for it"
+        );
+    }
+
+    /// Distinguishes the two suppression kinds (design §6): a user
+    /// `legend={"disabled": true}` on the color encoding suppresses at
+    /// PREPARE time — the bundle itself comes back empty — unlike compositor
+    /// suppression above, which leaves the bundle populated and only gates
+    /// the layout stage.
+    #[test]
+    fn prepare_and_layout_color_user_disabled_yields_empty_bundle() {
+        let (spec, batch) = species_scatter(true);
+        let theme = ThemeInputs::default();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let chart_config = ChartConfig::default();
+
+        let po = prepare_and_layout(&spec, &batch, &theme, viewport, &chart_config, None)
+            .expect("prepare_and_layout must succeed with a user-disabled color legend");
+
+        assert!(po.prep.legend_entries.is_empty(), "user-disabled legend must yield an empty bundle at prepare time");
+        assert!(po.prep.colorbar.is_none());
+        assert!(po.layout.legend.is_none(), "no legend to lay out when the bundle is empty");
     }
 }
 

@@ -36,7 +36,7 @@ pub use self::geometry::{Inset, Rect, Viewport};
 pub use self::legend::{
     ColorbarInput, ColorbarLayout, ColorbarTick, LegendDirection, LegendEntry,
     AuxLegendInput, LegendEntryLayout, LegendLayout, LegendOrient, LegendOverrides,
-    LegendStyleOpts, ShapeLegendEntry, SizeLegendEntry, SymbolKind,
+    LegendStyleOpts, LegendSuppression, ShapeLegendEntry, SizeLegendEntry, SymbolKind,
 };
 pub use self::panel::{FacetKey, PanelLayout, StripTitleLayout, TextAnchor};
 pub use self::text_metrics::{HeuristicMetrics, TextMetrics};
@@ -591,6 +591,13 @@ fn reserve_chart_title(
 /// off `inner`. Returns the color legend, the aux blocks, the plot rect remaining
 /// after both reservations, and the number of categorical entries dropped on
 /// overflow. Pure extraction of the former inline blocks; arithmetic unchanged.
+///
+/// `suppression` is the composite-shared-legend seam (design §6): a `true`
+/// flag skips that channel's reservation entirely (no gutter, no draw) even
+/// though `legend_entries`/`colorbar`/`aux_legend_inputs` are still populated
+/// by the caller — the compositor reads them from `PreparedInputs` to build
+/// its own figure-level legend. `LegendSuppression::default()` (both `false`)
+/// is byte-identical to the pre-suppression behavior.
 #[allow(clippy::too_many_arguments)]
 fn reserve_legends(
     inner: Rect,
@@ -601,6 +608,7 @@ fn reserve_legends(
     metrics: &dyn TextMetrics,
     legend_overrides: &legend::LegendOverrides,
     aux_legend_inputs: &[legend::AuxLegendInput],
+    suppression: legend::LegendSuppression,
 ) -> (Option<LegendLayout>, Vec<LegendLayout>, Rect, u32) {
     // D13+: Per-chart overrides from `encoding.color.legend` extra fields:
     //   labelFontSize  → overrides theme.label_font_size for entries/ticks
@@ -617,7 +625,9 @@ fn reserve_legends(
     let use_colorbar   = (colorbar.is_some() && legend_entries.is_empty() && !force_symbol)
         || (colorbar.is_some() && force_colorbar);
 
-    let (legend_layout, inner_after_legend) = if use_colorbar {
+    let (legend_layout, inner_after_legend) = if suppression.color {
+        (None, inner)
+    } else if use_colorbar {
         let cb = colorbar.unwrap();
         let tick_labels: Vec<String> =
             legend_overrides.values.clone().unwrap_or_else(|| cb.tick_labels.clone());
@@ -667,15 +677,36 @@ fn reserve_legends(
             legend_overrides.style.clone(),
         )
     };
-    let legend_dropped = legend_entries
-        .len()
-        .saturating_sub(legend_layout.as_ref().map_or(0, |l| l.entries.len()))
-        as u32;
+    // A suppressed color legend never attempted layout, so nothing "dropped"
+    // — a suppressed channel must not raise the unrelated overflow warning.
+    let legend_dropped = if suppression.color {
+        0
+    } else {
+        legend_entries
+            .len()
+            .saturating_sub(legend_layout.as_ref().map_or(0, |l| l.entries.len()))
+            as u32
+    };
 
     // 3b. Auxiliary (size / shape) legends, stacked beneath the color legend in
     //     the same gutter. When the widest aux block exceeds the color block,
     //     `layout_aux_legends` shrinks `inner_after_legend` further. Empty for
     //     color-only charts, so this is a no-op (plot region unchanged).
+    //
+    // Suppressed size (design §6 seam): drop the `Size` aux block before
+    // layout so it reserves no gutter and draws nothing, while `Shape` blocks
+    // (never compositor-suppressed) pass through unchanged.
+    let filtered_aux_inputs: Vec<legend::AuxLegendInput>;
+    let aux_legend_inputs: &[legend::AuxLegendInput] = if suppression.size {
+        filtered_aux_inputs = aux_legend_inputs
+            .iter()
+            .filter(|a| !matches!(a, legend::AuxLegendInput::Size { .. }))
+            .cloned()
+            .collect();
+        &filtered_aux_inputs
+    } else {
+        aux_legend_inputs
+    };
     let (aux_legends, inner_after_legend) = legend::layout_aux_legends(
         aux_legend_inputs,
         legend_layout.as_ref(),
@@ -1207,6 +1238,13 @@ fn layout_panel_axes(
     (panels, axis_layouts, secondary_y_axis_layouts, warnings)
 }
 
+/// `legend_suppression` is the composite-shared-legend seam (design §6):
+/// per-channel signal that a leaf's color/size legend must reserve no gutter
+/// and draw no nodes, even though the caller still supplies its fully-built
+/// legend inputs — a composite renderer captures those for its own
+/// figure-level legend. `LegendSuppression::default()` reproduces the
+/// pre-suppression layout byte-for-byte.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_layout(
     spec: &crate::spec::chart::ChartSpec,
     theme: &ThemeInputs,
@@ -1219,6 +1257,7 @@ pub fn compute_layout(
     metrics: &dyn TextMetrics,
     legend_overrides: &legend::LegendOverrides,
     aux_legend_inputs: &[legend::AuxLegendInput],
+    legend_suppression: legend::LegendSuppression,
 ) -> Result<LayoutResult, LayoutError> {
     // 1. Validate inputs.
     if viewport.width <= 0.0 || viewport.height <= 0.0 {
@@ -1275,6 +1314,7 @@ pub fn compute_layout(
         metrics,
         legend_overrides,
         aux_legend_inputs,
+        legend_suppression,
     );
 
     // 4 + 5. Reserve the x/y axis margin bands, yielding the plot region. The
@@ -1448,6 +1488,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         )
         .expect("layout should succeed on minimal spec");
 
@@ -1462,6 +1503,115 @@ mod tests {
         assert_eq!(panel.row, 0);
         assert_eq!(panel.col, 0);
         assert!(panel.facet_key.is_none());
+    }
+
+    // ── composite-shared-legend seam (design §6, 2026-07-12): LegendSuppression ──
+
+    /// `LegendSuppression { color: true, .. }` must reserve exactly zero
+    /// gutter and draw nothing for the color legend — the layout-stage half
+    /// of the seam contract. Proven three ways against the same non-empty
+    /// `legend_entries`: (1) unsuppressed lays the legend out and narrows the
+    /// plot area vs. a no-legend baseline; (2) suppressed draws no legend
+    /// (`result.legend.is_none()`); (3) suppressed's plot area is byte-equal
+    /// to the no-legend baseline — proof no gutter was reserved, not just
+    /// that entries were dropped. Also checks suppression never raises the
+    /// unrelated `LegendOverflowed` warning (it never attempted layout, so
+    /// nothing was "dropped").
+    #[test]
+    fn compute_layout_color_legend_suppression_reserves_no_gutter_and_draws_nothing() {
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let entries = vec![
+            LegendEntry { label: "alpha".into(), symbol: SymbolKind::Circle },
+            LegendEntry { label: "beta".into(), symbol: SymbolKind::Circle },
+        ];
+
+        let baseline = compute_layout(
+            &spec, &default_theme_inputs(), viewport, &axes, &[],
+            &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+        )
+        .expect("layout should succeed with no legend at all");
+
+        let with_legend = compute_layout(
+            &spec, &default_theme_inputs(), viewport, &axes, &[],
+            &entries, None, None, &m,
+            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
+        )
+        .expect("layout should succeed with an active legend");
+        assert!(with_legend.legend.is_some(), "unsuppressed legend must be laid out");
+        assert!(
+            with_legend.panels[0].plot_area.w < baseline.panels[0].plot_area.w,
+            "an active legend must narrow the plot area vs. the no-legend baseline"
+        );
+
+        let suppressed = compute_layout(
+            &spec, &default_theme_inputs(), viewport, &axes, &[],
+            &entries, None, None, &m,
+            &legend::LegendOverrides::default(), &[],
+            LegendSuppression { color: true, size: false },
+        )
+        .expect("layout should succeed with a suppressed legend");
+        assert!(suppressed.legend.is_none(), "suppressed color legend must not be laid out/drawn");
+        assert!(suppressed.warnings.is_empty(), "suppression must not raise LegendOverflowed");
+        assert_eq!(
+            suppressed.panels[0].plot_area, baseline.panels[0].plot_area,
+            "a suppressed legend must reserve exactly zero gutter — plot area matches the no-legend baseline"
+        );
+    }
+
+    /// `LegendSuppression { size: true, .. }` filters only the `Size` aux
+    /// block out of the reservation/draw pass; a `Shape` aux block (never
+    /// compositor-suppressed) is untouched. Proven by comparing a
+    /// size-suppressed [Size, Shape] run against a Shape-only unsuppressed
+    /// run: byte-equal plot areas mean the suppressed size block reserved
+    /// zero extra gutter beyond what Shape alone would need.
+    #[test]
+    fn compute_layout_size_legend_suppression_reserves_no_gutter_but_keeps_shape_aux() {
+        let spec = minimal_chart_spec();
+        let viewport = Viewport { width: 600.0, height: 400.0 };
+        let axes = dummy_axes();
+        let m = MockMetrics { measure: fixed_width(10.0), line_h_factor: 1.2 };
+        let size_entry = AuxLegendInput::Size {
+            title: Some("pop".into()),
+            entries: vec![SizeLegendEntry { label: "10".into(), radius: 4.0, color_hex: None }],
+        };
+        let shape_entry = AuxLegendInput::Shape {
+            title: Some("region".into()),
+            entries: vec![ShapeLegendEntry { label: "AS".into(), shape_name: "circle".into() }],
+        };
+
+        let shape_only = compute_layout(
+            &spec, &default_theme_inputs(), viewport, &axes, &[],
+            &[], None, None, &m,
+            &legend::LegendOverrides::default(), &[shape_entry.clone()], LegendSuppression::default(),
+        )
+        .expect("layout should succeed with only a shape aux legend");
+        assert_eq!(shape_only.aux_legends.len(), 1, "shape-only baseline must lay out one block");
+
+        let mixed_suppressed = compute_layout(
+            &spec, &default_theme_inputs(), viewport, &axes, &[],
+            &[], None, None, &m,
+            &legend::LegendOverrides::default(),
+            &[size_entry, shape_entry],
+            LegendSuppression { color: false, size: true },
+        )
+        .expect("layout should succeed with a suppressed size aux legend");
+
+        assert_eq!(
+            mixed_suppressed.aux_legends.len(), 1,
+            "only the shape block should survive size suppression"
+        );
+        assert!(
+            mixed_suppressed.aux_legends[0].entries.iter().all(|e| e.shape_name.is_some()),
+            "surviving aux block must be the shape legend, not size"
+        );
+        assert_eq!(
+            mixed_suppressed.panels[0].plot_area, shape_only.panels[0].plot_area,
+            "suppressed size must reserve zero gutter beyond the shape-only baseline"
+        );
     }
 
     // ── #52 Task 3: secondary y-axis layout + axis emission ──────────────────
@@ -1512,7 +1662,7 @@ mod tests {
             axes.secondary_y = n_secondary_axes(n);
             compute_layout(
                 &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-                &legend::LegendOverrides::default(), &[],
+                &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
             )
             .expect("layout should succeed with secondary y axes")
         };
@@ -1555,7 +1705,7 @@ mod tests {
         axes.secondary_y = n_secondary_axes(3);
         let result = compute_layout(
             &spec, &theme, viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[],
+            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
         )
         .unwrap();
 
@@ -1595,7 +1745,7 @@ mod tests {
         baseline_axes.secondary_y = n_secondary_axes(2);
         let baseline = compute_layout(
             &spec, &theme, viewport, &baseline_axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[],
+            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
         )
         .unwrap();
 
@@ -1605,7 +1755,7 @@ mod tests {
         widened_axes.secondary_y[0].overrides.min_band = Some(widened_min);
         let widened = compute_layout(
             &spec, &theme, viewport, &widened_axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[],
+            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
         )
         .unwrap();
 
@@ -1641,7 +1791,7 @@ mod tests {
         baseline_axes.secondary_y = n_secondary_axes(2);
         let baseline = compute_layout(
             &spec, &theme, viewport, &baseline_axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[],
+            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
         )
         .unwrap();
 
@@ -1651,7 +1801,7 @@ mod tests {
         capped_axes.secondary_y[0].overrides.max_band = Some(capped_max);
         let capped = compute_layout(
             &spec, &theme, viewport, &capped_axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[],
+            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
         )
         .unwrap();
 
@@ -1686,7 +1836,7 @@ mod tests {
 
         let result = compute_layout(
             &spec, &default_theme_inputs(), viewport, &axes, &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[],
+            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
         )
         .expect("layout should succeed on minimal spec");
 
@@ -1720,7 +1870,7 @@ mod tests {
         let baseline = compute_layout(
             &spec, &default_theme_inputs(), viewport, &dummy_axes(),
             &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[],
+            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
         )
         .expect("baseline layout");
 
@@ -1729,7 +1879,7 @@ mod tests {
         let widened = compute_layout(
             &spec, &default_theme_inputs(), viewport, &axes_big,
             &[], &[], None, None, &m,
-            &legend::LegendOverrides::default(), &[],
+            &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
         )
         .expect("widened layout");
 
@@ -1781,14 +1931,14 @@ mod tests {
 
         let baseline = compute_layout(
             &spec, &default_theme_inputs(), viewport, &dummy_axes(),
-            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[],
+            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
         ).unwrap();
 
         let mut axes = dummy_axes();
         axes.y.overrides.min_band = Some(200.0);
         let widened = compute_layout(
             &spec, &default_theme_inputs(), viewport, &axes,
-            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[],
+            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
         ).unwrap();
 
         let base_x = baseline.panels[0].plot_area.x;
@@ -1813,7 +1963,7 @@ mod tests {
         bottom_axes.x.title = Some("x title".into());
         let baseline = compute_layout(
             &spec, &default_theme_inputs(), viewport, &bottom_axes,
-            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[],
+            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
         ).unwrap();
         let base_plot = baseline.panels[0].plot_area;
 
@@ -1822,7 +1972,7 @@ mod tests {
         top_axes.x.orient = AxisOrient::Top;
         let result = compute_layout(
             &spec, &default_theme_inputs(), viewport, &top_axes,
-            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[],
+            &[], &[], None, None, &m, &legend::LegendOverrides::default(), &[], LegendSuppression::default(),
         ).unwrap();
         let plot = result.panels[0].plot_area;
 
@@ -1861,6 +2011,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         )
         .unwrap_err();
         match err {
@@ -1887,6 +2038,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         )
         .unwrap_err();
         match err {
@@ -1912,6 +2064,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         )
         .unwrap();
         let json = serde_json::to_string(&result).unwrap();
@@ -1966,6 +2119,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         )
         .unwrap();
 
@@ -2010,6 +2164,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         )
         .unwrap();
 
@@ -2040,6 +2195,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         ).unwrap();
 
         assert_eq!(result.panels.len(), 3);
@@ -2072,6 +2228,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         ).unwrap();
         assert!(result.panels[0].strip_title.is_none());
     }
@@ -2132,6 +2289,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         )
         .unwrap();
 
@@ -2219,6 +2377,7 @@ mod tests {
             &short_axes, &[], &[], None, None, &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         ).unwrap();
 
         let long_result = compute_layout(
@@ -2226,6 +2385,7 @@ mod tests {
             &long_axes, &[], &[], None, None, &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         ).unwrap();
 
         let short_bottom = short_result.panels[0].plot_area.y + short_result.panels[0].plot_area.h;
@@ -2269,12 +2429,14 @@ mod tests {
             &axes_no_x, &[], &[], None, None, &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         ).unwrap();
         let with_x_result = compute_layout(
             &spec, &default_theme_inputs(), viewport,
             &axes_with_x, &[], &[], None, None, &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         ).unwrap();
 
         let no_x_bottom = no_x_result.panels[0].plot_area.y + no_x_result.panels[0].plot_area.h;
@@ -2390,6 +2552,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         )
         .unwrap();
 
@@ -2467,6 +2630,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         )
         .unwrap();
 
@@ -2503,6 +2667,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         )
         .unwrap();
 
@@ -2592,6 +2757,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         )
         .unwrap();
 
@@ -2664,6 +2830,7 @@ mod tests {
             &m,
             &legend::LegendOverrides::default(),
             &[],
+            LegendSuppression::default(),
         )
         .unwrap();
 
