@@ -193,6 +193,18 @@ pub enum SceneNode {
         y: f64,
         content: String,
         style: TextStyle,
+        /// Y-scale slot this tick label belongs to (secondary-y-axis, GH #60/#73).
+        /// `None` for every non-axis-tick text node (titles, legend labels, mark
+        /// labels, annotations) and for y-axis tick labels on the byte-stable
+        /// single-slot default path (`0` = primary/left, `k` = the k-th
+        /// independent-y layer, matching [`crate::CoordKind::Cartesian`]'s
+        /// `y_domains` list and the `y_slot` attr already carried by the
+        /// enclosing axis `Group` on dual-axis panels). Only emitted (`Some`)
+        /// on panels with 2+ y-slots, so param-free/single-y scenes are
+        /// byte-identical to before this field existed. Absent on legacy wire
+        /// bytes deserializes to `None` via `serde(default)`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slot: Option<usize>,
     },
     Image {
         x: f64,

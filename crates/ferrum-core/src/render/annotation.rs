@@ -320,6 +320,7 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 x: px,
                 y: py,
                 content: text.to_string(),
+                slot: None,
                 style: TextStyle {
                     font_size: *font_size,
                     font_weight: FontWeight::Normal,
@@ -565,6 +566,7 @@ fn emit_span(
                 x: x + w * 0.5,
                 y: label_y,
                 content: label_text.to_string(),
+                slot: None,
                 style: TextStyle {
                     font_size: 11.0,
                     font_weight: FontWeight::Normal,
@@ -641,6 +643,7 @@ fn emit_bracket(
             x: mid_x + off_x,
             y: mid_y + off_y,
             content: label.to_string(),
+            slot: None,
             style: TextStyle {
                 font_size: 11.0,
                 font_weight: FontWeight::Normal,
@@ -721,6 +724,7 @@ fn emit_callout(
         x: tx,
         y: ty,
         content: text.to_string(),
+        slot: None,
         style: TextStyle {
             font_size: 12.0,
             font_weight: FontWeight::Normal,
@@ -802,7 +806,7 @@ mod tests {
         assert!(ann.below_marks.is_empty());
         assert_eq!(ann.above_marks.len(), 1);
         match &ann.above_marks[0] {
-            SceneNode::Text { x, y, content, style } => {
+            SceneNode::Text { x, y, content, style, .. } => {
                 assert!((x - 300.0).abs() < f64::EPSILON);
                 assert!((y - 170.0).abs() < f64::EPSILON);
                 assert_eq!(content, "hello");

@@ -199,6 +199,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             x: px + dx,
             y: py + dy,
             content: label,
+            slot: None,
             style: to_scene_text_style(
                 ctx.theme.colors.font_color,
                 row_font_size,

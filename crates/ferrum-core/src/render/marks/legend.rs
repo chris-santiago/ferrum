@@ -55,6 +55,7 @@ pub fn build_legend(
             x: title.x,
             y: title.y,
             content: title.text.clone(),
+            slot: None,
             style: to_scene_text_style(
                 theme.colors.title_color,
                 theme.typography.legend_title_font_size,
@@ -123,6 +124,7 @@ pub fn build_legend(
                 x: label_x,
                 y: tick.y + label_font_size * 0.35,
                 content: tick.label.clone(),
+                slot: None,
                 style: label_text_style.clone(),
             });
         }
@@ -240,6 +242,7 @@ pub fn build_legend(
             x: entry.label_anchor_x,
             y: entry.label_anchor_y,
             content: entry.label.clone(),
+            slot: None,
             style: label_text_style.clone(),
         });
     }

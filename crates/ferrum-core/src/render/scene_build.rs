@@ -923,7 +923,9 @@ fn route_panel_axes_and_grid(
     let mut axes_below: Vec<SceneNode> = Vec::new();
     let mut axes_above: Vec<SceneNode> = Vec::new();
     let route_axis = |axis: &AxisLayout, above: &mut Vec<SceneNode>, below: &mut Vec<SceneNode>| {
-        let nodes = marks::axis::build_axis(axis, theme);
+        // Untagged: x-axes and y-axes on the byte-stable single-slot default
+        // path never carry a `slot` tag on their tick-label text nodes.
+        let nodes = marks::axis::build_axis(axis, theme, None);
         if axis.draws_above_marks() {
             above.extend(nodes);
         } else {
@@ -943,7 +945,13 @@ fn route_panel_axes_and_grid(
     let dual_axis = !panel_secondary_y.is_empty();
     let route_y_axis_slotted =
         |axis: &AxisLayout, slot: usize, above: &mut Vec<SceneNode>, below: &mut Vec<SceneNode>| {
-            let nodes = marks::axis::build_axis(axis, theme);
+            // Slot tag on tick-label text nodes (GH #60/#73): every y-axis
+            // routed through this dual-axis wrapper tags its own tick labels
+            // with the same slot carried by the enclosing `Group`'s `y_slot`
+            // attr — including slot 0 (primary), for a uniform contract where
+            // "this panel has 2+ y-slots" implies every y-axis tick label is
+            // slot-tagged, not just the secondary ones.
+            let nodes = marks::axis::build_axis(axis, theme, Some(slot));
             let tagged = vec![SceneNode::Group {
                 attrs: vec![("y_slot".to_string(), slot.to_string())],
                 children: nodes,
@@ -1276,6 +1284,7 @@ fn build_title(
         x: title.x,
         y: title.y,
         content: title.text.clone(),
+        slot: None,
         style: to_scene_text_style(
             resolved_color, resolved_font_size, title.anchor, 0.0,
             &theme.typography.title_font_family, fw, None, 1.0,
@@ -1295,6 +1304,7 @@ fn build_title(
             x: title.x,
             y: sy,
             content: subtitle.clone(),
+            slot: None,
             style: to_scene_text_style(
                 resolved_sub_color, resolved_sub_font_size, title.anchor, 0.0,
                 &theme.typography.font_family, None, None, 1.0,
@@ -1696,6 +1706,7 @@ fn build_polar_axes(
                 x: lx,
                 y: ly,
                 content: tick.label.clone(),
+                slot: None,
                 style: draw::to_scene_text_style(
                     theme.colors.label_color, theme.typography.label_font_size,
                     crate::layout::TextAnchor::Middle, 0.0,
@@ -3273,6 +3284,39 @@ mod tests {
             sorted_tags, vec!["0".to_string(), "1".to_string()],
             "expected exactly one y_slot=0 (primary) and one y_slot=1 (secondary) axis group, got {tags:?}"
         );
+    }
+
+    /// GH #60/#73: within each slot-tagged y-axis `Group`, every tick-label
+    /// `SceneNode::Text` carries `slot: Some(k)` matching the Group's own
+    /// `y_slot` attr (`k`) — including slot 0 (primary), making the contract
+    /// uniform across every axis on a dual-axis panel. The axis title (at
+    /// most one `Text` per group, distinguishable as the only untagged one)
+    /// is never slot-tagged — it is not axis-tick text.
+    #[test]
+    fn y_axis_tick_text_nodes_tagged_with_slot_index() {
+        let scene = build_dual_y_scene(true);
+        let panel = &scene.panels[0];
+        let mut checked_groups = 0;
+        for node in &panel.axes {
+            if let SceneNode::Group { attrs, children } = node {
+                let Some((_, slot_str)) = attrs.iter().find(|(k, _)| k == "y_slot") else { continue };
+                let expected_slot: usize = slot_str.parse().unwrap();
+                let text_slots: Vec<Option<usize>> = children.iter().filter_map(|c| {
+                    if let SceneNode::Text { slot, .. } = c { Some(*slot) } else { None }
+                }).collect();
+                assert!(!text_slots.is_empty(), "y_slot={expected_slot} axis group must contain tick-label text");
+                let untagged = text_slots.iter().filter(|s| s.is_none()).count();
+                assert!(untagged <= 1, "at most the axis title may be untagged, got {untagged} untagged texts");
+                for slot in text_slots.iter().filter(|s| s.is_some()) {
+                    assert_eq!(
+                        *slot, Some(expected_slot),
+                        "tick-label text in the y_slot={expected_slot} group must carry the same slot"
+                    );
+                }
+                checked_groups += 1;
+            }
+        }
+        assert_eq!(checked_groups, 2, "expected one slot-tagged group each for primary and secondary y-axes");
     }
 
     /// #72 de-risking (design-review S3-2): with TWO independent-y layers, the

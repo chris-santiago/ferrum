@@ -195,6 +195,14 @@ pub struct TextElementData {
     pub y: f64,
     pub content: String,
     pub style: TextStyle,
+    /// Y-scale slot this tick label belongs to (secondary-y-axis, GH #60/#73),
+    /// mirrored verbatim from `SceneNode::Text::slot`. `None` for non-axis
+    /// text and for single-slot y-axis panels; `Some(k)` on dual-axis panels
+    /// (`0` = primary/left, `k` = the k-th independent-y layer). Consumed by
+    /// the zoomed-text relabeling path (`text_json.rs`) to select the correct
+    /// rescale affine by explicit slot instead of the column-frequency
+    /// heuristic it replaces.
+    pub slot: Option<usize>,
 }
 
 /// A verbatim SVG fragment collected from `SceneNode::Raw`.
@@ -799,6 +807,7 @@ fn transform_node(node: &SceneNode, ls: &LayoutScale) -> SceneNode {
             y,
             content,
             style,
+            slot,
         } => {
             let (x, y) = ls.apply(*x, *y);
             SceneNode::Text {
@@ -806,6 +815,7 @@ fn transform_node(node: &SceneNode, ls: &LayoutScale) -> SceneNode {
                 y,
                 content: content.clone(),
                 style: transform_text_style(style, mag),
+                slot: *slot,
             }
         }
         SceneNode::Image { x, y, w, h, data } => {
@@ -1407,12 +1417,14 @@ fn collect_nodes(
                 y,
                 content,
                 style,
+                slot,
             } => {
                 texts.push(TextElementData {
                     x: *x,
                     y: *y,
                     content: content.clone(),
                     style: style.clone(),
+                    slot: *slot,
                 });
             }
             SceneNode::Image { x, y, w, h, data } => match data {
@@ -3155,12 +3167,14 @@ mod tests {
                 y: 50.0,
                 content: "Hello".to_string(),
                 style: style.clone(),
+                slot: None,
             },
             SceneNode::Text {
                 x: 200.0,
                 y: 80.0,
                 content: "World".to_string(),
                 style,
+                slot: None,
             },
         ];
         let scene = make_scene_with_nodes(MarkBatchKind::Text, nodes);
@@ -3198,6 +3212,7 @@ mod tests {
             y: 100.0,
             content: "Label".to_string(),
             style,
+            slot: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Text, nodes);
         let data = load_scene(&scene);
@@ -3213,6 +3228,85 @@ mod tests {
             data.mesh_buffers.vertices.is_empty(),
             "text must not produce mesh"
         );
+    }
+
+    // ── Axis-tick text slot tag (GH #60/#73) ───────────────────────────
+
+    /// A `SceneNode::Text` with a `slot` tag must round-trip through the
+    /// actual wire format — JSON emit, then JSON decode, then `load_scene`'s
+    /// `TextElementData` extraction — not merely survive a Rust value clone.
+    /// This is the spec §9.5 slot-tag round-trip contract.
+    #[test]
+    fn axis_tick_text_slot_tag_round_trips_through_scene_json() {
+        use ferrum_scene::{FontWeight, TextAnchor, TextBaseline, TextStyle};
+        let style = TextStyle {
+            font_size: 11.0,
+            font_weight: FontWeight::Normal,
+            anchor: TextAnchor::End,
+            baseline: TextBaseline::Alphabetic,
+            angle: 0.0,
+            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            opacity: 1.0,
+            font_family: "sans-serif".to_string(),
+        };
+        let nodes = vec![SceneNode::Text {
+            x: 40.0,
+            y: 60.0,
+            content: "R2".to_string(),
+            style,
+            slot: Some(2),
+        }];
+        let scene = make_scene_with_nodes(MarkBatchKind::Text, nodes);
+
+        // Emit to JSON and decode back — the actual wire path, not a clone.
+        let json = serde_json::to_string(&scene).expect("serialize scene with slotted text");
+        assert!(json.contains("\"slot\":2"), "slot must appear on the wire: {json}");
+        let decoded: SceneGraph = serde_json::from_str(&json).expect("deserialize scene");
+
+        let data = load_scene(&decoded);
+        assert_eq!(data.text_elements.len(), 1);
+        assert_eq!(
+            data.text_elements[0].slot,
+            Some(2),
+            "slot tag must survive scene JSON emit -> decode -> load_scene extraction"
+        );
+    }
+
+    /// Absent `slot` field (legacy/pre-#60 scene JSON, or any non-axis text
+    /// node) deserializes to `None` via `serde(default)` — proving old wire
+    /// bytes and untagged text both decode without error.
+    #[test]
+    fn scene_json_without_slot_field_decodes_to_none() {
+        use ferrum_scene::{FontWeight, TextAnchor, TextBaseline, TextStyle};
+        let style = TextStyle {
+            font_size: 11.0,
+            font_weight: FontWeight::Normal,
+            anchor: TextAnchor::Middle,
+            baseline: TextBaseline::Alphabetic,
+            angle: 0.0,
+            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            opacity: 1.0,
+            font_family: "sans-serif".to_string(),
+        };
+        let nodes = vec![SceneNode::Text {
+            x: 10.0,
+            y: 20.0,
+            content: "untagged".to_string(),
+            style,
+            slot: None,
+        }];
+        let scene = make_scene_with_nodes(MarkBatchKind::Text, nodes);
+
+        // `slot: None` is skip_serialized — the emitted JSON has no "slot" key
+        // at all, exactly like scene JSON produced before this field existed.
+        let json = serde_json::to_string(&scene).expect("serialize scene with untagged text");
+        assert!(!json.contains("\"slot\""), "untagged text must omit slot from JSON: {json}");
+        let decoded: SceneGraph =
+            serde_json::from_str(&json).expect("legacy-shaped scene JSON must still deserialize");
+
+        let data = load_scene(&decoded);
+        assert_eq!(data.text_elements.len(), 1);
+        assert_eq!(data.text_elements[0].slot, None, "absent slot must decode to None");
     }
 
     // ── Group (recursive) ─────────────────────────────────────────────
@@ -3301,6 +3395,7 @@ mod tests {
             x: 250.0,
             y: 30.0,
             content: "Title".to_string(),
+            slot: None,
             style: TextStyle {
                 font_size: 16.0,
                 font_weight: FontWeight::Bold,
@@ -4891,6 +4986,7 @@ mod tests {
             y: 20.0,
             content: "Title".to_string(),
             style: text_style,
+            slot: None,
         };
 
         // Build the scene graph.
@@ -5803,6 +5899,7 @@ mod tests {
             y: 6.0,
             content: "hi".to_string(),
             style: gap_fix_text_style(12.0, 45.0),
+            slot: Some(1),
         };
         match transform_node(&node, &ls) {
             SceneNode::Text {
@@ -5810,6 +5907,7 @@ mod tests {
                 y,
                 content,
                 style,
+                slot,
             } => {
                 assert!((x - 20.0).abs() < 1e-9, "x: got {x}");
                 assert!((y - 43.0).abs() < 1e-9, "y: got {y}");
@@ -5823,6 +5921,7 @@ mod tests {
                     style.angle, 45.0,
                     "text rotation must pass through UNCHANGED (documented gap)"
                 );
+                assert_eq!(slot, Some(1), "slot tag must survive the layout-scale transform");
             }
             other => panic!("expected Text, got {other:?}"),
         }

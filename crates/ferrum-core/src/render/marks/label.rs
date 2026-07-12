@@ -179,6 +179,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> MarkBuildResult {
             x: px + dx,
             y: py + dy,
             content,
+            slot: None,
             style: to_scene_text_style(
                 color, font_size, TextAnchor::Middle, 0.0,
                 ctx.theme.typography.font_family.as_str(),

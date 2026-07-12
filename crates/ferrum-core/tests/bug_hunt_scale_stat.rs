@@ -321,6 +321,7 @@ fn text_node_empty_string_round_trips() {
     let node = SceneNode::Text {
         x: 100.0, y: 200.0,
         content: String::new(),
+        slot: None,
         style: default_text_style(),
     };
     let json = serde_json::to_string(&node).expect("serialize empty-text node");
@@ -337,6 +338,7 @@ fn text_node_very_long_text_round_trips() {
     let node = SceneNode::Text {
         x: 100.0, y: 200.0,
         content: long_text.clone(),
+        slot: None,
         style: default_text_style(),
     };
     let json = serde_json::to_string(&node).expect("serialize long-text node");
@@ -352,6 +354,7 @@ fn text_node_nan_coordinates_serialize_as_null() {
     let node = SceneNode::Text {
         x: f64::NAN, y: f64::NAN,
         content: "label".to_string(),
+        slot: None,
         style: TextStyle {
             font_size: f64::NAN,
             ..default_text_style()
@@ -366,6 +369,7 @@ fn text_node_unicode_round_trips() {
     let node = SceneNode::Text {
         x: 100.0, y: 200.0,
         content: "温度 (°C)".to_string(),
+        slot: None,
         style: default_text_style(),
     };
     let json = serde_json::to_string(&node).expect("serialize unicode text");
@@ -383,6 +387,7 @@ fn scene_graph_with_title_text_round_trips() {
     let title_node = SceneNode::Text {
         x: 300.0, y: 15.0,
         content: "My Chart Title".to_string(),
+        slot: None,
         style: TextStyle {
             font_weight: FontWeight::Bold,
             anchor: TextAnchor::Middle,
@@ -466,6 +471,7 @@ fn panel_with_strip_title_round_trips() {
     let strip = SceneNode::Text {
         x: 300.0, y: 5.0,
         content: "group = A".to_string(),
+        slot: None,
         style: TextStyle {
             font_weight: FontWeight::Bold,
             anchor: TextAnchor::Middle,

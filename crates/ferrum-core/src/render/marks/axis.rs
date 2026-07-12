@@ -4,7 +4,18 @@ use crate::layout::{AxisLayout, AxisOrient, Rect, TextAnchor, ThemeInputs};
 use crate::render::draw::{to_scene_stroke, to_scene_text_style};
 use ferrum_scene::SceneNode;
 
-pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
+/// Build an axis's scene nodes (domain line, ticks, tick labels, title).
+///
+/// `tick_slot` (secondary-y-axis, GH #60/#73): when `Some(k)`, every emitted
+/// tick-label `SceneNode::Text` (but not the axis title) is tagged with
+/// `slot: Some(k)` so the WASM zoomed-text relabeling path can select its
+/// rescale affine by explicit slot instead of the retired column-frequency
+/// heuristic. Callers pass `Some(k)` only for a y-axis routed through the
+/// dual-axis `Group` wrapper (mirrors that wrapper's `y_slot` attr — see
+/// `scene_build::route_panel_axes_and_grid`); every other caller (x-axes, and
+/// y-axes on the byte-stable single-slot default path) passes `None`, leaving
+/// tick-label nodes untagged exactly as before this field existed.
+pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usize>) -> Vec<SceneNode> {
     let mut nodes = Vec::new();
     let r = axis.axis_line;
 
@@ -163,6 +174,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
                     x: label_x,
                     y: label_y,
                     content: tick.label.clone(),
+                    slot: tick_slot,
                     style: to_scene_text_style(
                         label_color,
                         effective_font_size,
@@ -183,6 +195,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
                         x: label_x,
                         y: line_y,
                         content: line.to_string(),
+                        slot: tick_slot,
                         style: to_scene_text_style(
                             label_color,
                             effective_font_size,
@@ -214,6 +227,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs) -> Vec<SceneNode> {
             x: t.anchor_x,
             y: t.anchor_y,
             content: t.text.clone(),
+            slot: None,
             style: to_scene_text_style(
                 effective_title_color,
                 effective_title_font_size,
@@ -527,8 +541,8 @@ mod tests {
         let mut shifted = base.clone();
         shifted.translate = Some(10.0);
         let theme = ThemeInputs::default();
-        let base_nodes = build_axis(&base, &theme);
-        let shifted_nodes = build_axis(&shifted, &theme);
+        let base_nodes = build_axis(&base, &theme, None);
+        let shifted_nodes = build_axis(&shifted, &theme, None);
         assert_eq!(base_nodes.len(), shifted_nodes.len());
         // Compare each Line's y by 10px shift.
         for (b, s) in base_nodes.iter().zip(shifted_nodes.iter()) {
@@ -549,8 +563,8 @@ mod tests {
         let mut shifted = base.clone();
         shifted.translate = Some(8.0);
         let theme = ThemeInputs::default();
-        let base_nodes = build_axis(&base, &theme);
-        let shifted_nodes = build_axis(&shifted, &theme);
+        let base_nodes = build_axis(&base, &theme, None);
+        let shifted_nodes = build_axis(&shifted, &theme, None);
         for (b, s) in base_nodes.iter().zip(shifted_nodes.iter()) {
             if let (SceneNode::Line { x1: bx1, .. }, SceneNode::Line { x1: sx1, .. }) = (b, s) {
                 assert!((sx1 - (bx1 - 8.0)).abs() < 1e-9, "left translate must shift line left 8px");
@@ -667,12 +681,71 @@ mod tests {
             label_flush: None,
         };
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme);
+        let nodes = build_axis(&axis, &theme, None);
         // 1 domain line + 2 tick lines + 2 tick labels + 1 title = 6 nodes
         let line_count = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
         let text_count = nodes.iter().filter(|n| matches!(n, SceneNode::Text { .. })).count();
         assert!(line_count >= 3, "expected >=3 lines (domain + ticks), got {line_count}");
         assert!(text_count >= 3, "expected >=3 texts (2 labels + title), got {text_count}");
+    }
+
+    /// GH #60/#73: `tick_slot: Some(k)` tags every tick-label text node with
+    /// `slot: Some(k)` but leaves the axis title untagged (`slot: None`) —
+    /// the title is not axis-tick text and must stay excluded from the wire
+    /// contract this field serves (WASM slot-aware relabeling selects tick
+    /// labels, never titles, by slot).
+    #[test]
+    fn tick_slot_tags_tick_labels_but_not_title() {
+        let axis = AxisLayout {
+            orient: AxisOrient::Right,
+            panel_index: 0,
+            axis_line: Rect { x: 400.0, y: 10.0, w: 0.0, h: 300.0 },
+            ticks: vec![major_tick(50.0, "0"), major_tick(150.0, "1")],
+            minor_ticks: vec![],
+            title: Some(AxisTitleLayout {
+                text: "right y".into(),
+                anchor_x: 420.0,
+                anchor_y: 160.0,
+                angle: -90.0,
+            }),
+            show_labels: true,
+            show_ticks: true,
+            show_domain: true,
+            show_grid: true,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
+            offset: None,
+            label_flush: None,
+        };
+        let theme = ThemeInputs::default();
+        let nodes = build_axis(&axis, &theme, Some(2));
+        let texts: Vec<&SceneNode> = nodes.iter().filter(|n| matches!(n, SceneNode::Text { .. })).collect();
+        assert_eq!(texts.len(), 3, "2 tick labels + 1 title");
+        // Tick labels (first two Text nodes, emitted before the title) carry
+        // the tick_slot tag.
+        for t in &texts[..2] {
+            if let SceneNode::Text { content, slot, .. } = t {
+                assert_eq!(*slot, Some(2), "tick label '{content}' must carry the tick_slot tag");
+            }
+        }
+        // The title (last Text node) stays untagged.
+        if let SceneNode::Text { content, slot, .. } = texts[2] {
+            assert_eq!(content, "right y");
+            assert_eq!(*slot, None, "axis title must never carry a slot tag");
+        } else {
+            panic!("expected title Text node");
+        }
     }
 
     #[test]
@@ -708,7 +781,7 @@ mod tests {
             label_flush: None,
         };
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme);
+        let nodes = build_axis(&axis, &theme, None);
 
         // Both ticks should emit a tick mark line.
         let line_count = nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count();
@@ -761,7 +834,7 @@ mod tests {
             label_flush: None,
         };
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme);
+        let nodes = build_axis(&axis, &theme, None);
 
         // One tick line + two text nodes (one per line).
         let text_contents: Vec<_> = nodes.iter().filter_map(|n| {
@@ -824,7 +897,7 @@ mod tests {
             label_flush: None,
         };
         let theme = ThemeInputs::default(); // theme.typography.label_font_size == 11.0
-        let nodes = build_axis(&axis, &theme);
+        let nodes = build_axis(&axis, &theme, None);
 
         // The text node should use font_size 9.0, not the theme default.
         let text_node = nodes.iter().find(|n| matches!(n, SceneNode::Text { .. }));
@@ -988,7 +1061,7 @@ mod tests {
         // have anchor == End and the stored angle must equal -45.
         let axis = bottom_axis_with_angle(-45.0);
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme);
+        let nodes = build_axis(&axis, &theme, None);
         let texts = text_anchors_and_angles(&nodes);
         assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
         for (anchor, angle) in &texts {
@@ -1002,7 +1075,7 @@ mod tests {
         // Regression guard: the common flat (angle == 0) case must keep Middle.
         let axis = bottom_axis_with_angle(0.0);
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme);
+        let nodes = build_axis(&axis, &theme, None);
         let texts = text_anchors_and_angles(&nodes);
         assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
         for (anchor, _) in &texts {
@@ -1024,7 +1097,7 @@ mod tests {
         let font_size = theme.typography.label_font_size; // 11.0
 
         let label_y_at = |angle: f64| -> f64 {
-            build_axis(&bottom_axis_with_angle(angle), &theme)
+            build_axis(&bottom_axis_with_angle(angle), &theme, None)
                 .into_iter()
                 .find_map(|n| if let SceneNode::Text { y, .. } = n { Some(y) } else { None })
                 .expect("axis must have a text node")
@@ -1072,7 +1145,7 @@ mod tests {
         // Top axis with label_angle = -45: every tick-label must use Start anchor.
         let axis = top_axis_with_angle(-45.0);
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme);
+        let nodes = build_axis(&axis, &theme, None);
         let texts = text_anchors_and_angles(&nodes);
         assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
         for (anchor, _) in &texts {
@@ -1085,7 +1158,7 @@ mod tests {
         // Regression guard: flat top ticks must keep Middle.
         let axis = top_axis_with_angle(0.0);
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme);
+        let nodes = build_axis(&axis, &theme, None);
         let texts = text_anchors_and_angles(&nodes);
         assert_eq!(texts.len(), 2, "expected 2 tick-label text nodes");
         for (anchor, _) in &texts {
@@ -1105,7 +1178,7 @@ mod tests {
             angle: 0.0,
         });
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme);
+        let nodes = build_axis(&axis, &theme, None);
 
         let title_node = nodes.iter().find(|n| {
             if let SceneNode::Text { content, .. } = n { content == "My Axis Title" } else { false }
@@ -1132,8 +1205,8 @@ mod tests {
         };
         let theme = ThemeInputs::default();
 
-        let left_texts  = text_anchors_and_angles(&build_axis(&left_axis,  &theme));
-        let right_texts = text_anchors_and_angles(&build_axis(&right_axis, &theme));
+        let left_texts  = text_anchors_and_angles(&build_axis(&left_axis,  &theme, None));
+        let right_texts = text_anchors_and_angles(&build_axis(&right_axis, &theme, None));
 
         assert_eq!(left_texts.len(),  2, "expected 2 left tick-label nodes");
         assert_eq!(right_texts.len(), 2, "expected 2 right tick-label nodes");
@@ -1185,7 +1258,7 @@ mod tests {
             label_flush: None,
         };
         let theme = ThemeInputs::default();
-        let nodes = build_axis(&axis, &theme);
+        let nodes = build_axis(&axis, &theme, None);
         let title_node = nodes.iter().find(|n| {
             if let SceneNode::Text { content, .. } = n { content == "My Title" } else { false }
         });
@@ -1208,8 +1281,8 @@ mod tests {
         let mut shifted = base.clone();
         shifted.offset = Some(30.0);
         let theme = ThemeInputs::default();
-        let base_nodes = build_axis(&base, &theme);
-        let shifted_nodes = build_axis(&shifted, &theme);
+        let base_nodes = build_axis(&base, &theme, None);
+        let shifted_nodes = build_axis(&shifted, &theme, None);
         for (b, s) in base_nodes.iter().zip(shifted_nodes.iter()) {
             if let (SceneNode::Line { y1: by1, .. }, SceneNode::Line { y1: sy1, .. }) = (b, s) {
                 assert!((sy1 - (by1 + 30.0)).abs() < 1e-9, "offset must shift line down 30px");
@@ -1225,8 +1298,8 @@ mod tests {
         both.offset = Some(10.0);
         both.translate = Some(10.0);
         let theme = ThemeInputs::default();
-        let base_nodes = build_axis(&base, &theme);
-        let both_nodes = build_axis(&both, &theme);
+        let base_nodes = build_axis(&base, &theme, None);
+        let both_nodes = build_axis(&both, &theme, None);
         for (b, s) in base_nodes.iter().zip(both_nodes.iter()) {
             if let (SceneNode::Line { y1: by1, .. }, SceneNode::Line { y1: sy1, .. }) = (b, s) {
                 assert!(
@@ -1242,8 +1315,8 @@ mod tests {
         // Regression guard: no offset/translate → unchanged geometry.
         let base = bottom_axis_with_angle(0.0);
         let theme = ThemeInputs::default();
-        let a = build_axis(&base, &theme);
-        let b = build_axis(&base, &theme);
+        let a = build_axis(&base, &theme, None);
+        let b = build_axis(&base, &theme, None);
         assert_eq!(a, b);
     }
 
@@ -1285,7 +1358,7 @@ mod tests {
         let mut axis = three_tick_bottom_axis();
         axis.label_flush = Some(true);
         let theme = ThemeInputs::default();
-        let anchors = label_anchors(&build_axis(&axis, &theme));
+        let anchors = label_anchors(&build_axis(&axis, &theme, None));
         assert_eq!(anchors.len(), 3);
         assert_eq!(anchors[0], ("left".into(), ferrum_scene::TextAnchor::Start));
         assert_eq!(anchors[1], ("mid".into(), ferrum_scene::TextAnchor::Middle));
@@ -1297,7 +1370,7 @@ mod tests {
         // Regression guard: no flush → every bottom label stays Middle.
         let axis = three_tick_bottom_axis();
         let theme = ThemeInputs::default();
-        let anchors = label_anchors(&build_axis(&axis, &theme));
+        let anchors = label_anchors(&build_axis(&axis, &theme, None));
         for (_, a) in &anchors {
             assert_eq!(*a, ferrum_scene::TextAnchor::Middle, "flush off keeps Middle");
         }
@@ -1311,7 +1384,7 @@ mod tests {
         axis.label_flush = Some(true);
         axis.ticks[0].culled = true;
         let theme = ThemeInputs::default();
-        let anchors = label_anchors(&build_axis(&axis, &theme));
+        let anchors = label_anchors(&build_axis(&axis, &theme, None));
         // Culled tick emits no label; 2 labels remain: mid (now first→Start),
         // right (last→End).
         assert_eq!(anchors.len(), 2);
@@ -1330,9 +1403,9 @@ mod tests {
         let base = {
             let mut no_flush = axis.clone();
             no_flush.label_flush = None;
-            build_axis(&no_flush, &theme)
+            build_axis(&no_flush, &theme, None)
         };
-        let flushed = build_axis(&axis, &theme);
+        let flushed = build_axis(&axis, &theme, None);
         let ys = |nodes: &[SceneNode]| -> Vec<f64> {
             nodes.iter().filter_map(|n| {
                 if let SceneNode::Text { y, .. } = n { Some(*y) } else { None }

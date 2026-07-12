@@ -38,6 +38,7 @@ pub fn build_row_strip_title(
         x: strip.anchor.0,
         y: strip.anchor.1,
         content: strip.text.clone(),
+        slot: None,
         style: crate::render::draw::to_scene_text_style(
             theme.colors.font_color,
             strip.font_size,
@@ -81,6 +82,7 @@ pub fn build_strip_title(
         x: strip.anchor.0,
         y: strip.anchor.1,
         content: strip.text.clone(),
+        slot: None,
         style: to_scene_text_style(
             theme.colors.font_color,
             strip.font_size,

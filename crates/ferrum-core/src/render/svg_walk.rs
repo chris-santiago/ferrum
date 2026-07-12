@@ -231,7 +231,7 @@ fn emit_node(svg: &mut SvgBuffer, node: &SceneNode) {
             let svg_style = to_svg_fill_stroke_with_anchor(style, anchor_x, anchor_y);
             svg.path(&d, &svg_style);
         }
-        SceneNode::Text { x, y, content, style } => {
+        SceneNode::Text { x, y, content, style, .. } => {
             emit_text(svg, *x, *y, content, style);
         }
         SceneNode::Image { x, y, w, h, data } => {
@@ -490,6 +490,7 @@ mod tests {
             x: 200.0,
             y: 50.0,
             content: "ref_label_xyz".to_string(),
+            slot: None,
             style: ferrum_scene::TextStyle {
                 font_size: 12.0,
                 font_weight: ferrum_scene::FontWeight::Normal,

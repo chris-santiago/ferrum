@@ -400,7 +400,7 @@ mod bug_hunt_interactive_slots {
     }
 
     fn text(x: f64, y: f64, content: &str) -> TextElementData {
-        TextElementData { x, y, content: content.to_string(), style: style() }
+        TextElementData { x, y, content: content.to_string(), style: style(), slot: None }
     }
 
     fn tick(label: &str, pixel: f64) -> ferrum_scene::Tick {
@@ -651,6 +651,7 @@ mod tests {
             y,
             content: content.to_string(),
             style: make_style(),
+            slot: None,
         }
     }
 
@@ -1235,6 +1236,7 @@ mod tests {
             y: 200.0,
             content: r#"say "hello" \ world"#.to_string(),
             style: make_style(),
+            slot: None,
         };
         let json_str = build_text_json_from(&[te]);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str)
@@ -1251,6 +1253,7 @@ mod tests {
             y: f64::NAN,
             content: "NaN test".to_string(),
             style: make_style(),
+            slot: None,
         };
         let json_str = build_text_json_from(&[te]);
         // serde_json serializes NaN as null.
@@ -1268,6 +1271,7 @@ mod tests {
             y: f64::NEG_INFINITY,
             content: "inf test".to_string(),
             style: make_style(),
+            slot: None,
         };
         let json_str = build_text_json_from(&[te]);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str)

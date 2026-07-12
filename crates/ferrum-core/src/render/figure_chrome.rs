@@ -469,6 +469,7 @@ pub fn title_nodes(chrome: FigureChrome<'_>, panel_w: f64, panel_h: f64) -> (Vec
             x: line.x,
             y: line.y,
             content: line.content.to_string(),
+            slot: None,
             style: chrome_text_style(line),
         })
         .collect();

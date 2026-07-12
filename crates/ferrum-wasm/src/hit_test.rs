@@ -1104,6 +1104,7 @@ mod bug_hunt_tests {
         let nodes = vec![SceneNode::Text {
             x: 100.0, y: 100.0,
             content: "hello".into(),
+            slot: None,
             style: text_style(12.0),
         }];
         // Click within font_size radius of anchor — should hit.
@@ -1117,6 +1118,7 @@ mod bug_hunt_tests {
         let nodes = vec![SceneNode::Text {
             x: 50.0, y: 50.0,
             content: "label".into(),
+            slot: None,
             style: text_style(16.0),
         }];
         assert!(hit_test_texts(&nodes, 50.0, 50.0).is_some(), "click exactly on anchor must hit");
@@ -1142,6 +1144,7 @@ mod bug_hunt_tests {
             nodes: vec![SceneNode::Text {
                 x: 100.0, y: 100.0,
                 content: "label".into(),
+                slot: None,
                 style: text_style(14.0),
             }],
             data_indices: Some(vec![0]),
@@ -1688,6 +1691,7 @@ mod tests {
                 x: 100.0,
                 y: 100.0,
                 content: "label-node".into(),
+                slot: None,
                 style: text_style_small(),
             }],
             data_indices: Some(vec![0]),

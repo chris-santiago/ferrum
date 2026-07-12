@@ -519,6 +519,7 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                         x: cx,
                         y: cy,
                         content: content.clone(),
+                        slot: None,
                         style: to_scene_text_style(
                             text_color,
                             font_size,
