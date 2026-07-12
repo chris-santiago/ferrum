@@ -16,6 +16,14 @@
 //!   under the Python polar remapping, shared by `arc` and `bar::build_polar`.
 //!   `theta="x"` puts the angular channel on `x` and the radial channel on `y`;
 //!   `theta="y"` mirrors. Byte-identical to both marks' prior inline `match`.
+//!
+//! - [`band_extent_or`] — the band-geometry-unification consumer pattern (GH
+//!   #39 phase 2): bar/box/heatmap/tick width and extent formulas divide by a
+//!   panel-extent term (`panel.w` / `panel.h`) that must instead honor an
+//!   explicit `BandScale`/`PointScale`/positional-`OrdinalScale` pixel range
+//!   when the resolver recorded one. Ten call sites across `bar`, `rect`, and
+//!   `tick` repeat this exact substitution, so it is unified here rather than
+//!   left as ten copies of the same `.map(f64::abs).unwrap_or(..)` line.
 
 use crate::render::draw::{col_as_f64, col_as_str, color_field, DrawCtx};
 use crate::render::scale_resolve::{ColorScale, ResolvedScales, ScaleKind};
@@ -24,6 +32,22 @@ use crate::spec::encoding::Encoding;
 
 /// `(categorical_string_column, numeric_column)` for the color encoding.
 pub(crate) type ColorColumns = (Option<Vec<Option<String>>>, Option<Vec<Option<f64>>>);
+
+/// Band-pixel extent for a mark's width/size/extent formula (band-geometry
+/// unification design §6 consumer contract): `scale`'s explicit range extent
+/// when the resolver recorded one, otherwise `fallback` — the exact panel-
+/// extent expression (`panel.w` / `panel.h`) each call site used before this
+/// unification, so the no-range path stays byte-identical (§7 invariant).
+///
+/// `scale` must be the resolved scale on the *same axis* as `fallback`'s panel
+/// dimension (x-axis scale with `panel.w`, y-axis scale with `panel.h`).
+/// [`ScaleKind::explicit_band_extent`] returns `None` for every non-ordinal
+/// scale, so passing a scale that carries no band range (including the dummy
+/// unit scale synthesized for an absent axis) is safe: this always falls
+/// through to `fallback`.
+pub(crate) fn band_extent_or(scale: &ScaleKind, fallback: f64) -> f64 {
+    scale.explicit_band_extent().map(f64::abs).unwrap_or(fallback)
+}
 
 /// Load the per-row color-encoding columns for fill resolution (C9).
 ///

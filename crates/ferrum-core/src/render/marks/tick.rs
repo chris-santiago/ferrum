@@ -67,7 +67,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     for v in ys.iter().flatten() { set.insert(v.as_str()); }
                     set.len().max(1)
                 };
-                let tick_half = (panel.w / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+                // Band-geometry unification (#39 phase 2): x is unencoded in
+                // this mode, so `ctx.scales.x` is the dummy unit scale, whose
+                // `explicit_band_extent()` is always `None` — this always
+                // falls through to `panel.w`, matching the site-pairing
+                // convention (cross-axis tick length keyed to the panel-w
+                // term regardless of which field is ordinal).
+                let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
+                let tick_half = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
                 let baseline_x = panel.x;
                 let mut acc = MarkNodes::with_capacity(ys.len());
                 for i in 0..ys.len() {
@@ -133,7 +140,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 for v in xs.iter().flatten() { set.insert(v.as_str()); }
                 set.len().max(1)
             };
-            let tick_half = (panel.w / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+            // Band-geometry unification (#39 phase 2): honor an explicit
+            // x-band pixel range when the resolver recorded one; otherwise
+            // identical to `panel.w`.
+            let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
+            let tick_half = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
             let mut acc = MarkNodes::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -173,7 +184,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 for v in ys.iter().flatten() { set.insert(v.as_str()); }
                 set.len().max(1)
             };
-            let tick_half = (panel.h / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+            // Band-geometry unification (#39 phase 2): honor an explicit
+            // y-band pixel range when the resolver recorded one; otherwise
+            // identical to `panel.h`.
+            let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
+            let tick_half = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
             let mut acc = MarkNodes::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -214,7 +229,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             for v in xs.iter().flatten() { set.insert(v.as_str()); }
             set.len().max(1)
         };
-        let tick_half = (panel.h / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+        // Band-geometry unification (#39 phase 2): y is unencoded in this
+        // mode, so `ctx.scales.y` is the dummy unit scale, whose
+        // `explicit_band_extent()` is always `None` — this always falls
+        // through to `panel.h`, matching the site-pairing convention
+        // (cross-axis tick length keyed to the panel-h term regardless of
+        // which field is ordinal).
+        let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
+        let tick_half = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
         let baseline_y = panel.y + panel.h;
         let mut acc = MarkNodes::with_capacity(xs.len());
         for i in 0..xs.len() {
@@ -911,6 +933,126 @@ mod tests {
         assert_eq!(extents.len(), 4);
         for (lo, hi) in &extents {
             assert!(((hi - lo) - 30.0).abs() < 1e-9, "non-dodged tick width must be 30.0; got {}", hi - lo);
+        }
+    }
+
+    // ── Band-geometry unification (#39 phase 2) ──────────────────────────────
+
+    /// Ordinal-x + quantitative-y mode (boxplot median line): an explicit
+    /// `BandScale` x-axis (extent 220px, distinct from panel.w = 300px) must
+    /// drive `tick_half` from the scale's extent, not `panel.w`. Fails on
+    /// pre-Task-3 code, which always divides by `panel.w`.
+    #[test]
+    fn tick_ordinal_x_quant_y_explicit_range_scales_half_extent() {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+        use arrow::array::StringArray;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(crate::spec::encoding::DataType::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "median".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("median", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(Float64Array::from(vec![3.0, 5.0])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+
+        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0)
+            .with_explicit_range(true);
+        let scales = ResolvedScales {
+            x: ScaleKind::Ordinal(x_scale),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![3.0, 5.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None,
+            x2: None, y2: None, y_slots: Default::default(),
+        };
+
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let widths: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Line { x1, x2, .. } = n { Some((x1 - x2).abs()) } else { None }
+        }).collect();
+        assert_eq!(widths.len(), 2);
+        // |260 - 40| = 220 extent; 2 categories, 1 group, band_size 0.3 (default)
+        // → tick_half = 220 / 2 * 0.3 = 33.0 → full width 66.0.
+        for w in widths {
+            assert!((w - 66.0).abs() < 1e-9, "expected tick width 66.0 from the 220px explicit extent, got {w}");
+        }
+    }
+
+    /// Ordinal-y + quantitative-x mode (strip plot): an explicit `BandScale`
+    /// y-axis drives `tick_half` from the scale's extent, not `panel.h`.
+    #[test]
+    fn tick_ordinal_y_quant_x_explicit_range_scales_half_extent() {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+        use arrow::array::StringArray;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Tick,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "val".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "cat".into(), type_: Some(crate::spec::encoding::DataType::Ordinal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("val", DataType::Float64, false),
+            Field::new("cat", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![3.0, 5.0])),
+            Arc::new(StringArray::from(vec!["a", "b"])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 300.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+
+        let y_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0)
+            .with_explicit_range(true);
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![3.0, 5.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Ordinal(y_scale),
+            color: None, size: None, shape: None, opacity: None,
+            x2: None, y2: None, y_slots: Default::default(),
+        };
+
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Tick);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let heights: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let ferrum_scene::SceneNode::Line { y1, y2, .. } = n { Some((y1 - y2).abs()) } else { None }
+        }).collect();
+        assert_eq!(heights.len(), 2);
+        // |260 - 40| = 220 extent; 2 categories, 1 group, band_size 0.3 (default)
+        // → tick_half = 220 / 2 * 0.3 = 33.0 → full height 66.0.
+        for h in heights {
+            assert!((h - 66.0).abs() < 1e-9, "expected tick height 66.0 from the 220px explicit extent, got {h}");
         }
     }
 }

@@ -309,7 +309,10 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // dodge groups don't overlap (single source of truth: `n_dodge_groups`).
     // No Dodge → n_groups == 1 → byte-identical to the non-dodged width.
     let n_groups = crate::render::position::n_dodge_groups(ctx.batch);
-    let bar_width = (panel.w / n_categories as f64 / n_groups as f64) * 0.8;
+    // Band-geometry unification (#39 phase 2): honor an explicit x-band pixel
+    // range when the resolver recorded one; otherwise identical to `panel.w`.
+    let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
+    let bar_width = (band_extent / n_categories as f64 / n_groups as f64) * 0.8;
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
@@ -428,7 +431,10 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // adjacent dodge groups don't overlap (mirrors `build_ordinal`; the band
     // dimension is height here). No Dodge → n_groups == 1 → byte-identical.
     let n_groups = crate::render::position::n_dodge_groups(ctx.batch);
-    let bar_height = (panel.h / n_categories as f64 / n_groups as f64) * 0.8;
+    // Band-geometry unification (#39 phase 2): honor an explicit y-band pixel
+    // range when the resolver recorded one; otherwise identical to `panel.h`.
+    let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
+    let bar_height = (band_extent / n_categories as f64 / n_groups as f64) * 0.8;
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
@@ -2160,6 +2166,169 @@ mod tests {
         assert_eq!(heights.len(), 4);
         for h in &heights {
             assert!((h - 40.0).abs() < 1e-9, "non-dodged bar height must be 40.0; got {h}");
+        }
+    }
+
+    // ── Band-geometry unification (#39 phase 2) ──────────────────────────────
+
+    /// A minimal ordinal-x + quantitative-y ChartSpec/batch pair, reused by the
+    /// explicit-range and gate tests below.
+    fn ordinal_x_bar_ctx() -> (ChartSpec, arrow::record_batch::RecordBatch) {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "v".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+        ]).unwrap();
+        (spec, batch)
+    }
+
+    /// An explicit `BandScale` x-axis (extent 220px, distinct from panel.w =
+    /// 300px) must drive `bar_width` from the scale's extent, not `panel.w`.
+    /// Fails on pre-Task-3 code, which always divides by `panel.w`.
+    #[test]
+    fn bar_ordinal_x_explicit_range_scales_width_by_extent() {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+
+        let (spec, batch) = ordinal_x_bar_ctx();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+
+        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0)
+            .with_explicit_range(true);
+        let scales = ResolvedScales {
+            x: ScaleKind::Ordinal(x_scale),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 2.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None,
+            x2: None, y2: None, y_slots: Default::default(),
+        };
+
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let widths: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { w, .. } = n { Some(*w) } else { None }
+        }).collect();
+        assert_eq!(widths.len(), 2);
+        // |260 - 40| = 220 extent; 2 categories, 1 group → width = 220 / 2 * 0.8 = 88.0.
+        for w in widths {
+            assert!((w - 88.0).abs() < 1e-9, "expected bar width 88.0 from the 220px explicit extent, got {w}");
+        }
+    }
+
+    /// Explicitness is a recorded fact, not inferred by comparing the scale's
+    /// range to the panel extent (design §8). An `OrdinalScale` carrying a
+    /// numeric range but `with_explicit_range(false)` must still divide by
+    /// `panel.w`, ignoring its own range entirely — the discriminating check
+    /// against a float-comparison-based gate (which this scale's `[40, 260]`
+    /// range, being unequal to `[0, 300]`, would also happen to satisfy).
+    #[test]
+    fn bar_ordinal_x_no_explicit_range_ignores_scale_range_uses_panel() {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+
+        let (spec, batch) = ordinal_x_bar_ctx();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+
+        // Same numeric range as the explicit test above, but the explicitness
+        // flag defaults to false (never called `with_explicit_range`).
+        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0);
+        let scales = ResolvedScales {
+            x: ScaleKind::Ordinal(x_scale),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 2.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None,
+            x2: None, y2: None, y_slots: Default::default(),
+        };
+
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let widths: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { w, .. } = n { Some(*w) } else { None }
+        }).collect();
+        assert_eq!(widths.len(), 2);
+        // panel.w = 300, 2 categories, 1 group → width = 300 / 2 * 0.8 = 120.0
+        // (NOT 88.0, which the scale's own [40,260] range would give).
+        for w in widths {
+            assert!((w - 120.0).abs() < 1e-9, "expected panel-fallback bar width 120.0, got {w}");
+        }
+    }
+
+    /// Ordinal-y (horizontal bar) mirrors the x-axis case: an explicit
+    /// `BandScale` on y drives `bar_height` from the scale's extent, not
+    /// `panel.h`.
+    #[test]
+    fn bar_ordinal_y_explicit_range_scales_height_by_extent() {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "v".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            Arc::new(StringArray::from(vec!["a", "b"])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 300.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+
+        let y_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0)
+            .with_explicit_range(true);
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 2.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Ordinal(y_scale),
+            color: None, size: None, shape: None, opacity: None,
+            x2: None, y2: None, y_slots: Default::default(),
+        };
+
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let heights: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { h, .. } = n { Some(*h) } else { None }
+        }).collect();
+        assert_eq!(heights.len(), 2);
+        // |260 - 40| = 220 extent; 2 categories, 1 group → height = 220 / 2 * 0.8 = 88.0.
+        for h in heights {
+            assert!((h - 88.0).abs() < 1e-9, "expected bar height 88.0 from the 220px explicit extent, got {h}");
         }
     }
 }

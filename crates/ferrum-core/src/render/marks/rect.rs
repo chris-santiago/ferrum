@@ -221,7 +221,10 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // adjacent dodge groups don't overlap. No Dodge → n_groups == 1 →
         // byte-identical to the non-dodged box width.
         let n_groups = crate::render::position::n_dodge_groups(ctx.batch);
-        let box_w = (panel.w / n_categories as f64 / n_groups as f64)
+        // Band-geometry unification (#39 phase 2): honor an explicit x-band
+        // pixel range when the resolver recorded one; otherwise `panel.w`.
+        let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
+        let box_w = (band_extent / n_categories as f64 / n_groups as f64)
             * ctx.mark_style.misc.band_size.unwrap_or(0.6);
 
         for i in 0..xs.len() {
@@ -299,7 +302,10 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // body to its sub-band so adjacent dodge groups don't overlap. No Dodge
         // → n_groups == 1 → byte-identical to the non-dodged box height.
         let n_groups = crate::render::position::n_dodge_groups(ctx.batch);
-        let box_h = (panel.h / n_categories as f64 / n_groups as f64)
+        // Band-geometry unification (#39 phase 2): honor an explicit y-band
+        // pixel range when the resolver recorded one; otherwise `panel.h`.
+        let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
+        let box_h = (band_extent / n_categories as f64 / n_groups as f64)
             * ctx.mark_style.misc.band_size.unwrap_or(0.6);
 
         for i in 0..ys.len() {
@@ -393,8 +399,13 @@ fn build_heatmap(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let panel = ctx.panel.plot_area;
     let n_x = match &ctx.scales.x { ScaleKind::Ordinal(_) => count_distinct(&xs).max(1), _ => return empty_result() };
     let n_y = match &ctx.scales.y { ScaleKind::Ordinal(_) => count_distinct(&ys).max(1), _ => return empty_result() };
-    let cell_w = panel.w / n_x as f64;
-    let cell_h = panel.h / n_y as f64;
+    // Band-geometry unification (#39 phase 2): heatmap cells honor an explicit
+    // band pixel range per axis when the resolver recorded one; otherwise
+    // identical to `panel.w` / `panel.h`. Denominators stay per-axis category
+    // counts (`n_x` / `n_y`), not `n_categories`/`n_groups` — only the extent
+    // term changes.
+    let cell_w = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w) / n_x as f64;
+    let cell_h = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h) / n_y as f64;
 
     let cfield = color_field(ctx, spec);
     let color_numeric: Option<Vec<Option<f64>>> = match (&ctx.scales.color, cfield) {
@@ -1711,6 +1722,193 @@ mod tests {
         assert_eq!(rects.len(), 4);
         for (_, w) in &rects {
             assert!((w - 30.0).abs() < 1e-9, "non-dodged box width must be 30.0; got {w}");
+        }
+    }
+
+    // ── Band-geometry unification (#39 phase 2) ──────────────────────────────
+
+    /// An explicit `BandScale` x-axis (extent 220px, distinct from panel.w =
+    /// 300px) must drive the boxplot box body's `box_w` from the scale's
+    /// extent, not `panel.w`. Fails on pre-Task-3 code, which always divides
+    /// by `panel.w`.
+    #[test]
+    fn rect_ordinal_range_x_explicit_range_scales_box_width_by_extent() {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+        use arrow::array::Float64Array;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "q1".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y2: Some(EncodingSpec { field: "q3".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("q1", DataType::Float64, false),
+            Field::new("q3", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "b"])),
+            Arc::new(Float64Array::from(vec![2.0, 4.0])),
+            Arc::new(Float64Array::from(vec![6.0, 8.0])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+
+        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0)
+            .with_explicit_range(true);
+        let scales = ResolvedScales {
+            x: ScaleKind::Ordinal(x_scale),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![2.0, 8.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None,
+            x2: None, y2: None, y_slots: Default::default(),
+        };
+
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let widths: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { w, .. } = n { Some(*w) } else { None }
+        }).collect();
+        assert_eq!(widths.len(), 2);
+        // |260 - 40| = 220 extent; 2 categories, 1 group, band_size 0.6 (default)
+        // → box_w = 220 / 2 * 0.6 = 66.0.
+        for w in widths {
+            assert!((w - 66.0).abs() < 1e-9, "expected box_w 66.0 from the 220px explicit extent, got {w}");
+        }
+    }
+
+    /// CoordFlip orientation (y-ordinal + x/x2 quantitative): an explicit
+    /// `BandScale` y-axis drives `box_h` from the scale's extent, not
+    /// `panel.h`.
+    #[test]
+    fn rect_ordinal_range_y_explicit_range_scales_box_height_by_extent() {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+        use arrow::array::Float64Array;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "q1".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                x2: Some(EncodingSpec { field: "q3".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("q1", DataType::Float64, false),
+            Field::new("q3", DataType::Float64, false),
+            Field::new("cat", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![2.0, 4.0])),
+            Arc::new(Float64Array::from(vec![6.0, 8.0])),
+            Arc::new(StringArray::from(vec!["a", "b"])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 300.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+
+        let y_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0)
+            .with_explicit_range(true);
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![2.0, 8.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Ordinal(y_scale),
+            color: None, size: None, shape: None, opacity: None,
+            x2: None, y2: None, y_slots: Default::default(),
+        };
+
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let heights: Vec<f64> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { h, .. } = n { Some(*h) } else { None }
+        }).collect();
+        assert_eq!(heights.len(), 2);
+        // |260 - 40| = 220 extent; 2 categories, 1 group, band_size 0.6 (default)
+        // → box_h = 220 / 2 * 0.6 = 66.0.
+        for h in heights {
+            assert!((h - 66.0).abs() < 1e-9, "expected box_h 66.0 from the 220px explicit extent, got {h}");
+        }
+    }
+
+    /// Heatmap cell extent: an explicit `BandScale` range on x scales `cell_w`
+    /// from the scale's extent, while the unranged y axis keeps deriving
+    /// `cell_h` from `panel.h` (only the ranged axis's term changes).
+    #[test]
+    fn rect_heatmap_explicit_x_range_scales_cell_width_only() {
+        use crate::render::scale_resolve::ResolvedScales;
+        use crate::scale::ordinal::OrdinalScale;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Rect,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "row".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                y: Some(EncodingSpec { field: "col".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("row", DataType::Utf8, false),
+            Field::new("col", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            Arc::new(StringArray::from(vec!["x", "y", "x", "y"])),
+        ]).unwrap();
+
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 400.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+
+        let x_scale = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![40.0, 260.0], 0.0)
+            .with_explicit_range(true);
+        // y (col) keeps its ordinary panel-derived fallback range — no explicit flag.
+        let y_scale = OrdinalScale::new_internal(vec!["x".into(), "y".into()], vec![0.0, 400.0], 0.0);
+        let scales = ResolvedScales {
+            x: ScaleKind::Ordinal(x_scale),
+            y: ScaleKind::Ordinal(y_scale),
+            color: None, size: None, shape: None, opacity: None,
+            x2: None, y2: None, y_slots: Default::default(),
+        };
+
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Rect);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let dims: Vec<(f64, f64)> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { w, h, .. } = n { Some((*w, *h)) } else { None }
+        }).collect();
+        assert_eq!(dims.len(), 4, "expected 4 heatmap cells");
+        for (w, h) in dims {
+            // |260 - 40| = 220 extent / 2 row categories → cell_w = 110.0.
+            assert!((w - 110.0).abs() < 1e-9, "expected cell_w 110.0 from the 220px explicit x extent, got {w}");
+            // Unranged y: panel.h (400) / 2 col categories → cell_h = 200.0.
+            assert!((h - 200.0).abs() < 1e-9, "expected unranged cell_h to stay at panel.h/n_y = 200.0, got {h}");
         }
     }
 }
