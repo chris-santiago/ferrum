@@ -7,7 +7,7 @@ import json as _json
 import warnings
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from ferrum._chrome import chrome_kwargs, merge_configure_layers
 from ferrum._configure_mixin import ConfigureMixin
@@ -72,29 +72,169 @@ def _shallow_copy_composite(src) -> object:
     return new
 
 
-def _validate_resolve(resolve: Optional[Dict[str, str]], label: str) -> None:
-    """Raise ``ValueError`` when *resolve* is not a valid channel-mode dict.
+@dataclass(frozen=True)
+class Resolve:
+    """Per-channel scale and legend resolution for a composition's ``resolve=``.
+
+    Accepted everywhere a composition takes ``resolve=`` (``HConcatChart``,
+    ``VConcatChart``, ``ConcatChart``, ``RepeatChart``, ``LayerChart``, and
+    the ``hconcat``/``vconcat``/``concat``/``layer`` sugar) in place of a
+    flat ``{channel: mode}`` dict — the flat-dict form remains valid and is
+    equivalent to ``Resolve(scale=that_dict)``; both keep meaning *scale*
+    resolution.
 
     Parameters
     ----------
-    resolve : dict or None
-        Must be a dict mapping channel names to ``"shared"`` or
-        ``"independent"`` when not ``None``.
+    scale : dict, optional
+        Channel name (``"x"``, ``"y"``, ``"color"``, ``"size"``) ->
+        ``"shared"`` | ``"independent"``.  Whether panels share a unioned
+        domain for that channel — the same axis the flat-dict form controls.
+    legend : dict, optional
+        Channel name (``"color"`` or ``"size"`` only) ->
+        ``"shared"`` | ``"independent"``.  Whether a composite that shares
+        *scale* for that channel renders one figure-level legend
+        (``"shared"``) or keeps each participating panel's own legend
+        (``"independent"``).  Absent from *legend* means "follow the scale
+        mode" for that channel — the default, matching Vega-Lite. A
+        ``"shared"`` legend mode requires a ``"shared"`` scale mode for the
+        same channel; an unsatisfiable combination raises ``ValueError`` at
+        render time rather than silently falling back to per-panel legends.
+
+    Examples
+    --------
+    >>> import ferrum as fm
+    >>> fm.HConcatChart([a, b], resolve=fm.Resolve(scale={"color": "shared"}))
+    >>> # Force per-panel legends even though the color scale is shared:
+    >>> fm.HConcatChart(
+    ...     [a, b],
+    ...     resolve=fm.Resolve(scale={"color": "shared"}, legend={"color": "independent"}),
+    ... )
+    """
+
+    scale: Optional[Dict[str, str]] = None
+    legend: Optional[Dict[str, str]] = None
+
+
+# Type accepted wherever a composition takes ``resolve=``: the legacy flat
+# scale-mode dict (back-compat) or a Resolve(scale=, legend=) value class.
+ResolveArg = Union[Dict[str, str], Resolve, None]
+
+_LEGEND_RESOLVE_CHANNELS = ("color", "size")
+
+
+def _validate_scale_modes(modes: Optional[Dict[str, str]], label: str, *, field: str) -> None:
+    """Raise ``ValueError`` when *modes* is not a valid channel-mode dict.
+
+    Shared by :func:`_validate_resolve`'s flat-dict and ``Resolve.scale``
+    branches so both forms enforce the same ``"shared"``/``"independent"``
+    vocabulary. *field* names which part of ``resolve=`` is being validated
+    (``"resolve"`` for the flat-dict form, ``"scale"`` for ``Resolve.scale``)
+    so the error text points at what the caller actually wrote.
+    """
+    if modes is None:
+        return
+    if not isinstance(modes, dict):
+        raise ValueError(
+            f"{label}: {field} must be a dict mapping channel names "
+            f"to 'shared' or 'independent'; got {type(modes).__name__}"
+        )
+    for ch, mode in modes.items():
+        if mode not in ("shared", "independent"):
+            raise ValueError(
+                f"{label}: {field}[{ch!r}]={mode!r}; expected 'shared' or 'independent'"
+            )
+
+
+def _validate_legend_modes(legend: Optional[Dict[str, str]], label: str) -> None:
+    """Raise ``ValueError`` when ``Resolve.legend`` is not a valid legend dict.
+
+    Legend resolution is restricted to ``color``/``size`` (spec §6) — it has
+    no meaning for positional channels or any channel the composite resolve
+    pass doesn't carry a scale for, so an unsupported channel name is
+    rejected here unconditionally (unlike the scale dict, where an
+    unsupported channel is only an error when explicitly marked
+    ``"shared"`` — see :func:`_composite_resolve_field`).
+    """
+    if legend is None:
+        return
+    if not isinstance(legend, dict):
+        raise ValueError(
+            f"{label}: resolve.legend must be a dict mapping 'color'/'size' to "
+            f"'shared' or 'independent'; got {type(legend).__name__}"
+        )
+    for ch, mode in legend.items():
+        if ch not in _LEGEND_RESOLVE_CHANNELS:
+            raise ValueError(
+                f"{label}: resolve.legend[{ch!r}] is not a legend-resolvable channel "
+                f"(supported: {_LEGEND_RESOLVE_CHANNELS}); legend resolution only "
+                "applies to color/size"
+            )
+        if mode not in ("shared", "independent"):
+            raise ValueError(
+                f"{label}: resolve.legend[{ch!r}]={mode!r}; expected 'shared' or 'independent'"
+            )
+
+
+def _validate_resolve(resolve: ResolveArg, label: str) -> None:
+    """Raise ``ValueError`` when *resolve* is not a valid ``resolve=`` value.
+
+    Parameters
+    ----------
+    resolve : dict, Resolve, or None
+        A flat dict is validated as a scale channel-mode mapping (back-compat
+        — equivalent to ``Resolve(scale=resolve)``). A :class:`Resolve`
+        validates ``.scale`` the same way plus ``.legend`` (restricted to
+        ``color``/``size`` — see :func:`_validate_legend_modes`).
     label : str
         Class or function name used in the error message.
     """
     if resolve is None:
         return
+    if isinstance(resolve, Resolve):
+        _validate_scale_modes(resolve.scale, label, field="resolve.scale")
+        _validate_legend_modes(resolve.legend, label)
+        return
     if not isinstance(resolve, dict):
         raise ValueError(
-            f"{label}: resolve must be a dict mapping channel names "
-            f"to 'shared' or 'independent'; got {type(resolve).__name__}"
+            f"{label}: resolve must be a dict, Resolve, or None; got {type(resolve).__name__}"
         )
-    for ch, mode in resolve.items():
-        if mode not in ("shared", "independent"):
-            raise ValueError(
-                f"{label}: resolve[{ch!r}]={mode!r}; expected 'shared' or 'independent'"
-            )
+    _validate_scale_modes(resolve, label, field="resolve")
+
+
+def _resolve_scale_modes(resolve: ResolveArg) -> Dict[str, str]:
+    """Return the scale channel->mode mapping carried by a ``resolve=`` value.
+
+    Used by composition-internal code that needs to inspect scale modes
+    directly (``share_scale`` merging, ``LayerChart``'s x/y-independence
+    checks) rather than the composite wire field assembled by
+    :func:`_composite_resolve_field`. Returns ``{}`` for ``None``, the dict
+    itself for the flat-dict form, and ``.scale or {}`` for a
+    :class:`Resolve`.
+    """
+    if resolve is None:
+        return {}
+    if isinstance(resolve, Resolve):
+        return resolve.scale or {}
+    return resolve
+
+
+def _resolve_wire_dict(resolve: ResolveArg) -> Optional[dict]:
+    """Return a ``resolve=`` value in its JSON-serializable wire-dict shape.
+
+    Pure normalization for introspection surfaces (``RepeatChart.spec``):
+    no validation and no channel restriction, unlike
+    :func:`_composite_resolve_field` (the render-time lowering step, which
+    both validates and restricts). ``None`` and the flat-dict form pass
+    through unchanged (back-compat: byte-identical); a :class:`Resolve`
+    flattens to the same shape the lowering path emits — the scale entries
+    plus a ``"legend"`` sub-object only when legend overrides are present.
+    """
+    if resolve is None or isinstance(resolve, dict):
+        return resolve
+    wire = dict(resolve.scale or {})
+    if resolve.legend:
+        wire["legend"] = dict(resolve.legend)
+    return wire
 
 
 def _validate_share_modes(channels: Dict[str, str]) -> None:
@@ -326,25 +466,51 @@ def _is_leaf_chart(node) -> bool:
 _COMPOSITE_RESOLVE_CHANNELS = ("x", "y", "color", "size")
 
 
-def _composite_resolve_field(resolve: Optional[Dict[str, str]], *, kind: str) -> dict:
-    """Map a composition ``resolve=`` dict onto a composite node's resolve field.
+def _composite_resolve_field(resolve: ResolveArg, *, kind: str) -> dict:
+    """Map a composition ``resolve=`` value onto a composite node's resolve field.
 
     The Rust composite resolve pass spans the positional ``x``/``y`` channels
     plus ``color``/``size`` (10-pre-b); a ``"shared"`` request on any other
     channel (``shape``, ``opacity``, …) is not representable there. Returns
     ``{}`` when there is nothing to share, else ``{"x": mode, ...}`` restricted
-    to the supported channels.
+    to the supported channels, plus an optional ``"legend"`` sub-object (spec
+    §6 wire contract) carrying ``Resolve.legend`` for ``color``/``size``.
+
+    **Legend mode-matrix (spec §4/§6).** A channel's effective legend mode is
+    the explicit ``Resolve.legend[channel]`` when given, else that channel's
+    scale mode (the default: legend resolution follows scale resolution).
+    ``"shared"`` legend resolution requires ``"shared"`` scale resolution for
+    the same channel — deduping legends whose domains differ would fabricate
+    a mapping no panel uses (spec §4 "Explicit legend resolution", key
+    decision 5) — so that combination raises here, at lowering, rather than
+    silently falling back to per-panel legends.
+
+    Parameters
+    ----------
+    resolve : dict, Resolve, or None
+        A flat dict is scale-only (back-compat, equivalent to
+        ``Resolve(scale=resolve)``); a :class:`Resolve` additionally supplies
+        ``legend``.
+    kind : str
+        Composition class name, used in error messages.
 
     Raises
     ------
     ValueError
-        When an unsupported channel is marked ``"shared"`` — *kind* names the
-        composition node in the message.
+        When an unsupported channel is marked ``"shared"`` in ``scale``, when
+        ``legend`` names a channel other than ``color``/``size``, or when
+        ``legend`` requests ``"shared"`` for a channel whose effective scale
+        mode is not ``"shared"``.
     """
-    if not resolve:
+    if resolve is None:
         return {}
+    if isinstance(resolve, Resolve):
+        scale, legend = resolve.scale or {}, resolve.legend or {}
+    else:
+        scale, legend = resolve, {}
+
     out: dict = {}
-    for channel, mode in resolve.items():
+    for channel, mode in scale.items():
         if channel in _COMPOSITE_RESOLVE_CHANNELS:
             out[channel] = mode
         elif mode == "shared":
@@ -353,6 +519,24 @@ def _composite_resolve_field(resolve: Optional[Dict[str, str]], *, kind: str) ->
                 f"resolve pass does not support (supported: {_COMPOSITE_RESOLVE_CHANNELS}); "
                 "set it 'independent' or drop it from resolve="
             )
+
+    if legend:
+        legend_out: dict = {}
+        for channel, mode in legend.items():
+            if channel not in _LEGEND_RESOLVE_CHANNELS:
+                raise ValueError(
+                    f"{kind}: resolve.legend[{channel!r}] is not a legend-resolvable "
+                    f"channel (supported: {_LEGEND_RESOLVE_CHANNELS})"
+                )
+            effective_scale_mode = out.get(channel, "independent")
+            if mode == "shared" and effective_scale_mode != "shared":
+                raise ValueError(
+                    f"{kind}: resolve.legend[{channel!r}]='shared' requires "
+                    f"resolve.scale[{channel!r}]='shared' (got scale={effective_scale_mode!r}, "
+                    f"legend='shared'); a shared legend needs a unioned domain to dedup from"
+                )
+            legend_out[channel] = mode
+        out["legend"] = legend_out
     return out
 
 
@@ -1148,19 +1332,21 @@ class _ChartLike(ConfigureMixin):
         )
 
     def share_scale(self, **channels):
-        """Merge ``channels`` into this composition's ``resolve=`` field.
+        """Merge ``channels`` into this composition's ``resolve=`` scale field.
 
-        Pure sugar for constructing the same composition with
-        ``resolve={**(self._resolve or {}), **channels}`` — resolution
-        happens at render time through the composite tree, the same
-        Rust resolve pass (:func:`_composite_resolve_field`) that
-        ``resolve=`` at construction already uses. No ``scale=`` dict is
-        computed or injected here, and a "shared" union runs over
-        transform-aware chart extents (e.g. a box mark's whisker reach,
-        a KDE's density support), not raw column min/max — see
-        :func:`compute_union_domain` for the one remaining raw-column
-        injection seam (:meth:`LayerChart._build_merged`, the
-        interactive one-panel path; GH #52).
+        Pure sugar for constructing the same composition with the merged
+        scale-mode dict — resolution happens at render time through the
+        composite tree, the same Rust resolve pass
+        (:func:`_composite_resolve_field`) that ``resolve=`` at construction
+        already uses. No ``scale=`` domain dict is computed or injected here,
+        and a "shared" union runs over transform-aware chart extents (e.g. a
+        box mark's whisker reach, a KDE's density support), not raw column
+        min/max — see :func:`compute_union_domain` for the one remaining
+        raw-column injection seam (:meth:`LayerChart._build_merged`, the
+        interactive one-panel path; GH #52). ``**channels`` only ever
+        touches scale resolution; when the existing ``resolve=`` is a
+        :class:`Resolve` with a ``legend`` field set, that legend field
+        carries through unchanged onto the rebuilt composition.
 
         A child whose channel carries an explicit ``scale=`` (e.g.
         ``fm.Y("y", scale={"domain": [0, 200]})``) is EXCLUDED from the
@@ -1203,7 +1389,12 @@ class _ChartLike(ConfigureMixin):
             return self
         if not hasattr(self, "_resolve"):
             raise _unsupported_resolve_error(type(self).__name__)
-        merged = {**(self._resolve or {}), **channels}
+        existing = self._resolve
+        merged_scale = {**_resolve_scale_modes(existing), **channels}
+        existing_legend = existing.legend if isinstance(existing, Resolve) else None
+        merged: ResolveArg = (
+            Resolve(scale=merged_scale, legend=existing_legend) if existing_legend else merged_scale
+        )
         result = self._rebuild_with_charts(lambda c: c, resolve=merged)
         _copy_configure_layers(self, result)
         return result
@@ -1341,7 +1532,7 @@ class _CompositeBase(_ChartLike):
         charts: List,
         *,
         spacing: float = 10.0,
-        resolve: Optional[Dict[str, str]] = None,
+        resolve: ResolveArg = None,
     ) -> None:
         _validate_resolve(resolve, type(self).__name__)
         self.charts = list(charts)
@@ -1524,10 +1715,13 @@ class HConcatChart(_CompositeBase):
         Sub-charts to concatenate left-to-right.
     spacing : float, default 10.0
         Horizontal pixel gap between adjacent charts.
-    resolve : dict, optional
-        Per-channel scale-sharing overrides, e.g.
-        ``{"color": "shared"}``.  Accepts the same keys and values as
-        ``ConcatChart(resolve=...)``.
+    resolve : dict or Resolve, optional
+        Per-channel scale-sharing overrides, e.g. ``{"color": "shared"}``
+        (equivalent to ``Resolve(scale={"color": "shared"})``). Pass a
+        :class:`Resolve` to also control figure-level legend resolution,
+        e.g. ``Resolve(scale={"color": "shared"}, legend={"color": "independent"})``
+        to keep per-panel legends over a shared color scale.  Accepts the
+        same keys and values as ``ConcatChart(resolve=...)``.
 
     Examples
     --------
@@ -1556,10 +1750,13 @@ class VConcatChart(_CompositeBase):
         Sub-charts to stack top-to-bottom.
     spacing : float, default 10.0
         Vertical pixel gap between adjacent charts.
-    resolve : dict, optional
-        Per-channel scale-sharing overrides, e.g.
-        ``{"color": "shared"}``.  Accepts the same keys and values as
-        ``ConcatChart(resolve=...)``.
+    resolve : dict or Resolve, optional
+        Per-channel scale-sharing overrides, e.g. ``{"color": "shared"}``
+        (equivalent to ``Resolve(scale={"color": "shared"})``). Pass a
+        :class:`Resolve` to also control figure-level legend resolution,
+        e.g. ``Resolve(scale={"color": "shared"}, legend={"color": "independent"})``
+        to keep per-panel legends over a shared color scale.  Accepts the
+        same keys and values as ``ConcatChart(resolve=...)``.
 
     Examples
     --------
@@ -1876,13 +2073,16 @@ class RepeatChart(_CompositeBase):
     columns : int, optional
         Maximum number of columns for a wrapped 1-D repeat layout (no-op
         for 2-D row/column repeat).
-    resolve : dict, optional
+    resolve : dict or Resolve, optional
         Per-channel scale-sharing overrides — e.g.
         ``resolve={"x": "shared", "y": "independent"}``.  ``"shared"``
         computes the union domain across all panels (and across every
         layer of layered panels) and injects an explicit scale on every
         participating chart so the axis ticks match.  ``"independent"``
-        (the default for unlisted channels) keeps per-panel domains.
+        (the default for unlisted channels) keeps per-panel domains.  Pass
+        a :class:`Resolve` to also control figure-level legend resolution
+        for a shared ``color``/``size`` scale, e.g.
+        ``Resolve(scale={"color": "shared"}, legend={"color": "independent"})``.
 
     Raises
     ------
@@ -1920,7 +2120,7 @@ class RepeatChart(_CompositeBase):
         corner: bool = False,
         spacing: float = 10.0,
         columns: Optional[int] = None,
-        resolve=None,
+        resolve: ResolveArg = None,
     ) -> None:
         if diagonal is not None and (row is None or column is None):
             raise ValueError("RepeatChart: diagonal= requires both row= and column= to be set")
@@ -1948,14 +2148,14 @@ class RepeatChart(_CompositeBase):
         return [c for c in (self.template, self.diagonal) if c is not None]
 
     @property
-    def _resolve(self) -> Optional[dict]:
+    def _resolve(self) -> ResolveArg:
         """Alias for ``self.resolve`` (the public constructor attribute).
 
         ``RepeatChart`` exposes its resolve field as the public ``resolve``
         attribute (unlike the other forms' private ``_resolve``) so it can
         appear in :attr:`spec`. This read-only alias lets the base
         :meth:`_ChartLike.share_scale`'s ``hasattr(self, "_resolve")`` gate
-        and merge logic (``{**(self._resolve or {}), **channels}``) work for
+        and merge logic (:func:`_resolve_scale_modes`) work for
         ``RepeatChart`` unchanged, so :meth:`share_scale` needs no bespoke
         override.
         """
@@ -1978,7 +2178,7 @@ class RepeatChart(_CompositeBase):
             "diagonal": _embed_chart_spec(self.diagonal),
             "corner": self.corner,
             "columns": self.columns,
-            "resolve": self.resolve,
+            "resolve": _resolve_wire_dict(self.resolve),
             "spacing": self.spacing,
         }
 
@@ -2563,7 +2763,7 @@ class ClusterMapChart(_CompositeBase):
 # ---------------------------------------------------------------------------
 
 
-def _validate_layer_resolve(resolve: Optional[Dict[str, str]]) -> None:
+def _validate_layer_resolve(resolve: ResolveArg) -> None:
     """Raise ``ValueError`` when *resolve* marks ``x`` ``"independent"``.
 
     ``LayerChart`` overlays share one coordinate space along x by design
@@ -2581,13 +2781,11 @@ def _validate_layer_resolve(resolve: Optional[Dict[str, str]]) -> None:
 
     Parameters
     ----------
-    resolve : dict or None
-        The ``resolve=`` mapping passed to :class:`LayerChart` (already
+    resolve : dict, Resolve, or None
+        The ``resolve=`` value passed to :class:`LayerChart` (already
         validated for mode vocabulary by :func:`_validate_resolve`).
     """
-    if not resolve:
-        return
-    if resolve.get("x") == "independent":
+    if _resolve_scale_modes(resolve).get("x") == "independent":
         raise ValueError(
             "LayerChart: layers share one coordinate space (overlay contract); "
             "per-layer independent x scales are not supported "
@@ -2628,13 +2826,15 @@ class LayerChart(_ChartLike):
     ----------
     *charts : Chart
         Two or more charts to overlay.  At least one chart is required.
-    resolve : dict, optional
+    resolve : dict or Resolve, optional
         Per-channel scale-sharing overrides — e.g.
         ``resolve={"color": "independent"}``.  ``x`` is always shared (the
         overlay contract) and marking it ``"independent"`` raises (see GH
         #55 dual-x-axis).  ``y: "independent"`` renders a secondary axis
         per non-primary layer (GH #52).  Non-positional channels follow
-        the same inheritance rules as ``Chart + Chart``.
+        the same inheritance rules as ``Chart + Chart``.  Pass a
+        :class:`Resolve` to also control figure-level legend resolution for
+        a shared ``color``/``size`` scale.
     title : str, optional
         Title applied to the combined chart via ``.properties(title=...)``.
 
@@ -2659,7 +2859,7 @@ class LayerChart(_ChartLike):
     def __init__(
         self,
         *charts,
-        resolve: Optional[Dict[str, str]] = None,
+        resolve: ResolveArg = None,
         title: Optional[str] = None,
     ) -> None:
         if len(charts) < 1:
@@ -2819,7 +3019,7 @@ class LayerChart(_ChartLike):
 
     def _y_independent(self) -> bool:
         """Return whether ``resolve={"y": "independent"}`` was requested (GH #52)."""
-        return bool(self._resolve) and self._resolve.get("y") == "independent"
+        return _resolve_scale_modes(self._resolve).get("y") == "independent"
 
     def to_svg(self) -> str:
         """Render the layered charts to an SVG string.
@@ -2933,13 +3133,14 @@ class LayerChart(_ChartLike):
                     layers[i] = replace(layers[i], independent_y=True)
                 result._layers = layers
             n_before = len(result._layers)
-        if self._resolve:
-            shared = [ch for ch, mode in self._resolve.items() if mode == "shared"]
-            if shared:
-                for channel in shared:
-                    sd = compute_union_domain(self._charts, channel)
-                    if sd is not None:
-                        result = inject_scale(result, channel, sd)
+        shared = [
+            ch for ch, mode in _resolve_scale_modes(self._resolve).items() if mode == "shared"
+        ]
+        if shared:
+            for channel in shared:
+                sd = compute_union_domain(self._charts, channel)
+                if sd is not None:
+                    result = inject_scale(result, channel, sd)
         if self._title is not None:
             result = result.properties(title=self._title)
         # Prepend composition-level configure layers so per-chart config wins.
@@ -3019,9 +3220,11 @@ class ConcatChart(_CompositeBase):
         ``len(charts)`` (single row, no wrapping).
     spacing : float, default 10.0
         Pixel gap between adjacent panels.
-    resolve : dict, optional
+    resolve : dict or Resolve, optional
         Per-channel scale-sharing overrides — e.g.
-        ``resolve={"x": "shared", "y": "shared"}``.
+        ``resolve={"x": "shared", "y": "shared"}``.  Pass a :class:`Resolve`
+        to also control figure-level legend resolution for a shared
+        ``color``/``size`` scale.
 
     Raises
     ------
@@ -3049,7 +3252,7 @@ class ConcatChart(_CompositeBase):
         *charts,
         columns: Optional[int] = None,
         spacing: float = 10.0,
-        resolve: Optional[Dict[str, str]] = None,
+        resolve: ResolveArg = None,
     ) -> None:
         if len(charts) < 1:
             raise ValueError("ConcatChart requires at least one chart")

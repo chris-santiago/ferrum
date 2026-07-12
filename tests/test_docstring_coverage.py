@@ -71,6 +71,7 @@ _DOC_ALLOWLIST: set[str] = {
     "JointChart",
     "RepeatChart",
     "ClusterMapChart",
+    "Resolve",
     "Layer",
     "Repeat",
     "hconcat",

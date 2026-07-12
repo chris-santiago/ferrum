@@ -78,6 +78,7 @@ from ferrum.composition import (
     JointChart,
     RepeatChart,
     ClusterMapChart,
+    Resolve,
 )
 from ferrum.repeat import Repeat
 from ferrum.annotations import (
@@ -282,9 +283,10 @@ def hconcat(*charts, spacing=10.0, resolve=None):
         Two or more charts to place side-by-side.
     spacing : float, default 10.0
         Pixel gap between adjacent charts.
-    resolve : dict, optional
-        Per-channel scale-sharing overrides, e.g.
-        ``{"color": "shared"}``.
+    resolve : dict or Resolve, optional
+        Per-channel scale-sharing overrides, e.g. ``{"color": "shared"}``.
+        Pass a :class:`Resolve` to also control figure-level legend
+        resolution for a shared channel.
 
     Returns
     -------
@@ -311,9 +313,10 @@ def vconcat(*charts, spacing=10.0, resolve=None):
         Two or more charts to stack top-to-bottom.
     spacing : float, default 10.0
         Pixel gap between adjacent charts.
-    resolve : dict, optional
-        Per-channel scale-sharing overrides, e.g.
-        ``{"color": "shared"}``.
+    resolve : dict or Resolve, optional
+        Per-channel scale-sharing overrides, e.g. ``{"color": "shared"}``.
+        Pass a :class:`Resolve` to also control figure-level legend
+        resolution for a shared channel.
 
     Returns
     -------
@@ -338,9 +341,10 @@ def layer(*charts, resolve=None, title=None):
     ----------
     *charts : Chart
         Two or more charts to overlay bottom-to-top.
-    resolve : dict, optional
+    resolve : dict or Resolve, optional
         Per-channel scale-sharing overrides — e.g.
-        ``resolve={"color": "independent"}``.
+        ``resolve={"color": "independent"}``.  Pass a :class:`Resolve` to
+        also control figure-level legend resolution for a shared channel.
     title : str, optional
         Title applied to the combined chart.
 
@@ -372,8 +376,9 @@ def concat(*charts, columns=None, spacing=10.0, resolve=None):
         ``len(charts)`` (single row).
     spacing : float, default 10.0
         Pixel gap between adjacent cells.
-    resolve : dict, optional
-        Per-channel scale-sharing overrides.
+    resolve : dict or Resolve, optional
+        Per-channel scale-sharing overrides.  Pass a :class:`Resolve` to
+        also control figure-level legend resolution for a shared channel.
 
     Returns
     -------
@@ -446,6 +451,7 @@ __all__ = [
     "VConcatChart",
     "LayerChart",
     "ConcatChart",
+    "Resolve",
     "hconcat",
     "vconcat",
     "layer",

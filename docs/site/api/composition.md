@@ -11,6 +11,7 @@
         - JointChart
         - LayerChart
         - RepeatChart
+        - Resolve
         - VConcatChart
         - concat
         - hconcat
