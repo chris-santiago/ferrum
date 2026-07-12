@@ -779,6 +779,67 @@ def test_composite_level_configure_legend_orient_none_suppresses_band(chart_p, c
     )
 
 
+def test_single_chart_configure_legend_orient_none_suppresses_legend(chart_p):
+    """Fixed half of GH #74 defect 2: on a STANDALONE (non-composite) chart,
+    ``configure_legend(orient='none')`` was a silent no-op (Rust had no
+    ``LegendOrient::None`` variant, so ``prepare_render_inputs`` never saw a
+    suppression signal for the chart-level path). It must now join the same
+    ``disabled`` mechanism ``Color(legend=None)`` uses.
+    """
+    svg = chart_p.configure_legend(orient="none").to_svg()
+    texts = _legend_texts(svg)
+    assert texts.count("grp") == 0, (
+        f"single-chart orient='none' must suppress its own legend; got {texts}"
+    )
+
+
+def test_chart_level_orient_none_is_absolute_over_explicit_channel_legend(df_p):
+    """Pinned contract: chart-level ``configure_legend(orient='none')`` is an
+    ABSOLUTE disable — it is not overridable by a per-channel explicit legend
+    request (``Color(legend=Legend(...))``). There is no existing
+    "per-channel wins over chart-level *disable*" precedent in this codebase;
+    the only documented per-channel-wins rule is style-FILL (a per-channel
+    ``Legend(...)`` fills style fields the chart-level ``configure_legend``
+    left unset, `prepare/legend.rs` D13), not a suppression override. So even
+    a leaf that explicitly customizes its color legend still loses it under a
+    chart-level ``orient='none'``.
+    """
+    chart = (
+        fm.Chart(df_p)
+        .mark_point()
+        .encode(x="x", y="y", color=fm.Color("grp", legend=fm.Legend(title="Group")))
+        .configure_legend(orient="none")
+    )
+    svg = chart.to_svg()
+    texts = _legend_texts(svg)
+    assert texts.count("Group") == 0 and texts.count("grp") == 0, (
+        f"chart-level orient='none' must win over an explicit per-channel "
+        f"Legend(...) request; got {texts}"
+    )
+
+
+def test_leaf_configure_legend_overrides_composite_cascaded_orient_none(chart_p, chart_q):
+    """Precedence pin (spec §9.6 'per-chart explicit legend settings
+    interplay'): a composite-level ``configure_legend(orient='none')`` fans
+    to every leaf's ``_configure`` list via ``_inject_parent_config``, which
+    *prepends* the composite's layer so a leaf's own, later ``configure_legend``
+    call still wins (``_inject_parent_config``'s documented "per-chart layers
+    (which appear later) override them"). A leaf that re-enables its legend
+    with an explicit ``orient='bottom'`` must therefore still render it, and
+    the untouched sibling leaf stays suppressed by the composite's 'none'.
+    """
+    q_visible = chart_q.configure_legend(orient="bottom")
+    combo = fm.hconcat(chart_p, q_visible, resolve={"color": "shared"}).configure_legend(
+        orient="none"
+    )
+    svg = combo.to_svg()
+    texts = _legend_texts(svg)
+    assert texts.count("grp") == 1, (
+        f"leaf's own configure_legend must override the composite's cascaded "
+        f"orient='none' and keep exactly one legend visible; got {texts}"
+    )
+
+
 # ===========================================================================
 # Interactive-path boundary (scene JSON, not SVG).
 # ===========================================================================

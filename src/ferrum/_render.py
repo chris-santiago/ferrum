@@ -209,6 +209,19 @@ class _RenderMixin:
                     merged[key] = {**merged[key], **val}
                 else:
                     merged[key] = val
+        # GH #74: configure_legend(orient="none") joins the SAME suppression
+        # mechanism Color(legend=None) uses (encoding.<channel>.legend.disabled
+        # on the Rust side) -- there is no LegendOrient::None variant. Derived
+        # here, AFTER the full _configure layer merge above (not per-layer
+        # inside LegendConfig.to_dict()), so a later, more-specific
+        # configure_legend(...) layer -- e.g. a leaf's own call overriding a
+        # composite-cascaded orient="none" injected by _inject_parent_config --
+        # correctly wins and the suppression does not stick, matching the
+        # existing "per-chart layers (appear later) override" cascade
+        # convention documented on _inject_parent_config.
+        legend_cfg = merged.get("legend")
+        if isinstance(legend_cfg, dict) and legend_cfg.get("orient") == "none":
+            legend_cfg["disabled"] = True
         if self._annotations:
             ann_list = []
             for annotate in self._annotations:

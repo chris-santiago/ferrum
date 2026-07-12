@@ -107,6 +107,13 @@ pub(crate) fn build_color_legend(
     // Python ``Color`` class translates ``legend=None`` / ``legend=False``
     // from ``encode(color=Color(field, legend=None))`` into this JSON shape
     // so direct-label diagnostic charts can opt out of redundant legends.
+    //
+    // COUPLING (GH #74): the chart-level ``configure_legend(orient="none")``
+    // mirror in ``render::mod::prepare_and_layout`` post-hoc clears the SAME
+    // legend-content fields this branch leaves empty (entries, colorbar, plus
+    // the chart-wide extras aux_legends/title). If a new legend-content field
+    // is added to ``PreparedInputs`` and wired here, wire it into that clear
+    // block too, or a chart-level disable will silently leave it populated.
     let legend_disabled = spec
         .encoding
         .color

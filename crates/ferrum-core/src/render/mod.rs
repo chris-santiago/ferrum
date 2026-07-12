@@ -725,6 +725,17 @@ pub(crate) fn effective_legend_title(prep: &prepare::PreparedInputs) -> Option<S
     }
 }
 
+/// Whether chart-level `configure_legend(...)` fully suppresses the legend
+/// (GH #74). Currently set only via `disabled: true`, which Python's
+/// `_resolve_chart_config` derives from a fully-merged `orient="none"` —
+/// see the call site in `prepare_and_layout`. Reads the SAME `disabled`
+/// field `LegendStyleSpec` already carries for the per-encoding
+/// `Color(legend=None)` path (D13/Schwabish SB3); this is the chart-level
+/// mirror of that one suppression mechanism, not a second one.
+fn chart_config_legend_disabled(chart_config: &ChartConfig) -> bool {
+    chart_config.legend.as_ref().and_then(|l| l.style.disabled).unwrap_or(false)
+}
+
 /// Apply `ChartConfig.legend` fields to a `LegendOverrides`.
 ///
 /// Per-encoding `legend=Legend(...)` overrides (level 2) are already in the
@@ -1113,6 +1124,31 @@ fn prepare_and_layout(
 ) -> Result<PipelineOutput, RenderError> {
     let mut prep = prepare::prepare_render_inputs(spec, batch, theme, leaf_scales)?;
     let mut warnings = prep.warnings.clone();
+
+    // Chart-level `configure_legend(orient="none")` suppression (GH #74).
+    // Python's `_resolve_chart_config` (`_render.py`) maps a fully-merged
+    // `orient="none"` onto the same `disabled` signal `Color(legend=None)`
+    // sets at the per-channel level (`chart_config_legend_disabled` reads
+    // it here) — there is no `LegendOrient::None` variant on the Rust side.
+    // `prepare::prepare_render_inputs` only reads the per-channel
+    // `encoding.<channel>.legend.disabled` flag (Schwabish SB3), so the
+    // chart-level signal is applied here by clearing the already-built
+    // legend content — the exact same empty state that flag already
+    // produces. One seam covers every consumer: `render_svg` /
+    // `render_scene_json` call this function directly for a standalone
+    // chart, and `composite_render::render_leaf` calls this SAME function
+    // with the leaf's own `chart_config` for every composite leaf. A
+    // suppressed leaf therefore draws no per-panel legend AND yields an
+    // empty `LeafLegendBundle`, which `apply_legend_band` already treats as
+    // "no content to capture" — the identical degrade an all-disabled
+    // `Color(legend=None)` composite produces today (design §4/§9.8).
+    if chart_config_legend_disabled(chart_config) {
+        prep.legend_entries.clear();
+        prep.colorbar = None;
+        prep.aux_legends.clear();
+        prep.legend_title = None;
+        prep.legend_overrides.title = None;
+    }
 
     // Apply ChartConfig axis overrides (level 3) to AxisInput (level 2 wins when already set).
     // These styling fields use fill-only-if-`None` (first writer claims the slot), so the
