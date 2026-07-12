@@ -187,6 +187,17 @@ pub struct OrdinalScale {
     /// Original range values as supplied by the user, preserved for the
     /// Python getter. `None` when the user did not supply a range.
     range_orig: Option<Vec<OrdinalRangeValue>>,
+    /// Render-side explicitness flag (GH #39 phase 2, band-geometry
+    /// unification): `true` only when the positional resolver constructed
+    /// this scale from a user-supplied `BandScale`/`PointScale`/positional
+    /// `OrdinalScale` pixel range, as opposed to the panel-extent fallback.
+    /// Distinct from `range_user_set`, which tracks whether the *Python
+    /// constructor* received a `range` kwarg (used for the `.range` getter,
+    /// including non-positional color ranges). Always `false` from
+    /// `new_internal`; set via `with_explicit_range` at the render-internal
+    /// call sites that resolve an explicit `ScaleSpec` range. Consumed by
+    /// `explicit_band_extent()`.
+    explicit_pixel_range: bool,
 }
 
 impl OrdinalScale {
@@ -200,7 +211,33 @@ impl OrdinalScale {
             data: OrdinalScaleData { domain, range, padding },
             range_user_set: true,
             range_orig: Some(range_orig),
+            explicit_pixel_range: false,
         }
+    }
+
+    /// Marks this scale's pixel range as explicitly supplied by the user
+    /// (vs. the panel-extent fallback `new_internal` defaults to). Chainable
+    /// builder for the render-internal resolver call sites that know whether
+    /// the `ScaleSpec` carried a usable range (GH #39 phase 2). Never called
+    /// with `true` outside `render::scale_resolve::positional` — every other
+    /// `new_internal` call site keeps the default `false`.
+    pub(crate) fn with_explicit_range(mut self, explicit: bool) -> Self {
+        self.explicit_pixel_range = explicit;
+        self
+    }
+
+    /// Signed pixel extent (`r1 − r0`, in range order) of this scale's band
+    /// range, but only when [`with_explicit_range`](Self::with_explicit_range)
+    /// recorded it as user-supplied. `None` for the panel-extent fallback,
+    /// even though that range is numerically valid — explicitness is recorded
+    /// at construction, never inferred by comparing floats.
+    pub(crate) fn explicit_band_extent(&self) -> Option<f64> {
+        if !self.explicit_pixel_range {
+            return None;
+        }
+        let r0 = *self.data.range.first()?;
+        let r1 = *self.data.range.last()?;
+        Some(r1 - r0)
     }
 
     /// Crate-internal lookup. Returns `None` if `value` is not in the domain.
@@ -301,6 +338,7 @@ impl OrdinalScale {
             data: OrdinalScaleData { domain, range: internal_range, padding },
             range_user_set,
             range_orig,
+            explicit_pixel_range: false,
         })
     }
 
@@ -448,6 +486,7 @@ mod tests {
                 OrdinalRangeValue::Str("#cccccc".into()),
                 OrdinalRangeValue::Str("#e4572e".into()),
             ]),
+            explicit_pixel_range: false,
         };
         let orig = scale.range_orig.as_ref().unwrap();
         assert_eq!(orig.len(), 3);

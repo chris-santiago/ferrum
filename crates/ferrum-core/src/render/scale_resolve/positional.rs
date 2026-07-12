@@ -257,8 +257,11 @@ pub(in crate::render) fn build_from_scale_spec(
             // Extract numeric pixel range from the typed polymorphic `range`.
             // String values (color ranges) are handled by `build_color_scale` —
             // fall back to the pixel-range default when the range has no numbers.
-            let pixel_range = ordinal_pixel_range(range.as_deref(), pr);
-            ScaleKind::Ordinal(OrdinalScale::new_internal(d, pixel_range, *padding))
+            let (pixel_range, explicit) = ordinal_pixel_range(range.as_deref(), pr);
+            ScaleKind::Ordinal(
+                OrdinalScale::new_internal(d, pixel_range, *padding)
+                    .with_explicit_range(explicit),
+            )
         }
         ScaleSpec::Pow { exponent, common } => {
             let (d, r) = resolve_continuous_domain_and_range(&common.domain, &common.range, common.padding, col.as_ref(), &enc.field, pr)?;
@@ -279,11 +282,11 @@ pub(in crate::render) fn build_from_scale_spec(
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
             let effective_padding = padding_inner.unwrap_or(*padding);
-            ScaleKind::Ordinal(OrdinalScale::new_internal(
-                d,
-                band_point_pixel_range(range.as_deref(), pr),
-                effective_padding,
-            ))
+            let (band_range, explicit) = band_point_pixel_range(range.as_deref(), pr);
+            ScaleKind::Ordinal(
+                OrdinalScale::new_internal(d, band_range, effective_padding)
+                    .with_explicit_range(explicit),
+            )
         }
         ScaleSpec::Point { domain, padding, range, .. } => {
             let mut d = match domain {
@@ -291,11 +294,11 @@ pub(in crate::render) fn build_from_scale_spec(
                 None => distinct_positional_categories(batch, &enc.field)?,
             };
             apply_sort_to_domain(&mut d, enc.sort.as_ref(), sort_ctx, warnings);
-            ScaleKind::Ordinal(OrdinalScale::new_internal(
-                d,
-                band_point_pixel_range(range.as_deref(), pr),
-                *padding,
-            ))
+            let (point_range, explicit) = band_point_pixel_range(range.as_deref(), pr);
+            ScaleKind::Ordinal(
+                OrdinalScale::new_internal(d, point_range, *padding)
+                    .with_explicit_range(explicit),
+            )
         }
         // Continuous-degrading variants: whether the spec's `domain` is a
         // positional extent or a discrete-binning artifact is classified by
@@ -317,34 +320,49 @@ pub(in crate::render) fn build_from_scale_spec(
     })
 }
 
-/// Resolve the pixel-coordinate range for a `ScaleSpec::Ordinal`.
+/// Resolve the pixel-coordinate range for a `ScaleSpec::Ordinal`, plus
+/// whether that range counts as **explicit** for band-geometry purposes
+/// (GH #39 phase 2): `true` only when at least 2 numeric entries were found,
+/// mirroring `band_point_pixel_range`'s `>= 2`-entry gate so Band, Point, and
+/// positional Ordinal scales are never special-cased against each other.
 ///
 /// The typed `range` carries `Number` entries (pixel coordinates) and/or `Str`
 /// entries (color strings, handled by `build_color_scale`). This helper pulls
 /// the numbers for the positional resolver. When `range` is absent or carries
 /// no numbers (i.e. an all-string color range), the plot-area extent
-/// `[pr.0, pr.1]` is returned so the positional scale still functions.
+/// `[pr.0, pr.1]` is returned so the positional scale still functions. A
+/// single numeric entry is passed through unchanged (pre-existing arithmetic,
+/// untouched here) but does not count as explicit — `explicit_band_extent()`
+/// requires 2 entries to compute a signed extent.
 fn ordinal_pixel_range(
     range: Option<&[crate::scale::ordinal::OrdinalRangeValue]>,
     pr: (f64, f64),
-) -> Vec<f64> {
+) -> (Vec<f64>, bool) {
     match range {
         Some(values) => {
             let nums = crate::scale::ordinal::OrdinalRangeValue::numbers(values);
-            if nums.is_empty() { vec![pr.0, pr.1] } else { nums }
+            if nums.is_empty() {
+                (vec![pr.0, pr.1], false)
+            } else {
+                let explicit = nums.len() >= 2;
+                (nums, explicit)
+            }
         }
-        None => vec![pr.0, pr.1],
+        None => (vec![pr.0, pr.1], false),
     }
 }
 
-/// Resolve the pixel-coordinate range for a `ScaleSpec::Band`/`ScaleSpec::Point`.
+/// Resolve the pixel-coordinate range for a `ScaleSpec::Band`/`ScaleSpec::Point`,
+/// plus whether that range was explicitly supplied by the user (GH #39
+/// phase 2): `true` only for a usable (>= 2-entry) numeric range; the
+/// panel-extent fallback is never explicit.
 ///
 /// Explicit numeric pixel range for band/point scales; falls back to the
 /// panel extent when absent or degenerate (fewer than 2 entries).
-fn band_point_pixel_range(range: Option<&[f64]>, pr: (f64, f64)) -> Vec<f64> {
+fn band_point_pixel_range(range: Option<&[f64]>, pr: (f64, f64)) -> (Vec<f64>, bool) {
     match range {
-        Some(r) if r.len() >= 2 => vec![r[0], r[1]],
-        _ => vec![pr.0, pr.1],
+        Some(r) if r.len() >= 2 => (vec![r[0], r[1]], true),
+        _ => (vec![pr.0, pr.1], false),
     }
 }
 
@@ -437,29 +455,130 @@ pub(in crate::render) fn apply_coord_domain_overrides(
 
 #[cfg(test)]
 mod tests {
-    use super::band_point_pixel_range;
+    use super::{band_point_pixel_range, ordinal_pixel_range};
+    use crate::render::scale_resolve::ScaleKind;
 
-    /// Issue #39: an explicit two-entry range is honored verbatim.
+    /// Issue #39: an explicit two-entry range is honored verbatim, and marked
+    /// explicit for band-geometry consumers.
     #[test]
     fn band_point_pixel_range_honors_explicit_range() {
         let range = vec![40.0, 260.0];
-        assert_eq!(band_point_pixel_range(Some(&range), (0.0, 500.0)), vec![40.0, 260.0]);
+        assert_eq!(
+            band_point_pixel_range(Some(&range), (0.0, 500.0)),
+            (vec![40.0, 260.0], true)
+        );
     }
 
-    /// Issue #39: an absent range falls back to the panel extent.
+    /// Issue #39: an absent range falls back to the panel extent, and is not
+    /// marked explicit.
     #[test]
     fn band_point_pixel_range_falls_back_when_absent() {
-        assert_eq!(band_point_pixel_range(None, (0.0, 500.0)), vec![0.0, 500.0]);
+        assert_eq!(band_point_pixel_range(None, (0.0, 500.0)), (vec![0.0, 500.0], false));
     }
 
     /// Issue #39: a degenerate (fewer than 2 entries) range falls back to the
-    /// panel extent rather than panicking on out-of-bounds indexing.
+    /// panel extent rather than panicking on out-of-bounds indexing, and is
+    /// not marked explicit.
     #[test]
     fn band_point_pixel_range_falls_back_when_too_short() {
         let range = vec![40.0];
-        assert_eq!(band_point_pixel_range(Some(&range), (0.0, 500.0)), vec![0.0, 500.0]);
+        assert_eq!(
+            band_point_pixel_range(Some(&range), (0.0, 500.0)),
+            (vec![0.0, 500.0], false)
+        );
 
         let empty: Vec<f64> = vec![];
-        assert_eq!(band_point_pixel_range(Some(&empty), (0.0, 500.0)), vec![0.0, 500.0]);
+        assert_eq!(
+            band_point_pixel_range(Some(&empty), (0.0, 500.0)),
+            (vec![0.0, 500.0], false)
+        );
+    }
+
+    // ── explicitness contract (GH #39 phase 2, band-geometry unification) ──
+
+    /// A Band scale built with an explicit two-entry range reports
+    /// `explicit_band_extent()` as the signed extent `r1 - r0`.
+    #[test]
+    fn band_scale_explicit_range_reports_extent() {
+        let (range, explicit) = band_point_pixel_range(Some(&[40.0, 260.0]), (0.0, 500.0));
+        assert!(explicit);
+        let scale = ScaleKind::Ordinal(
+            crate::scale::ordinal::OrdinalScale::new_internal(
+                vec!["a".into(), "b".into()],
+                range,
+                0.0,
+            )
+            .with_explicit_range(explicit),
+        );
+        assert_eq!(scale.explicit_band_extent(), Some(220.0));
+    }
+
+    /// A reversed explicit range yields a negative signed extent.
+    #[test]
+    fn band_scale_explicit_reversed_range_reports_negative_extent() {
+        let (range, explicit) = band_point_pixel_range(Some(&[260.0, 40.0]), (0.0, 500.0));
+        assert!(explicit);
+        let scale = ScaleKind::Ordinal(
+            crate::scale::ordinal::OrdinalScale::new_internal(
+                vec!["a".into(), "b".into()],
+                range,
+                0.0,
+            )
+            .with_explicit_range(explicit),
+        );
+        assert_eq!(scale.explicit_band_extent(), Some(-220.0));
+    }
+
+    /// A Band scale falling back to the panel extent reports `None` even
+    /// though its range is numerically identical to what an explicit range
+    /// spanning the same pixels would be — explicitness is recorded at
+    /// construction, not inferred from the numbers.
+    #[test]
+    fn band_scale_fallback_range_reports_no_extent() {
+        let (range, explicit) = band_point_pixel_range(None, (0.0, 500.0));
+        assert!(!explicit);
+        let scale = ScaleKind::Ordinal(
+            crate::scale::ordinal::OrdinalScale::new_internal(
+                vec!["a".into(), "b".into()],
+                range,
+                0.0,
+            )
+            .with_explicit_range(explicit),
+        );
+        assert_eq!(scale.explicit_band_extent(), None);
+    }
+
+    /// A positional Ordinal scale with an explicit >= 2-entry numeric range
+    /// behaves identically to Band/Point (no special-casing).
+    #[test]
+    fn ordinal_positional_explicit_range_reports_extent() {
+        let range_values = vec![
+            crate::scale::ordinal::OrdinalRangeValue::Number(10.0),
+            crate::scale::ordinal::OrdinalRangeValue::Number(210.0),
+        ];
+        let (range, explicit) = ordinal_pixel_range(Some(&range_values), (0.0, 500.0));
+        assert!(explicit);
+        let scale = ScaleKind::Ordinal(
+            crate::scale::ordinal::OrdinalScale::new_internal(
+                vec!["a".into(), "b".into()],
+                range,
+                0.0,
+            )
+            .with_explicit_range(explicit),
+        );
+        assert_eq!(scale.explicit_band_extent(), Some(200.0));
+    }
+
+    /// A non-ordinal (Linear) scale always reports `None` — the accessor is
+    /// gated to ordinal positional scales only.
+    #[test]
+    fn linear_scale_never_reports_explicit_band_extent() {
+        let scale = ScaleKind::Linear(crate::scale::linear::LinearScale::new_internal(
+            vec![0.0, 100.0],
+            vec![40.0, 260.0],
+            false,
+            false,
+        ));
+        assert_eq!(scale.explicit_band_extent(), None);
     }
 }

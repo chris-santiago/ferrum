@@ -239,6 +239,23 @@ impl ScaleKind {
         (r[0], r[1])
     }
 
+    /// Signed band-pixel extent (`r1 − r0`, in range order) of an ordinal
+    /// positional scale's range, but only when the resolver recorded that
+    /// range as **explicitly supplied** by the user (`BandScale`/`PointScale`/
+    /// positional `OrdinalScale` `range=`) rather than the panel-extent
+    /// fallback. `None` for every other scale kind, and `None` for an ordinal
+    /// scale using the fallback range — even though that range is numerically
+    /// a valid extent, explicitness is a fact recorded at construction, never
+    /// inferred by comparing floats (band-geometry unification design §6).
+    ///
+    /// Consumer contract: `scale.explicit_band_extent().map(f64::abs).unwrap_or(panel_extent)`.
+    pub(in crate::render) fn explicit_band_extent(&self) -> Option<f64> {
+        match self {
+            ScaleKind::Ordinal(s) => s.explicit_band_extent(),
+            _ => None,
+        }
+    }
+
     /// Continuous-axis scale-projection support (continuous-axis tick design,
     /// 2026-05-30). Returns, for each major tick, its **domain fraction**
     /// `t ∈ [0, 1]` — the scale's normalized projection of the tick value,
