@@ -454,6 +454,60 @@ mod bug_hunt_tests {
 }
 
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod bug_hunt_interactive_slots {
+    use super::*;
+
+    /// Contract pin: `compose_panel_slot` documents the slot affine as y-only
+    /// (`sx`/`tx` identity by construction). If a caller ever writes a
+    /// non-identity `sx`/`tx` into a slot rescale, the composition silently
+    /// DROPS it — x always comes from the panel affine. This test pins that
+    /// drop so the contract is explicit rather than accidental.
+    #[test]
+    fn bug_hunt_compose_panel_slot_drops_slot_x_components() {
+        let panel = Affine2::identity();
+        let rogue_slot = Affine2 { sx: 5.0, sy: 1.0, tx: 99.0, ty: 0.0 };
+        let c = compose_panel_slot(panel, rogue_slot);
+        assert!((c.sx - 1.0).abs() < 1e-12, "slot sx must be ignored, got {}", c.sx);
+        assert!(c.tx.abs() < 1e-12, "slot tx must be ignored, got {}", c.tx);
+        assert!((c.sy - 1.0).abs() < 1e-12);
+        assert!(c.ty.abs() < 1e-12);
+    }
+
+    /// Numeric correctness with a NEGATIVE panel sy (y-flip pan/zoom state):
+    /// `panel ∘ slot` must still compose as panel.sy*(slot.sy*y + slot.ty) +
+    /// panel.ty. Hand-computed: panel {sy:-2, ty:10}, slot {sy:3, ty:5},
+    /// y=1 → slot: 8 → panel: -2*8+10 = -6.
+    #[test]
+    fn bug_hunt_compose_panel_slot_negative_panel_scale() {
+        let panel = Affine2 { sx: 1.0, sy: -2.0, tx: 0.0, ty: 10.0 };
+        let slot = Affine2 { sx: 1.0, sy: 3.0, tx: 0.0, ty: 5.0 };
+        let c = compose_panel_slot(panel, slot);
+        assert!((c.sy - (-6.0)).abs() < 1e-12, "sy must be -6, got {}", c.sy);
+        assert!(c.ty.abs() < 1e-12, "ty must be 0, got {}", c.ty);
+        let (_, y) = c.apply(0.0, 1.0);
+        assert!((y - (-6.0)).abs() < 1e-9, "composed y must be -6, got {y}");
+    }
+
+    /// A slot rescale composed with a panel affine must invert cleanly: the
+    /// displayed position of a slot-1 mark round-trips through
+    /// `inverse_apply` back to its scene position. This is the exact math a
+    /// slot-aware hit-test needs (see the failing slot hit-test in
+    /// `hit_test.rs::bug_hunt_interactive_slots`).
+    #[test]
+    fn bug_hunt_composed_slot_affine_round_trips_inverse() {
+        let panel = Affine2 { sx: 2.0, sy: 2.0, tx: 30.0, ty: -10.0 };
+        let slot = Affine2 { sx: 1.0, sy: 0.5, tx: 0.0, ty: 40.0 };
+        let c = compose_panel_slot(panel, slot);
+        let scene = (120.0_f64, 250.0_f64);
+        let (dx, dy) = c.apply(scene.0, scene.1);
+        let (bx, by) = c.inverse_apply(dx, dy);
+        assert!((bx - scene.0).abs() < 1e-9, "x round-trip failed: {bx}");
+        assert!((by - scene.1).abs() < 1e-9, "y round-trip failed: {by}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

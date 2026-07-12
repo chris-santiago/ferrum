@@ -443,6 +443,171 @@ fn rect_contains(r: &ferrum_scene::Rect, x: f64, y: f64) -> bool {
 
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
+mod bug_hunt_interactive_slots {
+    use super::*;
+    use ferrum_scene::{
+        BlendMode, CoordKind, FillStroke, LayoutScale, MarkBatch, MarkBatchKind, Panel, Rect,
+        TooltipContent, TooltipField,
+    };
+
+    fn fill() -> FillStroke {
+        FillStroke {
+            fill: Some(ferrum_scene::Color { r: 0, g: 0, b: 0, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        }
+    }
+
+    fn circle(cx: f64, cy: f64, r: f64) -> SceneNode {
+        SceneNode::Circle { cx, cy, r, style: fill() }
+    }
+
+    fn tooltip(field: &str, value: &str) -> TooltipContent {
+        TooltipContent {
+            fields: vec![TooltipField { name: field.to_string(), value: value.to_string() }],
+        }
+    }
+
+    fn slot_batch(nodes: Vec<SceneNode>, y_slot: usize, tip: TooltipContent) -> MarkBatch {
+        MarkBatch {
+            kind: MarkBatchKind::Point,
+            data_indices: Some((0..nodes.len()).collect()),
+            tooltips: Some(vec![tip; nodes.len()]),
+            hrefs: None,
+            descriptions: None,
+            keys: None,
+            blend: BlendMode::Normal,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+            y_slot,
+            nodes,
+        }
+    }
+
+    /// A single dual-axis panel: batch 0 (slot 0) and batch 1 (slot 1), each
+    /// with one circle.
+    fn dual_slot_panel(c0: (f64, f64), c1: (f64, f64)) -> Vec<Panel> {
+        vec![Panel {
+            id: 0,
+            plot_area: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            clip: Rect { x: 0.0, y: 0.0, w: 500.0, h: 500.0 },
+            coord: CoordKind::Cartesian {
+                x_domain: Some((0.0, 10.0)),
+                y_domain: Some((0.0, 100.0)),
+                expand: true,
+                clip: true,
+                y_domains: vec![Some((0.0, 100.0)), Some((0.0, 10.0))],
+            },
+            grid: vec![],
+            marks: vec![
+                slot_batch(vec![circle(c0.0, c0.1, 6.0)], 0, tooltip("y1", "primary")),
+                slot_batch(vec![circle(c1.0, c1.1, 6.0)], 1, tooltip("y2", "secondary")),
+            ],
+            axes: vec![],
+            annotations: vec![],
+            strip_title: vec![],
+            layout_scale: LayoutScale::identity(),
+        }]
+    }
+
+    fn identity_zoom() -> crate::zoom_pan::ZoomPanState {
+        crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default())
+    }
+
+    /// Overlapping marks from two layers in DIFFERENT slots: the linear scan
+    /// iterates batches in reverse, so the slot-1 batch (drawn on top) must
+    /// win the hit, and its per-layer tooltip — not the slot-0 layer's — must
+    /// be the one resolved for that batch index (per-layer tooltips,
+    /// bf40ee49).
+    #[test]
+    fn bug_hunt_overlapping_marks_in_different_slots_topmost_batch_wins() {
+        let panels = dual_slot_panel((100.0, 100.0), (100.0, 100.0)); // exact overlap
+        let zoom = identity_zoom();
+        let hit = hit_test(&panels, 100.0, 100.0, &zoom).expect("overlap must hit");
+        assert_eq!(hit.batch_idx, 1, "topmost (slot-1) batch must win the hit");
+        // The tooltip the runtime would serve for this hit is the slot-1 layer's.
+        let tip = panels[0].marks[hit.batch_idx]
+            .tooltips
+            .as_ref()
+            .and_then(|t| t.get(hit.node_idx))
+            .expect("slot-1 batch tooltip present");
+        assert_eq!(tip.fields[0].name, "y2", "hit must resolve the slot-1 layer's tooltip");
+        assert_eq!(tip.fields[0].value, "secondary");
+    }
+
+    /// At rest (identity panel affine, identity slot rescale) a slot-1 mark
+    /// hit-tests exactly like a slot-0 mark — the byte-stability control for
+    /// the failing test below.
+    #[test]
+    fn bug_hunt_slot1_mark_hit_test_at_rest_is_slot_agnostic() {
+        let panels = dual_slot_panel((100.0, 100.0), (300.0, 300.0));
+        let zoom = identity_zoom();
+        let hit = hit_test(&panels, 300.0, 300.0, &zoom).expect("slot-1 mark must hit at rest");
+        assert_eq!(hit.batch_idx, 1);
+        assert_eq!(hit.data_idx, Some(0));
+    }
+
+    /// After a per-slot domain rescale (domainParam/brush bound to the
+    /// independent-y layer, GH #52), slot-1 marks RENDER at
+    /// `compose_panel_slot(panel, slot_rescale)` — but `hit_test` only
+    /// inverse-applies the per-panel zoom affine (`zoom.transforms`); the
+    /// `slot_rescales` vector held by `WasmRenderer` is never consulted (no
+    /// parameter even exists to pass it). Clicking a rescaled slot-1 mark at
+    /// its DISPLAYED position therefore misses, and clicking its stale
+    /// pre-rescale position "hits" an empty spot on screen. Tooltips and
+    /// selections on the rescaled layer are broken until the panel zoom
+    /// resets.
+    #[test]
+    fn bug_hunt_hit_test_finds_slot1_mark_at_displayed_position_after_slot_rescale() { // BUG: hit_test ignores per-slot rescale affines — slot-1 marks are hit-tested at their pre-rescale position while the GPU draws them at panel∘slot
+        let panels = dual_slot_panel((100.0, 100.0), (200.0, 100.0));
+        // Panel affine stays identity (only the slot rescale fired) — this is
+        // exactly `apply_reactive_rescale`'s slotted branch.
+        let zoom = identity_zoom();
+        let slot_rescale = crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 };
+        let composed = crate::zoom_pan::compose_panel_slot(
+            crate::zoom_pan::Affine2::identity(),
+            slot_rescale,
+        );
+        // The GPU draws the slot-1 mark (scene y=100) at the composed position.
+        let (disp_x, disp_y) = composed.apply(200.0, 100.0);
+        assert_eq!((disp_x, disp_y), (200.0, 200.0), "fixture sanity: displayed at (200, 200)");
+
+        // Correct behavior: the click at the displayed position resolves the
+        // slot-1 mark. Today this returns None because hit_test has no slot
+        // awareness.
+        let hit = hit_test(&panels, disp_x, disp_y, &zoom);
+        assert!(
+            hit.is_some(),
+            "click at the DISPLAYED (slot-rescaled) position of a slot-1 mark must hit"
+        );
+        assert_eq!(hit.map(|h| h.batch_idx), Some(1));
+    }
+
+    /// The mirror image of the failing test above, pinning the wrong-space
+    /// behavior explicitly: the STALE pre-rescale position still hits even
+    /// though nothing is drawn there any more. When the slot-aware fix lands,
+    /// this test should be inverted alongside the one above.
+    #[test]
+    fn bug_hunt_hit_test_stale_pre_rescale_position_still_hits_slot1_mark() {
+        let panels = dual_slot_panel((100.0, 100.0), (200.0, 100.0));
+        let zoom = identity_zoom();
+        // No slot information reaches hit_test, so the scene-space position
+        // (200, 100) — where the mark is NOT displayed after the rescale —
+        // still registers a hit. This documents the current (wrong-space)
+        // contract; it is the passing half of the BUG pair.
+        let hit = hit_test(&panels, 200.0, 100.0, &zoom).expect("stale position hits today");
+        assert_eq!(hit.batch_idx, 1);
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
 mod bug_hunt_tests {
     use super::*;
 

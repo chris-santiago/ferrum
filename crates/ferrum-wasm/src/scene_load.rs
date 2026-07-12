@@ -7632,3 +7632,355 @@ mod bug_hunt_tests {
         assert_eq!(DrawKind::try_from(u32::MAX), Err(UnknownDrawKind(u32::MAX)));
     }
 }
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod bug_hunt_interactive_slots {
+    use super::*;
+
+    fn fill() -> FillStroke {
+        FillStroke {
+            fill: Some(Color { r: 10, g: 20, b: 30, a: 255 }),
+            stroke: None,
+            stroke_width: 0.0,
+            opacity: 1.0,
+            stroke_dash: None,
+            stroke_opacity: 1.0,
+            fill_opacity: 1.0,
+            angle: 0.0,
+        }
+    }
+
+    fn stroke() -> StrokeStyle {
+        StrokeStyle {
+            color: Color { r: 0, g: 0, b: 0, a: 255 },
+            width: 1.0,
+            opacity: 1.0,
+            dash: None,
+            stroke_cap: None,
+            stroke_join: None,
+            stroke_opacity: 1.0,
+        }
+    }
+
+    fn batch(kind: MarkBatchKind, nodes: Vec<SceneNode>, y_slot: usize) -> MarkBatch {
+        MarkBatch {
+            kind,
+            nodes,
+            data_indices: None,
+            tooltips: None,
+            hrefs: None,
+            descriptions: None,
+            keys: None,
+            blend: BlendMode::Normal,
+            stroke_cap: None,
+            stroke_join: None,
+            packed_instances: None,
+            y_slot,
+        }
+    }
+
+    fn dual_slot_scene(slot1: usize) -> SceneGraph {
+        SceneGraph {
+            width: 400.0,
+            height: 300.0,
+            background: None,
+            title: vec![],
+            panels: vec![Panel {
+                id: 0,
+                plot_area: Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 },
+                clip: Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 },
+                coord: CoordKind::Cartesian {
+                    x_domain: Some((0.0, 10.0)),
+                    y_domain: Some((0.0, 100.0)),
+                    expand: true,
+                    clip: true,
+                    y_domains: vec![Some((0.0, 100.0)), Some((0.0, 10.0))],
+                },
+                grid: vec![],
+                marks: vec![
+                    // Slot-0 mesh batch (line → tessellated mesh).
+                    batch(
+                        MarkBatchKind::Line,
+                        vec![SceneNode::Line {
+                            x1: 0.0,
+                            y1: 0.0,
+                            x2: 100.0,
+                            y2: 100.0,
+                            style: stroke(),
+                        }],
+                        0,
+                    ),
+                    // Slot-1 mesh batch.
+                    batch(
+                        MarkBatchKind::Line,
+                        vec![SceneNode::Line {
+                            x1: 0.0,
+                            y1: 50.0,
+                            x2: 100.0,
+                            y2: 150.0,
+                            style: stroke(),
+                        }],
+                        slot1,
+                    ),
+                    // Slot-1 instanced batch (circle → DrawCommand).
+                    batch(
+                        MarkBatchKind::Point,
+                        vec![SceneNode::Circle { cx: 50.0, cy: 50.0, r: 4.0, style: fill() }],
+                        slot1,
+                    ),
+                ],
+                axes: vec![],
+                annotations: vec![],
+                strip_title: vec![],
+                layout_scale: LayoutScale::identity(),
+            }],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        }
+    }
+
+    // ── load_scene: per-slot metadata threading ────────────────────────────
+
+    /// A dual-slot panel must produce `panel_slot_counts == [2]`, mesh slices
+    /// tagged with each batch's own y_slot, and an instanced draw command
+    /// carrying the slot-1 id — the exact metadata the render loop binds
+    /// per-(panel, slot) affines by.
+    #[test]
+    fn bug_hunt_load_scene_threads_y_slots_into_all_gpu_metadata() {
+        let data = load_scene(&dual_slot_scene(1));
+        assert_eq!(data.panel_slot_counts, vec![2], "y_domains len drives slot count");
+        assert_eq!(total_transform_slots(&data.panel_slot_counts), 2);
+
+        let mesh_slots: Vec<usize> = data.mark_mesh_panels.iter().map(|m| m.y_slot).collect();
+        assert_eq!(mesh_slots, vec![0, 1], "each mesh batch must carry its own slot");
+
+        let mark_cmds: Vec<&DrawCommand> =
+            data.draw_commands.iter().filter(|c| c.is_mark).collect();
+        assert_eq!(mark_cmds.len(), 1, "one instanced mark command (the circle batch)");
+        assert_eq!(mark_cmds[0].y_slot, 1, "instanced command must carry the batch's slot");
+        assert_eq!(mark_cmds[0].panel_id, 0);
+    }
+
+    /// A batch whose `y_slot` exceeds the panel's slot count (corrupt or
+    /// future scene) must load without panicking; the flat index the render
+    /// loop derives clamps to the panel's last slot instead of walking into a
+    /// sibling panel's block.
+    #[test]
+    fn bug_hunt_out_of_range_batch_slot_loads_and_clamps() {
+        let data = load_scene(&dual_slot_scene(7));
+        // The raw slot id is preserved on the command…
+        let mark_cmds: Vec<&DrawCommand> =
+            data.draw_commands.iter().filter(|c| c.is_mark).collect();
+        assert_eq!(mark_cmds[0].y_slot, 7);
+        // …and the index mapping clamps it inside the panel's 2-slot block.
+        let idx = transform_slot_index(&data.panel_slot_counts, 0, 7);
+        assert_eq!(idx, 1, "slot 7 of a 2-slot panel must clamp to slot 1");
+        assert!(idx < total_transform_slots(&data.panel_slot_counts));
+    }
+
+    /// A zero-panel scene: `panel_slot_counts` is empty while `panel_count`
+    /// floors at 1 and `total_transform_slots` floors at 1 — the divergent
+    /// trio the GpuBuffers/ZoomPanState constructors each consume. None of it
+    /// may panic.
+    #[test]
+    fn bug_hunt_zero_panel_scene_slot_bookkeeping_is_consistent() {
+        let scene = SceneGraph {
+            width: 100.0,
+            height: 100.0,
+            background: None,
+            title: vec![],
+            panels: vec![],
+            legend: vec![],
+            decorations: vec![],
+            selections: vec![],
+            interaction: InteractionConfig::default(),
+            chart_description: None,
+        };
+        let data = load_scene(&scene);
+        assert!(data.panel_slot_counts.is_empty());
+        assert_eq!(data.panel_count, 1, "panel_count floors at 1");
+        assert_eq!(total_transform_slots(&data.panel_slot_counts), 1, "slot total floors at 1");
+        // The (0, 0) lookup against empty counts must stay in the floor slot.
+        assert_eq!(transform_slot_index(&data.panel_slot_counts, 0, 0), 0);
+    }
+
+    /// `transform_slot_index` for a panel PAST the end of the counts vec
+    /// resolves to `total` — one past the last allocated slot — so every
+    /// caller's `.get(idx)` yields `None` and falls back to identity instead
+    /// of silently borrowing another panel's affine.
+    #[test]
+    fn bug_hunt_transform_slot_index_out_of_range_panel_lands_past_total() {
+        let counts = vec![2, 2];
+        let idx = transform_slot_index(&counts, 5, 0);
+        assert_eq!(idx, 4, "out-of-range panel must map past the allocated slots");
+        assert!(idx >= total_transform_slots(&counts), "must NOT alias an existing slot");
+    }
+
+    /// Non-cartesian coords have no slot list: Fixed and Polar panels are
+    /// always single-slot regardless of what a caller asks for.
+    #[test]
+    fn bug_hunt_panel_slot_count_non_cartesian_is_one() {
+        let fixed = CoordKind::Fixed {
+            ratio: 1.0,
+            x_domain: None,
+            y_domain: Some((0.0, 1.0)),
+            expand: true,
+            clip: true,
+        };
+        assert_eq!(panel_slot_count(&fixed), 1);
+        let polar = CoordKind::Polar {
+            theta: PolarThetaChannel::X,
+            start_angle: 0.0,
+            direction: PolarDirection::Clockwise,
+            inner_radius: 0.0,
+            outer_radius: 1.0,
+        };
+        assert_eq!(panel_slot_count(&polar), 1);
+    }
+
+    /// A cartesian panel whose y_domains contains ONLY `None` entries (all
+    /// ordinal slots) still counts each slot — the count comes from the list
+    /// length, not from domain usability.
+    #[test]
+    fn bug_hunt_panel_slot_count_counts_none_entries() {
+        let coord = CoordKind::Cartesian {
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+            y_domains: vec![None, None],
+        };
+        assert_eq!(panel_slot_count(&coord), 2);
+    }
+
+    // ── serde round-trips of the per-slot wire contract ────────────────────
+
+    /// `MarkBatch.y_slot`: 0 is omitted (byte-stability), non-zero survives a
+    /// JSON round-trip, and a pre-#52 payload without the key deserializes to
+    /// slot 0.
+    #[test]
+    fn bug_hunt_mark_batch_y_slot_serde_round_trip_and_default() {
+        let b0 = batch(MarkBatchKind::Point, vec![], 0);
+        let j0 = serde_json::to_string(&b0).expect("serialize");
+        assert!(!j0.contains("y_slot"), "slot 0 must be omitted: {j0}");
+
+        let b1 = batch(MarkBatchKind::Point, vec![], 1);
+        let j1 = serde_json::to_string(&b1).expect("serialize");
+        assert!(j1.contains("\"y_slot\":1"), "slot 1 must serialize: {j1}");
+        let back: MarkBatch = serde_json::from_str(&j1).expect("deserialize");
+        assert_eq!(back.y_slot, 1);
+
+        // Pre-#52 batch JSON (no y_slot key) → slot 0.
+        let legacy = r#"{"kind":"point","nodes":[],"data_indices":null,"tooltips":null,
+            "hrefs":null,"descriptions":null,"keys":null,"blend":"normal",
+            "stroke_cap":null,"stroke_join":null}"#;
+        let parsed: MarkBatch = serde_json::from_str(legacy).expect("legacy deserialize");
+        assert_eq!(parsed.y_slot, 0, "missing y_slot must default to 0");
+    }
+
+    /// `CoordKind::Cartesian.y_domains`: a populated list including a `None`
+    /// (ordinal) slot round-trips exactly; an empty list is omitted; a
+    /// pre-#52 payload without the key deserializes to empty.
+    #[test]
+    fn bug_hunt_coord_y_domains_serde_round_trip_with_none_slot() {
+        let coord = CoordKind::Cartesian {
+            x_domain: Some((0.0, 1.0)),
+            y_domain: Some((0.0, 100.0)),
+            expand: true,
+            clip: true,
+            y_domains: vec![Some((0.0, 100.0)), None, Some((-3.5, 3.5))],
+        };
+        let json = serde_json::to_string(&coord).expect("serialize");
+        assert!(json.contains("y_domains"), "populated y_domains must serialize");
+        let back: CoordKind = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, coord, "y_domains (incl. None slot) must round-trip");
+
+        let single = CoordKind::Cartesian {
+            x_domain: None,
+            y_domain: None,
+            expand: true,
+            clip: true,
+            y_domains: Vec::new(),
+        };
+        let sj = serde_json::to_string(&single).expect("serialize");
+        assert!(!sj.contains("y_domains"), "empty y_domains must be omitted: {sj}");
+
+        let legacy = r#"{"kind":"cartesian","x_domain":null,"y_domain":null,
+            "expand":true,"clip":true}"#;
+        let parsed: CoordKind = serde_json::from_str(legacy).expect("legacy deserialize");
+        match parsed {
+            CoordKind::Cartesian { y_domains, .. } => {
+                assert!(y_domains.is_empty(), "missing y_domains must default to empty")
+            }
+            other => panic!("expected cartesian, got {other:?}"),
+        }
+    }
+
+    /// `PanelTickLevels.y_slot_levels` round-trips (populated) and defaults to
+    /// empty when the key is absent (pre-#52 tick-level payloads).
+    #[test]
+    fn bug_hunt_panel_tick_levels_y_slot_levels_serde() {
+        let ptl = PanelTickLevels {
+            panel_id: 0,
+            x_levels: vec![],
+            y_levels: vec![],
+            y_slot_levels: vec![vec![TickLevel {
+                min_zoom: 1.0,
+                max_zoom: f64::INFINITY,
+                ticks: vec![Tick { value: 0.5, label: "0.5".into(), pixel: 42.0 }],
+            }]],
+        };
+        let json = serde_json::to_string(&ptl).expect("serialize");
+        assert!(json.contains("y_slot_levels"));
+        // Infinity must be string-encoded (zoom_serde), never a bare token
+        // that would break the browser's JSON.parse.
+        assert!(json.contains("\"Infinity\""), "max_zoom=inf must string-encode: {json}");
+        assert!(!json.contains(":Infinity"), "bare Infinity token must never appear: {json}");
+        let back: PanelTickLevels = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, ptl, "y_slot_levels must round-trip (incl. Infinity zoom bound)");
+
+        let legacy = r#"{"panel_id":3,"x_levels":[],"y_levels":[]}"#;
+        let parsed: PanelTickLevels = serde_json::from_str(legacy).expect("legacy deserialize");
+        assert!(parsed.y_slot_levels.is_empty(), "missing y_slot_levels must default to empty");
+    }
+
+    /// `ParamBinding.y_slot` survives a full `InteractionConfig` round-trip
+    /// embedded next to slot-0 bindings (which omit the key) — the mixed case
+    /// a dual-axis chart with two domainParams produces.
+    #[test]
+    fn bug_hunt_param_binding_slot_mix_round_trips_through_interaction_config() {
+        let cfg = InteractionConfig {
+            param_bindings: vec![
+                ParamBinding {
+                    param: "d1".into(),
+                    role: BindingRole::Domain,
+                    panel: Some(0),
+                    channel: Some("y".into()),
+                    y_slot: 0,
+                },
+                ParamBinding {
+                    param: "d2".into(),
+                    role: BindingRole::Domain,
+                    panel: Some(0),
+                    channel: Some("y".into()),
+                    y_slot: 1,
+                },
+            ],
+            ..InteractionConfig::default()
+        };
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        assert_eq!(
+            json.matches("y_slot").count(),
+            1,
+            "only the slot-1 binding may carry the key: {json}"
+        );
+        let back: InteractionConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, cfg);
+        assert_eq!(back.param_bindings[0].y_slot, 0);
+        assert_eq!(back.param_bindings[1].y_slot, 1);
+    }
+}

@@ -260,6 +260,152 @@ pub(crate) fn rescale_affine_cross_panel(
 }
 
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod bug_hunt_interactive_slots {
+    use super::*;
+    use ferrum_scene::Rect;
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect { x, y, w, h }
+    }
+
+    fn dual_coord() -> CoordKind {
+        CoordKind::Cartesian {
+            x_domain: Some((0.0, 10.0)),
+            y_domain: Some((0.0, 100.0)),
+            expand: true,
+            clip: true,
+            y_domains: vec![Some((0.0, 100.0)), Some((0.0, 10.0))],
+        }
+    }
+
+    /// The exact affine `apply_reactive_rescale` builds for a y-domainParam
+    /// brush on slot 1 of a single dual-axis panel, hand-computed.
+    ///
+    /// plot_area y: [0, 100]; slot-1 domain [0, 10]; brush screen y (40, 60).
+    /// Through slot 1 (screen flip): y=40 → 6, y=60 → 4 → data [4, 6] →
+    /// back to pixels [40, 60]. rescale over target span 100 → scale 5,
+    /// offset = 0 − 5·40 = −200. A mark at screen y=50 (data 5, brush
+    /// center) must map to 5·50 − 200 = 50 — i.e. the brush center stays put.
+    #[test]
+    fn bug_hunt_slotted_self_rescale_affine_hand_computed() {
+        let pa = rect(0.0, 0.0, 100.0, 100.0);
+        let coord = dual_coord();
+        let (scale, offset) =
+            rescale_affine_cross_panel((40.0, 60.0), &pa, &coord, &pa, &coord, Axis::Y, 1)
+                .expect("slot-1 domain present, brush non-degenerate");
+        assert!((scale - 5.0).abs() < 1e-9, "scale must be 5, got {scale}");
+        assert!((offset - (-200.0)).abs() < 1e-6, "offset must be -200, got {offset}");
+        assert!((scale * 50.0 + offset - 50.0).abs() < 1e-6, "brush center must be fixed");
+        assert!((scale * 40.0 + offset - 0.0).abs() < 1e-6, "brush top → plot top");
+    }
+
+    /// The same brush inverted through slot 0 must yield a DIFFERENT data
+    /// interval than slot 1 whenever the domains differ — if the slot index
+    /// were ignored, a slot-1 domainParam would silently rescale through the
+    /// primary domain. Discriminates the slot routing.
+    #[test]
+    fn bug_hunt_slot0_and_slot1_rescale_affines_agree_only_by_accident_of_geometry() {
+        let pa = rect(0.0, 0.0, 100.0, 100.0);
+        let coord = dual_coord();
+        // With source == target and proportional domains, the pixel-space
+        // affine happens to be identical — so use a target with a DIFFERENT
+        // pixel layout for slot 1's domain to expose the routing.
+        let tgt_pa = rect(0.0, 0.0, 100.0, 50.0); // target y: [0, 50]
+        let tgt_coord = CoordKind::Cartesian {
+            x_domain: Some((0.0, 10.0)),
+            y_domain: Some((0.0, 100.0)),
+            expand: true,
+            clip: true,
+            // slot 1's domain on the target covers only [0, 5]: data [4, 6]
+            // clips differently than the primary [0, 100].
+            y_domains: vec![Some((0.0, 100.0)), Some((0.0, 5.0))],
+        };
+        let r0 = reproject_extent((40.0, 60.0), &pa, &coord, &tgt_pa, &tgt_coord, Axis::Y, 0);
+        let r1 = reproject_extent((40.0, 60.0), &pa, &coord, &tgt_pa, &tgt_coord, Axis::Y, 1);
+        let (a0, b0) = r0.expect("slot-0 reprojection");
+        let (a1, b1) = r1.expect("slot-1 reprojection");
+        assert!(
+            (a0 - a1).abs() > 1.0 || (b0 - b1).abs() > 1.0,
+            "slot 0 ({a0},{b0}) and slot 1 ({a1},{b1}) must reproject differently"
+        );
+    }
+
+    /// Cross-panel reprojection where the SOURCE is dual-axis but the TARGET
+    /// is single-y: the target's `y_domains` is empty, so slot 1 falls back to
+    /// the target's legacy `y_domain`. Hand-computed round trip.
+    #[test]
+    fn bug_hunt_reproject_dual_source_to_single_y_target() {
+        let src_pa = rect(0.0, 0.0, 100.0, 100.0);
+        let src = dual_coord(); // slot 1 domain [0, 10]
+        let tgt_pa = rect(0.0, 0.0, 100.0, 100.0);
+        let tgt = CoordKind::Cartesian {
+            x_domain: None,
+            y_domain: Some((0.0, 10.0)), // same numeric domain as source slot 1
+            expand: true,
+            clip: true,
+            y_domains: Vec::new(), // single-y target
+        };
+        // Brush source screen y [0, 50] → slot-1 data [5, 10] → target pixels
+        // (domain [0,10], screen flip): data 10 → 0, data 5 → 50 → (0, 50).
+        let out = reproject_extent((0.0, 50.0), &src_pa, &src, &tgt_pa, &tgt, Axis::Y, 1)
+            .expect("both domains resolvable");
+        assert!((out.0 - 0.0).abs() < 1e-6, "lo={}", out.0);
+        assert!((out.1 - 50.0).abs() < 1e-6, "hi={}", out.1);
+    }
+
+    /// A slot index pointing at a `None` entry (ordinal slot-1 scale) must
+    /// make the whole reprojection return `None` — the binding is skipped, not
+    /// silently routed through the primary domain.
+    #[test]
+    fn bug_hunt_reproject_through_ordinal_slot_is_none() {
+        let pa = rect(0.0, 0.0, 100.0, 100.0);
+        let coord = CoordKind::Cartesian {
+            x_domain: None,
+            y_domain: Some((0.0, 100.0)),
+            expand: true,
+            clip: true,
+            y_domains: vec![Some((0.0, 100.0)), None], // slot 1 is ordinal
+        };
+        assert!(
+            reproject_extent((0.0, 50.0), &pa, &coord, &pa, &coord, Axis::Y, 1).is_none(),
+            "ordinal slot must make pixel↔data conversion undefined"
+        );
+    }
+
+    /// `CoordKind::Fixed` has no per-slot list: any y_slot must read the
+    /// single `y_domain` (the clamp-safe fallback), never panic or None.
+    #[test]
+    fn bug_hunt_axis_domain_slot_fixed_coord_ignores_slot() {
+        let fixed = CoordKind::Fixed {
+            ratio: 1.0,
+            x_domain: Some((0.0, 1.0)),
+            y_domain: Some((0.0, 5.0)),
+            expand: true,
+            clip: true,
+        };
+        assert_eq!(axis_domain_slot(&fixed, Axis::Y, 0), Some((0.0, 5.0)));
+        assert_eq!(axis_domain_slot(&fixed, Axis::Y, 3), Some((0.0, 5.0)));
+    }
+
+    /// Degenerate geometry must not divide by zero: a zero-height plot area
+    /// returns the domain lo; a zero-span domain returns the pixel lo. Both
+    /// must be finite (no NaN propagating into a slot rescale affine).
+    #[test]
+    fn bug_hunt_degenerate_spans_produce_finite_values() {
+        let flat_pa = rect(0.0, 20.0, 100.0, 0.0); // zero height
+        let d = pixel_to_data(20.0, &flat_pa, (3.0, 9.0), Axis::Y);
+        assert!(d.is_finite(), "zero-height plot area must not produce NaN, got {d}");
+        assert!((d - 3.0).abs() < 1e-12, "must return domain lo, got {d}");
+
+        let pa = rect(0.0, 0.0, 100.0, 100.0);
+        let p = data_to_pixel(5.0, &pa, (5.0, 5.0), Axis::Y); // zero-span domain
+        assert!(p.is_finite(), "zero-span domain must not produce NaN, got {p}");
+        assert!((p - 0.0).abs() < 1e-12, "must return pixel lo, got {p}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ferrum_scene::Rect;

@@ -381,6 +381,248 @@ pub(crate) fn format_tooltip_content(tooltip: &ferrum_scene::TooltipContent) -> 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod bug_hunt_interactive_slots {
+    use super::*;
+    use ferrum_scene::{Color, FontWeight, TextAnchor, TextBaseline, TextStyle};
+
+    fn style() -> TextStyle {
+        TextStyle {
+            font_size: 11.0,
+            font_weight: FontWeight::Normal,
+            font_family: "sans-serif".to_string(),
+            color: Color { r: 51, g: 51, b: 51, a: 255 },
+            opacity: 1.0,
+            anchor: TextAnchor::Start,
+            baseline: TextBaseline::Alphabetic,
+            angle: 0.0,
+        }
+    }
+
+    fn text(x: f64, y: f64, content: &str) -> TextElementData {
+        TextElementData { x, y, content: content.to_string(), style: style() }
+    }
+
+    fn tick(label: &str, pixel: f64) -> ferrum_scene::Tick {
+        ferrum_scene::Tick { value: pixel, label: label.to_string(), pixel }
+    }
+
+    fn level(labels: &[(&str, f64)]) -> ferrum_scene::TickLevel {
+        ferrum_scene::TickLevel {
+            min_zoom: 1.0,
+            max_zoom: 10.0,
+            ticks: labels.iter().map(|(l, p)| tick(l, *p)).collect(),
+        }
+    }
+
+    fn interaction(
+        y_labels: &[(&str, f64)],
+        slot_levels: Vec<Vec<ferrum_scene::TickLevel>>,
+    ) -> ferrum_scene::InteractionConfig {
+        ferrum_scene::InteractionConfig {
+            zoom_enabled: false,
+            pan_enabled: false,
+            conditionals: vec![],
+            linked_panels: vec![],
+            toolbar: true,
+            params: vec![],
+            param_bindings: vec![],
+            tick_levels: vec![ferrum_scene::PanelTickLevels {
+                panel_id: 0,
+                x_levels: vec![],
+                y_levels: vec![level(y_labels)],
+                y_slot_levels: slot_levels,
+            }],
+        }
+    }
+
+    fn parse(json: &str) -> Vec<serde_json::Value> {
+        serde_json::from_str(json).expect("valid JSON")
+    }
+
+    fn y_of(parsed: &[serde_json::Value], content: &str) -> f64 {
+        parsed
+            .iter()
+            .find(|v| v["content"] == content)
+            .and_then(|v| v["y"].as_f64())
+            .unwrap_or_else(|| panic!("{content} must be present"))
+    }
+
+    /// A secondary right axis with a SINGLE tick is never recognized as a
+    /// column (the `c >= 2` frequency filter in `build_zoomed_text_json`), so
+    /// its label does NOT reposition under a slot-only rescale — while a
+    /// single-tick PRIMARY axis relabels fine (the primary column has no
+    /// `>= 2` filter). A degenerate secondary domain (all values identical)
+    /// can legitimately produce one tick, and its axis then freezes under a
+    /// domainParam/brush rescale.
+    #[test]
+    fn bug_hunt_single_tick_secondary_axis_relabels_under_slot_rescale() { // BUG: `c >= 2` column filter means a 1-tick right axis never repositions; asymmetric with the primary axis which relabels with 1 tick
+        let cfg = interaction(&[("L", 100.0)], vec![vec![level(&[("R99", 120.0)])]]);
+        let all_text = vec![text(40.0, 100.0, "L"), text(460.0, 120.0, "R99")];
+        let panel = crate::zoom_pan::Affine2::identity();
+        let secondary = [crate::zoom_pan::compose_panel_slot(
+            panel,
+            crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 },
+        )];
+        let parsed = parse(&build_zoomed_text_json(&all_text, &cfg, 0, &panel, &secondary, None));
+        assert_eq!(
+            y_of(&parsed, "R99"),
+            240.0,
+            "single-tick right-axis label must reposition through its slot \
+             rescale (120 * 2 = 240) exactly as a multi-tick axis does"
+        );
+    }
+
+    /// Sanity control for the failing test above: the SAME setup with TWO
+    /// ticks on the right axis does reposition — proving the failure is the
+    /// column-recognition threshold, not the affine plumbing.
+    #[test]
+    fn bug_hunt_two_tick_secondary_axis_relabels_under_slot_rescale() {
+        let cfg = interaction(
+            &[("L", 100.0)],
+            vec![vec![level(&[("R1", 120.0), ("R2", 200.0)])]],
+        );
+        let all_text = vec![
+            text(40.0, 100.0, "L"),
+            text(460.0, 120.0, "R1"),
+            text(460.0, 200.0, "R2"),
+        ];
+        let panel = crate::zoom_pan::Affine2::identity();
+        let secondary = [crate::zoom_pan::compose_panel_slot(
+            panel,
+            crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 },
+        )];
+        let parsed = parse(&build_zoomed_text_json(&all_text, &cfg, 0, &panel, &secondary, None));
+        assert_eq!(y_of(&parsed, "R1"), 240.0);
+        assert_eq!(y_of(&parsed, "R2"), 400.0);
+        assert_eq!(y_of(&parsed, "L"), 100.0, "primary axis frozen under slot-only rescale");
+    }
+
+    /// A slot rescale that pushes right-axis labels outside the plot area must
+    /// clip them (same policy as primary ticks) — otherwise rescaled labels
+    /// pile up in the margin below/above the panel.
+    #[test]
+    fn bug_hunt_secondary_labels_clipped_when_slot_rescale_pushes_them_out() {
+        let cfg = interaction(
+            &[("L", 100.0)],
+            vec![vec![level(&[("R1", 100.0), ("R2", 200.0)])]],
+        );
+        let all_text = vec![
+            text(40.0, 100.0, "L"),
+            text(460.0, 100.0, "R1"),
+            text(460.0, 200.0, "R2"),
+        ];
+        let panel = crate::zoom_pan::Affine2::identity();
+        // Slot rescale moves everything down by 500 px — outside (0,0,500,400).
+        let secondary = [crate::zoom_pan::compose_panel_slot(
+            panel,
+            crate::zoom_pan::Affine2 { sx: 1.0, sy: 1.0, tx: 0.0, ty: 500.0 },
+        )];
+        let parsed = parse(&build_zoomed_text_json(
+            &all_text,
+            &cfg,
+            0,
+            &panel,
+            &secondary,
+            Some((0.0, 0.0, 500.0, 400.0)),
+        ));
+        let contents: Vec<&str> = parsed.iter().filter_map(|v| v["content"].as_str()).collect();
+        assert!(!contents.contains(&"R1"), "R1 at y=600 must be clipped (plot y ≤ 400)");
+        assert!(!contents.contains(&"R2"), "R2 at y=700 must be clipped");
+        assert!(contents.contains(&"L"), "unmoved primary label must survive");
+    }
+
+    /// Two right axes but only ONE secondary affine supplied: the outer column
+    /// (rank 1) must fall back to `secondary_affines.last()` — the documented
+    /// degradation — not to the panel affine and not panic.
+    #[test]
+    fn bug_hunt_more_columns_than_affines_falls_back_to_last() {
+        let cfg = interaction(
+            &[("L", 100.0)],
+            vec![
+                vec![level(&[("A1", 100.0), ("A2", 200.0)])],
+                vec![level(&[("B1", 100.0), ("B2", 200.0)])],
+            ],
+        );
+        let all_text = vec![
+            text(40.0, 100.0, "L"),
+            text(460.0, 100.0, "A1"),
+            text(460.0, 200.0, "A2"),
+            text(500.0, 100.0, "B1"),
+            text(500.0, 200.0, "B2"),
+        ];
+        let panel = crate::zoom_pan::Affine2::identity();
+        let only = crate::zoom_pan::compose_panel_slot(
+            panel,
+            crate::zoom_pan::Affine2 { sx: 1.0, sy: 3.0, tx: 0.0, ty: 0.0 },
+        );
+        let parsed = parse(&build_zoomed_text_json(&all_text, &cfg, 0, &panel, &[only], None));
+        // Rank 0 (x=460) uses affines[0]; rank 1 (x=500) has no affines[1] and
+        // must degrade to `last()` — the same ×3 rescale.
+        assert_eq!(y_of(&parsed, "A1"), 300.0);
+        assert_eq!(y_of(&parsed, "B1"), 300.0, "outer column must fall back to last affine");
+        assert_eq!(y_of(&parsed, "B2"), 600.0);
+    }
+
+    /// Two right axes sharing an identical tick STRING ("5") must each relabel
+    /// through their own column's affine — the position-based ranking, not a
+    /// string-set mapping, disambiguates them.
+    #[test]
+    fn bug_hunt_shared_tick_string_across_two_right_axes_uses_column_position() {
+        let cfg = interaction(
+            &[("L", 100.0)],
+            vec![
+                vec![level(&[("5", 100.0), ("7", 200.0)])],
+                vec![level(&[("5", 100.0), ("9", 200.0)])],
+            ],
+        );
+        let all_text = vec![
+            text(40.0, 100.0, "L"),
+            text(460.0, 100.0, "5"), // inner axis, slot 1
+            text(460.0, 200.0, "7"),
+            text(500.0, 100.0, "5"), // outer axis, slot 2 — same label string
+            text(500.0, 200.0, "9"),
+        ];
+        let panel = crate::zoom_pan::Affine2::identity();
+        let secondary = [
+            crate::zoom_pan::compose_panel_slot(
+                panel,
+                crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 },
+            ),
+            crate::zoom_pan::compose_panel_slot(
+                panel,
+                crate::zoom_pan::Affine2 { sx: 1.0, sy: 1.0, tx: 0.0, ty: 50.0 },
+            ),
+        ];
+        let parsed = parse(&build_zoomed_text_json(&all_text, &cfg, 0, &panel, &secondary, None));
+        let ys_of_5: Vec<f64> = parsed
+            .iter()
+            .filter(|v| v["content"] == "5")
+            .filter_map(|v| v["y"].as_f64())
+            .collect();
+        assert_eq!(ys_of_5.len(), 2, "both '5' labels must be emitted");
+        // Inner (x=460): 100 * 2 = 200. Outer (x=500): 100 + 50 = 150.
+        assert!(
+            ys_of_5.contains(&200.0) && ys_of_5.contains(&150.0),
+            "each '5' must move through its OWN column's affine, got {ys_of_5:?}"
+        );
+    }
+
+    /// Empty `y_slot_levels` inner vec (a slot with no tick levels at all —
+    /// e.g. an ordinal secondary axis) must not panic and must leave
+    /// right-side labels untouched.
+    #[test]
+    fn bug_hunt_empty_slot_level_vec_is_safe() {
+        let cfg = interaction(&[("L", 100.0)], vec![vec![]]);
+        let all_text = vec![text(40.0, 100.0, "L"), text(460.0, 100.0, "R1")];
+        let panel = crate::zoom_pan::Affine2 { sx: 1.0, sy: 2.0, tx: 0.0, ty: 0.0 };
+        let parsed = parse(&build_zoomed_text_json(&all_text, &cfg, 0, &panel, &[], None));
+        assert_eq!(y_of(&parsed, "L"), 200.0, "primary still relabels");
+        assert_eq!(y_of(&parsed, "R1"), 100.0, "unrecognized right label stays put");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ferrum_scene::{Color, FontWeight, TextAnchor, TextBaseline, TextStyle};
