@@ -297,10 +297,15 @@ pub(in crate::render) fn build_from_scale_spec(
             // PointScale(reverse=True) reverses the resolved domain order (GH #65).
             // Domain reversal — not a pixel-range flip — so axis tick labels
             // (domain-order via tick_labels/uniform_center) and explicit-range band
-            // centers follow the marks automatically. In this symmetric band model
-            // ((i + 0.5) * step centers) it is pixel-identical to the pyclass
-            // facade's mirror-about-range-midpoint (scale/point.rs). Applied after
-            // sort: "sort, then reverse", matching d3/Vega composition.
+            // centers follow the marks automatically. Within this resolver's
+            // symmetric band model ((i + 0.5) * step centers), reversing the domain
+            // is the same transform as mirroring each center about the range
+            // midpoint — the reverse semantic of the pyclass facade
+            // (scale/point.rs). Only the reverse *transform* is equivalent: the
+            // facade's BASE positions use the true point formula
+            // (extent/(n-1+2p), endpoints at the range edges) and do NOT match
+            // this band model — that divergence is the #67 north star. Applied
+            // after sort: "sort, then reverse", matching d3/Vega composition.
             if *reverse {
                 d.reverse();
             }
