@@ -36,6 +36,7 @@ from ferrum.plots._helpers import (
     _resolve_source,
     _validate_choice,
     _warn_deprecated_dispatcher,
+    _zero_anchored_domain,
 )
 
 
@@ -643,7 +644,7 @@ def _rank1d_chart_from_dataframe(
         pad = max(abs(min_score), abs(max_score)) * 0.05
         x_domain = [min_score - pad, max_score + pad]
     else:
-        x_domain = [0.0, max_score * 1.05 if max_score > 0.0 else 1.0]
+        x_domain = list(_zero_anchored_domain(pl.Series([0.0]), df["score"]))
 
     chart = ferrum.Chart(df).mark_rank1d(
         orient=orient,

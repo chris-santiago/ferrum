@@ -5,7 +5,7 @@ Shared by the ``ferrum.plots.*`` domain modules.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 import polars as pl
 
@@ -323,6 +323,30 @@ def _coerce_to_polars(data: Any) -> pl.DataFrame:
     if arr.ndim == 2:
         return pl.DataFrame({f"col_{j}": arr[:, j].tolist() for j in range(arr.shape[1])})
     return _to_polars(data)
+
+
+def _unique_col_name(existing_cols: Iterable[str], base: str) -> str:
+    """Return *base*, or ``f"{base}_{n}"`` for the smallest ``n >= 1`` absent
+    from *existing_cols*.
+
+    Used where a synthetic single-purpose column must not silently collide
+    with (and overwrite) a same-named user column -- e.g. ``jointplot``'s
+    box-marginal synthetic category column (``matrix.py``). Mirrors the
+    collision-avoidance intent of ``Chart.__add__``'s ``__rhs_`` renaming
+    (``chart.py``), adapted to a single-frame, single-name check; the
+    ``__add__`` rename is not itself expressed in terms of this helper
+    because it must find one shared suffix that is simultaneously
+    collision-free across *several* renamed columns, not a single name.
+    """
+    existing = set(existing_cols)
+    if base not in existing:
+        return base
+    n = 1
+    candidate = f"{base}_{n}"
+    while candidate in existing:
+        n += 1
+        candidate = f"{base}_{n}"
+    return candidate
 
 
 def _zero_anchored_domain(lower: pl.Series, upper: pl.Series) -> tuple[float, float]:

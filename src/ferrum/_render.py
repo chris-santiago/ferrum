@@ -221,7 +221,13 @@ class _RenderMixin:
         # convention documented on _inject_parent_config.
         legend_cfg = merged.get("legend")
         if isinstance(legend_cfg, dict) and legend_cfg.get("orient") == "none":
+            # Shallow-copy before mutating: in the single-config-layer branch
+            # above, `merged["legend"]` is assigned by reference from
+            # `LegendConfig.to_dict()` (line ~211), so mutating in place would
+            # silently corrupt a dict a caller may still hold a reference to.
+            legend_cfg = dict(legend_cfg)
             legend_cfg["disabled"] = True
+            merged["legend"] = legend_cfg
         if self._annotations:
             ann_list = []
             for annotate in self._annotations:

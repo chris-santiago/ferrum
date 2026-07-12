@@ -34,6 +34,7 @@ from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
     _color_field_for,
     _compose_compare,
+    _field_name,
     _finalize_chart,
     _grid_panels,
     _inject_cook_outliers,
@@ -481,7 +482,7 @@ def lmplot(
     data = _to_polars(data)
     casts = []
     for fld in (x, y):
-        col_name = fld.field if hasattr(fld, "field") else str(fld)
+        col_name = _field_name(fld)
         if col_name in data.columns and data[col_name].dtype in _INT_DTYPES:
             casts.append(pl.col(col_name).cast(pl.Float64))
     if casts:
@@ -517,7 +518,7 @@ def lmplot(
         # range padded by 5% on each side (matching the typical auto-scale margin).
         try:
             _df = data.collect() if hasattr(data, "collect") else data
-            x_col_name = x.field if hasattr(x, "field") else str(x)
+            x_col_name = _field_name(x)
             if hasattr(_df, "to_arrow"):
                 _x_series = _df[x_col_name]
                 _x_min = float(_x_series.min())
@@ -551,7 +552,7 @@ def lmplot(
     # When hue is set and the method is smooth-based (lm, loess), use
     # Smooth's groupby support to fit per-group smoothing in one pass.
     if hue is not None and method in ("lm", "loess"):
-        hue_col = hue.field if hasattr(hue, "field") else str(hue)
+        hue_col = _field_name(hue)
         if method == "lm":
             fit = (
                 Chart(data)

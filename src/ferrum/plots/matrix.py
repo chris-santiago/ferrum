@@ -26,6 +26,7 @@ from ferrum.plots._helpers import (
     _finalize_chart,
     _merge_layers,
     _to_polars,
+    _unique_col_name,
     _validate_choice,
 )
 
@@ -1291,14 +1292,8 @@ def _jointplot_build(
         # name -- with_columns() would otherwise silently overwrite it with
         # the constant placeholder, corrupting that column's real data
         # (e.g. collapsing a genuine hue split down to one level) rather
-        # than raising or renaming. Uniquify with an incrementing suffix
-        # (mirrors the collision-avoidance intent of chart.py's "__rhs_"
-        # renaming for merged-layer columns, adapted to a single-frame,
-        # single-name check).
-        suffix = 0
-        while box_cat_col in box_data.columns:
-            suffix += 1
-            box_cat_col = f"_joint_box_cat_{suffix}"
+        # than raising or renaming.
+        box_cat_col = _unique_col_name(box_data.columns, box_cat_col)
         box_data = box_data.with_columns(pl.lit("").alias(box_cat_col))
 
     enc_top: dict = {"x": x}

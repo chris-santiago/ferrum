@@ -371,7 +371,7 @@ def _coalesce_facet_rhs_columns(chart: "Chart") -> "Chart":
     """Coalesce renamed RHS copies of facet fields back into the primary column.
 
     When ``Chart.__add__`` merges two DataFrames with overlapping column names,
-    it renames the RHS columns to ``"{col}__rhs_{hex}"``.  If one of those
+    it renames the RHS columns to ``"{col}__rhs_{n:04d}"``.  If one of those
     columns is a facet field, the RHS layer rows end up with ``null`` in the
     facet column and are dropped by the facet partitioner.
 
@@ -1933,7 +1933,7 @@ class Chart(
         # 2c fix: coalesce any renamed RHS copies of the facet field(s) back
         # into the primary column.  When Chart.__add__ merges two DataFrames
         # with overlapping column names, it renames the RHS columns to
-        # "{col}__rhs_{hex}".  If one of those columns is the facet field,
+        # "{col}__rhs_{n:04d}".  If one of those columns is the facet field,
         # the RHS layer's rows end up with null in the facet column and are
         # dropped by the facet partitioner.  We detect and coalesce here so
         # all layers' rows carry the facet field value.
