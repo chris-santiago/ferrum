@@ -55,6 +55,7 @@ PAGES: dict[str, tuple[str, str]] = {
     "legend": ("Legend", "`Legend` value class for legend configuration."),
     "title": ("Title", "`Title` value class for figure titles."),
     "render_config": ("Render Config", "`RenderConfig` for auto-raster, scale, and output tuning."),
+    "configure": ("Configure", "Chart-level configuration dataclasses — Configure, AxisConfig, ColorConfig, GridConfig, LegendConfig, PaddingConfig, TitleConfig — plus format-preset resolution (resolve_format) and the Chart.override error (FerrumOverrideError)."),
     "specs": ("Specs", "Low-level serialized specs — `ChartSpec`, `EncodingSpec`."),
     "rendering": ("Rendering", "Low-level rendering entry points — `render_svg`, `render_png`, layout/compose helpers."),
 }
@@ -86,9 +87,14 @@ MODULE_RULES: list[tuple[str, str]] = [
     ("ferrum.repeat", "repeat"),
     ("ferrum.layer", "layer"),
     ("ferrum.schemes", "schemes"),
-    # ferrum.configure.* (Configure/AxisConfig/…) and ferrum.format_presets
-    # are not referenced by any autoref; they stay UNHOMED (reported, not a
-    # page). The `ferrum.config` namespace keeps its hand-written config.md.
+    # ferrum.configure.* (Configure/AxisConfig/…), ferrum.exceptions
+    # (FerrumOverrideError), and ferrum.format_presets (resolve_format) are
+    # homed on the "configure" page below. This is distinct from the
+    # `ferrum.config` namespace (the contextvars runtime-defaults store),
+    # which keeps its own hand-written config.md.
+    ("ferrum.configure", "configure"),
+    ("ferrum.exceptions", "configure"),
+    ("ferrum.format_presets", "configure"),
     ("ferrum.structural", "structural"),
     ("ferrum.grid", "grid"),
     ("ferrum.chart", "chart"),

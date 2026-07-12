@@ -84,6 +84,7 @@ nav = [
     { "Structural" = "api/structural.md" },
     { "Schemes" = "api/schemes.md" },
     { "Render Config" = "api/render_config.md" },
+    { "Configure" = "api/configure.md" },
     { "Title" = "api/title.md" },
     { "Transforms" = "api/transforms.md" },
     { "Statistics" = "api/statistics.md" },

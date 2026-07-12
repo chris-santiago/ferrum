@@ -77,7 +77,7 @@ Most Altair marks map directly. `mark_circle` and `mark_square` are aliases for 
 | `mark_text()` | [`.mark_text()`][ferrum.Chart.mark_text] | — |
 | `mark_tick()` | [`.mark_tick()`][ferrum.Chart.mark_tick] | — |
 | `mark_image()` | [`.mark_image()`][ferrum.Chart.mark_image] | — |
-| `mark_geoshape()` | — | Not yet implemented |
+| `mark_geoshape()` | [`.mark_geoshape()`][ferrum.Chart.mark_geoshape] | GeoJSON auto-detected; project via `coord(fm.CoordGeo(projection=…))` |
 | — | [`.mark_smooth()`][ferrum.Chart.mark_smooth] | No Altair equivalent — computes LOESS/LM in Rust |
 | — | [`.mark_histogram()`][ferrum.Chart.mark_histogram] | Altair uses `mark_bar()` + `transform_bin()` |
 | — | [`.mark_density()`][ferrum.Chart.mark_density] | Altair uses `mark_area()` + `transform_density()` |
@@ -270,7 +270,7 @@ chart.to_dict()   # Python dict
 | Adding selections | `.add_params(sel)` | `.add_selection(sel)` |
 | Repeat shorthand | `alt.repeat("column")` | `fm.Repeat("column")` |
 | Title objects | `alt.Title(...)` | `fm.Title(...)` |
-| Geographic marks | `mark_geoshape()` supported | Not yet implemented |
+| Geographic marks | `mark_geoshape()` supported | `mark_geoshape()` + `CoordGeo(projection=…)` |
 | Model diagnostics | — | 44 figure helpers, 28 visualizer classes |
 | DataFrame support | pandas, polars (via `from_dict`) | polars, pandas, modin, cuDF, dask, ibis, pyarrow |
 | System dependencies | Node.js for `.save()` on some formats | None — pure wheel |

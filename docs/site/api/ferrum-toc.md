@@ -29,5 +29,6 @@ Top-level public surface of the `ferrum` package.
 | [Legend](legend.md) | `Legend` value class for legend configuration |
 | [Title](title.md) | `Title` value class for title configuration |
 | [Render Config](render_config.md) | `RenderConfig` for auto-raster, scale, and output tuning |
+| [Configure](configure.md) | Chart-level config dataclasses — `Configure`, `AxisConfig`, `ColorConfig`, `GridConfig`, `LegendConfig`, `PaddingConfig`, `TitleConfig` — plus `resolve_format` and `FerrumOverrideError` |
 | [Color](color.md) | `ferrum.color` — color utilities and palette access |
 | [Config](config.md) | `ferrum.config` — runtime configuration |
