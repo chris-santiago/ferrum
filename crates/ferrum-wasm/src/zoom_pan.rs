@@ -38,6 +38,16 @@ impl Affine2 {
         }
         ((x - self.tx) / self.sx, (y - self.ty) / self.sy)
     }
+
+    /// Whether this affine is exactly the identity (unit scale, zero
+    /// translation). Slot rescales default to `Affine2::identity()` and are
+    /// reset with it, so the exact float comparison is intentional: an
+    /// untouched slot compares equal, a rescaled one does not. Used by the
+    /// slot-aware hit-test to route identity slots through the fast R-tree path
+    /// and non-identity slots through the composed-inverse linear scan.
+    pub fn is_identity(&self) -> bool {
+        self.sx == 1.0 && self.sy == 1.0 && self.tx == 0.0 && self.ty == 0.0
+    }
 }
 
 pub struct ZoomPanState {

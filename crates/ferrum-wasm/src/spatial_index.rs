@@ -53,6 +53,12 @@ pub struct MarkEntry {
     pub node_idx: usize,
     /// Optional data-row index from `batch.data_indices[node_idx]`.
     pub data_idx: Option<usize>,
+    /// Y-scale slot this mark maps through (secondary-y-axis, GH #52), copied
+    /// from the owning `MarkBatch::y_slot`. `0` = the primary/left-axis scale —
+    /// the byte-stable default for every single-y chart. The slot-aware
+    /// hit-test re-inverts the click through this slot's `(panel ∘ slot)`
+    /// affine before the containment/distance check.
+    pub y_slot: usize,
     /// Mark geometry — the typed circle-vs-rect discriminant. Drives
     /// `distance_2` and `geometry_contains`.
     pub geom: MarkGeom,
@@ -225,6 +231,110 @@ impl SpatialIndex {
         }
         None
     }
+
+    /// Slot-aware exact hit-test at display-space click `(x, y)`
+    /// (secondary-y-axis, GH #52).
+    ///
+    /// The R-tree stores every mark at its baked *scene* position. A mark in
+    /// y-slot `s` is DRAWN at `compose_panel_slot(panel_affine, slot_rescale[s])`,
+    /// so under a per-layer domain rescale different slots map through different
+    /// affines. This queries the tree at the *panel-affine* inverse of the click
+    /// (the shared-x / slot-0 search point) and then, PER CANDIDATE, re-inverts
+    /// the original click through that candidate's own `(panel ∘ slot)` affine —
+    /// using the same `transform_slot_index` mapping the render upload uses —
+    /// before the containment test. With every slot rescale identity (single-y
+    /// scenes and at rest) the composed inverse equals the panel-affine inverse,
+    /// so results are byte-identical to the pre-#52 path. Non-identity slots
+    /// whose displayed position lies far from the scene-space search point are
+    /// found by the caller's composed-inverse linear scan; this method's
+    /// per-candidate inverse ensures a scene-space coincidence in a rescaled
+    /// slot cannot register a false hit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hit_test_slot_aware(
+        &self,
+        panel_id: usize,
+        x: f64,
+        y: f64,
+        tolerance: f64,
+        panel_affine: crate::zoom_pan::Affine2,
+        slot_rescales: &[crate::zoom_pan::Affine2],
+        panel_slot_counts: &[usize],
+    ) -> Option<MarkEntry> {
+        let (sx, sy) = panel_affine.inverse_apply(x, y);
+        let aabb =
+            AABB::from_corners([sx - tolerance, sy - tolerance], [sx + tolerance, sy + tolerance]);
+        for entry in self.in_envelope(panel_id, aabb) {
+            let composed = composed_slot_affine(
+                panel_affine,
+                slot_rescales,
+                panel_slot_counts,
+                panel_id,
+                entry.y_slot,
+            );
+            let (cx, cy) = composed.inverse_apply(x, y);
+            if geometry_contains(entry, cx, cy, tolerance) {
+                return Some(entry.clone());
+            }
+        }
+        None
+    }
+
+    /// Slot-aware nearest-mark query at display-space click `(x, y)`
+    /// (secondary-y-axis, GH #52).
+    ///
+    /// Finds the tree's nearest mark to the panel-affine inverse of the click,
+    /// then measures its distance in the mark's own `(panel ∘ slot)` display
+    /// space via the per-candidate composed inverse, applying the same
+    /// [`SNAP_DISTANCE`] cutoff as [`nearest`](Self::nearest). Identity slots
+    /// reproduce [`nearest`] exactly (the composed inverse is the panel-affine
+    /// inverse, so the measured distance is the scene-space distance).
+    pub fn nearest_slot_aware(
+        &self,
+        panel_id: usize,
+        x: f64,
+        y: f64,
+        panel_affine: crate::zoom_pan::Affine2,
+        slot_rescales: &[crate::zoom_pan::Affine2],
+        panel_slot_counts: &[usize],
+    ) -> Option<(MarkEntry, f64)> {
+        let (sx, sy) = panel_affine.inverse_apply(x, y);
+        let panel_idx = self.trees.get(panel_id)?;
+        let (entry, _) = panel_idx.nearest(sx, sy)?;
+        let composed = composed_slot_affine(
+            panel_affine,
+            slot_rescales,
+            panel_slot_counts,
+            panel_id,
+            entry.y_slot,
+        );
+        let (cx, cy) = composed.inverse_apply(x, y);
+        let dist = entry.distance_2(&[cx, cy]).sqrt();
+        if dist > SNAP_DISTANCE {
+            return None;
+        }
+        Some((entry.clone(), dist))
+    }
+}
+
+/// The composed `(panel ∘ slot)` affine one mark maps through
+/// (secondary-y-axis, GH #52): the per-panel zoom/pan affine composed with the
+/// y-slot's domain-rescale affine, selected by the same
+/// [`transform_slot_index`](crate::scene_load::transform_slot_index) mapping the
+/// render upload uses. An absent or out-of-range slot rescale is identity, so
+/// the result is the panel affine unchanged.
+fn composed_slot_affine(
+    panel_affine: crate::zoom_pan::Affine2,
+    slot_rescales: &[crate::zoom_pan::Affine2],
+    panel_slot_counts: &[usize],
+    panel_id: usize,
+    y_slot: usize,
+) -> crate::zoom_pan::Affine2 {
+    let idx = crate::scene_load::transform_slot_index(panel_slot_counts, panel_id, y_slot);
+    let rescale = slot_rescales
+        .get(idx)
+        .copied()
+        .unwrap_or_else(crate::zoom_pan::Affine2::identity);
+    crate::zoom_pan::compose_panel_slot(panel_affine, rescale)
 }
 
 // ── MarkEntry constructors ───────────────────────────────────────────────────
@@ -236,7 +346,7 @@ impl SpatialIndex {
 /// center computation are defined in one place.
 fn circle_entry(cx: f64, cy: f64, r: f64, batch_idx: usize, node_idx: usize, data_idx: Option<usize>) -> MarkEntry {
     let aabb = AABB::from_corners([cx - r, cy - r], [cx + r, cy + r]);
-    MarkEntry { point: [cx, cy], batch_idx, node_idx, data_idx, geom: MarkGeom::Circle { r }, aabb }
+    MarkEntry { point: [cx, cy], batch_idx, node_idx, data_idx, y_slot: 0, geom: MarkGeom::Circle { r }, aabb }
 }
 
 /// Build a [`MarkEntry`] for a rect node.
@@ -248,7 +358,7 @@ fn rect_entry(x: f64, y: f64, w: f64, h: f64, batch_idx: usize, node_idx: usize,
     let cx = x + w / 2.0;
     let cy = y + h / 2.0;
     let aabb = AABB::from_corners([x, y], [x + w, y + h]);
-    MarkEntry { point: [cx, cy], batch_idx, node_idx, data_idx, geom: MarkGeom::Rect, aabb }
+    MarkEntry { point: [cx, cy], batch_idx, node_idx, data_idx, y_slot: 0, geom: MarkGeom::Rect, aabb }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -286,10 +396,14 @@ fn collect_batch_entries(batch: &MarkBatch, batch_idx: usize, out: &mut Vec<Mark
 
         match node {
             SceneNode::Circle { cx, cy, r, .. } => {
-                out.push(circle_entry(*cx, *cy, *r, batch_idx, node_idx, data_idx));
+                let mut entry = circle_entry(*cx, *cy, *r, batch_idx, node_idx, data_idx);
+                entry.y_slot = batch.y_slot;
+                out.push(entry);
             }
             SceneNode::Rect { x, y, w, h, .. } => {
-                out.push(rect_entry(*x, *y, *w, *h, batch_idx, node_idx, data_idx));
+                let mut entry = rect_entry(*x, *y, *w, *h, batch_idx, node_idx, data_idx);
+                entry.y_slot = batch.y_slot;
+                out.push(entry);
             }
             _ => {}
         }
@@ -306,7 +420,7 @@ fn collect_packed_entries(
     data: &SceneData,
     out: &mut Vec<MarkEntry>,
 ) {
-    for (batch_idx, _batch) in panel.marks.iter().enumerate() {
+    for (batch_idx, batch) in panel.marks.iter().enumerate() {
         let key = (panel_idx as u32, batch_idx as u32);
         let Some(meta) = data.packed_batch_meta.get(&key) else {
             continue;
@@ -321,14 +435,16 @@ fn collect_packed_entries(
                         .as_ref()
                         .and_then(|dis| dis.get(i))
                         .map(|&di| di as usize);
-                    out.push(circle_entry(
+                    let mut entry = circle_entry(
                         ci.center[0] as f64,
                         ci.center[1] as f64,
                         ci.radius as f64,
                         batch_idx,
                         i,
                         data_idx,
-                    ));
+                    );
+                    entry.y_slot = batch.y_slot;
+                    out.push(entry);
                 }
             }
             DrawKind::Rect => {
@@ -339,7 +455,7 @@ fn collect_packed_entries(
                         .as_ref()
                         .and_then(|dis| dis.get(i))
                         .map(|&di| di as usize);
-                    out.push(rect_entry(
+                    let mut entry = rect_entry(
                         ri.position[0] as f64,
                         ri.position[1] as f64,
                         ri.size[0] as f64,
@@ -347,7 +463,9 @@ fn collect_packed_entries(
                         batch_idx,
                         i,
                         data_idx,
-                    ));
+                    );
+                    entry.y_slot = batch.y_slot;
+                    out.push(entry);
                 }
             }
         }
@@ -1027,6 +1145,7 @@ mod tests {
             batch_idx: 0,
             node_idx: 0,
             data_idx: None,
+            y_slot: 0,
             geom: MarkGeom::Rect,
             aabb: AABB::from_corners([40.0, 40.0], [60.0, 60.0]),
         };
@@ -1041,6 +1160,7 @@ mod tests {
             batch_idx: 0,
             node_idx: 0,
             data_idx: None,
+            y_slot: 0,
             geom: MarkGeom::Rect,
             aabb: AABB::from_corners([40.0, 40.0], [60.0, 60.0]),
         };
@@ -1056,6 +1176,7 @@ mod tests {
             batch_idx: 0,
             node_idx: 0,
             data_idx: None,
+            y_slot: 0,
             geom: MarkGeom::Circle { r: 20.0 },
             aabb: AABB::from_corners([80.0, 80.0], [120.0, 120.0]),
         };
@@ -1070,6 +1191,7 @@ mod tests {
             batch_idx: 0,
             node_idx: 0,
             data_idx: None,
+            y_slot: 0,
             geom: MarkGeom::Circle { r: 10.0 },
             aabb: AABB::from_corners([-10.0, -10.0], [10.0, 10.0]),
         };

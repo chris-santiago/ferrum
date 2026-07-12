@@ -342,6 +342,16 @@ pub fn panel_slot_count(coord: &ferrum_scene::CoordKind) -> usize {
 pub fn transform_slot_index(panel_slot_counts: &[usize], panel: usize, y_slot: usize) -> usize {
     let base: usize = panel_slot_counts.iter().take(panel).sum();
     let count = panel_slot_counts.get(panel).copied().unwrap_or(1).max(1);
+    // In test builds, an out-of-range `y_slot` is a slot-plan desync bug
+    // (mark tagged with a slot its panel never allocated) — fail loudly so it
+    // surfaces where the tag was set, mirroring ferrum-core's mark-node
+    // debug-assert idiom. Release builds keep the clamp below as the safety
+    // net so a stray tag can never index past the transform-slot vector.
+    debug_assert!(
+        y_slot < count,
+        "y_slot {y_slot} out of range for panel {panel} (allocated {count} slot(s)); \
+         mark slot tag desynced from panel_slot_counts {panel_slot_counts:?}"
+    );
     base + y_slot.min(count - 1)
 }
 
@@ -1826,12 +1836,14 @@ mod tests {
     }
 
     #[test]
-    fn transform_slot_index_clamps_out_of_range_slot() {
-        // An out-of-range y_slot clamps to the panel's last slot rather than
-        // indexing past the panel's block.
+    #[should_panic(expected = "out of range for panel 0")]
+    fn transform_slot_index_debug_asserts_on_out_of_range_slot() {
+        // An out-of-range y_slot is a slot-plan desync bug: in test (debug)
+        // builds `transform_slot_index` fires a debug assertion (#73). Release
+        // builds instead clamp to the panel's last slot as a safety net — that
+        // clamp is unreachable via unit test because tests run in debug.
         let counts = vec![2, 2];
-        assert_eq!(transform_slot_index(&counts, 0, 5), 1, "clamp to panel 0's last slot");
-        assert_eq!(transform_slot_index(&counts, 1, 9), 3, "clamp to panel 1's last slot");
+        let _ = transform_slot_index(&counts, 0, 5);
     }
 
     #[test]
@@ -7865,20 +7877,21 @@ mod bug_hunt_interactive_slots {
     }
 
     /// A batch whose `y_slot` exceeds the panel's slot count (corrupt or
-    /// future scene) must load without panicking; the flat index the render
-    /// loop derives clamps to the panel's last slot instead of walking into a
-    /// sibling panel's block.
+    /// future scene) loads without panicking and preserves the raw slot id on
+    /// the draw command. Deriving the flat transform-slot index from that
+    /// out-of-range tag, however, is a slot-plan desync: in debug (test) builds
+    /// `transform_slot_index` fires the #73 debug assertion; release builds
+    /// clamp to the panel's last slot as a safety net.
     #[test]
-    fn bug_hunt_out_of_range_batch_slot_loads_and_clamps() {
+    #[should_panic(expected = "out of range for panel 0")]
+    fn bug_hunt_out_of_range_batch_slot_loads_but_index_debug_asserts() {
         let data = load_scene(&dual_slot_scene(7));
         // The raw slot id is preserved on the command…
         let mark_cmds: Vec<&DrawCommand> =
             data.draw_commands.iter().filter(|c| c.is_mark).collect();
         assert_eq!(mark_cmds[0].y_slot, 7);
-        // …and the index mapping clamps it inside the panel's 2-slot block.
-        let idx = transform_slot_index(&data.panel_slot_counts, 0, 7);
-        assert_eq!(idx, 1, "slot 7 of a 2-slot panel must clamp to slot 1");
-        assert!(idx < total_transform_slots(&data.panel_slot_counts));
+        // …but mapping that out-of-range tag to a flat slot index debug-asserts.
+        let _ = transform_slot_index(&data.panel_slot_counts, 0, 7);
     }
 
     /// A zero-panel scene: `panel_slot_counts` is empty while `panel_count`

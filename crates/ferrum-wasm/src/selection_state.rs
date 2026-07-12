@@ -65,6 +65,7 @@ impl InteractionState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn handle_click(
         &mut self,
         panels: &[ferrum_scene::Panel],
@@ -73,8 +74,12 @@ impl InteractionState {
         y: f64,
         zoom: &crate::zoom_pan::ZoomPanState,
         shift_held: bool,
+        slot_rescales: &[crate::zoom_pan::Affine2],
+        panel_slot_counts: &[usize],
     ) {
-        self.handle_click_with_index(panels, specs, x, y, zoom, shift_held, None);
+        self.handle_click_with_index(
+            panels, specs, x, y, zoom, shift_held, None, slot_rescales, panel_slot_counts,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -87,8 +92,12 @@ impl InteractionState {
         zoom: &crate::zoom_pan::ZoomPanState,
         shift_held: bool,
         spatial_index: Option<&crate::spatial_index::SpatialIndex>,
+        slot_rescales: &[crate::zoom_pan::Affine2],
+        panel_slot_counts: &[usize],
     ) {
-        let hit = hit_test::hit_test_with_index(panels, x, y, zoom, spatial_index);
+        let hit = hit_test::hit_test_with_index(
+            panels, x, y, zoom, spatial_index, slot_rescales, panel_slot_counts,
+        );
 
         for spec in specs {
             match spec {
@@ -192,12 +201,15 @@ impl InteractionState {
         x: f64,
         y: f64,
         zoom: &crate::zoom_pan::ZoomPanState,
+        slot_rescales: &[crate::zoom_pan::Affine2],
+        panel_slot_counts: &[usize],
     ) -> Option<&HitResult> {
-        self.handle_mousemove_with_index(panels, x, y, zoom, None)
+        self.handle_mousemove_with_index(panels, x, y, zoom, None, slot_rescales, panel_slot_counts)
     }
 
     /// Update the hover hit-result, using `spatial_index` for O(log n)
     /// circle/rect lookups when one is available.
+    #[allow(clippy::too_many_arguments)]
     pub fn handle_mousemove_with_index(
         &mut self,
         panels: &[ferrum_scene::Panel],
@@ -205,8 +217,12 @@ impl InteractionState {
         y: f64,
         zoom: &crate::zoom_pan::ZoomPanState,
         spatial_index: Option<&crate::spatial_index::SpatialIndex>,
+        slot_rescales: &[crate::zoom_pan::Affine2],
+        panel_slot_counts: &[usize],
     ) -> Option<&HitResult> {
-        self.hover = hit_test::hit_test_with_index(panels, x, y, zoom, spatial_index);
+        self.hover = hit_test::hit_test_with_index(
+            panels, x, y, zoom, spatial_index, slot_rescales, panel_slot_counts,
+        );
         self.hover.as_ref()
     }
 
@@ -491,7 +507,7 @@ mod tests {
         );
         // Click on empty panels (no marks) — simulates a background click.
         let zoom = crate::zoom_pan::ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default());
-        state.handle_click(&[], &specs, 50.0, 50.0, &zoom, false);
+        state.handle_click(&[], &specs, 50.0, 50.0, &zoom, false, &[], &[]);
         assert!(
             matches!(state.selections.get("sel1"), Some(SelectionState::Empty)),
             "background click must deselect to Empty"
@@ -503,7 +519,7 @@ mod tests {
         let specs = vec![point_spec("s")];
         let mut state = InteractionState::new(&specs);
         let zoom = crate::zoom_pan::ZoomPanState::new(0, &ferrum_scene::InteractionConfig::default());
-        state.handle_click(&[], &specs, 0.0, 0.0, &zoom, false);
+        state.handle_click(&[], &specs, 0.0, 0.0, &zoom, false, &[], &[]);
         assert!(matches!(state.selections.get("s"), Some(SelectionState::Empty)));
     }
 
@@ -825,7 +841,7 @@ mod tests {
         );
 
         // First click on mark with shift held — should select index 0.
-        state.handle_click(&panels, &specs, 100.0, 100.0, &zoom, true);
+        state.handle_click(&panels, &specs, 100.0, 100.0, &zoom, true, &[], &[]);
         match state.selections.get("sel") {
             Some(SelectionState::Point { indices, .. }) => {
                 assert!(
@@ -837,7 +853,7 @@ mod tests {
         }
 
         // Second click on same mark with shift held — toggle=ShiftKey means deselect.
-        state.handle_click(&panels, &specs, 100.0, 100.0, &zoom, true);
+        state.handle_click(&panels, &specs, 100.0, 100.0, &zoom, true, &[], &[]);
         assert!(
             matches!(
                 state.selections.get("sel"),
@@ -864,7 +880,7 @@ mod tests {
             0,
             &ferrum_scene::InteractionConfig::default(),
         );
-        state.handle_click(&[], &specs, 50.0, 50.0, &zoom, false);
+        state.handle_click(&[], &specs, 50.0, 50.0, &zoom, false, &[], &[]);
         assert!(
             matches!(state.selections.get("sel"), Some(SelectionState::Empty)),
             "click with empty panels must produce Empty selection"
@@ -986,7 +1002,7 @@ mod tests {
             0,
             &ferrum_scene::InteractionConfig::default(),
         );
-        state.handle_click(&[], &specs, 999.0, 999.0, &zoom, false);
+        state.handle_click(&[], &specs, 999.0, 999.0, &zoom, false, &[], &[]);
         assert!(
             matches!(state.selections.get("sel"), Some(SelectionState::Empty)),
             "background click on pre-seeded [0,1,2] must clear to Empty"
@@ -1477,7 +1493,7 @@ mod tests {
         );
 
         // Click on the mark.
-        state.handle_click(&panels, &specs, 100.0, 100.0, &zoom, false);
+        state.handle_click(&panels, &specs, 100.0, 100.0, &zoom, false, &[], &[]);
         match state.selections.get("sel") {
             Some(SelectionState::Point {
                 field_values,
@@ -1608,7 +1624,7 @@ mod tests {
         let zoom = crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
 
         // Click mark 0 (score="42.0") at (50, 50).
-        state.handle_click(&panels, &specs, 50.0, 50.0, &zoom, false);
+        state.handle_click(&panels, &specs, 50.0, 50.0, &zoom, false, &[], &[]);
 
         match state.selections.get("sel") {
             Some(SelectionState::Point { indices, .. }) => {
@@ -1723,7 +1739,7 @@ mod tests {
         let zoom = crate::zoom_pan::ZoomPanState::new(1, &ferrum_scene::InteractionConfig::default());
 
         // Click mark 0 (group="  a") at (50, 50).
-        state.handle_click(&panels, &specs, 50.0, 50.0, &zoom, false);
+        state.handle_click(&panels, &specs, 50.0, 50.0, &zoom, false, &[], &[]);
 
         match state.selections.get("sel") {
             Some(SelectionState::Point { indices, .. }) => {

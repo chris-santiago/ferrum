@@ -314,6 +314,8 @@ impl WasmRenderer {
             &self.zoom,
             shift_held,
             self.spatial_index.as_ref(),
+            &self.slot_rescales,
+            &loaded.data.panel_slot_counts,
         );
 
         self.apply_conditionals_and_render()
@@ -464,6 +466,7 @@ impl WasmRenderer {
         if let Some(hr) = hit_test::hit_test_nearest_with_index(
             &loaded.baked_panels, x as f64, y as f64, &self.zoom,
             self.spatial_index.as_ref(),
+            &self.slot_rescales, &loaded.data.panel_slot_counts,
         ) {
             return serde_json::json!({
                 "panel": hr.panel_id,
@@ -1103,7 +1106,7 @@ mod tests {
 
         // Use the spatial-index-aware hit test (the same path hit_test_at uses).
         let result = hit_test::hit_test_nearest_with_index(
-            &panels, 100.0, 100.0, &zoom, Some(&idx),
+            &panels, 100.0, 100.0, &zoom, Some(&idx), &[], &[],
         );
         let hr = result.expect("packed circle at (100,100) must be found via spatial index");
         assert_eq!(hr.panel_id, 0);
@@ -1113,7 +1116,7 @@ mod tests {
 
         // Also check the second packed circle.
         let result2 = hit_test::hit_test_nearest_with_index(
-            &panels, 200.0, 200.0, &zoom, Some(&idx),
+            &panels, 200.0, 200.0, &zoom, Some(&idx), &[], &[],
         );
         let hr2 = result2.expect("packed circle at (200,200) must be found");
         assert_eq!(hr2.data_idx, Some(8));
