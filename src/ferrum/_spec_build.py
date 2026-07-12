@@ -522,8 +522,14 @@ class SpecBuildMixin:
         """Collect the unified, de-duplicated reactive-parameter list (D6).
 
         Order: registered selections, explicit ``add_params`` variables, then
-        any ``Parameter`` referenced as a scale domain.  Deduplicated by
-        ``.name`` preserving first-seen order.
+        any ``Parameter`` referenced as a scale domain -- on the chart-level
+        encoding *and* on every layer's own encoding (GH #72: a layer-bound
+        domain param, e.g. an independent-y layer's ``Y(..., scale={"domain":
+        fm.param(...)})``, must reach the wire exactly like a chart-level one;
+        before this fix ``_collect_params`` only scanned ``enc``, so the layer
+        param never reached ``spec.params`` and Rust's substitution store was
+        empty for it). Deduplicated by ``.name`` preserving first-seen order,
+        regardless of which layer declares a given name.
 
         Raises
         ------
@@ -536,6 +542,13 @@ class SpecBuildMixin:
         from ferrum.chart import _check_param_collision
         from ferrum.parameter import Parameter, VariableParameter
 
+        # All encodings to scan for scale-domain Parameters: the chart-level
+        # encoding plus every layer's own encoding (layers may be absent).
+        all_encodings = [enc]
+        for layer in resolved._layers or []:
+            if layer is not None and layer.encoding:
+                all_encodings.append(layer.encoding)
+
         # Detect cross-kind collisions before building the ordered list.
         # Guard against None entries that should not exist but are technically
         # possible given that _selections / _params are bare untyped lists.
@@ -546,12 +559,15 @@ class SpecBuildMixin:
         for name in sorted(selection_names & variable_names):
             _check_param_collision(name, is_selection=True, context="param collection")
         # Also check domain-referenced VariableParameters against selections.
-        for ch in enc.values():
-            scale = ch.option("scale") if isinstance(ch, ChannelBase) else None
-            if isinstance(scale, dict):
-                domain = scale.get("domain")
-                if isinstance(domain, VariableParameter) and domain.name in selection_names:
-                    _check_param_collision(domain.name, is_selection=False, context="scale domain")
+        for encoding in all_encodings:
+            for ch in encoding.values():
+                scale = ch.option("scale") if isinstance(ch, ChannelBase) else None
+                if isinstance(scale, dict):
+                    domain = scale.get("domain")
+                    if isinstance(domain, VariableParameter) and domain.name in selection_names:
+                        _check_param_collision(
+                            domain.name, is_selection=False, context="scale domain"
+                        )
 
         ordered: list = []
         seen: set[str] = set()
@@ -565,12 +581,13 @@ class SpecBuildMixin:
             _add(sel)
         for p in resolved._params:
             _add(p)
-        for ch in enc.values():
-            scale = ch.option("scale") if isinstance(ch, ChannelBase) else None
-            if isinstance(scale, dict):
-                domain = scale.get("domain")
-                if isinstance(domain, Parameter):
-                    _add(domain)
+        for encoding in all_encodings:
+            for ch in encoding.values():
+                scale = ch.option("scale") if isinstance(ch, ChannelBase) else None
+                if isinstance(scale, dict):
+                    domain = scale.get("domain")
+                    if isinstance(domain, Parameter):
+                        _add(domain)
         return ordered
 
     @staticmethod
@@ -678,11 +695,34 @@ class SpecBuildMixin:
         (confirmed via headless WASM capture -- hovering a secondary-y-axis
         layer's mark showed the primary layer's ``x``/``revenue`` instead of
         its own field). An explicit chart-level ``tooltip``/``tooltip_fields``
-        short-circuits BOTH injections (explicit always wins, for every
-        layer); otherwise the chart-level auto-injection is kept alongside
-        the per-layer one: Rust prefers a layer's own tooltip fields for
-        that layer's batch and falls back to the chart-level ones when a
-        layer carries none (seam contract with the paired Rust-side fix).
+        wins over the chart-level auto-injection (skipping it entirely).
+
+        Whether it ALSO short-circuits the per-layer loop below depends on
+        where the chart-level value came from (GH #71 defect 3):
+
+        - ``Chart.__add__`` promotes the *primary* layer's own explicit
+          ``tooltip=`` onto the merged chart-level encoding (``new =
+          lhs._clone()``), and ``_expand_layers`` gives that same layer's
+          own ``encoding`` dict the identical key -- so the primary layer's
+          own encoding ALSO carries the explicit tooltip. In that case the
+          chart-level value is just a view of the primary layer's, and
+          other layers must still get their own auto-injected fields --
+          otherwise Rust's chart-level tooltip fallback leaks the primary
+          layer's fields onto every other layer's marks.
+        - A ``tooltip=`` set directly on an already-merged chart (e.g.
+          ``merged.encode(tooltip=...)``) only touches the chart-level
+          ``_encoding`` -- no layer's own encoding carries it. That is a
+          genuine chart-wide override, so it short-circuits every layer's
+          auto-injection (a per-layer auto injection would otherwise beat
+          the explicit tooltip in Rust's ``inherit_from`` merge).
+
+        The discriminator is therefore: does *any* layer's own encoding
+        already carry an explicit ``tooltip``/``tooltip_fields``? If yes,
+        the per-layer loop still runs for the remaining (tooltip-less)
+        layers; if no layer has one of its own, the chart-level explicit
+        value short-circuits the whole loop. A layer that itself carries an
+        explicit ``tooltip``/``tooltip_fields`` is always left untouched by
+        the loop (its own explicit value always wins for that layer).
         Unlayered and single-layer charts emit the exact same wire as
         before this fix (no ``kw["layers"]`` key, or a layers list whose
         entries already carry no distinct-from-chart-level fields to add).
@@ -700,17 +740,24 @@ class SpecBuildMixin:
             level and, for layered charts, on each layer's own encoding.
         """
         enc = kw.get("encoding") or {}
-        if "tooltip" in enc or "tooltip_fields" in enc:
-            # Explicit chart-level tooltip wins for every layer (a layer's
-            # own explicit tooltip still beats it in Rust's inherit_from
-            # merge). Skipping per-layer auto-injection here preserves the
-            # pre-fix behavior for explicitly-tooltipped layered charts.
-            return kw
-        auto_fields = _auto_tooltip_fields(enc)
-        if auto_fields:
-            kw.setdefault("encoding", {})["tooltip_fields"] = auto_fields
+        chart_level_explicit = "tooltip" in enc or "tooltip_fields" in enc
+        if not chart_level_explicit:
+            auto_fields = _auto_tooltip_fields(enc)
+            if auto_fields:
+                kw.setdefault("encoding", {})["tooltip_fields"] = auto_fields
 
-        for layer in kw.get("layers") or []:
+        layers = kw.get("layers") or []
+        any_layer_explicit = any(
+            "tooltip" in (layer.get("encoding") or {})
+            or "tooltip_fields" in (layer.get("encoding") or {})
+            for layer in layers
+        )
+        if chart_level_explicit and not any_layer_explicit:
+            # The chart-level tooltip did not come from a promoted layer --
+            # it is a genuine chart-wide override, so it wins for every layer.
+            return kw
+
+        for layer in layers:
             layer_enc = layer.get("encoding") or {}
             if "tooltip" in layer_enc or "tooltip_fields" in layer_enc:
                 continue

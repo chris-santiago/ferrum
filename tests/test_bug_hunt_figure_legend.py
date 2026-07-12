@@ -418,7 +418,7 @@ def _tooltip_wire(chart) -> dict:
     return json.loads(spec.to_json())
 
 
-def test_explicit_tooltip_on_primary_layer_does_not_leak_to_secondary(df):  # BUG: the primary layer's explicit tooltip= is promoted to the merged chart-level encoding, short-circuiting per-layer auto-injection — the secondary layer falls back to the PRIMARY's tooltip fields (the exact GH #52 Task 10f failure mode, re-entered through the lhs-explicit path)
+def test_explicit_tooltip_on_primary_layer_does_not_leak_to_secondary(df):  # FIXED (GH #71): the chart-level explicit-tooltip short-circuit in _inject_auto_tooltips no longer skips the per-layer loop outright -- it only short-circuits when NO layer's own encoding carries the explicit tooltip (a genuine chart-wide override); when the primary layer's own encoding carries it (promoted via Chart.__add__), the other layers still get their own auto-injected tooltip fields
     """Mirror of test_layered_chart_explicit_layer_tooltip_wins_over_auto but
     with the explicit tooltip on the FIRST (primary) layer: the second layer
     must still get its OWN auto tooltip_fields (x + its own y), not inherit

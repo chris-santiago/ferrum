@@ -248,7 +248,7 @@ def test_explicit_static_domain_on_secondary_layer_is_honored():
     )
 
 
-def test_domain_param_on_secondary_layer_resolves_static_slot_domain():  # BUG: domainParam initial value on an independent-y layer is ignored — y_domains[1] stays at the data extent instead of the param value, while the identical param on slot 0 (and on any single-y chart) resolves correctly
+def test_domain_param_on_secondary_layer_resolves_static_slot_domain():  # FIXED (GH #72): _collect_params (src/ferrum/_spec_build.py) now walks every layer's own encoding for Parameter scale domains, not just the chart-level encoding, so a secondary layer's domainParam reaches spec.params and Rust's substitution store is no longer empty for it
     """A domainParam's initial value on the secondary layer must resolve slot 1.
 
     The static resolver substitutes ``domainParam`` initial values into scale
@@ -270,6 +270,24 @@ def test_domain_param_on_secondary_layer_resolves_static_slot_domain():  # BUG: 
         f"slot-1 domainParam initial value [0.0, 1.0] must resolve into "
         f"y_domains[1], got {coord['y_domains'][1]}"
     )
+
+
+def test_layer_declared_domain_param_reaches_wire_params_exactly_once():
+    """A param registered chart-level and referenced as a LAYER's scale
+    domain appears in the wire's ``params`` list exactly once (GH #72,
+    ``_collect_params`` contract, spec §6): dedup by name must hold across
+    the chart-level/layer-level boundary, not just within one side of it.
+    """
+    df = _dual_df()
+    d = fm.param("d", value=[0.0, 1.0])
+    a = fm.Chart(df).mark_line().encode(x="x", y="y1").add_params(d)
+    b = fm.Chart(df).mark_line().encode(x="x", y=fm.Y("y2", scale={"domain": d}))
+    merged = fm.LayerChart(a, b, resolve={"y": "independent"})._build_merged()
+    wire = json.loads(merged.to_spec().to_json())
+
+    params = wire.get("params") or []
+    d_entries = [p for p in params if p["name"] == "d"]
+    assert len(d_entries) == 1, f"param 'd' must appear exactly once on the wire, got {params}"
 
 
 # ============================================================================
