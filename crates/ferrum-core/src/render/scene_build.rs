@@ -1277,19 +1277,20 @@ fn build_title(
     }
 }
 
-fn build_legend_decorations(
-    layout: &LayoutResult,
+/// Resolve the color scale a legend draws against, from a leaf's prepared
+/// inputs (`prep.layers[0].encoding` is the rendering encoding; the color scale
+/// is re-resolved over the leaf's final batch, then any chart-level
+/// `configure_color` override applied). Returns `None` when the leaf encodes no
+/// color. Shared by [`build_legend_decorations`] (per-panel legend draw) and the
+/// composite figure-legend band ([`super::composite_render`]), so both build the
+/// legend's color scale through one code path (design §7 facet parity: the
+/// figure legend reuses the same primitives, not a parallel implementation).
+pub(crate) fn resolve_legend_color_scale(
     spec: &ChartSpec,
     prep: &PreparedInputs,
     theme: &ThemeInputs,
     chart_config: &super::chart_config::ChartConfig,
-    out: &mut Vec<SceneNode>,
-) -> Result<(), RenderError> {
-    // Nothing to draw when neither a color legend nor any size/shape block is
-    // present.
-    if layout.legend.is_none() && layout.aux_legends.is_empty() {
-        return Ok(());
-    }
+) -> Result<Option<scale_resolve::ColorScale>, RenderError> {
     let mut rendering_spec_for_legend = ChartSpec {
         encoding: prep.layers[0].encoding.clone(),
         ..spec.clone()
@@ -1311,6 +1312,23 @@ fn build_legend_decorations(
     if let Some(ref cfg) = chart_config.color {
         super::apply_color_config_to_color_scale(&mut color_scale, cfg);
     }
+    Ok(color_scale)
+}
+
+fn build_legend_decorations(
+    layout: &LayoutResult,
+    spec: &ChartSpec,
+    prep: &PreparedInputs,
+    theme: &ThemeInputs,
+    chart_config: &super::chart_config::ChartConfig,
+    out: &mut Vec<SceneNode>,
+) -> Result<(), RenderError> {
+    // Nothing to draw when neither a color legend nor any size/shape block is
+    // present.
+    if layout.legend.is_none() && layout.aux_legends.is_empty() {
+        return Ok(());
+    }
+    let color_scale = resolve_legend_color_scale(spec, prep, theme, chart_config)?;
     if let Some(legend) = &layout.legend {
         out.extend(marks::legend::build_legend(legend, color_scale.as_ref(), theme));
     }

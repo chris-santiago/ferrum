@@ -231,7 +231,7 @@ fn leaf_count(node: &CompositeNode) -> usize {
 /// hole only — never a leaf or a composite — so a hole in one congruent-grid
 /// position never pairs its "domain" (it has none) with a real leaf at the
 /// matching position in a sibling row/column.
-fn congruent(a: &CompositeNode, b: &CompositeNode) -> bool {
+pub(crate) fn congruent(a: &CompositeNode, b: &CompositeNode) -> bool {
     match (a, b) {
         (CompositeNode::Leaf { .. }, CompositeNode::Leaf { .. }) => true,
         (CompositeNode::Hole { .. }, CompositeNode::Hole { .. }) => true,

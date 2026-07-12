@@ -618,65 +618,27 @@ fn reserve_legends(
     //   tickCount      → subsample colorbar ticks to at most N
     //   values         → replace auto-generated tick labels
     //   gradientLength / gradientThickness → colorbar bar dimensions
-    let effective_label_font_size = legend_overrides.style.label_font_size.unwrap_or(theme.typography.label_font_size);
-    let effective_direction = legend_overrides.direction.or(theme.legend.legend_direction);
-    let force_colorbar = legend_overrides.legend_type.as_deref() == Some("gradient");
-    let force_symbol   = legend_overrides.legend_type.as_deref() == Some("symbol");
-    let use_colorbar   = (colorbar.is_some() && legend_entries.is_empty() && !force_symbol)
-        || (colorbar.is_some() && force_colorbar);
-
-    let (legend_layout, inner_after_legend) = if suppression.color {
-        (None, inner)
-    } else if use_colorbar {
-        let cb = colorbar.unwrap();
-        let tick_labels: Vec<String> =
-            legend_overrides.values.clone().unwrap_or_else(|| cb.tick_labels.clone());
-        let tick_labels = if let Some(n) = legend_overrides.tick_count {
-            legend::subsample_tick_labels(tick_labels, n)
-        } else {
-            tick_labels
-        };
-        // B5 unit 3: thin colorbar ticks to honor `tick_min_step`. Needs the
-        // numeric domain the labels span (carried on `ColorbarInput.domain`);
-        // absent for explicit non-numeric label overrides → no-op.
-        let tick_labels = match (legend_overrides.tick_min_step, cb.domain) {
-            (Some(min_step), Some(domain)) =>
-                legend::thin_colorbar_ticks_by_min_step(tick_labels, domain, min_step),
-            _ => tick_labels,
-        };
-        legend::layout_colorbar(
-            inner,
-            theme.legend.legend_orient,
-            legend_title.clone(),
-            cb.stops.clone(),
-            tick_labels,
-            effective_label_font_size,
-            theme.typography.legend_title_font_size,
-            metrics,
-            theme.padding.column_padding,
-            legend_overrides.gradient_length,
-            legend_overrides.gradient_thickness,
-            legend_overrides.style.clip_height,
-            legend_overrides.style.label_color.clone(),
-            legend_overrides.style.label_font_size,
-        )
-    } else {
-        legend::layout_legend(
-            legend_entries,
-            theme.legend.legend_orient,
-            inner,
-            effective_label_font_size,
-            metrics,
-            effective_direction,
-            legend_title.as_deref(),
-            theme.typography.legend_title_font_size,
-            theme.legend.legend_columns,
-            legend_overrides.symbol_type.as_deref(),
-            // 380: the 11 categorical-style fields live once on
-            // `LegendOverrides.style`; no field-by-field copy.
-            legend_overrides.style.clone(),
-        )
-    };
+    // `suppression.color`: an empty-entries + no-colorbar input makes the
+    // shared dispatch a no-op `(None, inner, ..)` via `layout_legend`'s
+    // empty-entries early return — matching the pre-extraction "never
+    // attempted layout" skip (a suppressed channel raises no overflow warning
+    // below either).
+    let (color_entries, color_colorbar): (&[LegendEntry], Option<&ColorbarInput>) =
+        if suppression.color { (&[], None) } else { (legend_entries, colorbar) };
+    let (legend_layout, inner_after_legend, effective_label_font_size) = legend::layout_color_legend(
+        inner,
+        theme.legend.legend_orient,
+        theme.typography.label_font_size,
+        theme.legend.legend_direction,
+        theme.typography.legend_title_font_size,
+        theme.legend.legend_columns,
+        theme.padding.column_padding,
+        color_entries,
+        legend_title.as_deref(),
+        color_colorbar,
+        metrics,
+        legend_overrides,
+    );
     // A suppressed color legend never attempted layout, so nothing "dropped"
     // — a suppressed channel must not raise the unrelated overflow warning.
     let legend_dropped = if suppression.color {

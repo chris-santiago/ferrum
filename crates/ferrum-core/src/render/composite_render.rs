@@ -63,17 +63,25 @@
 //! their slot, per the paragraph above); the size only takes effect under a
 //! linear parent.
 
+use std::collections::HashMap;
+
 use arrow::record_batch::RecordBatch;
 use ferrum_scene::{LayoutScale, MarkBatch, Panel, Rect, SceneGraph, SceneNode};
 
-use crate::layout::{ThemeInputs, Viewport};
+use crate::layout::facet::ResolveMode;
+use crate::layout::legend::{layout_aux_legends, layout_color_legend};
+use crate::layout::text_metrics::TextMetrics;
+use crate::layout::{
+    AuxLegendInput, ColorbarInput, LegendEntry, LegendLayout, LegendOrient, LegendOverrides,
+    Rect as LayoutRect, ThemeInputs, Viewport,
+};
 use crate::spec::chart::ChartSpec;
 
 use super::chart_config::ChartConfig;
 use super::composite::{
-    flatten_leaf_specs, resolve_composite_scales, CompositeResolveError, LeafResolveInput,
+    congruent, flatten_leaf_specs, resolve_composite_scales, CompositeResolveError, LeafResolveInput,
 };
-use super::scale_resolve::LeafScaleContext;
+use super::scale_resolve::{ColorScale, LeafScaleContext};
 use super::svg::uniquify_clip_ids;
 use super::config::RenderConfig;
 use super::figure_chrome::{title_nodes, ChromeAnchor, FigureChrome, DEFAULT_CHROME_INSET};
@@ -243,20 +251,33 @@ pub(crate) fn render_composite_scene(
             transform_outputs: &prep.transform_outputs,
         })
         .collect();
-    let contexts = resolve_composite_scales(tree, &resolve_inputs)?;
+    let mut contexts = resolve_composite_scales(tree, &resolve_inputs)?;
     drop(resolve_inputs);
     drop(prepared);
+
+    // Figure-legend planning (design §5, GH #16 shared-legend Task 3): mark each
+    // participating leaf's per-channel legend suppression and identify the
+    // composite nodes that emit a single figure-level legend band. Writes the
+    // suppression flags into `contexts` BEFORE pass 2 so a suppressed leaf's
+    // layout reserves no gutter and draws no per-panel legend for that channel,
+    // while its prepared legend bundle is still captured (below) as the figure
+    // legend's content. A composite with all-independent legend resolution
+    // produces an empty plan — no suppression, no band — so its output is
+    // byte-identical to today (design §7 byte-stability invariant).
+    let band_plan = plan_legend_bands(tree, &mut contexts);
 
     // Pass 2/3 (per-leaf render): re-render each leaf with its resolved-domain
     // context so composite-shared channels land on the auto scale path (D4b). A
     // fully-empty context passes `None` so non-shared leaves render byte-identical
-    // to a standalone chart.
+    // to a standalone chart. A suppressed leaf additionally returns its prepared
+    // legend bundle so the compositor can build the figure legend from it.
     let mut leaf_scenes: Vec<SceneGraph> = Vec::with_capacity(n);
+    let mut bundles: Vec<Option<LeafLegendBundle>> = Vec::with_capacity(n);
     let mut warnings: Vec<RenderWarning> = Vec::new();
     for (i, leaf) in leaves.iter().enumerate() {
         let ctx = &contexts[i];
         let ctx_opt = (!ctx.is_empty()).then_some(ctx);
-        let (mut scene, leaf_warnings) = render_leaf(leaf, ctx_opt).map_err(|source| {
+        let (mut scene, leaf_warnings, bundle) = render_leaf(leaf, ctx_opt).map_err(|source| {
             CompositeRenderError::LeafRender { kind: "leaf", index: i, source }
         })?;
         // Uniquify each leaf's raw-fragment clip ids exactly once, keyed by the
@@ -265,17 +286,31 @@ pub(crate) fn render_composite_scene(
         // global panel renumber below).
         uniquify_scene_raw_clips(&mut scene, i);
         leaf_scenes.push(scene);
+        bundles.push(bundle);
         // Aggregated in leaf pre-order (the same order `leaves`/`flatten_leaf_specs`
         // produce), matching `render_svg`'s single-scene warning contract.
         warnings.extend(leaf_warnings);
     }
 
+    let band_ctx = LegendBandCtx { plan: &band_plan, contexts: &contexts, bundles: &bundles };
+
     // Pass 2/3 (place + merge): walk the tree, placing each leaf scene into the
     // composite frame. Panels are renumbered flat in pre-order as leaf scenes are
-    // consumed (D4c).
+    // consumed (D4c); `leaf_cursor` tracks the same pre-order leaf index so a
+    // figure-legend band node can capture the first participating leaf's bundle
+    // from its subtree.
     let mut scenes = leaf_scenes.into_iter();
     let mut panel_base = 0usize;
-    let mut placed = build_placed(tree, &mut scenes, &mut panel_base, call_theme, None);
+    let mut leaf_cursor = 0usize;
+    let mut placed = build_placed(
+        tree,
+        &mut scenes,
+        &mut panel_base,
+        &mut leaf_cursor,
+        call_theme,
+        &band_ctx,
+        None,
+    );
 
     // Root figure chrome (title/subtitle/caption/config) — validated root-only.
     if let CompositeNode::Composite { title, subtitle, caption, config, .. } = tree {
@@ -303,7 +338,7 @@ pub(crate) fn render_composite_scene(
 fn render_leaf(
     leaf: &CompositeLeafInput<'_>,
     ctx: Option<&LeafScaleContext>,
-) -> Result<(SceneGraph, Vec<RenderWarning>), RenderError> {
+) -> Result<(SceneGraph, Vec<RenderWarning>, Option<LeafLegendBundle>), RenderError> {
     // `prepare_and_layout` has no viewport guard of its own — `render_svg`/
     // `render_scene_json` each check this before calling it; a composite leaf
     // bypasses those entries, so the check is repeated here.
@@ -321,6 +356,18 @@ fn render_leaf(
         leaf.chart_config,
         ctx,
     )?;
+    // A leaf whose color and/or size legend the compositor is suppressing (design
+    // §6 seam) carries a figure-legend candidate bundle: the prepared legend
+    // inputs (still fully built by `prepare_render_inputs` regardless of
+    // suppression) plus the leaf's effective theme and color scale, so the
+    // compositor can lay out and draw one figure legend from the SAME primitives
+    // a per-panel legend uses. Non-suppressed leaves carry no bundle.
+    let bundle = match ctx {
+        Some(c) if c.suppress_color_legend || c.suppress_size_legend => {
+            Some(capture_leaf_bundle(leaf, &po)?)
+        }
+        _ => None,
+    };
     let scene = scene_build::build_scene(
         leaf.spec,
         &po.prep,
@@ -331,7 +378,477 @@ fn render_leaf(
         leaf.chart_config,
         ctx,
     )?;
-    Ok((scene, po.warnings))
+    Ok((scene, po.warnings, bundle))
+}
+
+/// Capture a suppressed leaf's prepared legend bundle as a figure-legend
+/// candidate (design §6 seam contract). The bundle carries exactly what the
+/// band assembler needs to lay out and draw one figure legend through the
+/// existing legend primitives: the categorical entries / colorbar input, the
+/// resolved (three-way) legend title, the per-channel style overrides, the
+/// size/shape aux inputs, the leaf's effective theme (legend orient + fonts +
+/// colors), the color scale the legend draws against, and whether this leaf
+/// merged the color+size channels on a shared field (which folds size into the
+/// color legend at prepare time — see [`LegendSuppression`]).
+fn capture_leaf_bundle(
+    leaf: &CompositeLeafInput<'_>,
+    po: &super::PipelineOutput,
+) -> Result<LeafLegendBundle, RenderError> {
+    let color_scale = scene_build::resolve_legend_color_scale(
+        leaf.spec,
+        &po.prep,
+        &po.effective_theme,
+        leaf.chart_config,
+    )?;
+    let mut overrides = super::legend_overrides_from_prep(&po.prep);
+    super::apply_chart_config_to_legend_overrides(&mut overrides, leaf.chart_config);
+    // Three-way legend-title resolution, identical to `prepare_and_layout`'s:
+    // explicit-empty suppresses (no title), explicit-non-empty wins, absent falls
+    // through to the prepared field-name default.
+    let title = match po.prep.legend_overrides.title.as_deref() {
+        Some(s) if s.trim().is_empty() => None,
+        Some(s) => Some(s.to_owned()),
+        None => po.prep.legend_title.clone(),
+    };
+    Ok(LeafLegendBundle {
+        entries: po.prep.legend_entries.clone(),
+        colorbar: po.prep.colorbar.clone(),
+        title,
+        overrides,
+        aux: po.prep.aux_legends.clone(),
+        color_scale,
+        theme: po.effective_theme.clone(),
+        merged_color_size: leaf_merges_color_size(leaf.spec),
+    })
+}
+
+/// A leaf merges its color and size legends when both channels encode the SAME
+/// field — `prepare_render_inputs` then folds size into the color legend (the
+/// aux `Size` block carries the color, and the redundant colorbar is dropped),
+/// so suppressing one channel must suppress the other (design §6 seam contract,
+/// handoff item 3). Derived from the spec so it is known before pass 2 (the
+/// suppression flags must be set before the leaf renders).
+fn leaf_merges_color_size(spec: &ChartSpec) -> bool {
+    match (spec.encoding.color.as_ref(), spec.encoding.size.as_ref()) {
+        (Some(c), Some(s)) => c.field == s.field,
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Figure-level shared legend (GH #16)
+// ---------------------------------------------------------------------------
+
+/// Base gap (px) between the panel grid and a figure-level legend band, matching
+/// the single-chart `LEGEND_PLOT_GAP` so a shared legend sits the same distance
+/// off the plot as a per-panel one.
+const LEGEND_BAND_GAP: f64 = 8.0;
+
+/// A sandbox `inner` extent the band legend is measured in. Large enough that the
+/// legend-strip carve (which caps a strip at half the inner extent) never clips
+/// the full legend; the measured content is then translated to the oriented edge
+/// of the merged scene, so the sandbox size never leaks into the output.
+const LEGEND_SANDBOX: f64 = 100_000.0;
+
+/// Which channels a resolving composite node emits a figure legend for. A node
+/// can band `color`, `size`, or both (a same-field color+size share stacks both
+/// in one band); at least one is always `true` for a node present in
+/// [`LegendBandPlan::band_nodes`].
+#[derive(Debug, Clone, Copy)]
+struct BandFlags {
+    color: bool,
+    size: bool,
+}
+
+/// The composite nodes that emit a figure-level legend band, keyed by node
+/// identity (pointer into the borrowed tree the layout pass walks). Empty for
+/// any composite with all-independent legend resolution — the byte-stable path.
+struct LegendBandPlan {
+    band_nodes: HashMap<*const CompositeNode, BandFlags>,
+}
+
+/// Everything the place/merge walk needs to draw a figure legend band: the plan
+/// (which nodes band which channels), the per-leaf resolved contexts (to test
+/// participation), and the per-leaf captured bundles (the legend content).
+struct LegendBandCtx<'a> {
+    plan: &'a LegendBandPlan,
+    contexts: &'a [LeafScaleContext],
+    bundles: &'a [Option<LeafLegendBundle>],
+}
+
+/// A participating leaf's captured legend inputs — the figure legend's content
+/// (design §6 seam contract). Built by [`capture_leaf_bundle`] for every leaf
+/// the compositor suppresses; the band assembler picks the first non-empty one
+/// in a resolving node's subtree (design §8.4 capture rule).
+struct LeafLegendBundle {
+    entries: Vec<LegendEntry>,
+    colorbar: Option<ColorbarInput>,
+    title: Option<String>,
+    overrides: LegendOverrides,
+    aux: Vec<AuxLegendInput>,
+    color_scale: Option<ColorScale>,
+    theme: ThemeInputs,
+    /// The leaf folded color+size into one legend on a shared field (see
+    /// [`leaf_merges_color_size`]).
+    merged_color_size: bool,
+}
+
+impl LeafLegendBundle {
+    /// A bundle is empty when the leaf produced no drawable legend content — a
+    /// leaf whose legend the user disabled (`legend=None`) yields this (prepare-
+    /// stage suppression), so it is skipped for figure-legend capture (§8.4).
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+            && self.colorbar.is_none()
+            && self.aux.iter().all(aux_block_is_empty)
+    }
+}
+
+/// True when an aux legend block carries no entries (nothing to draw).
+fn aux_block_is_empty(a: &AuxLegendInput) -> bool {
+    match a {
+        AuxLegendInput::Size { entries, .. } => entries.is_empty(),
+        AuxLegendInput::Shape { entries, .. } => entries.is_empty(),
+    }
+}
+
+/// Per-channel legend-resolution state carried down the tree during planning.
+#[derive(Debug, Clone, Copy)]
+struct ChannelWalk {
+    /// A congruent-shared-scale ancestor already resolved this channel, so no
+    /// inner node re-resolves it (the resolve pass stops at the outermost such
+    /// node — [`super::composite::resolve_channel`]).
+    resolved_above: bool,
+    /// We are inside a figure-legend band for this channel: participating leaves
+    /// below are suppressed.
+    band_active: bool,
+}
+
+/// Plan the figure-level legends for a composite tree (design §5). Writes the
+/// per-leaf `suppress_color_legend`/`suppress_size_legend` flags into `contexts`
+/// (read by pass 2's leaf layout) and returns the set of nodes that emit a band.
+///
+/// A node bands a channel when it is the outermost congruent-shared-**scale**
+/// node for that channel (the node where the resolve pass actually unioned the
+/// domain) AND its effective legend resolution is `Shared`. A `legend`-
+/// independent override over a shared scale therefore bands nothing and
+/// suppresses no leaf — today's per-panel rendering (design §4). A leaf is
+/// suppressed only when it *participated* in the shared domain (its context
+/// carries the channel), so a leaf with an explicit per-chart `scale=` (excluded
+/// from the union) keeps its own panel legend.
+fn plan_legend_bands(tree: &CompositeNode, contexts: &mut [LeafScaleContext]) -> LegendBandPlan {
+    let mut plan = LegendBandPlan { band_nodes: HashMap::new() };
+    let mut cursor = 0usize;
+    let root = ChannelWalk { resolved_above: false, band_active: false };
+    plan_legend_walk(tree, contexts, &mut cursor, root, root, &mut plan);
+    plan
+}
+
+fn plan_legend_walk(
+    node: &CompositeNode,
+    contexts: &mut [LeafScaleContext],
+    cursor: &mut usize,
+    color: ChannelWalk,
+    size: ChannelWalk,
+    plan: &mut LegendBandPlan,
+) {
+    match node {
+        CompositeNode::Leaf { spec, .. } => {
+            let i = *cursor;
+            *cursor += 1;
+            let merges = leaf_merges_color_size(spec);
+            if color.band_active && contexts[i].color.is_some() {
+                contexts[i].suppress_color_legend = true;
+                // Same-field color+size merge: the size legend is folded into the
+                // color block, so suppress both together (design §6, handoff 3).
+                if merges {
+                    contexts[i].suppress_size_legend = true;
+                }
+            }
+            if size.band_active && contexts[i].size.is_some() {
+                contexts[i].suppress_size_legend = true;
+            }
+        }
+        CompositeNode::Hole { .. } => {}
+        CompositeNode::Composite { children, resolve, .. } => {
+            let congruent_children = children.iter().all(|c| congruent(&children[0], c));
+            let (color_next, color_band) = descend_channel(
+                resolve.color,
+                resolve.effective_color_legend(),
+                congruent_children,
+                color,
+            );
+            let (size_next, size_band) = descend_channel(
+                resolve.size,
+                resolve.effective_size_legend(),
+                congruent_children,
+                size,
+            );
+            if color_band || size_band {
+                plan.band_nodes.insert(
+                    node as *const CompositeNode,
+                    BandFlags { color: color_band, size: size_band },
+                );
+            }
+            for c in children {
+                plan_legend_walk(c, contexts, cursor, color_next, size_next, plan);
+            }
+        }
+    }
+}
+
+/// Advance one channel's [`ChannelWalk`] across a composite node, returning the
+/// state its children see and whether THIS node emits a band for the channel.
+fn descend_channel(
+    scale_mode: ResolveMode,
+    eff_legend: ResolveMode,
+    congruent_children: bool,
+    cur: ChannelWalk,
+) -> (ChannelWalk, bool) {
+    // A shared legend over a non-shared scale is rejected at lowering (design
+    // §4); if one somehow reaches here, treat it as independent (no band) rather
+    // than misrender.
+    debug_assert!(
+        !(eff_legend == ResolveMode::Shared && scale_mode != ResolveMode::Shared),
+        "shared legend over non-shared scale must be rejected at lowering"
+    );
+    let is_scale_resolver =
+        !cur.resolved_above && scale_mode == ResolveMode::Shared && congruent_children;
+    let band_here = is_scale_resolver && eff_legend == ResolveMode::Shared;
+    let next = ChannelWalk {
+        resolved_above: cur.resolved_above || is_scale_resolver,
+        band_active: cur.band_active || band_here,
+    };
+    (next, band_here)
+}
+
+/// Draw one figure-level legend band on `scene` for the resolving node covering
+/// `leaf_range`. Captures the first participating leaf's non-empty bundle in
+/// pre-order (design §8.4); if every participating leaf is user-disabled (all
+/// bundles empty) no band is emitted, matching design §4.
+fn apply_legend_band(
+    scene: &mut SceneGraph,
+    band_ctx: &LegendBandCtx<'_>,
+    leaf_range: std::ops::Range<usize>,
+    flags: BandFlags,
+) {
+    let captured = leaf_range.into_iter().find_map(|i| {
+        let ctx = &band_ctx.contexts[i];
+        let participates =
+            (flags.color && ctx.color.is_some()) || (flags.size && ctx.size.is_some());
+        if !participates {
+            return None;
+        }
+        match &band_ctx.bundles[i] {
+            Some(b) if !b.is_empty() => Some(b),
+            _ => None,
+        }
+    });
+    let Some(bundle) = captured else { return };
+    draw_legend_band(scene, bundle, flags);
+}
+
+/// Lay out the band's legend content (color block + size aux) in a sandbox,
+/// measure its true drawn extent, then translate it to the oriented edge of
+/// `scene` and grow the scene. Reuses the single-chart legend layout + draw
+/// primitives (design §7 facet parity — no parallel legend implementation).
+fn draw_legend_band(scene: &mut SceneGraph, bundle: &LeafLegendBundle, flags: BandFlags) {
+    let metrics = super::font::FontdueMetrics::new();
+    let layouts = layout_band_legends(bundle, flags, &metrics);
+    if layouts.is_empty() {
+        return;
+    }
+    let theme = &bundle.theme;
+    let label_fs = bundle
+        .overrides
+        .style
+        .label_font_size
+        .unwrap_or(theme.typography.label_font_size);
+    let Some((min_x, min_y, max_x, max_y)) = legend_layouts_extent(&layouts, label_fs, &metrics)
+    else {
+        return;
+    };
+    let content_w = (max_x - min_x).max(0.0);
+    let content_h = (max_y - min_y).max(0.0);
+    let orient = theme.legend.legend_orient;
+    let old_w = scene.width;
+    let old_h = scene.height;
+
+    // Placement origin of the measured content block. Left/Top first shift the
+    // existing merged content over to make room (mirroring `apply_chrome_band`'s
+    // header shift); Right/Bottom simply grow the far edge.
+    let (target_x, target_y) = match orient {
+        LegendOrient::Right => (old_w + LEGEND_BAND_GAP, 0.0),
+        LegendOrient::Left => {
+            shift_scene(scene, content_w + LEGEND_BAND_GAP, 0.0);
+            (0.0, 0.0)
+        }
+        LegendOrient::Top => {
+            shift_scene(scene, 0.0, content_h + LEGEND_BAND_GAP);
+            (0.0, 0.0)
+        }
+        LegendOrient::Bottom => (0.0, old_h + LEGEND_BAND_GAP),
+    };
+    let dx = target_x - min_x;
+    let dy = target_y - min_y;
+
+    let mut nodes: Vec<SceneNode> = Vec::new();
+    for l in &layouts {
+        nodes.extend(super::marks::legend::build_legend(
+            l,
+            bundle.color_scale.as_ref(),
+            theme,
+        ));
+    }
+    offset_nodes(&mut nodes, dx, dy);
+
+    match orient {
+        LegendOrient::Right | LegendOrient::Left => {
+            scene.width = old_w + LEGEND_BAND_GAP + content_w;
+            scene.height = old_h.max(content_h);
+        }
+        LegendOrient::Top | LegendOrient::Bottom => {
+            scene.width = old_w.max(content_w);
+            scene.height = old_h + LEGEND_BAND_GAP + content_h;
+        }
+    }
+    scene.legend.extend(nodes);
+}
+
+/// Lay out the band's color block (categorical entries or colorbar) and its size
+/// aux block against a sandbox `inner`. The color-block dispatch is the shared
+/// [`layout_color_legend`] core also used by `layout::reserve_legends`; aux
+/// stacking (below) is composite-band-specific. Shape aux blocks are excluded: a
+/// same-field shape already folds into the color entries, and a differently-
+/// keyed shape legend is not composite-shared, so it stays per-panel.
+fn layout_band_legends(
+    bundle: &LeafLegendBundle,
+    flags: BandFlags,
+    metrics: &dyn TextMetrics,
+) -> Vec<LegendLayout> {
+    let theme = &bundle.theme;
+    let orient = theme.legend.legend_orient;
+    let overrides = &bundle.overrides;
+    let inner = LayoutRect { x: 0.0, y: 0.0, w: LEGEND_SANDBOX, h: LEGEND_SANDBOX };
+
+    // `!flags.color`: an empty-entries + no-colorbar input makes the shared
+    // dispatch a no-op `(None, inner, ..)` via `layout_legend`'s empty-entries
+    // early return — matching the pre-extraction "never attempted layout" skip.
+    let (color_entries, color_colorbar): (&[LegendEntry], Option<&ColorbarInput>) =
+        if flags.color { (&bundle.entries, bundle.colorbar.as_ref()) } else { (&[], None) };
+    let (color_legend, inner_after, effective_label_font_size) = layout_color_legend(
+        inner,
+        orient,
+        theme.typography.label_font_size,
+        theme.legend.legend_direction,
+        theme.typography.legend_title_font_size,
+        theme.legend.legend_columns,
+        theme.padding.column_padding,
+        color_entries,
+        bundle.title.as_deref(),
+        color_colorbar,
+        metrics,
+        overrides,
+    );
+
+    // Size aux is banded when the node shares size, or when a same-field color+
+    // size merge folded size into the color block this node bands.
+    let include_size = flags.size || (flags.color && bundle.merged_color_size);
+    let aux_inputs: Vec<AuxLegendInput> = if include_size {
+        bundle
+            .aux
+            .iter()
+            .filter(|a| matches!(a, AuxLegendInput::Size { .. }))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let (aux_legends, _) = layout_aux_legends(
+        &aux_inputs,
+        color_legend.as_ref(),
+        orient,
+        inner,
+        inner_after,
+        effective_label_font_size,
+        theme.typography.legend_title_font_size,
+        metrics,
+        theme.padding.column_padding,
+    );
+
+    let mut out: Vec<LegendLayout> = Vec::new();
+    out.extend(color_legend);
+    out.extend(aux_legends);
+    out
+}
+
+/// The bounding box `(min_x, min_y, max_x, max_y)` of every drawn glyph across
+/// `layouts` — entry swatches + labels, title, and colorbar bar + ticks. Used to
+/// size the scene growth and position the band; `None` when nothing is drawn.
+fn legend_layouts_extent(
+    layouts: &[LegendLayout],
+    label_fs: f64,
+    metrics: &dyn TextMetrics,
+) -> Option<(f64, f64, f64, f64)> {
+    let line_h = metrics.line_height(label_fs);
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    let mut any = false;
+    let mut acc = |x0: f64, y0: f64, x1: f64, y1: f64| {
+        min_x = min_x.min(x0);
+        min_y = min_y.min(y0);
+        max_x = max_x.max(x1);
+        max_y = max_y.max(y1);
+        any = true;
+    };
+    for l in layouts {
+        for e in &l.entries {
+            let lw = metrics.measure_width(&e.label, label_fs);
+            let half = e.symbol_radius.unwrap_or(6.0).max(6.0);
+            acc(
+                e.symbol_anchor_x - half,
+                e.symbol_anchor_y - line_h / 2.0,
+                e.label_anchor_x + lw,
+                e.symbol_anchor_y + line_h / 2.0,
+            );
+        }
+        if let Some(t) = &l.title {
+            let tw = metrics.measure_width(&t.text, label_fs);
+            acc(t.x, t.y - line_h, t.x + tw, t.y);
+        }
+        if let Some(cb) = &l.colorbar {
+            let mut max_tick = 0.0_f64;
+            for tk in &cb.ticks {
+                max_tick = max_tick.max(metrics.measure_width(&tk.label, label_fs));
+                acc(cb.bar_rect.x, tk.y - line_h / 2.0, cb.bar_rect.x, tk.y + line_h / 2.0);
+            }
+            acc(
+                cb.bar_rect.x,
+                cb.bar_rect.y,
+                cb.bar_rect.x + cb.bar_rect.w + 4.0 + max_tick,
+                cb.bar_rect.y + cb.bar_rect.h,
+            );
+        }
+    }
+    any.then_some((min_x, min_y, max_x, max_y))
+}
+
+/// Shift every panel and non-panel node in `scene` by `(dx, dy)` — the
+/// make-room step for a Left/Top legend band (mirrors [`apply_chrome_band`]'s
+/// header shift). No-op at `(0, 0)`.
+fn shift_scene(scene: &mut SceneGraph, dx: f64, dy: f64) {
+    if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+    let t = translate(dx, dy);
+    for panel in &mut scene.panels {
+        place_panel(panel, &t);
+    }
+    offset_nodes(&mut scene.title, dx, dy);
+    offset_nodes(&mut scene.legend, dx, dy);
+    offset_nodes(&mut scene.decorations, dx, dy);
 }
 
 // ---------------------------------------------------------------------------
@@ -358,7 +875,9 @@ fn build_placed(
     node: &CompositeNode,
     scenes: &mut std::vec::IntoIter<SceneGraph>,
     panel_base: &mut usize,
+    leaf_cursor: &mut usize,
     call_theme: &ThemeInputs,
+    band_ctx: &LegendBandCtx<'_>,
     parent_layout: Option<CompositeLayout>,
 ) -> Placed {
     let mut placed = match node {
@@ -368,6 +887,7 @@ fn build_placed(
                 .expect("leaf scenes count matches tree leaves (checked by entry)");
             renumber_panels(&mut scene, *panel_base);
             *panel_base += scene.panels.len();
+            *leaf_cursor += 1;
             let (width, height) = (scene.width, scene.height);
             Placed { scene, width, height }
         }
@@ -396,9 +916,10 @@ fn build_placed(
             Placed { scene: empty_scene(w, h), width: w, height: h }
         }
         CompositeNode::Composite { layout, children, spacing, row_ratios, col_ratios, ncols, nrows, .. } => {
+            let leaf_start = *leaf_cursor;
             let child_placed: Vec<Placed> = children
                 .iter()
-                .map(|c| build_placed(c, scenes, panel_base, call_theme, Some(*layout)))
+                .map(|c| build_placed(c, scenes, panel_base, leaf_cursor, call_theme, band_ctx, Some(*layout)))
                 .collect();
             let spacing = spacing.unwrap_or(DEFAULT_SPACING);
             let plan = plan_layout(
@@ -410,7 +931,20 @@ fn build_placed(
                 *ncols,
                 *nrows,
             );
-            merge_children(child_placed, plan)
+            let mut merged = merge_children(child_placed, plan);
+            // Figure-legend band (design §5 pass 3): if this composite node
+            // resolved a channel as a shared figure legend, grow the merged scene
+            // on the oriented edge and draw one legend built from the first
+            // participating leaf's captured bundle. Applied AFTER children are
+            // placed and BEFORE the per-child label / root chrome below, so a
+            // title band stacks above the legend exactly as it does for a
+            // per-panel legend.
+            if let Some(flags) = band_ctx.plan.band_nodes.get(&(node as *const CompositeNode)) {
+                apply_legend_band(&mut merged.scene, band_ctx, leaf_start..*leaf_cursor, *flags);
+                merged.width = merged.scene.width;
+                merged.height = merged.scene.height;
+            }
+            merged
         }
     };
     // Per-child panel label (Task 5d): a title-only chrome band reserved above
@@ -2477,5 +3011,516 @@ mod tests {
             font_size, 16.0,
             "sanity: the themed value must differ from the figure-chrome constant"
         );
+    }
+
+    // -- figure-level shared legend (GH #16, Task 3) --------------------------
+
+    use crate::layout::facet::ResolveMode as RM;
+
+    /// A point spec with a categorical color encoding on field `g`.
+    fn cat_color_spec() -> ChartSpec {
+        let mut s = scatter_spec();
+        s.encoding.color = Some(EncodingSpec { field: "g".into(), ..Default::default() });
+        s
+    }
+
+    /// A point spec with categorical color on `g` AND numeric size on `s`
+    /// (different fields → color+size do NOT merge; two stacked legends).
+    fn color_size_spec() -> ChartSpec {
+        let mut spec = cat_color_spec();
+        spec.encoding.size = Some(EncodingSpec { field: "s".into(), ..Default::default() });
+        spec
+    }
+
+    fn xyg_batch(xs: &[f64], ys: &[f64], gs: &[&str]) -> RecordBatch {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs.to_vec())),
+                Arc::new(Float64Array::from(ys.to_vec())),
+                Arc::new(StringArray::from(gs.iter().map(|s| Some(*s)).collect::<Vec<_>>())),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn xycs_batch(xs: &[f64], ys: &[f64], gs: &[&str], ss: &[f64]) -> RecordBatch {
+        use arrow::array::StringArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("s", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs.to_vec())),
+                Arc::new(Float64Array::from(ys.to_vec())),
+                Arc::new(StringArray::from(gs.iter().map(|s| Some(*s)).collect::<Vec<_>>())),
+                Arc::new(Float64Array::from(ss.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn color_hold_with(spec: ChartSpec, batch: RecordBatch, theme: ThemeInputs) -> LeafHold {
+        LeafHold { spec, batch, theme, config: RenderConfig::default(), chart_config: ChartConfig::default() }
+    }
+
+    fn color_hold(gs: &[&str]) -> LeafHold {
+        color_hold_with(cat_color_spec(), xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], gs), ThemeInputs::default())
+    }
+
+    fn color_hold_oriented(gs: &[&str], orient: LegendOrient) -> LeafHold {
+        let mut theme = ThemeInputs::default();
+        theme.legend.legend_orient = orient;
+        color_hold_with(cat_color_spec(), xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], gs), theme)
+    }
+
+    fn color_leaf(data: usize) -> CompositeNode {
+        CompositeNode::Leaf { spec: Box::new(cat_color_spec()), data, label: None }
+    }
+
+    /// An hconcat of `n` color leaves with the given color resolve mode and an
+    /// optional explicit legend override.
+    fn color_hconcat(n: usize, color: RM, legend_color: Option<RM>) -> CompositeNode {
+        let mut node = composite(CompositeLayout::Hconcat, (0..n).map(color_leaf).collect());
+        if let CompositeNode::Composite { resolve, .. } = &mut node {
+            resolve.color = color;
+            resolve.legend.color = legend_color;
+        }
+        node
+    }
+
+    #[test]
+    fn shared_color_hconcat_emits_one_figure_legend_not_per_panel() {
+        // Two color leaves sharing color, legend follows scale (default) → one
+        // figure band; the same tree forced legend-independent keeps N panel
+        // legends. The band's legend-node count must be strictly fewer.
+        let h0 = color_hold(&["a", "b", "a"]);
+        let h1 = color_hold(&["a", "b", "a"]);
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+
+        let shared = color_hconcat(2, RM::Shared, None);
+        let (shared_scene, _) = render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
+
+        let indep = color_hconcat(2, RM::Shared, Some(RM::Independent));
+        let (indep_scene, _) = render_composite_scene(&indep, &leaves, &ThemeInputs::default()).unwrap();
+
+        assert!(!shared_scene.legend.is_empty(), "shared color must emit one figure legend");
+        assert!(!indep_scene.legend.is_empty(), "legend-independent keeps per-panel legends");
+        assert!(
+            shared_scene.legend.len() < indep_scene.legend.len(),
+            "one figure legend ({}) must draw fewer nodes than two per-panel legends ({})",
+            shared_scene.legend.len(),
+            indep_scene.legend.len(),
+        );
+        assert_eq!(shared_scene.panels.len(), 2, "band must not add or drop panels");
+    }
+
+    #[test]
+    fn shared_color_band_grows_scene_on_right_edge() {
+        // Right orient (theme default): the figure legend grows the scene width
+        // beyond the panel-grid width (300 + 10 + 300 = 610); the per-panel
+        // (legend-independent) render keeps legends inside each panel, so its
+        // width stays the grid width.
+        let h0 = color_hold(&["a", "b", "a"]);
+        let h1 = color_hold(&["a", "b", "a"]);
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+
+        let shared = color_hconcat(2, RM::Shared, None);
+        let (shared_scene, _) = render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
+        assert!(shared_scene.width > 610.0, "right band must grow width past the grid: {}", shared_scene.width);
+        assert!((shared_scene.height - 200.0).abs() < 1e-6, "right band must not grow height");
+
+        let indep = color_hconcat(2, RM::Shared, Some(RM::Independent));
+        let (indep_scene, _) = render_composite_scene(&indep, &leaves, &ThemeInputs::default()).unwrap();
+        assert!((indep_scene.width - 610.0).abs() < 1e-6, "per-panel legends must not grow the grid width: {}", indep_scene.width);
+    }
+
+    #[test]
+    fn shared_color_band_grows_top_and_shifts_panels_down() {
+        let h0 = color_hold_oriented(&["a", "b", "a"], LegendOrient::Top);
+        let h1 = color_hold_oriented(&["a", "b", "a"], LegendOrient::Top);
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let tree = color_hconcat(2, RM::Shared, None);
+        let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert!(scene.height > 200.0, "top band must grow scene height: {}", scene.height);
+        assert!((scene.width - 610.0).abs() < 1e-6, "top band must not grow width: {}", scene.width);
+        assert!(scene.panels[0].plot_area.y > 8.0, "top band must shift panels down: {}", scene.panels[0].plot_area.y);
+    }
+
+    #[test]
+    fn shared_color_band_left_shifts_panels_right() {
+        let h0 = color_hold_oriented(&["a", "b", "a"], LegendOrient::Left);
+        let h1 = color_hold_oriented(&["a", "b", "a"], LegendOrient::Left);
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let tree = color_hconcat(2, RM::Shared, None);
+        let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert!(scene.width > 610.0, "left band must grow scene width: {}", scene.width);
+        // Panel 0's plot area is pushed right by the legend gutter.
+        let right_h = color_hold(&["a", "b", "a"]);
+        let right_leaves = [leaf_input(&right_h, 300.0, 200.0), leaf_input(&right_h, 300.0, 200.0)];
+        let (right_scene, _) = render_composite_scene(&tree, &right_leaves, &ThemeInputs::default()).unwrap();
+        assert!(
+            scene.panels[0].plot_area.x > right_scene.panels[0].plot_area.x,
+            "left band shifts panels right ({} vs right-orient {})",
+            scene.panels[0].plot_area.x, right_scene.panels[0].plot_area.x,
+        );
+    }
+
+    #[test]
+    fn nested_shared_color_attaches_band_to_inner_subtree_only() {
+        // Outer hconcat is independent; the inner hconcat of two color leaves
+        // shares color. One band attaches at the inner node; forcing the inner
+        // legend-independent removes the band (per-panel legends return).
+        let inner_shared = {
+            let mut inner = composite(CompositeLayout::Hconcat, vec![color_leaf(0), color_leaf(1)]);
+            if let CompositeNode::Composite { resolve, .. } = &mut inner {
+                resolve.color = RM::Shared;
+            }
+            composite(CompositeLayout::Hconcat, vec![leaf_node(2), inner])
+        };
+        let inner_indep = {
+            let mut inner = composite(CompositeLayout::Hconcat, vec![color_leaf(0), color_leaf(1)]);
+            if let CompositeNode::Composite { resolve, .. } = &mut inner {
+                resolve.color = RM::Shared;
+                resolve.legend.color = Some(RM::Independent);
+            }
+            composite(CompositeLayout::Hconcat, vec![leaf_node(2), inner])
+        };
+        let c0 = color_hold(&["a", "b", "a"]);
+        let c1 = color_hold(&["a", "b", "a"]);
+        let plain = hold(); // data index 2: a plain x/y leaf, no color
+        // Leaf inputs are in tree pre-order: the outer plain leaf, then the inner
+        // node's two color leaves.
+        let ordered = [
+            leaf_input(&plain, 300.0, 200.0),
+            leaf_input(&c0, 300.0, 200.0),
+            leaf_input(&c1, 300.0, 200.0),
+        ];
+        let (shared_scene, _) = render_composite_scene(&inner_shared, &ordered, &ThemeInputs::default()).unwrap();
+        let (indep_scene, _) = render_composite_scene(&inner_indep, &ordered, &ThemeInputs::default()).unwrap();
+        assert!(!shared_scene.legend.is_empty(), "inner-shared color must emit one band");
+        assert!(
+            shared_scene.legend.len() < indep_scene.legend.len(),
+            "nested band ({}) must draw fewer legend nodes than per-panel ({})",
+            shared_scene.legend.len(), indep_scene.legend.len(),
+        );
+        assert_eq!(shared_scene.panels.len(), 3);
+    }
+
+    #[test]
+    fn all_participating_leaves_disabled_emits_no_band() {
+        // Both color leaves disable their color legend → empty bundles, so no
+        // figure band is emitted even though color resolves shared. Suppression
+        // still applies (nothing to draw either way), so scene.legend is empty.
+        use crate::render::chart_config::LegendStyleSpec;
+        let disabled_spec = || {
+            let mut s = cat_color_spec();
+            s.encoding.color.as_mut().unwrap().legend =
+                Some(Box::new(LegendStyleSpec { disabled: Some(true), ..Default::default() }));
+            s
+        };
+        let h0 = color_hold_with(disabled_spec(), xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"]), ThemeInputs::default());
+        let h1 = color_hold_with(disabled_spec(), xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"]), ThemeInputs::default());
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        // Tree leaf specs must also carry the disabled legend so planning sees it.
+        let mut tree = composite(
+            CompositeLayout::Hconcat,
+            vec![
+                CompositeNode::Leaf { spec: Box::new(disabled_spec()), data: 0, label: None },
+                CompositeNode::Leaf { spec: Box::new(disabled_spec()), data: 1, label: None },
+            ],
+        );
+        if let CompositeNode::Composite { resolve, .. } = &mut tree {
+            resolve.color = RM::Shared;
+        }
+        let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert!(scene.legend.is_empty(), "all-disabled participants → no figure band");
+        assert!((scene.width - 610.0).abs() < 1e-6, "no band → no width growth: {}", scene.width);
+    }
+
+    #[test]
+    fn capture_skips_disabled_leaf_and_uses_next_participant() {
+        // Leaf 0 disables its color legend; leaf 1 keeps it. The band captures
+        // leaf 1's non-empty bundle, so exactly one band is still emitted.
+        use crate::render::chart_config::LegendStyleSpec;
+        let mut disabled = cat_color_spec();
+        disabled.encoding.color.as_mut().unwrap().legend =
+            Some(Box::new(LegendStyleSpec { disabled: Some(true), ..Default::default() }));
+        let h0 = color_hold_with(disabled.clone(), xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"]), ThemeInputs::default());
+        let h1 = color_hold(&["a", "b", "a"]);
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let mut tree = composite(
+            CompositeLayout::Hconcat,
+            vec![
+                CompositeNode::Leaf { spec: Box::new(disabled), data: 0, label: None },
+                color_leaf(1),
+            ],
+        );
+        if let CompositeNode::Composite { resolve, .. } = &mut tree {
+            resolve.color = RM::Shared;
+        }
+        let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        assert!(!scene.legend.is_empty(), "band must be captured from the non-disabled leaf 1");
+        assert!(scene.width > 610.0, "band from leaf 1 still grows the scene: {}", scene.width);
+    }
+
+    #[test]
+    fn explicit_leaf_color_scale_keeps_its_own_panel_legend() {
+        // Leaf 1 pins an explicit ordinal color scale → excluded from the shared
+        // union, so it renders its own panel legend while leaf 0 (participant) is
+        // deduped into the figure band. Result: MORE legend nodes than a tree
+        // where both participate (band only).
+        use crate::spec::encoding::ScaleSpec;
+        let mut excl_spec = cat_color_spec();
+        excl_spec.encoding.color.as_mut().unwrap().scale =
+            Some(ScaleSpec::Ordinal { domain: None, range: None, padding: 0.0 });
+        let h0 = color_hold(&["a", "b", "a"]);
+        let h1 = color_hold_with(excl_spec.clone(), xyg_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"]), ThemeInputs::default());
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let mut tree = composite(
+            CompositeLayout::Hconcat,
+            vec![color_leaf(0), CompositeNode::Leaf { spec: Box::new(excl_spec), data: 1, label: None }],
+        );
+        if let CompositeNode::Composite { resolve, .. } = &mut tree {
+            resolve.color = RM::Shared;
+        }
+        let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        // Baseline: both participate (no explicit scale) → single band only.
+        let both = color_hold(&["a", "b", "a"]);
+        let both_leaves = [leaf_input(&both, 300.0, 200.0), leaf_input(&both, 300.0, 200.0)];
+        let both_tree = color_hconcat(2, RM::Shared, None);
+        let (both_scene, _) = render_composite_scene(&both_tree, &both_leaves, &ThemeInputs::default()).unwrap();
+
+        assert!(
+            scene.legend.len() > both_scene.legend.len(),
+            "excluded leaf's own legend ({}) must add nodes beyond the lone band ({})",
+            scene.legend.len(), both_scene.legend.len(),
+        );
+    }
+
+    #[test]
+    fn shared_color_and_size_stack_both_in_one_band() {
+        // A leaf with color (categorical) + size (numeric) on DIFFERENT fields,
+        // sharing both channels on one node → one band containing the color
+        // legend AND the size aux block: more legend nodes than a color-only band.
+        let batch = xycs_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &["a", "b", "a"], &[2.0, 5.0, 9.0]);
+        let h0 = color_hold_with(color_size_spec(), batch.clone(), ThemeInputs::default());
+        let h1 = color_hold_with(color_size_spec(), batch, ThemeInputs::default());
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+        let cs_leaf = |data| CompositeNode::Leaf { spec: Box::new(color_size_spec()), data, label: None };
+        let mut tree = composite(CompositeLayout::Hconcat, vec![cs_leaf(0), cs_leaf(1)]);
+        if let CompositeNode::Composite { resolve, .. } = &mut tree {
+            resolve.color = RM::Shared;
+            resolve.size = RM::Shared;
+        }
+        let (both_scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        // Color-only shared baseline (size independent → size legend stays per-panel,
+        // not in the band).
+        let color_only = color_hconcat(2, RM::Shared, None);
+        let ch = color_hold(&["a", "b", "a"]);
+        let color_leaves = [leaf_input(&ch, 300.0, 200.0), leaf_input(&ch, 300.0, 200.0)];
+        let (color_scene, _) = render_composite_scene(&color_only, &color_leaves, &ThemeInputs::default()).unwrap();
+
+        assert!(!both_scene.legend.is_empty(), "color+size share must emit a band");
+        assert!(
+            both_scene.legend.len() > color_scene.legend.len(),
+            "stacked color+size band ({}) must draw more nodes than a color-only band ({})",
+            both_scene.legend.len(), color_scene.legend.len(),
+        );
+    }
+
+    #[test]
+    fn legend_independent_override_matches_per_panel_baseline() {
+        // A shared color SCALE with legend={color: independent} must render the
+        // per-panel legends today's shared-scale output produced — no band, no
+        // suppression. Its legend-node count matches the independent-scale render
+        // (both draw one legend per panel) and exceeds the shared-legend band.
+        let h0 = color_hold(&["a", "b", "a"]);
+        let h1 = color_hold(&["a", "b", "a"]);
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+
+        let override_tree = color_hconcat(2, RM::Shared, Some(RM::Independent));
+        let (override_scene, _) = render_composite_scene(&override_tree, &leaves, &ThemeInputs::default()).unwrap();
+
+        let independent_scale = color_hconcat(2, RM::Independent, None);
+        let (indep_scene, _) = render_composite_scene(&independent_scale, &leaves, &ThemeInputs::default()).unwrap();
+
+        assert_eq!(
+            override_scene.legend.len(), indep_scene.legend.len(),
+            "legend-independent over a shared scale must draw the same per-panel legends as an independent scale",
+        );
+        assert!((override_scene.width - 610.0).abs() < 1e-6, "no band → no growth: {}", override_scene.width);
+    }
+
+    // -- extraction fix-round regression tests (Task 3, legend::layout_color_legend) --
+
+    fn xys_batch(xs: &[f64], ys: &[f64], ss: &[f64]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("s", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(xs.to_vec())),
+                Arc::new(Float64Array::from(ys.to_vec())),
+                Arc::new(Float64Array::from(ss.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A point spec with numeric size on `s` and NO color channel at all.
+    fn size_only_spec() -> ChartSpec {
+        let mut s = scatter_spec();
+        s.encoding.size = Some(EncodingSpec { field: "s".into(), ..Default::default() });
+        s
+    }
+
+    fn size_leaf(data: usize) -> CompositeNode {
+        CompositeNode::Leaf { spec: Box::new(size_only_spec()), data, label: None }
+    }
+
+    #[test]
+    fn shared_size_only_bands_and_suppresses_panel_size_legends() {
+        // Size shared, color independent (no color channel at all): one figure
+        // size legend band; per-panel size legends must be suppressed. Mirrors
+        // `shared_color_hconcat_emits_one_figure_legend_not_per_panel` but drives
+        // the size channel through `layout_color_legend`'s dispatch instead of the
+        // color one — the shared helper's `legend_entries`/`colorbar` inputs are
+        // both empty for a size-only leaf, so this exercises its early-return arm.
+        let batch = xys_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &[2.0, 5.0, 9.0]);
+        let h0 = color_hold_with(size_only_spec(), batch.clone(), ThemeInputs::default());
+        let h1 = color_hold_with(size_only_spec(), batch, ThemeInputs::default());
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+
+        let mut shared = composite(CompositeLayout::Hconcat, vec![size_leaf(0), size_leaf(1)]);
+        if let CompositeNode::Composite { resolve, .. } = &mut shared {
+            resolve.size = RM::Shared;
+        }
+        let (shared_scene, _) = render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
+
+        let mut indep = composite(CompositeLayout::Hconcat, vec![size_leaf(0), size_leaf(1)]);
+        if let CompositeNode::Composite { resolve, .. } = &mut indep {
+            resolve.size = RM::Independent;
+        }
+        let (indep_scene, _) = render_composite_scene(&indep, &leaves, &ThemeInputs::default()).unwrap();
+
+        assert!(!shared_scene.legend.is_empty(), "shared size must emit one figure legend band");
+        assert!(!indep_scene.legend.is_empty(), "independent size keeps per-panel size legends");
+        assert!(
+            shared_scene.legend.len() < indep_scene.legend.len(),
+            "one figure size band ({}) must draw fewer nodes than two per-panel size legends ({})",
+            shared_scene.legend.len(), indep_scene.legend.len(),
+        );
+        assert_eq!(shared_scene.panels.len(), 2, "band must not add or drop panels");
+    }
+
+    /// A point spec with color AND size mapped to the SAME numeric field `s` —
+    /// `leaf_merges_color_size` folds size into the color legend for this leaf.
+    fn merged_color_size_spec() -> ChartSpec {
+        let mut s = scatter_spec();
+        s.encoding.color = Some(EncodingSpec { field: "s".into(), ..Default::default() });
+        s.encoding.size = Some(EncodingSpec { field: "s".into(), ..Default::default() });
+        s
+    }
+
+    fn merged_leaf(data: usize) -> CompositeNode {
+        CompositeNode::Leaf { spec: Box::new(merged_color_size_spec()), data, label: None }
+    }
+
+    #[test]
+    fn same_field_color_size_merge_bands_folded_size_and_suppresses_both_channels() {
+        // color+size on the SAME field ("s") merges into one legend per leaf
+        // (`leaf_merges_color_size`), so sharing color ALONE (size resolve stays
+        // Independent, the default) must still band the folded size content —
+        // `layout_band_legends`'s `include_size = flags.color && merged_color_size`
+        // arm — and suppress BOTH panel channels together, not just color.
+        let batch = xys_batch(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0], &[2.0, 5.0, 9.0]);
+        let h0 = color_hold_with(merged_color_size_spec(), batch.clone(), ThemeInputs::default());
+        let h1 = color_hold_with(merged_color_size_spec(), batch, ThemeInputs::default());
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+
+        let mut shared = composite(CompositeLayout::Hconcat, vec![merged_leaf(0), merged_leaf(1)]);
+        if let CompositeNode::Composite { resolve, .. } = &mut shared {
+            resolve.color = RM::Shared;
+        }
+        let (shared_scene, _) = render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
+
+        // Baseline A: same tree, resolve stays default (Independent) → both
+        // panels keep their OWN already-merged color+size legend (nothing
+        // compositor-suppressed) — proves suppression collapsed two per-panel
+        // merged blocks into one band.
+        let unshared = composite(CompositeLayout::Hconcat, vec![merged_leaf(0), merged_leaf(1)]);
+        let (unshared_scene, _) = render_composite_scene(&unshared, &leaves, &ThemeInputs::default()).unwrap();
+
+        // Baseline B: a plain categorical color-only band (different field,
+        // no size at all) — proves the merged band carries MORE than bare
+        // color, i.e. the folded size swatches are actually present.
+        let color_only = color_hconcat(2, RM::Shared, None);
+        let ch = color_hold(&["a", "b", "a"]);
+        let color_leaves = [leaf_input(&ch, 300.0, 200.0), leaf_input(&ch, 300.0, 200.0)];
+        let (color_scene, _) = render_composite_scene(&color_only, &color_leaves, &ThemeInputs::default()).unwrap();
+
+        assert!(!shared_scene.legend.is_empty(), "same-field color+size merge must emit a band");
+        assert!(
+            shared_scene.legend.len() < unshared_scene.legend.len(),
+            "one band folding both suppressed channels ({}) must draw fewer nodes than two \
+             per-panel merged legends ({})",
+            shared_scene.legend.len(), unshared_scene.legend.len(),
+        );
+        assert!(
+            shared_scene.legend.len() > color_scene.legend.len(),
+            "band with folded size content ({}) must draw more nodes than a color-only band ({})",
+            shared_scene.legend.len(), color_scene.legend.len(),
+        );
+        assert_eq!(shared_scene.panels.len(), 2, "band must not add or drop panels");
+    }
+
+    #[test]
+    fn nested_shared_color_band_at_top_orient_grows_height_and_shifts_panels_down() {
+        // The flat two-leaf Left/Top orient geometry tests above put the shared
+        // node at the tree root; this drives the same Top-orient geometry
+        // through a NESTED tree (the shared node is an inner child, alongside an
+        // unrelated sibling leaf), proving `layout_color_legend`'s dispatch still
+        // grows/shifts on the correct edge when the band attaches below the root.
+        let inner = {
+            let mut inner = composite(CompositeLayout::Hconcat, vec![color_leaf(0), color_leaf(1)]);
+            if let CompositeNode::Composite { resolve, .. } = &mut inner {
+                resolve.color = RM::Shared;
+            }
+            composite(CompositeLayout::Hconcat, vec![leaf_node(2), inner])
+        };
+        let plain = hold();
+        let c0 = color_hold_oriented(&["a", "b", "a"], LegendOrient::Top);
+        let c1 = color_hold_oriented(&["a", "b", "a"], LegendOrient::Top);
+        let leaves = [
+            leaf_input(&plain, 300.0, 200.0),
+            leaf_input(&c0, 300.0, 200.0),
+            leaf_input(&c1, 300.0, 200.0),
+        ];
+        let (scene, _) = render_composite_scene(&inner, &leaves, &ThemeInputs::default()).unwrap();
+
+        assert!(!scene.legend.is_empty(), "nested Top-orient share must still emit a band");
+        assert!(scene.height > 200.0, "top band must grow scene height even when nested: {}", scene.height);
+        assert!(
+            scene.panels[1].plot_area.y > 8.0,
+            "top band must shift the inner subtree's panels down: {}",
+            scene.panels[1].plot_area.y,
+        );
+        assert_eq!(scene.panels.len(), 3, "band must not add or drop panels");
     }
 }

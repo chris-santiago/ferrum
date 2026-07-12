@@ -961,6 +961,101 @@ pub fn layout_colorbar(
     (Some(legend), new_inner)
 }
 
+/// Resolve the D13+ per-legend overrides (`labelFontSize`, `direction`,
+/// `type="gradient"`/`"symbol"`, `tickCount`, `values`, `tickMinStep`,
+/// `gradientLength`/`gradientThickness`) against the theme, then dispatch the
+/// color legend to [`layout_colorbar`] (continuous) or [`layout_legend`]
+/// (categorical entries). Shared core of the single-chart legend reservation
+/// (`layout::reserve_legends`) and the composite figure-level legend band
+/// (`render::composite_render::layout_band_legends`, GH #16 design §7 facet
+/// parity) — the two sites differ only in what `inner` they measure the
+/// legend against and how they use the aux (size/shape) legends stacked
+/// beneath, so this covers just the identical color-block dispatch.
+///
+/// A caller that wants no color legend attempted at all (e.g. a
+/// compositor-suppressed panel) passes an empty `legend_entries` slice and
+/// `colorbar: None` — `layout_legend`'s empty-entries early return then makes
+/// this a no-op `(None, inner, effective_label_font_size)`, matching the
+/// pre-extraction "never attempted layout" suppression behavior exactly.
+///
+/// Returns the laid-out color legend (`None` for empty entries and no
+/// colorbar), the plot rect remaining after the reservation, and the
+/// resolved `effective_label_font_size` — callers also need this for their
+/// own aux-legend stacking, so it is returned rather than recomputed.
+#[allow(clippy::too_many_arguments)]
+pub fn layout_color_legend(
+    inner: Rect,
+    orient: LegendOrient,
+    theme_label_font_size: f64,
+    theme_legend_direction: Option<LegendDirection>,
+    legend_title_font_size: f64,
+    legend_columns: Option<u32>,
+    column_padding: f64,
+    legend_entries: &[LegendEntry],
+    legend_title: Option<&str>,
+    colorbar: Option<&ColorbarInput>,
+    metrics: &dyn TextMetrics,
+    legend_overrides: &LegendOverrides,
+) -> (Option<LegendLayout>, Rect, f64) {
+    let effective_label_font_size =
+        legend_overrides.style.label_font_size.unwrap_or(theme_label_font_size);
+    let effective_direction = legend_overrides.direction.or(theme_legend_direction);
+    let force_colorbar = legend_overrides.legend_type.as_deref() == Some("gradient");
+    let force_symbol = legend_overrides.legend_type.as_deref() == Some("symbol");
+    let use_colorbar = (colorbar.is_some() && legend_entries.is_empty() && !force_symbol)
+        || (colorbar.is_some() && force_colorbar);
+
+    let (legend_layout, inner_after_legend) = if use_colorbar {
+        let cb = colorbar.expect("use_colorbar implies colorbar present");
+        let tick_labels: Vec<String> =
+            legend_overrides.values.clone().unwrap_or_else(|| cb.tick_labels.clone());
+        let tick_labels = if let Some(n) = legend_overrides.tick_count {
+            subsample_tick_labels(tick_labels, n)
+        } else {
+            tick_labels
+        };
+        // B5 unit 3: thin colorbar ticks to honor `tick_min_step`. Needs the
+        // numeric domain the labels span (carried on `ColorbarInput.domain`);
+        // absent for explicit non-numeric label overrides → no-op.
+        let tick_labels = match (legend_overrides.tick_min_step, cb.domain) {
+            (Some(min_step), Some(domain)) =>
+                thin_colorbar_ticks_by_min_step(tick_labels, domain, min_step),
+            _ => tick_labels,
+        };
+        layout_colorbar(
+            inner,
+            orient,
+            legend_title.map(str::to_owned),
+            cb.stops.clone(),
+            tick_labels,
+            effective_label_font_size,
+            legend_title_font_size,
+            metrics,
+            column_padding,
+            legend_overrides.gradient_length,
+            legend_overrides.gradient_thickness,
+            legend_overrides.style.clip_height,
+            legend_overrides.style.label_color.clone(),
+            legend_overrides.style.label_font_size,
+        )
+    } else {
+        layout_legend(
+            legend_entries,
+            orient,
+            inner,
+            effective_label_font_size,
+            metrics,
+            effective_direction,
+            legend_title,
+            legend_title_font_size,
+            legend_columns,
+            legend_overrides.symbol_type.as_deref(),
+            legend_overrides.style.clone(),
+        )
+    };
+    (legend_layout, inner_after_legend, effective_label_font_size)
+}
+
 // ── Auxiliary (size / shape) legends ────────────────────────────────────────
 
 /// A graduated size-legend value: the data value's formatted label and the

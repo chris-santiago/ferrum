@@ -182,17 +182,14 @@ impl CompositeResolve {
     ///
     /// Wire-contract Task 1 of the GH #16 shared-legend build (see
     /// `design-docs/superpowers/specs/2026-07-12-composite-shared-legend-design.md`).
-    /// Not yet called outside tests — the compositor consumer
-    /// (`render::composite_render`) lands in a later task, hence the
-    /// `dead_code` allow below.
-    #[allow(dead_code)]
+    /// Consumed by the compositor's figure-legend band planner
+    /// (`render::composite_render::plan_legend_bands`, Task 3).
     pub fn effective_color_legend(&self) -> ResolveMode {
         self.legend.color.unwrap_or(self.color)
     }
 
     /// Effective legend resolution mode for `size`. See
     /// [`CompositeResolve::effective_color_legend`].
-    #[allow(dead_code)]
     pub fn effective_size_legend(&self) -> ResolveMode {
         self.legend.size.unwrap_or(self.size)
     }
