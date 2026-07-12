@@ -1052,6 +1052,98 @@ pub fn resolve_scales_with_outputs(
     )
 }
 
+/// Reactive-rescale substitution (D6): turn `domainParam` references into
+/// concrete domains before scale resolution. No-op when `params` is empty (the
+/// byte-stability gate) or when a referenced param yields no static numeric
+/// domain (selection / unmatched name → left `None` for auto-infer).
+///
+/// Lives in `scale_resolve` (not `scene_build`) so it is reachable from BOTH the
+/// prepare stage (secondary-y axis inputs) and scene_build (marks, `y_domains`),
+/// per the seam doc's one-way dependency: prepare → scale_resolve ← scene_build.
+/// Relocated here (#72) so the two per-layer y resolutions share one param-aware
+/// path — see [`resolve_layer_y_slot_scale`].
+pub(in crate::render) fn resolve_param_domains(spec: &mut ChartSpec) {
+    if spec.params.is_empty() {
+        return;
+    }
+    let store = crate::spec::parameter::ParamStore::new(&spec.params);
+    if store.is_empty() {
+        return;
+    }
+    let enc = &mut spec.encoding;
+    for channel in [
+        enc.x.as_mut(),
+        enc.y.as_mut(),
+        enc.color.as_mut(),
+        enc.size.as_mut(),
+        enc.opacity.as_mut(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let Some(scale) = channel.scale.as_mut() else { continue };
+        let Some(name) = scale.domain_param().map(str::to_owned) else { continue };
+        if let Some(domain) = store.numeric_domain(&name) {
+            scale.set_domain(domain);
+        }
+        // else: leave domain = None → auto-infer (empty-selection semantics).
+    }
+}
+
+/// Resolve one independent layer's y-scale slot (secondary-y-axis, GH #52 / #72).
+///
+/// The single param-aware per-layer y-domain resolution shared by the two stages
+/// that must agree: the prepare stage's `build_secondary_y_axis_inputs` (axis
+/// ticks/title/band width, with a placeholder pixel range) and scene_build's
+/// `resolve_layer_y_scale` (per-panel mark placement + scene `y_domains`, with
+/// the panel-real pixel range). Both derive the same logical scale; only the
+/// caller-supplied pixel range differs, and domain-derived tick fractions do not
+/// depend on it, so the two resolutions agree bit-for-bit on the domain.
+///
+/// The layer's own encoding overlays the chart encoding, `layers: None` stops
+/// [`numeric_domain_union`] from re-unioning sibling layers' y fields (so this
+/// slot spans exactly its own data), and `domainParam` references are substituted
+/// into concrete domains via [`resolve_param_domains`] BEFORE resolution — the
+/// piece the prepare path previously lacked (#72), which made static right-axis
+/// ticks diverge from mark placement once layer params reached the wire.
+///
+/// Returns the resolved `y` [`ScaleKind`] plus any warnings the resolution
+/// produced (the caller propagates them). No-op param substitution keeps
+/// param-free dual-axis charts byte-identical.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::render) fn resolve_layer_y_slot_scale(
+    spec: &ChartSpec,
+    layer_mark: crate::spec::mark::Mark,
+    layer_encoding: &crate::spec::encoding::Encoding,
+    layer_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    x_pixel_range: (f64, f64),
+    y_pixel_range: (f64, f64),
+    theme: &ThemeInputs,
+    leaf_scales: Option<&LeafScaleContext>,
+) -> Result<(ScaleKind, Vec<crate::render::RenderWarning>), RenderError> {
+    let mut merged_encoding = spec.encoding.clone();
+    merged_encoding.overlay_from(layer_encoding);
+    let mut layer_spec = ChartSpec {
+        mark: layer_mark,
+        encoding: merged_encoding,
+        layers: None,
+        ..spec.clone()
+    };
+    resolve_param_domains(&mut layer_spec);
+
+    let (layer_scales, warnings) = resolve_scales_with_leaf_context(
+        &layer_spec,
+        layer_batch,
+        transform_outputs,
+        x_pixel_range,
+        y_pixel_range,
+        theme,
+        leaf_scales,
+    )?;
+    Ok((layer_scales.y, warnings))
+}
+
 /// D4b composite seam: the full scale-resolution form, threading an optional
 /// per-leaf resolved-domain context so a composite-shared leaf resolves its
 /// positional axes on the auto path (facet padding/`nice`), seeded by the shared

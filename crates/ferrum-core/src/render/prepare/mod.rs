@@ -860,21 +860,22 @@ fn build_secondary_y_axis_inputs(
                 .expect("layer.data_source validated by prepare_render_inputs"),
             None => transformed,
         };
-        // Same per-layer encoding merge `resolve_layer_y_scale` (scene_build.rs,
-        // Task 2) uses: the layer's own encoding overlays the chart-level
-        // encoding, and `layers: None` stops the y-domain union from re-unioning
-        // sibling layers' fields so this slot spans exactly its own data.
+        // Shared param-aware per-layer y resolution (#72): the same
+        // `scale_resolve::resolve_layer_y_slot_scale` scene_build's
+        // `resolve_layer_y_scale` (Task 2) consumes for per-panel mark placement,
+        // so axis ticks here and mark positions there share one substituted
+        // domain. Only the pixel range differs (placeholder here vs. panel-real
+        // there); domain-derived tick fractions do not depend on it. The merged
+        // encoding below (layer's own overlaying the chart-level) drives axis
+        // tick-count/title metadata only — the resolved scale itself comes from
+        // the shared helper.
         let mut layer_encoding = spec.encoding.clone();
         layer_encoding.overlay_from(&layer.encoding);
-        let layer_spec = ChartSpec {
-            mark: layer.mark,
-            encoding: layer_encoding.clone(),
-            layers: None,
-            ..spec.clone()
-        };
-        let (layer_scales, layer_warnings) =
-            crate::render::scale_resolve::resolve_scales_with_leaf_context(
-                &layer_spec,
+        let (y_scale, layer_warnings) =
+            crate::render::scale_resolve::resolve_layer_y_slot_scale(
+                spec,
+                layer.mark,
+                &layer.encoding,
                 layer_batch,
                 transform_outputs,
                 (0.0, 1.0),
@@ -888,7 +889,7 @@ fn build_secondary_y_axis_inputs(
             Channel::Y,
             layer_encoding.y.as_ref(),
             layer_encoding.y.as_ref(),
-            &layer_scales.y,
+            &y_scale,
             y_tick_count,
             theme,
         )?;

@@ -554,7 +554,7 @@ fn resolve_panel_scales(
 
     // Reactive-rescale substitution (D6): turn `domainParam` references into
     // concrete domains before scale resolution. No-op when `params` is empty.
-    resolve_param_domains(&mut rendering_spec_for_panel);
+    scale_resolve::resolve_param_domains(&mut rendering_spec_for_panel);
 
     // Scale resolution over this panel's pixel range.
     let (mut scales, scale_warnings) = scale_resolve::resolve_scales_with_leaf_context(
@@ -649,21 +649,16 @@ fn resolve_layer_y_scale(
     y_offset: f64,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<scale_resolve::ScaleKind, RenderError> {
-    let mut layer_encoding = spec.encoding.clone();
-    layer_encoding.overlay_from(&layer.encoding);
-    let mut layer_spec = ChartSpec {
-        mark: layer.mark,
-        encoding: layer_encoding,
-        // Resolve this slot from ITS OWN field only: dropping `layers` stops
-        // `numeric_domain_union` from re-unioning sibling layers' y fields, so an
-        // independent layer's y-scale spans exactly its own data.
-        layers: None,
-        ..spec.clone()
-    };
-    resolve_param_domains(&mut layer_spec);
-
-    let (layer_scales, layer_warnings) = scale_resolve::resolve_scales_with_leaf_context(
-        &layer_spec,
+    // Shared param-aware per-layer y resolution (#72): the layer encoding
+    // overlays the chart encoding, `layers: None` scopes the domain to this
+    // layer's own field, and `domainParam` references are substituted before
+    // resolution — the SAME resolution the prepare stage's axis-input builder
+    // consumes, so ticks and marks cannot diverge. Only the pixel range differs
+    // (panel-real here vs. prepare's placeholder).
+    let (mut y, layer_warnings) = scale_resolve::resolve_layer_y_slot_scale(
+        spec,
+        layer.mark,
+        &layer.encoding,
         layer_batch,
         &prep.transform_outputs,
         (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
@@ -672,7 +667,6 @@ fn resolve_layer_y_scale(
         leaf_scales,
     )?;
     warnings.extend(layer_warnings);
-    let mut y = layer_scales.y;
     y.translate_explicit_ordinal_range(y_offset);
     Ok(y)
 }
@@ -1122,34 +1116,6 @@ fn build_panel_mark_batches(
     Ok(mark_batches)
 }
 
-fn resolve_param_domains(spec: &mut ChartSpec) {
-    if spec.params.is_empty() {
-        return;
-    }
-    let store = crate::spec::parameter::ParamStore::new(&spec.params);
-    if store.is_empty() {
-        return;
-    }
-    let enc = &mut spec.encoding;
-    for channel in [
-        enc.x.as_mut(),
-        enc.y.as_mut(),
-        enc.color.as_mut(),
-        enc.size.as_mut(),
-        enc.opacity.as_mut(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let Some(scale) = channel.scale.as_mut() else { continue };
-        let Some(name) = scale.domain_param().map(str::to_owned) else { continue };
-        if let Some(domain) = store.numeric_domain(&name) {
-            scale.set_domain(domain);
-        }
-        // else: leave domain = None → auto-infer (empty-selection semantics).
-    }
-}
-
 /// Collect param→scene bindings (D6, 5e-2a) from the original spec.
 ///
 /// The static resolver substitutes `domainParam` into a concrete domain and
@@ -1335,7 +1301,7 @@ pub(crate) fn resolve_legend_color_scale(
         encoding: prep.layers[0].encoding.clone(),
         ..spec.clone()
     };
-    resolve_param_domains(&mut rendering_spec_for_legend);
+    scale_resolve::resolve_param_domains(&mut rendering_spec_for_legend);
     let mut color_scale = if rendering_spec_for_legend.encoding.color.is_some() {
         let (gs, _) = scale_resolve::resolve_scales_with_outputs(
             &rendering_spec_for_legend,
@@ -2275,7 +2241,7 @@ mod tests {
             bind: None,
             select: None,
         }]);
-        resolve_param_domains(&mut spec);
+        scale_resolve::resolve_param_domains(&mut spec);
         assert_eq!(x_domain(&spec), Some(vec![10.0, 20.0]));
         // domain_param cleared after substitution.
         assert_eq!(spec.encoding.x.unwrap().scale.unwrap().domain_param(), None);
@@ -2292,7 +2258,7 @@ mod tests {
             bind: None,
             select: None,
         }]);
-        resolve_param_domains(&mut spec);
+        scale_resolve::resolve_param_domains(&mut spec);
         assert_eq!(x_domain(&spec), None);
     }
 
@@ -2306,7 +2272,7 @@ mod tests {
             bind: None,
             select: None,
         }]);
-        resolve_param_domains(&mut spec);
+        scale_resolve::resolve_param_domains(&mut spec);
         assert_eq!(x_domain(&spec), None);
     }
 
@@ -2315,7 +2281,7 @@ mod tests {
         // The byte-stability gate: empty params → spec unchanged.
         let mut spec = spec_with_x_domain_param(Vec::new());
         let before = serde_json::to_string(&spec).unwrap();
-        resolve_param_domains(&mut spec);
+        scale_resolve::resolve_param_domains(&mut spec);
         let after = serde_json::to_string(&spec).unwrap();
         assert_eq!(before, after);
     }
@@ -3212,6 +3178,95 @@ mod tests {
         assert_eq!(
             sorted_tags, vec!["0".to_string(), "1".to_string()],
             "expected exactly one y_slot=0 (primary) and one y_slot=1 (secondary) axis group, got {tags:?}"
+        );
+    }
+
+    /// #72 discriminating (spec §9.3): for a param-bound secondary (independent-y)
+    /// layer, the static right-axis tick labels, the scene `y_domains[1]`, and the
+    /// marks all reflect the param's *substituted* domain — proving prepare (axis
+    /// ticks) and scene_build (marks / `y_domains`) share ONE param-aware per-layer
+    /// y resolution (`scale_resolve::resolve_layer_y_slot_scale`).
+    ///
+    /// The independent layer's `y` scale carries a `domainParam` "d1" whose Variable
+    /// value overrides the domain to `[0, 1000]`, DISJOINT from the data-inferred
+    /// `y1` range `[100, 300]`. Before the unification, prepare's axis-input path
+    /// did not substitute params, so the right-axis ticks spanned `[100, 300]` while
+    /// scene_build's marks/`y_domains` used the substituted `[0, 1000]` — the two
+    /// diverged. The spec is built directly with `params` populated, so the test is
+    /// independent of the Python param-hoisting fix (Task 4).
+    #[test]
+    fn param_bound_secondary_axis_ticks_equal_substituted_domain() {
+        let (mut spec, batch) = two_layer_dual_y_spec(true);
+        // Bind the independent layer's y scale to a domain param whose declared
+        // value is disjoint from the data range.
+        spec.layers.as_mut().unwrap()[1]
+            .encoding
+            .y
+            .as_mut()
+            .unwrap()
+            .scale = Some(linear_domain_param("d1"));
+        spec.params = vec![ParameterSpec {
+            name: "d1".into(),
+            kind: ParamKind::Variable,
+            value: Some(serde_json::json!([0.0, 1000.0])),
+            bind: None,
+            select: None,
+        }];
+
+        let theme = ThemeInputs::default();
+        let viewport = crate::layout::Viewport { width: 600.0, height: 400.0 };
+        let config = super::super::config::RenderConfig::default();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+
+        let prep =
+            super::super::prepare::prepare_render_inputs(&spec, &batch, &theme, None).unwrap();
+        let mut warnings = prep.warnings.clone();
+        let metrics = super::super::font::FontdueMetrics::new();
+        let layout = crate::layout::compute_layout(
+            &spec, &theme, viewport,
+            &prep.axes, &prep.facet_groups, &prep.legend_entries,
+            prep.legend_title.clone(), prep.colorbar.as_ref(), &metrics,
+            &crate::layout::legend::LegendOverrides::default(), &prep.aux_legends,
+            crate::layout::legend::LegendSuppression::default(),
+        )
+        .unwrap();
+        let scene = build_scene(
+            &spec, &prep, &layout, &theme, &config, &mut warnings, &chart_config, None,
+        )
+        .unwrap();
+
+        // Scene side (marks + y_domains): slot 1 carries the substituted domain.
+        // Marks on layer 1 are positioned through this slot's scale, so the coord
+        // `y_domains[1]` IS the domain the marks project through.
+        let slot1 = match &scene.panels[0].coord {
+            ferrum_scene::CoordKind::Cartesian { y_domains, .. } => {
+                y_domains[1].expect("slot 1 domain must be Some")
+            }
+            other => panic!("expected Cartesian coord, got {other:?}"),
+        };
+        assert_eq!(
+            slot1, (0.0, 1000.0),
+            "scene y_domains[1] must be the substituted param domain, not the data [100,300]"
+        );
+
+        // Prepare side (axis ticks): the right axis's tick labels must reflect the
+        // SAME substituted domain. Parse numeric tick labels (stripping thousands
+        // separators).
+        assert_eq!(layout.secondary_y_axes.len(), 1, "one right axis for the independent layer");
+        let tick_vals: Vec<f64> = layout.secondary_y_axes[0]
+            .ticks
+            .iter()
+            .filter_map(|t| t.label.replace(',', "").parse::<f64>().ok())
+            .collect();
+        assert!(!tick_vals.is_empty(), "secondary axis must have numeric tick labels");
+        let max_tick = tick_vals.iter().cloned().fold(f64::MIN, f64::max);
+        let min_tick = tick_vals.iter().cloned().fold(f64::MAX, f64::min);
+        // Discriminates: the data domain [100,300] cannot produce a tick at 1000 or
+        // a tick at 0; the substituted [0,1000] domain produces both.
+        assert_eq!(
+            (min_tick, max_tick),
+            slot1,
+            "right-axis tick extent must equal scene y_domains[1] (ticks == marks == y_domains[1]); got {tick_vals:?}"
         );
     }
 }
