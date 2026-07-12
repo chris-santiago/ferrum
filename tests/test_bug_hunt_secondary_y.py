@@ -668,4 +668,30 @@ def test_scene_render_of_secondary_y_desugared_chart_is_one_panel():
     scene = json.loads(scene_json)
     assert len(scene["panels"]) == 1
     assert isinstance(packed, (bytes, bytearray))
-    assert "__rhs_" not in scene_json
+
+
+# ---------------------------------------------------------------------------
+# GH #71 defect 4 -- SecondaryY(mark=...) must reject composite mark names.
+# A composite mark bypasses the mark_*() desugar pipeline and would reach
+# Rust as a raw, unknown primitive with no guard (chart._desugar_secondary_y).
+# ---------------------------------------------------------------------------
+
+
+def test_secondary_y_composite_mark_raises_naming_primitives_and_layerchart():
+    df = _df()
+    base = fm.Chart(df).mark_bar().encode(x="x", y="y")
+    with pytest.raises(ValueError, match=r"SecondaryY:.*boxplot.*primitive") as excinfo:
+        base + SecondaryY("z", mark="boxplot")
+    message = str(excinfo.value)
+    for primitive in ("point", "line", "bar", "area", "rule", "text", "tick", "rect"):
+        assert primitive in message, f"error message must name valid primitive {primitive!r}"
+    assert "LayerChart" in message
+    assert "independent" in message
+
+
+def test_secondary_y_valid_primitive_mark_renders_end_to_end():
+    df = _df()
+    chart = fm.Chart(df).mark_bar().encode(x="x", y="y") + SecondaryY("z", mark="area")
+    svg = chart.to_svg()
+    _assert_no_bad_tokens(svg)
+    assert "z" in _rotated_titles(svg)

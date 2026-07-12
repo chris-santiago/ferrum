@@ -238,8 +238,23 @@ def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
     chart-level transforms are replaced with ``_expand_layers``'s filtered
     top-level list so an encoding-implicit aggregate does not double-run
     once the chart carries ``_layers``.
+
+    ``feature.mark`` is validated against ``_PRIMITIVE_MARKS`` before any of
+    that expansion runs (GH #71 defect 4): a composite mark name (e.g.
+    ``"boxplot"``) bypasses the ``mark_*()`` desugar pipeline entirely and
+    would otherwise build a raw ``_Layer`` that reaches Rust as an unknown
+    primitive with no guard, so it raises ``ValueError`` here instead.
     """
     from ferrum.encoding.positional import Y as _Y
+
+    if feature.mark not in _PRIMITIVE_MARKS:
+        raise ValueError(
+            f"SecondaryY: mark={feature.mark!r} is not a primitive mark; must be "
+            f"one of {sorted(_PRIMITIVE_MARKS)}. A composite mark name (e.g. "
+            "'boxplot', 'violin') cannot be used here -- for a composite overlay "
+            "on a secondary axis, use "
+            "LayerChart(chart, other_chart, resolve={'y': 'independent'}) instead."
+        )
 
     resolved = chart._resolve_pending()
     new = resolved._clone()

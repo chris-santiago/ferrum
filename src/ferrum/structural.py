@@ -26,7 +26,13 @@ class SecondaryY:
     a chart with no ``x`` raises ``ValueError``. ``field`` is read from the
     base chart's own table (the desugar performs no data merge), so a
     ``field`` that is not a column of the base data also raises
-    ``ValueError`` at ``+`` time.
+    ``ValueError`` at ``+`` time. ``mark`` must name a primitive mark
+    (``point``, ``line``, ``bar``, ``area``, ``rule``, ``text``, ``tick``,
+    ``rect``) -- a composite mark name (e.g. ``"boxplot"``) would otherwise
+    bypass the ``mark_*()`` desugar pipeline and reach the renderer as an
+    unknown primitive, so it raises ``ValueError`` at ``+`` time; use
+    ``LayerChart(chart, other_chart, resolve={"y": "independent"})`` for a
+    composite overlay on a secondary axis instead.
 
     This re-bases the feature onto ferrum's per-layer independent-y
     subsystem: unlike the original overlay-only renderer, the secondary
