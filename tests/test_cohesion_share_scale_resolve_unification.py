@@ -36,6 +36,7 @@ from ferrum.composition import (
     JointChart,
     LayerChart,
     RepeatChart,
+    Resolve,
 )
 from tests._svg_extents import y_axis_extents
 
@@ -93,7 +94,7 @@ def test_share_scale_children_carry_no_injected_scale(box_small, box_large):
     result = (box_small | box_large).share_scale(y="shared")
     for child in result.charts:
         assert child._encoding["y"]._kwargs.get("scale") is None
-    assert result._resolve == {"y": "shared"}
+    assert result._resolve == Resolve(scale={"y": "shared"})
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +165,7 @@ def test_layer_chart_share_scale_accepts_independent_y():
     a = fm.Chart(df).mark_point().encode(x="x", y="y")
     b = fm.Chart(df).mark_line().encode(x="x", y="y")
     layered = LayerChart(a, b).share_scale(y="independent")
-    assert layered._resolve == {"y": "independent"}
+    assert layered._resolve == Resolve(scale={"y": "independent"})
     layered.to_svg()
 
 
@@ -179,7 +180,7 @@ def test_layer_chart_color_independent_stays_legal():
 
     # share_scale sugar route.
     shared = LayerChart(a, b).share_scale(color="independent")
-    assert shared._resolve == {"color": "independent"}
+    assert shared._resolve == Resolve(scale={"color": "independent"})
     shared.to_svg()
 
 

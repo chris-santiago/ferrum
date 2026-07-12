@@ -299,15 +299,19 @@ pub(crate) fn render_composite_scene(
     // composite frame. Panels are renumbered flat in pre-order as leaf scenes are
     // consumed (D4c); `leaf_cursor` tracks the same pre-order leaf index so a
     // figure-legend band node can capture the first participating leaf's bundle
-    // from its subtree.
+    // from its subtree. `node_cursor` tracks the same pre-order `Composite`-node
+    // index `plan_legend_bands` assigned, so `band_plan.band_nodes` (keyed by
+    // that index — see `LegendBandPlan`) resolves to the right node here too.
     let mut scenes = leaf_scenes.into_iter();
     let mut panel_base = 0usize;
     let mut leaf_cursor = 0usize;
+    let mut node_cursor = 0usize;
     let mut placed = build_placed(
         tree,
         &mut scenes,
         &mut panel_base,
         &mut leaf_cursor,
+        &mut node_cursor,
         call_theme,
         &band_ctx,
         None,
@@ -450,10 +454,21 @@ struct BandFlags {
 }
 
 /// The composite nodes that emit a figure-level legend band, keyed by node
-/// identity (pointer into the borrowed tree the layout pass walks). Empty for
-/// any composite with all-independent legend resolution — the byte-stable path.
+/// identity. Empty for any composite with all-independent legend resolution
+/// — the byte-stable path.
+///
+/// Keyed by a **pre-order composite-node index** (assigned only to
+/// `Composite` nodes, incremented on entry — the same idiom `leaf_cursor`
+/// uses for leaves) rather than the node's raw pointer: a pointer key is
+/// sound only while [`plan_legend_walk`] and [`build_placed`] both borrow
+/// the SAME tree value, which holds today (`render_composite_scene` walks
+/// one borrowed `tree: &CompositeNode` throughout), but a future clone
+/// between the two passes would silently drop every band (no error, no
+/// test failure — a different address, `HashMap::get` just misses). The
+/// node-index key is stable across any such clone because both walks
+/// re-derive it structurally, from the tree shape rather than its address.
 struct LegendBandPlan {
-    band_nodes: HashMap<*const CompositeNode, BandFlags>,
+    band_nodes: HashMap<usize, BandFlags>,
 }
 
 /// Everything the place/merge walk needs to draw a figure legend band: the plan
@@ -527,24 +542,31 @@ struct ChannelWalk {
 /// from the union) keeps its own panel legend.
 fn plan_legend_bands(tree: &CompositeNode, contexts: &mut [LeafScaleContext]) -> LegendBandPlan {
     let mut plan = LegendBandPlan { band_nodes: HashMap::new() };
-    let mut cursor = 0usize;
+    let mut leaf_cursor = 0usize;
+    let mut node_cursor = 0usize;
     let root = ChannelWalk { resolved_above: false, band_active: false };
-    plan_legend_walk(tree, contexts, &mut cursor, root, root, &mut plan);
+    plan_legend_walk(tree, contexts, &mut leaf_cursor, &mut node_cursor, root, root, &mut plan);
     plan
 }
 
+/// `node_cursor` assigns each `Composite` node a pre-order index — incremented
+/// once per `Composite` arm visited, on entry, before descending into
+/// children — exactly mirroring how [`build_placed`] must increment its own
+/// `node_cursor` at the same point in the same traversal order, so a node's
+/// index here and its index there always agree (see [`LegendBandPlan`]).
 fn plan_legend_walk(
     node: &CompositeNode,
     contexts: &mut [LeafScaleContext],
-    cursor: &mut usize,
+    leaf_cursor: &mut usize,
+    node_cursor: &mut usize,
     color: ChannelWalk,
     size: ChannelWalk,
     plan: &mut LegendBandPlan,
 ) {
     match node {
         CompositeNode::Leaf { spec, .. } => {
-            let i = *cursor;
-            *cursor += 1;
+            let i = *leaf_cursor;
+            *leaf_cursor += 1;
             let merges = leaf_merges_color_size(spec);
             if color.band_active && contexts[i].color.is_some() {
                 contexts[i].suppress_color_legend = true;
@@ -560,6 +582,8 @@ fn plan_legend_walk(
         }
         CompositeNode::Hole { .. } => {}
         CompositeNode::Composite { children, resolve, .. } => {
+            let node_idx = *node_cursor;
+            *node_cursor += 1;
             // Must agree bit-for-bit with `resolve_channel`'s congruence
             // gate (composite.rs): the band attaches at exactly the node
             // where the resolve pass unions the domain, and a `Hole` cell
@@ -580,13 +604,10 @@ fn plan_legend_walk(
                 size,
             );
             if color_band || size_band {
-                plan.band_nodes.insert(
-                    node as *const CompositeNode,
-                    BandFlags { color: color_band, size: size_band },
-                );
+                plan.band_nodes.insert(node_idx, BandFlags { color: color_band, size: size_band });
             }
             for c in children {
-                plan_legend_walk(c, contexts, cursor, color_next, size_next, plan);
+                plan_legend_walk(c, contexts, leaf_cursor, node_cursor, color_next, size_next, plan);
             }
         }
     }
@@ -601,12 +622,20 @@ fn descend_channel(
     cur: ChannelWalk,
 ) -> (ChannelWalk, bool) {
     // A shared legend over a non-shared scale is rejected at lowering (design
-    // §4); if one somehow reaches here, treat it as independent (no band) rather
-    // than misrender.
-    debug_assert!(
-        !(eff_legend == ResolveMode::Shared && scale_mode != ResolveMode::Shared),
-        "shared legend over non-shared scale must be rejected at lowering"
-    );
+    // §4, the Python `_lower_composite` guard) — a normal caller can never
+    // build this combination. `CompositeNode::validate` does not re-check it
+    // Rust-side, so a caller who constructs the composite wire spec directly
+    // (bypassing Python) can still reach this arm. Below, `is_scale_resolver`
+    // requires `scale_mode == Shared`, so a non-Shared `scale_mode` always
+    // yields `band_here == false` regardless of `eff_legend` — the degrade is
+    // "no band for this channel", not a misrender, mirroring how the scale
+    // resolve pass itself treats the same spec (no union, per-panel
+    // fallback). Deliberately no assert and no log: a `debug_assert!` would
+    // abort every debug/test build the moment such a spec is constructed
+    // (making the documented degrade untestable), and this crate has no
+    // stderr/log convention to reach for. The degrade contract is pinned by
+    // `invalid_wire_shared_legend_over_independent_scale_degrades_to_no_band`
+    // below.
     let is_scale_resolver =
         !cur.resolved_above && scale_mode == ResolveMode::Shared && congruent_children;
     let band_here = is_scale_resolver && eff_legend == ResolveMode::Shared;
@@ -884,11 +913,18 @@ struct Placed {
 /// this only matters for the `Hole` arm below); it is how a sized hole
 /// (Task 10-rust) knows whether its parent is a linear (`hconcat`/`vconcat`)
 /// layout, the only layout kind where its `width`/`height` take effect.
+/// `node_cursor` assigns each `Composite` node the same pre-order index
+/// [`plan_legend_walk`] assigned it — incremented at the identical point in
+/// the identical traversal order — so the [`LegendBandPlan::band_nodes`]
+/// lookup below always lands on the right node (see [`LegendBandPlan`]'s doc
+/// for why this replaced a raw-pointer key).
+#[allow(clippy::too_many_arguments)]
 fn build_placed(
     node: &CompositeNode,
     scenes: &mut std::vec::IntoIter<SceneGraph>,
     panel_base: &mut usize,
     leaf_cursor: &mut usize,
+    node_cursor: &mut usize,
     call_theme: &ThemeInputs,
     band_ctx: &LegendBandCtx<'_>,
     parent_layout: Option<CompositeLayout>,
@@ -929,10 +965,18 @@ fn build_placed(
             Placed { scene: empty_scene(w, h), width: w, height: h }
         }
         CompositeNode::Composite { layout, children, spacing, row_ratios, col_ratios, ncols, nrows, .. } => {
+            // Captured BEFORE recursing into children, at the same point
+            // `plan_legend_walk`'s `Composite` arm captures its own
+            // `node_idx` — keeping the two walks' pre-order numbering
+            // bit-for-bit aligned (see `LegendBandPlan`'s doc).
+            let node_idx = *node_cursor;
+            *node_cursor += 1;
             let leaf_start = *leaf_cursor;
             let child_placed: Vec<Placed> = children
                 .iter()
-                .map(|c| build_placed(c, scenes, panel_base, leaf_cursor, call_theme, band_ctx, Some(*layout)))
+                .map(|c| {
+                    build_placed(c, scenes, panel_base, leaf_cursor, node_cursor, call_theme, band_ctx, Some(*layout))
+                })
                 .collect();
             let spacing = spacing.unwrap_or(DEFAULT_SPACING);
             let plan = plan_layout(
@@ -952,7 +996,7 @@ fn build_placed(
             // placed and BEFORE the per-child label / root chrome below, so a
             // title band stacks above the legend exactly as it does for a
             // per-panel legend.
-            if let Some(flags) = band_ctx.plan.band_nodes.get(&(node as *const CompositeNode)) {
+            if let Some(flags) = band_ctx.plan.band_nodes.get(&node_idx) {
                 apply_legend_band(&mut merged.scene, band_ctx, leaf_start..*leaf_cursor, *flags);
                 merged.width = merged.scene.width;
                 merged.height = merged.scene.height;
@@ -3548,6 +3592,50 @@ mod tests {
             "legend-independent over a shared scale must draw the same per-panel legends as an independent scale",
         );
         assert!((override_scene.width - 610.0).abs() < 1e-6, "no band → no growth: {}", override_scene.width);
+    }
+
+    #[test]
+    fn invalid_wire_shared_legend_over_independent_scale_degrades_to_no_band() {
+        // A directly-constructed composite wire spec: `legend.color =
+        // Some(Shared)` paired with an INDEPENDENT color scale. Python's
+        // lowering-time guard rejects this exact combination (design §4)
+        // before it ever reaches Rust, so no real caller can build it —
+        // `CompositeNode::validate` does not re-check the pairing either.
+        // This test constructs the wire-level spec directly to pin what
+        // `descend_channel` does when that guard is bypassed: it computes
+        // `effective_color_legend() == Shared` while `resolve.color ==
+        // Independent`, but `is_scale_resolver` requires `scale_mode ==
+        // Shared`, so `band_here` is always `false` regardless of the
+        // legend override — no band, no suppression, per-panel legends
+        // stay exactly as an independent-scale render's. No panic either
+        // (a `debug_assert!` here would have aborted this test under the
+        // default debug/test profile).
+        let h0 = color_hold(&["a", "b", "a"]);
+        let h1 = color_hold(&["a", "b", "a"]);
+        let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
+
+        let mut invalid = composite(CompositeLayout::Hconcat, vec![color_leaf(0), color_leaf(1)]);
+        if let CompositeNode::Composite { resolve, .. } = &mut invalid {
+            resolve.color = RM::Independent;
+            resolve.legend.color = Some(RM::Shared);
+        }
+        let (scene, _) = render_composite_scene(&invalid, &leaves, &ThemeInputs::default())
+            .expect("an invalid wire-level legend/scale pairing must degrade, not error");
+
+        // Baseline: a plain independent-scale tree with no legend override —
+        // today's per-panel rendering. The invalid pairing must match it
+        // exactly: no band, same per-panel legend count, same panel count.
+        let baseline = color_hconcat(2, RM::Independent, None);
+        let (baseline_scene, _) =
+            render_composite_scene(&baseline, &leaves, &ThemeInputs::default()).unwrap();
+
+        assert_eq!(
+            scene.legend.len(), baseline_scene.legend.len(),
+            "shared legend over an independent scale must degrade to the same per-panel \
+             legends as a plain independent-scale render: got {} vs baseline {}",
+            scene.legend.len(), baseline_scene.legend.len(),
+        );
+        assert_eq!(scene.panels.len(), 2, "degrade must not add or drop panels");
     }
 
     // -- extraction fix-round regression tests (Task 3, legend::layout_color_legend) --

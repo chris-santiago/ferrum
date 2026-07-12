@@ -14,7 +14,8 @@ and back-compat with the flat-dict ``resolve=`` form.
 Task 5 adds the end-to-end regression suite for the flagship outcome: the
 Rust-side figure-level legend band is now landed and ``pairplot(hue=)`` /
 ``jointplot(hue=)`` render exactly ONE legend. The tests below assert on
-rendered SVG text-node counts (see ``_legend_texts`` below) to discriminate
+rendered SVG text-node counts (see ``legend_texts`` in ``tests/_snapshots.py``,
+imported below as ``_legend_texts``) to discriminate
 one-figure-legend output from N-per-panel-legend output, covering spec §9.1
 (pairplot/jointplot one-legend), §9.5 (opt-out still shows N per-panel
 legends — this also documents pre-feature/main behavior), §9.7 (explicit
@@ -326,11 +327,19 @@ def test_share_scale_preserves_existing_legend_field(chart_a, chart_b):
     assert merged._resolve.legend == {"color": "independent"}
 
 
-def test_share_scale_without_legend_stays_flat_dict(chart_a, chart_b):
-    """No legend ever set: share_scale keeps returning the plain scale dict."""
+def test_share_scale_without_legend_normalizes_to_resolve(chart_a, chart_b):
+    """No legend ever set: share_scale still normalizes to one stable type.
+
+    share_scale() always constructs the merged resolve as a ``Resolve``
+    (never the flat-dict form), so ``_resolve``'s type is stable across
+    every share_scale() call regardless of whether a legend override was
+    ever set. Wire-equivalence between the flat-dict and Resolve(scale=)
+    forms is already proven elsewhere (byte-identical SVG), so this has no
+    rendering effect.
+    """
     base = HConcatChart([chart_a, chart_b], resolve={"color": "shared"})
     merged = base.share_scale(size="shared")
-    assert merged._resolve == {"color": "shared", "size": "shared"}
+    assert merged._resolve == Resolve(scale={"color": "shared", "size": "shared"})
 
 
 def test_share_scale_still_raises_for_jointchart():
@@ -381,6 +390,27 @@ def test_repeatchart_spec_flat_dict_resolve_unchanged(df_a):
     rc = fm.RepeatChart(template, row=["x", "y"], column=["x", "y"], resolve=flat)
     assert rc.spec["resolve"] == {"color": "shared"}
     assert rc.spec["resolve"] is flat  # back-compat: pass-through, not a copy
+
+
+def test_repeatchart_spec_resolve_matches_lowered_composite_tree_resolve(df_a):
+    """Divergence regression (design-review remediation, GH #16).
+
+    ``RepeatChart.spec`` (introspection, via ``_resolve_wire_dict``) and the
+    lowered composite tree's resolve field (render-time lowering, via
+    ``_composite_resolve_field``) now share one wire-assembly core
+    (``_assemble_resolve_wire``), so a ``Resolve(scale=..., legend=...)``
+    value must flatten to the exact same dict on both surfaces -- they can
+    never again drift apart on which channels survive.
+    """
+    template = fm.Chart(df_a).mark_point().encode(x="x", y="y", color="g")
+    rc = fm.RepeatChart(
+        template,
+        row=["x", "y"],
+        column=["x", "y"],
+        resolve=Resolve(scale={"color": "shared", "x": "shared"}, legend={"color": "independent"}),
+    )
+    lowered = rc._composite_tree(auto_tooltips=False)
+    assert rc.spec["resolve"] == lowered.tree["resolve"]
 
 
 # ---------------------------------------------------------------------------
@@ -604,13 +634,17 @@ def test_pairplot_hue_with_markers_collapses_shape_into_color_legend(pairplot_df
 
 
 # ---------------------------------------------------------------------------
-# Task 5 item 6 — jointplot public surface: _internal_resolve stays private.
+# Task 5 item 6 — jointplot public surface: the private resolve= wiring
+# JointChart uses internally (``_resolve=``, renamed from ``_internal_resolve``
+# for GH #16 design-review remediation) stays private.
 # ---------------------------------------------------------------------------
 
 
 def test_jointplot_with_hue_share_scale_still_raises(joint_df):
-    """``_internal_resolve`` must not have broken the ``_unsupported_resolve_error``
-    gate: ``share_scale()`` on a hue-colored ``jointplot`` still raises.
+    """JointChart's internal ``_resolve=`` wiring must not have broken the
+    ``_unsupported_resolve_error`` gate: ``share_scale()`` on a hue-colored
+    ``jointplot`` still raises (JointChart's class-level
+    ``_supports_user_resolve`` stays False regardless of this internal field).
     """
     joint = fm.jointplot(joint_df, x="x", y="y", hue="grp")
     with pytest.raises(ValueError, match="resolve="):
@@ -618,15 +652,15 @@ def test_jointplot_with_hue_share_scale_still_raises(joint_df):
 
 
 def test_internal_resolve_not_in_jointplot_public_docstring():
-    assert "_internal_resolve" not in (fm.jointplot.__doc__ or "")
+    assert "_resolve" not in (fm.jointplot.__doc__ or "")
 
 
 def test_internal_resolve_not_in_jointchart_public_docstring():
-    assert "_internal_resolve" not in (fm.JointChart.__doc__ or "")
+    assert "_resolve" not in (fm.JointChart.__doc__ or "")
 
 
 def test_internal_resolve_not_in_jointplot_signature():
     import inspect
 
     sig = inspect.signature(fm.jointplot)
-    assert "_internal_resolve" not in sig.parameters
+    assert "_resolve" not in sig.parameters

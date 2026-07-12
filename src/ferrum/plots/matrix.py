@@ -1289,7 +1289,7 @@ def _jointplot_build(
     # #16) so jointplot renders exactly one figure-level legend instead of
     # one per panel. JointChart has no user-facing resolve= (its panel
     # alignment is fixed layout geometry), so this rides the private
-    # _internal_resolve constructor argument rather than a public knob.
+    # _resolve constructor argument rather than a public knob.
     joint_resolve = {"color": "shared"} if hue is not None else None
     result = JointChart(
         center,
@@ -1297,7 +1297,7 @@ def _jointplot_build(
         right=right,
         ratio=ratio,
         spacing=space,
-        _internal_resolve=joint_resolve,
+        _resolve=joint_resolve,
     )
     result = _finalize_chart(
         result, mark=mark, encode=encode, properties=properties, layers=layers, theme=None

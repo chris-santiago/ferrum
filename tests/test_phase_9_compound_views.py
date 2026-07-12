@@ -478,7 +478,7 @@ class TestShareScale:
         # the (also-independent) default.
         result = comp.share_scale(x="independent")
         assert result is not comp
-        assert result._resolve == {"x": "independent"}
+        assert result._resolve == fe.Resolve(scale={"x": "independent"})
         assert result.to_svg() == comp.to_svg()
 
     def test_hconcat_share_x(self):
@@ -492,7 +492,7 @@ class TestShareScale:
         left = fe.Chart(df).mark_point().encode(x="a", y="y")
         right = fe.Chart(df).mark_point().encode(x="b", y="y")
         shared = (left | right).share_scale(x="shared")
-        assert shared._resolve == {"x": "shared"}
+        assert shared._resolve == fe.Resolve(scale={"x": "shared"})
         # share_scale never injects scale= -- resolve= sharing is render-time.
         for child in shared.charts:
             assert child._encoding["x"]._kwargs.get("scale") is None
@@ -515,7 +515,7 @@ class TestShareScale:
         top = fe.Chart(df).mark_point().encode(x="x", y="low")
         bot = fe.Chart(df).mark_point().encode(x="x", y="high")
         shared = (top & bot).share_scale(y="shared")
-        assert shared._resolve == {"y": "shared"}
+        assert shared._resolve == fe.Resolve(scale={"y": "shared"})
         for child in shared.charts:
             assert child._encoding["y"]._kwargs.get("scale") is None
         equivalent = fe.VConcatChart([top, bot], resolve={"y": "shared"})
@@ -563,7 +563,7 @@ class TestShareScale:
         tpl = fe.Chart(df).mark_point().encode(x=Repeat.column, y="y")
         rc = fe.RepeatChart(tpl, column=["small", "big"])
         shared = rc.share_scale(x="shared")
-        assert shared.resolve == {"x": "shared"}
+        assert shared.resolve == fe.Resolve(scale={"x": "shared"})
         # expand() no longer injects scale= -- sharing rides the composite
         # tree's resolve field at render time.
         cells = shared.expand()
@@ -585,7 +585,7 @@ class TestShareScale:
         tpl = fe.Chart(df).mark_point().encode(x=Repeat.column, y="y")
         rc = fe.RepeatChart(tpl, column=["small", "big"], resolve={"y": "shared"})
         shared = rc.share_scale(x="shared")
-        assert shared.resolve == {"y": "shared", "x": "shared"}
+        assert shared.resolve == fe.Resolve(scale={"y": "shared", "x": "shared"})
 
     def test_share_scale_silent_when_channel_unbound(self):
         # Two charts neither of which binds 'size' — share_scale should

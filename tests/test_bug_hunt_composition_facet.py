@@ -28,6 +28,7 @@ from ferrum.composition import (
     JointChart,
     LayerChart,
     RepeatChart,
+    Resolve,
     VConcatChart,
     ClusterMapChart,
 )
@@ -1714,7 +1715,7 @@ def test_share_scale_independent_is_noop():
     combined = c1 | c2
     result = combined.share_scale(x="independent", y="independent")
     assert result is not combined
-    assert result._resolve == {"x": "independent", "y": "independent"}
+    assert result._resolve == Resolve(scale={"x": "independent", "y": "independent"})
     assert result.to_svg() == combined.to_svg()
 
 
@@ -3208,7 +3209,7 @@ def test_repeat_chart_share_scale_merges_resolve():
     template = Chart(df).encode(x=fr.Repeat.column, y=fr.Repeat.row).mark_point()
     rc = RepeatChart(template, row=["a", "b"], column=["a", "b"], resolve={"x": "shared"})
     updated = rc.share_scale(y="shared")
-    assert updated.resolve == {"x": "shared", "y": "shared"}
+    assert updated.resolve == Resolve(scale={"x": "shared", "y": "shared"})
 
 
 def test_repeat_chart_share_scale_invalid_mode_raises():

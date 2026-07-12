@@ -99,6 +99,10 @@ class Resolve:
         ``"shared"`` legend mode requires a ``"shared"`` scale mode for the
         same channel; an unsatisfiable combination raises ``ValueError`` at
         render time rather than silently falling back to per-panel legends.
+        This shared-legend-requires-shared-scale matrix is enforced at
+        render (lowering), not at ``Resolve``/composite construction time —
+        constructing ``Resolve(scale={"color": "independent"}, legend={"color": "shared"})``
+        succeeds; the mismatch only raises once something renders it.
 
     Examples
     --------
@@ -145,6 +149,22 @@ def _validate_scale_modes(modes: Optional[Dict[str, str]], label: str, *, field:
             )
 
 
+def _legend_channel_unsupported_error(label: str, channel: str) -> ValueError:
+    """Return the ``ValueError`` for a ``resolve.legend`` channel outside color/size.
+
+    Single source of this message, called from both :func:`_validate_legend_modes`
+    (construction-time validation, reached for every ``Resolve``-bearing
+    composite's ``__init__`` via :func:`_validate_resolve`) and
+    :func:`_composite_resolve_field` (render-time lowering) so a caller sees
+    identical wording regardless of which validation pass catches the
+    unsupported channel first.
+    """
+    return ValueError(
+        f"{label}: resolve.legend[{channel!r}] is not a legend-resolvable channel "
+        f"(supported: {_LEGEND_RESOLVE_CHANNELS}); legend resolution only applies to color/size"
+    )
+
+
 def _validate_legend_modes(legend: Optional[Dict[str, str]], label: str) -> None:
     """Raise ``ValueError`` when ``Resolve.legend`` is not a valid legend dict.
 
@@ -164,11 +184,7 @@ def _validate_legend_modes(legend: Optional[Dict[str, str]], label: str) -> None
         )
     for ch, mode in legend.items():
         if ch not in _LEGEND_RESOLVE_CHANNELS:
-            raise ValueError(
-                f"{label}: resolve.legend[{ch!r}] is not a legend-resolvable channel "
-                f"(supported: {_LEGEND_RESOLVE_CHANNELS}); legend resolution only "
-                "applies to color/size"
-            )
+            raise _legend_channel_unsupported_error(label, ch)
         if mode not in ("shared", "independent"):
             raise ValueError(
                 f"{label}: resolve.legend[{ch!r}]={mode!r}; expected 'shared' or 'independent'"
@@ -221,20 +237,19 @@ def _resolve_scale_modes(resolve: ResolveArg) -> Dict[str, str]:
 def _resolve_wire_dict(resolve: ResolveArg) -> Optional[dict]:
     """Return a ``resolve=`` value in its JSON-serializable wire-dict shape.
 
-    Pure normalization for introspection surfaces (``RepeatChart.spec``):
-    no validation and no channel restriction, unlike
-    :func:`_composite_resolve_field` (the render-time lowering step, which
-    both validates and restricts). ``None`` and the flat-dict form pass
-    through unchanged (back-compat: byte-identical); a :class:`Resolve`
-    flattens to the same shape the lowering path emits — the scale entries
-    plus a ``"legend"`` sub-object only when legend overrides are present.
+    The non-validating half of :func:`_assemble_resolve_wire`'s two entry
+    points, used by introspection surfaces (``RepeatChart.spec``): the same
+    channel-restriction loop as :func:`_composite_resolve_field` (the
+    render-time lowering step), minus the raising, so the two can never
+    emit different shapes for the same :class:`Resolve` value — see the
+    divergence regression test in ``tests/test_composite_shared_legend.py``.
+    ``None`` and the flat-dict form pass through unchanged (back-compat:
+    byte-identical, including object identity for the flat-dict form); a
+    :class:`Resolve` flattens through the shared core.
     """
     if resolve is None or isinstance(resolve, dict):
         return resolve
-    wire = dict(resolve.scale or {})
-    if resolve.legend:
-        wire["legend"] = dict(resolve.legend)
-    return wire
+    return _assemble_resolve_wire(resolve.scale or {}, resolve.legend or {}, validate=False)
 
 
 def _validate_share_modes(channels: Dict[str, str]) -> None:
@@ -257,12 +272,12 @@ def _validate_share_modes(channels: Dict[str, str]) -> None:
 def _unsupported_resolve_error(kind: str) -> ValueError:
     """Return the ``ValueError`` for a form with no ``resolve=`` field to share.
 
-    Shared by :meth:`_ChartLike.share_scale`'s ``hasattr`` guard and
-    :class:`JointChart`/:class:`ClusterMapChart`'s ``_rebuild_with_charts``
-    (reached only if a caller passes an explicit ``resolve=`` override
-    directly rather than through ``share_scale``, which already raises via
-    the ``hasattr`` guard before getting there) so the message text is
-    identical from both call sites.
+    Shared by :meth:`_ChartLike.share_scale`'s ``_supports_user_resolve``
+    gate and :class:`JointChart`/:class:`ClusterMapChart`'s
+    ``_rebuild_with_charts`` (reached only if a caller passes an explicit
+    ``resolve=`` override directly rather than through ``share_scale``, which
+    already raises via the ``_supports_user_resolve`` gate before getting
+    there) so the message text is identical from both call sites.
     """
     return ValueError(
         f"{kind}: share_scale requires a resolve= field, which {kind} does not carry "
@@ -466,24 +481,105 @@ def _is_leaf_chart(node) -> bool:
 _COMPOSITE_RESOLVE_CHANNELS = ("x", "y", "color", "size")
 
 
-def _composite_resolve_field(resolve: ResolveArg, *, kind: str) -> dict:
-    """Map a composition ``resolve=`` value onto a composite node's resolve field.
+def _assemble_resolve_wire(
+    scale: Dict[str, str], legend: Dict[str, str], *, validate: bool, kind: Optional[str] = None
+) -> dict:
+    """Flatten a ``(scale, legend)`` channel-mode pair to the resolve wire shape.
 
-    The Rust composite resolve pass spans the positional ``x``/``y`` channels
-    plus ``color``/``size`` (10-pre-b); a ``"shared"`` request on any other
-    channel (``shape``, ``opacity``, …) is not representable there. Returns
-    ``{}`` when there is nothing to share, else ``{"x": mode, ...}`` restricted
-    to the supported channels, plus an optional ``"legend"`` sub-object (spec
-    §6 wire contract) carrying ``Resolve.legend`` for ``color``/``size``.
+    The single wire-assembly core shared by :func:`_resolve_wire_dict`
+    (introspection, ``validate=False``) and :func:`_composite_resolve_field`
+    (render-time lowering, ``validate=True``) — both restrict *scale* to
+    :data:`_COMPOSITE_RESOLVE_CHANNELS` and *legend* to
+    :data:`_LEGEND_RESOLVE_CHANNELS` through this exact same loop, so the two
+    surfaces can never drift apart on *which channels survive*; the only
+    difference between the two modes is the treatment of invalid input:
+    ``validate=True`` raises, while ``validate=False`` excludes an
+    *unsupported channel* from the result and passes a *mode-matrix
+    violation* (``"shared"`` legend over a non-shared scale) through
+    verbatim — introspection is a raw view of what was constructed, and the
+    violation still raises at lowering. In practice introspection never
+    sees either case anyway, since
+    :func:`_validate_resolve`/:func:`_validate_legend_modes` already reject
+    an unsupported legend channel at ``Resolve``/composite construction.
 
     **Legend mode-matrix (spec §4/§6).** A channel's effective legend mode is
-    the explicit ``Resolve.legend[channel]`` when given, else that channel's
-    scale mode (the default: legend resolution follows scale resolution).
+    the explicit ``legend[channel]`` when given, else that channel's scale
+    mode (the default: legend resolution follows scale resolution).
     ``"shared"`` legend resolution requires ``"shared"`` scale resolution for
     the same channel — deduping legends whose domains differ would fabricate
     a mapping no panel uses (spec §4 "Explicit legend resolution", key
-    decision 5) — so that combination raises here, at lowering, rather than
-    silently falling back to per-panel legends.
+    decision 5) — so that combination raises when ``validate=True``, rather
+    than silently falling back to per-panel legends.
+
+    Parameters
+    ----------
+    scale, legend : dict
+        Already-flattened channel -> mode maps (a flat-dict ``resolve=`` is
+        *scale*, ``{}`` *legend*; a :class:`Resolve` is ``.scale or {}``,
+        ``.legend or {}``).
+    validate : bool
+        ``True`` raises ``ValueError`` on an unsupported ``"shared"`` scale
+        channel, an unsupported legend channel, or a ``"shared"`` legend
+        mode without a ``"shared"`` effective scale mode. ``False`` excludes
+        unsupported channels from the result without raising and passes a
+        mode-matrix violation through verbatim (see above).
+    kind : str, optional
+        Composition class name used in the raised messages. Required when
+        ``validate=True``.
+
+    Returns
+    -------
+    dict
+        ``{"x": mode, ...}`` restricted to the supported scale channels,
+        plus an optional ``"legend"`` sub-object (spec §6 wire contract)
+        when *legend* is non-empty.
+
+    Raises
+    ------
+    ValueError
+        See *validate* above. Only raised when ``validate=True``.
+    """
+    out: dict = {}
+    for channel, mode in scale.items():
+        if channel in _COMPOSITE_RESOLVE_CHANNELS:
+            out[channel] = mode
+        elif mode == "shared" and validate:
+            raise ValueError(
+                f"{kind}: resolve= marks {channel!r} 'shared', which the composite "
+                f"resolve pass does not support (supported: {_COMPOSITE_RESOLVE_CHANNELS}); "
+                "set it 'independent' or drop it from resolve="
+            )
+
+    if legend:
+        legend_out: dict = {}
+        for channel, mode in legend.items():
+            if channel not in _LEGEND_RESOLVE_CHANNELS:
+                if validate:
+                    raise _legend_channel_unsupported_error(kind, channel)
+                continue
+            effective_scale_mode = out.get(channel, "independent")
+            if mode == "shared" and effective_scale_mode != "shared":
+                if validate:
+                    raise ValueError(
+                        f"{kind}: resolve.legend[{channel!r}]='shared' requires "
+                        f"resolve.scale[{channel!r}]='shared' (got "
+                        f"scale={effective_scale_mode!r}, legend='shared'); a shared "
+                        "legend needs a unioned domain to dedup from"
+                    )
+            legend_out[channel] = mode
+        out["legend"] = legend_out
+    return out
+
+
+def _composite_resolve_field(resolve: ResolveArg, *, kind: str) -> dict:
+    """Map a composition ``resolve=`` value onto a composite node's resolve field.
+
+    The validating half of :func:`_assemble_resolve_wire`'s two entry
+    points: the Rust composite resolve pass spans the positional ``x``/``y``
+    channels plus ``color``/``size`` (10-pre-b), so a ``"shared"`` request on
+    any other channel (``shape``, ``opacity``, …) is not representable there
+    and raises rather than silently rendering something other than what the
+    caller asked for.
 
     Parameters
     ----------
@@ -500,7 +596,7 @@ def _composite_resolve_field(resolve: ResolveArg, *, kind: str) -> dict:
         When an unsupported channel is marked ``"shared"`` in ``scale``, when
         ``legend`` names a channel other than ``color``/``size``, or when
         ``legend`` requests ``"shared"`` for a channel whose effective scale
-        mode is not ``"shared"``.
+        mode is not ``"shared"``. See :func:`_assemble_resolve_wire`.
     """
     if resolve is None:
         return {}
@@ -508,36 +604,7 @@ def _composite_resolve_field(resolve: ResolveArg, *, kind: str) -> dict:
         scale, legend = resolve.scale or {}, resolve.legend or {}
     else:
         scale, legend = resolve, {}
-
-    out: dict = {}
-    for channel, mode in scale.items():
-        if channel in _COMPOSITE_RESOLVE_CHANNELS:
-            out[channel] = mode
-        elif mode == "shared":
-            raise ValueError(
-                f"{kind}: resolve= marks {channel!r} 'shared', which the composite "
-                f"resolve pass does not support (supported: {_COMPOSITE_RESOLVE_CHANNELS}); "
-                "set it 'independent' or drop it from resolve="
-            )
-
-    if legend:
-        legend_out: dict = {}
-        for channel, mode in legend.items():
-            if channel not in _LEGEND_RESOLVE_CHANNELS:
-                raise ValueError(
-                    f"{kind}: resolve.legend[{channel!r}] is not a legend-resolvable "
-                    f"channel (supported: {_LEGEND_RESOLVE_CHANNELS})"
-                )
-            effective_scale_mode = out.get(channel, "independent")
-            if mode == "shared" and effective_scale_mode != "shared":
-                raise ValueError(
-                    f"{kind}: resolve.legend[{channel!r}]='shared' requires "
-                    f"resolve.scale[{channel!r}]='shared' (got scale={effective_scale_mode!r}, "
-                    f"legend='shared'); a shared legend needs a unioned domain to dedup from"
-                )
-            legend_out[channel] = mode
-        out["legend"] = legend_out
-    return out
+    return _assemble_resolve_wire(scale, legend, validate=True, kind=kind)
 
 
 @dataclass(frozen=True)
@@ -1098,6 +1165,19 @@ class _ChartLike(ConfigureMixin):
     (earlier entries in ``_configure`` are overridden by later ones).
     """
 
+    # Whether this composition accepts a user-facing resolve= field and
+    # therefore supports :meth:`share_scale`. True for the concat/repeat/
+    # layer forms (HConcatChart, VConcatChart, ConcatChart, RepeatChart,
+    # LayerChart), each of which sets this to True and carries a real
+    # ``_resolve`` the composite resolve pass reads. False (the default
+    # here) for JointChart/ClusterMapChart, whose panel alignment is fixed
+    # layout geometry with no resolve= channel to share into -- share_scale
+    # gates on this explicit predicate rather than probing for a private
+    # attribute (JointChart also has a ``_resolve`` field internally, for
+    # ``jointplot(hue=...)``'s figure-legend wiring, so an attribute probe
+    # can no longer double as the "does this support user resolve=" check).
+    _supports_user_resolve: bool = False
+
     def to_svg(self) -> str:  # pragma: no cover - abstract
         raise NotImplementedError(f"{type(self).__name__} must implement to_svg")
 
@@ -1346,7 +1426,12 @@ class _ChartLike(ConfigureMixin):
         interactive one-panel path; GH #52). ``**channels`` only ever
         touches scale resolution; when the existing ``resolve=`` is a
         :class:`Resolve` with a ``legend`` field set, that legend field
-        carries through unchanged onto the rebuilt composition.
+        carries through unchanged onto the rebuilt composition. The merged
+        result is always stored as a :class:`Resolve` (never the flat-dict
+        form), even when no legend override is present -- a stable
+        ``_resolve`` type after every ``share_scale`` call. This has no
+        effect on rendering: the flat-dict form and ``Resolve(scale=that_dict)``
+        lower to identical wire output (byte-identical SVG).
 
         A child whose channel carries an explicit ``scale=`` (e.g.
         ``fm.Y("y", scale={"domain": [0, 200]})``) is EXCLUDED from the
@@ -1387,14 +1472,12 @@ class _ChartLike(ConfigureMixin):
         _validate_share_modes(channels)
         if not channels:
             return self
-        if not hasattr(self, "_resolve"):
+        if not self._supports_user_resolve:
             raise _unsupported_resolve_error(type(self).__name__)
         existing = self._resolve
         merged_scale = {**_resolve_scale_modes(existing), **channels}
         existing_legend = existing.legend if isinstance(existing, Resolve) else None
-        merged: ResolveArg = (
-            Resolve(scale=merged_scale, legend=existing_legend) if existing_legend else merged_scale
-        )
+        merged = Resolve(scale=merged_scale, legend=existing_legend)
         result = self._rebuild_with_charts(lambda c: c, resolve=merged)
         _copy_configure_layers(self, result)
         return result
@@ -1485,8 +1568,8 @@ class _ChartLike(ConfigureMixin):
 
         Subclasses must implement this — it's the seam between the
         generic ``theme`` / ``properties`` plumbing on the base and each
-        composition's constructor signature. Subclasses whose composition
-        carries a ``_resolve`` field (and are therefore reachable through
+        composition's constructor signature. Subclasses with
+        ``_supports_user_resolve = True`` (and therefore reachable through
         the base :meth:`share_scale`) additionally accept a ``resolve=``
         override — when given, it replaces the rebuilt instance's
         ``resolve=`` instead of preserving the original.
@@ -1734,6 +1817,7 @@ class HConcatChart(_CompositeBase):
     # methods (_render_interactive / to_svg).  Construction, resolve, rebuild,
     # and __repr__ are all inherited unchanged.
     _composite_layout = "hconcat"
+    _supports_user_resolve = True
 
 
 class VConcatChart(_CompositeBase):
@@ -1769,6 +1853,7 @@ class VConcatChart(_CompositeBase):
     # methods (_render_interactive / to_svg).  Construction, resolve, rebuild,
     # and __repr__ are all inherited unchanged.
     _composite_layout = "vconcat"
+    _supports_user_resolve = True
 
 
 # --------------------------------------------------------------------------
@@ -1828,7 +1913,7 @@ class JointChart(_CompositeBase):
         right=None,
         ratio: int = 5,
         spacing: float = 10.0,
-        _internal_resolve: ResolveArg = None,
+        _resolve: ResolveArg = None,
     ) -> None:
         if ratio <= 0:
             raise ValueError(f"ratio must be > 0; got {ratio}")
@@ -1842,10 +1927,14 @@ class JointChart(_CompositeBase):
         # _unsupported_resolve_error), but ``jointplot(hue=...)`` needs a
         # way to opt the grid it builds into the shared-color legend band
         # (spec §8.6) without exposing share_scale()/resolve= to callers.
-        # Deliberately NOT named ``_resolve``: the base ``share_scale()``
-        # gates on ``hasattr(self, "_resolve")``, and JointChart must keep
-        # failing that gate.
-        self._internal_resolve = _internal_resolve
+        # Named ``_resolve`` honestly (same field name and lowering path
+        # every other composition uses) -- ``share_scale()`` gates on the
+        # explicit ``_supports_user_resolve`` class attribute rather than
+        # probing for this attribute, so JointChart can carry a real
+        # ``_resolve`` internally and still correctly fail that gate (its
+        # class-level ``_supports_user_resolve`` stays False, inherited
+        # unchanged from ``_ChartLike``).
+        self._resolve = _resolve
         self._init_figure_chrome()
 
     @property
@@ -1892,18 +1981,19 @@ class JointChart(_CompositeBase):
             right=self.right,
             ratio=self.ratio,
             spacing=self.spacing,
-            _internal_resolve=self._internal_resolve,
+            _resolve=self._resolve,
         )
         self._carry_figure_chrome(result)
         return result
 
     def _rebuild_with_charts(self, fn, *, resolve=_RESOLVE_UNCHANGED):
         if resolve is not _RESOLVE_UNCHANGED:
-            # Unreachable via the public share_scale() sugar (its hasattr
-            # guard raises the same error before ever reaching here, since
-            # JointChart carries no _resolve/resolve field) -- kept as a
-            # defensive typed error for any direct caller, for signature
-            # uniformity with the other _rebuild_with_charts forms.
+            # Unreachable via the public share_scale() sugar (its
+            # _supports_user_resolve gate raises the same error before ever
+            # reaching here, since JointChart's class-level
+            # _supports_user_resolve is False) -- kept as a defensive typed
+            # error for any direct caller, for signature uniformity with the
+            # other _rebuild_with_charts forms.
             raise _unsupported_resolve_error(type(self).__name__)
         new = JointChart(
             fn(self.center),
@@ -1911,7 +2001,7 @@ class JointChart(_CompositeBase):
             right=(fn(self.right) if self.right is not None else None),
             ratio=self.ratio,
             spacing=self.spacing,
-            _internal_resolve=self._internal_resolve,
+            _resolve=self._resolve,
         )
         self._carry_figure_chrome(new)
         return new
@@ -1950,14 +2040,14 @@ class JointChart(_CompositeBase):
         inside another composite: the figure title then lowers to a per-child
         ``"label"`` and a subtitle/caption declines (root-only chrome).
 
-        ``self._internal_resolve`` (set by ``jointplot(hue=...)``, never a
-        public constructor argument) lowers onto this grid node's resolve
-        field via :func:`_composite_resolve_field`, exactly like
-        :class:`RepeatChart`'s public ``resolve=`` -- the Rust resolve pass
-        then unions the center/top/right color domains and, when the
-        effective legend mode is ``"shared"`` (the default once scale is
-        shared), the compositor renders one figure-level legend instead of
-        one per panel (spec §8.6).
+        ``self._resolve`` (set by ``jointplot(hue=...)`` via the private
+        ``_resolve=`` constructor argument, never a public constructor
+        argument) lowers onto this grid node's resolve field via
+        :func:`_composite_resolve_field`, exactly like :class:`RepeatChart`'s
+        public ``resolve=`` -- the Rust resolve pass then unions the
+        center/top/right color domains and, when the effective legend mode
+        is ``"shared"`` (the default once scale is shared), the compositor
+        renders one figure-level legend instead of one per panel (spec §8.6).
 
         Returns
         -------
@@ -2014,7 +2104,7 @@ class JointChart(_CompositeBase):
             row_ratios = None
             col_ratios = None
 
-        resolve_field = _composite_resolve_field(self._internal_resolve, kind=type(self).__name__)
+        resolve_field = _composite_resolve_field(self._resolve, kind=type(self).__name__)
 
         return _build_grid_tree(
             cells,
@@ -2132,6 +2222,8 @@ class RepeatChart(_CompositeBase):
         "columns",
         "resolve",
     )
+
+    _supports_user_resolve = True
 
     def __init__(
         self,
@@ -2880,6 +2972,8 @@ class LayerChart(_ChartLike):
 
     __slots__ = ("_charts", "_resolve", "_title")
 
+    _supports_user_resolve = True
+
     def __init__(
         self,
         *charts,
@@ -3270,6 +3364,7 @@ class ConcatChart(_CompositeBase):
     # Static + interactive dispatch are inherited from ``_CompositeBase``;
     # only the ``ncols`` field is specialised here.
     _composite_layout = "wrap"
+    _supports_user_resolve = True
 
     def __init__(
         self,

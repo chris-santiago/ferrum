@@ -31,7 +31,7 @@ import polars as pl
 
 import ferrum as fm
 from ferrum import Chart
-from ferrum.composition import _validate_share_modes, RepeatChart
+from ferrum.composition import _validate_share_modes, RepeatChart, Resolve
 
 
 # ---------------------------------------------------------------------------
@@ -99,20 +99,20 @@ def test_composition_share_scale_accepts_independent(chart: Chart) -> None:
     combined = chart | chart
     result = combined.share_scale(x="independent")
     assert result is not combined
-    assert result._resolve == {"x": "independent"}
+    assert result._resolve == Resolve(scale={"x": "independent"})
     assert result.to_svg() == combined.to_svg()
 
 
 def test_repeat_share_scale_accepts_shared(repeat_chart: RepeatChart) -> None:
     """RepeatChart.share_scale accepts 'shared' without raising."""
     result = repeat_chart.share_scale(x="shared")
-    assert result.resolve == {"x": "shared"}
+    assert result.resolve == Resolve(scale={"x": "shared"})
 
 
 def test_repeat_share_scale_accepts_independent(repeat_chart: RepeatChart) -> None:
     """RepeatChart.share_scale accepts 'independent' without raising."""
     result = repeat_chart.share_scale(y="independent")
-    assert result.resolve == {"y": "independent"}
+    assert result.resolve == Resolve(scale={"y": "independent"})
 
 
 # ---------------------------------------------------------------------------
