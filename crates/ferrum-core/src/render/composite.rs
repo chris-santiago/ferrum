@@ -128,13 +128,31 @@ impl std::error::Error for CompositeResolveError {}
 // Entry point
 // ---------------------------------------------------------------------------
 
-/// Read the resolve mode for `channel` off a composite node's [`CompositeResolve`].
+/// Read the positional resolve mode for `channel` off a composite node's
+/// [`CompositeResolve`]. Positional channels (`x`/`y`) are node-local with a
+/// hard `Independent` default; the non-positional channels (`color`/`size`)
+/// carry an unset (`None`) state and are read through [`channel_resolve`]
+/// instead, so this helper treats an unset color/size as `Independent`.
 fn resolve_mode(resolve: &crate::spec::composite::CompositeResolve, channel: Channel) -> ResolveMode {
     match channel {
         Channel::X => resolve.x,
         Channel::Y => resolve.y,
+        Channel::Color => resolve.color.unwrap_or(ResolveMode::Independent),
+        Channel::Size => resolve.size.unwrap_or(ResolveMode::Independent),
+    }
+}
+
+/// Read the *explicit* non-positional resolve mode for `channel`, or `None`
+/// when the node left it unset (inherit the ancestor's effective mode — spec
+/// §6, GH #74). Only `Color`/`Size` carry this unset state.
+fn channel_resolve(
+    resolve: &crate::spec::composite::CompositeResolve,
+    channel: Channel,
+) -> Option<ResolveMode> {
+    match channel {
         Channel::Color => resolve.color,
         Channel::Size => resolve.size,
+        Channel::X | Channel::Y => Some(resolve_mode(resolve, channel)),
     }
 }
 
@@ -166,8 +184,18 @@ pub(crate) fn resolve_composite_scales(
     }
     let mut out = vec![LeafScaleContext::default(); n];
     let span: Vec<usize> = (0..n).collect();
-    for channel in [Channel::X, Channel::Y, Channel::Color, Channel::Size] {
+    // Positional x/y: tree-path pairing across congruent direct children
+    // (grids pair by column — pairplot/compare), node-local, no inheritance.
+    for channel in [Channel::X, Channel::Y] {
         resolve_channel(tree, &span, channel, leaves, &mut out)?;
+    }
+    // Non-positional color/size: leaf-span union at each effective-shared node
+    // (GH #74). A node's effective mode is its explicit setting if any, else
+    // the nearest ancestor's effective mode (spec §6); the union spans every
+    // descendant leaf whose effective mode stays shared, through nested
+    // composites and spliced overlay subtrees.
+    for channel in [Channel::Color, Channel::Size] {
+        resolve_nonpositional(tree, &span, channel, ResolveMode::Independent, leaves, &mut out)?;
     }
     Ok(out)
 }
@@ -261,21 +289,24 @@ pub(crate) fn congruent(a: &CompositeNode, b: &CompositeNode) -> bool {
 /// and should simply be skipped. Vacuously `true` for an all-hole child list
 /// (nothing to pair, nothing to union).
 ///
-/// Both [`resolve_channel`] (this module) and the figure-legend planner
-/// (`composite_render::plan_legend_walk`, GH #16) call this — the legend
-/// band must attach at exactly the node where the resolve pass unions the
-/// domain, so the two congruence gates must agree bit-for-bit.
+/// Only the POSITIONAL walk ([`resolve_channel`], this module) consults
+/// this gate now: since the #74 leaf-span union, color/size sharing goes
+/// through [`resolve_nonpositional`] with no congruence requirement, and
+/// the figure-legend planner (`composite_render::plan_legend_walk`) mirrors
+/// that effective-mode rule instead — see the lockstep contract notes on
+/// [`resolve_nonpositional`] and in `composite_render.rs`.
 pub(crate) fn congruent_non_hole(children: &[CompositeNode]) -> bool {
     let mut real = children.iter().filter(|c| !matches!(c, CompositeNode::Hole { .. }));
     let Some(first) = real.next() else { return true };
     real.all(|c| congruent(first, c))
 }
 
-/// Resolve one channel for `node`, whose leaves occupy global indices `leaf_span`
-/// (in pre-order). At a `Shared` node the children's domains are unioned by
-/// congruent tree-path pairing; at an `Independent` node (or a non-congruent
-/// `Shared` node) resolution recurses into each child so inner sharing still
-/// applies.
+/// Resolve one *positional* channel (`x`/`y`) for `node`, whose leaves occupy
+/// global indices `leaf_span` (in pre-order). At a `Shared` node the children's
+/// domains are unioned by congruent tree-path pairing (grids pair by column);
+/// at an `Independent` node (or a non-congruent `Shared` node) resolution
+/// recurses into each child so inner sharing still applies. Color/size take the
+/// leaf-span path in [`resolve_nonpositional`] instead.
 fn resolve_channel(
     node: &CompositeNode,
     leaf_span: &[usize],
@@ -330,6 +361,99 @@ fn resolve_channel(
             resolve_channel(child, span, channel, leaves, out)?;
         }
         Ok(())
+    }
+}
+
+/// Resolve one *non-positional* channel (`color`/`size`) for `node` (GH #74).
+///
+/// Unlike [`resolve_channel`]'s positional tree-path pairing, a shared color/
+/// size scale unions across the node's **entire leaf span**, not just leaves at
+/// matching grid positions — a single legend/scale must cover every panel,
+/// however the panels nest. Effective-mode inheritance (spec §6): a node's
+/// effective mode is its explicit [`channel_resolve`] setting if any, else the
+/// inherited ancestor mode; `inherited` threads that down. A node is the
+/// *outermost* effective-shared node exactly when `eff == Shared` while
+/// `inherited != Shared`, and only there do we union — a deeper shared node
+/// (unset child of a shared parent) is already covered, and an explicitly
+/// `Independent` child resets the chain so its own subtree can re-share.
+///
+/// This is the resolve-side half of the bit-for-bit contract with
+/// [`super::composite_render::plan_legend_walk`]: the figure legend band
+/// attaches at exactly this outermost effective-shared node (see that walk's
+/// `descend_channel`, which computes the identical `eff`/`inherited` gate).
+fn resolve_nonpositional(
+    node: &CompositeNode,
+    leaf_span: &[usize],
+    channel: Channel,
+    inherited: ResolveMode,
+    leaves: &[LeafResolveInput<'_>],
+    out: &mut [LeafScaleContext],
+) -> Result<(), CompositeResolveError> {
+    let CompositeNode::Composite { children, resolve, .. } = node else {
+        return Ok(()); // Leaf/Hole: assignment is decided by an ancestor.
+    };
+    let eff = channel_resolve(resolve, channel).unwrap_or(inherited);
+
+    if eff == ResolveMode::Shared && inherited != ResolveMode::Shared {
+        // Outermost effective-shared node: union every descendant leaf whose
+        // effective mode stays shared (excluding explicit-independent
+        // subtrees, which `collect_shared_leaves` skips and the recursion
+        // below resolves on their own).
+        let mut group: Vec<usize> = Vec::new();
+        collect_shared_leaves(node, leaf_span, channel, inherited, &mut group);
+        resolve_group(&group, channel, leaves, out)?;
+    }
+
+    // Always recurse: descendants under an explicit-independent boundary reset
+    // `inherited` and may re-share among themselves; descendants already
+    // covered by this node's union recurse harmlessly (their `eff == inherited
+    // == Shared`, so no second union fires).
+    let mut cursor = 0;
+    for child in children {
+        let lc = leaf_count(child);
+        resolve_nonpositional(child, &leaf_span[cursor..cursor + lc], channel, eff, leaves, out)?;
+        cursor += lc;
+    }
+    Ok(())
+}
+
+/// Collect the global leaf indices belonging to the shared union owned by the
+/// outermost effective-shared node this is first called on. Descends only
+/// through the *contiguous* shared region: the moment a descendant composite's
+/// effective mode drops to `Independent` (an explicit opt-out — spec §6), that
+/// whole branch is skipped — including any node that re-shares beneath it,
+/// since a re-shared node under an independent boundary is a *separate* union
+/// owner ([`resolve_nonpositional`]'s recursion resolves it on its own). Holes
+/// contribute nothing.
+fn collect_shared_leaves(
+    node: &CompositeNode,
+    leaf_span: &[usize],
+    channel: Channel,
+    inherited: ResolveMode,
+    acc: &mut Vec<usize>,
+) {
+    match node {
+        CompositeNode::Leaf { .. } => {
+            if inherited == ResolveMode::Shared {
+                // A leaf occupies exactly one global index in its span.
+                acc.extend_from_slice(leaf_span);
+            }
+        }
+        CompositeNode::Hole { .. } => {}
+        CompositeNode::Composite { children, resolve, .. } => {
+            let eff = channel_resolve(resolve, channel).unwrap_or(inherited);
+            if eff != ResolveMode::Shared {
+                // Independent boundary: nothing below belongs to this union
+                // (a deeper re-share owns its own leaves).
+                return;
+            }
+            let mut cursor = 0;
+            for child in children {
+                let lc = leaf_count(child);
+                collect_shared_leaves(child, &leaf_span[cursor..cursor + lc], channel, eff, acc);
+                cursor += lc;
+            }
+        }
     }
 }
 
@@ -702,10 +826,10 @@ mod tests {
         }
     }
     fn shared_color() -> CompositeResolve {
-        CompositeResolve { color: ResolveMode::Shared, ..CompositeResolve::default() }
+        CompositeResolve { color: Some(ResolveMode::Shared), ..CompositeResolve::default() }
     }
     fn shared_size() -> CompositeResolve {
-        CompositeResolve { size: ResolveMode::Shared, ..CompositeResolve::default() }
+        CompositeResolve { size: Some(ResolveMode::Shared), ..CompositeResolve::default() }
     }
 
     /// Hold owned per-leaf pieces so borrows in `LeafResolveInput` stay valid.
@@ -1053,6 +1177,122 @@ mod tests {
         let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
         assert_eq!(ctx[0].color, None);
         assert_eq!(ctx[1].color, None);
+    }
+
+    // -- nested color/size: leaf-span union + inheritance (GH #74) -------------
+
+    #[test]
+    fn outer_shared_color_spans_nested_composite_leaves() {
+        // Outer hconcat shares color; the inner hconcat leaves color UNSET. The
+        // union must span the nested subtree's leaves AND the outer sibling —
+        // congruence-agnostic, unlike positional x/y pairing.
+        let l0 = owned(spec_with_color("c"), num_batch("c", &[0.0, 10.0]));
+        let l1 = owned(spec_with_color("c"), num_batch("c", &[5.0, 30.0]));
+        let l2 = owned(spec_with_color("c"), num_batch("c", &[20.0, 25.0]));
+        let inner = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node_color("c"), leaf_node_color("c")],
+            CompositeResolve::default(), // inner color unset -> inherits shared
+        );
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![inner, leaf_node_color("c")],
+            shared_color(),
+        );
+        let inputs = [input(&l0), input(&l1), input(&l2)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let expect = Some(SharedDomain::Numeric { lo: 0.0, hi: 30.0 });
+        assert_eq!(ctx[0].color, expect, "nested leaf 0 must join the outer union");
+        assert_eq!(ctx[1].color, expect, "nested leaf 1 must join the outer union");
+        assert_eq!(ctx[2].color, expect, "outer sibling must join the union");
+    }
+
+    #[test]
+    fn nested_and_outer_both_shared_union_once_not_twice() {
+        // Sharing declared at BOTH nesting levels: the outer union already
+        // covers every leaf, so the inner shared node must not re-resolve a
+        // narrower domain — every leaf carries the full union.
+        let l0 = owned(spec_with_color("c"), num_batch("c", &[0.0, 10.0]));
+        let l1 = owned(spec_with_color("c"), num_batch("c", &[5.0, 30.0]));
+        let l2 = owned(spec_with_color("c"), num_batch("c", &[20.0, 25.0]));
+        let inner = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node_color("c"), leaf_node_color("c")],
+            shared_color(), // inner explicitly shared too
+        );
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![inner, leaf_node_color("c")],
+            shared_color(),
+        );
+        let inputs = [input(&l0), input(&l1), input(&l2)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        let expect = Some(SharedDomain::Numeric { lo: 0.0, hi: 30.0 });
+        assert_eq!(ctx[0].color, expect);
+        assert_eq!(ctx[1].color, expect);
+        assert_eq!(ctx[2].color, expect);
+    }
+
+    #[test]
+    fn explicit_independent_child_opts_out_of_outer_shared_union() {
+        // The inheritance rule's explicit-wins half (spec §6): an inner
+        // composite that explicitly resolves color Independent excludes its
+        // leaves from the outer shared union, while the outer sibling still
+        // participates. The opted-out leaves keep no shared context (own
+        // standalone resolution).
+        let l0 = owned(spec_with_color("c"), num_batch("c", &[0.0, 10.0]));
+        let l1 = owned(spec_with_color("c"), num_batch("c", &[5.0, 30.0]));
+        let l2 = owned(spec_with_color("c"), num_batch("c", &[20.0, 25.0]));
+        let indep_inner = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node_color("c"), leaf_node_color("c")],
+            CompositeResolve { color: Some(ResolveMode::Independent), ..CompositeResolve::default() },
+        );
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![indep_inner, leaf_node_color("c")],
+            shared_color(),
+        );
+        let inputs = [input(&l0), input(&l1), input(&l2)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        // Opted-out inner leaves: excluded from the outer union.
+        assert_eq!(ctx[0].color, None, "explicit-independent inner leaf 0 opts out");
+        assert_eq!(ctx[1].color, None, "explicit-independent inner leaf 1 opts out");
+        // Outer sibling: the only participant, unions only its own extent.
+        assert_eq!(ctx[2].color, Some(SharedDomain::Numeric { lo: 20.0, hi: 25.0 }));
+    }
+
+    #[test]
+    fn inner_shared_under_independent_boundary_reshares_locally() {
+        // A shared node nested under an explicit-independent boundary re-shares
+        // among ITS own leaves (the inheritance chain reset — spec §6), even
+        // though those leaves were excluded from an outer shared union.
+        let l0 = owned(spec_with_color("c"), num_batch("c", &[0.0, 10.0])); // outer sibling
+        let l1 = owned(spec_with_color("c"), num_batch("c", &[5.0, 30.0])); // inner-inner leaf
+        let l2 = owned(spec_with_color("c"), num_batch("c", &[6.0, 40.0])); // inner-inner leaf
+        let reshared = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node_color("c"), leaf_node_color("c")],
+            shared_color(), // re-shares locally
+        );
+        let indep_mid = composite(
+            CompositeLayout::Hconcat,
+            vec![reshared],
+            CompositeResolve { color: Some(ResolveMode::Independent), ..CompositeResolve::default() },
+        );
+        let tree = composite(
+            CompositeLayout::Hconcat,
+            vec![leaf_node_color("c"), indep_mid],
+            shared_color(),
+        );
+        let inputs = [input(&l0), input(&l1), input(&l2)];
+        let ctx = resolve_composite_scales(&tree, &inputs).unwrap();
+        // Outer sibling: only participant of the OUTER union (mid opted out).
+        assert_eq!(ctx[0].color, Some(SharedDomain::Numeric { lo: 0.0, hi: 10.0 }));
+        // Inner-inner leaves: re-shared among themselves = [5, 40].
+        let inner_expect = Some(SharedDomain::Numeric { lo: 5.0, hi: 40.0 });
+        assert_eq!(ctx[1].color, inner_expect);
+        assert_eq!(ctx[2].color, inner_expect);
     }
 
     #[test]

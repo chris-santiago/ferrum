@@ -130,16 +130,26 @@ pub struct CompositeResolve {
     pub y: ResolveMode,
     /// Color scale sharing (10-pre-b). Continuous color unions a `[lo, hi]`
     /// extent; categorical color unions an order-preserving category vector.
-    #[serde(default = "default_independent")]
-    pub color: ResolveMode,
+    ///
+    /// Unlike the positional `x`/`y` channels, color/size resolution is
+    /// `Option`: `None` is *unset* (inherit the nearest ancestor's effective
+    /// mode — spec §6 nested-resolve rule, GH #74), distinct from
+    /// `Some(Independent)` (an *explicit* opt-out that wins over an ancestor's
+    /// shared mode). Positional channels stay node-local (no inheritance —
+    /// grids pair by tree path), so they need no such distinction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<ResolveMode>,
     /// Size scale sharing (10-pre-b): unions the numeric `[min, max]` extent.
-    #[serde(default = "default_independent")]
-    pub size: ResolveMode,
+    /// `Option` with the same unset-inherits / explicit-wins semantics as
+    /// [`CompositeResolve::color`] (spec §6, GH #74).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<ResolveMode>,
     /// Legend resolution override for `color`/`size` (shared-legend design
     /// spec §6 "wire contract"). Absent (both channels `None`, the common
-    /// case) means *follow the scale mode* for both channels — see
-    /// [`CompositeResolve::effective_color_legend`]/
-    /// [`CompositeResolve::effective_size_legend`].
+    /// case) means *follow the scale mode* for both channels; the figure-legend
+    /// band planner resolves the effective legend mode against the *inherited*
+    /// effective scale mode (`render::composite_render::descend_channel`, spec
+    /// §6 nested-resolve rule).
     #[serde(default, skip_serializing_if = "CompositeLegendResolve::is_default")]
     pub legend: CompositeLegendResolve,
 }
@@ -153,8 +163,8 @@ impl Default for CompositeResolve {
         CompositeResolve {
             x: ResolveMode::Independent,
             y: ResolveMode::Independent,
-            color: ResolveMode::Independent,
-            size: ResolveMode::Independent,
+            color: None,
+            size: None,
             legend: CompositeLegendResolve::default(),
         }
     }
@@ -168,31 +178,11 @@ impl CompositeResolve {
     pub fn is_default(r: &CompositeResolve) -> bool {
         r.x == ResolveMode::Independent
             && r.y == ResolveMode::Independent
-            && r.color == ResolveMode::Independent
-            && r.size == ResolveMode::Independent
+            && r.color.is_none()
+            && r.size.is_none()
             && CompositeLegendResolve::is_default(&r.legend)
     }
 
-    /// Effective legend resolution mode for `color` (shared-legend design
-    /// spec §6 "semantic rule"): the explicit `legend.color` override if
-    /// present, else the `color` scale resolution mode ("follow scale" —
-    /// the unset, common case). Does not validate legality (a `Shared`
-    /// legend override paired with an `Independent` color scale is a
-    /// lowering-time error, not this helper's concern — spec §6).
-    ///
-    /// Wire-contract Task 1 of the GH #16 shared-legend build (see
-    /// `design-docs/superpowers/specs/2026-07-12-composite-shared-legend-design.md`).
-    /// Consumed by the compositor's figure-legend band planner
-    /// (`render::composite_render::plan_legend_bands`, Task 3).
-    pub fn effective_color_legend(&self) -> ResolveMode {
-        self.legend.color.unwrap_or(self.color)
-    }
-
-    /// Effective legend resolution mode for `size`. See
-    /// [`CompositeResolve::effective_color_legend`].
-    pub fn effective_size_legend(&self) -> ResolveMode {
-        self.legend.size.unwrap_or(self.size)
-    }
 }
 
 /// Legend resolution override for the `color`/`size` channels (shared-legend
@@ -913,10 +903,8 @@ mod tests {
         }
         let json = serde_json::to_string(&node).unwrap();
         assert!(
-            json.contains(
-                r#""resolve":{"x":"shared","y":"independent","color":"independent","size":"independent"}"#
-            ),
-            "json: {json}"
+            json.contains(r#""resolve":{"x":"shared","y":"independent"}"#),
+            "unset color/size are Option-None and omitted from canonical JSON: {json}"
         );
         let parsed: CompositeNode = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, node);
@@ -933,8 +921,8 @@ mod tests {
 
         let mut node = composite(CompositeLayout::Hconcat, vec![leaf(0)]);
         if let CompositeNode::Composite { resolve, .. } = &mut node {
-            resolve.color = ResolveMode::Shared;
-            resolve.size = ResolveMode::Shared;
+            resolve.color = Some(ResolveMode::Shared);
+            resolve.size = Some(ResolveMode::Shared);
         }
         let json = serde_json::to_string(&node).unwrap();
         assert!(json.contains(r#""color":"shared""#), "json: {json}");
@@ -957,10 +945,6 @@ mod tests {
         assert_eq!(resolve.legend, CompositeLegendResolve::default());
         assert_eq!(resolve.legend.color, None);
         assert_eq!(resolve.legend.size, None);
-        // Follow-scale: no override means the effective legend mode mirrors
-        // the scale mode (spec §6 semantic rule).
-        assert_eq!(resolve.effective_color_legend(), ResolveMode::Shared);
-        assert_eq!(resolve.effective_size_legend(), ResolveMode::Independent);
     }
 
     #[test]
@@ -974,7 +958,7 @@ mod tests {
     fn explicit_legend_override_round_trips() {
         let mut node = composite(CompositeLayout::Hconcat, vec![leaf(0)]);
         if let CompositeNode::Composite { resolve, .. } = &mut node {
-            resolve.color = ResolveMode::Shared;
+            resolve.color = Some(ResolveMode::Shared);
             resolve.legend.color = Some(ResolveMode::Independent);
         }
         let json = serde_json::to_string(&node).unwrap();
@@ -985,15 +969,16 @@ mod tests {
         let parsed: CompositeNode = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, node);
         let CompositeNode::Composite { resolve, .. } = parsed else { panic!("expected Composite") };
-        assert_eq!(resolve.effective_color_legend(), ResolveMode::Independent);
+        assert_eq!(resolve.legend.color, Some(ResolveMode::Independent));
+        assert_eq!(resolve.legend.size, None);
     }
 
     #[test]
     fn explicit_legend_both_channels_round_trips() {
         let mut node = composite(CompositeLayout::Hconcat, vec![leaf(0)]);
         if let CompositeNode::Composite { resolve, .. } = &mut node {
-            resolve.color = ResolveMode::Shared;
-            resolve.size = ResolveMode::Shared;
+            resolve.color = Some(ResolveMode::Shared);
+            resolve.size = Some(ResolveMode::Shared);
             resolve.legend.color = Some(ResolveMode::Shared);
             resolve.legend.size = Some(ResolveMode::Independent);
         }
@@ -1004,33 +989,6 @@ mod tests {
         );
         let parsed: CompositeNode = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, node);
-    }
-
-    #[test]
-    fn effective_legend_mode_follows_scale_when_no_override() {
-        let resolve = CompositeResolve {
-            color: ResolveMode::Shared,
-            size: ResolveMode::Independent,
-            ..Default::default()
-        };
-        assert_eq!(resolve.effective_color_legend(), ResolveMode::Shared);
-        assert_eq!(resolve.effective_size_legend(), ResolveMode::Independent);
-    }
-
-    #[test]
-    fn effective_legend_mode_prefers_explicit_override_over_scale() {
-        let resolve = CompositeResolve {
-            color: ResolveMode::Shared,
-            legend: CompositeLegendResolve { color: Some(ResolveMode::Independent), size: None },
-            ..Default::default()
-        };
-        assert_eq!(
-            resolve.effective_color_legend(),
-            ResolveMode::Independent,
-            "explicit legend override wins over scale mode"
-        );
-        // Untouched channel still follows scale.
-        assert_eq!(resolve.effective_size_legend(), ResolveMode::Independent);
     }
 
     #[test]
@@ -1059,11 +1017,9 @@ mod tests {
 
             let node = composite_tree_from_py(root.as_any()).unwrap();
             let CompositeNode::Composite { resolve, .. } = node else { panic!("expected Composite") };
-            assert_eq!(resolve.color, ResolveMode::Shared);
+            assert_eq!(resolve.color, Some(ResolveMode::Shared));
             assert_eq!(resolve.legend.color, Some(ResolveMode::Independent));
             assert_eq!(resolve.legend.size, None);
-            assert_eq!(resolve.effective_color_legend(), ResolveMode::Independent);
-            assert_eq!(resolve.effective_size_legend(), ResolveMode::Independent);
         });
     }
 
@@ -1090,7 +1046,7 @@ mod tests {
             let node = composite_tree_from_py(root.as_any()).unwrap();
             let CompositeNode::Composite { resolve, .. } = node else { panic!("expected Composite") };
             assert_eq!(resolve.legend, CompositeLegendResolve::default());
-            assert_eq!(resolve.effective_color_legend(), ResolveMode::Shared);
+            assert_eq!(resolve.color, Some(ResolveMode::Shared));
         });
     }
 
@@ -1117,8 +1073,8 @@ mod tests {
 
             let node = composite_tree_from_py(root.as_any()).unwrap();
             let CompositeNode::Composite { resolve, .. } = node else { panic!("expected Composite") };
-            assert_eq!(resolve.color, ResolveMode::Shared);
-            assert_eq!(resolve.size, ResolveMode::Shared);
+            assert_eq!(resolve.color, Some(ResolveMode::Shared));
+            assert_eq!(resolve.size, Some(ResolveMode::Shared));
             assert_eq!(resolve.x, ResolveMode::Independent);
             assert_eq!(resolve.y, ResolveMode::Independent);
         });

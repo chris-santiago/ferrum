@@ -79,8 +79,7 @@ use crate::spec::chart::ChartSpec;
 
 use super::chart_config::ChartConfig;
 use super::composite::{
-    congruent_non_hole, flatten_leaf_specs, resolve_composite_scales, CompositeResolveError,
-    LeafResolveInput,
+    flatten_leaf_specs, resolve_composite_scales, CompositeResolveError, LeafResolveInput,
 };
 use super::scale_resolve::{ColorScale, LeafScaleContext};
 use super::svg::uniquify_clip_ids;
@@ -519,10 +518,13 @@ fn aux_block_is_empty(a: &AuxLegendInput) -> bool {
 /// Per-channel legend-resolution state carried down the tree during planning.
 #[derive(Debug, Clone, Copy)]
 struct ChannelWalk {
-    /// A congruent-shared-scale ancestor already resolved this channel, so no
-    /// inner node re-resolves it (the resolve pass stops at the outermost such
-    /// node — [`super::composite::resolve_channel`]).
-    resolved_above: bool,
+    /// The effective scale-resolution mode inherited from ancestors for this
+    /// channel (spec §6, GH #74): `Shared` once an ancestor established a
+    /// shared union that covers this node, else `Independent`. The outermost
+    /// effective-shared node is the one where `scale_eff == Shared` while
+    /// `scale_inherited != Shared` — mirroring
+    /// [`super::composite::resolve_nonpositional`]'s union gate bit-for-bit.
+    scale_inherited: ResolveMode,
     /// We are inside a figure-legend band for this channel: participating leaves
     /// below are suppressed.
     band_active: bool,
@@ -532,19 +534,20 @@ struct ChannelWalk {
 /// per-leaf `suppress_color_legend`/`suppress_size_legend` flags into `contexts`
 /// (read by pass 2's leaf layout) and returns the set of nodes that emit a band.
 ///
-/// A node bands a channel when it is the outermost congruent-shared-**scale**
-/// node for that channel (the node where the resolve pass actually unioned the
-/// domain) AND its effective legend resolution is `Shared`. A `legend`-
-/// independent override over a shared scale therefore bands nothing and
-/// suppresses no leaf — today's per-panel rendering (design §4). A leaf is
-/// suppressed only when it *participated* in the shared domain (its context
-/// carries the channel), so a leaf with an explicit per-chart `scale=` (excluded
-/// from the union) keeps its own panel legend.
+/// A node bands a channel when it is the outermost effective-shared-**scale**
+/// node for that channel (the node where [`super::composite::resolve_nonpositional`]
+/// unioned the domain across the whole leaf span — GH #74) AND its effective
+/// legend resolution is `Shared`. A `legend`-independent override over a shared
+/// scale therefore bands nothing and suppresses no leaf — today's per-panel
+/// rendering (design §4). A leaf is suppressed only when it *participated* in
+/// the shared domain (its context carries the channel), so a leaf with an
+/// explicit per-chart `scale=`, or under an explicitly-independent nested node
+/// (excluded from the union), keeps its own panel legend.
 fn plan_legend_bands(tree: &CompositeNode, contexts: &mut [LeafScaleContext]) -> LegendBandPlan {
     let mut plan = LegendBandPlan { band_nodes: HashMap::new() };
     let mut leaf_cursor = 0usize;
     let mut node_cursor = 0usize;
-    let root = ChannelWalk { resolved_above: false, band_active: false };
+    let root = ChannelWalk { scale_inherited: ResolveMode::Independent, band_active: false };
     plan_legend_walk(tree, contexts, &mut leaf_cursor, &mut node_cursor, root, root, &mut plan);
     plan
 }
@@ -584,25 +587,17 @@ fn plan_legend_walk(
         CompositeNode::Composite { children, resolve, .. } => {
             let node_idx = *node_cursor;
             *node_cursor += 1;
-            // Must agree bit-for-bit with `resolve_channel`'s congruence
-            // gate (composite.rs): the band attaches at exactly the node
-            // where the resolve pass unions the domain, and a `Hole` cell
-            // (pairplot's corner triangle, jointplot's empty corner) must
-            // not disqualify the node's real cells from sharing (see
-            // `congruent_non_hole`'s doc).
-            let congruent_children = congruent_non_hole(children);
-            let (color_next, color_band) = descend_channel(
-                resolve.color,
-                resolve.effective_color_legend(),
-                congruent_children,
-                color,
-            );
-            let (size_next, size_band) = descend_channel(
-                resolve.size,
-                resolve.effective_size_legend(),
-                congruent_children,
-                size,
-            );
+            // Must agree bit-for-bit with `resolve_nonpositional`'s union gate
+            // (composite.rs): the band attaches at exactly the outermost
+            // effective-shared node where the resolve pass unions the color/
+            // size domain across the whole leaf span (GH #74). No congruence
+            // gate here — the leaf-span union is congruence-agnostic (a nested
+            // composite child no longer blocks sharing); congruence stays a
+            // positional x/y concern only.
+            let (color_next, color_band) =
+                descend_channel(resolve.color, resolve.legend.color, color);
+            let (size_next, size_band) =
+                descend_channel(resolve.size, resolve.legend.size, size);
             if color_band || size_band {
                 plan.band_nodes.insert(node_idx, BandFlags { color: color_band, size: size_band });
             }
@@ -615,32 +610,41 @@ fn plan_legend_walk(
 
 /// Advance one channel's [`ChannelWalk`] across a composite node, returning the
 /// state its children see and whether THIS node emits a band for the channel.
+///
+/// `node_scale` is the node's explicit color/size resolve (`None` = unset,
+/// inherit — spec §6, GH #74); `legend_override` is its explicit
+/// `resolve.legend` entry for the channel (`None` = follow the effective
+/// scale mode). The effective scale mode is `node_scale.unwrap_or(inherited)`,
+/// and this node is the outermost effective-shared node exactly when that mode
+/// is `Shared` while the inherited mode is not — the same gate
+/// [`super::composite::resolve_nonpositional`] uses to place its union, so band
+/// and union always coincide.
 fn descend_channel(
-    scale_mode: ResolveMode,
-    eff_legend: ResolveMode,
-    congruent_children: bool,
+    node_scale: Option<ResolveMode>,
+    legend_override: Option<ResolveMode>,
     cur: ChannelWalk,
 ) -> (ChannelWalk, bool) {
-    // A shared legend over a non-shared scale is rejected at lowering (design
-    // §4, the Python `_lower_composite` guard) — a normal caller can never
-    // build this combination. `CompositeNode::validate` does not re-check it
-    // Rust-side, so a caller who constructs the composite wire spec directly
-    // (bypassing Python) can still reach this arm. Below, `is_scale_resolver`
-    // requires `scale_mode == Shared`, so a non-Shared `scale_mode` always
-    // yields `band_here == false` regardless of `eff_legend` — the degrade is
-    // "no band for this channel", not a misrender, mirroring how the scale
-    // resolve pass itself treats the same spec (no union, per-panel
-    // fallback). Deliberately no assert and no log: a `debug_assert!` would
-    // abort every debug/test build the moment such a spec is constructed
-    // (making the documented degrade untestable), and this crate has no
-    // stderr/log convention to reach for. The degrade contract is pinned by
-    // `invalid_wire_shared_legend_over_independent_scale_degrades_to_no_band`
-    // below.
+    let scale_eff = node_scale.unwrap_or(cur.scale_inherited);
+    // Legend follows the effective scale mode unless explicitly overridden.
+    let legend_eff = legend_override.unwrap_or(scale_eff);
+    // Outermost effective-shared scale node for the channel: the resolve pass
+    // unions the domain here, so this is the only node that may band it.
     let is_scale_resolver =
-        !cur.resolved_above && scale_mode == ResolveMode::Shared && congruent_children;
-    let band_here = is_scale_resolver && eff_legend == ResolveMode::Shared;
+        scale_eff == ResolveMode::Shared && cur.scale_inherited != ResolveMode::Shared;
+    // A shared legend over a non-shared effective scale is rejected at lowering
+    // (design §4, the Python `_lower_composite` guard) — a normal caller can
+    // never build it. `CompositeNode::validate` does not re-check it Rust-side,
+    // so a directly-constructed wire spec can still reach here; because
+    // `is_scale_resolver` requires an effective-shared scale, such a spec
+    // yields `band_here == false` regardless of `legend_eff` — the degrade is
+    // "no band for this channel", not a misrender, mirroring how the resolve
+    // pass treats the same spec (no union, per-panel fallback). Deliberately no
+    // assert/log (an abort would make the documented degrade untestable). The
+    // contract is pinned by
+    // `invalid_wire_shared_legend_over_independent_scale_degrades_to_no_band`.
+    let band_here = is_scale_resolver && legend_eff == ResolveMode::Shared;
     let next = ChannelWalk {
-        resolved_above: cur.resolved_above || is_scale_resolver,
+        scale_inherited: scale_eff,
         band_active: cur.band_active || band_here,
     };
     (next, band_here)
@@ -3151,7 +3155,7 @@ mod tests {
     fn color_hconcat(n: usize, color: RM, legend_color: Option<RM>) -> CompositeNode {
         let mut node = composite(CompositeLayout::Hconcat, (0..n).map(color_leaf).collect());
         if let CompositeNode::Composite { resolve, .. } = &mut node {
-            resolve.color = color;
+            resolve.color = Some(color);
             resolve.legend.color = legend_color;
         }
         node
@@ -3414,14 +3418,14 @@ mod tests {
         let inner_shared = {
             let mut inner = composite(CompositeLayout::Hconcat, vec![color_leaf(0), color_leaf(1)]);
             if let CompositeNode::Composite { resolve, .. } = &mut inner {
-                resolve.color = RM::Shared;
+                resolve.color = Some(RM::Shared);
             }
             composite(CompositeLayout::Hconcat, vec![leaf_node(2), inner])
         };
         let inner_indep = {
             let mut inner = composite(CompositeLayout::Hconcat, vec![color_leaf(0), color_leaf(1)]);
             if let CompositeNode::Composite { resolve, .. } = &mut inner {
-                resolve.color = RM::Shared;
+                resolve.color = Some(RM::Shared);
                 resolve.legend.color = Some(RM::Independent);
             }
             composite(CompositeLayout::Hconcat, vec![leaf_node(2), inner])
@@ -3471,7 +3475,7 @@ mod tests {
             ],
         );
         if let CompositeNode::Composite { resolve, .. } = &mut tree {
-            resolve.color = RM::Shared;
+            resolve.color = Some(RM::Shared);
         }
         let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         assert!(scene.legend.is_empty(), "all-disabled participants → no figure band");
@@ -3497,7 +3501,7 @@ mod tests {
             ],
         );
         if let CompositeNode::Composite { resolve, .. } = &mut tree {
-            resolve.color = RM::Shared;
+            resolve.color = Some(RM::Shared);
         }
         let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
         assert!(!scene.legend.is_empty(), "band must be captured from the non-disabled leaf 1");
@@ -3522,7 +3526,7 @@ mod tests {
             vec![color_leaf(0), CompositeNode::Leaf { spec: Box::new(excl_spec), data: 1, label: None }],
         );
         if let CompositeNode::Composite { resolve, .. } = &mut tree {
-            resolve.color = RM::Shared;
+            resolve.color = Some(RM::Shared);
         }
         let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
@@ -3551,8 +3555,8 @@ mod tests {
         let cs_leaf = |data| CompositeNode::Leaf { spec: Box::new(color_size_spec()), data, label: None };
         let mut tree = composite(CompositeLayout::Hconcat, vec![cs_leaf(0), cs_leaf(1)]);
         if let CompositeNode::Composite { resolve, .. } = &mut tree {
-            resolve.color = RM::Shared;
-            resolve.size = RM::Shared;
+            resolve.color = Some(RM::Shared);
+            resolve.size = Some(RM::Shared);
         }
         let (both_scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
 
@@ -3603,20 +3607,20 @@ mod tests {
         // `CompositeNode::validate` does not re-check the pairing either.
         // This test constructs the wire-level spec directly to pin what
         // `descend_channel` does when that guard is bypassed: it computes
-        // `effective_color_legend() == Shared` while `resolve.color ==
-        // Independent`, but `is_scale_resolver` requires `scale_mode ==
-        // Shared`, so `band_here` is always `false` regardless of the
-        // legend override — no band, no suppression, per-panel legends
-        // stay exactly as an independent-scale render's. No panic either
-        // (a `debug_assert!` here would have aborted this test under the
-        // default debug/test profile).
+        // `legend_eff == Shared` while the effective scale mode is
+        // `Independent`, but `is_scale_resolver` requires an effective-shared
+        // scale, so `band_here` is always `false` regardless of the legend
+        // override — no band, no suppression, per-panel legends stay exactly
+        // as an independent-scale render's. No panic either (a `debug_assert!`
+        // here would have aborted this test under the default debug/test
+        // profile).
         let h0 = color_hold(&["a", "b", "a"]);
         let h1 = color_hold(&["a", "b", "a"]);
         let leaves = [leaf_input(&h0, 300.0, 200.0), leaf_input(&h1, 300.0, 200.0)];
 
         let mut invalid = composite(CompositeLayout::Hconcat, vec![color_leaf(0), color_leaf(1)]);
         if let CompositeNode::Composite { resolve, .. } = &mut invalid {
-            resolve.color = RM::Independent;
+            resolve.color = Some(RM::Independent);
             resolve.legend.color = Some(RM::Shared);
         }
         let (scene, _) = render_composite_scene(&invalid, &leaves, &ThemeInputs::default())
@@ -3683,13 +3687,13 @@ mod tests {
 
         let mut shared = composite(CompositeLayout::Hconcat, vec![size_leaf(0), size_leaf(1)]);
         if let CompositeNode::Composite { resolve, .. } = &mut shared {
-            resolve.size = RM::Shared;
+            resolve.size = Some(RM::Shared);
         }
         let (shared_scene, _) = render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
 
         let mut indep = composite(CompositeLayout::Hconcat, vec![size_leaf(0), size_leaf(1)]);
         if let CompositeNode::Composite { resolve, .. } = &mut indep {
-            resolve.size = RM::Independent;
+            resolve.size = Some(RM::Independent);
         }
         let (indep_scene, _) = render_composite_scene(&indep, &leaves, &ThemeInputs::default()).unwrap();
 
@@ -3730,7 +3734,7 @@ mod tests {
 
         let mut shared = composite(CompositeLayout::Hconcat, vec![merged_leaf(0), merged_leaf(1)]);
         if let CompositeNode::Composite { resolve, .. } = &mut shared {
-            resolve.color = RM::Shared;
+            resolve.color = Some(RM::Shared);
         }
         let (shared_scene, _) = render_composite_scene(&shared, &leaves, &ThemeInputs::default()).unwrap();
 
@@ -3774,7 +3778,7 @@ mod tests {
         let inner = {
             let mut inner = composite(CompositeLayout::Hconcat, vec![color_leaf(0), color_leaf(1)]);
             if let CompositeNode::Composite { resolve, .. } = &mut inner {
-                resolve.color = RM::Shared;
+                resolve.color = Some(RM::Shared);
             }
             composite(CompositeLayout::Hconcat, vec![leaf_node(2), inner])
         };
@@ -3807,7 +3811,7 @@ mod tests {
     fn color_grid(children: Vec<CompositeNode>, nrows: u32, ncols: u32, color: RM) -> CompositeNode {
         let mut node = composite(CompositeLayout::Grid, children);
         if let CompositeNode::Composite { resolve, nrows: nr, ncols: nc, .. } = &mut node {
-            resolve.color = color;
+            resolve.color = Some(color);
             *nr = Some(nrows);
             *nc = Some(ncols);
         }

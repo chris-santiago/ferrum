@@ -103,7 +103,7 @@ def test_concat_wrap_partial_last_row_shared_color_one_legend(chart_p, chart_q, 
     assert texts.count("grp") == 1, f"wrap layout shared color must dedupe; got {texts}"
 
 
-def test_outer_shared_resolve_spans_nested_hconcat_leaves(chart_p, chart_q, df_p):  # BUG: outer resolve={'color':'shared'} is silently ignored for leaves nested inside a composite child — no domain union (nested panels keep local domains) and 3 per-panel legends render instead of 1 figure legend
+def test_outer_shared_resolve_spans_nested_hconcat_leaves(chart_p, chart_q, df_p):  # FIXED (#74): outer resolve={'color':'shared'} now unions across the whole leaf span, spanning leaves nested inside a composite child into one figure legend
     """resolve declared on the OUTER vconcat only; the inner hconcat carries
     no resolve.  The outer union must span the nested subtree's leaves and
     produce exactly ONE figure legend for all three panels.
@@ -119,7 +119,7 @@ def test_outer_shared_resolve_spans_nested_hconcat_leaves(chart_p, chart_q, df_p
     )
 
 
-def test_nested_and_outer_both_shared_renders_single_legend(chart_p, chart_q, df_p):  # BUG: same root cause as above — the outer shared resolve never reaches the nested subtree, so the inner band renders (1) plus the outer sibling's own panel legend (1) = 2 'grp' legends instead of 1
+def test_nested_and_outer_both_shared_renders_single_legend(chart_p, chart_q, df_p):  # FIXED (#74): the outer union covers every leaf and the inner shared node is already-covered (no second band), so the figure renders exactly one 'grp' legend
     """Sharing declared at BOTH nesting levels: the outer union already
     covers every leaf, so the figure must not render duplicate 'grp'
     legends (one per composite node claiming the same leaves).
@@ -134,7 +134,7 @@ def test_nested_and_outer_both_shared_renders_single_legend(chart_p, chart_q, df
     )
 
 
-def test_layerchart_inside_hconcat_shared_color_one_legend(chart_p, chart_q, df_p):  # BUG: outer shared resolve does not reach leaves spliced from a nested LayerChart overlay (_splice_lowered_subtree) — 3 per-panel 'grp' legends render (2 stacked inside the overlay panel + 1 sibling) instead of 1 figure legend
+def test_layerchart_inside_hconcat_shared_color_one_legend(chart_p, chart_q, df_p):  # FIXED (#74): the overlay node leaves color unset, so it inherits the outer shared mode and its spliced leaves join the union — one figure legend across overlay + sibling
     """A LayerChart child lowers via _splice_lowered_subtree (overlay node)
     inside the outer hconcat; the outer shared color must union across the
     overlay's leaves AND the sibling leaf, capturing one legend.
@@ -147,6 +147,33 @@ def test_layerchart_inside_hconcat_shared_color_one_legend(chart_p, chart_q, df_
     texts = _legend_texts(svg)
     assert texts.count("grp") == 1, (
         f"Layer-inside-Concat shared color must dedupe to one legend; got {texts}"
+    )
+
+
+def test_explicit_independent_child_under_outer_shared_stays_independent(chart_p, chart_q, df_p):
+    """The inheritance rule's explicit-wins half (spec §6, #74): an inner
+    composite that explicitly declares resolve={'color':'independent'} opts its
+    leaves OUT of an outer shared union — they keep their own per-panel legends
+    rather than being deduped into the figure band.  Discriminating baseline:
+    the same shape with the inner left UNSET collapses to one legend (the
+    inherit-shared case, covered above), so an explicit-independent inner must
+    render MORE than one 'grp' legend.
+    Code path: _lower_any recursion — outer shared over an explicitly-
+    independent inner composite (channel_resolve None vs Some(Independent)).
+    """
+    c = fm.Chart(df_p).mark_point().encode(x="x", y="y", color="grp")
+    inner = fm.hconcat(chart_p, chart_q, resolve={"color": "independent"})
+    svg = fm.hconcat(inner, c, resolve={"color": "shared"}).to_svg()
+    texts = _legend_texts(svg)
+    # Control: identical shape but inner UNSET -> inherits shared -> one legend.
+    shared_inner = fm.hconcat(chart_p, chart_q)
+    shared_svg = fm.hconcat(shared_inner, c, resolve={"color": "shared"}).to_svg()
+    assert _legend_texts(shared_svg).count("grp") == 1, (
+        "control: an unset inner must inherit the outer shared mode (one legend)"
+    )
+    assert texts.count("grp") > 1, (
+        f"explicit-independent inner must keep its own per-panel legends, not "
+        f"dedupe into the figure band; got {texts}"
     )
 
 
