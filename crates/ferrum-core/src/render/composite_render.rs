@@ -69,7 +69,7 @@ use arrow::record_batch::RecordBatch;
 use ferrum_scene::{LayoutScale, MarkBatch, Panel, Rect, SceneGraph, SceneNode};
 
 use crate::layout::facet::ResolveMode;
-use crate::layout::legend::{layout_aux_legends, layout_color_legend};
+use crate::layout::legend::{layout_aux_legends, layout_color_legend, LEGEND_OUTER_PAD};
 use crate::layout::text_metrics::TextMetrics;
 use crate::layout::{
     AuxLegendInput, ColorbarInput, LegendEntry, LegendLayout, LegendOrient, LegendOverrides,
@@ -671,7 +671,9 @@ fn draw_legend_band(scene: &mut SceneGraph, bundle: &LeafLegendBundle, flags: Ba
         .style
         .label_font_size
         .unwrap_or(theme.typography.label_font_size);
-    let Some((min_x, min_y, max_x, max_y)) = legend_layouts_extent(&layouts, label_fs, &metrics)
+    let title_fs = theme.typography.legend_title_font_size;
+    let Some((min_x, min_y, max_x, max_y)) =
+        legend_layouts_extent(&layouts, label_fs, title_fs, &metrics)
     else {
         return;
     };
@@ -683,16 +685,25 @@ fn draw_legend_band(scene: &mut SceneGraph, bundle: &LeafLegendBundle, flags: Ba
 
     // Placement origin of the measured content block. Left/Top first shift the
     // existing merged content over to make room (mirroring `apply_chrome_band`'s
-    // header shift); Right/Bottom simply grow the far edge.
+    // header shift); Right/Bottom simply grow the far edge. Either way, the band's
+    // OUTER edge — the one that borders the canvas boundary rather than the
+    // `LEGEND_BAND_GAP` toward the panels — gets `LEGEND_OUTER_PAD` of trailing
+    // safety margin: `legend_layouts_extent` measures glyph *advance* widths via
+    // `TextMetrics::measure_width`, which does not include the terminal glyph's
+    // right side-bearing/ink overhang, so an exact-fit grow clips that sliver at
+    // the canvas edge. `LEGEND_OUTER_PAD` is the same inner padding
+    // `estimate_legend_size`/`estimate_colorbar_size` reserve around per-panel
+    // legend content on every side (layout/legend.rs) — reused here rather than
+    // inventing a second margin constant.
     let (target_x, target_y) = match orient {
         LegendOrient::Right => (old_w + LEGEND_BAND_GAP, 0.0),
         LegendOrient::Left => {
-            shift_scene(scene, content_w + LEGEND_BAND_GAP, 0.0);
-            (0.0, 0.0)
+            shift_scene(scene, LEGEND_OUTER_PAD + content_w + LEGEND_BAND_GAP, 0.0);
+            (LEGEND_OUTER_PAD, 0.0)
         }
         LegendOrient::Top => {
-            shift_scene(scene, 0.0, content_h + LEGEND_BAND_GAP);
-            (0.0, 0.0)
+            shift_scene(scene, 0.0, LEGEND_OUTER_PAD + content_h + LEGEND_BAND_GAP);
+            (0.0, LEGEND_OUTER_PAD)
         }
         LegendOrient::Bottom => (0.0, old_h + LEGEND_BAND_GAP),
     };
@@ -711,12 +722,12 @@ fn draw_legend_band(scene: &mut SceneGraph, bundle: &LeafLegendBundle, flags: Ba
 
     match orient {
         LegendOrient::Right | LegendOrient::Left => {
-            scene.width = old_w + LEGEND_BAND_GAP + content_w;
+            scene.width = old_w + LEGEND_BAND_GAP + content_w + LEGEND_OUTER_PAD;
             scene.height = old_h.max(content_h);
         }
         LegendOrient::Top | LegendOrient::Bottom => {
             scene.width = old_w.max(content_w);
-            scene.height = old_h + LEGEND_BAND_GAP + content_h;
+            scene.height = old_h + LEGEND_BAND_GAP + content_h + LEGEND_OUTER_PAD;
         }
     }
     scene.legend.extend(nodes);
@@ -792,12 +803,19 @@ fn layout_band_legends(
 /// The bounding box `(min_x, min_y, max_x, max_y)` of every drawn glyph across
 /// `layouts` — entry swatches + labels, title, and colorbar bar + ticks. Used to
 /// size the scene growth and position the band; `None` when nothing is drawn.
+///
+/// `title_fs` is the title's OWN font size (`theme.typography.legend_title_font_size`),
+/// distinct from `label_fs`: the title is drawn at `title_fs` by `build_legend`
+/// (via `layout_color_legend`), so measuring it at `label_fs` here would silently
+/// under-size the band whenever a theme sets the two font sizes differently.
 fn legend_layouts_extent(
     layouts: &[LegendLayout],
     label_fs: f64,
+    title_fs: f64,
     metrics: &dyn TextMetrics,
 ) -> Option<(f64, f64, f64, f64)> {
     let line_h = metrics.line_height(label_fs);
+    let title_line_h = metrics.line_height(title_fs);
     let mut min_x = f64::INFINITY;
     let mut min_y = f64::INFINITY;
     let mut max_x = f64::NEG_INFINITY;
@@ -822,8 +840,8 @@ fn legend_layouts_extent(
             );
         }
         if let Some(t) = &l.title {
-            let tw = metrics.measure_width(&t.text, label_fs);
-            acc(t.x, t.y - line_h, t.x + tw, t.y);
+            let tw = metrics.measure_width(&t.text, title_fs);
+            acc(t.x, t.y - title_line_h, t.x + tw, t.y);
         }
         if let Some(cb) = &l.colorbar {
             let mut max_tick = 0.0_f64;
@@ -1615,6 +1633,7 @@ mod tests {
     use crate::spec::encoding::DataType as EncDataType;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
+    use crate::layout::SymbolKind;
     use arrow::array::Float64Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
@@ -3180,6 +3199,178 @@ mod tests {
             scene.panels[0].plot_area.x > right_scene.panels[0].plot_area.x,
             "left band shifts panels right ({} vs right-orient {})",
             scene.panels[0].plot_area.x, right_scene.panels[0].plot_area.x,
+        );
+    }
+
+    // -- legend band clip-safety padding (GH #16 follow-up) -------------------
+    //
+    // `draw_legend_band` used to grow the scene by the EXACT measured content
+    // extent (`legend_layouts_extent`'s bounding box) with zero trailing safety
+    // margin on the edge bordering the canvas boundary. `legend_layouts_extent`
+    // measures glyph *advance* widths (`TextMetrics::measure_width`), which
+    // don't include the terminal glyph's right side-bearing/ink overhang, so an
+    // exact-fit grow clips that sliver at the canvas edge — visible on real SVG
+    // goldens as a clipped title/label/tick-label glyph. These tests construct a
+    // `LeafLegendBundle` directly (bypassing the full render pipeline, same as
+    // the private-function access every other test in this module relies on)
+    // so the assertions are exact rather than a loose end-to-end threshold.
+
+    /// A minimal two-entry categorical bundle under the given theme/title.
+    fn band_bundle(theme: ThemeInputs, title: Option<&str>) -> LeafLegendBundle {
+        LeafLegendBundle {
+            entries: vec![
+                LegendEntry { label: "a".into(), symbol: SymbolKind::Circle },
+                LegendEntry { label: "b".into(), symbol: SymbolKind::Circle },
+            ],
+            colorbar: None,
+            title: title.map(str::to_owned),
+            overrides: LegendOverrides::default(),
+            aux: Vec::new(),
+            color_scale: None,
+            theme,
+            merged_color_size: false,
+        }
+    }
+
+    /// A single-stop-pair colorbar bundle (numeric legend content) under the
+    /// given theme/title — exercises the colorbar arm of `legend_layouts_extent`
+    /// (`cb.bar_rect` + tick labels), distinct from the categorical-entries arm
+    /// every other band test drives.
+    fn band_colorbar_bundle(theme: ThemeInputs, title: Option<&str>) -> LeafLegendBundle {
+        LeafLegendBundle {
+            entries: Vec::new(),
+            colorbar: Some(ColorbarInput {
+                stops: vec![(0.0, "#000000".into()), (1.0, "#ffffff".into())],
+                tick_labels: vec!["1".into(), "7.75".into(), "10".into()],
+                domain: Some((1.0, 10.0)),
+            }),
+            title: title.map(str::to_owned),
+            overrides: LegendOverrides::default(),
+            aux: Vec::new(),
+            color_scale: None,
+            theme,
+            merged_color_size: false,
+        }
+    }
+
+    /// For each of the four orients, the scene must grow past the band's own
+    /// measured content extent (`legend_layouts_extent`, the same function
+    /// `draw_legend_band` uses) by at least `LEGEND_OUTER_PAD` on the grown
+    /// edge — the discriminating geometry assertion: on pre-fix code, the grown
+    /// edge equals the content extent exactly (delta 0 < `LEGEND_OUTER_PAD`),
+    /// so this fails RED on the unpadded implementation.
+    #[test]
+    fn legend_band_pads_trailing_edge_past_content_extent_all_orients() {
+        let metrics = crate::render::font::FontdueMetrics::new();
+        let flags = BandFlags { color: true, size: false };
+
+        for orient in
+            [LegendOrient::Right, LegendOrient::Left, LegendOrient::Top, LegendOrient::Bottom]
+        {
+            let mut theme = ThemeInputs::default();
+            theme.legend.legend_orient = orient;
+            let bundle = band_bundle(theme.clone(), Some("grp"));
+
+            let mut scene = empty_scene(300.0, 200.0);
+            draw_legend_band(&mut scene, &bundle, flags);
+
+            let layouts = layout_band_legends(&bundle, flags, &metrics);
+            let (min_x, min_y, max_x, max_y) = legend_layouts_extent(
+                &layouts,
+                theme.typography.label_font_size,
+                theme.typography.legend_title_font_size,
+                &metrics,
+            )
+            .expect("band content must measure non-empty");
+            let content_w = max_x - min_x;
+            let content_h = max_y - min_y;
+
+            let grown = match orient {
+                LegendOrient::Right | LegendOrient::Left => {
+                    scene.width - 300.0 - LEGEND_BAND_GAP
+                }
+                LegendOrient::Top | LegendOrient::Bottom => {
+                    scene.height - 200.0 - LEGEND_BAND_GAP
+                }
+            };
+            let content = match orient {
+                LegendOrient::Right | LegendOrient::Left => content_w,
+                LegendOrient::Top | LegendOrient::Bottom => content_h,
+            };
+            assert!(
+                grown >= content + LEGEND_OUTER_PAD - 1e-9,
+                "{orient:?} band must reserve at least LEGEND_OUTER_PAD ({LEGEND_OUTER_PAD}) \
+                 past its measured content extent ({content}), got grown={grown}",
+            );
+        }
+    }
+
+    /// Same trailing-padding assertion, driven through the colorbar arm of
+    /// `legend_layouts_extent` at `LegendOrient::Bottom` — the specific
+    /// "horizontal colorbar band" case called out as a known risk area (the
+    /// bottom-orient golden `shared_colorbar_orient_bottom.svg`).
+    #[test]
+    fn legend_band_pads_trailing_edge_colorbar_bottom_orient() {
+        let metrics = crate::render::font::FontdueMetrics::new();
+        let flags = BandFlags { color: true, size: false };
+        let mut theme = ThemeInputs::default();
+        theme.legend.legend_orient = LegendOrient::Bottom;
+        let bundle = band_colorbar_bundle(theme.clone(), Some("value"));
+
+        let mut scene = empty_scene(300.0, 200.0);
+        draw_legend_band(&mut scene, &bundle, flags);
+
+        let layouts = layout_band_legends(&bundle, flags, &metrics);
+        let (_, min_y, _, max_y) = legend_layouts_extent(
+            &layouts,
+            theme.typography.label_font_size,
+            theme.typography.legend_title_font_size,
+            &metrics,
+        )
+        .expect("colorbar band content must measure non-empty");
+        let content_h = max_y - min_y;
+        let grown = scene.height - 200.0 - LEGEND_BAND_GAP;
+        assert!(
+            grown >= content_h + LEGEND_OUTER_PAD - 1e-9,
+            "bottom colorbar band must reserve at least LEGEND_OUTER_PAD ({LEGEND_OUTER_PAD}) \
+             past its measured content extent ({content_h}), got grown={grown}",
+        );
+    }
+
+    /// Regression for the title-font-size bug: `legend_layouts_extent` used to
+    /// measure the band title at `label_fs` (the *label* font size) instead of
+    /// `theme.typography.legend_title_font_size` — a no-op under the default
+    /// theme (both default to the same 11px), so it only manifests when a theme
+    /// sets them differently and the title is the widest element. A 40px title
+    /// longer than any 11px label must grow the band wide enough for the 40px
+    /// glyphs, not the (much narrower) 11px estimate.
+    #[test]
+    fn legend_band_title_measured_at_title_font_size_not_label_font_size() {
+        let mut theme = ThemeInputs::default();
+        theme.typography.legend_title_font_size = 40.0;
+        let bundle = band_bundle(theme.clone(), Some("A Very Long Legend Title"));
+
+        let mut scene = empty_scene(300.0, 200.0);
+        draw_legend_band(&mut scene, &bundle, BandFlags { color: true, size: false });
+
+        let metrics = crate::render::font::FontdueMetrics::new();
+        let title_w_at_title_fs = metrics.measure_width(
+            "A Very Long Legend Title",
+            theme.typography.legend_title_font_size,
+        );
+        let title_w_at_label_fs =
+            metrics.measure_width("A Very Long Legend Title", theme.typography.label_font_size);
+        assert!(
+            title_w_at_title_fs > title_w_at_label_fs,
+            "sanity: the 40px title must measure wider than the 11px label-font estimate \
+             ({title_w_at_title_fs} vs {title_w_at_label_fs})",
+        );
+
+        let band_w = scene.width - 300.0;
+        assert!(
+            band_w >= title_w_at_title_fs,
+            "band width ({band_w}) must fit the title measured at legend_title_font_size \
+             ({title_w_at_title_fs}), not just the label-font estimate ({title_w_at_label_fs})",
         );
     }
 

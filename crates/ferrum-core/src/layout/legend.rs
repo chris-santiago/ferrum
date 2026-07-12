@@ -247,7 +247,12 @@ pub struct LegendOverrides {
 
 const SYMBOL_WIDTH: f64 = 12.0;
 const SYMBOL_LABEL_GAP: f64 = 4.0;
-const LEGEND_OUTER_PAD: f64 = 8.0;
+/// Inner padding `estimate_legend_size`/`estimate_colorbar_size` reserve around
+/// per-panel legend content on every side. `render::composite_render` reuses
+/// this same constant as the figure-band's trailing safety margin (see
+/// `draw_legend_band`) so the two legend-rendering paths share one margin
+/// definition rather than drifting.
+pub(crate) const LEGEND_OUTER_PAD: f64 = 8.0;
 const LEGEND_ENTRY_ROW_PAD: f64 = 4.0;
 const LEGEND_TITLE_GAP: f64 = 8.0;
 /// Base gap between the plot area and the legend strip so data points near the
