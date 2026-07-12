@@ -9,8 +9,11 @@ import math
 import pytest
 
 from ferrum import (
+    DivergingScale,
     LinearScale,
     LogScale,
+    PowScale,
+    SequentialScale,
     TimeScale,
     SymlogScale,
     OrdinalScale,
@@ -134,6 +137,66 @@ def test_linear_rejects_wrong_domain_length():
 def test_linear_rejects_degenerate_domain():
     with pytest.raises(ValueError, match="domain endpoints must differ"):
         LinearScale(domain=[5.0, 5.0], range=[0.0, 1.0])
+
+
+def test_linear_rejects_short_range_with_no_domain():
+    """A short `range` with `domain` omitted must raise, not panic.
+
+    Regression test (GH #69 sibling): `resolve_continuous` (scale/core.rs)
+    used to gate ALL range validation behind `domain_user_set`, so a 1-element
+    `range` with no `domain` indexed past the end of the Vec at
+    `range: [r[0], r[1]]` and crashed the process with an out-of-bounds
+    panic instead of raising a typed `ValueError`. Every affine-continuous
+    scale (Linear/Log/Pow/Symlog) shares this constructor prelude.
+    """
+    with pytest.raises(ValueError, match="range must have length 2"):
+        LinearScale(range=[5.0])
+
+
+def test_pow_rejects_short_range_with_no_domain():
+    """Sibling of the LinearScale case above — same shared `resolve_continuous`."""
+    with pytest.raises(ValueError, match="range must have length 2"):
+        PowScale(range=[5.0])
+
+
+def test_symlog_rejects_non_finite_range_with_no_domain():
+    """A non-finite `range` with `domain` omitted used to be silently accepted
+    (same validation gate as the short-range panic above); must now raise.
+    """
+    with pytest.raises(ValueError):
+        SymlogScale(range=[0.0, float("inf")])
+
+
+def test_sequential_scale_rejects_short_domain():
+    """SequentialScale(domain=[5.0]) must raise, not silently become [0, 1].
+
+    Regression test (GH #69 sibling): scale/sequential.rs had the identical
+    silent-fabrication pattern as the pre-fix Band/Point/Diverging
+    constructors (`if v.len() >= 2 {...} else { [0.0, 1.0] }`), which shipped
+    the placeholder to the wire as if it were the user's explicit intent.
+    """
+    with pytest.raises(ValueError, match="domain must have length"):
+        SequentialScale(domain=[5.0])
+
+
+def test_sequential_scale_rejects_non_finite_domain():
+    with pytest.raises(ValueError):
+        SequentialScale(domain=[0.0, float("nan")])
+
+
+def test_diverging_scale_rejects_degenerate_domain():
+    """DivergingScale(domain=[5.0, 5.0]) must raise (lo == hi).
+
+    Cohesion fix (#69 review): `resolve_continuous` and `QuantizeScale` both
+    reject a degenerate (lo == hi) domain, but `DivergingScale::new` did not
+    — adjudicated as an in-scope unification gap. A 3-element domain whose
+    first and last entries match (`[5.0, 7.0, 5.0]`) is rejected the same
+    way.
+    """
+    with pytest.raises(ValueError, match="domain endpoints must differ"):
+        DivergingScale(domain=[5.0, 5.0])
+    with pytest.raises(ValueError, match="domain endpoints must differ"):
+        DivergingScale(domain=[5.0, 7.0, 5.0])
 
 
 def test_log_rejects_zero_in_domain():

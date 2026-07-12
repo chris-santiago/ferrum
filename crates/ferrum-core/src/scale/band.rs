@@ -1,7 +1,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::scale_spec_to_py_dict;
+use super::core::{scale_spec_to_py_dict, validate_band_point_range};
 use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,6 +14,13 @@ struct BandScaleData {
 
 impl BandScaleData {
     /// Compute bandwidth and step given a pixel extent.
+    ///
+    /// `bandwidth` is always non-negative, even when `extent` is negative
+    /// (an inverted explicit `range=[hi, lo]`, GH #69): d3's band scale never
+    /// reports a negative bandwidth, and downstream `cx - bandwidth/2`
+    /// consumers would silently flip sides if it went negative. `step` stays
+    /// signed — it drives `scale_str`'s position arithmetic, which must place
+    /// bands in descending order for a descending range.
     fn layout(&self, extent: f64) -> (f64, f64) {
         let n = self.domain.len() as f64;
         if n == 0.0 { return (0.0, 0.0); }
@@ -22,7 +29,7 @@ impl BandScaleData {
         // D3 formula: step = extent / max(1, n - paddingInner + paddingOuter * 2)
         let denom = (n - self.padding_inner + self.padding_outer * 2.0).max(1.0);
         let step = extent / denom;
-        let bandwidth = step * (1.0 - self.padding_inner);
+        let bandwidth = (step * (1.0 - self.padding_inner)).abs();
         (bandwidth, step)
     }
 
@@ -125,9 +132,13 @@ impl BandScale {
                 "align must be in [0, 1]; got {align}"
             )));
         }
-        let r = range.map(|v| {
-            if v.len() >= 2 { [v[0], v[1]] } else { [0.0, 1.0] }
-        });
+        let r = match range {
+            Some(v) => {
+                validate_band_point_range(&v)?;
+                Some([v[0], v[1]])
+            }
+            None => None,
+        };
         Ok(BandScale {
             data: BandScaleData {
                 domain: domain.unwrap_or_default(),

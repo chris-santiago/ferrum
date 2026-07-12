@@ -273,6 +273,20 @@ impl ScaleKind {
         }
     }
 
+    /// Re-anchor an EXPLICIT ordinal positional range onto a different facet
+    /// panel (GH #70 — explicit Band/Point/positional-Ordinal ranges are
+    /// chart-absolute by design, so every panel must translate by its own
+    /// displacement from the reference panel). Delegates to
+    /// [`OrdinalScale::translate_explicit_range`], which itself no-ops unless
+    /// this scale's range was recorded as user-supplied
+    /// (`explicit_pixel_range`). A no-op for every non-`Ordinal` scale kind —
+    /// continuous scales' explicit ranges are out of this fix's scope.
+    pub(in crate::render) fn translate_explicit_ordinal_range(&mut self, offset: f64) {
+        if let ScaleKind::Ordinal(s) = self {
+            s.translate_explicit_range(offset);
+        }
+    }
+
     /// Continuous-axis scale-projection support (continuous-axis tick design,
     /// 2026-05-30). Returns, for each major tick, its **domain fraction**
     /// `t ∈ [0, 1]` — the scale's normalized projection of the tick value,

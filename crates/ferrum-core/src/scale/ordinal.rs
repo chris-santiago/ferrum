@@ -189,6 +189,27 @@ pub struct OrdinalScale {
     /// even for the panel-extent fallback, because it only feeds the Python
     /// `.range` getter / compute facade. For "did the user supply the pixel
     /// range this scale renders with", use `explicit_pixel_range` below.
+    ///
+    /// `range_user_set` and `explicit_pixel_range` look like a near-duplicate
+    /// pair (bug-hunt design review, GH #69) but are NOT two states of one
+    /// concept: each is written by exactly one of two disjoint constructors
+    /// and read by exactly one of two disjoint consumers, and no single
+    /// `OrdinalScale` instance ever has both fields meaningfully set at once.
+    /// `OrdinalScale::new` (the `#[pyo3(new)]` Python constructor) sets
+    /// `range_user_set` from whether a `range=` kwarg was passed and never
+    /// touches `explicit_pixel_range` (it stays `false`); it feeds the `.range`
+    /// Python getter and `to_scale_spec()`'s wire form. `new_internal` (the
+    /// render-resolver constructor) hardcodes `range_user_set = true`
+    /// unconditionally — a value that is never read on a render-internal
+    /// instance, since render code never calls `.range()` — and instead
+    /// carries its explicitness fact through `explicit_pixel_range` via the
+    /// `with_explicit_range` builder, feeding `explicit_band_extent()` /
+    /// `explicit_band_centers()`. Collapsing them into one enum would force a
+    /// single type to represent two orthogonal facts from two call sites that
+    /// never interact, at the cost of every read site here having to re-derive
+    /// which "mode" applies — a net increase in cognitive load for no removed
+    /// duplication. Kept as two booleans; this comment (not a type) is the
+    /// contract.
     range_user_set: bool,
     /// Original range values as supplied by the user, preserved for the
     /// Python getter. `None` when the user did not supply a range.
@@ -289,6 +310,41 @@ impl OrdinalScale {
             *self.data.range.first().unwrap(),
             *self.data.range.last().unwrap(),
         ]
+    }
+
+    /// Re-anchor this scale's pixel range by `offset`, used to place an
+    /// EXPLICITLY user-supplied Band/Point/positional-Ordinal range onto a
+    /// facet panel other than the reference panel (GH #70).
+    ///
+    /// An explicit range is chart-absolute by design (#39 phase 2): every
+    /// panel's resolver call receives the SAME literal `[lo, hi]`, so under
+    /// faceting every panel's marks — and, via `explicit_band_centers`, its
+    /// axis ticks — would otherwise land at the identical absolute pixels,
+    /// correct for at most one panel and overlapping/clipped for the rest.
+    /// The render-side caller (`scene_build::resolve_panel_scales`) translates
+    /// every panel but the reference (panel 0, where `offset == 0.0`) by that
+    /// panel's own displacement from panel 0's plot-area origin, so the same
+    /// user-specified extent re-anchors inside each panel's own window.
+    ///
+    /// No-op when this scale's range was never recorded as explicit
+    /// (`explicit_pixel_range == false`) — the panel-extent fallback already
+    /// resolves per-panel and must not be shifted again.
+    ///
+    /// Only `data.range` is load-bearing at render time (mark placement,
+    /// `explicit_band_extent()`, `explicit_band_centers()`); this deliberately
+    /// leaves the wire/getter-facing `range_orig` untouched. A render-internal
+    /// `OrdinalScale` (built via `new_internal` + `with_explicit_range`) never
+    /// flows back through the `.range` Python getter or `to_scale_spec()` — those
+    /// exist for the PyO3-constructed path — so mutating `range_orig` here would
+    /// be unread, cosmetic-looking state with no consumer, and a future reader
+    /// might mistake it for load-bearing.
+    pub(crate) fn translate_explicit_range(&mut self, offset: f64) {
+        if !self.explicit_pixel_range || offset == 0.0 {
+            return;
+        }
+        for r in self.data.range.iter_mut() {
+            *r += offset;
+        }
     }
 
     pub(crate) fn repr_string(&self) -> String {
@@ -519,6 +575,51 @@ mod tests {
         for (cat, c) in ["a", "b", "c", "d"].iter().zip(&centers) {
             assert_eq!(scale.scale_internal(cat), Some(*c));
         }
+    }
+
+    // ── translate_explicit_range (GH #70 facet re-anchoring) ─────────────────
+
+    /// An explicit range shifts both endpoints — and thus every band center —
+    /// by `offset`.
+    #[test]
+    fn translate_explicit_range_shifts_explicit_range() {
+        let mut scale = OrdinalScale::new_internal(
+            vec!["a".into(), "b".into()],
+            vec![40.0, 260.0],
+            0.0,
+        )
+        .with_explicit_range(true);
+        scale.translate_explicit_range(100.0);
+        assert_eq!(scale.range_pair(), [140.0, 360.0]);
+        assert_eq!(scale.explicit_band_extent(), Some(220.0), "shifting preserves the signed extent");
+    }
+
+    /// A non-explicit (panel-extent fallback) range is untouched by
+    /// `translate_explicit_range`, even with a non-zero offset — the
+    /// fallback already resolves per-panel and must not be shifted again.
+    #[test]
+    fn translate_explicit_range_noop_when_not_explicit() {
+        let mut scale = OrdinalScale::new_internal(
+            vec!["a".into(), "b".into()],
+            vec![40.0, 260.0],
+            0.0,
+        ); // no `.with_explicit_range(true)` — explicit_pixel_range stays false
+        scale.translate_explicit_range(100.0);
+        assert_eq!(scale.range_pair(), [40.0, 260.0]);
+    }
+
+    /// An explicit range with a zero offset (panel 0 / the reference panel,
+    /// or any standalone non-faceted render) is untouched.
+    #[test]
+    fn translate_explicit_range_noop_when_offset_zero() {
+        let mut scale = OrdinalScale::new_internal(
+            vec!["a".into(), "b".into()],
+            vec![40.0, 260.0],
+            0.0,
+        )
+        .with_explicit_range(true);
+        scale.translate_explicit_range(0.0);
+        assert_eq!(scale.range_pair(), [40.0, 260.0]);
     }
 
     // ── OrdinalRangeValue round-trip tests ───────────────────────────────────

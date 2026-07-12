@@ -89,13 +89,16 @@ def _assert_finite_svg(svg: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_band_scale_single_element_range_rejected_or_preserved():  # BUG: silently rewritten to [0.0, 1.0]
+def test_band_scale_single_element_range_rejected_or_preserved():
     """BandScale(range=[100.0]) must not silently become range=[0.0, 1.0].
 
-    Targets scale/band.rs::new (`if v.len() >= 2 { [v[0], v[1]] } else { [0.0, 1.0] }`):
-    a 1-element range is silently replaced with the [0.0, 1.0] placeholder,
-    which then flows to the wire as an EXPLICIT range and squashes every mark
-    into a 1-pixel band. OrdinalScale raises ValueError for the same input.
+    Regression test (GH #69): scale/band.rs::new used to silently replace a
+    1-element range with the [0.0, 1.0] placeholder (`if v.len() >= 2 {
+    [v[0], v[1]] } else { [0.0, 1.0] }`), which then flowed to the wire as an
+    EXPLICIT range and squashed every mark into a 1-pixel band. Fixed by
+    routing the range through the shared `validate_band_point_range` helper
+    (mirroring OrdinalScale's `validate_ordinal`), which raises ValueError for
+    the same input.
     """
     try:
         s = fr.BandScale(domain=["a", "b"], range=[100.0])
@@ -107,10 +110,12 @@ def test_band_scale_single_element_range_rejected_or_preserved():  # BUG: silent
     )
 
 
-def test_band_scale_empty_range_rejected_or_treated_as_none():  # BUG: silently rewritten to [0.0, 1.0]
+def test_band_scale_empty_range_rejected_or_treated_as_none():
     """BandScale(range=[]) must raise or behave as if range were omitted.
 
-    Same scale/band.rs::new code path as above with v.len() == 0.
+    Regression test (GH #69): same scale/band.rs::new code path as
+    `test_band_scale_single_element_range_rejected_or_preserved`, with
+    `v.len() == 0`.
     """
     try:
         s = fr.BandScale(domain=["a", "b"], range=[])
@@ -122,10 +127,11 @@ def test_band_scale_empty_range_rejected_or_treated_as_none():  # BUG: silently 
     )
 
 
-def test_point_scale_single_element_range_rejected_or_preserved():  # BUG: silently rewritten to [0.0, 1.0]
+def test_point_scale_single_element_range_rejected_or_preserved():
     """PointScale(range=[100.0]) — same silent [0.0, 1.0] substitution as BandScale.
 
-    Targets scale/point.rs::new.
+    Regression test (GH #69): scale/point.rs::new had the same gap as
+    scale/band.rs::new, fixed by the same `validate_band_point_range` helper.
     """
     try:
         s = fr.PointScale(domain=["a", "b"], range=[100.0])
@@ -137,12 +143,14 @@ def test_point_scale_single_element_range_rejected_or_preserved():  # BUG: silen
     )
 
 
-def test_band_scale_single_element_range_does_not_squash_marks():  # BUG: bars rendered in a 1-px range
+def test_band_scale_single_element_range_does_not_squash_marks():
     """End-to-end: a degenerate 1-element range must not squash all bars into ~1px.
 
-    The resolver's band_point_pixel_range() correctly treats a < 2-entry wire
-    range as non-explicit (positional.rs), but the pyclass constructor already
-    rewrote [100.0] to [0.0, 1.0] before the wire, defeating that guard.
+    Regression test (GH #69): the resolver's band_point_pixel_range() already
+    correctly treated a < 2-entry wire range as non-explicit (positional.rs),
+    but the pyclass constructor used to rewrite [100.0] to [0.0, 1.0] before
+    the wire, defeating that guard. The constructor now rejects the
+    degenerate range outright.
     """
     df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [1.0, 2.0, 3.0]})
     try:
@@ -164,19 +172,19 @@ def test_band_scale_single_element_range_does_not_squash_marks():  # BUG: bars r
     )
 
 
-def test_band_scale_non_finite_range_rejected():  # BUG: NaN/inf range accepted silently
+def test_band_scale_non_finite_range_rejected():
     """BandScale(range=[nan, 260]) must be rejected like OrdinalScale rejects it.
 
-    Targets the missing validate_finite call in scale/band.rs::new —
-    OrdinalScale routes its numeric range through validate_ordinal (which
-    calls validate_finite); BandScale/PointScale skip range validation
-    entirely.
+    Regression test (GH #69): scale/band.rs::new used to skip range
+    validation entirely, while OrdinalScale routed its numeric range through
+    `validate_ordinal` (which calls `validate_finite`). Fixed by routing
+    Band/Point ranges through the shared `validate_band_point_range` helper.
     """
     with pytest.raises(ValueError):
         fr.BandScale(domain=["a", "b"], range=[float("nan"), 260.0])
 
 
-def test_point_scale_infinite_range_rejected():  # BUG: NaN/inf range accepted silently
+def test_point_scale_infinite_range_rejected():
     """PointScale(range=[0, inf]) must be rejected (sibling of the BandScale gap)."""
     with pytest.raises(ValueError):
         fr.PointScale(domain=["a", "b"], range=[0.0, float("inf")])
@@ -215,27 +223,30 @@ def test_band_scale_padding_inner_boundary_one_rejected():
         fr.BandScale(domain=["a", "b"], padding_inner=1.0)
 
 
-def test_band_scale_bandwidth_non_negative_with_inverted_range():  # BUG: bandwidth() returns -110 for range=[260, 40]
+def test_band_scale_bandwidth_non_negative_with_inverted_range():
     """BandScale.bandwidth() must be non-negative even for range=[hi, lo].
 
-    Targets scale/band.rs::bandwidth → BandScaleData::layout: step =
-    extent / denom with extent = r1 - r0 < 0 gives a negative step, and
-    bandwidth = step * (1 - padding_inner) comes back negative. d3's band
-    scale never reports a negative bandwidth; downstream `cx - bandwidth/2`
-    arithmetic silently flips sides.
+    Regression test (GH #69): scale/band.rs::bandwidth -> BandScaleData::layout
+    used to return `step * (1 - padding_inner)` unabsed, so an inverted range
+    (`extent = r1 - r0 < 0`) gave a negative step and thus a negative
+    bandwidth. d3's band scale never reports a negative bandwidth, and
+    downstream `cx - bandwidth/2` arithmetic would silently flip sides. Fixed
+    by taking `.abs()` of the bandwidth (the signed `step` is left alone —
+    it still drives `scale_str`'s descending-position arithmetic).
     """
     s = fr.BandScale(domain=["a", "b"], range=[260.0, 40.0])
     bw = s.bandwidth()
     assert bw >= 0.0, f"BandScale(range=[260, 40]).bandwidth() is negative: {bw}"
 
 
-def test_diverging_scale_short_domain_rejected_or_preserved():  # BUG: silently rewritten to [0.0, 0.5, 1.0]
+def test_diverging_scale_short_domain_rejected_or_preserved():
     """DivergingScale(domain=[5.0]) must not silently become [0.0, 0.5, 1.0].
 
-    Targets scale/diverging.rs::new — a domain with < 2 elements is silently
-    replaced by the [0.0, 0.5, 1.0] placeholder, corrupting the user's input
-    (the getter, the wire dict, and positional_extent all report the fabricated
-    domain).
+    Regression test (GH #69): scale/diverging.rs::new used to silently
+    replace a domain with < 2 elements with the [0.0, 0.5, 1.0] placeholder,
+    corrupting the user's input (the getter, the wire dict, and
+    positional_extent all reported the fabricated domain). Fixed by rejecting
+    a short domain with ValueError instead.
     """
     try:
         s = fr.DivergingScale(domain=[5.0])
@@ -320,14 +331,12 @@ def test_zero_width_explicit_range_renders_finite_svg():
 def test_nan_in_explicit_range_produces_finite_svg_or_raises():
     """A NaN range must never emit NaN SVG coordinates.
 
-    Observed behavior: the constructor accepts NaN (the bug pinned by
-    test_band_scale_non_finite_range_rejected), the NaN serializes to JSON
-    null, and to_svg() raises ``ValueError: scale: invalid type: null,
-    expected f64`` from serde — a typed refusal far from the source, but not
-    silent corruption. This test accepts any ValueError (constructor- or
-    render-time) and otherwise requires a NaN-free SVG, so it stays green if
-    the constructor gap is fixed and goes red only if NaN ever reaches the
-    output.
+    Post-GH #69 the constructor itself rejects a non-finite range
+    (`test_band_scale_non_finite_range_rejected`), so this test's constructor
+    call always raises and returns early. Left in place as a belt-and-braces
+    contract pin: this test accepts any ValueError (constructor- or
+    render-time) and otherwise requires a NaN-free SVG, so it would catch a
+    future regression that let a non-finite range slip past construction.
     """
     try:
         scale = fr.BandScale(domain=["a", "b"], range=[float("nan"), 260.0])
@@ -520,15 +529,18 @@ def test_band_scale_on_x_and_y_simultaneously_heatmap():
         )
 
 
-def test_explicit_band_range_on_faceted_chart_marks_stay_in_each_panel():  # BUG: all panels' bars pinned to the same absolute pixel window
+def test_explicit_band_range_on_faceted_chart_marks_stay_in_each_panel():
     """An explicit BandScale range on a 2-panel faceted chart must place marks
     inside EVERY panel's plot area, not pin all panels' bars to the same
     absolute pixel window.
 
-    Targets the interaction of build_from_scale_spec's explicit-range bypass
-    with per-panel pixel ranges (each panel calls the resolver with its own
-    absolute plot-area extent; an absolute [40, 260] range can only be right
-    for one of them — panel 2's bars render on top of panel 1).
+    Regression test (GH #70): `build_from_scale_spec`'s explicit-range bypass
+    used to ignore each panel's own pixel range entirely and echo the same
+    literal `[lo, hi]` for every panel — correct for at most one panel, with
+    the rest overlapping/clipped. Fixed in `scene_build::resolve_panel_scales`
+    by re-anchoring the resolved scale's explicit range onto each panel's own
+    displacement from the reference (panel 0) plot-area origin
+    (`OrdinalScale::translate_explicit_range`).
     """
     df = pl.DataFrame(
         {

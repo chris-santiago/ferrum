@@ -528,13 +528,18 @@ def test_bin_ordinal_scale_nan_returns_none():
 
 
 def test_sequential_scale_short_domain_list():
-    """SequentialScale with domain=[single_value] should use [0, 1] fallback.
+    """SequentialScale with a 1-element domain must raise, not fabricate a
+    placeholder.
 
-    Targets sequential.rs line 38-39: if v.len() >= 2 {...} else {[0.0, 1.0]}.
+    Superseded by GH #69 (sibling of the Band/Point/Diverging fix):
+    scale/sequential.rs used to silently replace a domain with < 2 elements
+    with the [0.0, 1.0] placeholder (line 38-39: `if v.len() >= 2 {...} else
+    {[0.0, 1.0]}`), corrupting the user's input as if it were their explicit
+    intent. Fixed to raise ValueError instead, matching the sibling
+    Band/Point/Diverging/OrdinalScale convention.
     """
-    s = fr.SequentialScale(domain=[5.0])
-    # Should use [0.0, 1.0] as default when too few elements
-    assert s.domain == [0.0, 1.0]
+    with pytest.raises(ValueError):
+        fr.SequentialScale(domain=[5.0])
 
 
 def test_diverging_scale_two_element_domain():
@@ -550,15 +555,18 @@ def test_diverging_scale_two_element_domain():
 
 
 def test_diverging_scale_single_element_domain():
-    """DivergingScale with 1-element domain should use [0, 0.5, 1] fallback.
+    """DivergingScale with a 1-element domain must raise, not fabricate a
+    placeholder.
 
-    Targets diverging.rs line 44-46: else -> [0.0, 0.5, 1.0].
+    Superseded by GH #69: diverging.rs used to silently replace a domain with
+    < 2 elements with the [0.0, 0.5, 1.0] placeholder (line 44-46: else ->
+    [0.0, 0.5, 1.0]), corrupting the user's input as if it were their explicit
+    intent. Fixed to raise ValueError instead, matching the sibling
+    OrdinalScale convention (see
+    tests/test_bug_hunt_band_point_range.py::test_diverging_scale_short_domain_rejected_or_preserved).
     """
-    s = fr.DivergingScale(domain=[5.0])
-    d = s.domain
-    assert d is not None
-    assert len(d) == 3
-    assert d == [0.0, 0.5, 1.0]
+    with pytest.raises(ValueError):
+        fr.DivergingScale(domain=[5.0])
 
 
 def test_diverging_scale_domain_mid_with_no_domain():

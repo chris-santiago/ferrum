@@ -1,6 +1,7 @@
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::scale_spec_to_py_dict;
+use super::core::{scale_spec_to_py_dict, validate_finite};
 use crate::spec::encoding::ScaleSpec;
 
 /// Sequential color-mapping scale.
@@ -52,9 +53,25 @@ impl SequentialScale {
         domain: Option<Vec<f64>>,
         reverse: bool,
     ) -> PyResult<Self> {
-        let d = domain.map(|v| {
-            if v.len() >= 2 { [v[0], v[1]] } else { [0.0, 1.0] }
-        });
+        // GH #69 sibling fix: scale/sequential.rs used to silently rewrite a
+        // < 2-element domain to the [0.0, 1.0] placeholder and skip finite
+        // validation entirely, the same sibling-drift pattern fixed for
+        // Band/Point/Diverging. A domain with >= 2 entries still truncates to
+        // the first two (matching the Band/Point/Ordinal range convention);
+        // only a genuinely short or non-finite domain is rejected.
+        let d = match domain {
+            Some(v) => {
+                if v.len() < 2 {
+                    return Err(PyValueError::new_err(format!(
+                        "domain must have length >= 2 ([lo, hi]); got {}",
+                        v.len()
+                    )));
+                }
+                validate_finite("domain", &v)?;
+                Some([v[0], v[1]])
+            }
+            None => None,
+        };
         Ok(SequentialScale { scheme, domain: d, reverse })
     }
 

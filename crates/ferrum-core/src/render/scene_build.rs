@@ -56,6 +56,14 @@ pub fn build_scene(
     // state so sharing it across panels is correct.
     let facet_metrics = super::font::FontdueMetrics::new();
 
+    // GH #70: reference plot area for re-anchoring an explicit Band/Point/
+    // positional-Ordinal pixel range per facet panel (see
+    // `resolve_panel_scales` and `OrdinalScale::translate_explicit_range`).
+    // `layout.panels[0]` for every standalone (non-faceted) render IS this
+    // render's only panel, so `panel_offset` below is always `(0.0, 0.0)`
+    // there — byte-identical to the pre-#70 behavior.
+    let reference_plot_area = layout.panels.first().map(|p| p.plot_area);
+
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
             warnings.push(RenderWarning::EmptyPanel { panel_index: panel_idx });
@@ -115,6 +123,14 @@ pub fn build_scene(
             })
             .collect::<Result<Vec<_>, RenderError>>()?;
 
+        // GH #70: this panel's displacement from the reference (panel 0)
+        // plot-area origin, threaded into `resolve_panel_scales` so an
+        // explicit Band/Point/positional-Ordinal range re-anchors inside
+        // THIS panel instead of staying pinned to chart-absolute pixels.
+        let panel_offset = reference_plot_area
+            .map(|r| (panel.plot_area.x - r.x, panel.plot_area.y - r.y))
+            .unwrap_or((0.0, 0.0));
+
         // Per-panel scale build (encoding merge + param-domain substitution +
         // scale resolution + color-config re-apply) through the single
         // `resolve_panel_scales` seam, so the prepare provisional pass and this
@@ -130,6 +146,7 @@ pub fn build_scene(
             chart_config,
             warnings,
             leaf_scales,
+            panel_offset,
         )?;
 
         tick_levels.push(build_tick_levels(&scales, panel_idx));
@@ -518,6 +535,14 @@ fn resolve_panel_scales(
     // D4b composite seam: shared-domain context for this leaf. `None` for
     // standalone renders → resolves exactly as before.
     leaf_scales: Option<&LeafScaleContext>,
+    // GH #70: this panel's `(x, y)` displacement from the reference (panel 0)
+    // plot-area origin. `(0.0, 0.0)` for panel 0 and for every standalone
+    // (non-faceted) render — byte-identical to the pre-#70 behavior. Applied
+    // AFTER scale resolution to re-anchor an explicit Band/Point/positional-
+    // Ordinal pixel range (chart-absolute by design, #39 phase 2) inside this
+    // panel instead of leaving it pinned to the same absolute pixels every
+    // panel would otherwise share.
+    panel_offset: (f64, f64),
 ) -> Result<(ChartSpec, scale_resolve::ResolvedScales), RenderError> {
     // Encoding merge: layer-0 encoding overlays the chart-level encoding.
     let mut merged_encoding = spec.encoding.clone();
@@ -542,6 +567,14 @@ fn resolve_panel_scales(
         leaf_scales,
     )?;
     warnings.extend(scale_warnings);
+
+    // GH #70: re-anchor an explicit Band/Point/positional-Ordinal range onto
+    // THIS panel. No-op (both components `0.0`) for panel 0 and for every
+    // standalone render; a no-op per-axis when that axis's resolved scale
+    // isn't a genuinely user-supplied explicit range (see
+    // `OrdinalScale::translate_explicit_range`).
+    scales.x.translate_explicit_ordinal_range(panel_offset.0);
+    scales.y.translate_explicit_ordinal_range(panel_offset.1);
 
     // Apply chart_config color overrides (level 3) to the per-panel color scale.
     // Must run after scale resolution because `resolve_scales_with_outputs`
@@ -573,6 +606,7 @@ fn resolve_panel_scales(
                 panel,
                 theme,
                 leaf_scales,
+                panel_offset.1,
                 warnings,
             )?;
             slots.push(y_scale);
@@ -609,6 +643,10 @@ fn resolve_layer_y_scale(
     panel: &crate::layout::PanelLayout,
     theme: &ThemeInputs,
     leaf_scales: Option<&LeafScaleContext>,
+    // GH #70: this panel's y displacement from the reference panel's
+    // plot-area origin (see `resolve_panel_scales`), applied to this slot's
+    // resolved y scale the same way the primary y is re-anchored.
+    y_offset: f64,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<scale_resolve::ScaleKind, RenderError> {
     let mut layer_encoding = spec.encoding.clone();
@@ -634,7 +672,9 @@ fn resolve_layer_y_scale(
         leaf_scales,
     )?;
     warnings.extend(layer_warnings);
-    Ok(layer_scales.y)
+    let mut y = layer_scales.y;
+    y.translate_explicit_ordinal_range(y_offset);
+    Ok(y)
 }
 
 /// Per-panel axis layouts for the independent-resolve facet case (MOD-09).
@@ -2599,11 +2639,11 @@ mod tests {
         // One implicit layer → one layer batch (the whole panel batch).
         let layer_batches = vec![batch.clone()];
         let (_spec_a, scales_a) = resolve_panel_scales(
-            &spec, &prep, &panel_narrow, &batch, &layer_batches, &theme, &chart_config, &mut warnings, None,
+            &spec, &prep, &panel_narrow, &batch, &layer_batches, &theme, &chart_config, &mut warnings, None, (0.0, 0.0),
         )
         .unwrap();
         let (_spec_b, scales_b) = resolve_panel_scales(
-            &spec, &prep, &panel_wide, &batch, &layer_batches, &theme, &chart_config, &mut warnings, None,
+            &spec, &prep, &panel_wide, &batch, &layer_batches, &theme, &chart_config, &mut warnings, None, (0.0, 0.0),
         )
         .unwrap();
 
@@ -2851,7 +2891,7 @@ mod tests {
         let layer_batches = vec![batch.clone(), batch.clone()];
         let mut warnings = Vec::new();
         let (_spec, scales) = resolve_panel_scales(
-            spec, &prep, &panel, batch, &layer_batches, &theme, &chart_config, &mut warnings, None,
+            spec, &prep, &panel, batch, &layer_batches, &theme, &chart_config, &mut warnings, None, (0.0, 0.0),
         )
         .unwrap();
         scales

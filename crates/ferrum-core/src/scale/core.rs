@@ -112,6 +112,21 @@ pub(crate) fn validate_ordinal_domain(domain: &[String], padding: f64) -> PyResu
 
 pub(crate) fn validate_ordinal(domain: &[String], range: &[f64], padding: f64) -> PyResult<()> {
     validate_ordinal_domain(domain, padding)?;
+    validate_band_point_range(range)?;
+    Ok(())
+}
+
+/// Validate a Band/Point pixel range: at least 2 entries (extent endpoints)
+/// and every entry finite. Mirrors the numeric-range check `validate_ordinal`
+/// applies, so `BandScale`/`PointScale` reject the same malformed `range=`
+/// OrdinalScale already rejects, instead of each silently substituting its
+/// own `[0.0, 1.0]` placeholder as if it were the user's explicit intent
+/// (GH #69 sibling-drift fix). Finiteness is checked on EVERY entry (via
+/// `validate_finite`), even though a `range` with more than 2 entries is
+/// later truncated to its first two by the resolver (see
+/// `band_point_pixel_range` in `render::scale_resolve::positional`) — a
+/// non-finite value anywhere in the input is user error worth rejecting.
+pub(crate) fn validate_band_point_range(range: &[f64]) -> PyResult<()> {
     if range.len() < 2 {
         return Err(PyValueError::new_err(format!(
             "range must have length >= 2 (extent endpoints); got {}",
@@ -160,26 +175,45 @@ pub(crate) fn validate_quantile(domain: &[f64], range: &[f64]) -> PyResult<()> {
     Ok(())
 }
 
-pub(crate) fn validate_continuous_pair(domain: &[f64], range: &[f64]) -> PyResult<()> {
+/// Validate a continuous-scale domain pair: exactly 2 entries, both finite,
+/// and endpoints that differ (a degenerate `[c, c]` domain divides by zero
+/// downstream). Shared by [`validate_continuous_pair`] and
+/// [`resolve_continuous`] so the two never drift on what counts as a valid
+/// domain (GH #69 cohesion fix — `resolve_continuous` used to hand-duplicate
+/// this exact check inline).
+pub(crate) fn validate_continuous_domain(domain: &[f64]) -> PyResult<()> {
     if domain.len() != 2 {
         return Err(PyValueError::new_err(format!(
             "domain must have length 2; got {}",
             domain.len()
         )));
     }
+    validate_finite("domain", domain)?;
+    if domain[0] == domain[1] {
+        return Err(PyValueError::new_err(
+            "domain endpoints must differ (lo != hi)",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a continuous-scale range pair: exactly 2 entries, both finite.
+/// Shared by [`validate_continuous_pair`] and [`resolve_continuous`] (see
+/// [`validate_continuous_domain`]'s doc for why this was extracted).
+pub(crate) fn validate_continuous_range(range: &[f64]) -> PyResult<()> {
     if range.len() != 2 {
         return Err(PyValueError::new_err(format!(
             "range must have length 2; got {}",
             range.len()
         )));
     }
-    validate_finite("domain", domain)?;
     validate_finite("range", range)?;
-    if domain[0] == domain[1] {
-        return Err(PyValueError::new_err(
-            "domain endpoints must differ (lo != hi)",
-        ));
-    }
+    Ok(())
+}
+
+pub(crate) fn validate_continuous_pair(domain: &[f64], range: &[f64]) -> PyResult<()> {
+    validate_continuous_domain(domain)?;
+    validate_continuous_range(range)?;
     Ok(())
 }
 
@@ -199,12 +233,25 @@ pub(crate) struct ResolvedContinuous {
 /// Shared prelude for the affine-continuous `#[new]` constructors.
 ///
 /// Captures `range_user_set`/`domain_user_set`, unwraps `range` to the
-/// `[0, 1]` default, substitutes the per-scale `domain_sentinel` when no
-/// domain is supplied, and runs `validate_continuous_pair` only when the user
-/// set a domain (the sentinel is never validated — render-time inference
-/// replaces it before any scale computation). Per-scale validation (Log's
-/// base/sign checks, Pow's exponent, Symlog's constant) and `nice` remain in
-/// each scale because they depend on fields this helper does not know about.
+/// `[0, 1]` default, and substitutes the per-scale `domain_sentinel` when no
+/// domain is supplied (the sentinel is never validated — render-time
+/// inference replaces it before any scale computation). Per-scale validation
+/// (Log's base/sign checks, Pow's exponent, Symlog's constant) and `nice`
+/// remain in each scale because they depend on fields this helper does not
+/// know about.
+///
+/// `domain` and `range` are each validated independently via
+/// [`validate_continuous_domain`] / [`validate_continuous_range`], whenever
+/// the user actually supplied that argument (GH #69 sibling fix): the
+/// previous `if domain_user_set { validate_continuous_pair(...) }` gate
+/// skipped ALL range validation whenever `domain` was left unset, so e.g.
+/// `LinearScale(range=[5.0])` indexed past the end of a 1-element `Vec` at
+/// `range: [r[0], r[1]]` below and **panicked** (`index out of bounds`)
+/// instead of raising a typed `ValueError`; a non-finite `range` with no
+/// `domain` slipped through silently for the same reason. This helper calls
+/// the same per-field validators that [`validate_continuous_pair`] composes
+/// from (rather than hand-duplicating their checks inline), which keeps the
+/// two call paths from drifting on error messages or thresholds.
 pub(crate) fn resolve_continuous(
     domain: Option<Vec<f64>>,
     range: Option<Vec<f64>>,
@@ -212,11 +259,16 @@ pub(crate) fn resolve_continuous(
 ) -> PyResult<ResolvedContinuous> {
     let range_user_set = range.is_some();
     let domain_user_set = domain.is_some();
+
+    if let Some(r) = range.as_deref() {
+        validate_continuous_range(r)?;
+    }
+    if let Some(d) = domain.as_deref() {
+        validate_continuous_domain(d)?;
+    }
+
     let r = range.unwrap_or_else(|| vec![0.0, 1.0]);
     let dom = domain.unwrap_or_else(|| domain_sentinel.to_vec());
-    if domain_user_set {
-        validate_continuous_pair(&dom, &r)?;
-    }
     Ok(ResolvedContinuous {
         domain: [dom[0], dom[1]],
         range: [r[0], r[1]],
@@ -244,6 +296,56 @@ mod tests {
     fn test_validate_continuous_pair_rejects_non_finite() {
         assert!(validate_continuous_pair(&[0.0, f64::NAN], &[0.0, 1.0]).is_err());
         assert!(validate_continuous_pair(&[0.0, 10.0], &[f64::INFINITY, 1.0]).is_err());
+    }
+
+    // ── resolve_continuous: range validated even when domain is unset (GH #69) ──
+
+    /// A short `range` with `domain` unset used to skip validation entirely
+    /// (gated behind `domain_user_set`) and then panic on `range: [r[0],
+    /// r[1]]` with an out-of-bounds index. Must now raise a typed error.
+    #[test]
+    fn test_resolve_continuous_rejects_short_range_with_no_domain() {
+        let r = resolve_continuous(None, Some(vec![5.0]), [0.0, 1.0]);
+        assert!(r.is_err(), "1-element range with no domain must be rejected, not panic");
+    }
+
+    /// A non-finite `range` with `domain` unset used to slip through silently
+    /// (same validation gate). Must now raise.
+    #[test]
+    fn test_resolve_continuous_rejects_non_finite_range_with_no_domain() {
+        let r = resolve_continuous(None, Some(vec![0.0, f64::NAN]), [0.0, 1.0]);
+        assert!(r.is_err(), "non-finite range with no domain must be rejected");
+    }
+
+    /// A short/non-finite `domain` with `range` unset must also be rejected
+    /// independently (the domain-side mirror of the two tests above).
+    #[test]
+    fn test_resolve_continuous_rejects_bad_domain_with_no_range() {
+        assert!(resolve_continuous(Some(vec![5.0]), None, [0.0, 1.0]).is_err());
+        assert!(resolve_continuous(Some(vec![0.0, f64::INFINITY]), None, [0.0, 1.0]).is_err());
+        assert!(resolve_continuous(Some(vec![5.0, 5.0]), None, [0.0, 1.0]).is_err());
+    }
+
+    /// Neither argument supplied: both fall back to their defaults/sentinel
+    /// untouched (the sentinel itself is never validated).
+    #[test]
+    fn test_resolve_continuous_defaults_when_neither_set() {
+        let resolved = resolve_continuous(None, None, [1.0, 10.0]).unwrap();
+        assert_eq!(resolved.domain, [1.0, 10.0]);
+        assert_eq!(resolved.range, [0.0, 1.0]);
+        assert!(!resolved.domain_user_set);
+        assert!(!resolved.range_user_set);
+    }
+
+    /// A well-formed `range` with `domain` unset resolves cleanly (the
+    /// non-buggy path this fix must not regress).
+    #[test]
+    fn test_resolve_continuous_accepts_valid_range_with_no_domain() {
+        let resolved = resolve_continuous(None, Some(vec![10.0, 200.0]), [0.0, 1.0]).unwrap();
+        assert_eq!(resolved.range, [10.0, 200.0]);
+        assert_eq!(resolved.domain, [0.0, 1.0]);
+        assert!(resolved.range_user_set);
+        assert!(!resolved.domain_user_set);
     }
 
     #[test]

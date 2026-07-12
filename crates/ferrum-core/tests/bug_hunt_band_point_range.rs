@@ -111,7 +111,7 @@ impl BandScaleData {
         }
         let denom = (n - self.padding_inner + self.padding_outer * 2.0).max(1.0);
         let step = extent / denom;
-        let bandwidth = step * (1.0 - self.padding_inner);
+        let bandwidth = (step * (1.0 - self.padding_inner)).abs();
         (bandwidth, step)
     }
 
@@ -419,14 +419,16 @@ fn band_empty_domain_layout_zero_and_nan_lookup() {
     assert!(s.scale_str("a", 0.0, 300.0).is_nan());
 }
 
-// BUG: BandScaleData::layout returns a NEGATIVE bandwidth for an inverted
-// range (extent < 0 → step < 0 → bandwidth = step * (1 - pi) < 0). The
-// pyclass getter BandScale::bandwidth() ships this sign to Python; d3 never
-// reports a negative bandwidth and `cx - bandwidth/2` consumers silently
-// flip sides. Mirrored by
+// Regression test (GH #69): BandScaleData::layout used to return a NEGATIVE
+// bandwidth for an inverted range (extent < 0 → step < 0 → bandwidth =
+// step * (1 - pi) < 0). The pyclass getter BandScale::bandwidth() shipped
+// that sign to Python; d3 never reports a negative bandwidth and
+// `cx - bandwidth/2` consumers would silently flip sides. Fixed by taking
+// `.abs()` of the bandwidth (not the signed `step`, which still drives
+// `scale_str`'s descending-position arithmetic). Mirrored by
 // tests/test_bug_hunt_band_point_range.py::test_band_scale_bandwidth_non_negative_with_inverted_range.
 #[test]
-fn band_bandwidth_non_negative_for_inverted_range() { // BUG: negative bandwidth under range=[hi, lo]
+fn band_bandwidth_non_negative_for_inverted_range() {
     let s = BandScaleData {
         domain: vec!["a".into(), "b".into()],
         padding_inner: 0.0,

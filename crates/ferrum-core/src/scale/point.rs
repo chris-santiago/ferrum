@@ -1,7 +1,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::scale_spec_to_py_dict;
+use super::core::{scale_spec_to_py_dict, validate_band_point_range};
 use crate::spec::encoding::ScaleSpec;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,9 +109,13 @@ impl PointScale {
                 "align must be in [0, 1]; got {align}"
             )));
         }
-        let r = range.map(|v| {
-            if v.len() >= 2 { [v[0], v[1]] } else { [0.0, 1.0] }
-        });
+        let r = match range {
+            Some(v) => {
+                validate_band_point_range(&v)?;
+                Some([v[0], v[1]])
+            }
+            None => None,
+        };
         Ok(PointScale {
             data: PointScaleData {
                 domain: domain.unwrap_or_default(),

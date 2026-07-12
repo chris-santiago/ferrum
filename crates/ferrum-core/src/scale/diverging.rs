@@ -1,6 +1,7 @@
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use super::core::scale_spec_to_py_dict;
+use super::core::{scale_spec_to_py_dict, validate_finite};
 use crate::spec::encoding::ScaleSpec;
 
 /// Diverging color-mapping scale.
@@ -56,15 +57,43 @@ impl DivergingScale {
         domain: Option<Vec<f64>>,
         domain_mid: Option<f64>,
     ) -> PyResult<Self> {
-        let d = domain.map(|v| {
-            if v.len() >= 3 {
-                [v[0], v[1], v[2]]
-            } else if v.len() == 2 {
-                [v[0], (v[0] + v[1]) / 2.0, v[1]]
-            } else {
-                [0.0, 0.5, 1.0]
+        let d = match domain {
+            Some(v) => {
+                // Reject a domain with fewer than 2 elements instead of
+                // silently substituting the [0.0, 0.5, 1.0] placeholder as if
+                // it were the user's explicit intent (GH #69) — the getter,
+                // the wire dict, and `positional_extent` would otherwise all
+                // report a domain the user never asked for.
+                if v.len() < 2 {
+                    return Err(PyValueError::new_err(format!(
+                        "domain must have length >= 2 ([lo, hi]) or 3 ([lo, mid, hi]); got {}",
+                        v.len()
+                    )));
+                }
+                validate_finite("domain", &v)?;
+                // Reject a degenerate domain (lo == hi) the same way
+                // `resolve_continuous`/`QuantizeScale` do for their own
+                // domains (GH #69 cohesion fix) — a zero-width diverging
+                // domain has no meaningful midpoint and would divide by zero
+                // in `positional_extent`'s downstream consumers.
+                if v.len() >= 3 {
+                    if v[0] == v[2] {
+                        return Err(PyValueError::new_err(
+                            "domain endpoints must differ (lo != hi)",
+                        ));
+                    }
+                    Some([v[0], v[1], v[2]])
+                } else {
+                    if v[0] == v[1] {
+                        return Err(PyValueError::new_err(
+                            "domain endpoints must differ (lo != hi)",
+                        ));
+                    }
+                    Some([v[0], (v[0] + v[1]) / 2.0, v[1]])
+                }
             }
-        });
+            None => None,
+        };
         Ok(DivergingScale { scheme, domain: d, domain_mid })
     }
 
@@ -120,6 +149,31 @@ mod tests {
         assert_eq!(s.scheme, None);
         assert_eq!(s.domain, None);
         assert_eq!(s.domain_mid, Some(0.0));
+    }
+
+    // ── constructor validation (GH #69) ──────────────────────────────────────
+
+    /// A 2-element degenerate domain (`lo == hi`) must be rejected, matching
+    /// `resolve_continuous`/`QuantizeScale`'s own domain-degeneracy check.
+    #[test]
+    fn diverging_scale_new_rejects_degenerate_two_element_domain() {
+        assert!(DivergingScale::new(None, Some(vec![5.0, 5.0]), None).is_err());
+    }
+
+    /// A 3-element domain with `lo == hi` (matching first/last, ignoring the
+    /// midpoint) must also be rejected.
+    #[test]
+    fn diverging_scale_new_rejects_degenerate_three_element_domain() {
+        assert!(DivergingScale::new(None, Some(vec![5.0, 5.0, 5.0]), None).is_err());
+        assert!(DivergingScale::new(None, Some(vec![5.0, 7.0, 5.0]), None).is_err());
+    }
+
+    /// A well-formed domain is unaffected by the new degeneracy check
+    /// (non-regression pin for the existing 2-/3-element expansion).
+    #[test]
+    fn diverging_scale_new_accepts_well_formed_domain() {
+        let s = DivergingScale::new(None, Some(vec![-10.0, 30.0]), None).unwrap();
+        assert_eq!(s.domain, Some([-10.0, 10.0, 30.0]));
     }
 
     #[test]
