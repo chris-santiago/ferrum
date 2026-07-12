@@ -207,8 +207,10 @@ def test_domain_param_on_secondary_layer_binding_carries_y_slot():
     """A domainParam on the independent-y layer's y must emit y_slot=1."""
     df = _dual_df()
     a = fm.Chart(df).mark_line().encode(x="x", y="y1")
-    b = fm.Chart(df).mark_line().encode(
-        x="x", y=fm.Y("y2", scale={"domain": fm.param("d2", value=[0.0, 1.0])})
+    b = (
+        fm.Chart(df)
+        .mark_line()
+        .encode(x="x", y=fm.Y("y2", scale={"domain": fm.param("d2", value=[0.0, 1.0])}))
     )
     scene = _scene(fm.LayerChart(a, b, resolve={"y": "independent"}))
     bindings = scene["interaction"].get("param_bindings") or []
@@ -227,8 +229,10 @@ def test_domain_param_on_primary_layer_of_dual_axis_resolves_static_domain():
     slot domain when the slot is the primary one.
     """
     df = _dual_df()
-    a = fm.Chart(df).mark_line().encode(
-        x="x", y=fm.Y("y1", scale={"domain": fm.param("d1", value=[0.0, 100.0])})
+    a = (
+        fm.Chart(df)
+        .mark_line()
+        .encode(x="x", y=fm.Y("y1", scale={"domain": fm.param("d1", value=[0.0, 100.0])}))
     )
     b = fm.Chart(df).mark_line().encode(x="x", y="y2")
     coord = _scene(fm.LayerChart(a, b, resolve={"y": "independent"}))["panels"][0]["coord"]
@@ -262,8 +266,10 @@ def test_domain_param_on_secondary_layer_resolves_static_slot_domain():  # FIXED
     """
     df = _dual_df()
     a = fm.Chart(df).mark_line().encode(x="x", y="y1")
-    b = fm.Chart(df).mark_line().encode(
-        x="x", y=fm.Y("y2", scale={"domain": fm.param("d2", value=[0.0, 1.0])})
+    b = (
+        fm.Chart(df)
+        .mark_line()
+        .encode(x="x", y=fm.Y("y2", scale={"domain": fm.param("d2", value=[0.0, 1.0])}))
     )
     coord = _scene(fm.LayerChart(a, b, resolve={"y": "independent"}))["panels"][0]["coord"]
     assert coord["y_domains"][1] == [0.0, 1.0], (
@@ -328,9 +334,7 @@ def test_infinity_in_secondary_column_produces_finite_slot_domain():
     reject the whole scene. ``parse_constant`` rejection asserts no bare
     Infinity/NaN token exists anywhere in the payload.
     """
-    df = pl.DataFrame(
-        {"x": [1.0, 2.0, 3.0], "y1": [1.0, 2.0, 3.0], "y2": [0.1, float("inf"), 0.3]}
-    )
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y1": [1.0, 2.0, 3.0], "y2": [0.1, float("inf"), 0.3]})
     scene_json, _ = _render_scene(_dual_layer(df))
     scene = json.loads(scene_json, parse_constant=_reject_constant)
     y_domains = scene["panels"][0]["coord"]["y_domains"]
@@ -347,7 +351,9 @@ def test_all_identical_secondary_values_produce_nondegenerate_slot_domain():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y1": [1.0, 2.0, 3.0], "y2": [5.0, 5.0, 5.0]})
     y_domains = _scene(_dual_layer(df))["panels"][0]["coord"]["y_domains"]
     lo, hi = y_domains[1]
-    assert lo < hi, f"constant column must yield a padded (non-degenerate) domain, got {y_domains[1]}"
+    assert lo < hi, (
+        f"constant column must yield a padded (non-degenerate) domain, got {y_domains[1]}"
+    )
     assert lo <= 5.0 <= hi
 
 

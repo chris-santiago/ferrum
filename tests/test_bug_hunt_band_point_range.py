@@ -46,9 +46,11 @@ def _data_bar_rects(svg: str) -> list[dict[str, str]]:
     return _svg_elements(
         svg,
         "rect",
-        lambda a: bool(a.get("fill"))
-        and a["fill"] != _THEME_BACKGROUND
-        and not a["fill"].startswith("url("),
+        lambda a: (
+            bool(a.get("fill"))
+            and a["fill"] != _THEME_BACKGROUND
+            and not a["fill"].startswith("url(")
+        ),
     )
 
 
@@ -273,7 +275,9 @@ def test_diverging_scale_two_element_domain_midpoint_inserted():
 
 
 def _band_bar_svg(range_, domain=("a", "b", "c", "d"), **band_kwargs) -> str:
-    df = pl.DataFrame({"cat": list(domain), "val": [float(10 * (i + 1)) for i in range(len(domain))]})
+    df = pl.DataFrame(
+        {"cat": list(domain), "val": [float(10 * (i + 1)) for i in range(len(domain))]}
+    )
     return (
         fr.Chart(df)
         .mark_bar()
@@ -308,10 +312,10 @@ def test_inverted_explicit_range_bars_within_range_and_labels_reversed():
     # Reversed range → 'a' takes the RIGHTMOST band center (232.5), 'd' the leftmost.
     a_pos = _axis_tick_label_pos(svg, "a", coord="x")
     d_pos = _axis_tick_label_pos(svg, "d", coord="x")
-    assert a_pos > d_pos, (
-        f"inverted range must reverse label pixel order: a={a_pos}, d={d_pos}"
+    assert a_pos > d_pos, f"inverted range must reverse label pixel order: a={a_pos}, d={d_pos}"
+    assert a_pos == pytest.approx(232.5, abs=0.5), (
+        f"'a' center under [260,40] should be 232.5, got {a_pos}"
     )
-    assert a_pos == pytest.approx(232.5, abs=0.5), f"'a' center under [260,40] should be 232.5, got {a_pos}"
 
 
 def test_zero_width_explicit_range_renders_finite_svg():
@@ -435,7 +439,10 @@ def test_point_scale_reverse_composes_with_inverted_range():
             fr.Chart(df)
             .mark_point()
             .encode(
-                x=fr.X("cat", scale=fr.PointScale(domain=["x", "y", "z"], reverse=reverse, range=range_)),
+                x=fr.X(
+                    "cat",
+                    scale=fr.PointScale(domain=["x", "y", "z"], reverse=reverse, range=range_),
+                ),
                 y="val",
             )
             .properties(width=600, height=400)
@@ -448,8 +455,7 @@ def test_point_scale_reverse_composes_with_inverted_range():
     x_double = _axis_tick_label_pos(svg_double, "x", coord="x")
     x_forward = _axis_tick_label_pos(svg_forward, "x", coord="x")
     assert x_double == pytest.approx(x_forward, abs=0.5), (
-        f"reverse=True over [260, 40] must equal forward over [40, 260]: "
-        f"{x_double} vs {x_forward}"
+        f"reverse=True over [260, 40] must equal forward over [40, 260]: {x_double} vs {x_forward}"
     )
     assert x_forward == pytest.approx(76.667, abs=0.5)
 
@@ -465,7 +471,9 @@ def test_point_scale_sort_then_reverse_composition():
         fr.Chart(df)
         .mark_point()
         .encode(
-            x=fr.X("cat", sort="descending", scale=fr.PointScale(reverse=True, range=[40.0, 260.0])),
+            x=fr.X(
+                "cat", sort="descending", scale=fr.PointScale(reverse=True, range=[40.0, 260.0])
+            ),
             y="val",
         )
         .properties(width=600, height=400)
@@ -515,9 +523,11 @@ def test_band_scale_on_x_and_y_simultaneously_heatmap():
     cells = _svg_elements(
         svg,
         "rect",
-        lambda a: bool(a.get("fill"))
-        and a["fill"] != _THEME_BACKGROUND
-        and not a["fill"].startswith("url("),
+        lambda a: (
+            bool(a.get("fill"))
+            and a["fill"] != _THEME_BACKGROUND
+            and not a["fill"].startswith("url(")
+        ),
     )
     assert len(cells) == 4, f"expected 4 heatmap cells, got {len(cells)}"
     for a in cells:
@@ -819,7 +829,9 @@ def test_band_point_specs_survive_chartspec_json_round_trip():
         fr.Chart(df)
         .mark_point()
         .encode(
-            x=fr.X("cat", scale=fr.PointScale(domain=["a", "b"], reverse=True, range=[40.0, 260.0])),
+            x=fr.X(
+                "cat", scale=fr.PointScale(domain=["a", "b"], reverse=True, range=[40.0, 260.0])
+            ),
             y="val",
         )
     )

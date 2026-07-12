@@ -148,9 +148,7 @@ def test_pairplot_single_var_1x1_grid_hue_renders_one_legend(df):
 
 
 def test_pairplot_infinity_in_var_produces_finite_svg(df):
-    dfi = df.with_columns(
-        pl.Series("a", [1.0, 2.0, float("inf"), 4.0, 5.0, 6.0])
-    )
+    dfi = df.with_columns(pl.Series("a", [1.0, 2.0, float("inf"), 4.0, 5.0, 6.0]))
     svg = fm.pairplot(dfi, vars=["a", "b"], hue="grp", diag_kind=None).to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg
@@ -218,7 +216,9 @@ def test_pairplot_color_channel_object_hue_renders():  # FIXED (GH #75): _pairpl
     assert _legend_texts(svg).count("grp") == 1
 
 
-def test_jointplot_color_channel_object_hue_kde_one_legend(df):  # FIXED (GH #75): _jointplot_build's kde branch no longer sets kde_jk["groupby"] = hue explicitly (which bypassed density's isinstance(groupby, str) gate for Color objects) -- it now relies on _prep_groupby_from_color's auto-injection from the already-correct color encoding
+def test_jointplot_color_channel_object_hue_kde_one_legend(
+    df,
+):  # FIXED (GH #75): _jointplot_build's kde branch no longer sets kde_jk["groupby"] = hue explicitly (which bypassed density's isinstance(groupby, str) gate for Color objects) -- it now relies on _prep_groupby_from_color's auto-injection from the already-correct color encoding
     """jointplot docstring: ``hue : str or encoding``. The Color-object form
     must produce the same single figure legend the string form does
     (_jointplot_build L1210-1214 threads hue into kde groupby only when str)."""
@@ -340,7 +340,9 @@ def test_jointplot_marginal_kind_box_hue_column_named_joint_box_cat_survives():
     assert texts.count("_joint_box_cat") == 1 and "p" in texts and "q" in texts
 
 
-def test_jointplot_kind_hist_hue_one_figure_legend(df):  # FIXED (GH #75): kind="hist"/"hex" (whose center color is a computed aggregate, not hue) no longer opt into the whole-grid {"color": "shared"} resolve -- top/right instead get an identical explicit ordinal hue domain with the legend suppressed on one, collapsing to one legend without corrupting the (mismatched-domain) union
+def test_jointplot_kind_hist_hue_one_figure_legend(
+    df,
+):  # FIXED (GH #75): kind="hist"/"hex" (whose center color is a computed aggregate, not hue) no longer opt into the whole-grid {"color": "shared"} resolve -- top/right instead get an identical explicit ordinal hue domain with the legend suppressed on one, collapsing to one legend without corrupting the (mismatched-domain) union
     """jointplot(hue=) contract (spec §9.1, GH #16): exactly ONE figure-level
     legend. Must hold for every center kind, not just 'scatter'."""
     svg = fm.jointplot(df, x="a", y="b", hue="grp", kind="hist").to_svg()
@@ -348,7 +350,9 @@ def test_jointplot_kind_hist_hue_one_figure_legend(df):  # FIXED (GH #75): kind=
     assert texts.count("grp") == 1, f"expected one figure legend for kind='hist'; got {texts}"
 
 
-def test_jointplot_kind_hex_hue_one_figure_legend(df):  # FIXED (GH #75): the hex center no longer inherits hue onto its color channel (Hex has no groupby, so it only mislabeled the count legend with the hue field's name) -- the hue legend now comes solely from the marginals, matched onto one explicit domain like the "hist" fix above
+def test_jointplot_kind_hex_hue_one_figure_legend(
+    df,
+):  # FIXED (GH #75): the hex center no longer inherits hue onto its color channel (Hex has no groupby, so it only mislabeled the count legend with the hue field's name) -- the hue legend now comes solely from the marginals, matched onto one explicit domain like the "hist" fix above
     """jointplot(kind='hex', hue=): hue must either collapse to one figure
     legend or be rejected with a typed error — never N per-panel legends."""
     svg = fm.jointplot(df, x="a", y="b", hue="grp", kind="hex").to_svg()
@@ -418,7 +422,9 @@ def _tooltip_wire(chart) -> dict:
     return json.loads(spec.to_json())
 
 
-def test_explicit_tooltip_on_primary_layer_does_not_leak_to_secondary(df):  # FIXED (GH #71): the chart-level explicit-tooltip short-circuit in _inject_auto_tooltips no longer skips the per-layer loop outright -- it only short-circuits when NO layer's own encoding carries the explicit tooltip (a genuine chart-wide override); when the primary layer's own encoding carries it (promoted via Chart.__add__), the other layers still get their own auto-injected tooltip fields
+def test_explicit_tooltip_on_primary_layer_does_not_leak_to_secondary(
+    df,
+):  # FIXED (GH #71): the chart-level explicit-tooltip short-circuit in _inject_auto_tooltips no longer skips the per-layer loop outright -- it only short-circuits when NO layer's own encoding carries the explicit tooltip (a genuine chart-wide override); when the primary layer's own encoding carries it (promoted via Chart.__add__), the other layers still get their own auto-injected tooltip fields
     """Mirror of test_layered_chart_explicit_layer_tooltip_wins_over_auto but
     with the explicit tooltip on the FIRST (primary) layer: the second layer
     must still get its OWN auto tooltip_fields (x + its own y), not inherit
@@ -493,7 +499,26 @@ def test_catplot_violin_hue_renders_single_legend():
     df = pl.DataFrame(
         {
             "grp": ["p", "q", "p", "q", "p", "q"] * 3,
-            "val": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 2.0, 3.0, 1.0, 5.0, 4.0, 6.0, 3.0, 1.0, 2.0, 6.0, 5.0, 4.0],
+            "val": [
+                1.0,
+                2.0,
+                3.0,
+                4.0,
+                5.0,
+                6.0,
+                2.0,
+                3.0,
+                1.0,
+                5.0,
+                4.0,
+                6.0,
+                3.0,
+                1.0,
+                2.0,
+                6.0,
+                5.0,
+                4.0,
+            ],
             "hue2": (["u"] * 9) + (["v"] * 9),
         }
     )

@@ -6,6 +6,39 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.20.0 — 2026-07-12
+
+Two secondary-axis and composite-legend feature streams ([#52](https://github.com/chris-santiago/ferrum/issues/52), [#16](https://github.com/chris-santiago/ferrum/issues/16)), the dodge-by-model `compare=` diagnostics ([#42](https://github.com/chris-santiago/ferrum/issues/42)), and Band/Point range handling ([#39](https://github.com/chris-santiago/ferrum/issues/39)/[#65](https://github.com/chris-santiago/ferrum/issues/65)/[#40](https://github.com/chris-santiago/ferrum/issues/40)) land alongside a release-scoped bug sweep that consolidated 23 edge-case defects into eight remediating issues ([#69](https://github.com/chris-santiago/ferrum/issues/69)–[#76](https://github.com/chris-santiago/ferrum/issues/76)).
+
+### Added
+
+- `chart + SecondaryY(...)` secondary y-axis: per-layer independent y-scale slots, dual-side stacked axis bands, and a per-(panel, slot) interactive runtime for dual-axis charts ([#52](https://github.com/chris-santiago/ferrum/issues/52))
+- One figure-level legend for a composition: `fm.Resolve(scale=, legend=)`, a compositor legend band for shared color/size resolve, and `pairplot`/`jointplot` rendering a single legend on `hue` ([#16](https://github.com/chris-santiago/ferrum/issues/16))
+- Shared color/size resolve now spans nested composites via a leaf-span union, so an outer `resolve={"color": "shared"}` reaches leaves inside nested concats and layered overlays ([#74](https://github.com/chris-santiago/ferrum/issues/74))
+- `configure_legend(orient="none")` suppresses a chart's legends and the figure-level band ([#74](https://github.com/chris-santiago/ferrum/issues/74))
+- `importance_chart` / `shap_bar_chart` / `cv_scores_chart` render dodge-by-model panels under `compare=`; dodge eligibility extended to importance/shap_bar/cv_scores/text marks ([#42](https://github.com/chris-santiago/ferrum/issues/42))
+- `SecondaryY` validates its `mark` against the primitive-mark set with a typed error ([#71](https://github.com/chris-santiago/ferrum/issues/71))
+- Axis-tick text nodes carry an explicit slot tag on the scene wire ([#60](https://github.com/chris-santiago/ferrum/issues/60), [#73](https://github.com/chris-santiago/ferrum/issues/73))
+
+### Fixed
+
+- Scale constructors no longer silently fabricate placeholder ranges or accept non-finite values: `BandScale`/`PointScale`/`DivergingScale`/`SequentialScale` and the continuous scales raise typed errors on short or non-finite input (closing a `LinearScale(range=[5.0])` panic), and inverted band ranges yield non-negative bandwidth ([#69](https://github.com/chris-santiago/ferrum/issues/69))
+- An explicit Band/Point pixel range is re-anchored per facet panel, so marks and ticks stay within each panel instead of pinning to one absolute window ([#70](https://github.com/chris-santiago/ferrum/issues/70))
+- Independent-y conflict detection is spelling-independent — both the `LayerChart(resolve={"y": "independent"})` and `chart + SecondaryY` forms raise the same conflict under `resolve={"y": "shared"}` ([#71](https://github.com/chris-santiago/ferrum/issues/71))
+- The internal column-collision rename is deterministic and never leaks a `__rhs_` sentinel into axis titles or tooltips; the original column name is shown ([#71](https://github.com/chris-santiago/ferrum/issues/71))
+- An explicit tooltip on the primary layer of a layered chart no longer leaks to other layers; a scale-domain `param` declared on a layer reaches the wire so the secondary axis reflects its declared domain ([#71](https://github.com/chris-santiago/ferrum/issues/71), [#72](https://github.com/chris-santiago/ferrum/issues/72))
+- Interactive dual-axis charts: hit-testing finds rescaled secondary-layer marks at their displayed position, and a single-tick secondary axis relabels under a slot rescale ([#73](https://github.com/chris-santiago/ferrum/issues/73))
+- `jointplot(kind="reg")` and `jointplot(marginal_kind="box")` render instead of crashing; `pairplot`/`jointplot` accept an encoding object for `hue`; `hist`/`hex` + `hue` render one figure legend ([#75](https://github.com/chris-santiago/ferrum/issues/75))
+- `compare=` diagnostics: a reserved `"base"` key raises instead of overwriting the primary model, `top_k=0` gives a legible error, infinite/NaN importances no longer corrupt the domain or ranking, and tied scores order deterministically ([#76](https://github.com/chris-santiago/ferrum/issues/76))
+- Dodge selects its band axis by resolved scale kind, fixing overlapping/desynced boxes for natively-horizontal marks ([#75](https://github.com/chris-santiago/ferrum/issues/75))
+- `PointScale(reverse=)` is honored at the positional resolver; categorical axis ticks sit at explicit-range band centers; a 3-element `Diverging` domain no longer truncates positional axes ([#65](https://github.com/chris-santiago/ferrum/issues/65), [#39](https://github.com/chris-santiago/ferrum/issues/39), [#40](https://github.com/chris-santiago/ferrum/issues/40))
+
+### Changed
+
+- Per-layer y-domain resolution is unified: one param-aware resolver feeds both axis ticks and mark placement, and the layer→slot mapping is computed once at prepare time (`YSlotPlan`) ([#72](https://github.com/chris-santiago/ferrum/issues/72))
+- The nested-resolve effective-mode gate is a single shared function across the domain-union and legend-band walks; the legacy secondary-axis silo and the dead spatial-index API were removed ([#74](https://github.com/chris-santiago/ferrum/issues/74), [#52](https://github.com/chris-santiago/ferrum/issues/52))
+- Diagnostic domain/ranking/field-name helpers were de-duplicated into shared functions across the `plots` builders
+
 ## 0.19.0 — 2026-07-05
 
 ### Breaking changes

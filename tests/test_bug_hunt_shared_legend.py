@@ -103,7 +103,9 @@ def test_concat_wrap_partial_last_row_shared_color_one_legend(chart_p, chart_q, 
     assert texts.count("grp") == 1, f"wrap layout shared color must dedupe; got {texts}"
 
 
-def test_outer_shared_resolve_spans_nested_hconcat_leaves(chart_p, chart_q, df_p):  # FIXED (#74): outer resolve={'color':'shared'} now unions across the whole leaf span, spanning leaves nested inside a composite child into one figure legend
+def test_outer_shared_resolve_spans_nested_hconcat_leaves(
+    chart_p, chart_q, df_p
+):  # FIXED (#74): outer resolve={'color':'shared'} now unions across the whole leaf span, spanning leaves nested inside a composite child into one figure legend
     """resolve declared on the OUTER vconcat only; the inner hconcat carries
     no resolve.  The outer union must span the nested subtree's leaves and
     produce exactly ONE figure legend for all three panels.
@@ -119,7 +121,9 @@ def test_outer_shared_resolve_spans_nested_hconcat_leaves(chart_p, chart_q, df_p
     )
 
 
-def test_nested_and_outer_both_shared_renders_single_legend(chart_p, chart_q, df_p):  # FIXED (#74): the outer union covers every leaf and the inner shared node is already-covered (no second band), so the figure renders exactly one 'grp' legend
+def test_nested_and_outer_both_shared_renders_single_legend(
+    chart_p, chart_q, df_p
+):  # FIXED (#74): the outer union covers every leaf and the inner shared node is already-covered (no second band), so the figure renders exactly one 'grp' legend
     """Sharing declared at BOTH nesting levels: the outer union already
     covers every leaf, so the figure must not render duplicate 'grp'
     legends (one per composite node claiming the same leaves).
@@ -134,7 +138,9 @@ def test_nested_and_outer_both_shared_renders_single_legend(chart_p, chart_q, df
     )
 
 
-def test_layerchart_inside_hconcat_shared_color_one_legend(chart_p, chart_q, df_p):  # FIXED (#74): the overlay node leaves color unset, so it inherits the outer shared mode and its spliced leaves join the union — one figure legend across overlay + sibling
+def test_layerchart_inside_hconcat_shared_color_one_legend(
+    chart_p, chart_q, df_p
+):  # FIXED (#74): the overlay node leaves color unset, so it inherits the outer shared mode and its spliced leaves join the union — one figure legend across overlay + sibling
     """A LayerChart child lowers via _splice_lowered_subtree (overlay node)
     inside the outer hconcat; the outer shared color must union across the
     overlay's leaves AND the sibling leaf, capturing one legend.
@@ -279,15 +285,21 @@ def test_nan_in_continuous_shared_color_domain():
     the unioned [min, max] extent must not be poisoned to NaN (which would
     render an empty/NaN colorbar gradient).
     """
-    df1 = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0], "val": [1.0, float("nan"), 5.0]})
-    df2 = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "val": [2.0, 10.0, float("nan")]})
+    df1 = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0], "y": [1.0, 2.0, 3.0], "val": [1.0, float("nan"), 5.0]}
+    )
+    df2 = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "val": [2.0, 10.0, float("nan")]}
+    )
     a = fm.Chart(df1).mark_point().encode(x="x", y="y", color="val")
     b = fm.Chart(df2).mark_point().encode(x="x", y="y", color="val")
     svg = fm.hconcat(a, b, resolve={"color": "shared"}).to_svg()
     assert "<svg" in svg
     assert "NaN" not in svg, "NaN leaked into rendered SVG coordinates/gradient"
     texts = _legend_texts(svg)
-    assert texts.count("val") == 1, f"NaN-bearing continuous union must yield one colorbar; got {texts}"
+    assert texts.count("val") == 1, (
+        f"NaN-bearing continuous union must yield one colorbar; got {texts}"
+    )
 
 
 # ===========================================================================
@@ -460,9 +472,7 @@ def test_legend_independent_without_scale_renders_like_default(chart_p, chart_q)
     Code path: _assemble_resolve_wire legend-only branch (out has no scale
     keys, legend sub-object emitted).
     """
-    svg = fm.hconcat(
-        chart_p, chart_q, resolve=Resolve(legend={"color": "independent"})
-    ).to_svg()
+    svg = fm.hconcat(chart_p, chart_q, resolve=Resolve(legend={"color": "independent"})).to_svg()
     texts = _legend_texts(svg)
     assert texts.count("grp") == 2, (
         f"legend=independent with no shared scale must keep per-panel legends; got {texts}"
@@ -503,9 +513,7 @@ def test_repeatchart_matrix_violation_constructs_but_raises_at_render(df_p):
     validate=True/False split.
     """
     template = fm.Chart(df_p).mark_point().encode(x="x", y="y", color="grp")
-    rc = RepeatChart(
-        template, column=["x", "y"], resolve=Resolve(legend={"color": "shared"})
-    )
+    rc = RepeatChart(template, column=["x", "y"], resolve=Resolve(legend={"color": "shared"}))
     spec = rc.spec  # introspection must not raise
     assert spec["resolve"] == {"legend": {"color": "shared"}}
     json.dumps(spec)
@@ -664,9 +672,7 @@ def test_jointplot_hue_survives_properties_width():
     joint = fm.jointplot(df, x="x", y="y", hue="grp").properties(width=300, height=300)
     svg = joint.to_svg()
     texts = _legend_texts(svg)
-    assert texts.count("grp") == 1, (
-        f"_resolve lost through _forward_child_properties; got {texts}"
-    )
+    assert texts.count("grp") == 1, f"_resolve lost through _forward_child_properties; got {texts}"
 
 
 def test_jointplot_hue_marginal_box_drops_hue_on_right_still_one_legend():  # FIXED (GH #75): both marginals now bind a synthetic single-level categorical column so desugar_boxplot's x-and-y requirement is met, and color=hue is set via .encode() (not a color_field= mark kwarg) so both the BoxStats groupby and the figure-legend title resolve from the same chart-level encoding
@@ -763,7 +769,9 @@ def test_leaf_configure_legend_orient_none_with_shared_band(chart_p, df_q):
     )
 
 
-def test_composite_level_configure_legend_orient_none_suppresses_band(chart_p, chart_q):  # FIXED (GH #74, sweep Task 11): configure_legend(orient='none') now joins the Color(legend=None) disabled mechanism, so per-panel legends AND the figure-level band are both suppressed (all-disabled → no band, §9.8) — consistent with orient='bottom' being honored by the band
+def test_composite_level_configure_legend_orient_none_suppresses_band(
+    chart_p, chart_q
+):  # FIXED (GH #74, sweep Task 11): configure_legend(orient='none') now joins the Color(legend=None) disabled mechanism, so per-panel legends AND the figure-level band are both suppressed (all-disabled → no band, §9.8) — consistent with orient='bottom' being honored by the band
     """configure_legend(orient='none') on the COMPOSITE fans to every leaf
     via _inject_parent_config; with all leaves suppressed the band must
     render NO figure legend (the all-disabled analog for the configure
