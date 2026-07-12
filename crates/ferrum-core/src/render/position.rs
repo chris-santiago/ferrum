@@ -325,18 +325,36 @@ fn apply_dodge(
     // continuous-band and ordinal-band paths.
     let slot_domain = dodge_slot_domain(by_field, scales, encoding);
 
-    // Dodge offsets marks along the categorical BAND axis. Under CoordFlip,
-    // prepare.rs has swapped x/y in the encoding, so the band axis lives in
-    // encoding.y with its ordinal scale in scales.y; the value axis is in
-    // encoding.x. When not flipped the band axis is encoding.x / scales.x. We
-    // select the band axis once and apply every downstream computation (ordinal
-    // sub-band offset, continuous column rewrite) to it — mirroring how
-    // `apply_stack` swaps the value/category channels under `coord_flipped`.
-    let (band_enc, band_scale) = if coord_flipped {
-        (encoding.y.as_ref(), &scales.y)
-    } else {
-        (encoding.x.as_ref(), &scales.x)
+    // Dodge offsets marks along the categorical BAND axis. The band axis is
+    // whichever positional channel actually resolved to an Ordinal scale —
+    // mirroring the per-axis ordinality check `apply_jitter` already uses
+    // (`x_is_ordinal` / `y_is_ordinal` there) — not `coord_flipped` alone.
+    //
+    // `coord_flipped` used to be the sole signal: under CoordFlip, prepare.rs
+    // swaps x/y in the encoding, so the band lands in encoding.y/scales.y, and
+    // `apply_stack` mirrors that swap the same way. But composite-mark
+    // desugars can swap x/y themselves WITHOUT setting CoordFlip — e.g.
+    // `mark_boxplot(horizontal=True)` (composite.py's `enc()`) puts the
+    // continuous value on encoding.x and the categorical band on encoding.y
+    // while `coord_flipped == false`. Picking encoding.x there dodges the
+    // continuous value axis instead of the category axis, and — because each
+    // box sub-layer (whisker/box/median) carries a different value column —
+    // desyncs the sub-layers from each other (GH #75 cohesion-review defect).
+    //
+    // When exactly one axis is Ordinal, that one is unambiguously the band.
+    // When both or neither are (the continuous-band case exercised by
+    // `dodge_continuous_x_rewrites_x_column`, where dodge offsets a
+    // quantitative-but-discrete x), scale kind can't disambiguate, so we fall
+    // back to the `coord_flipped` convention — identical to the pre-fix
+    // default and keeping every currently-passing goldens/tests byte-stable.
+    let x_is_ordinal = matches!(scales.x, ScaleKind::Ordinal(_));
+    let y_is_ordinal = matches!(scales.y, ScaleKind::Ordinal(_));
+    let band_on_y = match (x_is_ordinal, y_is_ordinal) {
+        (true, false) => false,
+        (false, true) => true,
+        _ => coord_flipped,
     };
+    let (band_enc, band_scale) = if band_on_y { (encoding.y.as_ref(), &scales.y) } else { (encoding.x.as_ref(), &scales.x) };
 
     // Resolve the band column (the axis being dodged).
     let band_field = band_enc.ok_or_else(|| {
@@ -348,7 +366,7 @@ fn apply_dodge(
     })?;
     let is_ordinal_band = batch.schema().field(band_col_idx).data_type() != &DataType::Float64;
     if is_ordinal_band {
-        return apply_dodge_ordinal(batch, &by_cats, padding, band_scale, coord_flipped, slot_domain);
+        return apply_dodge_ordinal(batch, &by_cats, padding, band_scale, band_on_y, slot_domain);
     }
     let band_arr = batch
         .column(band_col_idx)
@@ -408,23 +426,25 @@ fn apply_dodge(
 /// axis cannot be rewritten in data space. Injects two synthetic Float64
 /// columns named `__pos_x_offset__` and `__pos_y_offset__`. The sub-band offset
 /// is emitted into the axis that carries the categorical band: `__pos_x_offset__`
-/// when not flipped (band axis = x), `__pos_y_offset__` when `coord_flipped`
-/// (prepare.rs put the band axis in y). The other column is always 0.
-/// All positional mark drawers read these columns post-scale-resolve via
-/// [`read_position_offsets`] and add them to the rendered position.
+/// when `band_on_y` is false, `__pos_y_offset__` when `band_on_y` is true. The
+/// other column is always 0. All positional mark drawers read these columns
+/// post-scale-resolve via [`read_position_offsets`] and add them to the
+/// rendered position.
 ///
 /// `by_cats` is the per-row grouping category resolved by
 /// [`resolve_group_channel`] (one entry per row; null group rows are `""`).
-/// `band_scale` is the ordinal scale of the band axis (scales.x unflipped,
-/// scales.y flipped) and supplies the pixel bandwidth. `slot_domain` is the
-/// color-scale domain order threaded from [`apply_dodge`]: `Some` orders
+/// `band_scale` is the ordinal scale of the band axis (scales.x when
+/// `band_on_y` is false, scales.y when true — resolved by [`apply_dodge`]
+/// from which axis actually carries the Ordinal scale, not from
+/// `coord_flipped` alone) and supplies the pixel bandwidth. `slot_domain` is
+/// the color-scale domain order threaded from [`apply_dodge`]: `Some` orders
 /// sub-band slots by legend order, `None` keeps first-appearance order.
 fn apply_dodge_ordinal(
     batch: &RecordBatch,
     by_cats: &[String],
     padding: f64,
     band_scale: &ScaleKind,
-    coord_flipped: bool,
+    band_on_y: bool,
     slot_domain: Option<&[String]>,
 ) -> Result<RecordBatch, crate::render::RenderError> {
     let schema = batch.schema();
@@ -453,8 +473,8 @@ fn apply_dodge_ordinal(
         let gi = *group_idx.get(g).unwrap();
         let off = -bandwidth_px / 2.0 + bandwidth_px * padding + sub_band * (gi as f64 + 0.5);
         // Emit the sub-band offset into whichever axis carries the categorical
-        // band: y under CoordFlip (prepare.rs swapped x/y), x otherwise.
-        if coord_flipped {
+        // band, as resolved by the caller.
+        if band_on_y {
             x_offsets.push(0.0);
             y_offsets.push(off);
         } else {
@@ -1005,6 +1025,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(y_off, offset_col(&unflipped, "__pos_x_offset__"));
+    }
+
+    #[test]
+    fn dodge_ordinal_band_on_y_without_coord_flip_offsets_y_not_x() {
+        // GH #75 cohesion-review defect: a natively-horizontal composite mark
+        // (mark_boxplot(horizontal=True)) swaps x/y in its Python desugar
+        // WITHOUT setting CoordFlip, so encoding.x is the continuous value
+        // channel and encoding.y is the categorical band — the mirror image of
+        // `dodge_ordinal_band_flipped_offsets_y_matches_unflipped_x` but with
+        // `coord_flipped == false`. Selecting the band axis from `coord_flipped`
+        // alone (the pre-fix behavior) wrongly treats "val" as the band and
+        // silently no-ops the dodge (or corrupts "val") instead of offsetting
+        // "cat". The band axis must be chosen by which channel actually
+        // resolved to an Ordinal scale.
+        let b = batch_cat_val_grp();
+        let enc = enc_xy("val", "cat", Some("grp"));
+        let s = scales_one_ordinal(false); // ordinal scale lives on y, not x
+        let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+
+        let y_off = offset_col(&out, "__pos_y_offset__");
+        assert_eq!(y_off, vec![-12.5, 12.5, -12.5, 12.5], "band offset must land in y (the ordinal axis)");
+        assert_eq!(offset_col(&out, "__pos_x_offset__"), vec![0.0, 0.0, 0.0, 0.0], "value axis (x) must not be offset");
     }
 
     #[test]
