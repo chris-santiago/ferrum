@@ -617,6 +617,25 @@ class Chart(
         """
         return _resolve_pending_impl(self)
 
+    def _has_independent_y_layer(self) -> bool:
+        """Return whether any of this chart's layers carry ``independent_y=True``.
+
+        The plain-``Chart`` capability predicate that mirrors
+        ``LayerChart._y_independent()`` for the *other* spelling of
+        dual-axis (GH #52/#71): ``chart + SecondaryY(...)``
+        (:func:`_desugar_secondary_y`) never becomes a ``LayerChart`` --
+        it appends one flagged layer onto this chart's own ``_layers`` --
+        so composition-level independent-y conflict detection
+        (:func:`ferrum.composition._contains_independent_y_layer`) consults
+        this predicate for a leaf ``Chart`` the same way it consults
+        ``LayerChart._y_independent()`` for the layered spelling. A chart
+        with no ``_layers`` (single-mark, never desugared) cannot carry the
+        flag.
+        """
+        if not self._layers:
+            return False
+        return any(layer.independent_y for layer in self._layers)
+
     # ---- Marks (primitives) ----
 
     def _set_mark(self, name: str, **kwargs: Any) -> "Chart":

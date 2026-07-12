@@ -2398,18 +2398,21 @@ def test_inset_in_hconcat_sub_chart_renders():
     _assert_valid_svg(svg)
 
 
-def test_secondary_y_in_layer_chart_renders():
-    """SecondaryY on a chart within a LayerChart renders valid SVG.
-
-    Targets LayerChart._build_merged: the merged chart should contain
-    both the layer structure and the structural features.
+def test_secondary_y_in_layer_chart_raises_shared_y_conflict():
+    """A `chart + SecondaryY(...)` member nested in a default-resolve
+    LayerChart raises the GH #52/#71 shared-y conflict instead of silently
+    overlaying the flagged layer's y-scale onto the composite's shared
+    domain (LayerChart's default resolve IS the "y": "shared" overlay path
+    -- see LayerChart._composite_tree). Use
+    `LayerChart(c1, c2, resolve={"y": "independent"})` (routed through
+    `_build_merged`) to actually render a dual-axis LayerChart.
     """
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0], "z": [10.0, 20.0, 30.0]})
     c1 = Chart(df).mark_point().encode(x="x", y="y") + SecondaryY("z", color="red")
     c2 = Chart(df).mark_line().encode(x="x", y="y")
     lc = LayerChart(c1, c2)
-    svg = lc.to_svg()
-    _assert_valid_svg(svg)
+    with pytest.raises(ValueError, match=r"(?s)shared.*independent"):
+        lc.to_svg()
 
 
 # ---------------------------------------------------------------------------

@@ -744,24 +744,32 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> _LoweredTree:
 
 
 def _contains_independent_y_layer(node) -> bool:
-    """Return whether *node* is, or nests, an independent-y ``LayerChart``.
+    """Return whether *node* is, or nests, a dual-axis (independent-y) chart.
 
     Used by :func:`_lower_any` to detect a parent composite's explicit
-    ``resolve={"y": "shared"}`` colliding with a dual-axis ``LayerChart``
-    (``resolve={"y": "independent"}``) anywhere in its subtree (GH #52 spec
-    §4 "Nesting"). An independent-y layer chart lowers to one leaf whose
-    per-layer y-scale slots are resolved leaf-locally in Rust -- it does not
-    participate in cross-panel y sharing, so an explicit ask to share y
-    across a subtree containing one is contradictory and must raise rather
-    than silently drop the caller's request. Recurses through every
-    composite form's ``.charts`` (HConcat/VConcat/wrap children, JointChart/
-    RepeatChart/ClusterMapChart cells, LayerChart layers) to catch the
-    conflict at any nesting depth, not just an immediate child.
+    ``resolve={"y": "shared"}`` colliding with a dual-axis chart anywhere in
+    its subtree (GH #52 spec §4 "Nesting"). Dual-axis has two disjoint
+    spellings that both flag one or more layers ``independent_y=True`` (GH
+    #71): a ``LayerChart(resolve={"y": "independent"})`` (checked via
+    ``_y_independent()``) and a plain ``Chart`` produced by
+    ``chart + SecondaryY(...)`` (checked via
+    :meth:`ferrum.chart.Chart._has_independent_y_layer`, the capability
+    predicate mirroring ``_y_independent()`` for that spelling). Either
+    lowers to one leaf whose per-layer y-scale slots are resolved
+    leaf-locally in Rust -- it does not participate in cross-panel y
+    sharing, so an explicit ask to share y across a subtree containing one
+    is contradictory and must raise rather than silently drop the caller's
+    request. Recurses through every composite form's ``.charts``
+    (HConcat/VConcat/wrap children, JointChart/RepeatChart/ClusterMapChart
+    cells, LayerChart layers) to catch the conflict at any nesting depth,
+    not just an immediate child.
     """
     if isinstance(node, LayerChart) and node._y_independent():
         return True
     if isinstance(node, _ChartLike):
         return any(_contains_independent_y_layer(child) for child in node.charts)
+    if _is_leaf_chart(node):
+        return node._has_independent_y_layer()
     return False
 
 
@@ -3043,8 +3051,10 @@ class LayerChart(_ChartLike):
         ------
         ValueError
             When ``resolve=`` marks an unsupported channel ``"shared"``, when
-            a layer is not a plain leaf ``Chart``, or when every layer's data
-            is empty.
+            a layer is not a plain leaf ``Chart``, when a layer carries its
+            own ``independent_y=True`` flag (a ``chart + SecondaryY(...)``
+            member reaching this shared-y overlay path -- see below), or
+            when every layer's data is empty.
         """
         resolve_field = _composite_resolve_field(self._resolve, kind="LayerChart")
         # x is always forced "shared" here regardless of self._resolve --
@@ -3064,6 +3074,23 @@ class LayerChart(_ChartLike):
             if not _is_leaf_chart(c):
                 raise ValueError(
                     f"LayerChart: every layer must be a plain Chart, got {type(c).__name__}"
+                )
+            # A member produced by `chart + SecondaryY(...)` (GH #71) already
+            # carries its own flagged independent-y layer -- this shared-y
+            # overlay path forces x/y "shared" across every member above, so
+            # nesting one here is the same GH #52 spec §4 "Nesting" conflict
+            # _lower_any raises for a LayerChart(resolve={"y": "independent"})
+            # nested under an explicit parent resolve={"y": "shared"}; raise
+            # here instead of silently overlaying the flagged layer onto the
+            # shared y-scale it was asked to opt out of.
+            if c._has_independent_y_layer():
+                raise ValueError(
+                    "LayerChart: resolve={'y': 'shared'} (the default when unset) "
+                    "conflicts with a member chart produced by `chart + "
+                    "SecondaryY(...)` -- its flagged layer's y-scale slot does not "
+                    "participate in cross-panel y sharing (GH #52 spec §4 "
+                    "'Nesting'); wrap this LayerChart with resolve={'y': "
+                    "'independent'} instead, or drop the SecondaryY member"
                 )
 
         payloads: list = []

@@ -343,11 +343,11 @@ def test_categorical_x_shared_across_slots():
 # ---------------------------------------------------------------------------
 
 
-# _contains_independent_y_layer only detects LayerChart instances, not plain
-# Charts whose _layers carry independent_y=True flags — so the GH #52 spec §4
-# nesting conflict is raised for one spelling of a dual-axis chart and
-# silently skipped for the other.
-def test_hconcat_explicit_shared_y_over_secondary_y_chart_raises():  # BUG: renders silently; z slot stays independent under an explicit parent resolve={"y": "shared"}
+# FIXED (GH #71): _contains_independent_y_layer now also consults
+# Chart._has_independent_y_layer -- the capability predicate for a plain
+# Chart whose _layers carry independent_y=True flags -- so the GH #52 spec
+# §4 nesting conflict raises identically for both spellings of dual-axis.
+def test_hconcat_explicit_shared_y_over_secondary_y_chart_raises():  # FIXED: previously rendered silently; z slot stayed independent under an explicit parent resolve={"y": "shared"}
     """The SAME dual-axis chart spelled as `LayerChart(..., resolve=
     {"y": "independent"})` raises under a parent resolve={"y": "shared"}
     (see test_parent_explicit_shared_y_over_independent_y_layer_raises in
@@ -362,10 +362,10 @@ def test_hconcat_explicit_shared_y_over_secondary_y_chart_raises():  # BUG: rend
         composite.to_svg()
 
 
-# LayerChart's shared-y overlay route (_composite_tree) force-sets y "shared"
-# without checking whether a member's _layers carry independent_y=True flags,
-# so the explicit shared request silently coexists with a dual axis.
-def test_layerchart_explicit_shared_y_over_flagged_member_raises():  # BUG: renders the dual axis anyway; explicit resolve={"y": "shared"} silently ignored for the flagged layer
+# FIXED (GH #71): LayerChart's shared-y overlay route (_composite_tree) now
+# checks each member's Chart._has_independent_y_layer() and raises instead
+# of force-setting y "shared" over a flagged member.
+def test_layerchart_explicit_shared_y_over_flagged_member_raises():  # FIXED: previously rendered the dual axis anyway; explicit resolve={"y": "shared"} was silently ignored for the flagged layer
     df = _df()
     dual_flat = fm.Chart(df).mark_bar().encode(x="x", y="y") + SecondaryY("z")
     other = fm.Chart(df).mark_point().encode(x="x", y="y")
