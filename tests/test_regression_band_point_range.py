@@ -8,7 +8,7 @@ fell back to the full panel extent regardless of what the caller asked for.
 
 The fix adds the field, emits it from ``to_scale_spec``, and honors it in the
 positional resolver (falling back to the panel extent only when ``range`` is
-absent). These tests check three things:
+absent). These tests check four things:
 
 1. **Wire-level** — ``chart.to_json()`` carries the requested ``range`` under the
    band/point scale on the x encoding.
@@ -17,6 +17,10 @@ absent). These tests check three things:
    that sub-range rather than spanning the full panel.
 3. **Fallback** — a band scale built *without* ``range`` has no ``"range"`` key
    in its wire dict, so the panel-extent fallback path is untouched by the fix.
+4. **Geometry / axis alignment** (phase 2) — bar/box/heatmap/tick band geometry
+   and categorical axis tick placement derive from the resolved scale's
+   explicit range rather than the panel extent, so marks nest within the
+   range and the axis agrees with the marks.
 """
 
 from __future__ import annotations
@@ -201,9 +205,10 @@ def test_band_scale_without_range_omits_range_key():
 # 4. Geometry / axis-alignment: phase 2 (GH #39) — band geometry consumers
 #    (bar/box/heatmap/tick width, categorical axis tick placement) must also
 #    derive from the resolved scale's explicit range, not the panel extent.
-#    These are the discriminating RED tests for design-docs/superpowers/specs/
-#    2026-07-11-band-point-range-geometry-design.md §9; they fail today
-#    (phase 1 fixes mark *position* only) and must pass after Tasks 3-4.
+#    These pin design-docs/superpowers/specs/
+#    2026-07-11-band-point-range-geometry-design.md §9's acceptance; before the
+#    band-geometry unification landed they failed (phase 1 fixed mark
+#    *position* only, geometry was still panel-derived).
 # ---------------------------------------------------------------------------
 
 BAND_RANGE = [40.0, 260.0]
@@ -266,10 +271,10 @@ def test_ordinal_y_range_constrains_bar_heights_and_tick_labels():
     the y-axis tick labels align to the same band centers as the bars.
 
     Regression: issue #39 phase 2 — bar geometry and categorical axis tick
-    placement are independently re-derived from the full panel extent, so an
-    explicit y range constrains mark *position* only (phase 1); bar height
-    still spills past the range and tick labels stay at panel-uniform
-    centers instead of the band centers.
+    placement were independently re-derived from the full panel extent, so an
+    explicit y range constrained mark *position* only (phase 1); bar height
+    spilled past the range and tick labels stayed at panel-uniform centers
+    instead of the band centers.
     """
     df = pl.DataFrame({"cat": ["a", "b", "c", "d"], "val": [10.0, 20.0, 30.0, 40.0]})
     chart = (
@@ -382,9 +387,9 @@ def test_tick_mark_half_extent_scales_with_explicit_range():
     extent, not the full panel width; ticks nest within the requested range.
 
     Regression: issue #39 phase 2 — tick.rs's ordinal-x + quantitative-y mode
-    (``tick_half = panel.w / n_cats / n_groups * band_size``) is
-    panel-derived and ignores ``range=``; today it spills ticks outside
-    [40, 260] and sizes them far wider than a 55px band step.
+    (``tick_half = panel.w / n_cats / n_groups * band_size``) was
+    panel-derived and ignored ``range=``, spilling ticks outside [40, 260]
+    and sizing them far wider than a 55px band step.
     """
     df = pl.DataFrame({"cat": ["a", "b", "c", "d"], "val": [10.0, 20.0, 30.0, 40.0]})
     chart = (
@@ -413,9 +418,9 @@ def test_tick_mark_half_extent_scales_with_explicit_range():
 
 def test_x_axis_tick_labels_align_with_band_centers():
     """Under an explicit BandScale range, x tick label centers equal the mark
-    band centers, not the uniform-over-panel placement used today.
+    band centers, not a uniform-over-panel placement.
 
-    Regression: issue #39 phase 2 — categorical axis tick placement is
+    Regression: issue #39 phase 2 — categorical axis tick placement was
     independently derived by dividing the full panel width evenly, ignoring
     the resolved scale's band centers under an explicit range.
     """
@@ -442,10 +447,10 @@ def test_dodged_bars_non_overlapping_within_explicit_range():
     """Dodged sub-bars stay within an explicit BandScale range and do not
     overlap each other, matching the band geometry they subdivide.
 
-    Regression: issue #39 phase 2 — Dodge's sub-band offsets are correct
-    (bandwidth()-derived, the in-tree precedent per the design spec), but bar
-    *width* is still panel-derived, so sub-bars both spill outside the range
-    and overlap adjacent dodge groups.
+    Regression: issue #39 phase 2 — Dodge's sub-band offsets were already
+    correct (bandwidth()-derived, the in-tree precedent per the design spec),
+    but bar *width* was panel-derived, so sub-bars both spilled outside the
+    range and overlapped adjacent dodge groups.
     """
     df = pl.DataFrame(
         {
