@@ -608,3 +608,27 @@ New follow-ups discovered during the run (none blocking #52's close):
 | SY-7 | S2 | **Layer-spec synthesis recipe exists twice** (whole-change gate 2026-07-11): `prepare/mod.rs::build_secondary_y_axis_inputs` and `scene_build.rs::resolve_layer_y_scale` both synthesize a per-layer single-y ChartSpec (overlay layer encoding, strip `layers`, mark from layer) — deliberate and cross-documented (mirrors the primary's provisional-vs-panel double resolution), but a future drift seam. Extract a shared `synthesize_layer_y_spec` helper when either site is next touched. GH #62. |
 | SY-9 | S1 | **Per-layer `ResolvedScales` clone carries stale `y_slots`** (design review 2026-07-11): `build_panel_mark_batches` clones `ResolvedScales` per independent layer swapping `.y` to the slot scale, but the clone's `y_slots` still describes all slots — internally inconsistent, never read today (marks read `.y`), a latent trap if a mark ever consults `ctx.scales.y_slots`. Cheapest fix: empty `y_slots` on the per-layer clone. `crates/ferrum-core/src/render/scene_build.rs` (~:977-986). GH #64. |
 | SY-8 | S2 | **Two per-slot list-indexing conventions on the wire** (whole-change gate 2026-07-11): `CoordKind::Cartesian.y_domains` includes slot 0; `PanelTickLevels.y_slot_levels` and the wasm `secondary_affines` are slot-1-based (index = slot − 1). Both are documented and tested at each seam; standardize on one convention if a third per-slot list is ever added. GH #63. |
+
+## 2026-07-11 — Band/Point explicit `range=` (#39) resolved + new follow-ups
+
+GH #39 (Band/Point scales: explicit `range=` silently dropped at the wire
+boundary) is resolved on `fix/band-point-scale-range`, per
+`design-docs/superpowers/specs/2026-07-11-band-point-range-geometry-design.md`.
+`ScaleSpec::Band`/`Point` now carry an optional `range`; the positional
+resolver honors it and records **range-explicitness** on the resolved
+`OrdinalScale` (`explicit_pixel_range`, set only at construction — never
+float-inferred); all band-geometry consumers derive from the scale when a
+range is explicit: mark widths/cells/tick extents via
+`render/marks/channels.rs::band_extent_or`, categorical axis ticks + grid via
+`AxisInput.categorical_positions` (absolute band centers). The no-range path
+is byte-identical by construction (literal panel-extent fallback expressions,
+golden corpus + `test_scale_spec_parity.py` green). Regression module:
+`tests/test_regression_band_point_range.py` (10 tests, RED-proven).
+
+New follow-ups discovered during the run (none blocking #39's close):
+
+| ID | Sev | Item |
+|---|---|---|
+| BR-1 | S2 | **`PointScale(reverse=)` / `align=` are serialized but never consumed at render.** The resolver's Band/Point arms swallow both with `..`; `OrdinalScale::new_internal` has no reverse/align parameter and no `ScaleKind::Ordinal` path honors them — the same silent-drop class as #39's `range=`, one field over. Fix = OrdinalScale reverse/align support (or resolver-side domain/range pre-transform) + regression tests. `crates/ferrum-core/src/render/scale_resolve/positional.rs`, `scale/{point,ordinal}.rs`. GH issue to file. |
+| BR-2 | S2 | **Explicit range + `padding_inner` + dodge is an untested overlap seam.** Mark widths are padding-ignoring (`extent / n / n_groups * shape_factor`) while dodge sub-band offsets are padding-aware (`bandwidth()`); large `padding_inner` under dodge can overlap bars. Pre-existing on the fallback path too (spec §3 declares padding-aware widths a non-goal), but the explicit-range path makes it more reachable. Add a discriminating test for explicit-range+padding+dodge before leaning on this seam (design review 2026-07-11). `crates/ferrum-core/src/render/{marks/bar.rs,position.rs:431-454}`. GH issue to file. |
+| BR-3 | S1 | **North-star: collapse the explicitness gate.** `band_extent_or`'s fallback exists solely to keep no-range arithmetic byte-identical (recomputing `panel.w` as `(panel.x+panel.w)-panel.x` can drift 1 ulp). When a golden-regeneration window is acceptable, make the resolved scale the *unconditional* source of band geometry and delete the gate. Related tidies noted by reviews: `range_user_set` vs `explicit_pixel_range` coexistence (doc-warned at the field, 6f245d69+); 1-entry ordinal range passes through (`ordinal_pixel_range`, pre-existing) while Band/Point fall back — both non-explicit, documented divergence; `tick_projection`/`categorical_positions` mutual exclusivity is discipline-enforced (a `debug_assert` would harden). GH issue to file. |

@@ -183,6 +183,12 @@ pub struct OrdinalScale {
     data: OrdinalScaleData,
     /// Whether the user explicitly supplied a range (false → auto-fill from
     /// plot-area extent at render time).
+    ///
+    /// CAUTION: not reliable as a positional-explicitness signal —
+    /// `new_internal` (the render-resolver constructor) hardcodes it `true`
+    /// even for the panel-extent fallback, because it only feeds the Python
+    /// `.range` getter / compute facade. For "did the user supply the pixel
+    /// range this scale renders with", use `explicit_pixel_range` below.
     range_user_set: bool,
     /// Original range values as supplied by the user, preserved for the
     /// Python getter. `None` when the user did not supply a range.

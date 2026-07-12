@@ -37,6 +37,24 @@ import ferrum as fr
 # ---------------------------------------------------------------------------
 
 
+_THEME_BACKGROUND = "#faf7f2"
+
+
+def _svg_elements(svg: str, tag: str, keep) -> list[dict[str, str]]:
+    """Return attr dicts for self-closing ``<tag .../>`` elements passing ``keep``.
+
+    Shared parse loop for the mark-geometry helpers below; ``keep`` receives
+    the attr dict and returns whether the element is a data mark (vs. panel
+    background, chrome, or legend swatch).
+    """
+    out = []
+    for m in re.finditer(rf"<{tag}([^/]+)/>", svg):
+        attrs = dict(re.findall(r'([\w-]+)="([^"]+)"', m.group(1)))
+        if keep(attrs):
+            out.append(attrs)
+    return out
+
+
 def _data_bar_rects(svg: str) -> list[dict[str, str]]:
     """Return attr dicts for <rect> elements that are data bars.
 
@@ -44,13 +62,11 @@ def _data_bar_rects(svg: str) -> list[dict[str, str]]:
     ``fill`` entirely (inheriting from a parent group); data bars always carry
     an explicit non-background fill.
     """
-    rects = []
-    for m in re.finditer(r"<rect([^/]+)/>", svg):
-        attrs = dict(re.findall(r'([\w-]+)="([^"]+)"', m.group(1)))
-        fill = attrs.get("fill")
-        if fill and fill != "#faf7f2":
-            rects.append(attrs)
-    return rects
+    return _svg_elements(
+        svg,
+        "rect",
+        lambda a: bool(a.get("fill")) and a["fill"] != _THEME_BACKGROUND,
+    )
 
 
 def _circle_cxs(svg: str) -> list[float]:
@@ -240,13 +256,10 @@ def _mark_lines(svg: str, stroke: str = "#2563eb") -> list[dict[str, float]]:
     lines use the theme's neutral gray strokes, so filtering by stroke
     isolates data marks from chrome.
     """
-    lines = []
-    for m in re.finditer(r"<line([^/]+)/>", svg):
-        attrs = dict(re.findall(r'([\w-]+)="([^"]+)"', m.group(1)))
-        if attrs.get("stroke") != stroke:
-            continue
-        lines.append({k: float(attrs[k]) for k in ("x1", "y1", "x2", "y2")})
-    return lines
+    return [
+        {k: float(attrs[k]) for k in ("x1", "y1", "x2", "y2")}
+        for attrs in _svg_elements(svg, "line", lambda a: a.get("stroke") == stroke)
+    ]
 
 
 def _heatmap_cell_rects(svg: str) -> list[dict[str, str]]:
@@ -256,14 +269,15 @@ def _heatmap_cell_rects(svg: str) -> list[dict[str, str]]:
     swatch, which is filled with a ``url(#...)`` gradient reference rather
     than a flat color.
     """
-    cells = []
-    for m in re.finditer(r"<rect([^/]+)/>", svg):
-        attrs = dict(re.findall(r'([\w-]+)="([^"]+)"', m.group(1)))
-        fill = attrs.get("fill")
-        if not fill or fill == "#faf7f2" or fill.startswith("url("):
-            continue
-        cells.append(attrs)
-    return cells
+    return _svg_elements(
+        svg,
+        "rect",
+        lambda a: (
+            bool(a.get("fill"))
+            and a["fill"] != _THEME_BACKGROUND
+            and not a["fill"].startswith("url(")
+        ),
+    )
 
 
 def test_ordinal_y_range_constrains_bar_heights_and_tick_labels():
@@ -405,7 +419,7 @@ def test_tick_mark_half_extent_scales_with_explicit_range():
     lines = _mark_lines(svg)
     assert len(lines) == 4, f"Expected 4 tick marks, got {len(lines)}: {lines}"
 
-    step = (BAND_RANGE[1] - BAND_RANGE[0]) / 4  # 4 categories
+    step = BAND_STEP  # 4 categories over BAND_RANGE
     for line in lines:
         x0, x1 = sorted((line["x1"], line["x2"]))
         assert x0 >= BAND_RANGE[0] - _TOL and x1 <= BAND_RANGE[1] + _TOL, (
