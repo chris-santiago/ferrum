@@ -238,14 +238,27 @@ def _resolve_wire_dict(resolve: ResolveArg) -> Optional[dict]:
     """Return a ``resolve=`` value in its JSON-serializable wire-dict shape.
 
     The non-validating half of :func:`_assemble_resolve_wire`'s two entry
-    points, used by introspection surfaces (``RepeatChart.spec``): the same
-    channel-restriction loop as :func:`_composite_resolve_field` (the
-    render-time lowering step), minus the raising, so the two can never
-    emit different shapes for the same :class:`Resolve` value — see the
-    divergence regression test in ``tests/test_composite_shared_legend.py``.
-    ``None`` and the flat-dict form pass through unchanged (back-compat:
-    byte-identical, including object identity for the flat-dict form); a
-    :class:`Resolve` flattens through the shared core.
+    points, used by introspection surfaces (``RepeatChart.spec``). For a
+    :class:`Resolve` value, this runs the same channel-restriction loop as
+    :func:`_composite_resolve_field` (the render-time lowering step), minus
+    the raising, so the two can never emit different shapes for the same
+    :class:`Resolve` value — see the divergence regression test in
+    ``tests/test_composite_shared_legend.py``.
+
+    **Flat-dict raw-view exception (2026-07-12, #74):** ``None`` and the
+    flat-dict form do **not** go through that restriction loop at all —
+    they pass through unchanged (back-compat: byte-identical, including
+    object identity for the flat-dict form). :func:`_composite_resolve_field`
+    has no such bypass: it runs a flat dict through the same restriction
+    loop as a :class:`Resolve`, with ``validate=True``. So for an
+    already-invalid flat dict (one carrying an unsupported channel key —
+    reachable only by constructing ``_resolve`` outside the validated
+    ``Resolve``/``resolve=`` surface), this function returns it raw while
+    :func:`_composite_resolve_field` raises at lowering; the two are *not*
+    guaranteed to agree in that case. In practice every flat dict reaching
+    either function has already passed :func:`_validate_resolve`, so this
+    divergence is unobservable from the public API — it is a deliberate
+    identity/back-compat carve-out, not an equivalence guarantee.
     """
     if resolve is None or isinstance(resolve, dict):
         return resolve
@@ -488,19 +501,27 @@ def _assemble_resolve_wire(
 
     The single wire-assembly core shared by :func:`_resolve_wire_dict`
     (introspection, ``validate=False``) and :func:`_composite_resolve_field`
-    (render-time lowering, ``validate=True``) — both restrict *scale* to
-    :data:`_COMPOSITE_RESOLVE_CHANNELS` and *legend* to
-    :data:`_LEGEND_RESOLVE_CHANNELS` through this exact same loop, so the two
-    surfaces can never drift apart on *which channels survive*; the only
-    difference between the two modes is the treatment of invalid input:
-    ``validate=True`` raises, while ``validate=False`` excludes an
-    *unsupported channel* from the result and passes a *mode-matrix
-    violation* (``"shared"`` legend over a non-shared scale) through
-    verbatim — introspection is a raw view of what was constructed, and the
-    violation still raises at lowering. In practice introspection never
-    sees either case anyway, since
+    (render-time lowering, ``validate=True``) for a :class:`Resolve` value
+    — both restrict *scale* to :data:`_COMPOSITE_RESOLVE_CHANNELS` and
+    *legend* to :data:`_LEGEND_RESOLVE_CHANNELS` through this exact same
+    loop, so the two surfaces can never drift apart on *which channels
+    survive* for that value shape; the only difference between the two
+    modes is the treatment of invalid input: ``validate=True`` raises,
+    while ``validate=False`` excludes an *unsupported channel* from the
+    result and passes a *mode-matrix violation* (``"shared"`` legend over a
+    non-shared scale) through verbatim — introspection is a raw view of
+    what was constructed, and the violation still raises at lowering. In
+    practice introspection never sees either case anyway, since
     :func:`_validate_resolve`/:func:`_validate_legend_modes` already reject
     an unsupported legend channel at ``Resolve``/composite construction.
+
+    **This equivalence covers only the** :class:`Resolve` **path.** A flat
+    dict never reaches this function from :func:`_resolve_wire_dict` (it
+    has its own raw-view early return, 2026-07-12 #74) but always reaches
+    it from :func:`_composite_resolve_field` (``scale=resolve, legend={}``)
+    — so the two callers' overall outputs are not equivalent for the
+    flat-dict form the way they are for :class:`Resolve`; see
+    :func:`_resolve_wire_dict`'s docstring for that exception.
 
     **Legend mode-matrix (spec §4/§6).** A channel's effective legend mode is
     the explicit ``legend[channel]`` when given, else that channel's scale

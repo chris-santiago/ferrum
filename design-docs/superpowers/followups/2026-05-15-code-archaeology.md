@@ -603,7 +603,7 @@ New follow-ups discovered during the run (none blocking #52's close):
 | SY-2 | S1 | **RepeatChart `resolve={"y":"shared"}` over an independent-y template bypasses the composite conflict raise.** The typed `ValueError` for "parent composite `y: shared` over a subtree containing an independent-y layered leaf" is enforced at `_composite_tree`/`_lower_any`'s ordinary composite-node walk; a `RepeatChart` carrying its own `resolve={"y": "shared"}` over an independent-y template chart routes through `_build_grid_tree` instead, which does not run that guard. Exotic (no test currently exercises it); log only, not a live bug. GH #57. |
 | SY-3 | S2 | **Field-based linked selection suppresses per-layer auto-tooltips.** A layered chart with a field-based `selection_point`/`selection_interval` linked tooltip takes the chart-level selection-tooltip injection path, which early-returns before the new per-layer auto-tooltip walk runs — so a selection-bound layered chart still shows one shared tooltip field set rather than per-layer fields. Not a regression (this behavior predates #52); just a narrower scope than the unconditional per-layer case documented in `ferrum-spec.md`'s auto-tooltips note. `src/ferrum/_spec_build.py`. GH #58. |
 | SY-4 | S3 | **Explicit `Axis(orient="left")` on a secondary layer is silently forced `Right`.** Spec-compliant (§4 "Axes": secondary layers always render right), but repo precedent elsewhere favors surfacing a contradictory explicit request (warning or typed error) rather than silently overriding it. User decision pending on whether to add one; not a bug today. `crates/ferrum-core/src/render/prepare/mod.rs` (`build_secondary_y_axis_inputs`). GH #59. |
-| SY-5 | S2 | **`text_json` right-axis relabel needs ≥2 ticks per secondary axis.** The WASM `text_json` right-axis column-recognition heuristic ranks candidate columns by ascending-x layout geometry; a degenerate single-tick right axis (e.g. a secondary layer whose y-domain collapses to one value) doesn't produce enough ticks for the heuristic to recognize the column, so it won't relabel on zoom/pan. Documented at Task 9's quality-review carry-forward; no crash, just a missed relabel in a narrow domain-collapse case. **Proper fix (design-review 2026-07-11, rated borderline S3): carry the slot id on tick-label text nodes** (`TextElementData` gains a slot field in the scene contract) so `text_json` selects the rescale affine by explicit slot instead of reconstructing slot identity from x-column ranking + tick-string matching — the one place the spec §6 slot contract is reconstructed rather than carried. Subsumes the >=2-tick heuristic limitation entirely. `crates/ferrum-wasm/src/text_json.rs`, `crates/ferrum-scene/src/types.rs`. GH #60. |
+| SY-5 | S2 | ~~**`text_json` right-axis relabel needs ≥2 ticks per secondary axis.** The WASM `text_json` right-axis column-recognition heuristic ranks candidate columns by ascending-x layout geometry; a degenerate single-tick right axis (e.g. a secondary layer whose y-domain collapses to one value) doesn't produce enough ticks for the heuristic to recognize the column, so it won't relabel on zoom/pan. Documented at Task 9's quality-review carry-forward; no crash, just a missed relabel in a narrow domain-collapse case.~~ ✅ **RESOLVED 2026-07-12** (post-v0.19 sweep #71–#74, Task 7, commit `717d35e5`): the proper fix landed as planned — `SceneNode::Text` (and `ferrum-scene`'s `TextElementData`) gains an optional `slot` field, serde-defaulted so untagged/legacy scenes are byte-identical; `build_axis` tags every y-slot's tick-label text nodes (titles stay untagged) and `route_y_axis_slotted` tags all slots uniformly including the primary. Task 8 (commit `17abcda7`, #73) then rewired `text_json` to select the rescale affine by this explicit slot tag instead of the ascending-x column-frequency heuristic, and **deleted** the heuristic machinery (`y2_x_freq`/`ranked_cols`/`col_rank`) outright — a net simplification, not just a workaround. A single-tick right axis now relabels identically to a multi-tick one, and the stray-label guarantee is strengthened structurally (an untagged node can never be mistaken for an axis label, regardless of content matching a tick string), pinned by a dedicated regression test. GH #60 closed. `crates/ferrum-core/src/render/marks/axis.rs`, `crates/ferrum-core/src/render/scene_build.rs`, `crates/ferrum-scene/src/types.rs`, `crates/ferrum-wasm/src/text_json.rs`, `crates/ferrum-wasm/src/scene_load.rs`. |
 | SY-6 | S1 | **`build_structural_nodes`'s `StructuralOutput` 4-tuple has two permanently-empty slots.** With `StructuralSpec::SecondaryY` deleted (Task 7), only `BreakAxis`/`Inset` remain, and neither populates the `extra_axes` / `extra_mark_batches` locals (only `extra_annotations` and `break_results` are ever mutated) — those two locals were changed from `let mut` to `let` to silence clippy, but the 4-tuple `StructuralOutput` return shape was deliberately left as-is (a future structural variant could repopulate them). Tidy candidate — collapse to the 2 live fields, or re-justify the 4-tuple with a comment — when this function is next touched. `crates/ferrum-core/src/render/scene_build.rs` (`build_structural_nodes`). GH #61. |
 | SY-7 | S2 | **Layer-spec synthesis recipe exists twice** (whole-change gate 2026-07-11): `prepare/mod.rs::build_secondary_y_axis_inputs` and `scene_build.rs::resolve_layer_y_scale` both synthesize a per-layer single-y ChartSpec (overlay layer encoding, strip `layers`, mark from layer) — deliberate and cross-documented (mirrors the primary's provisional-vs-panel double resolution), but a future drift seam. Extract a shared `synthesize_layer_y_spec` helper when either site is next touched. GH #62. |
 | SY-9 | S1 | **Per-layer `ResolvedScales` clone carries stale `y_slots`** (design review 2026-07-11): `build_panel_mark_batches` clones `ResolvedScales` per independent layer swapping `.y` to the slot scale, but the clone's `y_slots` still describes all slots — internally inconsistent, never read today (marks read `.y`), a latent trap if a mark ever consults `ctx.scales.y_slots`. Cheapest fix: empty `y_slots` on the per-layer clone. `crates/ferrum-core/src/render/scene_build.rs` (~:977-986). GH #64. |
@@ -632,3 +632,69 @@ New follow-ups discovered during the run (none blocking #39's close):
 | BR-1 | S2 | **`PointScale(reverse=)` / `align=` are serialized but never consumed at render.** The resolver's Band/Point arms swallow both with `..`; `OrdinalScale::new_internal` has no reverse/align parameter and no `ScaleKind::Ordinal` path honors them — the same silent-drop class as #39's `range=`, one field over. Fix = OrdinalScale reverse/align support (or resolver-side domain/range pre-transform) + regression tests. `crates/ferrum-core/src/render/scale_resolve/positional.rs`, `scale/{point,ordinal}.rs`. GH #65 — **RESOLVED 2026-07-11** (main 1b18f79d..2834756d): `reverse` honored via post-sort domain reversal at the Point arm; `align` adjudicated inert at every layer (no pixel rounding → zero alignment leftover; compute facade ignores it identically) — no semantic to restore, documented in the ScaleSpec→ScaleKind mapping rustdoc; base-position model divergence stays with #67. |
 | BR-2 | S2 | **Explicit range + `padding_inner` + dodge is an untested overlap seam.** Mark widths are padding-ignoring (`extent / n / n_groups * shape_factor`) while dodge sub-band offsets are padding-aware (`bandwidth()`); large `padding_inner` under dodge can overlap bars. Pre-existing on the fallback path too (spec §3 declares padding-aware widths a non-goal), but the explicit-range path makes it more reachable. Add a discriminating test for explicit-range+padding+dodge before leaning on this seam (design review 2026-07-11). `crates/ferrum-core/src/render/{marks/bar.rs,position.rs:431-454}`. GH #66. |
 | BR-3 | S1 | **North-star: collapse the explicitness gate.** `band_extent_or`'s fallback exists solely to keep no-range arithmetic byte-identical (recomputing `panel.w` as `(panel.x+panel.w)-panel.x` can drift 1 ulp). When a golden-regeneration window is acceptable, make the resolved scale the *unconditional* source of band geometry and delete the gate. Related tidies noted by reviews: `range_user_set` vs `explicit_pixel_range` coexistence (doc-warned at the field, 6f245d69+); 1-entry ordinal range passes through (`ordinal_pixel_range`, pre-existing) while Band/Point fall back — both non-explicit, documented divergence; `tick_projection`/`categorical_positions` mutual exclusivity is discipline-enforced (a `debug_assert` would harden). GH #67. |
+
+## 2026-07-12 — post-v0.19 sweep (#71–#74) resolved + new follow-ups
+
+Four coherent remediations from the release-scoped bug hunt of `v0.19.0..main`
+(issues #69–#76), per
+`design-docs/superpowers/specs/2026-07-12-post-v019-sweep-71-74-design.md`,
+are resolved on `fix/post-v0.19-bug-sweep`: (A) #71 unifies independent-y
+semantics across both dual-axis spellings and fixes a rename-sentinel/tooltip
+leak; (B) #72 hoists per-layer domain params onto the wire and unifies
+per-slot y-domain resolution (`YSlotPlan`, computed once at prepare); (C) #73
+makes WASM hit-testing and axis relabeling slot-aware under runtime rescales
+(subsumes SY-5/GH #60, resolved above); (D) #74 defines and implements nested
+composite shared resolve for color/size (leaf-span union, commit `d3d8e12d`)
+and makes `configure_legend(orient="none")` join the legend-disabled
+mechanism (commit `d1bf18b6`). See `ferrum-spec.md` §3.9's 2026-07-12 (#74)
+note and the #16 composite-shared-legend design doc's matching nesting-rule
+update for the user-facing contract.
+
+**#52 §4 "Nesting" — spelling-independent conflict, closed (commit
+`10244b0f`, #71 Task 1).** The GH #52 spec's nesting conflict ("a parent
+composite's explicit `resolve={"y": "shared"}` colliding with a dual-axis
+chart in its subtree raises") was only enforced for the
+`LayerChart(resolve={"y": "independent"})` spelling —
+`_contains_independent_y_layer` recognized `LayerChart._y_independent()` but
+had no path to a plain `Chart` whose `_layers` carry `independent_y=True`
+flags from the *other* spelling, `chart + SecondaryY(...)`. A composition
+built from the `SecondaryY` spelling silently rendered instead of raising.
+`Chart` now exposes a `_has_independent_y_layer()` capability predicate
+(mirroring the #16 `_supports_user_resolve` idiom) that
+`_contains_independent_y_layer` consults for leaf `Chart`s the same way it
+consults `LayerChart._y_independent()` for the layered spelling, and
+`LayerChart._composite_tree`'s own shared-y overlay route raises the same
+typed error when one of its members carries the flag. Both spellings of
+dual-axis now raise identically under an explicit (or default) parent
+`resolve={"y": "shared"}`. `src/ferrum/chart.py`, `src/ferrum/composition.py`.
+
+**Dodge band-axis fix (commit `4f2839bb`) + `apply_stack` follow-up (#77).**
+Discovered while shipping #75 (jointplot/pairplot builder defects):
+`apply_dodge` chose its categorical band axis from `coord_flipped` alone,
+which only an explicit `CoordFlip` sets. A natively-horizontal composite
+mark (e.g. `mark_boxplot(horizontal=True)`) swaps x/y at Python desugar
+*without* setting `CoordFlip`, so a dodged horizontal boxplot offset along
+the continuous value axis instead of the category axis — and because each
+box sub-layer (rect/whisker/median) carries a different value column, the
+sub-layers desynced from each other. The band axis is now chosen by which
+resolved scale is `ScaleKind::Ordinal` (the same convention `apply_jitter`
+already used, healing the sibling drift between the two), falling back to
+`coord_flipped` only when both/neither axis is ordinal (byte-identical for
+every currently-passing case). `apply_dodge_ordinal`'s `coord_flipped` param
+is renamed `band_on_y`. The commit message flags `apply_stack`'s matching
+`coord_flipped`-only band-axis selection as **unproven-broken** by the same
+class of bug (no repro yet, but the same natively-horizontal-desugar path
+could reach it) — tracked as **GH #77**, an audit of `apply_stack` for the
+identical pattern, not yet fixed. `crates/ferrum-core/src/render/position.rs`.
+
+*Back-link to the `__dodge_n_groups__` fragility note (2026-07-10,
+above):* that note's producer/consumer contract (`apply_dodge_ordinal`
+stamps `DODGE_N_GROUPS_KEY`; `bar.rs`/`rect.rs`/`tick.rs` read it via
+`n_dodge_groups` at every band-geometry call site) is **unaffected** by this
+fix — `4f2839bb` only changes *which axis* `apply_dodge_ordinal` treats as
+the band before computing sub-band offsets, not the metadata contract or
+its consumers. Anyone auditing that fragility note after this commit should
+know the band-axis selection it depends on is now `ScaleKind`-driven, not
+`coord_flipped`-driven, at the same call site; the #77 `apply_stack` audit
+should check whether its own band-axis selection needs the analogous
+widening before touching `n_dodge_groups`-adjacent code there.

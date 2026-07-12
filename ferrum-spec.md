@@ -874,6 +874,33 @@ spans `"color"` and `"size"` only (the channels whose scales can be shared).
 > implemented** and has been narrowed out of this signature; shared axis
 > rendering across composite panels is tracked as its own follow-up issue.
 
+> **2026-07-12 (#74):** nested-composite resolve is now a defined rule, not
+> emergent behavior. For **`color`/`size`**: a composite node whose
+> *effective* mode for the channel is `"shared"` unions the domain (and, per
+> the #16 legend band, captures the figure legend) across its **entire leaf
+> span** — every descendant leaf, through nested composites and spliced
+> overlay subtrees — not just leaves at matching grid positions. A node's
+> effective mode is its own explicit `resolve=`/`Resolve(scale=...)` setting
+> for that channel when given; an unset node **inherits the nearest
+> ancestor's effective mode**. An explicit `"independent"` child opts its
+> whole subtree out and resets the chain, so a re-shared node beneath it
+> starts its own, separate union. The figure legend band attaches at the
+> outermost node whose effective mode is `"shared"`; leaves it covers get
+> per-panel suppression, so all three nesting shapes (outer-shared subtree,
+> nested-and-outer both shared, a layered chart spliced into a shared
+> concat) render exactly **one** legend. **`x`/`y`** are unaffected: they
+> keep the pre-existing positional tree-path pairing across congruent direct
+> children (grids pair by column — pairplot/compare) with no inheritance.
+>
+> **`configure_legend(orient="none")`** now suppresses legends through the
+> same disabled-legend mechanism `Color(legend=None)` uses: per-panel
+> legends, gutter reservations, and the figure-level legend band are all
+> cleared. This applies both to a single chart (previously a silent no-op —
+> the value parsed but nothing suppressed) and to a composite, where it
+> disables every legend the node covers; per the existing all-disabled rule,
+> if every participating leaf ends up disabled, no figure legend band is
+> emitted. `orient="bottom"` (and every other valid orient) is unaffected.
+
 ---
 
 ### 3.10 Selections (Interactivity)

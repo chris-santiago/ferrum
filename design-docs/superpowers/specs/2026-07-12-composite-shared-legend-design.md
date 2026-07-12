@@ -68,6 +68,31 @@ marks `color` (or `size`) shared:
   sharing, so a shared-color subtree inside an independent parent gets one
   legend local to that subtree.
 
+> **2026-07-12 (#74) — nesting rule superseded (leaf-span union):** the
+> "legend attaches at the composite node that declared the sharing" line
+> above described sharing as **node-local** — a shared node only pooled its
+> *direct, congruent* children, so a leaf living inside a nested composite
+> child (a nested `hconcat`, or a `LayerChart` spliced in as an overlay
+> subtree) was silently excluded from both the domain union and the legend
+> capture: three legends rendered where the caller asked for one. This is
+> now fixed with a defined inheritance rule instead of left emergent: for
+> **`color`/`size`**, a node's *effective* mode is its own explicit
+> `resolve=` setting for that channel if any, else the nearest ancestor's
+> effective mode; at the **outermost** node whose effective mode is
+> `"shared"`, the domain union — and the figure legend band — spans the
+> node's **entire leaf span** (every descendant leaf, through nested
+> composites and spliced overlay subtrees), not just direct congruent
+> children. An explicit `"independent"` child still opts its whole subtree
+> out and resets the inheritance chain, so a re-shared node beneath it owns
+> its own, separate union/legend — the "shared subtree inside an
+> independent parent gets its own local legend" example above still holds,
+> it is just no longer the *only* nesting shape that works. `x`/`y`
+> positional resolve is unaffected: it keeps the pre-existing tree-path
+> pairing across congruent direct children, with no inheritance. See
+> `ferrum-spec.md` §3.9's matching 2026-07-12 (#74) note and
+> `crates/ferrum-core/src/render/composite.rs`'s `resolve_nonpositional`/
+> `collect_shared_leaves` (the implementation; commit `d3d8e12d`).
+
 **Explicit legend resolution.**
 
 - `legend={"color": "independent"}` with a shared color scale → today's
