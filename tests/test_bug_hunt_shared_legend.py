@@ -763,7 +763,7 @@ def test_leaf_configure_legend_orient_none_with_shared_band(chart_p, df_q):
     )
 
 
-def test_composite_level_configure_legend_orient_none_suppresses_band(chart_p, chart_q):  # BUG: composite-wide configure_legend(orient='none') suppresses every per-panel legend but the figure-level band still renders one 'grp' legend — inconsistent with orient='bottom' (honored by the band, golden 7) and with Color(legend=None) all-disabled (band suppressed, §9.8)
+def test_composite_level_configure_legend_orient_none_suppresses_band(chart_p, chart_q):  # FIXED (GH #74, sweep Task 11): configure_legend(orient='none') now joins the Color(legend=None) disabled mechanism, so per-panel legends AND the figure-level band are both suppressed (all-disabled → no band, §9.8) — consistent with orient='bottom' being honored by the band
     """configure_legend(orient='none') on the COMPOSITE fans to every leaf
     via _inject_parent_config; with all leaves suppressed the band must
     render NO figure legend (the all-disabled analog for the configure
