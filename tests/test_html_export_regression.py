@@ -755,6 +755,30 @@ def test_p33_html_contains_inter_font(tmp_path):
     assert "Inter" in content, "HTML must embed Inter font"
 
 
+# ── P33b. Interactive @font-face covers bold weight (GH #80) ───────────────
+
+
+def test_p33b_interactive_font_face_covers_bold_weight(tmp_path):
+    """GH #80 regression: the interactive @font-face must cover bold (600)
+    weights via the Inter *variable* font (``font-weight:100 900``).
+
+    A single-weight (Regular/400) face forces the browser to synthesize
+    faux-bold for the theme's 600-weight text (figure title, axis titles,
+    legend title), which renders blurry — while normal-weight ticks/legend
+    entries stay crisp. Guards against regressing to a single-weight face.
+    """
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4.0, 5.0, 6.0]})
+    chart = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").properties(title="Title")
+    out = tmp_path / "gh80.html"
+    chart.interactive().save(str(out))
+    content = out.read_text()
+    assert "font-weight:100 900" in content, (
+        "interactive @font-face must span the variable weight range (covers 600), "
+        "not a single 400 face — else bold text faux-bolds and renders blurry"
+    )
+    assert "data:font/woff2" in content, "variable Inter font must be embedded as woff2"
+
+
 # ── P34. HTML export background matches scene JSON background ──────────────
 
 
