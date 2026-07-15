@@ -178,10 +178,13 @@ class MarkBase:
     def to_mark_kwargs_dict(self) -> dict:
         """Return the subset of stored kwargs that map to ``MarkKwargsSpec`` fields.
 
-        Statistical mark kwargs (``bandwidth``, ``method``, ``ci``, etc.)
-        are not included here — they are consumed directly by the desugar
-        functions (``desugar_density``, ``desugar_smooth``, …) which build
-        the transform objects before this dict is ever inspected.
+        Statistical mark kwargs — the "forwarded to the transform" group in
+        *Mark style kwargs* in the marks & encodings guide
+        (``docs/site/guide/marks-encodings.md``), e.g.
+        ``bandwidth``, ``method``, ``ci`` — are not included here; they are
+        consumed directly by the desugar functions (``desugar_density``,
+        ``desugar_smooth``, …) which build the transform objects before
+        this dict is ever inspected.
 
         ``orient`` is consumed Python-side (sets ``_coord = "flip"`` on the
         chart) and is never forwarded to the Rust renderer.

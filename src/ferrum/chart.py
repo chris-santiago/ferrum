@@ -308,6 +308,24 @@ def _desugar_secondary_y(chart: "Chart", feature: "SecondaryY") -> "Chart":
     return new
 
 
+def _annotations_from_primitive(primitive: object) -> list:
+    """Expand a ``Chart._annotation_primitive`` value into ``Annotate`` containers.
+
+    Most ``annotate_*`` helpers set a single primitive (``AnnotationLine``,
+    ``AnnotationText``, etc.), which becomes one ``Annotate``. A labelled
+    ``annotate_hline``/``annotate_vline`` sets a *list* of primitives (the
+    reference line plus its label text) so that ``+`` overlay — which reads
+    only ``_annotation_primitive`` and discards the helper chart's mark
+    layers — carries both. Each list element becomes its own ``Annotate``
+    entry in the destination chart's ``_annotations``.
+    """
+    from ferrum.annotation.container import Annotate
+
+    if isinstance(primitive, list):
+        return [Annotate(item) for item in primitive]
+    return [Annotate(primitive)]
+
+
 def _append_unique_by_name(seq: list, item: object) -> None:
     """Append *item* to *seq* if no element with the same ``.name`` is present.
 
@@ -1144,7 +1162,11 @@ class Chart(
         Parameters
         ----------
         **kwargs
-            Mark style overrides: ``color``, ``opacity``, ``stroke_width``, etc.
+            Constant mark-style overrides such as ``color`` (alias for
+            ``fill``), ``opacity``, ``stroke``, ``stroke_width``. See
+            *Mark style kwargs* in the marks & encodings guide
+            (``docs/site/guide/marks-encodings.md``) for the full accepted
+            set.
 
         Examples
         --------
@@ -1164,7 +1186,10 @@ class Chart(
         Parameters
         ----------
         **kwargs
-            Mark style overrides: ``width``, ``height``, ``opacity``, etc.
+            Constant mark-style overrides, e.g. ``opacity``. See *Mark
+            style kwargs* in the marks & encodings guide
+            (``docs/site/guide/marks-encodings.md``) for the full accepted
+            set.
 
         Examples
         --------
@@ -1183,7 +1208,11 @@ class Chart(
         Parameters
         ----------
         **kwargs
-            Mark style overrides: ``color``, ``opacity``, ``stroke_width``, etc.
+            Constant mark-style overrides such as ``color`` (alias for
+            ``fill``), ``opacity``, ``stroke``, ``stroke_width``. See
+            *Mark style kwargs* in the marks & encodings guide
+            (``docs/site/guide/marks-encodings.md``) for the full accepted
+            set.
 
         Examples
         --------
@@ -1235,8 +1264,10 @@ class Chart(
             placed label position.  Useful when labels are placed far from
             their source points.  Default ``False``.
         **kwargs
-            Additional mark style overrides (``fill``, ``opacity``,
-            ``font_weight``, etc.).
+            Additional mark-style overrides, e.g. ``fill``, ``opacity``,
+            ``font_weight``. See *Mark style kwargs* in the marks &
+            encodings guide (``docs/site/guide/marks-encodings.md``) for
+            the full accepted set.
 
         Examples
         --------
@@ -1627,14 +1658,25 @@ class Chart(
                     mark_kwargs={"opacity": 0, "size": 0},
                 )
                 new._layers = [carrier]
-                new._annotations = new._annotations + [
-                    Annotate(lhs._annotation_primitive),
-                    Annotate(rhs._annotation_primitive),
-                ]
+                # Rebuild from the two primitive expansions ONLY -- do not
+                # keep `new._annotations`'s carried-over value.  `new` was
+                # cloned from `lhs`, and a labelled annotate_hline/vline's
+                # `_annotations` already holds its (dormant) label Annotate
+                # for standalone rendering; keeping it here would double it
+                # up with the label re-supplied by
+                # `_annotations_from_primitive(lhs._annotation_primitive)`.
+                # Both operands are fresh annotate_* helpers whose entire
+                # visual content lives in their primitives, so the clone's
+                # `_annotations` carries nothing that isn't already covered.
+                new._annotations = _annotations_from_primitive(
+                    lhs._annotation_primitive
+                ) + _annotations_from_primitive(rhs._annotation_primitive)
             else:
                 new = rhs._clone()
                 new._layers = rhs_layers
-                new._annotations = new._annotations + [Annotate(lhs._annotation_primitive)]
+                new._annotations = new._annotations + _annotations_from_primitive(
+                    lhs._annotation_primitive
+                )
             new._annotation_primitive = None
             _warn_on_layer_conflicts(lhs, rhs)
             return new
@@ -1648,7 +1690,9 @@ class Chart(
         # the annotation data is not needed by any layer.
         if rhs._annotation_primitive is not None:
             new._layers = lhs_layers  # LHS layers only — no RHS mark layers
-            new._annotations = new._annotations + [Annotate(rhs._annotation_primitive)]
+            new._annotations = new._annotations + _annotations_from_primitive(
+                rhs._annotation_primitive
+            )
             _warn_on_layer_conflicts(lhs, rhs)
             return new
 

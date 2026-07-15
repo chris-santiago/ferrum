@@ -58,8 +58,57 @@ def _capture_line_style(*, stroke: Optional[str], stroke_dash) -> _LineStyle:
 
 
 def _attach_annotation_primitive(chart: Chart, primitive: object) -> Chart:
-    """Set the annotation primitive on a Chart so ``+`` routes through annotations."""
+    """Set the annotation primitive on a Chart so ``+`` routes through annotations.
+
+    ``primitive`` is usually a single annotation primitive (``AnnotationLine``,
+    ``AnnotationText``, etc.), but may also be a ``list`` of primitives — see
+    :func:`_attach_line_with_label`, which sets a two-element list so a
+    labelled reference line's ``+`` overlay carries both the line and its
+    label. ``Chart.__add__`` reads this field through the module-level
+    ``ferrum.chart._annotations_from_primitive`` helper, which accepts
+    either shape.
+    """
     chart._annotation_primitive = primitive
+    return chart
+
+
+def _attach_line_with_label(
+    chart: Chart,
+    line_primitive: object,
+    *,
+    label: Optional[str],
+    label_x: _AnnotationCoord,
+    label_y: _AnnotationCoord,
+    label_dx: float,
+    label_dy: float,
+    label_align: str,
+) -> Chart:
+    """Wire a reference-line ``Chart`` for both standalone and ``+`` overlay rendering.
+
+    Unlabelled (``label is None``): attaches ``line_primitive`` as the sole
+    ``_annotation_primitive`` — unchanged from the pre-label behavior.
+
+    Labelled: the line's own ``mark_rule`` layer is kept (so standalone
+    rendering still draws the line), the label is added as a real
+    ``_annotations`` entry (so it also renders standalone), and
+    ``_annotation_primitive`` is set to ``[line_primitive, text_primitive]``
+    so the ``+`` overlay path — which discards the helper chart's mark
+    layers and reads only ``_annotation_primitive`` — carries both the line
+    and its label. Neither path draws the line twice: standalone draws it
+    via ``mark_rule``, not ``_annotation_primitive`` (dormant until ``+``);
+    overlay draws it via ``_annotation_primitive``, not ``mark_rule``
+    (dropped by ``Chart.__add__``).
+    """
+    if label is None:
+        return _attach_annotation_primitive(chart, line_primitive)
+
+    from ferrum.annotation.container import Annotate
+
+    text_primitive = annotate_text(
+        label_x, label_y, label, dx=label_dx, dy=label_dy, align=label_align
+    )._annotation_primitive
+    chart._annotations = chart._annotations + [Annotate(text_primitive)]
+    chart._annotation_primitive = [line_primitive, text_primitive]
     return chart
 
 
@@ -83,7 +132,10 @@ def annotate_hline(
         (``date``, ``datetime``, ISO-8601 strings) are converted to
         epoch-milliseconds (UTC) to align with ferrum's temporal axis scale.
     label : str, optional
-        Reserved for future use (no-op today).
+        Text to display alongside the line, near its right end, inset from
+        the axis edge and offset above the rule.  Renders both standalone
+        (``.to_svg()``) and when layered with ``+`` onto another chart.
+        When omitted, no text is rendered.
     stroke : str, optional
         Line color as a CSS color string. Defaults to the mark default when
         omitted.
@@ -100,6 +152,10 @@ def annotate_hline(
     >>> import ferrum as fm
     >>> ref = fm.annotate_hline(y=0.0, stroke="red", stroke_dash=[4, 4])
     >>> chart = fm.Chart(df).encode(x="t", y="r").mark_line() & ref
+
+    Labelled reference line:
+
+    >>> fm.annotate_hline(y=0.0, label="baseline")
     """
     from ferrum.annotation.coords import norm
     from ferrum.annotation.primitives import AnnotationLine
@@ -122,7 +178,18 @@ def annotate_hline(
         stroke_width=1,
         dash=style.dash,
     )
-    return _attach_annotation_primitive(chart, prim)
+    # Label near the right end of the line: inset from the right axis edge
+    # (dx=-6, align="right") and offset above the rule (dy=-6).
+    return _attach_line_with_label(
+        chart,
+        prim,
+        label=label,
+        label_x=norm(1),
+        label_y=y_coord,
+        label_dx=-6,
+        label_dy=-6,
+        label_align="right",
+    )
 
 
 def annotate_vline(
@@ -145,7 +212,10 @@ def annotate_vline(
         (``date``, ``datetime``, ISO-8601 strings) are converted to
         epoch-milliseconds (UTC) to align with ferrum's temporal axis scale.
     label : str, optional
-        Reserved for future use (no-op today).
+        Text to display alongside the line, near its top, inset from the
+        axis edge and offset to the side of the rule so it doesn't overlap.
+        Renders both standalone (``.to_svg()``) and when layered with ``+``
+        onto another chart.  When omitted, no text is rendered.
     stroke : str, optional
         Line color as a CSS color string.
     stroke_dash : list of float, optional
@@ -161,6 +231,10 @@ def annotate_vline(
     >>> import ferrum as fm
     >>> ref = fm.annotate_vline(x=2020, stroke="#888")
     >>> chart = fm.Chart(df).encode(x="year", y="val").mark_line() & ref
+
+    Labelled reference line:
+
+    >>> fm.annotate_vline(x=2020, label="cutoff")
     """
     from ferrum.annotation.coords import norm
     from ferrum.annotation.primitives import AnnotationLine
@@ -180,7 +254,19 @@ def annotate_vline(
         stroke_width=1,
         dash=style.dash,
     )
-    return _attach_annotation_primitive(chart, prim)
+    # Label near the top of the line: inset from the top axis edge (dy=6)
+    # and offset to the right of the rule (dx=6, align="left") so the text
+    # doesn't overlap the line.
+    return _attach_line_with_label(
+        chart,
+        prim,
+        label=label,
+        label_x=x_coord,
+        label_y=norm(1),
+        label_dx=6,
+        label_dy=6,
+        label_align="left",
+    )
 
 
 def annotate_rect(

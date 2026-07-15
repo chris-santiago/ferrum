@@ -570,9 +570,69 @@ chart = fm.Chart(df).mark_line(point=True).encode(x="date:T", y="value:Q")
 chart = fm.Chart(df).mark_point(shape="|").encode(x="x", y="group:N")
 ```
 
+## Mark style kwargs
+
+Every `mark_*()` method accepts `**kwargs` — constant style overrides passed straight through to the renderer, layered on top of (or instead of) any data-driven encoding. Ferrum validates these against a fixed allowlist: passing an unrecognized name raises `TypeError` immediately rather than silently dropping it.
+
+This section is the canonical reference for that allowlist. Docstrings across the codebase that describe a mark's `**kwargs` point back here by name rather than re-listing every accepted key. Not every kwarg applies to every mark (`font_size` only makes sense for `mark_text`/`mark_label`, for example); passing one that doesn't apply to a given mark is harmless — the renderer ignores it for that mark type.
+
+### Core style
+
+| Kwarg | Meaning |
+|---|---|
+| `size` | Mark size (point area in px², or a mark-specific extent). |
+| `fill` | Fill colour override (CSS colour string or hex). |
+| `stroke` | Stroke/outline colour override. |
+| `opacity` | Overall opacity in `[0, 1]`. |
+| `stroke_width` | Stroke/outline width in pixels. |
+| `stroke_dash` | Dash pattern as alternating on/off pixel lengths, e.g. `[4, 2]`. |
+| `corner_radius` | Corner rounding in pixels (`mark_bar`, `mark_rect`). |
+| `font_size` | Font size in points (`mark_text`, `mark_label`). |
+| `font_weight` | CSS font-weight, e.g. `"bold"`, `400`, `700` (`mark_text`, `mark_label`). |
+| `align` | Horizontal text alignment: `"left"`, `"center"`, `"right"`. |
+| `baseline` | Vertical text alignment: `"top"`, `"middle"`, `"bottom"`. |
+| `dx`, `dy` | Fixed pixel offset from the anchor point (`mark_text`, `mark_label`). |
+| `angle` | Rotation in degrees. |
+
+### Mark-specific (validated per-mark)
+
+| Kwarg | Meaning |
+|---|---|
+| `interpolate` | Curve interpolation for `mark_line`/`mark_area`: `"linear"`, `"monotone"`, `"step"`, `"step-before"`, `"step-after"`, `"basis"`, `"cardinal"`. |
+| `stroke_cap` | Line cap style for `mark_line`: `"butt"`, `"round"`, `"square"`. |
+| `stroke_join` | Line join style for `mark_line`/`mark_area`: `"miter"`, `"round"`, `"bevel"`. |
+| `orient` | `mark_bar`/`mark_tick`: `orient="horizontal"` flips the mark to a horizontal orientation. |
+| `filled` | `mark_point`: whether points are filled (default) or open outlines. |
+| `shape` | `mark_point`: point glyph name — see the [`mark_point()`][ferrum.Chart.mark_point] docstring for the full glyph list. |
+| `limit` | `mark_text`: maximum rendered width in pixels; clips overflow. |
+| `band_size` | `mark_tick`/`mark_rect`: extent of the tick/band along its cross axis. |
+| `line` | `mark_area`: whether to draw the top boundary as a line. Default `False`. |
+| `borders` | `mark_area`/`mark_errorband`: whether to draw border lines at the band edges. |
+
+### Statistical mark kwargs (forwarded to the transform)
+
+| Kwarg | Meaning |
+|---|---|
+| `method` | Smoothing method (`mark_smooth`: `"lm"`/`"linear"`, `"loess"`, `"quadratic"`, `"cubic"`, `"log"`, `"sqrt"`) or extent method (`mark_errorbar`: `"ci"`, `"sd"`, `"sem"`, `"iqr"`). |
+| `ci` | Confidence level for the CI band, e.g. `0.95` (`mark_smooth`). |
+| `bandwidth` | KDE or LOESS bandwidth (`mark_density`, `mark_smooth`). |
+| `degree` | Polynomial degree for linear/quadratic/cubic smoothing (`mark_smooth`). |
+| `n` | Number of evaluation points along the x range (`mark_smooth`). |
+| `kernel` | KDE kernel shape (`mark_density`): `"gaussian"`, `"tophat"`, `"epanechnikov"`, etc. |
+| `extent` | KDE evaluation range `[min, max]` (`mark_density`). |
+| `cumulative` | Render a cumulative density/histogram. Default `False`. |
+| `bin_count` | Target number of histogram bins (`mark_histogram`). |
+| `bin_width` | Exact histogram bin width in data units; overrides `bin_count`. |
+| `density` | Normalise histogram counts to a probability density (`mark_histogram`). Default `False`. |
+| `right` | Whether histogram bins are closed on the right (`mark_histogram`). |
+| `multiple` | How to combine grouped density/histogram layers when `color` is encoded: `"layer"`, `"stack"`, `"dodge"`. |
+| `blend` | Alpha-compositing blend mode for layered marks: `"alpha"` (default), `"additive"`. |
+| `leader_line` | `mark_label`: draw a thin connecting line from the data point to the placed label. Default `False`. |
+| `zero` | `mark_bar`: set `zero=False` to suppress the y-scale zero-anchor. Default `True`. |
+
 ## Friendly kwarg aliases
 
-Every mark — primitive (`mark_point`, `mark_line`), statistical (`mark_density`, `mark_histogram`, `mark_smooth`), and composite (`mark_boxplot`, `mark_violin`) — accepts the same constant mark-style kwargs (`opacity`, `fill`, `stroke`, `stroke_width`, `stroke_dash`, `size`), plus short, familiar aliases for them. Aliases are resolved before the spec is compiled — they have no runtime cost and produce identical output.
+Every mark — primitive (`mark_point`, `mark_line`), statistical (`mark_density`, `mark_histogram`, `mark_smooth`), and composite (`mark_boxplot`, `mark_violin`) — accepts the [mark style kwargs](#mark-style-kwargs) above, plus short, familiar aliases for the most common ones. Aliases are resolved before the spec is compiled — they have no runtime cost and produce identical output.
 
 | Alias | Canonical | Notes |
 |---|---|---|
