@@ -5,12 +5,9 @@ from __future__ import annotations
 import tempfile
 import webbrowser
 from pathlib import Path
-from typing import TYPE_CHECKING, Union, cast
+from typing import Union, cast
 
 from ferrum._scene import SupportsRender
-
-if TYPE_CHECKING:
-    from ferrum.chart import Chart
 
 
 def save_chart(
@@ -147,17 +144,24 @@ def html_string(
     )
 
 
-def show_chart(chart: "Chart") -> None:
-    """Display a chart inline in Jupyter or open it in a browser.
+def show_chart(chart: SupportsRender) -> None:
+    """Display a chart-like object inline in Jupyter or open it in a browser.
 
     Attempts Jupyter inline display first (``IPython.display.SVG``); falls
     back to writing a temporary HTML file and opening it with
     ``webbrowser.open`` when not running inside a kernel.
 
+    This is the single ``show()`` display path for the whole library:
+    ``Chart.show()`` and every composition wrapper's ``.show()`` (via
+    ``_ChartLike.show()``) route through here, so inline-vs-browser
+    detection and title resolution are identical regardless of which
+    entry point a caller reaches.
+
     Parameters
     ----------
-    chart : Chart
-        The chart to display.
+    chart : chart-like
+        Any object exposing the chart-like rendering surface -- ``to_svg()``
+        and ``to_png(scale=...)`` (see :class:`ferrum._scene.SupportsRender`).
 
     Returns
     -------

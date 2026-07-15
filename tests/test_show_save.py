@@ -68,6 +68,32 @@ def test_show_in_non_jupyter_opens_browser(chart, monkeypatch):
     assert opened[0].endswith(".html")
 
 
+def test_composite_show_routes_through_show_chart(chart, monkeypatch):
+    """GH #81: composition .show() must route through the shared display
+    path, not print raw SVG to stdout.
+
+    ``_ChartLike.show()`` (every HConcat/VConcat/Concat/Joint/Repeat/
+    ClusterMap/Layer chart) previously did ``print(self.to_svg())``, which
+    dumps raw markup to stdout instead of displaying inline in Jupyter or
+    opening a browser tab. It must delegate to ``ferrum.display.show_chart``
+    -- the same path ``Chart.show()`` already uses -- exactly once, passing
+    the composite itself.
+    """
+    import ferrum as fm
+
+    calls = []
+    monkeypatch.setattr("ferrum.display.show_chart", lambda c: calls.append(c))
+
+    other_df = pl.DataFrame({"a": [7, 8, 9], "b": [1, 2, 3]})
+    other = Chart(other_df).mark_point().encode(x="a", y="b")
+    composite = fm.hconcat(chart, other)
+
+    composite.show()
+
+    assert len(calls) == 1
+    assert calls[0] is composite
+
+
 def test_repr_svg_returns_string_for_jupyter(chart):
     s = chart._repr_svg_()
     assert s is not None

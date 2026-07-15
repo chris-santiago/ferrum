@@ -1236,8 +1236,15 @@ class _ChartLike(ConfigureMixin):
     # rules would block the attribute form on ``_CompositeBase``.
 
     def show(self) -> None:
-        """Print the SVG markup to stdout."""
-        print(self.to_svg())
+        """Display the composition inline in Jupyter or open it in a browser.
+
+        Routes through :func:`ferrum.display.show_chart`, the same display
+        path ``Chart.show()`` uses, so inline-vs-browser detection and
+        title resolution are identical for a composite and a plain chart.
+        """
+        from ferrum.display import show_chart
+
+        show_chart(self)
 
     def _repr_svg_(self) -> str:
         """Return SVG for Jupyter inline display."""
