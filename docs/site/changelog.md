@@ -6,6 +6,25 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.20.1 — 2026-07-15
+
+A patch release of interactive-rendering and annotation fixes found after v0.20.0, plus a documentation pass ([#80](https://github.com/chris-santiago/ferrum/issues/80)–[#83](https://github.com/chris-santiago/ferrum/issues/83)).
+
+### Added
+
+None
+
+### Fixed
+
+- Interactive charts: bold text (figure title, axis titles, legend title) no longer renders blurry. The overlay `@font-face` now embeds the Inter variable font (`font-weight:100 900`) instead of a single-weight Regular face that forced the browser to synthesize faux-bold ([#80](https://github.com/chris-santiago/ferrum/issues/80))
+- Composite charts' `.show()` (`hconcat`/`vconcat`/`concat`/`jointplot`/`clustermap`/layer) displays inline in Jupyter instead of printing raw SVG markup to stdout ([#81](https://github.com/chris-santiago/ferrum/issues/81))
+- `annotate_hline` / `annotate_vline` `label=` now renders the label and is preserved under `+` overlay onto a chart, where previously it was a documented no-op ([#82](https://github.com/chris-santiago/ferrum/issues/82))
+
+### Other
+
+- The accepted mark-style `**kwargs` are now documented in a canonical "Mark style kwargs" guide section generated from the enforced allowlist, with docstring cross-references replacing vague "…, etc." boilerplate ([#83](https://github.com/chris-santiago/ferrum/issues/83))
+- API reference: the config value-classes (`Configure`, `AxisConfig`, …), `resolve_format`, and `FerrumOverrideError` are homed on a new `configure` page, and the Altair comparison's stale `mark_geoshape` "not yet implemented" rows are corrected
+
 ## 0.20.0 — 2026-07-12
 
 Two secondary-axis and composite-legend feature streams ([#52](https://github.com/chris-santiago/ferrum/issues/52), [#16](https://github.com/chris-santiago/ferrum/issues/16)), the dodge-by-model `compare=` diagnostics ([#42](https://github.com/chris-santiago/ferrum/issues/42)), and Band/Point range handling ([#39](https://github.com/chris-santiago/ferrum/issues/39)/[#65](https://github.com/chris-santiago/ferrum/issues/65)/[#40](https://github.com/chris-santiago/ferrum/issues/40)) land alongside a release-scoped bug sweep that consolidated 23 edge-case defects into eight remediating issues ([#69](https://github.com/chris-santiago/ferrum/issues/69)–[#76](https://github.com/chris-santiago/ferrum/issues/76)).
