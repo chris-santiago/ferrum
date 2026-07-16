@@ -51,7 +51,7 @@ The semantics of the chart stay identical. A scatter at 1,000 rows and a scatter
 
 ### Scatter benchmark: Ferrum vs. Altair vs. seaborn vs. Plotly vs. plotnine
 
-Median of 3 runs on Apple M-series, macOS 24.6.0, Python 3.10. All libraries render the same bivariate-normal data with equivalent chart specifications. Ferrum runs with auto-raster on at both scales. Plotly uses ScatterGL (WebGL-backed) with kaleido for static exports. plotnine uses the same matplotlib backends as seaborn but adds a ggplot2-style grammar layer.
+Ferrum v0.20.1. Median of 3 runs on Apple M-series, macOS 24.6.0, Python 3.10. All libraries render the same bivariate-normal data with equivalent chart specifications. Ferrum runs with auto-raster on at both scales. Plotly uses ScatterGL (WebGL-backed) with kaleido for static exports. plotnine uses the same matplotlib backends as seaborn but adds a ggplot2-style grammar layer.
 
 #### 200,000 points
 
@@ -109,7 +109,7 @@ Ferrum's commitment is that those plots remain part of the same chart language e
 
 Performance is not only about speed in isolation. A library that is fast but requires a fragile system stack — Cairo, X11, a display server, a JavaScript runtime — is harder to deploy where real work happens.
 
-Ferrum favors operational simplicity as part of the same commitment. The rendering stack is pure Rust. There is no matplotlib dependency. There is no display server requirement. Charts render identically in notebooks, scripts, CI pipelines, containers, SSH sessions, and Kubernetes jobs. `pip install ferrum` is the entire setup; the compiled core ships in the wheel.
+Ferrum favors operational simplicity as part of the same commitment. The rendering stack is pure Rust. There is no matplotlib dependency. There is no display server requirement. Charts render identically in notebooks, scripts, CI pipelines, containers, SSH sessions, and Kubernetes jobs. `pip install ferrum-viz` is the entire setup; the compiled core ships in the wheel.
 
 This is part of why the library can promise that the same plotting code works in development and in production, not only that it runs fast in isolated benchmarks.
 

@@ -4,7 +4,7 @@ This page gets you from zero to a rendered chart in under a minute. By the end y
 
 !!! note "Prerequisites"
     This tutorial uses scikit-learn for sample datasets. If you followed the
-    [recommended install](install.md) (`pip install ferrum-viz[all]`), you
+    [recommended install](install.md) (`pip install "ferrum-viz[all]"`), you
     already have it. If you chose the lean install, run
     `pip install ferrum-viz[models]` first.
 
@@ -142,6 +142,19 @@ chart
 To clip the axis range without modifying the encoding, use `.xlim()` and `.ylim()`:
 
 ```python
+import ferrum as fm
+import polars as pl
+from sklearn.datasets import load_iris
+
+raw = load_iris()
+iris = pl.DataFrame(raw.data, schema=["sepal_length", "sepal_width", "petal_length", "petal_width"]).with_columns(
+    species=pl.Series([raw.target_names[t] for t in raw.target])
+)
+chart = (
+    fm.Chart(iris)
+    .mark_point()
+    .encode(x="sepal_length", y="petal_length", color="species:N")
+)
 chart = chart.xlim(4.5, 7.5).ylim(1.0, 6.5)
 chart
 ```
@@ -153,7 +166,7 @@ Both are shortcuts: `.labs()` is equivalent to setting `title=` on each channel 
 In four snippets you used:
 
 1. **Data binding** — `fm.Chart(iris)` accepts polars, pandas, modin, cuDF, dask, ibis, pyarrow, or dict-of-arrays. One constructor.
-2. **Marks** — [`mark_point()`][ferrum.Chart.mark_point], [`mark_smooth()`][ferrum.Chart.mark_smooth], [`mark_boxplot()`][ferrum.Chart.mark_boxplot]. Ferrum has 54 marks covering primitives, statistical transforms, distributions, and model diagnostics.
+2. **Marks** — [`mark_point()`][ferrum.Chart.mark_point], [`mark_smooth()`][ferrum.Chart.mark_smooth], [`mark_boxplot()`][ferrum.Chart.mark_boxplot]. Ferrum ships dozens of marks covering primitives, statistical transforms, distributions, and model diagnostics.
 3. **Encodings** — `x`, `y`, `color`. Shorthand strings like `"species:N"` set the type (Nominal). The `:N` suffix declares the field as Nominal (categorical); Ferrum supports four type codes: `:Q` (quantitative/continuous), `:N` (nominal/categorical), `:O` (ordinal/ranked), and `:T` (temporal/datetime). See [Marks & encodings](../guide/marks-encodings.md#encoding-channels) for details. The full form [`fm.X("field", type="Q", title="...")`][ferrum.X] gives finer control.
 4. **Composition** — `+` layers marks on shared axes. `|` and `&` concatenate charts side-by-side or stacked.
 5. **Themes** — `.theme(fm.themes.publication)` swaps the entire visual style without touching the data or encoding.

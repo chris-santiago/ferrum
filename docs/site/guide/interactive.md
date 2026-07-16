@@ -14,7 +14,7 @@ Install the interactive extras:
 pip install ferrum-viz[jupyter]
 ```
 
-This adds `anywidget` and `ipywidgets` as dependencies. The WASM GPU renderer is bundled inside the `ferrum` wheel — no separate download.
+This adds `anywidget` (which pulls in `ipywidgets`) as a dependency. The WASM GPU renderer is bundled inside the `ferrum` wheel — no separate download.
 
 ## Switching to interactive mode
 

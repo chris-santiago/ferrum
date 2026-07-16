@@ -72,6 +72,16 @@ AxisConfig(
 | `domain_max` | `float | None` | `None` | Maximum of the scale domain |
 | `nice` | `bool | None` | `None` | Round domain to nice values |
 | `zero` | `bool | None` | `None` | Include zero in the domain |
+| `label_padding` | `float | None` | `None` | Pixel gap between tick mark and label text (defaults to 2.0) |
+| `grid_opacity` | `float | None` | `None` | Grid line opacity (0–1) |
+| `orient` | `str | None` | `None` | Axis side: `"top"`/`"bottom"` (x) or `"left"`/`"right"` (y); set via `axis_x`/`axis_y`, not the shared `axis` |
+| `translate` | `float | None` | `None` | Pixel translation of the axis group perpendicular to its line |
+| `min_band` | `float | None` | `None` | Lower bound for the reserved axis margin band, in pixels |
+| `max_band` | `float | None` | `None` | Upper bound for the reserved axis margin band, in pixels |
+| `tick_extra` | `bool | None` | `None` | Append an extra tick at each domain boundary |
+| `tick_min_step` | `float | None` | `None` | Minimum step between ticks in data space |
+| `title_orient` | `str | None` | `None` | Side/orientation of the axis title |
+| `zindex` | `int | None` | `None` | Coarse draw order of the axis relative to marks |
 
 ### Notes
 
@@ -196,6 +206,16 @@ LegendConfig(
 | `gradient_length` | `float | None` | `None` | Continuous gradient legend length |
 | `offset` | `float | None` | `None` | Offset from the plot area edge |
 | `padding` | `float | None` | `None` | Internal padding between items |
+| `label_color` | `str | None` | `None` | Legend label color |
+| `label_limit` | `float | None` | `None` | Max label width in pixels; wider labels truncate with an ellipsis |
+| `symbol_stroke_width` | `float | None` | `None` | Stroke width of legend symbol swatches |
+| `gradient_thickness` | `float | None` | `None` | Gradient (colorbar) legend thickness in pixels |
+| `title_padding` | `float | None` | `None` | Padding between the legend title and its entries |
+| `row_padding` | `float | None` | `None` | Vertical entry spacing (vertical-direction legends) |
+| `column_padding` | `float | None` | `None` | Horizontal entry spacing (horizontal-direction legends) |
+| `clip_height` | `float | None` | `None` | Cap on legend group height in pixels; overflow is clipped |
+| `tick_min_step` | `float | None` | `None` | Minimum step between colorbar ticks in data units |
+| `zindex` | `int | None` | `None` | Coarse draw order of the legend relative to marks |
 
 ### Notes
 

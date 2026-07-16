@@ -177,7 +177,9 @@ combined
 
 ![Shared scales](img/composition_08.png)
 
-[`.share_scale()`][ferrum.Chart.share_scale] accepts keyword arguments where each key is a channel name (`x`, `y`, `color`, `size`) and the value is `"shared"` or `"independent"`. Channels not listed default to `"independent"`. When `"shared"`, the union domain across all member charts is computed and injected into every panel, locking their axes to the same range and ticks.
+`.share_scale()` accepts keyword arguments where each key is a channel name and the value is `"shared"` or `"independent"`. Channels not listed default to `"independent"`. When `"shared"`, the union domain across all member charts is computed and injected into every panel, locking their axes to the same range and ticks.
+
+The full channel set (`x`, `y`, `color`, `size`) is supported on composition objects (`HConcatChart`, `VConcatChart`, `JointChart`, `RepeatChart`). The base [`Chart.share_scale`][ferrum.Chart.share_scale] method supports `x` and `y` only; call `.share_scale(color=..., size=...)` on a composition, not on a single `Chart`.
 
 The method returns a new composition of the same type — it works on [`HConcatChart`][ferrum.HConcatChart], [`VConcatChart`][ferrum.VConcatChart], [`JointChart`][ferrum.JointChart], and [`RepeatChart`][ferrum.RepeatChart].
 
@@ -206,7 +208,7 @@ joint
 
 ![JointChart with marginal](img/composition_06.png)
 
-The center chart shares its x-axis with the top marginal. `JointChart` also accepts a `right=` keyword that places a marginal on the right edge sharing the y-axis; the `right` marginal needs to be a chart authored with the correct orientation for that side. The `ratio` parameter (default 5) controls how much vertical space the center chart takes versus the marginal — `ratio=5` means the center is 5× taller than the top marginal.
+The center chart shares its x-axis with the top marginal. `JointChart` also accepts a `right=` keyword that places a marginal on the right edge sharing the y-axis. A right marginal must be authored to run vertically: pass `orientation="horizontal"` to the marginal's `mark_density`/`mark_histogram` so its density axis points sideways to match the shared y-axis. The `ratio` parameter (default 5) controls how much vertical space the center chart takes versus the marginal — `ratio=5` means the center is 5× taller than the top marginal. If you would rather not manage the orientation by hand, use [`jointplot`][ferrum.jointplot] (below), which builds both marginals with the correct orientation for you.
 
 If you want a one-line entry point that handles both marginals and the orientation for you, [`jointplot`][ferrum.jointplot] in `ferrum.plots` is the convenience helper that builds a [`JointChart`][ferrum.JointChart] automatically.
 
@@ -313,7 +315,7 @@ That recursive composition is what makes complex dashboards-as-static-images via
 
 ## LayerChart and ConcatChart
 
-Phase 12 adds [`LayerChart`](../api/composition.md) for shared-axes overlay and [`ConcatChart`](../api/composition.md) for wrapping grid layouts.
+Ferrum provides [`LayerChart`](../api/composition.md) for shared-axes overlay and [`ConcatChart`](../api/composition.md) for wrapping grid layouts.
 
 In addition to the `+` operator and `|` / `&` operators, ferrum provides two class-based composition primitives for programmatic use: [`LayerChart`][ferrum.LayerChart] and [`ConcatChart`][ferrum.ConcatChart].
 
@@ -378,4 +380,4 @@ Every composition — `|`, `&`, `ConcatChart`, `LayerChart`, and the grid forms 
 - [Themes](themes.md) for how to apply consistent styling across composed charts.
 - [Model diagnostics](model-diagnostics.md) for the canonical use case: composing multiple diagnostic plots into a model evaluation view.
 - [Interactive rendering](interactive.md) for how selections and linked views work across composed charts.
-- The [API Reference](../api/ferrum.md) for the full signatures of `HConcatChart`, `VConcatChart`, `JointChart`, `RepeatChart`, and `ClusterMapChart`.
+- The [API Reference](../api/ferrum-toc.md) for the full signatures of `HConcatChart`, `VConcatChart`, `JointChart`, `RepeatChart`, and `ClusterMapChart`.

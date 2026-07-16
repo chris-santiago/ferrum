@@ -6,7 +6,7 @@ The diagnostic surface consists of three coordinated layers. You can mix and mat
 
 | Layer | What it is | When to reach for it |
 |---|---|---|
-| **Figure-level helpers** | [`roc_chart`][ferrum.roc_chart], [`calibration_chart`][ferrum.calibration_chart], [`confusion_matrix_chart`][ferrum.confusion_matrix_chart], [`shap_chart`][ferrum.shap_chart], etc. | One-line entry points. Takes a fitted model + test data, returns a [`Chart`][ferrum.Chart]. |
+| **Figure-level helpers** | [`roc_chart`][ferrum.roc_chart], [`calibration_chart`][ferrum.calibration_chart], [`confusion_matrix_chart`][ferrum.confusion_matrix_chart], [`shap_beeswarm_chart`][ferrum.shap_beeswarm_chart], etc. | One-line entry points. Takes a fitted model + test data, returns a [`Chart`][ferrum.Chart]. |
 | **[`ModelSource`][ferrum.ModelSource]** | The data interface | When you want to compute derived diagnostic data once and reuse it across multiple charts. |
 | **sklearn-protocol visualizers** | [`ROCVisualizer`][ferrum.ROCVisualizer], [`CalibrationVisualizer`][ferrum.CalibrationVisualizer], [`ConfusionMatrixVisualizer`][ferrum.ConfusionMatrixVisualizer], etc. | When you want lifecycle control (`.fit()` / `.score()` / `.show()`) or are following a yellowbrick-style pattern. |
 
@@ -76,11 +76,13 @@ Every helper follows the same signature shape: `helper(model_or_source, X=None, 
 |---|---|
 | Classification | [`roc_chart`][ferrum.roc_chart], [`pr_chart`][ferrum.pr_chart], [`calibration_chart`][ferrum.calibration_chart], [`confusion_matrix_chart`][ferrum.confusion_matrix_chart], [`class_prediction_error_chart`][ferrum.class_prediction_error_chart], [`classification_report_chart`][ferrum.classification_report_chart], [`class_balance_chart`][ferrum.class_balance_chart], [`discrimination_threshold_chart`][ferrum.discrimination_threshold_chart], [`gain_chart`][ferrum.gain_chart], [`lift_chart`][ferrum.lift_chart] |
 | Regression | [`residuals_chart`][ferrum.residuals_chart], [`prediction_error_chart`][ferrum.prediction_error_chart], [`cooks_distance_chart`][ferrum.cooks_distance_chart] |
-| Feature explanation | [`importance_chart`][ferrum.importance_chart], [`shap_chart`][ferrum.shap_chart], [`shap_beeswarm_chart`][ferrum.shap_beeswarm_chart], [`shap_bar_chart`][ferrum.shap_bar_chart], [`shap_waterfall_chart`][ferrum.shap_waterfall_chart], [`pdp_chart`][ferrum.pdp_chart] |
+| Feature explanation | [`importance_chart`][ferrum.importance_chart], [`shap_beeswarm_chart`][ferrum.shap_beeswarm_chart], [`shap_bar_chart`][ferrum.shap_bar_chart], [`shap_waterfall_chart`][ferrum.shap_waterfall_chart], [`pdp_chart`][ferrum.pdp_chart] |
 | Model selection | [`learning_curve_chart`][ferrum.learning_curve_chart], [`validation_curve_chart`][ferrum.validation_curve_chart], [`cv_scores_chart`][ferrum.cv_scores_chart], [`alpha_selection_chart`][ferrum.alpha_selection_chart] |
-| Clustering / manifold | [`silhouette_chart`][ferrum.silhouette_chart], [`elbow_chart`][ferrum.elbow_chart], [`manifold_chart`][ferrum.manifold_chart], [`pca_scree_chart`][ferrum.pca_scree_chart], [`intercluster_distance_chart`][ferrum.intercluster_distance_chart], [`parallel_coordinates_chart`][ferrum.parallel_coordinates_chart], [`decision_boundary_chart`][ferrum.decision_boundary_chart], [`rank_chart`][ferrum.rank_chart], [`rank1d_chart`][ferrum.rank1d_chart], [`rank2d_chart`][ferrum.rank2d_chart], [`cluster_diagnostics`][ferrum.cluster_diagnostics] |
+| Clustering / manifold | [`silhouette_chart`][ferrum.silhouette_chart], [`elbow_chart`][ferrum.elbow_chart], [`manifold_chart`][ferrum.manifold_chart], [`pca_scree_chart`][ferrum.pca_scree_chart], [`intercluster_distance_chart`][ferrum.intercluster_distance_chart], [`parallel_coordinates_chart`][ferrum.parallel_coordinates_chart], [`decision_boundary_chart`][ferrum.decision_boundary_chart], [`rank1d_chart`][ferrum.rank1d_chart], [`rank2d_chart`][ferrum.rank2d_chart], [`cluster_diagnostics`][ferrum.cluster_diagnostics] |
 
-The full API surface is on the [API Reference / ferrum](../api/ferrum.md) page.
+The full API surface is on the [API Reference / plots](../api/plots.md) page.
+
+The fitted-model path (`roc_chart(model, X, y)`) needs scikit-learn — install it with `pip install "ferrum-viz[models]"`. The precomputed `y_true=` / `y_pred=` path (below) needs no extra.
 
 ## `ModelSource`: derived diagnostic data
 
@@ -114,7 +116,7 @@ The `report` value is a regular composed chart — `(roc | cm) & importances` la
 
 The boundary `ModelSource` enforces is the load-bearing one: it computes the derived diagnostic tables *once*, then every chart consumes the result. Without `ModelSource`, computing a ROC curve and a calibration curve on the same model would re-predict probabilities twice, and you'd have to thread that data plumbing through your own code.
 
-`ModelSource` also lazy-imports sklearn, shap, and umap as needed: `import ferrum` does not pull those packages into your process. They load only when you actually compute a diagnostic that requires them — and only on the **fitted-model** path. The raw-array path (below) computes its metrics on Ferrum's native Rust kernels and imports none of them.
+`ModelSource` also lazy-imports sklearn and shap as needed: `import ferrum` does not pull those packages into your process. (UMAP embeddings run in pure Rust, so no Python `umap` package is ever imported.) They load only when you actually compute a diagnostic that requires them — and only on the **fitted-model** path. The raw-array path (below) computes its metrics on Ferrum's native Rust kernels and imports none of them.
 
 ## Comparing multiple models
 
@@ -310,4 +312,4 @@ A few sharp edges worth knowing:
 - [Figure-level helpers](figure-helpers.md) for the broader family of one-line chart helpers (most diagnostic helpers follow the same pattern).
 - [Composition](composition.md) for the operators (`+`, `|`, `&`) used to compose multiple diagnostics into a single model report.
 - [Themes](themes.md) for applying consistent styling to a multi-chart diagnostic view.
-- The [API Reference / ferrum](../api/ferrum.md) for the full signatures of every `*_chart` helper and every `*Visualizer` class.
+- The [API Reference / plots](../api/plots.md) for the full signatures of every `*_chart` helper, and [API Reference / visualizers](../api/visualizers.md) for every `*Visualizer` class.

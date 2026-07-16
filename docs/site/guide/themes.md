@@ -158,6 +158,7 @@ Notes:
 | `tick_color` | str | Tick mark color. |
 | `tick_size` | float | Tick mark length. |
 | `tick_width` | float | Tick mark width. |
+| `cull_threshold` | int | Tick-label count above which crowded labels are culled. Set to `0` to disable culling. |
 
 ### Marks
 
@@ -194,6 +195,8 @@ For programmatic palette access outside of themes, see [ferrum.color](../api/col
 | `column_padding` | float | Spacing between columns in multi-panel layouts. |
 | `row_padding` | float | Spacing between rows in multi-panel layouts. |
 | `strip_background_color` | str | Facet strip-title background. |
+| `strip_padding` | float | Vertical padding around facet strip titles. |
+| `strip_text_size` | float | Font size for facet strip-title text. |
 | `reference_line_color` | str | Color for reference lines. |
 | `reference_line_dash` | list | Dash pattern for reference lines. |
 
@@ -218,7 +221,7 @@ Ten named categorical palettes, selectable via `color_scheme`:
 
 ### Sequential
 
-Twelve named sequential ramps, selectable via `sequential_scheme`:
+Sixteen named sequential ramps, selectable via `sequential_scheme`:
 
 | Name | Character |
 |---|---|
@@ -234,6 +237,10 @@ Twelve named sequential ramps, selectable via `sequential_scheme`:
 | `inferno` | Perceptually uniform black-red-yellow. |
 | `cividis` | Colorblind-optimized blue-yellow. |
 | `blues` | ColorBrewer sequential blues. |
+| `reds` | ColorBrewer single-hue reds. |
+| `greens` | ColorBrewer single-hue greens. |
+| `oranges` | ColorBrewer single-hue oranges. |
+| `purples` | ColorBrewer single-hue purples. |
 
 ### Diverging
 

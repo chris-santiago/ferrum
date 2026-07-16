@@ -57,7 +57,19 @@ title_anchor, title_offset : optional
     grid : bool, optional
         Whether to draw grid lines (default True).
     grid_color, grid_width, grid_dash, grid_opacity : optional
-        Grid line styling. ``grid_dash`` is a list of dash lengths.
+        Grid line styling applied to every gridline. ``grid_dash`` is a list
+        of dash lengths.
+    major_grid_color, major_grid_width, major_grid_dash, major_grid_opacity : optional
+        Per-level styling for major gridlines. Mirror the flat ``grid_*``
+        keys but apply only to major gridlines, overriding the flat values
+        when set.
+    minor_grid_color, minor_grid_width, minor_grid_dash, minor_grid_opacity : optional
+        Per-level styling for minor gridlines (see ``minor``). Mirror the
+        flat ``grid_*`` keys but apply only to minor gridlines.
+    minor : bool, optional
+        Whether to draw minor gridlines on continuous scales (default
+        False). ``fm.Grid`` is the structured API for richer per-level grid
+        styling.
     axis_line : bool, optional
         Whether to draw axis strokes (default True).
     axis_line_color, axis_line_width, tick_color, tick_size, tick_width : optional

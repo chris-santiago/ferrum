@@ -386,7 +386,7 @@ chart = (
 Methods: `"linear"`, `"poly"` (set `order=` for degree), `"exp"`, `"log"`, `"pow"`.
 
 !!! note "mark_smooth method aliases"
-    `mark_smooth(method=)` accepts several friendly aliases in addition to the primary names. `"linear"`, `"quadratic"`, and `"cubic"` map to OLS polynomial fits of degree 1, 2, and 3 respectively; `"log"` and `"sqrt"` fit log and square-root curves. `"lm"` is the primary name for linear fits; `"loess"` (or `"lowess"`) is the primary name for locally weighted regression. All of the following are valid: `method="lm"`, `method="linear"`, `method="loess"`, `method="quadratic"`, `method="cubic"`, `method="log"`, `method="sqrt"`.
+    `mark_smooth(method=)` accepts several friendly aliases in addition to the primary names. `"linear"`, `"quadratic"`, and `"cubic"` map to OLS polynomial fits of degree 1, 2, and 3 respectively; `"log"` and `"sqrt"` fit log and square-root curves. `"lm"` is the primary name for linear fits; `"loess"` is the name for locally weighted regression. All of the following are valid: `method="lm"`, `method="linear"`, `method="loess"`, `method="quadratic"`, `method="cubic"`, `method="log"`, `method="sqrt"`.
 
 ### `transform_loess` — LOESS smoothing
 
@@ -562,4 +562,4 @@ The order matters: filtering before aggregation reduces the data that gets summa
 - [Marks & encodings](marks-encodings.md) for the mark types and encoding channels that consume transform output.
 - [Composition](composition.md) for combining multiple transformed views into compound charts.
 - [Figure-level helpers](figure-helpers.md) for one-line chart functions that handle common transform patterns internally.
-- The [API Reference](../api/ferrum.md) for the full signatures of every transform function.
+- The [API Reference](../api/ferrum-toc.md) for the full signatures of every transform function.

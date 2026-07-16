@@ -15,7 +15,7 @@ If you think in `ggplot() + geom_*() + facet_*()`, the translation to Ferrum is 
 | `geom_col()` | [`.mark_bar()`][ferrum.Chart.mark_bar] | — |
 | `geom_histogram()` | [`.mark_histogram()`][ferrum.Chart.mark_histogram] | Binning computed in Rust. |
 | `geom_density()` | [`.mark_density()`][ferrum.Chart.mark_density] | KDE computed in Rust. |
-| `geom_smooth()` | [`.mark_smooth()`][ferrum.Chart.mark_smooth] | `method=` accepts `"lm"`, `"loess"`, `"lowess"`, `"poly"`. |
+| `geom_smooth()` | [`.mark_smooth()`][ferrum.Chart.mark_smooth] | `method=` accepts `"lm"` (alias `"linear"`), `"loess"`, `"quadratic"`, `"cubic"`, `"log"`, `"sqrt"`. |
 | `geom_boxplot()` | [`.mark_boxplot()`][ferrum.Chart.mark_boxplot] | — |
 | `geom_violin()` | [`.mark_violin()`][ferrum.Chart.mark_violin] | — |
 | `geom_tile()` | [`.mark_rect()`][ferrum.Chart.mark_rect] | — |
@@ -33,7 +33,7 @@ If you think in `ggplot() + geom_*() + facet_*()`, the translation to Ferrum is 
 | `facet_wrap(~var)` | [`.encode(facet="var")`][ferrum.Chart.encode] | Faceting is an encoding channel. |
 | `facet_grid(row~col)` | [`.encode(facet_row="row", facet_col="col")`][ferrum.Chart.encode] | — |
 | `scale_x_log10()` | `.encode(x=`[`fm.X`][ferrum.X]`("x", scale=`[`fm.LogScale`][ferrum.LogScale]`()))` | Scales are values, not global functions. |
-| `coord_flip()` | [`.coord("flip")`][ferrum.Chart.coord] | — |
+| `coord_flip()` | [`.coord(`][ferrum.Chart.coord]`fm.CoordFlip())` | Coordinates are objects, not strings. |
 | `labs(title=, x=, y=)` | [`.labs(x=, y=, title=)`][ferrum.Chart.labs] | Post-hoc axis label shortcut. Also `.properties(title=)` for chart title only. |
 | `xlim()` / `ylim()` | [`.xlim(lo, hi)`][ferrum.Chart.xlim] / [`.ylim(lo, hi)`][ferrum.Chart.ylim] | Axis limit shortcuts. Also `fm.X("field", scale=fm.LinearScale(domain=[lo, hi]))`. |
 | `geom_abline(slope=, intercept=)` | [`fm.annotate_abline(slope, intercept)`][ferrum.annotate_abline] | Returns a `Chart`; layer it with `+`. Accepts `stroke=`, `stroke_width=`, `stroke_dash=`. |
@@ -121,11 +121,11 @@ plotnine delegates statistical computation to scipy and statsmodels via matplotl
 
 | Category | plotnine | Ferrum |
 |---|---|---|
-| Primitive marks | point, line, bar, area, tile, text, rule, segment, step | All of plotnine's + tick, rect, image |
+| Primitive marks | point, line, bar, area, tile, text, rule, segment, step | All of plotnine's + tick, rect, image (step via `mark_line(interpolate="step")`) |
 | Statistical marks | histogram, density, smooth, boxplot, violin, qq, hex, contour, ribbon, errorbar | All of plotnine's + boxen, swarm, raster, function |
 | Faceting | `facet_wrap`, `facet_grid` | `facet`, `facet_row`, `facet_col` encoding channels |
 | Composition | `+` (layers only) | `+` layer, `\|` [`hconcat`][ferrum.hconcat], `&` [`vconcat`][ferrum.vconcat], [`RepeatChart`][ferrum.RepeatChart], [`JointChart`][ferrum.JointChart] |
-| Coordinates | `coord_flip`, `coord_fixed`, `coord_cartesian`, `coord_polar` | `"flip"`, `"polar"`, `"theta"`, `"radial"` |
+| Coordinates | `coord_flip`, `coord_fixed`, `coord_cartesian`, `coord_polar` | [`fm.CoordFlip()`][ferrum.CoordFlip], [`fm.CoordPolar(theta=...)`][ferrum.CoordPolar], [`fm.CoordCartesian(...)`][ferrum.CoordCartesian], [`fm.CoordFixed(...)`][ferrum.CoordFixed] |
 | Scales | Full ggplot2 scale system | Typed scale values like [`fm.LinearScale`][ferrum.LinearScale] / [`fm.LogScale`][ferrum.LogScale] (`domain=`, `range=`) |
 | Themes | ggplot2 theme system (bw, classic, minimal, etc.) | 12 built-in themes (Paper Ink, Slate Citrus, Dark, Publication, Economist, etc.). See [Themes](../guide/themes.md). |
 | Interactivity | matplotlib backends only | WASM/GPU renderer with selections, zoom/pan, linked views via [`.interactive()`][ferrum.Chart.interactive] |

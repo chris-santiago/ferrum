@@ -32,7 +32,8 @@ class Color(ChannelBase):
     scheme : str, optional
         Named categorical color scheme (e.g. ``"tableau10"``, ``"set1"``).
     scale : Scale, optional
-        Explicit scale override (e.g. ``ColorScale.Continuous("viridis")``).
+        Explicit scale override (e.g. ``fm.ContinuousScheme("viridis")`` or
+        ``fm.continuous_palette("viridis")``).
     title : str, optional
         Legend title override.  When omitted the field name is used.
 
@@ -182,11 +183,25 @@ class Fill(ChannelBase):
         Column name to map to fill color.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
+    scheme : str, optional
+        Named categorical or continuous color scheme (e.g. ``"tableau10"``,
+        ``"viridis"``), validated against the palette registry.
+    scale : Scale, optional
+        Explicit scale override (e.g. ``fm.ContinuousScheme("viridis")``).
+    title : str, optional
+        Legend title override.  When omitted the field name is used.
+
+    Notes
+    -----
+    ``legend`` is honored: passing ``legend={"disabled": True}``, ``legend=None``,
+    or ``legend=False`` suppresses the fill legend in the rendered SVG.
+    ``condition`` is accepted but reserved for future use.
 
     Examples
     --------
     >>> import ferrum as fm
     >>> fm.Chart(df).encode(x="hp", y="mpg", fill=fm.Fill("origin"))
+    >>> fm.Chart(df).encode(x="hp", y="mpg", fill=fm.Fill("origin", scheme="set1"))
     """
 
     _channel_name = "fill"
@@ -205,11 +220,25 @@ class Stroke(ChannelBase):
         Column name to map to stroke color.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
+    scheme : str, optional
+        Named categorical or continuous color scheme (e.g. ``"tableau10"``,
+        ``"viridis"``), validated against the palette registry.
+    scale : Scale, optional
+        Explicit scale override (e.g. ``fm.ContinuousScheme("viridis")``).
+    title : str, optional
+        Legend title override.  When omitted the field name is used.
+
+    Notes
+    -----
+    ``legend`` is honored: passing ``legend={"disabled": True}``, ``legend=None``,
+    or ``legend=False`` suppresses the stroke legend in the rendered SVG.
+    ``condition`` is accepted but reserved for future use.
 
     Examples
     --------
     >>> import ferrum as fm
     >>> fm.Chart(df).encode(x="hp", y="mpg", stroke=fm.Stroke("origin"))
+    >>> fm.Chart(df).encode(x="hp", y="mpg", stroke=fm.Stroke("origin", scheme="set1"))
     """
 
     _channel_name = "stroke"
@@ -229,6 +258,12 @@ class FillOpacity(ChannelBase):
         Column name to map to fill opacity.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
+
+    Notes
+    -----
+    ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
+    the legend in the rendered SVG.  ``scale`` (explicit scale override) and
+    ``title`` (legend title) are also honored.
 
     Examples
     --------
@@ -254,6 +289,11 @@ class StrokeOpacity(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
+    Notes
+    -----
+    ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
+    the legend in the rendered SVG.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -276,6 +316,11 @@ class StrokeWidth(ChannelBase):
         Column name to map to stroke width.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
+
+    Notes
+    -----
+    ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
+    the legend in the rendered SVG.
 
     Examples
     --------
@@ -301,6 +346,11 @@ class StrokeDash(ChannelBase):
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
 
+    Notes
+    -----
+    ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
+    the legend in the rendered SVG.
+
     Examples
     --------
     >>> import ferrum as fm
@@ -324,6 +374,11 @@ class Angle(ChannelBase):
         Column name to map to rotation angle.
     type_ : {"Q", "N", "O", "T"}, optional
         Data type. Inferred from the column dtype when omitted.
+
+    Notes
+    -----
+    ``legend`` is honored: passing ``legend=None`` or ``legend=False`` suppresses
+    the legend in the rendered SVG.
 
     Examples
     --------

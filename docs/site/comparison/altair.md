@@ -88,7 +88,7 @@ Most Altair marks map directly. `mark_circle` and `mark_square` are aliases for 
 
 ## Transforms
 
-In Altair, transforms are chained on the chart: `chart.transform_filter(...)`. In Ferrum, transforms are passed to `.transform()` as objects:
+In Altair, transforms are chained on the chart: `chart.transform_filter(...)`. In Ferrum, the top-level `transform_*` functions build transform specs that you pass to `.transform()`. Predicates and calculate expressions reference fields via `datum.`:
 
 <!--pytest.mark.skip-->
 ```python
@@ -99,7 +99,7 @@ alt.Chart(df).mark_point().encode(x="x:Q", y="y:Q").transform_filter(
 
 # Ferrum
 fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q").transform(
-    fm.Filter("value > 0")
+    fm.transform_filter("datum.value > 0")
 )
 ```
 
@@ -107,17 +107,17 @@ Common transform equivalents:
 
 | Altair | Ferrum |
 |---|---|
-| `.transform_filter(predicate)` | `.transform(fm.Filter("expr"))` |
-| `.transform_calculate(field, expr)` | `.transform(fm.Calculate(field="name", expr="expr"))` |
-| `.transform_fold(fields, as_=["key","value"])` | `.transform(fm.Fold(fields=["a","b"]))` |
+| `.transform_filter(predicate)` | `.transform(fm.transform_filter("datum.value > 0"))` |
+| `.transform_calculate(field, expr)` | `.transform(fm.transform_calculate("name", "datum.a * 2"))` |
+| `.transform_fold(fields, as_=["key","value"])` | `.transform(fm.transform_fold(["a", "b"]))` |
 | `.transform_aggregate(groupby=, ...)` | `.transform(fm.Aggregate(groupby=["col"], ops=[...]))` |
 | `.transform_bin("binned_x", field="x")` | Mark-level: `.mark_histogram(bin_count=20)` |
 | `.transform_density("value")` | Mark-level: `.mark_density()` |
 | `.transform_regression("y", on="x")` | Mark-level: `.mark_smooth(method="lm")` |
 | `.transform_loess("y", on="x")` | Mark-level: `.mark_smooth(method="loess")` |
-| `.transform_window(...)` | `.transform(fm.Window(...))` |
-| `.transform_sample(n)` | `.transform(fm.Sample(n=n))` |
-| `.transform_flatten(fields)` | `.transform(fm.Flatten(fields=["col"]))` |
+| `.transform_window(...)` | `.transform(fm.transform_window(...))` |
+| `.transform_sample(n)` | `.transform(fm.transform_sample(n))` |
+| `.transform_flatten(fields)` | `.transform(fm.transform_flatten(["col"]))` |
 
 Statistical transforms (bin, density, regression, loess) are first-class marks in Ferrum — they compute in Rust at render time and do not require a separate transform step.
 
@@ -152,11 +152,12 @@ alt.Chart(df).mark_point().encode(
     y="mpg:Q",
 ).repeat(column=["hp", "weight", "displacement"])
 
-# Ferrum
-fm.Chart(df).mark_point().encode(
-    x=fm.X(fm.Repeat("column"), type="quantitative"),
+# Ferrum — build a template chart, then wrap it in RepeatChart
+template = fm.Chart(df).mark_point().encode(
+    x=fm.Repeat.column,
     y="mpg:Q",
-).repeat(column=["hp", "weight", "displacement"])
+)
+fm.RepeatChart(template, column=["hp", "weight", "displacement"])
 ```
 
 ## Selections and conditions
@@ -199,20 +200,22 @@ alt.Chart(df).mark_point().encode(
 
 # Ferrum
 fm.Chart(df).mark_point().encode(
-    x=fm.X("x:Q", scale=fm.Scale(type="log")),
-    color=fm.Color("cat:N", scale=fm.Scale(scheme="tableau10")),
+    x=fm.X("x:Q", scale=fm.LogScale()),
+    color=fm.Color("cat:N", scale={"scheme": "tableau10"}),
 )
 ```
 
+The scale *type* is chosen by the class you instantiate (`fm.LogScale`, `fm.SqrtScale`, `fm.LinearScale`, `fm.OrdinalScale`, …); the remaining Altair `Scale` parameters map to constructor keywords or, for schemes, a dict on the channel:
+
 | Altair `Scale` param | Ferrum equivalent |
 |---|---|
-| `type="log"` | `fm.Scale(type="log")` |
-| `type="sqrt"` | `fm.Scale(type="sqrt")` |
-| `domain=[0, 100]` | `fm.Scale(domain=[0, 100])` |
-| `range=["red","blue"]` | `fm.Scale(range=["red","blue"])` |
-| `zero=False` | `fm.Scale(zero=False)` |
-| `scheme="tableau10"` | `fm.Scale(scheme="tableau10")` |
-| `clamp=True` | `fm.Scale(clamp=True)` |
+| `type="log"` | `fm.LogScale()` |
+| `type="sqrt"` | `fm.SqrtScale()` |
+| `domain=[0, 100]` | `fm.LinearScale(domain=[0, 100])` |
+| `range=["red","blue"]` | `fm.OrdinalScale(domain=["a", "b"], range=["red", "blue"])` |
+| `zero=False` | pin an explicit `fm.LinearScale(domain=[lo, hi])` (no `zero` toggle) |
+| `scheme="tableau10"` | `scale={"scheme": "tableau10"}` on the channel |
+| `clamp=True` | `fm.LinearScale(clamp=True)` |
 
 ## Chart properties
 
@@ -268,7 +271,7 @@ chart.to_dict()   # Python dict
 | Statistical transforms | `.transform_*()` on chart | First-class marks (`.mark_smooth()`, `.mark_density()`, etc.) |
 | Selection conditions | `alt.condition(sel, a, b)` | `sel.when(a).otherwise(b)` |
 | Adding selections | `.add_params(sel)` | `.add_selection(sel)` |
-| Repeat shorthand | `alt.repeat("column")` | `fm.Repeat("column")` |
+| Repeat shorthand | `alt.repeat("column")` | `fm.Repeat.column` in a template + `fm.RepeatChart(template, column=[...])` |
 | Title objects | `alt.Title(...)` | `fm.Title(...)` |
 | Geographic marks | `mark_geoshape()` supported | `mark_geoshape()` + `CoordGeo(projection=…)` |
 | Model diagnostics | — | 44 figure helpers, 28 visualizer classes |

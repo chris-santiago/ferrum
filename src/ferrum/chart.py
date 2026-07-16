@@ -1162,11 +1162,12 @@ class Chart(
         Parameters
         ----------
         **kwargs
-            Constant mark-style overrides such as ``color`` (alias for
-            ``fill``), ``opacity``, ``stroke``, ``stroke_width``. See
-            *Mark style kwargs* in the marks & encodings guide
-            (``docs/site/guide/marks-encodings.md``) for the full accepted
-            set.
+            Constant mark-style overrides: ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``opacity``, ``corner_radius``;
+            aliases ``color``→``fill`` and ``alpha``→``opacity``.  Unknown keys
+            raise ``TypeError``.  See *Mark style kwargs* in the marks &
+            encodings guide (``docs/site/guide/marks-encodings.md``) for the
+            full accepted set.
 
         Examples
         --------
@@ -1186,10 +1187,12 @@ class Chart(
         Parameters
         ----------
         **kwargs
-            Constant mark-style overrides, e.g. ``opacity``. See *Mark
-            style kwargs* in the marks & encodings guide
-            (``docs/site/guide/marks-encodings.md``) for the full accepted
-            set.
+            Constant mark-style overrides: ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``opacity``, ``corner_radius``;
+            aliases ``color``→``fill`` and ``alpha``→``opacity``.  Unknown keys
+            raise ``TypeError``.  See *Mark style kwargs* in the marks &
+            encodings guide (``docs/site/guide/marks-encodings.md``) for the
+            full accepted set.
 
         Examples
         --------
@@ -1208,11 +1211,12 @@ class Chart(
         Parameters
         ----------
         **kwargs
-            Constant mark-style overrides such as ``color`` (alias for
-            ``fill``), ``opacity``, ``stroke``, ``stroke_width``. See
-            *Mark style kwargs* in the marks & encodings guide
-            (``docs/site/guide/marks-encodings.md``) for the full accepted
-            set.
+            Constant mark-style overrides: ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``opacity``, ``corner_radius``;
+            aliases ``color``→``fill`` and ``alpha``→``opacity``.  Unknown keys
+            raise ``TypeError``.  See *Mark style kwargs* in the marks &
+            encodings guide (``docs/site/guide/marks-encodings.md``) for the
+            full accepted set.
 
         Examples
         --------

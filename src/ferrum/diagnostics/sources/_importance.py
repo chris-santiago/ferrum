@@ -30,16 +30,25 @@ class FeatureImportanceMixin(_MixinBase):
     ) -> pl.DataFrame:
         """Feature importance per feature, sorted by descending |importance|.
 
-        ``method="builtin"`` reads the wrapped model's ``feature_importances_``
-        (tree-based estimators) or ``coef_`` (linear estimators, averaged
-        absolute value across classes for multi-output linears). ``std`` is
-        zero in this path — sklearn's built-in attribute exposes no
-        per-feature variance.
-
-        ``method="permutation"`` calls sklearn's
-        ``permutation_importance`` with ``n_repeats``/``scoring`` and
-        populates ``std`` with the per-feature standard deviation across
-        repeats.
+        Parameters
+        ----------
+        method : {"builtin", "permutation"}, default "builtin"
+            ``"builtin"`` reads the wrapped model's ``feature_importances_``
+            (tree-based estimators) or ``coef_`` (linear estimators, averaged
+            absolute value across classes for multi-output linears); ``std``
+            is zero in this path since the built-in attribute exposes no
+            per-feature variance. ``"permutation"`` calls sklearn's
+            ``permutation_importance`` and populates ``std`` with the
+            per-feature standard deviation across repeats.
+        n_repeats : int, default 30
+            Number of permutation repeats (``method="permutation"`` only).
+        scoring : str or callable, optional
+            Scorer passed to ``permutation_importance``
+            (``method="permutation"`` only). ``None`` uses the estimator's
+            default score.
+        random_state : int, optional
+            Seed for the permutation shuffles. Falls back to the source's
+            ``random_state`` when omitted.
         """
         rs = random_state if random_state is not None else self._random_state
         key = self._cache_key(
@@ -152,9 +161,18 @@ class FeatureImportanceMixin(_MixinBase):
         - ``coef_``: ``shap.LinearExplainer`` (deterministic, fast).
         - ``feature_importances_``: ``shap.TreeExplainer`` (deterministic
           for tree ensembles).
-        - otherwise: ``shap.KernelExplainer`` (model-agnostic; uses the
-          first ``min(50, N)`` rows of X as the background unless an
-          explicit ``background`` array is passed).
+        - otherwise: ``shap.KernelExplainer`` (model-agnostic).
+
+        Parameters
+        ----------
+        background : array-like, optional
+            Background dataset for the model-agnostic
+            ``shap.KernelExplainer`` path. When ``None``, the first
+            ``min(50, N)`` rows of X are used. Ignored by the deterministic
+            ``LinearExplainer`` / ``TreeExplainer`` paths.
+        max_evals : int, default 500
+            Reserved for future use (no-op today). Participates only in the
+            result cache key; not yet forwarded to the SHAP explainer.
         """
         key = self._cache_key(
             "shap_values",
@@ -212,19 +230,23 @@ class FeatureImportanceMixin(_MixinBase):
     ) -> pl.DataFrame:
         """Partial dependence per feature.
 
-        ``kind="average"`` (default) returns the marginal PD curve per
-        feature with ``sample_id = -1`` (one row per grid point per
-        feature).
-
-        ``kind="individual"`` returns per-sample ICE curves: one row per
-        ``(feature, sample_id, grid_point)`` triple with ``sample_id`` in
-        ``[0, n_samples)``. Chart builders pair this with the ``detail``
-        encoding channel on ``sample_id`` to render one polyline per
-        sample.
-
-        ``kind="both"`` returns the union of the two: ICE rows plus
-        average rows (``sample_id = -1``), so a downstream chart can
-        overlay both layers on the same DataFrame.
+        Parameters
+        ----------
+        features : list of str or int
+            Feature names or column indices to compute partial dependence
+            for. One set of rows is emitted per feature.
+        grid_resolution : int, default 100
+            Number of grid points sampled across each feature's range.
+        kind : {"average", "individual", "both"}, default "average"
+            ``"average"`` returns the marginal PD curve per feature with
+            ``sample_id = -1`` (one row per grid point per feature).
+            ``"individual"`` returns per-sample ICE curves: one row per
+            ``(feature, sample_id, grid_point)`` triple with ``sample_id``
+            in ``[0, n_samples)``. ``"both"`` returns the union (ICE rows
+            plus average rows), so a downstream chart can overlay both
+            layers on the same DataFrame. Chart builders pair the ICE rows
+            with the ``detail`` encoding channel on ``sample_id`` to render
+            one polyline per sample.
         """
         if kind not in ("average", "individual", "both"):
             raise ValueError(

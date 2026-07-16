@@ -36,12 +36,31 @@ class X(ChannelBase):
     title : str, optional
         Axis title override.  When omitted the field name is used.
 
+    Notes
+    -----
+    These additional keyword arguments are honored on positional channels:
+
+    - ``sort`` — ordinal domain order: a list of strings, ``"ascending"`` /
+      ``"descending"``, or a channel shorthand such as ``"-y"`` to sort by the
+      per-category aggregate of another channel.
+    - ``axis`` — an ``Axis(...)`` instance, ``False`` to suppress the axis, or a
+      raw axis dict.
+    - ``stack`` — ``True`` / one of ``"zero"``, ``"normalize"``, ``"center"``, or
+      a falsy spelling (``False``, ``"false"``, ``"null"``, ``"none"``) to
+      disable stacking.
+    - ``impute`` — an imputation dict applied before mapping.
+    - ``format`` — a tick-format string, paired with ``format_type`` /
+      ``formatType`` (``"number"`` or ``"time"``).
+    - ``legend`` — a ``Legend(...)`` instance, ``None`` / ``False`` to suppress,
+      or a raw legend dict.
+
     Examples
     --------
     >>> import ferrum as fm
     >>> fm.Chart(df).encode(x=fm.X("hp", type_="Q"))
     >>> fm.Chart(df).encode(x=fm.X("hp", bin=True))
     >>> fm.Chart(df).encode(x=fm.X("hp", aggregate="mean"))
+    >>> fm.Chart(df).encode(x=fm.X("category", sort="-y"))
     """
 
     _channel_name = "x"
@@ -70,11 +89,30 @@ class Y(ChannelBase):
     title : str, optional
         Axis title override.  When omitted the field name is used.
 
+    Notes
+    -----
+    These additional keyword arguments are honored on positional channels:
+
+    - ``sort`` — ordinal domain order: a list of strings, ``"ascending"`` /
+      ``"descending"``, or a channel shorthand such as ``"-x"`` to sort by the
+      per-category aggregate of another channel.
+    - ``axis`` — an ``Axis(...)`` instance, ``False`` to suppress the axis, or a
+      raw axis dict.
+    - ``stack`` — ``True`` / one of ``"zero"``, ``"normalize"``, ``"center"``, or
+      a falsy spelling (``False``, ``"false"``, ``"null"``, ``"none"``) to
+      disable stacking.
+    - ``impute`` — an imputation dict applied before mapping.
+    - ``format`` — a tick-format string, paired with ``format_type`` /
+      ``formatType`` (``"number"`` or ``"time"``).
+    - ``legend`` — a ``Legend(...)`` instance, ``None`` / ``False`` to suppress,
+      or a raw legend dict.
+
     Examples
     --------
     >>> import ferrum as fm
     >>> fm.Chart(df).encode(y=fm.Y("mpg", type_="Q"))
     >>> fm.Chart(df).encode(y=fm.Y("mpg", aggregate="mean"))
+    >>> fm.Chart(df).encode(y=fm.Y("category", sort="-x"))
     """
 
     _channel_name = "y"

@@ -60,6 +60,17 @@ class ModelSelectionMixin(_MixinBase):
         CI on the mean). Chart builders dedupe by (train_size, split) to
         render a ribbon + line; the per-fold rows enable per-fold strip
         overlays if a future caller wants them.
+
+        Parameters
+        ----------
+        cv : int, default 5
+            Number of cross-validation folds.
+        scoring : str or callable, optional
+            Scorer passed to sklearn's ``learning_curve``. ``None`` uses the
+            estimator's default score.
+        train_sizes : array-like, optional
+            Training-set sizes (absolute or fractional) to evaluate.
+            Defaults to ``numpy.linspace(0.1, 1.0, 5)``.
         """
         if self._y is None:
             raise ValueError("ModelSource.learning_curve() requires y to be provided.")
@@ -103,9 +114,21 @@ class ModelSelectionMixin(_MixinBase):
     ) -> pl.DataFrame:
         """Return validation-curve scores per (param_value, fold, split).
 
-        Same shape as ``learning_curve`` but parameterized by an
-        estimator hyperparameter sweep. ``param`` is the kwarg name on
-        the wrapped estimator (e.g. ``"alpha"`` for ``Ridge``).
+        Same shape as ``learning_curve`` but parameterized by an estimator
+        hyperparameter sweep.
+
+        Parameters
+        ----------
+        param : str
+            Estimator hyperparameter to sweep — the kwarg name on the
+            wrapped estimator (e.g. ``"alpha"`` for ``Ridge``).
+        values : array-like
+            Hyperparameter values to evaluate.
+        cv : int, default 5
+            Number of cross-validation folds.
+        scoring : str or callable, optional
+            Scorer passed to sklearn's ``validation_curve``. ``None`` uses
+            the estimator's default score.
         """
         if self._y is None:
             raise ValueError("ModelSource.validation_curve() requires y to be provided.")
@@ -150,6 +173,14 @@ class ModelSelectionMixin(_MixinBase):
         Returns one row per (fold, split) — train and test scores for each
         cross-validation fold. Chart builders use this for boxplot / bar /
         strip distributions across folds.
+
+        Parameters
+        ----------
+        cv : int, default 5
+            Number of cross-validation folds.
+        scoring : str or callable, optional
+            Scorer passed to sklearn's ``cross_validate``. ``None`` uses the
+            estimator's default score.
         """
         if self._y is None:
             raise ValueError("ModelSource.cv_scores() requires y to be provided.")
@@ -193,6 +224,16 @@ class ModelSelectionMixin(_MixinBase):
         held-out split — plus per-alpha ``mean_score`` / ``std_score``
         aggregates. Chart builders dedupe by alpha to render a single
         line, and use ``argmax(mean_score)`` to mark the best alpha.
+
+        Parameters
+        ----------
+        alphas : array-like
+            Regularization strengths to evaluate.
+        cv : int, default 5
+            Number of cross-validation folds.
+        scoring : str or callable, optional
+            Scorer passed to the underlying sweep. ``None`` uses the
+            estimator's default score.
         """
         if self._y is None:
             raise ValueError("ModelSource.alpha_selection() requires y to be provided.")

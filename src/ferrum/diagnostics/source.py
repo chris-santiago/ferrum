@@ -42,9 +42,11 @@ class ModelSource(
 
     Constructing a ``ModelSource`` is sklearn-free — only attribute
     introspection runs at ``__init__`` time. Derived-data methods that
-    need sklearn / shap / umap lazy-import on call, so ``import ferrum``
+    need sklearn / shap lazy-import on call, so ``import ferrum``
     never pulls those packages into the user's process unless they
-    actually compute a diagnostic that requires them.
+    actually compute a diagnostic that requires them. (UMAP embeddings
+    run in Rust via ``_core.umap_embedding``; there is no Python
+    ``umap`` dependency.)
 
     Each derived-data method returns a long-form polars DataFrame
     whose schema is documented in ``ferrum.diagnostics._internal.schemas`` —

@@ -186,7 +186,7 @@ chart = (
 
 ### Scale types
 
-Positional channels accept an explicit scale via the `scale=` parameter. Ferrum exposes five scale classes:
+Positional channels accept an explicit scale via the `scale=` parameter. The primary scale classes are:
 
 | Scale | Usage |
 |---|---|
@@ -294,7 +294,7 @@ chart = (
 )
 ```
 
-Legend suppression is currently supported on [`Color`][ferrum.Color]. Other appearance channels (`size`, `shape`) accept the `legend` kwarg but it is reserved for future use.
+Legend suppression works on [`Color`][ferrum.Color], [`Size`][ferrum.Size], and [`Shape`][ferrum.Shape]. Pass `legend=False` or `legend=None` on any of these channels to hide its legend.
 
 See [Legend](../api/legend.md) for per-channel legend customization via the `Legend(...)` value class.
 
@@ -306,7 +306,7 @@ See [Color](../api/color.md) for programmatic palette access.
 
 ## Mark families
 
-Ferrum ships 54 mark methods on [`Chart`][ferrum.Chart]. They group into families by what they're for.
+Ferrum ships 56 mark methods on [`Chart`][ferrum.Chart]. They group into families by what they're for.
 
 ### Primitive marks
 
@@ -625,7 +625,7 @@ This section is the canonical reference for that allowlist. Docstrings across th
 | `bin_width` | Exact histogram bin width in data units; overrides `bin_count`. |
 | `density` | Normalise histogram counts to a probability density (`mark_histogram`). Default `False`. |
 | `right` | Whether histogram bins are closed on the right (`mark_histogram`). |
-| `multiple` | How to combine grouped density/histogram layers when `color` is encoded: `"layer"`, `"stack"`, `"dodge"`. |
+| `multiple` | How to combine grouped density/histogram layers when `color` is encoded: `"layer"` (default, overlaid), `"stack"` (cumulative area stack), or `"fill"` (normalized 100% area stack). `"dodge"` is accepted but not yet implemented. |
 | `blend` | Alpha-compositing blend mode for layered marks: `"alpha"` (default), `"additive"`. |
 | `leader_line` | `mark_label`: draw a thin connecting line from the data point to the placed label. Default `False`. |
 | `zero` | `mark_bar`: set `zero=False` to suppress the y-scale zero-anchor. Default `True`. |
@@ -705,4 +705,4 @@ This puts a per-species LOESS overlay on top of a scatter. Same encoding, two ma
 - [Themes](themes.md) for changing how marks look without changing the chart spec.
 - [Figure-level helpers](figure-helpers.md) for one-line entry points to common chart patterns.
 - [Stats in the rendering pipeline](concepts/stats-pipeline.md) for the design rationale behind statistical marks.
-- The [API Reference](../api/ferrum.md) for the full method signatures of every mark and encoding channel.
+- The [API Reference](../api/ferrum-toc.md) for the full method signatures of every mark and encoding channel.

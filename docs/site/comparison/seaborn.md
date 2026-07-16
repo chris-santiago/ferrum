@@ -10,7 +10,7 @@ The differences are structural: Ferrum returns chart objects you compose with gr
 |---|---|---|
 | `sns.displot(df, x=, kind=)` | [`fm.displot(df, x=, kind=)`][ferrum.displot] | Same signature. `kind` ∈ `"hist"`, `"kde"`, `"ecdf"`. |
 | `sns.catplot(df, x=, y=, kind=)` | [`fm.catplot(df, x=, y=, kind=)`][ferrum.catplot] | Same `kind` values: `"strip"`, `"box"`, `"violin"`, `"swarm"`, `"bar"`, `"point"`, `"boxen"`, `"count"`. |
-| `sns.lmplot(df, x=, y=)` | [`fm.lmplot(df, x=, y=)`][ferrum.lmplot] | `method=` replaces `order=` for polynomial fits. |
+| `sns.lmplot(df, x=, y=)` | [`fm.lmplot(df, x=, y=)`][ferrum.lmplot] | `order=` works as in seaborn (polynomial degree); `method=` additionally selects the fit family (`"lm"`, `"loess"`). |
 | `sns.residplot(df, x=, y=)` | [`fm.residplot(df, x=, y=)`][ferrum.residplot] | Same interface. |
 | `sns.pairplot(df)` | [`fm.pairplot(df)`][ferrum.pairplot] | `vars=`, `hue=`, `corner=`, `diag_kind=` all supported. |
 | `sns.jointplot(df, x=, y=)` | [`fm.jointplot(df, x=, y=)`][ferrum.jointplot] | `kind=`, `marginal_kind=` match seaborn. |

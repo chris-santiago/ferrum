@@ -20,14 +20,18 @@ class RankingMixin(_MixinBase):
     def rank1d(self, *, algorithm: str = "shapiro") -> pl.DataFrame:
         """Univariate feature ranking.
 
-        ``algorithm`` in ``{"shapiro", "variance", "covariance"}``. The
-        Shapiro-Wilk and variance algorithms operate on X alone;
+        The Shapiro-Wilk and variance algorithms operate on X alone;
         ``"covariance"`` ranks features by absolute sample covariance with
         ``y`` and therefore requires ``y`` to be present.
 
         Output schema (``SCHEMA_RANK1D``): ``feature: Utf8``,
         ``score: Float64``, ``rank: Int64``. Rows are pre-sorted by descending
         score so ``rank=1`` is always the top feature.
+
+        Parameters
+        ----------
+        algorithm : {"shapiro", "variance", "covariance"}, default "shapiro"
+            Univariate ranking statistic. ``"covariance"`` requires ``y``.
         """
         key = self._cache_key("rank1d", algorithm=algorithm)
         if key in self._cache:
@@ -53,12 +57,17 @@ class RankingMixin(_MixinBase):
     def rank2d(self, *, algorithm: str = "pearson") -> pl.DataFrame:
         """Pairwise feature ranking — long-form correlation matrix.
 
-        ``algorithm`` in ``{"pearson", "spearman", "kendall", "covariance"}``.
-        All algorithms now run in Rust (Kendall uses Knight's O(n log n)).
+        All algorithms run in Rust (Kendall uses Knight's O(n log n)).
 
         Output schema (``SCHEMA_RANK2D``): ``feature_x: Utf8``,
         ``feature_y: Utf8``, ``correlation: Float64`` — one row per
         ordered pair of features, p × p rows total.
+
+        Parameters
+        ----------
+        algorithm : {"pearson", "spearman", "kendall", "covariance"}, default "pearson"
+            Correlation / association statistic computed for each feature
+            pair.
         """
         from ferrum._core import py_rank2d
 

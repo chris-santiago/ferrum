@@ -50,11 +50,19 @@ class ClassificationCurvesMixin(_MixinBase):
     ) -> pl.DataFrame:
         """ROC curve(s). One row per (class, threshold). ``auc`` repeats per class.
 
-        For binary classifiers with ``average=None`` (default), returns a
-        single curve on the positive (second) class. For multiclass,
-        returns one-vs-rest curves per class; pass ``average`` in
-        {"micro", "macro", "weighted"} to additionally include a summary
-        curve under ``class="<average>"``.
+        For binary classifiers, returns a single curve on the positive
+        (second) class. For multiclass, returns one-vs-rest curves per class.
+
+        Parameters
+        ----------
+        average : {None, "micro", "macro", "weighted"}, default None
+            Multiclass averaging. ``None`` returns per-class one-vs-rest
+            curves (or the single positive-class curve for binary
+            classifiers); ``"micro"`` / ``"macro"`` / ``"weighted"``
+            additionally include a summary curve under ``class="<average>"``.
+        drop_intermediate : bool, default True
+            Drop collinear ROC points that do not change the curve's shape
+            (sklearn's ``drop_intermediate``), yielding a lighter frame.
         """
         key = self._cache_key(
             "roc_curve",
@@ -82,23 +90,23 @@ class ClassificationCurvesMixin(_MixinBase):
         """Precision-recall curve(s). One row per (class, threshold).
 
         For binary classifiers, returns a single curve on the positive
-        (second) class — ``average`` is accepted for API symmetry with
-        the multiclass path but has no effect because binary classifiers
-        have only one curve to draw. For multiclass:
-
-        - ``average=None`` (default) — returns one-vs-rest curves per
-          class.
-        - ``average in {"micro", "macro", "weighted"}`` — returns a
-          single summary curve with ``class="<average>"`` and no
-          per-class rows. Macro / weighted variants interpolate per-
-          class precision over a shared recall grid (100 points); micro
-          ravels the binarized labels into one curve. ``threshold`` is
-          NaN on every row of macro / weighted summaries (recall-grid
-          interpolation discards thresholds) and follows sklearn's
-          padding convention for micro.
+        (second) class. For multiclass, ``average=None`` returns
+        one-vs-rest curves per class, while ``average`` in
+        {"micro", "macro", "weighted"} returns a single summary curve with
+        ``class="<average>"`` and no per-class rows. Macro / weighted
+        variants interpolate per-class precision over a shared recall grid
+        (100 points); micro ravels the binarized labels into one curve.
 
         ``threshold`` is NaN at the final (recall=0) point of every
-        per-class curve per sklearn's convention.
+        per-class curve per sklearn's convention. For macro / weighted
+        summaries it is NaN on every row (recall-grid interpolation
+        discards thresholds); micro follows sklearn's padding convention.
+
+        Parameters
+        ----------
+        average : {None, "micro", "macro", "weighted"}, default None
+            Multiclass averaging strategy. Accepted but inert for binary
+            classifiers, which have only one curve to draw.
         """
         if average is not None and average not in ("micro", "macro", "weighted"):
             raise ValueError(
@@ -133,6 +141,15 @@ class ClassificationCurvesMixin(_MixinBase):
         Returns one row per non-empty bin with ``mean_predicted``,
         ``fraction_positive``, and ``count``. Delegates to the
         ``calibration_kernel`` Rust kernel.
+
+        Parameters
+        ----------
+        n_bins : int, default 10
+            Number of bins used to group predicted probabilities.
+        strategy : {"uniform", "quantile"}, default "uniform"
+            Bin-edge strategy (matches ``sklearn.calibration``).
+            ``"uniform"`` uses equal-width bins; ``"quantile"`` uses bins
+            holding an equal number of samples.
         """
         key = self._cache_key(
             "calibration_curve",
@@ -200,10 +217,16 @@ class ClassificationCurvesMixin(_MixinBase):
         reports precision, recall, F1, and queue_rate at each. ``queue_rate``
         is the hand-computed fraction ``(y_score >= t).mean()``.
 
-        When ``cv`` is an int, runs the same sweep on each fold's held-out
-        scores from a freshly-cloned + re-fit estimator and averages
-        per-threshold metrics across folds. Pass a splitter object with a
-        ``.split()`` method to override.
+        Parameters
+        ----------
+        n_thresholds : int, default 50
+            Number of evenly-spaced thresholds swept across [0, 1].
+        cv : int or cross-validation splitter, optional
+            When an int, runs the same sweep on each fold's held-out scores
+            from a freshly-cloned + re-fit estimator and averages
+            per-threshold metrics across folds. Pass a splitter object with
+            a ``.split()`` method to override the fold generator. ``None``
+            (default) sweeps the in-sample scores directly.
         """
         key = self._cache_key(
             "discrimination_threshold",
@@ -291,11 +314,16 @@ class ClassificationCurvesMixin(_MixinBase):
     def confusion_matrix(self, *, normalize: str | None = None) -> pl.DataFrame:
         """Confusion matrix in long form: one row per (actual, predicted) cell.
 
-        ``normalize``: ``None`` for raw counts, ``"true"``/``"pred"``/``"all"``
-        for sklearn-style normalization. ``value`` is the (possibly
-        normalized) count; ``value_fmt`` is a stringified label suitable for
-        ``mark_text`` overlay (integer counts when unnormalized, two-decimal
-        fractions when normalized).
+        ``value`` is the (possibly normalized) count; ``value_fmt`` is a
+        stringified label suitable for ``mark_text`` overlay (integer counts
+        when unnormalized, two-decimal fractions when normalized).
+
+        Parameters
+        ----------
+        normalize : {None, "true", "pred", "all"}, default None
+            Normalization mode. ``None`` reports raw counts; ``"true"`` /
+            ``"pred"`` / ``"all"`` apply sklearn-style normalization over
+            rows / columns / the whole matrix.
         """
         key = self._cache_key("confusion_matrix", normalize=normalize)
         if key in self._cache:

@@ -18,8 +18,8 @@ chart = (
     fm.Chart(df)
     .mark_point(size=60)
     .encode(x="x:Q", y="y:Q")
-    + ann.text(3.6, 9.2, "Sensor fault", color="#c0392b", font_size=12, anchor="start")
-    + ann.arrow(3.5, 9.1, 3.1, 8.95, stroke="#c0392b", stroke_width=1.5, curve="arc")
+    + ann.text(4.0, 7.0, "Sensor fault", color="#c0392b", font_size=14, anchor="start")
+    + ann.arrow(3.9, 7.5, 3.1, 8.8, stroke="#c0392b", stroke_width=1.5)
 )
 ```
 
@@ -72,15 +72,19 @@ ann.text(fm.norm(0.5), fm.px(10), "Centered title", anchor="middle")
 
 ## Z-order
 
-Annotations render in one of two layers:
+Only `text` annotations expose a `z=` control, letting a label render in one of two layers:
 
 - `z="above_marks"` (default): drawn on top of all marks
 - `z="below_marks"`: drawn behind marks
 
 ```python
-ann.rect(0, 0, 50, 100, fill="#fff3cd", z="below_marks")  # highlight behind points
-ann.text(25, 50, "Zone A", z="above_marks")               # label on top
+ann.text(25, 50, "Zone A", z="above_marks")   # label on top of the marks
+ann.text(25, 50, "Watermark", z="below_marks")  # label behind the marks
 ```
+
+The shape primitives (`arrow`, `rect`, `line`, `span`, `bracket`, `callout`, `image`)
+do not take `z=`. They draw in their default layer relative to the marks; there is no
+per-annotation knob to move a shape behind the marks today.
 
 ---
 
@@ -152,15 +156,16 @@ ann.arrow(
     stroke="#333",
     stroke_width=1.5,
     head_size=8,
-    curve="straight",       # "straight" | "arc" | "elbow"
 )
 ```
+
+Arrows are straight line segments from the tail `(x, y)` to the head `(x2, y2)`.
 
 **Example: annotate an outlier point**
 
 ```python
 + ann.text(4.2, 9.8, "Outlier", dx=10, dy=-5)
-+ ann.arrow(4.2, 9.8, 4.2, 8.5, curve="arc")
++ ann.arrow(4.2, 9.8, 4.2, 8.5)
 ```
 
 ---
@@ -178,7 +183,6 @@ ann.rect(
     opacity=0.1,
     stroke=None,            # border color; None = no border
     corner_radius=0,
-    z="above_marks",
 )
 ```
 
@@ -190,7 +194,6 @@ ann.rect(
     "2026-04-01", fm.norm(1.0),
     fill="#fef9c3",
     opacity=0.3,
-    z="below_marks",
 )
 ```
 
@@ -273,8 +276,6 @@ chart = (
     )
 )
 ```
-
-![Highlighted target zone with span and reference line](../../assets/recipes/highlight_region.png)
 
 **Example: highlight an x-axis time range**
 

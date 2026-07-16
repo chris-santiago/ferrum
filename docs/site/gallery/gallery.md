@@ -380,8 +380,6 @@ One-line entry points for common chart patterns.
 
     *helper:* `fm.residplot(df, x="x", y="y")`
 
-    *grammar:* `fm.Chart(df).mark_smooth(method="lm", inject_residuals=True).encode(x="x", y="residual")`
-
 -   **pairplot**
 
     ---

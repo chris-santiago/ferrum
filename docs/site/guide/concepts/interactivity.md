@@ -43,6 +43,10 @@ A chart you wrote with the static renderer in mind keeps working when interactiv
 
 What does change is what you can express. Once interactivity is part of the renderer contract, you have a vocabulary for selections and linked views inside the chart spec itself. The shape of the spec gets richer; the shape of your code does not get more complicated.
 
+## How interactive output is delivered
+
+Calling `.interactive()` returns an interactive view; how you see it depends on where you are. In a notebook, the view renders inline through anywidget, so install the `jupyter` extra (`pip install "ferrum-viz[jupyter]"`). Outside a notebook, write a standalone HTML file with `.save("chart.html")` and open it in any browser. Either way, the WASM/GPU runtime that drives selections, zoom, pan, and linked views ships pre-built inside the wheel, so there is no separate JavaScript build step or runtime to install. `.interactive(toolbar=...)` toggles the zoom/pan/reset toolbar (on by default).
+
 ## Current status
 
 | Capability | Status |

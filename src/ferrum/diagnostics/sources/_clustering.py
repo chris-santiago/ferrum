@@ -29,8 +29,11 @@ class ClusteringMixin(_MixinBase):
         ``mark_silhouette`` to render bars in a tightly-packed Rousseeuw
         layout), ``cluster``, and ``silhouette_value``.
 
-        ``k`` is informational; if provided, the result is filtered to
-        clusters in ``range(k)``.
+        Parameters
+        ----------
+        k : int, optional
+            Informational cluster count. When provided, the result is
+            filtered to clusters in ``range(k)``.
         """
         key = self._cache_key("silhouette", k=k)
         if key in self._cache:
@@ -80,6 +83,12 @@ class ClusteringMixin(_MixinBase):
         If the wrapped model exposes ``explained_variance_ratio_`` (e.g.
         ``sklearn.decomposition.PCA``), reads it directly (backward compat).
         Otherwise computes from raw X via Rust SVD.
+
+        Parameters
+        ----------
+        n_components : int, optional
+            Truncate the result to the first ``n_components`` components.
+            ``None`` (default) keeps all components.
         """
         key = self._cache_key("pca_variance", n_components=n_components)
         if key in self._cache:
@@ -115,6 +124,19 @@ class ClusteringMixin(_MixinBase):
         Returns ``dim_0`` … ``dim_{n_components-1}`` plus a ``label`` column
         (``y`` when provided, else zeros — used to color the scatter).
         ``random_state`` is taken from the source's ``random_state``.
+
+        Parameters
+        ----------
+        method : {"umap", "tsne", "pca"}, default "umap"
+            Dimensionality-reduction algorithm.
+        n_components : int, default 2
+            Number of embedding dimensions to emit (``dim_0`` …
+            ``dim_{n_components-1}``).
+        **method_kwargs
+            Algorithm-specific options forwarded to the Rust kernel.
+            ``"umap"`` accepts ``n_neighbors``, ``min_dist``, ``n_epochs``;
+            ``"tsne"`` accepts ``perplexity``, ``learning_rate``,
+            ``n_iter``; ``"pca"`` takes none.
         """
         key = self._cache_key(
             "embeddings",
@@ -178,6 +200,16 @@ class ClusteringMixin(_MixinBase):
         emitted column), ``x`` / ``y`` (Float64, the 2D embedded coordinate),
         and ``size`` (Int64, sample count). Requires the wrapped model to
         expose ``cluster_centers_``.
+
+        Parameters
+        ----------
+        k : int
+            Number of clusters to embed. Clamped to the number of available
+            ``cluster_centers_``.
+        method : {"mds", "tsne"}, default "mds"
+            Embedding algorithm for projecting cluster centers to 2D.
+            ``"tsne"`` requires at least 4 clusters; use ``"mds"`` for small
+            ``k``.
         """
         key = self._cache_key(
             "intercluster_distance",

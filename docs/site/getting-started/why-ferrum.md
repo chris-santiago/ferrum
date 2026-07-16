@@ -10,7 +10,7 @@ There are excellent Python plotting libraries today. Each is best at one thing. 
 
 ### 1. One grammar that scales to production data size
 
-Every existing library breaks at some point — plotnine and seaborn (both matplotlib-bound) around 100,000 marks, Altair around 5,000 rows, plotly around 500,000. The library closest to Ferrum's grammar philosophy — plotnine, a faithful ggplot2 port — inherits matplotlib's rendering ceiling, so the grammar stops scaling before the data does. (See [benchmarks](../guide/concepts/performance-scale.md) for methodology and numbers.)
+Every existing library runs into practical scaling limits — plotnine and seaborn (both matplotlib-bound) around 100,000 marks, plotly around 500,000. Altair's default `max_rows` guard trips at around 5,000 rows (it raises `MaxRowsError`, and the limit is configurable rather than a hard rendering ceiling). The library closest to Ferrum's grammar philosophy — plotnine, a faithful ggplot2 port — inherits matplotlib's rendering ceiling, so the grammar stops scaling before the data does. (See [benchmarks](../guide/concepts/performance-scale.md) for methodology and numbers.)
 
 Ferrum keeps the same chart spec working at 100 rows and at 10,000,000 rows. Auto-raster and GPU rendering happen transparently behind the same spec — you don't author for one scale and rewrite for another.
 

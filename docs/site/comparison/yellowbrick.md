@@ -20,7 +20,7 @@ Yellowbrick pioneered the idea of "visual diagnostics" — sklearn-protocol obje
 | `ValidationCurve(model)` | [`fm.ValidationCurveVisualizer(model)`][ferrum.ValidationCurveVisualizer] | [`fm.validation_curve_chart(model, X, y)`][ferrum.validation_curve_chart] |
 | `CVScores(model)` | [`fm.CVScoresVisualizer(model)`][ferrum.CVScoresVisualizer] | [`fm.cv_scores_chart(model, X, y)`][ferrum.cv_scores_chart] |
 | `SilhouetteVisualizer(model)` | [`fm.SilhouetteVisualizer(model)`][ferrum.SilhouetteVisualizer] | [`fm.silhouette_chart(model, X)`][ferrum.silhouette_chart] |
-| `KElbowVisualizer(model)` | [`fm.ElbowVisualizer(model_class)`][ferrum.ElbowVisualizer] | [`fm.elbow_chart(model_class, X)`][ferrum.elbow_chart] |
+| `KElbowVisualizer(model)` | [`fm.ElbowVisualizer(model_class, ks=range(2, 11))`][ferrum.ElbowVisualizer] | [`fm.elbow_chart(model_class, X, ks=range(2, 11))`][ferrum.elbow_chart] |
 | `InterclusterDistance(model)` | [`fm.InterclusterDistanceVisualizer(model)`][ferrum.InterclusterDistanceVisualizer] | [`fm.intercluster_distance_chart(model, X)`][ferrum.intercluster_distance_chart] |
 | `Manifold(model)` | [`fm.ManifoldVisualizer(model)`][ferrum.ManifoldVisualizer] | [`fm.manifold_chart(model, X)`][ferrum.manifold_chart] |
 | `ClassBalance(labels)` | [`fm.ClassBalanceVisualizer(model)`][ferrum.ClassBalanceVisualizer] | [`fm.class_balance_chart(model, X, y)`][ferrum.class_balance_chart] |

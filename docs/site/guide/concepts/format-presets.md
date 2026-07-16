@@ -48,12 +48,16 @@ and does not map to a standard d3-format string.
 
 ### Notes on `"percent"`
 
-d3-format's `.1%` multiplies the input by 100 and appends a `%` sign. If your data is
-already in the 0–100 range (not 0–1), use `label_format_raw` with a custom string:
+d3-format's `.1%` multiplies the input by 100 and appends a `%` sign, so it expects
+input in the 0–1 range. There is no d3-format escape for a trailing literal `%`, so if
+your data is *already* in the 0–100 range (e.g. `45.2`, not `0.452`) you cannot append a
+`%` glyph with a raw format string. Divide the values by 100 first and use the `percent`
+preset:
 
 ```python
 # Data is already in percent form (e.g. 45.2, not 0.452)
-chart.configure_axis(label_format_raw=".1f%%")
+df = df.with_columns((pl.col("rate") / 100).alias("rate"))
+chart.configure_axis(label_format="percent")  # renders 45.2%
 ```
 
 ---
@@ -91,8 +95,8 @@ When no preset covers your case, `label_format_raw` accepts any valid d3-format 
 # Two decimal places, no thousands separator
 chart.configure_axis(label_format_raw=".2f")
 
-# Millions with one decimal
-chart.configure_axis(label_format_raw="$.1fM")
+# Abbreviated currency (SI prefix): 1_400_000 → "$1.4M", 950_000 → "$950k"
+chart.configure_axis(label_format_raw="$.2s")
 
 # Custom date format
 chart.configure_axis(label_format_raw="%d/%m/%Y")

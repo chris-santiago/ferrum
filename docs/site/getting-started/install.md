@@ -8,24 +8,24 @@ Ferrum runs on Python 3.10 or newer. The Rust core ships as a pre-built extensio
 
     <!--pytest.mark.skip-->
     ```bash
-    pip install ferrum-viz[all]
+    pip install "ferrum-viz[all]"
     ```
 
 === "uv"
 
     <!--pytest.mark.skip-->
     ```bash
-    uv add ferrum-viz[all]
+    uv add "ferrum-viz[all]"
     ```
 
 === "poetry"
 
     <!--pytest.mark.skip-->
     ```bash
-    poetry add ferrum-viz[all]
+    poetry add "ferrum-viz[all]"
     ```
 
-This installs Ferrum with all optional dependencies — model diagnostics, SHAP explanations, and interactive Jupyter rendering. For a leaner install (e.g. containers or CI), drop `[all]`: `pip install ferrum-viz`.
+This installs Ferrum with all optional dependencies — model diagnostics, SHAP explanations, and interactive Jupyter rendering. Quote the brackets so zsh (the default macOS shell) does not treat them as a glob. For a leaner install (e.g. containers or CI), drop `[all]`: `pip install ferrum-viz`.
 
 !!! info "Pre-1.0 release status"
     Ferrum is currently pre-1.0 (the live version is shown in the page footer). The public surface is stabilizing toward the 1.0 commitment described in [Why Ferrum](why-ferrum.md), but APIs may shift between minor versions until 1.0 is cut. Pin a specific version in production code.
@@ -63,10 +63,10 @@ Ferrum ships four optional dependency groups for features that need external pac
 
 | Extra | What it adds | Install |
 |---|---|---|
-| `models` | Diagnostics from a **fitted model** (`fm.roc_chart(model, X, y)`, etc.) via sklearn. Not needed for the raw-array path — see below. | `pip install ferrum-viz[models]` |
-| `shap` | SHAP explanations (beeswarm, bar, waterfall) via sklearn + shap | `pip install ferrum-viz[shap]` |
-| `jupyter` | Interactive rendering via anywidget (WASM/GPU canvas in notebooks) | `pip install ferrum-viz[jupyter]` |
-| `all` | Everything above | `pip install ferrum-viz[all]` |
+| `models` | Diagnostics from a **fitted model** (`fm.roc_chart(model, X, y)`, etc.) via sklearn. Not needed for the raw-array path — see below. | `pip install "ferrum-viz[models]"` |
+| `shap` | SHAP explanations (beeswarm, bar, waterfall) via sklearn + shap | `pip install "ferrum-viz[shap]"` |
+| `jupyter` | Interactive rendering via anywidget (WASM/GPU canvas in notebooks) | `pip install "ferrum-viz[jupyter]"` |
+| `all` | Everything above | `pip install "ferrum-viz[all]"` |
 
 The base install (`pip install ferrum-viz`) covers the grammar API, all marks, themes, composition, static SVG/PNG rendering, and DataFrame ingestion. The extras add fitted-model diagnostics (sklearn), SHAP explanations, and Jupyter interactivity.
 

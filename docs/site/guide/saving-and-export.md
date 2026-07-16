@@ -27,7 +27,7 @@ All of these methods are available on every chart object — base `Chart`, compo
 | PNG | [`.to_png()`][ferrum.Chart.to_png] | `.png` | Rasterized via `resvg` in Rust. No Cairo/Pillow needed. |
 | HTML | [`.to_html()`][ferrum.Chart.to_html] | `.html` | Self-contained interactive page with inlined WASM renderer. |
 | JSON | [`.save("out.json")`][ferrum.Chart.save] | `.json` | Chart spec as JSON — the same format as `.to_json()`. |
-| PDF | [`.save("out.pdf")`][ferrum.Chart.save] | `.pdf` | Rasterized via `resvg-py`. No Ghostscript or Cairo needed. |
+| PDF | [`.save("out.pdf")`][ferrum.Chart.save] | `.pdf` | Rasterized PNG (Rust `resvg`) wrapped in a PDF page. No Ghostscript or Cairo needed. |
 
 ## Saving to disk
 
@@ -89,7 +89,7 @@ html_str = chart.to_html()    # str — self-contained interactive HTML page
 
 ## PDF export
 
-`chart.save("chart.pdf")` exports a vector PDF using `resvg-py` under the hood — no Ghostscript, Cairo, or other system tool required. The same zero-dependency guarantee as PNG rasterization applies.
+`chart.save("chart.pdf")` embeds a rasterized PNG (produced by the same Rust `resvg` pipeline as `to_png()`) inside a minimal, dependency-free PDF page written by a pure-Python codec — no Ghostscript, Cairo, or other system tool required. The same zero-system-dependency guarantee as PNG rasterization applies. Because the page holds a raster image, `scale=` controls its resolution just as it does for PNG; PDF output is not resolution-independent vector art.
 
 ```python
 chart.save("chart.pdf")
@@ -158,7 +158,7 @@ report.save("model_report.png")
 
 ## No system dependencies
 
-Ferrum's rendering pipeline is pure Rust. SVG rendering, PNG rasterization (`resvg`), and WASM compilation all happen inside the wheel. There is no dependency on Cairo, X11, Ghostscript, or any display server. `pip install ferrum` is the entire setup — charts render in Kubernetes, CI, SSH sessions, and headless containers.
+Ferrum's rendering pipeline is pure Rust. SVG rendering, PNG rasterization (`resvg`), and WASM compilation all happen inside the wheel. There is no dependency on Cairo, X11, Ghostscript, or any display server. `pip install ferrum-viz` is the entire setup — charts render in Kubernetes, CI, SSH sessions, and headless containers.
 
 ## Where to go next
 

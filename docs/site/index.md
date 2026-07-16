@@ -92,6 +92,6 @@ A practitioner moving from Altair, Seaborn, or Yellowbrick should be able to rea
 
     ---
 
-    The [API Reference](api/ferrum.md) covers every public class and function — from [`Chart`][ferrum.Chart] and [`encoding`](api/encoding.md) to [`plots`](api/plots.md), [`themes`](api/themes.md), [`selection`](api/selection.md), and [more](api/ferrum.md).
+    The [API Reference](api/ferrum-toc.md) covers every public class and function — from [`Chart`][ferrum.Chart] and [`encoding`](api/encoding.md) to [`plots`](api/plots.md), [`themes`](api/themes.md), [`selection`](api/selection.md), and [more](api/ferrum-toc.md).
 
 </div>

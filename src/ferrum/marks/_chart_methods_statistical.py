@@ -306,7 +306,9 @@ class StatisticalMarksMixin:
         position : Position, optional
             Position adjustment -- e.g. ``fm.Dodge()`` for side-by-side boxes.
         **mark_kwargs
-            Additional mark-style overrides forwarded to each constituent layer.
+            Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
+            ``alpha``→``opacity``) forwarded to each constituent layer.
 
         Returns
         -------
@@ -374,7 +376,7 @@ class StatisticalMarksMixin:
 
         Parameters
         ----------
-        k_depth : {"proportion", "trustworthy", "full"}, default "proportion"
+        k_depth : {"tukey", "proportion", "trustworthy", "full"}, default "tukey"
             Rule for choosing the number of letter-value levels.
         k_proportion : float, optional
             Proportion parameter used when ``k_depth="proportion"``.  Default
@@ -397,7 +399,9 @@ class StatisticalMarksMixin:
         position : Position, optional
             Position adjustment.
         **mark_kwargs
-            Additional mark-style overrides forwarded to constituent layers.
+            Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
+            ``alpha``→``opacity``) forwarded to constituent layers.
 
         Returns
         -------
@@ -460,7 +464,9 @@ class StatisticalMarksMixin:
         position : Position, optional
             Position adjustment.
         **mark_kwargs
-            Mark-style overrides forwarded to constituent rule/tick layers.
+            Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
+            ``alpha``→``opacity``) forwarded to the constituent rule/tick layers.
 
         Returns
         -------
@@ -519,7 +525,9 @@ class StatisticalMarksMixin:
         position : Position, optional
             Position adjustment.
         **mark_kwargs
-            Mark-style overrides (e.g. ``opacity``) forwarded to the ribbon layer.
+            Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
+            ``alpha``→``opacity``) forwarded to the ribbon layer.
 
         Returns
         -------
@@ -642,7 +650,9 @@ class StatisticalMarksMixin:
         position : Position, optional
             Position adjustment.
         **mark_kwargs
-            Mark-style overrides forwarded to the polygon/path layers.
+            Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
+            ``alpha``→``opacity``) forwarded to the polygon/path layers.
 
         Returns
         -------
@@ -720,7 +730,9 @@ class StatisticalMarksMixin:
         position : Position, optional
             Position adjustment.
         **mark_kwargs
-            Mark-style overrides forwarded to the violin polygon layer.
+            Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
+            ``alpha``→``opacity``) forwarded to the violin polygon layer.
 
         Returns
         -------
@@ -774,7 +786,9 @@ class StatisticalMarksMixin:
         position : Position, optional
             Position adjustment.
         **mark_kwargs
-            Mark-style overrides for the scatter layer.
+            Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
+            ``alpha``→``opacity``) forwarded to the scatter layer.
 
         Returns
         -------
@@ -856,7 +870,9 @@ class StatisticalMarksMixin:
         position : Position, optional
             Position adjustment.
         **mark_kwargs
-            Mark-style overrides forwarded to the image layer.
+            Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
+            ``alpha``→``opacity``) forwarded to the image layer.
 
         Returns
         -------
@@ -1010,7 +1026,9 @@ class StatisticalMarksMixin:
         position : Position, optional
             Position adjustment.
         **mark_kwargs
-            Mark-style overrides forwarded to the point layer.
+            Constant mark-style overrides (``opacity``, ``fill``, ``stroke``,
+            ``stroke_width``, ``stroke_dash``, ``size``; aliases ``color``→``fill``,
+            ``alpha``→``opacity``) forwarded to the point layer.
 
         Returns
         -------
