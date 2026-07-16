@@ -15,7 +15,7 @@ Coordinates in annotation primitives can be expressed in these ways:
 - ``OrdinalCategoryCoord`` — a category label resolved to a band center at
   render time via the chart's ordinal domain
 
-Use the :func:`px` and :func:`norm` factory functions as readable shorthands.
+Use the [px][ferrum.px] and [norm][ferrum.norm] factory functions as readable shorthands.
 """
 
 from __future__ import annotations

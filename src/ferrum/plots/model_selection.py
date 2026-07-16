@@ -423,7 +423,7 @@ def learning_curve_chart(
 
     Notes
     -----
-    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    When ``compare=`` is supplied, returns a [ConcatChart][ferrum.ConcatChart] with
     one panel per model (small multiples, shared x/y scales). Each panel is
     the single-model learning curve for that model, labeled with the model
     name. The internal train/test coloring is preserved per panel. The
@@ -545,7 +545,7 @@ def validation_curve_chart(
 
     Notes
     -----
-    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    When ``compare=`` is supplied, returns a [ConcatChart][ferrum.ConcatChart] with
     one panel per model (small multiples, shared x/y scales). Each panel is
     the single-model validation curve for that model, labeled with the model
     name. The internal train/test coloring is preserved per panel. The
@@ -664,12 +664,12 @@ def cv_scores_chart(
     Notes
     -----
     When ``compare=`` is supplied (GH #42) with ``kind="box"`` or
-    ``"strip"``, returns a single :class:`~ferrum.Chart` with ``split`` as
+    ``"strip"``, returns a single [Chart][ferrum.Chart] with ``split`` as
     the shared categorical axis and one box/strip group per model, dodged
     within each split band, plus a model legend; ``kind="strip"`` drops the
     single-model jitter under dodge (position adjustments are not
     composable). With ``kind="bar"``, ``compare=`` instead returns a
-    :class:`~ferrum.ConcatChart` with one panel per model (small multiples,
+    [ConcatChart][ferrum.ConcatChart] with one panel per model (small multiples,
     shared x/y scales) -- fold x split x model is three grouping
     dimensions, so it keeps the pre-#42 layout. The single-model path (no
     ``compare=``) is unchanged.
@@ -782,7 +782,7 @@ def alpha_selection_chart(
 
     Notes
     -----
-    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    When ``compare=`` is supplied, returns a [ConcatChart][ferrum.ConcatChart] with
     one panel per model (small multiples, shared x/y scales). Each panel is
     the single-model alpha selection chart for that model, labeled with the
     model name, with its own best-alpha highlight. The single-model path

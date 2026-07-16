@@ -87,5 +87,5 @@ def get_default_theme() -> Theme:
 
 
 def theme_context(theme: Theme) -> AbstractContextManager:
-    """Context-manager-spelling alias for :func:`set_default_theme`. See it for full semantics."""
+    """Context-manager-spelling alias for [set_default_theme][ferrum.set_default_theme]. See it for full semantics."""
     return set_default_theme(theme)

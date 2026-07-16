@@ -1,6 +1,6 @@
 """Text and tooltip encoding channels (Text, Detail, Tooltip, Href, ...).
 
-Each channel references one named role from :mod:`ferrum.encoding._honored`;
+Each channel references one named role from `_honored`;
 ``_honored_kwargs`` is the single, machine-readable source of truth for which
 kwargs the channel honors (see the ``ChannelBase`` docstring for the contract).
 """
@@ -218,7 +218,7 @@ class Url(ChannelBase):
 
     Each row provides a ``data:image/...;base64,<payload>`` URL that is
     placed as an image tile at the position given by the ``x`` and ``y``
-    encodings.  Used exclusively with :meth:`~ferrum.Chart.mark_image`.
+    encodings.  Used exclusively with [mark_image][ferrum.Chart.mark_image].
 
     Parameters
     ----------

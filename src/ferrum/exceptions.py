@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 class FerrumOverrideError(Exception):
-    """Raised when a :meth:`ferrum.Chart.override` path cannot be resolved.
+    """Raised when a [override][ferrum.Chart.override] path cannot be resolved.
 
     ``Chart.override(**kwargs)`` is a flat snake_case escape hatch onto the
     chart's presentation spec.  Because the Rust spec deserializers silently

@@ -211,9 +211,9 @@ class ChannelBase:
     ``_honored_kwargs`` is the single, machine-readable source of truth for the
     kwargs a channel honors. A kwarg in this set is accepted silently and (if it
     has a serializer) forwarded to the EncodingSpec by
-    :meth:`to_encoding_spec_dict`; a kwarg NOT in the set triggers a one-time
+    `to_encoding_spec_dict`; a kwarg NOT in the set triggers a one-time
     ``warn_once`` and is dropped. Per-channel membership is assembled from the
-    named role constants in :mod:`ferrum.encoding._honored`; do not narrate
+    named role constants in `_honored`; do not narrate
     render status (``"honored"`` / ``"reserved"`` / ``"no-op today"``) in
     per-channel docstrings, as that prose drifts from this set.
     """
@@ -347,11 +347,11 @@ class ChannelBase:
         Iterates this channel's own ``_honored_kwargs`` (the single source of
         truth) rather than a separate hard-coded key list, so a kwarg is
         serialized iff the channel honors it.  Each honored key routes through
-        :data:`_SPEC_DICT_HANDLERS` to its serializer; keys with no handler
+        `_SPEC_DICT_HANDLERS` to its serializer; keys with no handler
         (``bin``/``aggregate``) are honored for the warn guard but consumed via
-        :meth:`to_implicit_transforms`, so they contribute nothing here.
+        `to_implicit_transforms`, so they contribute nothing here.
 
-        Keys are emitted in :data:`_SPEC_DICT_ORDER` so the dict layout is
+        Keys are emitted in `_SPEC_DICT_ORDER` so the dict layout is
         stable regardless of ``frozenset`` iteration order.
         """
         out: dict = {"field": self.field}

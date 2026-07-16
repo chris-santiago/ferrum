@@ -1,6 +1,6 @@
 """Facet encoding channels (Facet, FacetRow, FacetCol).
 
-Each channel references the ``FACET`` role from :mod:`ferrum.encoding._honored`;
+Each channel references the ``FACET`` role from `_honored`;
 ``_honored_kwargs`` is the single, machine-readable source of truth for which
 kwargs the channel honors (see the ``ChannelBase`` docstring for the contract).
 """

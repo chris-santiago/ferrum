@@ -1163,7 +1163,7 @@ def calibration_chart(
         ``"uniform"`` uses equally-spaced bins; ``"quantile"`` uses
         equal-frequency bins.
     annotate_brier : bool, default True
-        When ``True``, attaches the :class:`BrierLabel` composite (spec
+        When ``True``, attaches the [BrierLabel][ferrum.BrierLabel] composite (spec
         3.11) showing the Brier score per series.  The chart title also
         encodes the Brier value when exactly one model is shown.
     subtitle : str or None, default None

@@ -2,8 +2,8 @@
 
 A channel's ``_honored_kwargs`` is the single authority for which keyword
 arguments it honors: it drives both the ``warn_once`` guard in
-:meth:`ChannelBase.__init__` and the serializer in
-:meth:`ChannelBase.to_encoding_spec_dict` (which iterates this set). A kwarg is
+`__init__` and the serializer in
+`to_encoding_spec_dict` (which iterates this set). A kwarg is
 serialized iff it is honored, so the guard and the serializer cannot drift.
 
 The role constants below are *named* so the X-vs-X2 and Theta-vs-Theta2 splits

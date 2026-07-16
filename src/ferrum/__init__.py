@@ -285,7 +285,7 @@ def hconcat(*charts, spacing=10.0, resolve=None):
         Pixel gap between adjacent charts.
     resolve : dict or Resolve, optional
         Per-channel scale-sharing overrides, e.g. ``{"color": "shared"}``.
-        Pass a :class:`Resolve` to also control figure-level legend
+        Pass a [Resolve][ferrum.Resolve] to also control figure-level legend
         resolution for a shared channel.
 
     Returns
@@ -315,7 +315,7 @@ def vconcat(*charts, spacing=10.0, resolve=None):
         Pixel gap between adjacent charts.
     resolve : dict or Resolve, optional
         Per-channel scale-sharing overrides, e.g. ``{"color": "shared"}``.
-        Pass a :class:`Resolve` to also control figure-level legend
+        Pass a [Resolve][ferrum.Resolve] to also control figure-level legend
         resolution for a shared channel.
 
     Returns
@@ -343,7 +343,7 @@ def layer(*charts, resolve=None, title=None):
         Two or more charts to overlay bottom-to-top.
     resolve : dict or Resolve, optional
         Per-channel scale-sharing overrides — e.g.
-        ``resolve={"color": "independent"}``.  Pass a :class:`Resolve` to
+        ``resolve={"color": "independent"}``.  Pass a [Resolve][ferrum.Resolve] to
         also control figure-level legend resolution for a shared channel.
     title : str, optional
         Title applied to the combined chart.
@@ -377,7 +377,7 @@ def concat(*charts, columns=None, spacing=10.0, resolve=None):
     spacing : float, default 10.0
         Pixel gap between adjacent cells.
     resolve : dict or Resolve, optional
-        Per-channel scale-sharing overrides.  Pass a :class:`Resolve` to
+        Per-channel scale-sharing overrides.  Pass a [Resolve][ferrum.Resolve] to
         also control figure-level legend resolution for a shared channel.
 
     Returns

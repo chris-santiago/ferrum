@@ -573,7 +573,7 @@ class ConfigureMixin:
         padding: "PaddingConfig | None" = None,
         color: "ColorConfig | None" = None,
     ):
-        """Append a :class:`~ferrum.configure.Configure` layer.
+        """Append a [Configure][ferrum.Configure] layer.
 
         Accepts typed config objects for each domain.  All parameters are
         keyword-only and default to ``None`` (no change for that domain).

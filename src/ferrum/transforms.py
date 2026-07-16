@@ -165,7 +165,7 @@ def transform_filter(predicate: "str | dict | Parameter") -> dict:
     ----------
     predicate : str, dict, or Parameter
         Vega-style expression string (e.g. ``"datum.x > 5"``), a dict filter
-        specification, or a :class:`~ferrum.parameter.Parameter` (a selection
+        specification, or a [Parameter][ferrum.Parameter] (a selection
         or variable parameter).  A ``Parameter`` predicate emits a pass-through
         ``"true"`` predicate plus a ``param`` marker: the static render keeps
         all rows while the WASM runtime crossfilters live against the linked

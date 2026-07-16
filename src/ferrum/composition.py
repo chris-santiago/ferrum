@@ -314,12 +314,12 @@ def compute_union_domain(charts, channel: str) -> Optional[dict]:
     unions numeric min/max (linear) or unique values (ordinal).  Time
     domains use the same numeric union path but emit ``type="time"``.
 
-    :meth:`LayerChart._build_merged` (the interactive one-panel merged
+    ``_build_merged`` (the interactive one-panel merged
     path) is the ONLY production caller left. Every other composition's
     scale sharing -- ``_ChartLike.share_scale``, ``RepeatChart.expand()``
     /``resolve=``, and HConcat/VConcat/ConcatChart/JointChart/ClusterMapChart's
     own ``resolve=`` -- rides the Rust composite resolve pass instead
-    (:func:`_composite_resolve_field`), which unions *transform-aware*
+    (``_composite_resolve_field``), which unions *transform-aware*
     chart extents (e.g. a box mark's whisker reach, a KDE's density
     support) rather than this function's raw column min/max. That
     divergence is real and intentional for now: ``_build_merged`` renders
@@ -401,8 +401,8 @@ def inject_scale(chart, channel: str, scale_dict: dict):
     Channels not currently bound on the chart (or on a particular layer)
     are left untouched — no implicit binding is added.
 
-    Paired exclusively with :func:`compute_union_domain` at
-    :meth:`LayerChart._build_merged` -- the single remaining raw-column
+    Paired exclusively with ``compute_union_domain`` at
+    ``_build_merged`` -- the single remaining raw-column
     scale-injection seam (see that function's docstring for why).
     """
     from ferrum._layer import _Layer
@@ -1182,8 +1182,8 @@ def _build_grid_tree(
 class _ChartLike(ConfigureMixin):
     """Common rendering plumbing shared by every composition wrapper.
 
-    Concrete subclasses must implement :meth:`to_svg`, :attr:`charts`,
-    :meth:`theme`, :meth:`properties`, and :meth:`__repr__`.  This base
+    Concrete subclasses must implement ``to_svg``, ``charts``,
+    ``theme``, ``properties``, and ``__repr__``.  This base
     centralizes the save / show / Jupyter-display / PNG-stub boilerplate
     that previously drifted across five copies (K2 / K3 / K11 / K15).
 
@@ -1238,7 +1238,7 @@ class _ChartLike(ConfigureMixin):
     def show(self) -> None:
         """Display the composition inline in Jupyter or open it in a browser.
 
-        Routes through :func:`ferrum.display.show_chart`, the same display
+        Routes through ``show_chart``, the same display
         path ``Chart.show()`` uses, so inline-vs-browser detection and
         title resolution are identical for a composite and a plain chart.
         """
@@ -1263,7 +1263,7 @@ class _ChartLike(ConfigureMixin):
         """Return the composition rendered as PNG bytes.
 
         This **returns** the PNG-encoded image data; it does not display the
-        composition.  Rasterises the SVG produced by :meth:`to_svg` through
+        composition.  Rasterises the SVG produced by ``to_svg`` through
         the Rust resvg pipeline — the same rasteriser ``Chart.to_png()`` uses.
 
         Parameters
@@ -1311,9 +1311,9 @@ class _ChartLike(ConfigureMixin):
         WASM-backed interactive renderer rather than a static SVG snapshot.
         Because it bundles that renderer, the document is substantially larger
         than a static export; for a lightweight static image use
-        :meth:`to_svg` / :meth:`to_png`.
+        ``to_svg`` / ``to_png``.
 
-        Routes through the shared :func:`ferrum.display.html_string` helper, so
+        Routes through the shared ``html_string`` helper, so
         the HTML assembly and tab-title resolution are identical to a plain
         ``Chart``.  It does **not** construct a live ``InteractiveChart``
         widget, so headless HTML export works without ``anywidget`` installed.
@@ -1350,8 +1350,8 @@ class _ChartLike(ConfigureMixin):
         """Render the composition to an SVG string.
 
         .. deprecated:: 0.16.0
-            Use :meth:`to_svg` instead.  ``show_svg`` will be removed in a
-            future release.  It now forwards to :meth:`to_svg`.
+            Use ``to_svg`` instead.  ``show_svg`` will be removed in a
+            future release.  It now forwards to ``to_svg``.
 
         Returns
         -------
@@ -1369,8 +1369,8 @@ class _ChartLike(ConfigureMixin):
         """Render the composition to PNG bytes.
 
         .. deprecated:: 0.16.0
-            Use :meth:`to_png` instead.  ``show_png`` will be removed in a
-            future release.  It now forwards to :meth:`to_png`.
+            Use ``to_png`` instead.  ``show_png`` will be removed in a
+            future release.  It now forwards to ``to_png``.
 
         Parameters
         ----------
@@ -1401,7 +1401,7 @@ class _ChartLike(ConfigureMixin):
     ) -> None:
         """Save the composition to a file.
 
-        Routes through :func:`ferrum.display.save_chart` — the single
+        Routes through ``save_chart`` — the single
         save-format router shared with ``Chart.save`` — so the supported
         format table (``svg`` / ``png`` / ``html`` / ``json`` / ``pdf``) and
         the HTML / title resolution are identical across chart and composite.
@@ -1453,17 +1453,17 @@ class _ChartLike(ConfigureMixin):
         Pure sugar for constructing the same composition with the merged
         scale-mode dict — resolution happens at render time through the
         composite tree, the same Rust resolve pass
-        (:func:`_composite_resolve_field`) that ``resolve=`` at construction
+        (``_composite_resolve_field``) that ``resolve=`` at construction
         already uses. No ``scale=`` domain dict is computed or injected here,
         and a "shared" union runs over transform-aware chart extents (e.g. a
         box mark's whisker reach, a KDE's density support), not raw column
-        min/max — see :func:`compute_union_domain` for the one remaining
-        raw-column injection seam (:meth:`LayerChart._build_merged`, the
+        min/max — see ``compute_union_domain`` for the one remaining
+        raw-column injection seam (``_build_merged``, the
         interactive one-panel path; GH #52). ``**channels`` only ever
         touches scale resolution; when the existing ``resolve=`` is a
-        :class:`Resolve` with a ``legend`` field set, that legend field
+        [Resolve][ferrum.Resolve] with a ``legend`` field set, that legend field
         carries through unchanged onto the rebuilt composition. The merged
-        result is always stored as a :class:`Resolve` (never the flat-dict
+        result is always stored as a [Resolve][ferrum.Resolve] (never the flat-dict
         form), even when no legend override is present -- a stable
         ``_resolve`` type after every ``share_scale`` call. This has no
         effect on rendering: the flat-dict form and ``Resolve(scale=that_dict)``
@@ -1621,19 +1621,19 @@ class _CompositeBase(_ChartLike):
     VConcat / Concat) *and* the asymmetric panel layouts (Joint / Repeat /
     ClusterMap).  Figure chrome is stored at the composition level
     (``_figure_title`` / ``_figure_subtitle`` / ``_figure_caption``),
-    intercepted in :meth:`properties` so it never reaches an inner panel,
-    and surfaced for the HTML document title via :meth:`_figure_title_text`.
+    intercepted in ``properties`` so it never reaches an inner panel,
+    and surfaced for the HTML document title via ``_figure_title_text``.
 
     The symmetric containers also use this class's ``__init__`` to hold an
     ordered ``charts`` list and a pixel ``spacing`` between panels, plus
     ``__or__`` / ``__and__`` to chain further compositions.  The asymmetric
     layouts keep their own slot-based ``__init__`` and ``charts`` property;
-    they call :meth:`_init_figure_chrome` to wire the chrome fields.
+    they call ``_init_figure_chrome`` to wire the chrome fields.
 
     **Symmetric-concat layout strategy.**  ``HConcatChart`` and
     ``VConcatChart`` differ only in their layout axis, so their
     ``_rebuild_with_charts`` / ``_render_interactive`` / ``to_svg`` /
-    ``__repr__`` bodies live here once, parameterized by :attr:`_composite_layout`
+    ``__repr__`` bodies live here once, parameterized by ``_composite_layout``
     (the wire ``layout`` kind the composite render entry uses:
     ``"hconcat"``/``"vconcat"``/``"wrap"``).  This defaults to ``None`` on the
     base; the asymmetric layouts (Joint / Repeat / ClusterMap) and the
@@ -1810,7 +1810,7 @@ class _CompositeBase(_ChartLike):
         """Render the concatenated charts to an SVG string.
 
         Routes HConcat/VConcat/ConcatChart through the one-call Rust composite
-        entry (``render_composite_svg``); see :func:`_lower_composite`.
+        entry (``render_composite_svg``); see ``_lower_composite``.
         """
         lowered = _lower_composite(self, auto_tooltips=False)
         return lowered.render_svg()
@@ -1837,7 +1837,7 @@ class HConcatChart(_CompositeBase):
     resolve : dict or Resolve, optional
         Per-channel scale-sharing overrides, e.g. ``{"color": "shared"}``
         (equivalent to ``Resolve(scale={"color": "shared"})``). Pass a
-        :class:`Resolve` to also control figure-level legend resolution,
+        [Resolve][ferrum.Resolve] to also control figure-level legend resolution,
         e.g. ``Resolve(scale={"color": "shared"}, legend={"color": "independent"})``
         to keep per-panel legends over a shared color scale.  Accepts the
         same keys and values as ``ConcatChart(resolve=...)``.
@@ -1873,7 +1873,7 @@ class VConcatChart(_CompositeBase):
     resolve : dict or Resolve, optional
         Per-channel scale-sharing overrides, e.g. ``{"color": "shared"}``
         (equivalent to ``Resolve(scale={"color": "shared"})``). Pass a
-        :class:`Resolve` to also control figure-level legend resolution,
+        [Resolve][ferrum.Resolve] to also control figure-level legend resolution,
         e.g. ``Resolve(scale={"color": "shared"}, legend={"color": "independent"})``
         to keep per-panel legends over a shared color scale.  Accepts the
         same keys and values as ``ConcatChart(resolve=...)``.
@@ -1984,7 +1984,7 @@ class JointChart(_CompositeBase):
 
         Embedded charts round-trip through ``ChartSpec.from_json``. Purely an
         introspection/serialization surface — rendering goes through the
-        composite spec tree (:meth:`_composite_tree`), not this dict.
+        composite spec tree (``_composite_tree``), not this dict.
         """
         share_x = ["center"]
         if self.top is not None:
@@ -2230,7 +2230,7 @@ class RepeatChart(_CompositeBase):
         layer of layered panels) and injects an explicit scale on every
         participating chart so the axis ticks match.  ``"independent"``
         (the default for unlisted channels) keeps per-panel domains.  Pass
-        a :class:`Resolve` to also control figure-level legend resolution
+        a [Resolve][ferrum.Resolve] to also control figure-level legend resolution
         for a shared ``color``/``size`` scale, e.g.
         ``Resolve(scale={"color": "shared"}, legend={"color": "independent"})``.
 
@@ -2319,7 +2319,7 @@ class RepeatChart(_CompositeBase):
 
         Embedded charts round-trip through ``ChartSpec.from_json``. Purely an
         introspection/serialization surface — rendering goes through the
-        composite spec tree (:meth:`_composite_tree`), not this dict.
+        composite spec tree (``_composite_tree``), not this dict.
         """
         return {
             "kind": "repeat",
@@ -2344,7 +2344,7 @@ class RepeatChart(_CompositeBase):
           the template on ``row_field == col_field`` panels.
         - 1-D wrap (only one of *row* or *column* set): the populated
           field list, paired with ``None`` on the missing axis.  Geometry
-          is applied by :meth:`to_svg` driven by ``columns``.
+          is applied by [to_svg][ferrum.RepeatChart.to_svg] driven by ``columns``.
         - Layer-only (``layer=`` set, *row* and *column* both ``None``):
           a single panel containing all layers.
 
@@ -2360,11 +2360,11 @@ class RepeatChart(_CompositeBase):
             ``Repeat.*`` placeholders replaced. For 1-D and layer-only
             layouts the unused axis is ``None``. Panels are returned
             exactly as materialized — ``resolve=`` is NOT applied here.
-            Scale sharing is a render-time concern: :meth:`to_svg` /
-            :meth:`_render_interactive` (via :meth:`_composite_tree`) lower
+            Scale sharing is a render-time concern: [to_svg][ferrum.RepeatChart.to_svg] /
+            ``_render_interactive`` (via ``_composite_tree``) lower
             ``self.resolve`` onto the composite tree's resolve field, which
             the Rust resolve pass unions across cells (see
-            :func:`_composite_resolve_field`). A caller that wants shared
+            ``_composite_resolve_field``). A caller that wants shared
             panels should render the ``RepeatChart`` directly rather than
             reading scale dicts off ``expand()``'s output.
 
@@ -2504,16 +2504,16 @@ class RepeatChart(_CompositeBase):
     def share_scale(self, **channels):
         """Share scales across this repeat's panels by merging into ``resolve=``.
 
-        Pure sugar for :meth:`_ChartLike.share_scale` — ``RepeatChart``
+        Pure sugar for ``_ChartLike.share_scale`` — ``RepeatChart``
         exposes its resolve field as the public ``resolve`` attribute (see
         the ``_resolve`` alias property), so the base implementation's merge
         logic and ``_rebuild_with_charts(lambda c: c, resolve=merged)`` call
         work unchanged.  Both paths store the identical ``resolve`` dict,
-        which :meth:`_composite_tree` lowers onto the composite tree's
-        resolve field at render time (:meth:`to_svg` /
-        :meth:`_render_interactive`); the Rust resolve pass then unions the
+        which ``_composite_tree`` lowers onto the composite tree's
+        resolve field at render time ([to_svg][ferrum.RepeatChart.to_svg] /
+        ``_render_interactive``); the Rust resolve pass then unions the
         shared channel's domain across every panel (including each layer of
-        layered panels). :meth:`expand` does NOT apply ``resolve=`` — it
+        layered panels). [expand][ferrum.RepeatChart.expand] does NOT apply ``resolve=`` — it
         returns panels un-injected regardless of this setting.  Passing the
         same channel twice with different modes takes the call's value.
 
@@ -2725,7 +2725,7 @@ class ClusterMapChart(_CompositeBase):
 
         Embedded charts round-trip through ``ChartSpec.from_json``. Purely an
         introspection/serialization surface — rendering goes through the
-        composite spec tree (:meth:`_composite_tree`), not this dict.
+        composite spec tree (``_composite_tree``), not this dict.
         """
         return {
             "kind": "cluster_map",
@@ -2950,22 +2950,22 @@ class LayerChart(_ChartLike):
 
     All layers share x scale by default (union domain) and this cannot be
     turned off — the overlay only makes sense with a single shared x
-    coordinate space; see :func:`_validate_layer_resolve`.  ``y`` shares by
+    coordinate space; see ``_validate_layer_resolve``.  ``y`` shares by
     default too, but ``resolve={"y": "independent"}`` renders a dual-axis
     chart instead: layer 0's y-axis on the left, each subsequent layer's own
-    y-axis stacked on the right (GH #52) — see :meth:`_build_merged` and
-    :meth:`to_svg`.  The charts are merged using the same ``Chart + Chart``
+    y-axis stacked on the right (GH #52) — see ``_build_merged`` and
+    [to_svg][ferrum.LayerChart.to_svg].  The charts are merged using the same ``Chart + Chart``
     layer-merge logic that the ``+`` operator provides — domain union,
     null-padded diagonal concat for heterogeneous data, named-transform
     routing for per-layer transforms.
 
     Render routing (three routes): the ``_y_independent()`` predicate
     selects the static path — (1) static shared/default y → the Phase B
-    overlay composite tree (:meth:`_composite_tree`); (2) static
+    overlay composite tree (``_composite_tree``); (2) static
     independent y → the merged flat single-panel chart
-    (:meth:`_build_merged` → ``to_svg``) — while (3) the interactive
+    (``_build_merged`` → ``to_svg``) — while (3) the interactive
     entry point ALWAYS uses the merged flat chart regardless of resolve
-    (:meth:`_render_interactive_merged`) because selections/hit-testing
+    (``_render_interactive_merged``) because selections/hit-testing
     require overlays to be ONE scene panel.  Nested lowering follows the
     same predicate in ``_lower_any``.
 
@@ -2985,7 +2985,7 @@ class LayerChart(_ChartLike):
         #55 dual-x-axis).  ``y: "independent"`` renders a secondary axis
         per non-primary layer (GH #52).  Non-positional channels follow
         the same inheritance rules as ``Chart + Chart``.  Pass a
-        :class:`Resolve` to also control figure-level legend resolution for
+        [Resolve][ferrum.Resolve] to also control figure-level legend resolution for
         a shared ``color``/``size`` scale.
     title : str, optional
         Title applied to the combined chart via ``.properties(title=...)``.
@@ -3198,10 +3198,10 @@ class LayerChart(_ChartLike):
         """Render the layered charts to an SVG string.
 
         Default/shared-y renders through the composite overlay tree
-        (:meth:`_composite_tree`). ``resolve={"y": "independent"}`` renders
+        (``_composite_tree``). ``resolve={"y": "independent"}`` renders
         a dual-axis chart instead: the overlay tree has no per-layer
         y-scale-slot concept, so it routes through the same merged flat
-        single-panel path (:meth:`_build_merged`) the interactive output
+        single-panel path (``_build_merged``) the interactive output
         already uses (GH #52) -- one implementation serves both output
         kinds for independent y.
 
@@ -3324,17 +3324,17 @@ class LayerChart(_ChartLike):
         """Forward non-chrome ``properties(**kwargs)`` to every layer; store ``title`` locally.
 
         ``LayerChart`` is a single-plot overlay: it merges its layers into one
-        ``Chart`` at render time via :meth:`_build_merged`, which already applies
+        ``Chart`` at render time via ``_build_merged``, which already applies
         ``self._title`` to the merged chart.  Because of that, ``title`` must be
         stored on the ``LayerChart`` itself (not fanned to the inner charts), so that:
 
-        - :meth:`_figure_title_text` (→ ``_title``) returns the correct text for
+        - ``_figure_title_text`` (→ ``_title``) returns the correct text for
           the HTML document ``<title>``.
-        - :meth:`_build_merged` applies the title to the merged chart's on-plot
+        - ``_build_merged`` applies the title to the merged chart's on-plot
           chrome exactly once — inner layers carry no stray title.
 
         Non-chrome kwargs (``width``, ``height``, ...) are fanned to every layer as
-        usual via the base :meth:`_ChartLike.properties` implementation.
+        usual via the base ``_ChartLike.properties`` implementation.
 
         Parameters
         ----------
@@ -3395,7 +3395,7 @@ class ConcatChart(_CompositeBase):
         Pixel gap between adjacent panels.
     resolve : dict or Resolve, optional
         Per-channel scale-sharing overrides — e.g.
-        ``resolve={"x": "shared", "y": "shared"}``.  Pass a :class:`Resolve`
+        ``resolve={"x": "shared", "y": "shared"}``.  Pass a [Resolve][ferrum.Resolve]
         to also control figure-level legend resolution for a shared
         ``color``/``size`` scale.
 

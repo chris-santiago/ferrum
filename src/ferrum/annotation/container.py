@@ -14,7 +14,7 @@ class Annotate:
     ----------
     items : annotation primitive or list of annotation primitives
         A single primitive or a list of primitives created by the factory
-        functions in :mod:`ferrum.annotation`.
+        functions in `annotation`.
 
     Examples
     --------

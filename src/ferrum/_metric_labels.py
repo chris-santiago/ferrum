@@ -225,7 +225,7 @@ class AUCLabel:
 class APLabel:
     """Auto-placed Average Precision annotation for PR charts.
 
-    Sibling of :class:`AUCLabel` for precision-recall curves.  ``x`` is
+    Sibling of [AUCLabel][ferrum.AUCLabel] for precision-recall curves.  ``x`` is
     treated as recall and ``y`` as precision.  Computes step-function
     area under the curve per series.
 

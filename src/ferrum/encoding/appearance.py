@@ -1,6 +1,6 @@
 """Appearance encoding channels (Color, Fill, Stroke, Opacity, Size, Shape, Angle).
 
-Each channel references one named role from :mod:`ferrum.encoding._honored`;
+Each channel references one named role from `_honored`;
 ``_honored_kwargs`` is the single, machine-readable source of truth for which
 kwargs the channel honors (see the ``ChannelBase`` docstring for the contract).
 """

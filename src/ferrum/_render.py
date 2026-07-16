@@ -361,8 +361,8 @@ class _RenderMixin:
         """Return the chart rendered as an SVG string.
 
         This **returns** the SVG markup; it does not display the chart.
-        Use :meth:`show` to display inline or in a browser, or
-        :meth:`save` to write to disk.
+        Use [show][ferrum.Chart.show] to display inline or in a browser, or
+        [save][ferrum.Chart.save] to write to disk.
 
         Parameters
         ----------
@@ -434,7 +434,7 @@ class _RenderMixin:
         """Return the chart rendered as PNG bytes.
 
         This **returns** the PNG-encoded image data; it does not display the
-        chart.  Use :meth:`show` to display, or :meth:`save` to write to disk.
+        chart.  Use [show][ferrum.Chart.show] to display, or [save][ferrum.Chart.save] to write to disk.
 
         Parameters
         ----------
@@ -482,7 +482,7 @@ class _RenderMixin:
         WASM-backed interactive renderer rather than a static SVG snapshot.
         Because it bundles that renderer, the document is substantially larger
         than a static export; for a lightweight static image use
-        :meth:`to_svg` / :meth:`to_png`.
+        [to_svg][ferrum.Chart.to_svg] / [to_png][ferrum.Chart.to_png].
 
         Parameters
         ----------
@@ -529,8 +529,8 @@ class _RenderMixin:
         """Render the chart to an SVG string.
 
         .. deprecated:: 0.16.0
-            Use :meth:`to_svg` instead.  ``show_svg`` will be removed in a
-            future release.  It now forwards to :meth:`to_svg`.
+            Use [to_svg][ferrum.Chart.to_svg] instead.  ``show_svg`` will be removed in a
+            future release.  It now forwards to [to_svg][ferrum.Chart.to_svg].
 
         Parameters
         ----------
@@ -553,8 +553,8 @@ class _RenderMixin:
         """Render the chart to PNG bytes.
 
         .. deprecated:: 0.16.0
-            Use :meth:`to_png` instead.  ``show_png`` will be removed in a
-            future release.  It now forwards to :meth:`to_png`.
+            Use [to_png][ferrum.Chart.to_png] instead.  ``show_png`` will be removed in a
+            future release.  It now forwards to [to_png][ferrum.Chart.to_png].
 
         Parameters
         ----------

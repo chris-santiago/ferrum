@@ -599,7 +599,7 @@ def pca_scree_chart(
     Notes
     -----
     When ``compare=`` is supplied with a fitted PCA estimator, returns a
-    :class:`~ferrum.ConcatChart` with one panel per model (small multiples,
+    [ConcatChart][ferrum.ConcatChart] with one panel per model (small multiples,
     independent per-panel scales). Each panel is the single-model scree chart
     for that PCA, labeled with the model name. PCA component axes live in
     incomparable coordinate systems across different decompositions, so scales
@@ -897,7 +897,7 @@ def intercluster_distance_chart(
 
     Notes
     -----
-    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    When ``compare=`` is supplied, returns a [ConcatChart][ferrum.ConcatChart] with
     one panel per model (small multiples, independent per-panel scales). Each
     panel is the single-model distance map for that clusterer, labeled with
     the model name. Embedding coordinate systems are not comparable across
@@ -988,7 +988,7 @@ def silhouette_chart(
 
     Notes
     -----
-    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    When ``compare=`` is supplied, returns a [ConcatChart][ferrum.ConcatChart] with
     one panel per model (small multiples, independent per-panel scales). Each
     panel is the single-model silhouette chart for that clusterer, labeled with
     the model name. Silhouette coefficient axes are not directly comparable
@@ -1076,7 +1076,7 @@ def manifold_chart(
 
     Notes
     -----
-    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    When ``compare=`` is supplied, returns a [ConcatChart][ferrum.ConcatChart] with
     one panel per model (small multiples, independent per-panel scales). Each
     panel is the single-model embedding scatter for that clusterer, labeled with
     the model name. Manifold embedding coordinates are not comparable across

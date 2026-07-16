@@ -867,7 +867,7 @@ def importance_chart(
 
     Notes
     -----
-    When ``compare=`` is supplied (GH #42), returns a single :class:`~ferrum.Chart`
+    When ``compare=`` is supplied (GH #42), returns a single [Chart][ferrum.Chart]
     with one shared feature axis and bars grouped (dodged) by model, plus a
     model legend. Features are ranked once globally across models by mean
     *absolute* importance and the shared top-``top_k`` set is used for every
@@ -974,7 +974,7 @@ def shap_beeswarm_chart(
 
     Notes
     -----
-    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    When ``compare=`` is supplied, returns a [ConcatChart][ferrum.ConcatChart] with
     one panel per model (small multiples, shared x/y scales). Each panel is
     the single-model beeswarm chart for that model, labeled with the model
     name. The single-model path (no ``compare=``) is unchanged.
@@ -1078,12 +1078,12 @@ def shap_bar_chart(
     Notes
     -----
     When ``compare=`` is supplied (GH #42) with ``per_class=False``, returns a
-    single :class:`~ferrum.Chart` with one shared feature axis and bars
+    single [Chart][ferrum.Chart] with one shared feature axis and bars
     grouped (dodged) by model, plus a model legend. SHAP values are stacked
     across models before ``_shap_order_features`` ranks the pooled values
     once, globally; the shared top-``max_display`` feature set is used for
     every model. With ``per_class=True``, ``compare=`` instead returns a
-    :class:`~ferrum.ConcatChart` with one panel per model (small multiples,
+    [ConcatChart][ferrum.ConcatChart] with one panel per model (small multiples,
     shared x/y scales) -- class is a competing facet dimension, so it keeps
     the pre-#42 layout. The single-model path (no ``compare=``) is
     unchanged.
@@ -1193,7 +1193,7 @@ def shap_waterfall_chart(
 
     Notes
     -----
-    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    When ``compare=`` is supplied, returns a [ConcatChart][ferrum.ConcatChart] with
     one panel per model (small multiples, shared x/y scales). Each panel is
     the single-model waterfall chart for that model and sample, labeled with
     the model name. The single-model path (no ``compare=``) is unchanged.
@@ -1320,7 +1320,7 @@ def shap_chart(
 
     Notes
     -----
-    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    When ``compare=`` is supplied, returns a [ConcatChart][ferrum.ConcatChart] with
     one panel per model (small multiples, shared x/y scales). The per-model
     builder is chosen by ``kind`` exactly as the single-model path does; each
     panel is labeled with the model name. The single-model path (no
@@ -1477,7 +1477,7 @@ def pdp_chart(
 
     Notes
     -----
-    When ``compare=`` is supplied, returns a :class:`~ferrum.ConcatChart` with
+    When ``compare=`` is supplied, returns a [ConcatChart][ferrum.ConcatChart] with
     one panel per model (small multiples). Each panel is the single-model PDP
     facet composite for that model (one facet per feature), labeled with the
     model name. Each feature facet keeps its own independent x axis (PDP curves

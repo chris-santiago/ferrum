@@ -1,7 +1,7 @@
 """Annotation primitive dataclasses and factory functions.
 
 Each factory function returns a frozen dataclass instance that can be
-collected into an :class:`~ferrum.annotation.container.Annotate` container
+collected into an [Annotate][ferrum.Annotate] container
 and attached to a chart.
 
 All coordinate arguments accept:
@@ -10,8 +10,8 @@ All coordinate arguments accept:
 - ``datetime.date`` / ``datetime.datetime`` — temporal data-space coordinates
   (converted to epoch-milliseconds UTC at serialization time)
 - ISO-8601 date/datetime strings — parsed and converted to epoch-milliseconds
-- :class:`~ferrum.annotation.coords.PixelCoord` — absolute pixel offset
-- :class:`~ferrum.annotation.coords.NormCoord` — normalized [0, 1] fraction
+- [PixelCoord][ferrum.PixelCoord] — absolute pixel offset
+- [NormCoord][ferrum.NormCoord] — normalized [0, 1] fraction
 """
 
 from __future__ import annotations
@@ -288,7 +288,7 @@ def text(
     Parameters
     ----------
     x, y : CoordValue
-        Position (data-space float, :func:`px`, or :func:`norm`).
+        Position (data-space float, [px][ferrum.px], or [norm][ferrum.norm]).
     text : str
         Label text.
     font_size : float, default 12

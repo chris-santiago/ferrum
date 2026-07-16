@@ -90,11 +90,11 @@ class ROCVisualizer(FerrumVisualizer):
 
     @property
     def has_score(self) -> bool:
-        """True iff :meth:`score` returns a real AUC rather than the fallback.
+        """True iff `score` returns a real AUC rather than the fallback.
 
         ROC scores from class probabilities, so unlike the base class it is
         scoreable when the model exposes ``predict_proba`` even with no
-        ``.score`` method. Mirrors the exact branch taken in :meth:`score`,
+        ``.score`` method. Mirrors the exact branch taken in `score`,
         so the two can never drift.
         """
         return hasattr(self.model, "predict_proba") or callable(getattr(self.model, "score", None))
@@ -211,12 +211,12 @@ class CalibrationVisualizer(FerrumVisualizer):
 
     @property
     def has_score(self) -> bool:
-        """True iff :meth:`score` returns a real metric rather than the fallback.
+        """True iff [score][ferrum.CalibrationVisualizer.score] returns a real metric rather than the fallback.
 
         A multi-model overlay has no single ``.score`` to report, so
-        ``has_score`` is ``False`` and :meth:`score` returns ``0.0`` — the two
-        stay mutually consistent. A single-model calibration keeps the base
-        ``model.score`` behavior unchanged.
+        ``has_score`` is ``False`` and [score][ferrum.CalibrationVisualizer.score]
+        returns ``0.0`` — the two stay mutually consistent. A single-model
+        calibration keeps the base ``model.score`` behavior unchanged.
         """
         if self._is_multi_model:
             return False
@@ -228,7 +228,7 @@ class CalibrationVisualizer(FerrumVisualizer):
         Overlaying several models has no single well-defined score, so rather
         than silently returning only the first model's metric this returns the
         documented ``0.0`` no-single-score fallback (consistent with
-        :attr:`has_score` being ``False``).
+        [has_score][ferrum.CalibrationVisualizer.has_score] being ``False``).
         """
         if self._is_multi_model:
             return 0.0

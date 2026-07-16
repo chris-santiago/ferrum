@@ -143,7 +143,7 @@ def rank_chart(
     >>> fm.rank_chart(X_train, rank="1d", algorithm="shapiro", top_k=10)
 
     .. deprecated:: 2026-05-12
-        Use :func:`rank1d_chart` or :func:`rank2d_chart` directly. This
+        Use [rank1d_chart][ferrum.rank1d_chart] or [rank2d_chart][ferrum.rank2d_chart] directly. This
         dispatcher remains as a shim that forwards to the appropriate
         sibling and will be removed in a future major release.
     """

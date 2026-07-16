@@ -109,8 +109,8 @@ class Inset:
     bounds : tuple
         ``(left, top, right, bottom)`` boundary coordinates for the inset
         within the parent plot area.  Each coordinate may be a ``float``
-        (data-space), :class:`~ferrum.annotation.coords.PixelCoord`, or
-        :class:`~ferrum.annotation.coords.NormCoord`.
+        (data-space), [PixelCoord][ferrum.PixelCoord], or
+        [NormCoord][ferrum.NormCoord].
     border : bool, default True
         Draw a border around the inset.
     border_color : str, default "#999"

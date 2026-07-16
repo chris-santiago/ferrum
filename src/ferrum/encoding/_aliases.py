@@ -2,7 +2,7 @@
 
 The alias graph is expressed as DATA (the ``_ENCODING_ALIASES`` table) driven by
 one generic loop, so the policy is visible in one place rather than spread across
-inline branches. :func:`apply_channel_aliases` operates on shallow copies of the
+inline branches. `apply_channel_aliases` operates on shallow copies of the
 encoding and mark-kwargs dicts from ``Chart.to_spec`` — it does not mutate the
 chart's internal state.
 
@@ -56,7 +56,7 @@ def apply_channel_aliases(enc: dict, mk: dict) -> tuple[dict, dict]:
     Operates on shallow copies of the encoding and mark-kwargs dicts from
     ``to_spec()`` — does not mutate the chart's internal state.
 
-    Encoding-dict aliases (in :data:`_ENCODING_ALIASES`, applied in order):
+    Encoding-dict aliases (in `_ENCODING_ALIASES`, applied in order):
 
     1. ``fill`` -> ``color`` when ``color`` is not already present.
     2. ``stroke`` -> ``color`` when ``color`` is not already present;

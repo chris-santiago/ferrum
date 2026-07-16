@@ -1076,7 +1076,7 @@ def residuals_chart(
           carries a ``model`` colour group with one overlaid series per model
           (unchanged single-panel overlay).
         - any multi-panel value (``"auto"`` or an explicit list): returns a
-          :class:`~ferrum.ConcatChart` of small multiples, one panel per model.
+          [ConcatChart][ferrum.ConcatChart] of small multiples, one panel per model.
           Each model renders its full multi-panel diagnostic grid as one
           small-multiple panel, labeled with the model name. Scale sharing
           across models is not applied to the multi-panel grid (each panel
@@ -1224,7 +1224,7 @@ def prediction_error_chart(
           group with one actual-vs-predicted series per model and a shared y=x
           reference line (unchanged single-panel overlay).
         - with ``ci`` or ``reference_band``: returns a
-          :class:`~ferrum.ConcatChart` of small multiples, one panel per model,
+          [ConcatChart][ferrum.ConcatChart] of small multiples, one panel per model,
           with shared x/y scales. Each panel's residual band is computed from
           that model's residuals only — never pooled across models.
     random_state : int or None, default None
@@ -1329,7 +1329,7 @@ def cooks_distance_chart(
         rule (Hair et al.); ``None`` disables highlighting.
     compare : dict of str -> estimator or None, default None
         Mapping of label -> fitted estimator to compare against ``model``.
-        When supplied, returns a :class:`~ferrum.ConcatChart` of small
+        When supplied, returns a [ConcatChart][ferrum.ConcatChart] of small
         multiples, one residuals-vs-leverage panel per model, with shared x/y
         scales. Each panel's Cook's distance and leverage are derived from that
         model's own hat matrix only. The single-model path (no ``compare=``) is

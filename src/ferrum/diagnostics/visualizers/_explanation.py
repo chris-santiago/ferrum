@@ -341,7 +341,7 @@ class SHAPBeeswarmVisualizer(_SHAPBaseMixin, FerrumVisualizer):
 class SHAPBarVisualizer(_SHAPBaseMixin, FerrumVisualizer):
     """Mean-absolute SHAP per feature as a horizontal bar chart.
 
-    Parameters mirror :class:`SHAPBeeswarmVisualizer`; see that class
+    Parameters mirror [SHAPBeeswarmVisualizer][ferrum.SHAPBeeswarmVisualizer]; see that class
     for the full parameter list.
 
     Examples

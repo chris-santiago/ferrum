@@ -56,21 +56,24 @@ class FerrumVisualizer:
 
     @property
     def has_score(self) -> bool:
-        """Whether :meth:`score` returns a real test-set metric.
+        """Whether [score][ferrum.FerrumVisualizer.score] returns a real test-set metric.
 
         Derived from behavior rather than hand-maintained: ``True`` exactly
         when the wrapped model exposes a ``.score`` method (so the inherited
-        :meth:`score` delegates to it), ``False`` for genuinely no-model
-        visualizers (rank / parallel-coordinates / class-balance / elbow)
-        whose :meth:`score` returns the ``0.0`` fallback. Mirrors the guard
-        in :meth:`score`, so the two can never drift.
+        [score][ferrum.FerrumVisualizer.score] delegates to it), ``False``
+        for genuinely no-model visualizers (rank / parallel-coordinates /
+        class-balance / elbow) whose [score][ferrum.FerrumVisualizer.score]
+        returns the ``0.0`` fallback. Mirrors the guard in
+        [score][ferrum.FerrumVisualizer.score], so the two can never drift.
 
-        Subclasses that override :meth:`score` with a different scoreability
-        condition (e.g. :class:`ROCVisualizer`, which scores from
-        ``predict_proba``) or that wrap multiple models with no single metric
-        (e.g. a multi-model overlay) override this property to keep the two in
-        lockstep — ``has_score`` is ``True`` for an instance iff its
-        :meth:`score` returns a real metric rather than the ``0.0`` fallback.
+        Subclasses that override [score][ferrum.FerrumVisualizer.score] with
+        a different scoreability condition (e.g.
+        [ROCVisualizer][ferrum.ROCVisualizer], which scores from
+        ``predict_proba``) or that wrap multiple models with no single
+        metric (e.g. a multi-model overlay) override this property to keep
+        the two in lockstep — ``has_score`` is ``True`` for an instance iff
+        its [score][ferrum.FerrumVisualizer.score] returns a real metric
+        rather than the ``0.0`` fallback.
         """
         return callable(getattr(self.model, "score", None))
 

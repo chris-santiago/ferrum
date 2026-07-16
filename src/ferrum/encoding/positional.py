@@ -1,6 +1,6 @@
 """Positional encoding channels (X, Y, X2, Y2, errors, polar).
 
-Each channel references one named role from :mod:`ferrum.encoding._honored`;
+Each channel references one named role from `_honored`;
 ``_honored_kwargs`` is the single, machine-readable source of truth for which
 kwargs the channel honors (see the ``ChannelBase`` docstring for the contract).
 """

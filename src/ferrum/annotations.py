@@ -408,7 +408,7 @@ def annotate_text(
         Vertical pixel offset from ``(x, y)``.
     anchor : str, optional
         Horizontal text anchor in the SVG vocabulary (matching
-        :func:`ferrum.annotation.text`): ``"start"``, ``"middle"``, or
+        `text`): ``"start"``, ``"middle"``, or
         ``"end"``.  This is the canonical keyword.  When neither ``anchor`` nor
         ``align`` is supplied the anchor defaults to ``"middle"`` (centered).
     align : str, optional

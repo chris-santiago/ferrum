@@ -832,13 +832,13 @@ class Chart(
         """Render data as filled circles — shorthand for ``mark_point(shape="circle")``.
 
         Mirrors the Altair ``mark_circle()`` convenience method.  All keyword
-        arguments are forwarded to :meth:`mark_point`, including aliases such
+        arguments are forwarded to [mark_point][ferrum.Chart.mark_point], including aliases such
         as ``color`` and ``alpha``.
 
         Parameters
         ----------
         **kwargs
-            Any keyword accepted by :meth:`mark_point` (``size``, ``fill``,
+            Any keyword accepted by [mark_point][ferrum.Chart.mark_point] (``size``, ``fill``,
             ``opacity``, ``color``, ``alpha``, etc.).
 
         Returns
@@ -860,13 +860,13 @@ class Chart(
         """Render data as filled squares — shorthand for ``mark_point(shape="square")``.
 
         Mirrors the Altair ``mark_square()`` convenience method.  All keyword
-        arguments are forwarded to :meth:`mark_point`, including aliases such
+        arguments are forwarded to [mark_point][ferrum.Chart.mark_point], including aliases such
         as ``color`` and ``alpha``.
 
         Parameters
         ----------
         **kwargs
-            Any keyword accepted by :meth:`mark_point` (``size``, ``fill``,
+            Any keyword accepted by [mark_point][ferrum.Chart.mark_point] (``size``, ``fill``,
             ``opacity``, ``color``, ``alpha``, etc.).
 
         Returns
@@ -999,7 +999,7 @@ class Chart(
         pixel offset.  Use this mark when you control placement explicitly
         (e.g. inline bar labels, callout annotations at known coordinates).
 
-        See also :meth:`mark_label` for a point-anchored annotation with
+        See also [mark_label][ferrum.Chart.mark_label] for a point-anchored annotation with
         automatic collision avoidance and optional leader-line support.
 
         Requires a ``text`` encoding channel pointing at the column to display.
@@ -1231,13 +1231,13 @@ class Chart(
 
         Each label is anchored to its (x, y) data point and positioned by a
         greedy collision-avoidance algorithm (not placed at an arbitrary
-        coordinate like :meth:`mark_text`).  An optional leader line
+        coordinate like [mark_text][ferrum.Chart.mark_text]).  An optional leader line
         (``leader_line=True``) draws a thin connecting line from the data
         point to the placed label, useful when the label lands far from its
         source point.  Use this mark when you want the renderer to find
         non-overlapping placements automatically.
 
-        See also :meth:`mark_text` for a free-positioned text glyph that
+        See also [mark_text][ferrum.Chart.mark_text] for a free-positioned text glyph that
         places the label at the exact encoded coordinate without collision
         avoidance or a leader line.
 
@@ -2143,7 +2143,7 @@ class Chart(
     def override(self, **kwargs: Any) -> "Chart":
         """Store low-level spec-path overrides to be applied at render time.
 
-        Overrides are merged into :attr:`_overrides` with later calls winning
+        Overrides are merged into `_overrides` with later calls winning
         on key conflicts. The ``override()`` call never mutates the receiver.
 
         Parameters
@@ -2668,12 +2668,12 @@ class Chart(
         """Serialise the chart specification to a JSON string.
 
         .. note::
-            Unlike :meth:`to_svg`, :meth:`to_png`, and :meth:`to_html` — which
+            Unlike [to_svg][ferrum.Chart.to_svg], [to_png][ferrum.Chart.to_png], and [to_html][ferrum.Chart.to_html] — which
             return *rendered* output — ``to_json`` returns the chart
             **specification** (the declaration you built), not the rendered
             scene graph.  ``save(path)`` with a ``.json`` extension writes the
             rendered scene graph instead, which is a different artifact.  For
-            the specification as a Python value, see :meth:`to_dict`.
+            the specification as a Python value, see [to_dict][ferrum.Chart.to_dict].
 
         Calls ``to_spec()`` to build the ``ChartSpec`` and then serialises it
         via the Rust ``serde_json`` encoder.  When ``indent`` is given the
@@ -2774,7 +2774,7 @@ class Chart(
     def add_params(self, *params) -> "Chart":
         """Attach reactive variable parameter(s) to this chart.
 
-        Records one or more :class:`~ferrum.parameter.Parameter` objects (built
+        Records one or more [Parameter][ferrum.Parameter] objects (built
         via ``fm.param()``) so they are emitted into the spec's ``params``
         section.  Parameters drive reactive scale domains (``scale={"domain":
         param}``) and crossfilters (``transform_filter(param)``) in the WASM
