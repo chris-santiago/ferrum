@@ -93,6 +93,7 @@ _STACK_ELIGIBLE = frozenset(
 
 _VALID_JITTER_AXES = {"x", "y", "both"}
 _VALID_STACK_ANCHORS = {"top", "mid"}
+_VALID_STACK_VALUE_AXES = {"x", "y", None}
 
 # Canonical set of real stack-offset strategies.  Single source of truth for
 # every stack-offset validator (Stack, transform_stack, and the encoding
@@ -284,12 +285,21 @@ class Stack:
         ``mark_class_prediction_error(show_counts=True)`` to land
         per-segment count labels without duplicating cumsum logic
         in Python.
+    value_axis : {"x", "y"} or None, default None
+        Which positional channel carries the value being cumulated.
+        ``None`` (default) infers the axis from ``CoordFlip`` the way
+        every pre-existing Stack does. Set explicitly only when a
+        composite-mark desugar remaps the value channel onto ``x``
+        without setting ``CoordFlip`` (e.g. ``mark_histogram``/
+        ``mark_density`` with ``orient="horizontal"``, GH #77) — end
+        users composing a ``Stack`` directly should leave this unset.
 
     Raises
     ------
     ValueError
         If ``offset`` is not one of ``"zero"``, ``"normalize"``,
-        ``"center"`` or ``anchor`` is not one of ``"top"``, ``"mid"``.
+        ``"center"`` or ``anchor`` is not one of ``"top"``, ``"mid"``
+        or ``value_axis`` is not one of ``"x"``, ``"y"``, ``None``.
 
     Examples
     --------
@@ -302,17 +312,22 @@ class Stack:
     by: Optional[str] = None
     offset: str = "zero"
     anchor: str = "top"
+    value_axis: Optional[str] = None
 
     def __post_init__(self) -> None:
         _validate_stack_offset(self.offset, where="Stack")
         if self.anchor not in _VALID_STACK_ANCHORS:
             raise ValueError(f"Stack: anchor must be 'top'|'mid'; got '{self.anchor}'")
+        if self.value_axis not in _VALID_STACK_VALUE_AXES:
+            raise ValueError(f"Stack: value_axis must be 'x'|'y'|None; got '{self.value_axis}'")
 
     def to_spec_dict(self) -> dict:
         """Return the serialized spec dict for this position adjustment."""
         d: dict = {"type": "stack", "offset": self.offset, "anchor": self.anchor}
         if self.by is not None:
             d["by"] = self.by
+        if self.value_axis is not None:
+            d["value_axis"] = self.value_axis
         return d
 
 

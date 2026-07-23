@@ -181,14 +181,21 @@ def desugar_density(
 
     # multiple="stack" and "fill" use the Stack position adjuster.
     # multiple="dodge": Rust KDE normalize_mode handles per-group normalization.
+    #
+    # GH #77: orientation="horizontal" remaps the value column onto
+    # encoding.x directly (`encoding_remap` above) without setting
+    # CoordFlip, so the Stack must say so explicitly — otherwise Rust's
+    # `apply_stack` falls back to `coord_flipped` (False here) and
+    # cumulates the wrong column.
+    stack_value_axis = "x" if orientation == "horizontal" else None
     if multiple == "stack":
         from ferrum.position import Stack
 
-        position = Stack(offset="zero")
+        position = Stack(offset="zero", value_axis=stack_value_axis)
     elif multiple == "fill":
         from ferrum.position import Stack
 
-        position = Stack(offset="normalize")
+        position = Stack(offset="normalize", value_axis=stack_value_axis)
     elif multiple == "dodge":
         # For density plots, "dodge" produces overlapping curves (same as "layer").
         # Histogram dodge (side-by-side bars) is handled separately in mark_histogram.
@@ -321,15 +328,22 @@ def desugar_histogram(
         encoding_remap = {"x": "bin_start", "x2": "bin_end", "y": count_column}
 
     # multiple= → position adjustment on the count/density axis.
+    #
+    # GH #77: orientation="horizontal" remaps the count/density column onto
+    # encoding.x directly (`encoding_remap` above) without setting
+    # CoordFlip, so the Stack must say so explicitly — otherwise Rust's
+    # `apply_stack` falls back to `coord_flipped` (False here) and
+    # cumulates the wrong column.
+    stack_value_axis = "x" if orientation == "horizontal" else None
     position = None
     if multiple == "stack":
         from ferrum.position import Stack
 
-        position = Stack(offset="zero")
+        position = Stack(offset="zero", value_axis=stack_value_axis)
     elif multiple == "fill":
         from ferrum.position import Stack
 
-        position = Stack(offset="normalize")
+        position = Stack(offset="normalize", value_axis=stack_value_axis)
     elif multiple == "dodge":
         from ferrum.position import Dodge
 

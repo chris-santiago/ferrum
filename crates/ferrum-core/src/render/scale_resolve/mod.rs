@@ -1296,8 +1296,11 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
         if has_x && !has_y {
             let x_enc = spec.encoding.x.as_ref().unwrap();
             let x2_enc = spec.encoding.x2.as_ref();
+            // Stack-aware x-axis (GH #77 follow-up): see
+            // `position::axis_batch_for_x` for the rationale.
+            let x_batch = crate::render::position::axis_batch_for_x(spec, &x_enc.field, primary_batch);
             let pos_fields = PositionalFields { x: Some(x_enc.field.as_str()), y: None };
-            let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, x_shared_domain, &mut warnings)?;
+            let x = build_axis_scale("x", x_enc, x2_enc, pos_fields, &x_batch, transform_outputs, x_pixel_range, spec, x_shared, x_shared_domain, &mut warnings)?;
             let (color, size, shape, opacity) = build_auxiliary_scales(spec, primary_batch, transform_outputs, theme, leaf_scales, &mut warnings)?;
             return Ok((ResolvedScales {
                 x, y: dummy_unit_scale(y_pixel_range, false),
@@ -1351,7 +1354,12 @@ pub(in crate::render) fn resolve_scales_with_leaf_context(
         x: Some(x_enc.field.as_str()),
         y: Some(y_enc.field.as_str()),
     };
-    let mut x = build_axis_scale("x", x_enc, x2_enc, pos_fields, primary_batch, transform_outputs, x_pixel_range, spec, x_shared, x_shared_domain, &mut warnings)?;
+    // Stack-aware x-axis (GH #77 follow-up): resolve against the post-Stack
+    // batch when the spec carries a matching Stack adjustment whose
+    // resolved value axis is X. See `position::axis_batch_for_x` for the
+    // rationale.
+    let x_batch = crate::render::position::axis_batch_for_x(spec, &x_enc.field, primary_batch);
+    let mut x = build_axis_scale("x", x_enc, x2_enc, pos_fields, &x_batch, transform_outputs, x_pixel_range, spec, x_shared, x_shared_domain, &mut warnings)?;
     // Stack-aware y-axis: resolve against the post-Stack batch when the
     // spec carries a matching Stack adjustment. See
     // `position::axis_batch_for_y` for the rationale.

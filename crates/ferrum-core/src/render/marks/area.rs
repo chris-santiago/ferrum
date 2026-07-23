@@ -94,6 +94,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let has_y2 = y2s_opt.is_some();
 
     let baseline_y = ctx.panel.plot_area.y + ctx.panel.plot_area.h;
+    // GH #77 follow-up: fallback baseline for a horizontal stacked area's
+    // base edge (see `stack_value_on_x` below), mirroring `baseline_y`.
+    let baseline_x = ctx.panel.plot_area.x;
 
     let cf = color_field(ctx, spec);
     // Use col_as_ordinal_category_str so that Int*, Float*, and Bool color columns
@@ -124,6 +127,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 .map(|a| a.iter().collect())
         });
     let is_stacked = stack_bases.is_some();
+    // GH #77 follow-up: `apply_stack` stamps this key when the cumulated
+    // *value* column landed on X (a horizontal composite-mark desugar, or
+    // real CoordFlip) rather than Y. `__stack_y_base__` is the same column
+    // name regardless of axis, so this flag decides whether the base maps
+    // through `scales.x` (bottom point varies in x at the row's own y) or
+    // `scales.y` (bottom point varies in y at the row's own x — today's
+    // default). Absent the stamp, behavior is byte-identical to pre-#77.
+    let stack_value_on_x = crate::render::position::stack_value_on_x(ctx.batch);
 
     // Stacked areas use opaque fills so each band is visually distinct.
     let base_opacity = if is_stacked { 1.0 } else { ctx.mark_style.paint.opacity };
@@ -172,11 +183,20 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                     .unwrap_or(baseline_y);
                 bottom.push((cx, by + yo));
             } else if let Some(ref bases) = stack_bases {
-                let base_y = bases.get(i)
-                    .and_then(|v| *v)
-                    .and_then(|b| ctx.scales.y.to_pixel_f64(b))
-                    .unwrap_or(baseline_y);
-                bottom.push((cx, base_y));
+                let base_v = bases.get(i).and_then(|v| *v);
+                if stack_value_on_x {
+                    // Value lives on X: the base is a horizontal offset at
+                    // the row's own y-pixel, not a vertical offset at cx.
+                    let base_x = base_v
+                        .and_then(|b| ctx.scales.x.to_pixel_f64(b))
+                        .unwrap_or(baseline_x);
+                    bottom.push((base_x + xo, cy_top));
+                } else {
+                    let base_y = base_v
+                        .and_then(|b| ctx.scales.y.to_pixel_f64(b))
+                        .unwrap_or(baseline_y);
+                    bottom.push((cx, base_y));
+                }
             }
         }
         if top.len() < 2 { continue; }
@@ -301,7 +321,7 @@ mod tests {
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::mark::Mark;
     use ferrum_scene::SceneNode;
-    use arrow::array::Float64Array;
+    use arrow::array::{Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
@@ -990,5 +1010,218 @@ mod tests {
             "group A fill_opacity must be 0.3; got {}", fill_opacities[0]);
         assert!((fill_opacities[1] - 0.8).abs() < 1e-9,
             "group B fill_opacity must be 0.8; got {}", fill_opacities[1]);
+    }
+
+    // ------------------------------------------------------------------
+    // GH #77 follow-up: `build`'s stacked-area base handling must honor the
+    // `STACK_VALUE_ON_X_KEY` stamp `apply_stack` writes, mapping the base
+    // through `scales.x` (and pairing it with the row's own y-pixel)
+    // instead of always mapping through `scales.y` at the row's own
+    // x-pixel.
+    // ------------------------------------------------------------------
+
+    fn extract_path_points(cmds: &[ferrum_scene::PathCmd]) -> Vec<(f64, f64)> {
+        cmds.iter().filter_map(|c| match c {
+            ferrum_scene::PathCmd::MoveTo { x, y } | ferrum_scene::PathCmd::LineTo { x, y } => Some((*x, *y)),
+            _ => None,
+        }).collect()
+    }
+
+    /// RED against the pre-fix drawer: without the axis-aware fix, the base
+    /// point for row i is computed as `(cx_i, scales.y.to_pixel(base_i))` —
+    /// the SAME x-pixel as the top point, with the base mapped through the
+    /// wrong (y) scale — instead of `(scales.x.to_pixel(base_i), cy_i)`.
+    #[test]
+    fn horizontal_stacked_area_base_maps_through_x_scale() {
+        use crate::render::position::apply_position;
+        use crate::render::scale_resolve::{ColorScale, ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset, StackValueAxis};
+        use std::borrow::Cow;
+
+        // Horizontal density desugar shape: "density" (value) on x, "value"
+        // (position along the curve) on y. Two position samples (0.0, 1.0),
+        // two stack groups "a"/"b" at each — "b"'s base varies across rows
+        // (3.0, then 4.0), a stronger discriminator than a constant-0 base.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("density", DataType::Float64, false),
+            Field::new("value", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let raw = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![3.0, 5.0, 4.0, 6.0])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0])),
+            Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+        ]).unwrap();
+
+        let enc = Encoding {
+            x: Some(EncodingSpec { field: "density".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            y: Some(EncodingSpec { field: "value".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            color: Some(EncodingSpec { field: "grp".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+            ..Default::default()
+        };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 100.0], false, false)),
+            color: Some(ColorScale::Categorical {
+                domain: vec!["a".into(), "b".into()],
+                palette: Cow::Owned(vec![
+                    crate::render::color::from_rgb(0x00, 0x00, 0x00),
+                    crate::render::color::from_rgb(0xFF, 0xFF, 0xFF),
+                ]),
+            }),
+            size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+        };
+        let pos = PositionAdjust::Stack {
+            by: Some("grp".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: Some(StackValueAxis::X),
+        };
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+        assert!(crate::render::position::stack_value_on_x(&adjusted), "value_axis: Some(X) must stamp the marker");
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: enc,
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: Some(pos), title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Area);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &adjusted, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        // "b"'s cumulated density: at value=0 → 3+5=8; at value=1 → 4+6=10.
+        // Its base: at value=0 → 3.0 (a's cumulative there); at value=1 → 4.0.
+        // x-scale [0,10]→[0,300]px (×30); y-scale [0,1]→[0,100]px (×100).
+        let b_path = result.nodes.iter().find_map(|n| {
+            if let SceneNode::Path { commands, closed: true, .. } = n {
+                let pts = extract_path_points(commands);
+                if pts.first().map(|(x, _)| (*x - 240.0).abs() < 1e-6).unwrap_or(false) {
+                    return Some(pts);
+                }
+            }
+            None
+        }).expect("expected group b's closed area path (top[0].x == 8.0*30 == 240px)");
+
+        // Path layout: [top0, top1, bottom1, bottom0, Close] (Close yields no point).
+        assert_eq!(b_path.len(), 4, "expected 4 points (2 top + 2 bottom) for group b");
+        let (top0, top1, bottom1, bottom0) = (b_path[0], b_path[1], b_path[2], b_path[3]);
+
+        assert!((top0.0 - 240.0).abs() < 1e-6, "top0.x (density=8) must be 240px; got {}", top0.0);
+        assert!((top0.1 - 0.0).abs() < 1e-6, "top0.y (value=0) must be 0px; got {}", top0.1);
+        assert!((top1.0 - 300.0).abs() < 1e-6, "top1.x (density=10) must be 300px; got {}", top1.0);
+        assert!((top1.1 - 100.0).abs() < 1e-6, "top1.y (value=1) must be 100px; got {}", top1.1);
+
+        // Base points: mapped through scales.x (not scales.y), paired with
+        // the row's own top y-pixel (not the row's own top x-pixel).
+        assert!((bottom0.0 - 90.0).abs() < 1e-6, "bottom0.x (base=3.0 via x-scale) must be 90px; got {}", bottom0.0);
+        assert!((bottom0.1 - top0.1).abs() < 1e-6, "bottom0.y must equal top0.y (same row); got {} vs {}", bottom0.1, top0.1);
+        assert!((bottom1.0 - 120.0).abs() < 1e-6, "bottom1.x (base=4.0 via x-scale) must be 120px; got {}", bottom1.0);
+        assert!((bottom1.1 - top1.1).abs() < 1e-6, "bottom1.y must equal top1.y (same row); got {} vs {}", bottom1.1, top1.1);
+    }
+
+    /// Byte-stability: without the stamp (vertical Stack — the pre-#77
+    /// default), the base still maps through `scales.y` at the row's own
+    /// x-pixel, exactly as before the GH #77 follow-up.
+    #[test]
+    fn vertical_stacked_area_byte_stable_without_stamp() {
+        use crate::render::position::apply_position;
+        use crate::render::scale_resolve::{ColorScale, ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::encoding::{DataType as SDT, EncodingSpec};
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
+        use std::borrow::Cow;
+
+        // Two x-positions (0.0, 1.0), two stack groups "a"/"b" at each —
+        // mirrors the horizontal test's shape so both tests are directly
+        // comparable, but with x=position (category) / y=value (stacked).
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let raw = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0])),
+            Arc::new(Float64Array::from(vec![3.0, 5.0, 4.0, 6.0])),
+            Arc::new(StringArray::from(vec!["a", "b", "a", "b"])),
+        ]).unwrap();
+
+        let enc = Encoding {
+            x: Some(EncodingSpec { field: "x".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            y: Some(EncodingSpec { field: "y".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            color: Some(EncodingSpec { field: "grp".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+            ..Default::default()
+        };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
+            color: Some(ColorScale::Categorical {
+                domain: vec!["a".into(), "b".into()],
+                palette: Cow::Owned(vec![
+                    crate::render::color::from_rgb(0x00, 0x00, 0x00),
+                    crate::render::color::from_rgb(0xFF, 0xFF, 0xFF),
+                ]),
+            }),
+            size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+        };
+        let pos = PositionAdjust::Stack {
+            by: Some("grp".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+        assert!(!crate::render::position::stack_value_on_x(&adjusted), "vertical Stack must not stamp the horizontal-value marker");
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Area,
+            encoding: enc,
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: Some(pos), title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Area);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &adjusted, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        // Group "b" (cumulated y: bin x=0 → 3+5=8, bin x=1 → 4+6=10; base:
+        // bin x=0 → 3.0, bin x=1 → 4.0). x-scale [0,1]→[0,300]px;
+        // y-scale [0,10]→[100,0]px (inverted: v → 100 - 10*v).
+        // top0 = (x=0→0px, y=8→20px); top1 = (x=1→300px, y=10→0px).
+        let b_path = result.nodes.iter().find_map(|n| {
+            if let SceneNode::Path { commands, closed: true, .. } = n {
+                let pts = extract_path_points(commands);
+                if pts.first().map(|(_, y)| (*y - 20.0).abs() < 1e-6).unwrap_or(false) {
+                    return Some(pts);
+                }
+            }
+            None
+        }).expect("expected group b's closed area path (top[0].y == 100 - 10*8 == 20px)");
+
+        assert_eq!(b_path.len(), 4, "expected 4 points (2 top + 2 bottom) for group b");
+        let (top0, top1, bottom1, bottom0) = (b_path[0], b_path[1], b_path[2], b_path[3]);
+
+        assert!((top0.0 - 0.0).abs() < 1e-6, "top0.x (x=0) must be 0px; got {}", top0.0);
+        assert!((top0.1 - 20.0).abs() < 1e-6, "top0.y (y=8) must be 20px; got {}", top0.1);
+        assert!((top1.0 - 300.0).abs() < 1e-6, "top1.x (x=1) must be 300px; got {}", top1.0);
+        assert!((top1.1 - 0.0).abs() < 1e-6, "top1.y (y=10) must be 0px; got {}", top1.1);
+
+        // Pre-#77 (and unchanged) base geometry: (cx, base mapped through
+        // scales.y) — the SAME x-pixel as the row's own top point.
+        assert!((bottom0.0 - top0.0).abs() < 1e-6, "bottom0.x must equal top0.x (cx, unchanged); got {} vs {}", bottom0.0, top0.0);
+        assert!((bottom0.1 - 70.0).abs() < 1e-6, "bottom0.y (base=3.0 via y-scale) must be 70px; got {}", bottom0.1);
+        assert!((bottom1.0 - top1.0).abs() < 1e-6, "bottom1.x must equal top1.x (cx, unchanged); got {} vs {}", bottom1.0, top1.0);
+        assert!((bottom1.1 - 60.0).abs() < 1e-6, "bottom1.y (base=4.0 via y-scale) must be 60px; got {}", bottom1.1);
     }
 }

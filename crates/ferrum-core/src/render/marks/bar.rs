@@ -674,6 +674,19 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
+    // GH #77 follow-up: a stacked horizontal bar/histogram (value column on
+    // X — `apply_stack` stamps `STACK_VALUE_ON_X_KEY`) must span
+    // [base, value] on X, not [panel-left, value]; each bin's segments
+    // accumulate outward from the stack base rather than every segment
+    // overlapping from x=0. Absent the stamp (no Stack, or a vertical
+    // Stack whose value lives on Y), `stack_bases` is `None` and every bar
+    // keeps today's fixed `baseline_x` — byte-identical.
+    let stack_bases: Option<Vec<Option<f64>>> = if crate::render::position::stack_value_on_x(ctx.batch) {
+        col_as_f64(ctx.batch, "__stack_y_base__").ok()
+    } else {
+        None
+    };
+
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
@@ -698,8 +711,24 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
         let px_right = px_right + x_offsets[i];
         let py_top   = py_top   + y_offsets[i];
         let py_bottom = py_bottom + y_offsets[i];
-        let width  = (px_right - baseline_x).max(0.0);
         let height = (py_top - py_bottom).abs().max(1.0);
+
+        // Stack base (segment start on X); falls back to the panel-left
+        // baseline when unstacked, the base row is non-finite, or the base
+        // doesn't resolve through the x-scale.
+        let row_base_x = stack_bases
+            .as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .filter(|v| v.is_finite())
+            .and_then(|b| ctx.scales.x.to_pixel_f64(b))
+            .map(|p| p + x_offsets[i])
+            .unwrap_or(baseline_x);
+        // Clamp (not abs) to zero, matching the pre-existing unstacked
+        // formula (`(px_right - baseline_x).max(0.0)`): a degenerate row
+        // whose value pixel lands left of its base renders nothing, not a
+        // mirrored rect on the wrong side of the base.
+        let rect_x = row_base_x;
+        let width = (px_right - row_base_x).max(0.0);
 
         let fill_color = resolve_fill_color(
             ctx.scales.color.as_ref(),
@@ -721,7 +750,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
         let (style, cr) = sc.row_fill_stroke(Some(fill_sc), stroke_sc, &base, fill_opacity, stroke_opacity, i);
 
         acc.push(SceneNode::Rect {
-            x: baseline_x,
+            x: rect_x,
             y: py_top.min(py_bottom),
             w: width,
             h: height,
@@ -2338,5 +2367,175 @@ mod tests {
         for h in heights {
             assert!((h - 88.0).abs() < 1e-9, "expected bar height 88.0 from the 220px explicit extent, got {h}");
         }
+    }
+
+    // ------------------------------------------------------------------
+    // GH #77 follow-up: `build_quantitative_horizontal` must honor the
+    // `STACK_VALUE_ON_X_KEY` stamp `apply_stack` writes, spanning each
+    // segment [base, value] on X instead of always drawing from the
+    // panel-left baseline.
+    // ------------------------------------------------------------------
+
+    /// RED against the pre-fix drawer: without the base-aware fix, every
+    /// segment draws from `panel.x` (0px) to its own cumulated value, so
+    /// segment "b" (base=3, top=8) would render as [0px, 240px] — fully
+    /// overlapping segment "a"'s [0px, 90px] — instead of the correct
+    /// adjacent, non-overlapping [90px, 240px].
+    #[test]
+    fn horizontal_stacked_bar_segments_span_base_to_value_no_overlap() {
+        use crate::render::position::apply_position;
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset, StackValueAxis};
+
+        // Horizontal desugar shape: count (value) on x, bin_start/bin_end
+        // (category) on y/y2 — one bin, two stack groups "a" and "b".
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("count", DataType::Float64, false),
+            Field::new("bin_start", DataType::Float64, false),
+            Field::new("bin_end", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let raw = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![3.0, 5.0])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0])),
+            Arc::new(Float64Array::from(vec![1.0, 1.0])),
+            Arc::new(StringArray::from(vec!["a", "b"])),
+        ]).unwrap();
+
+        let enc = Encoding {
+            x: Some(EncodingSpec { field: "count".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            y: Some(EncodingSpec { field: "bin_start".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            y2: Some(EncodingSpec { field: "bin_end".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            color: Some(EncodingSpec { field: "grp".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+            ..Default::default()
+        };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 100.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+        };
+        let pos = PositionAdjust::Stack {
+            by: Some("grp".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: Some(StackValueAxis::X),
+        };
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: enc,
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: Some(pos), title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &adjusted, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let rects: Vec<(f64, f64)> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { x, w, .. } = n { Some((*x, *w)) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 2, "expected 2 stacked bar segments");
+
+        // Group order: a=0, b=1 (first-appearance). a: base=0→top=3; b: base=3→top=8.
+        // x-scale [0,10]→[0,300]px: 0→0px, 3→90px, 8→240px.
+        let (x0, w0) = rects[0];
+        let (x1, w1) = rects[1];
+        assert!((x0 - 0.0).abs() < 1e-6, "segment a must start at base=0 → 0px; got {x0}");
+        assert!((x0 + w0 - 90.0).abs() < 1e-6, "segment a must end at value=3 → 90px; got {}", x0 + w0);
+        assert!((x1 - 90.0).abs() < 1e-6, "segment b must start at its own base (=a's top, 90px); got {x1}");
+        assert!((x1 + w1 - 240.0).abs() < 1e-6, "segment b must end at value=8 → 240px; got {}", x1 + w1);
+
+        // No overlap: segment b starts exactly where segment a ends.
+        assert!(x0 + w0 <= x1 + 1e-9, "stacked segments in the same bin must not overlap");
+    }
+
+    /// Byte-stability: `build_ordinal` (the standard categorical
+    /// x + stacked y bar path) is untouched by the GH #77 follow-up — it
+    /// never reads `STACK_VALUE_ON_X_KEY` and its batch never carries the
+    /// stamp (Stack's value column is always y for an ordinal-x bar, by
+    /// construction of which builder `build()` dispatches to). Pins the
+    /// exact stacked rect geometry to guard against an accidental
+    /// regression from the new horizontal-axis-aware code path.
+    #[test]
+    fn vertical_ordinal_stacked_bar_byte_stable_without_stamp() {
+        use crate::render::position::apply_position;
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let raw = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["x", "x"])),
+            Arc::new(Float64Array::from(vec![3.0, 5.0])),
+            Arc::new(StringArray::from(vec!["a", "b"])),
+        ]).unwrap();
+
+        let enc = Encoding {
+            x: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+            y: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            color: Some(EncodingSpec { field: "grp".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+            ..Default::default()
+        };
+        let scales = ResolvedScales {
+            x: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["x".into()], vec![0.0, 300.0], 0.0)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+        };
+        let pos = PositionAdjust::Stack {
+            by: Some("grp".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+        // No STACK_VALUE_ON_X_KEY on this batch: value_axis=None + coord_flipped=false → value on y.
+        assert!(!crate::render::position::stack_value_on_x(&adjusted), "vertical Stack must not stamp the horizontal-value marker");
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: enc,
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: Some(pos), title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &adjusted, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let rects: Vec<(f64, f64)> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { y, h, .. } = n { Some((*y, *h)) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 2, "expected 2 stacked bar segments");
+
+        // y-scale [0,10]→[100,0]px (inverted): 0→100px, 3→70px, 8→20px.
+        // Group order a=0,b=1: a spans base=0(100px)→top=3(70px); b spans base=3(70px)→top=8(20px).
+        let (y0, h0) = rects[0];
+        let (y1, h1) = rects[1];
+        assert!((y0 - 70.0).abs() < 1e-6, "segment a top must be at 70px; got {y0}");
+        assert!((h0 - 30.0).abs() < 1e-6, "segment a height must be 30px; got {h0}");
+        assert!((y1 - 20.0).abs() < 1e-6, "segment b top must be at 20px; got {y1}");
+        assert!((h1 - 50.0).abs() < 1e-6, "segment b height must be 50px; got {h1}");
     }
 }

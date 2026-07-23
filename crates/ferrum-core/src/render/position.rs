@@ -16,24 +16,29 @@ use arrow::datatypes::{DataType, Field, Schema};
 use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
 use crate::render::RenderWarning;
 use crate::spec::chart::ChartSpec;
-use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
+use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset, StackValueAxis};
 
 /// Return the batch the y-scale should resolve against, accounting for a
 /// Stack position adjustment.
 ///
 /// When a layer (or the single-layer spec) carries a `Stack` adjustment
-/// whose encoded y matches `y_field`, the rendered y values are the
-/// *cumulative* values from `apply_stack`, not the original column.
-/// Resolving the y-scale from the raw batch would clip stacked tops
-/// outside the domain — `LinearScale` returns NaN for out-of-domain
-/// inputs and `bar.rs` drops every row whose top falls past it. Returning
-/// the post-stack batch here keeps stacked bars visible.
+/// whose encoded y matches `y_field` AND whose resolved value axis (GH #77:
+/// [`resolve_stack_value_on_x`], using this spec's real `coord_flipped` —
+/// `rendering_spec.coord` survives the CoordFlip encoding swap unchanged, so
+/// it always reflects the true flip state here) is Y, the rendered y values
+/// are the *cumulative* values from `apply_stack`, not the original column.
+/// Resolving the y-scale from the raw batch would clip stacked tops outside
+/// the domain — `LinearScale` returns NaN for out-of-domain inputs and
+/// `bar.rs` drops every row whose top falls past it. Returning the
+/// post-stack batch here keeps stacked bars visible.
 ///
-/// Borrowed `primary_batch` is returned when no Stack matches; the owned
-/// stacked batch is returned (boxed by `Cow`) otherwise. On a stack
-/// failure the caller's primary batch is returned — the scale resolves
-/// from raw data and the downstream `apply_stack` re-attempt during
-/// drawing will surface the same error to the user.
+/// Borrowed `primary_batch` is returned when no Stack matches, or when a
+/// matching Stack's value axis resolves to X instead (GH #77 follow-up —
+/// widening belongs to `axis_batch_for_x` in that case, not here). The owned
+/// stacked batch is returned (boxed by `Cow`) when the value axis resolves
+/// to Y. On a stack failure the caller's primary batch is returned — the
+/// scale resolves from raw data and the downstream `apply_stack` re-attempt
+/// during drawing will surface the same error to the user.
 ///
 /// Pre-F15 this logic lived in `scale_resolve::resolve_scales_with_outputs`
 /// via a private `find_stack_for_y` helper. The Stack handling belongs
@@ -44,12 +49,18 @@ pub(crate) fn axis_batch_for_y<'a>(
     y_field: &str,
     primary_batch: &'a RecordBatch,
 ) -> Cow<'a, RecordBatch> {
-    let Some((by, offset, anchor, layer_enc)) = find_stack_for_y(spec, y_field) else {
+    let Some((by, offset, anchor, value_axis, layer_enc)) = find_stack_for_y(spec, y_field) else {
         return Cow::Borrowed(primary_batch);
     };
-    // axis_batch_for_y operates on the original spec (pre-flip), so
-    // coord_flipped is always false here.
-    //
+    let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
+    // GH #77 follow-up: only proceed when this Stack's resolved value axis
+    // is actually Y — the SAME triad `apply_stack` uses (shared via
+    // `resolve_stack_value_on_x`), not a per-axis guess. A matching Stack
+    // whose value lives on X (explicit `value_axis: Some(X)`, or a real
+    // CoordFlip) is `axis_batch_for_x`'s to widen, not this function's.
+    if resolve_stack_value_on_x(value_axis, coord_flipped) {
+        return Cow::Borrowed(primary_batch);
+    }
     // This is the scale-resolve *preview* stack (to widen the y-domain to the
     // stacked tops); the real draw-pass stack runs later via `apply_position`
     // with the panel's live warnings sink. Any `PositionAdjustSkipped` warning
@@ -57,24 +68,80 @@ pub(crate) fn axis_batch_for_y<'a>(
     // by that draw pass — so we discard this preview's warnings to avoid a
     // duplicate.
     let mut discard_warnings = Vec::new();
-    match apply_stack(primary_batch, by, offset, anchor, layer_enc, false, &mut discard_warnings) {
+    match apply_stack(primary_batch, by, offset, anchor, value_axis, layer_enc, coord_flipped, &mut discard_warnings) {
         Ok(b) => Cow::Owned(b),
         Err(_) => Cow::Borrowed(primary_batch),
     }
 }
 
-/// Find the first Stack position adjustment in the spec whose layer (or
-/// the chart itself, in the single-layer case) encodes the given y-field.
-/// Multi-Stack layers are not merged here — the first match wins.
-fn find_stack_for_y<'a>(
+/// Return the batch the x-scale should resolve against, accounting for a
+/// Stack position adjustment (GH #77 follow-up).
+///
+/// Symmetric counterpart to [`axis_batch_for_y`] above — same rationale
+/// (stacked cumulative tops must widen the axis domain or `LinearScale`
+/// clips them and drawers silently skip every row past the first group),
+/// same preview-stack / discard-warnings structure, same per-layer walk
+/// shape, same real-`coord_flipped` + [`resolve_stack_value_on_x`] gating —
+/// only proceeding when the resolved value axis is X. Needed once GH #77's
+/// `value_axis: Some(X)` (horizontal composite-mark desugars) or a real
+/// `CoordFlip` can put the stacked *value* column on X instead of Y —
+/// before this, X was never anything but an ordinal/binned category axis,
+/// which needs no value-based widening, so no X-side counterpart existed.
+///
+/// An earlier version of this function passed a *hardcoded* `true` (the
+/// per-axis "assume value is here" guess `axis_batch_for_y` used to pass
+/// `false`) instead of the real `coord_flipped`, relying on `apply_stack`'s
+/// value-column type check to fail safe when the guess was wrong. That is
+/// unsound whenever both axes are Float64 (e.g. a shared-bin-edge
+/// histogram, where `x`/`y` are both numeric): a plain vertical stacked
+/// histogram would spuriously match here, and if the wrong-axis column's
+/// values happened to repeat across groups (entirely plausible — the
+/// standard vertical stacked-histogram shape is exactly that, since
+/// `shared_extent=True` makes bin edges repeat by design) the "wrong"
+/// cumulation could silently corrupt real category data instead of merely
+/// failing a type check. Using the real `coord_flipped` (via the same
+/// triad `apply_stack` uses) removes the guess entirely: the gate above
+/// answers "is the value really on this axis" from the same source of
+/// truth the draw pass uses, so a vertical (non-flipped, no explicit
+/// `value_axis`) spec's `axis_batch_for_x` call never even attempts
+/// `apply_stack` — byte-identical no-op, not a fail-safe one.
+pub(crate) fn axis_batch_for_x<'a>(
     spec: &'a ChartSpec,
-    y_field: &str,
-) -> Option<(
+    x_field: &str,
+    primary_batch: &'a RecordBatch,
+) -> Cow<'a, RecordBatch> {
+    let Some((by, offset, anchor, value_axis, layer_enc)) = find_stack_for_x(spec, x_field) else {
+        return Cow::Borrowed(primary_batch);
+    };
+    let coord_flipped = matches!(spec.coord, Some(crate::spec::coord::CoordKind::Flip));
+    if !resolve_stack_value_on_x(value_axis, coord_flipped) {
+        return Cow::Borrowed(primary_batch);
+    }
+    let mut discard_warnings = Vec::new();
+    match apply_stack(primary_batch, by, offset, anchor, value_axis, layer_enc, coord_flipped, &mut discard_warnings) {
+        Ok(b) => Cow::Owned(b),
+        Err(_) => Cow::Borrowed(primary_batch),
+    }
+}
+
+/// The `Stack` fields [`find_stack_for_y`]/[`find_stack_for_x`] extract,
+/// plus the layer/spec `Encoding` the match came from. A named alias
+/// (rather than an inline 5-tuple) keeps both functions' signatures under
+/// clippy's `type_complexity` threshold — GH #77 added `value_axis` as the
+/// 4th element; the GH #77 follow-up reused the same alias for the new
+/// X-side finder rather than duplicating it.
+type StackForAxis<'a> = (
     Option<&'a str>,
     &'a StackOffset,
     &'a crate::spec::position::StackAnchor,
+    Option<crate::spec::position::StackValueAxis>,
     &'a crate::spec::encoding::Encoding,
-)> {
+);
+
+/// Find the first Stack position adjustment in the spec whose layer (or
+/// the chart itself, in the single-layer case) encodes the given y-field.
+/// Multi-Stack layers are not merged here — the first match wins.
+fn find_stack_for_y<'a>(spec: &'a ChartSpec, y_field: &str) -> Option<StackForAxis<'a>> {
     if let Some(layers) = spec.layers.as_ref() {
         for layer in layers {
             let layer_y = layer
@@ -86,17 +153,50 @@ fn find_stack_for_y<'a>(
             if layer_y != Some(y_field) {
                 continue;
             }
-            if let Some(PositionAdjust::Stack { by, offset, anchor }) =
+            if let Some(PositionAdjust::Stack { by, offset, anchor, value_axis }) =
                 layer.position.as_ref().or(spec.position.as_ref())
             {
-                return Some((by.as_deref(), offset, anchor, &layer.encoding));
+                return Some((by.as_deref(), offset, anchor, *value_axis, &layer.encoding));
             }
         }
     }
-    if let Some(PositionAdjust::Stack { by, offset, anchor }) = spec.position.as_ref() {
+    if let Some(PositionAdjust::Stack { by, offset, anchor, value_axis }) = spec.position.as_ref() {
         let spec_y = spec.encoding.y.as_ref().map(|e| e.field.as_str());
         if spec_y == Some(y_field) {
-            return Some((by.as_deref(), offset, anchor, &spec.encoding));
+            return Some((by.as_deref(), offset, anchor, *value_axis, &spec.encoding));
+        }
+    }
+    None
+}
+
+/// Find the first Stack position adjustment in the spec whose layer (or
+/// the chart itself, in the single-layer case) encodes the given x-field.
+/// Symmetric counterpart to [`find_stack_for_y`] — same layer-walk shape,
+/// checking `encoding.x` instead of `encoding.y`. Multi-Stack layers are
+/// not merged here — the first match wins.
+fn find_stack_for_x<'a>(spec: &'a ChartSpec, x_field: &str) -> Option<StackForAxis<'a>> {
+    if let Some(layers) = spec.layers.as_ref() {
+        for layer in layers {
+            let layer_x = layer
+                .encoding
+                .x
+                .as_ref()
+                .map(|e| e.field.as_str())
+                .or_else(|| spec.encoding.x.as_ref().map(|e| e.field.as_str()));
+            if layer_x != Some(x_field) {
+                continue;
+            }
+            if let Some(PositionAdjust::Stack { by, offset, anchor, value_axis }) =
+                layer.position.as_ref().or(spec.position.as_ref())
+            {
+                return Some((by.as_deref(), offset, anchor, *value_axis, &layer.encoding));
+            }
+        }
+    }
+    if let Some(PositionAdjust::Stack { by, offset, anchor, value_axis }) = spec.position.as_ref() {
+        let spec_x = spec.encoding.x.as_ref().map(|e| e.field.as_str());
+        if spec_x == Some(x_field) {
+            return Some((by.as_deref(), offset, anchor, *value_axis, &spec.encoding));
         }
     }
     None
@@ -134,7 +234,12 @@ pub(crate) fn apply_position(
                 "false" | "null" | "none" => return None,
                 _ => return None,
             };
-            Some(PositionAdjust::Stack { by: None, offset, anchor: StackAnchor::Top })
+            // No explicit `value_axis`: this synthetic Stack comes from the
+            // `encoding.{x,y}.stack` shorthand, whose axis is already
+            // selected by `coord_flipped` above via `stack_source` — not a
+            // composite-mark desugar bypass, so `apply_stack`'s
+            // `coord_flipped` fallback is the correct (and only) signal here.
+            Some(PositionAdjust::Stack { by: None, offset, anchor: StackAnchor::Top, value_axis: None })
         });
         enc_stack.as_ref()
     } else {
@@ -150,8 +255,8 @@ pub(crate) fn apply_position(
         PositionAdjust::Jitter { axis, width, seed } => {
             apply_jitter(batch, axis, *width, *seed, scales, encoding)
         }
-        PositionAdjust::Stack { by, offset, anchor } => {
-            apply_stack(batch, by.as_deref(), offset, anchor, encoding, coord_flipped, warnings)
+        PositionAdjust::Stack { by, offset, anchor, value_axis } => {
+            apply_stack(batch, by.as_deref(), offset, anchor, *value_axis, encoding, coord_flipped, warnings)
         }
     }
 }
@@ -622,6 +727,26 @@ fn apply_jitter(
 // Stack
 // ---------------------------------------------------------------------------
 
+/// Resolve whether a Stack's cumulated *value* column lives on X (GH #77).
+///
+/// The single canonical triad: an explicit `value_axis` always wins
+/// (`Some(X)` → true, `Some(Y)` → false); `None` falls back to
+/// `coord_flipped` — real `CoordFlip` always structurally puts value on X
+/// (prepare.rs's `build_layers` swap convention). Shared by [`apply_stack`]
+/// (the draw-time cumulation) and `axis_batch_for_x`/`axis_batch_for_y`
+/// (the scale-resolve domain-widening preview, GH #77 follow-up) so the two
+/// passes can never disagree about which axis holds the value.
+pub(crate) fn resolve_stack_value_on_x(
+    value_axis: Option<StackValueAxis>,
+    coord_flipped: bool,
+) -> bool {
+    match value_axis {
+        Some(StackValueAxis::X) => true,
+        Some(StackValueAxis::Y) => false,
+        None => coord_flipped,
+    }
+}
+
 /// Position-adjust a layer's batch for a stacked layout.
 ///
 /// Computes per-row segment bounds within each x-bin and writes them
@@ -641,11 +766,19 @@ fn apply_jitter(
 /// The renderer stays mark-agnostic; the choice of anchor lives in
 /// the position spec and is set by whichever composite-mark desugar
 /// is producing the layer.
+///
+/// GH #77 added `value_axis` as the 8th parameter (the explicit axis
+/// override), pushing this past clippy's `too_many_arguments` default
+/// threshold of 7 — matching the existing precedent for wide,
+/// single-purpose render-pass functions elsewhere in this crate (e.g.
+/// `layout::legend`, `render::annotation`, `render::scale_resolve`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_stack(
     batch: &RecordBatch,
     by_field: Option<&str>,
     offset: &crate::spec::position::StackOffset,
     anchor: &crate::spec::position::StackAnchor,
+    value_axis: Option<crate::spec::position::StackValueAxis>,
     encoding: &crate::spec::encoding::Encoding,
     coord_flipped: bool,
     warnings: &mut Vec<RenderWarning>,
@@ -666,11 +799,20 @@ pub(crate) fn apply_stack(
         return Ok(batch.clone());
     };
 
-    // When coord_flipped, the prepare step has already swapped x/y in the
-    // encoding. The numeric (value) column is now in encoding.x and the
-    // categorical (grouping) column is in encoding.y. We swap the logical
-    // roles so Stack cumulates the correct column.
-    let (value_enc, cat_enc) = if coord_flipped {
+    // GH #77: the value vs. category axis is resolved from an explicit
+    // `value_axis` (set by composite-mark desugars that swap x/y directly,
+    // e.g. `desugar_histogram`/`desugar_density` with
+    // `orientation="horizontal"`, WITHOUT setting CoordFlip) when present;
+    // `None` falls back to the `coord_flipped`-only convention (real
+    // `CoordFlip`, where prepare.rs has already swapped x/y in the
+    // encoding — the numeric (value) column lands in encoding.x and the
+    // categorical (grouping) column in encoding.y). This is
+    // byte-identical to the pre-#77 behavior whenever `value_axis` is
+    // `None`. Shared with `axis_batch_for_x`/`axis_batch_for_y` (GH #77
+    // follow-up) via `resolve_stack_value_on_x` so domain widening can
+    // never desync from cumulation.
+    let value_on_x = resolve_stack_value_on_x(value_axis, coord_flipped);
+    let (value_enc, cat_enc) = if value_on_x {
         (encoding.x.as_ref(), encoding.y.as_ref())
     } else {
         (encoding.y.as_ref(), encoding.x.as_ref())
@@ -826,7 +968,22 @@ pub(crate) fn apply_stack(
     cols.push(Arc::new(Float64Array::from(new_y_base)));
     new_fields.push(Field::new("__stack_y_base__", DataType::Float64, true));
 
-    let new_schema = Arc::new(Schema::new(new_fields));
+    // GH #77 follow-up: stamp explicit schema metadata (mirroring the
+    // `DODGE_N_GROUPS_KEY` / `DODGE_SUB_BAND_PX_KEY` pattern from
+    // `apply_dodge_ordinal`, GH #66) recording that the stacked *value*
+    // column landed on the X axis this pass, not Y. `__stack_y_base__` is
+    // always the same column regardless of axis, so mark drawers (`bar.rs`,
+    // `area.rs`) that consume it need an explicit signal for which scale to
+    // map it through — they can't infer it from the batch shape alone.
+    // Absence of the key (the `!value_on_x` branch below) is the pre-#77
+    // default and keeps every existing vertical-stack mark byte-identical.
+    let new_schema = if value_on_x {
+        let mut metadata = batch.schema().metadata().clone();
+        metadata.insert(STACK_VALUE_ON_X_KEY.to_string(), "1".to_string());
+        Arc::new(Schema::new(new_fields).with_metadata(metadata))
+    } else {
+        Arc::new(Schema::new(new_fields))
+    };
     RecordBatch::try_new(new_schema, cols)
         .map_err(|e| crate::render::RenderError::PositionAdjustFailed { adjustment: "Stack", reason: format!("{e}") })
 }
@@ -836,7 +993,7 @@ mod tests {
     use super::*;
     use crate::render::scale_resolve::ColorScale;
     use crate::spec::encoding::{Encoding, EncodingSpec};
-    use crate::spec::position::{JitterAxis, PositionAdjust, StackAnchor, StackOffset};
+    use crate::spec::position::{JitterAxis, PositionAdjust, StackAnchor, StackOffset, StackValueAxis};
     use arrow::array::{Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
@@ -1230,7 +1387,7 @@ mod tests {
         let b = batch_xyg();
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
-        let pos = PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Zero, anchor: StackAnchor::Top };
+        let pos = PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Zero, anchor: StackAnchor::Top, value_axis: None };
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // Group order: a=0, b=1. At x=1: a=10 → 10, b=20 → 30. At x=2: a=30 → 30, b=40 → 70.
@@ -1249,6 +1406,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Normalize,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -1264,7 +1422,7 @@ mod tests {
         let b = batch_xyg();
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
-        let pos = PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Center, anchor: StackAnchor::Top };
+        let pos = PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Center, anchor: StackAnchor::Top, value_axis: None };
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // x=1: total=30, mid=15. a row goes 0..10 → top at 10-15=-5.
@@ -1286,6 +1444,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Mid,
+            value_axis: None,
         };
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -1315,6 +1474,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Normalize,
             anchor: StackAnchor::Mid,
+            value_axis: None,
         };
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -1337,6 +1497,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Center,
             anchor: StackAnchor::Mid,
+            value_axis: None,
         };
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -1387,6 +1548,7 @@ mod tests {
                 by: Some("g".into()),
                 offset: StackOffset::Zero,
                 anchor: StackAnchor::Top,
+                value_axis: None,
             }),
             title: None,
             axis_x: None,
@@ -1408,6 +1570,7 @@ mod tests {
             Some("g"),
             &StackOffset::Zero,
             &StackAnchor::Top,
+            None,
             &spec.encoding,
             false,
             &mut Vec::new(),
@@ -1415,6 +1578,278 @@ mod tests {
         assert!(
             direct.is_err(),
             "apply_stack should fail on Boolean y column"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // GH #77 follow-up (E2E-discovered gap): `axis_batch_for_x`, the X-side
+    // counterpart to `axis_batch_for_y`. Before this, only Y ever got
+    // Stack-aware domain widening; a horizontal stack's x-domain resolved
+    // from the RAW per-group values, so `LinearScaleData::scale` returned
+    // NaN (`clamp=false`) for the true stacked total and drawers silently
+    // skipped every row past the first group.
+    // ------------------------------------------------------------------
+
+    /// RED against the pre-fix code (no x-widening at all): the x-domain
+    /// auto-sizes from the raw per-group column (max 5.0, plus padding),
+    /// so `to_pixel_f64(8.0)` — the true stacked total — returns `None`.
+    #[test]
+    fn axis_batch_for_x_widens_horizontal_stack_domain() {
+        use crate::layout::ThemeInputs;
+        use crate::render::scale_resolve::resolve_scales;
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::mark::Mark;
+        use crate::spec::position::StackValueAxis;
+
+        // Horizontal desugar shape: count (value) on x, bin_start (category)
+        // on y — one bin, two stack groups "a" (3.0) and "b" (5.0); stacked
+        // total = 8.0.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("count", DataType::Float64, false),
+            Field::new("bin_start", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![3.0, 5.0])),
+                Arc::new(Float64Array::from(vec![0.0, 0.0])),
+                Arc::new(StringArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+
+        let spec = ChartSpec {
+            data: Default::default(),
+            mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "count".into(), type_: None, ..Default::default() }),
+                y: Some(EncodingSpec { field: "bin_start".into(), type_: None, ..Default::default() }),
+                color: Some(EncodingSpec { field: "grp".into(), type_: None, ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: Some(PositionAdjust::Stack {
+                by: Some("grp".into()),
+                offset: StackOffset::Zero,
+                anchor: StackAnchor::Top,
+                value_axis: Some(StackValueAxis::X),
+            }),
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let theme = ThemeInputs::default();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 100.0), &theme).unwrap();
+
+        let px = scales.x.to_pixel_f64(8.0);
+        assert!(
+            px.is_some(),
+            "x-domain must widen to include the stacked total (8.0); to_pixel_f64 returned None"
+        );
+    }
+
+    /// Byte-stability: a standard vertical Stack (value on y, the pre-#77
+    /// default) leaves `axis_batch_for_x` a no-op — the X-side's
+    /// value-on-X fallback assumption is wrong here (x is the category),
+    /// so `apply_stack` fails cleanly (Utf8 "cat" can't be cumulated) and
+    /// `axis_batch_for_x` falls back to `Cow::Borrowed`. `axis_batch_for_y`
+    /// keeps its existing (pre-#77) behavior unchanged — same cumulated
+    /// values as `stack_zero_accumulates_y`.
+    #[test]
+    fn axis_batch_for_x_is_noop_for_vertical_stack() {
+        let b = batch_xyg();
+        let enc = enc_xy("x", "y", Some("g"));
+        let spec = crate::spec::chart::ChartSpec {
+            data: Default::default(),
+            mark: crate::spec::mark::Mark::Bar,
+            encoding: enc,
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: Some(PositionAdjust::Stack {
+                by: Some("g".into()),
+                offset: StackOffset::Zero,
+                anchor: StackAnchor::Top,
+                value_axis: None,
+            }),
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let x_result = axis_batch_for_x(&spec, "x", &b);
+        assert!(matches!(x_result, Cow::Borrowed(_)), "x-side must be a no-op for a vertical stack");
+
+        let y_result = axis_batch_for_y(&spec, "y", &b);
+        match y_result {
+            Cow::Owned(out) => {
+                let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+                // Same expected values as stack_zero_accumulates_y.
+                assert_eq!(ya.value(0), 10.0);
+                assert_eq!(ya.value(1), 30.0);
+                assert_eq!(ya.value(2), 30.0);
+                assert_eq!(ya.value(3), 70.0);
+            }
+            Cow::Borrowed(_) => panic!("expected y-side widening to succeed for a vertical stack"),
+        }
+    }
+
+    /// Real CoordFlip+Stack (no composite desugar, so `value_axis` stays
+    /// `None` — the swap is structural, baked into the encoding by
+    /// `prepare::build_layers` before this code ever runs): `x` now holds
+    /// the value column, `y` the category. `spec.coord` here is
+    /// `Some(CoordKind::Flip)` — exactly what `prepare::build_layers`'s
+    /// `rendering_spec` retains (the encoding gets swapped, but `coord`
+    /// passes through unchanged via struct-update syntax), which is the
+    /// real signal `axis_batch_for_x`/`axis_batch_for_y` now read (GH #77
+    /// follow-up) instead of guessing. `axis_batch_for_x` must resolve
+    /// this correctly through the `None`-fallback path (same as the
+    /// draw-time `apply_stack` call); `axis_batch_for_y` must gate out
+    /// (no-op) since y is now the category.
+    #[test]
+    fn axis_batch_for_x_widens_through_coord_flip_fallback() {
+        // Mirrors stack_coord_flipped_uses_x_as_value_column's batch shape:
+        // x=val (numeric, the value after the CoordFlip swap), y=cat
+        // (categorical), exactly what `prepare::build_layers` produces.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+                Arc::new(Float64Array::from(vec![3.0, 5.0, 2.0, 4.0])),
+                Arc::new(StringArray::from(vec!["x", "y", "x", "y"])),
+            ],
+        )
+        .unwrap();
+
+        let enc = enc_xy("val", "cat", Some("grp"));
+        let spec = crate::spec::chart::ChartSpec {
+            data: Default::default(),
+            mark: crate::spec::mark::Mark::Bar,
+            encoding: enc,
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(crate::spec::coord::CoordKind::Flip),
+            mark_style: None,
+            position: Some(PositionAdjust::Stack {
+                by: Some("grp".into()),
+                offset: StackOffset::Zero,
+                anchor: StackAnchor::Top,
+                value_axis: None,
+            }),
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let x_result = axis_batch_for_x(&spec, "val", &batch);
+        match x_result {
+            Cow::Owned(out) => {
+                let val_idx = out.schema().index_of("val").unwrap();
+                let va = out.column(val_idx).as_any().downcast_ref::<Float64Array>().unwrap();
+                // Same expected values as stack_coord_flipped_uses_x_as_value_column.
+                assert_eq!(va.value(0), 3.0);
+                assert_eq!(va.value(1), 8.0);
+                assert_eq!(va.value(2), 2.0);
+                assert_eq!(va.value(3), 6.0);
+            }
+            Cow::Borrowed(_) => panic!("expected x-side widening to succeed through the CoordFlip fallback"),
+        }
+
+        let y_result = axis_batch_for_y(&spec, "cat", &batch);
+        assert!(matches!(y_result, Cow::Borrowed(_)), "y-side must be a no-op once value has flipped to x");
+    }
+
+    /// Pin for an intentional behavior change from this GH #77 follow-up
+    /// (not silent drift): `axis_batch_for_y` used to hardcode
+    /// `coord_flipped = false` unconditionally, so a real-CoordFlip'd Stack
+    /// whose category column happened to be Float64 (not Utf8 — e.g. a
+    /// numeric bin-edge-style category, which passes `apply_stack`'s
+    /// value-column type check same as a genuine value column would) got
+    /// spuriously cumulated and Y-widened here, even though the value had
+    /// actually flipped onto X. That path never rendered correctly anyway
+    /// (the draw-time `apply_stack` call — which always used the *real*
+    /// `coord_flipped` — cumulated the correct X column, so the drawer's
+    /// x-domain was fine and this stray Y-widening was inert at best, but
+    /// silently corrupting at worst if a caller ever inspected the
+    /// preview batch's y column). Reading the real `coord_flipped` here
+    /// now gates this out deliberately: this is a bug fix, not a
+    /// regression.
+    #[test]
+    fn axis_batch_for_y_gates_out_for_flipped_numeric_category_stack() {
+        // Real CoordFlip, numeric category (Float64, NOT Utf8) — the exact
+        // shape that used to slip past the old hardcoded-false check.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Float64, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0])),
+                Arc::new(Float64Array::from(vec![3.0, 5.0, 2.0, 4.0])),
+                Arc::new(StringArray::from(vec!["x", "y", "x", "y"])),
+            ],
+        )
+        .unwrap();
+
+        let enc = enc_xy("val", "cat", Some("grp"));
+        let spec = crate::spec::chart::ChartSpec {
+            data: Default::default(),
+            mark: crate::spec::mark::Mark::Bar,
+            encoding: enc,
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: Some(crate::spec::coord::CoordKind::Flip),
+            mark_style: None,
+            position: Some(PositionAdjust::Stack {
+                by: Some("grp".into()),
+                offset: StackOffset::Zero,
+                anchor: StackAnchor::Top,
+                value_axis: None,
+            }),
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+
+        let y_result = axis_batch_for_y(&spec, "cat", &batch);
+        assert!(
+            matches!(y_result, Cow::Borrowed(_)),
+            "axis_batch_for_y must gate out (Cow::Borrowed) for a flipped numeric-category \
+             stack — a deliberate bug fix, not silent drift: value resolved to x here, so y \
+             (the category) must never be cumulated or widened"
         );
     }
 
@@ -1449,6 +1884,7 @@ mod tests {
             by: Some("grp".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
 
         // With coord_flipped=true, Stack should treat encoding.x ("val") as
@@ -1484,6 +1920,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -1521,6 +1958,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
 
         // Must not error — Int64 should be widened to f64.
@@ -1568,6 +2006,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
 
         let out = apply_position(&batch, Some(&pos), &s, &enc, false, &mut Vec::new())
@@ -1827,6 +2266,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -1845,6 +2285,7 @@ mod tests {
             by: Some("nope".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -1882,6 +2323,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -1914,6 +2356,7 @@ mod tests {
             by: None,
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -1935,6 +2378,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -1987,6 +2431,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -2034,6 +2479,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -2126,6 +2572,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -2175,6 +2622,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -2207,6 +2655,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -2283,6 +2732,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -2331,6 +2781,7 @@ mod tests {
             by: Some("y".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -2364,6 +2815,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -2414,6 +2866,7 @@ mod tests {
             by: Some("by_col".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -2437,6 +2890,7 @@ mod tests {
             by: None,
             offset: StackOffset::Zero,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -2470,6 +2924,7 @@ mod tests {
             by: Some("g".into()),
             offset: StackOffset::Normalize,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let mut warnings = Vec::new();
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
@@ -2838,6 +3293,179 @@ mod tests {
             x0 + w0, (x0 + w0) - x1
         );
     }
+
+    // ------------------------------------------------------------------
+    // GH #77: Stack.value_axis (composite-mark horizontal desugars swap
+    // x/y without setting CoordFlip, so coord_flipped stays false while
+    // the value channel lives on encoding.x).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn stack_value_axis_x_cumulates_along_x_without_coord_flip() {
+        // Mirrors desugar_histogram/desugar_density's orientation="horizontal"
+        // shape: x = count/density (value), y = bin_start/value (category),
+        // with coord_flipped=false (no real CoordFlip involved). Pre-#77 code
+        // picked the value/category axis purely from coord_flipped, so it
+        // would have treated "count" (Float64, on x) as the CATEGORY column
+        // and "bin_start" (also Float64, on y) as the VALUE column to
+        // cumulate — silently wrong. With `value_axis: Some(X)` set (as the
+        // Python-side desugar fix will do), Stack must cumulate encoding.x
+        // ("count") grouped by encoding.y ("bin_start") instead.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("count", DataType::Float64, false),
+            Field::new("bin_start", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![3.0, 5.0, 2.0, 4.0])),
+                Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0, 1.0])),
+                Arc::new(StringArray::from(vec!["x", "y", "x", "y"])),
+            ],
+        )
+        .unwrap();
+
+        let enc = enc_xy("count", "bin_start", Some("grp"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("grp".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: Some(StackValueAxis::X),
+        };
+
+        let out = apply_position(&batch, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+
+        // "count" (encoding.x, the value column) must be cumulated.
+        let count_idx = out.schema().index_of("count").unwrap();
+        let ca = out.column(count_idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        // Group order: x=0, y=1. At bin_start=0: x=3→3, y=5→8. At bin_start=1: x=2→2, y=4→6.
+        assert_eq!(ca.value(0), 3.0);
+        assert_eq!(ca.value(1), 8.0);
+        assert_eq!(ca.value(2), 2.0);
+        assert_eq!(ca.value(3), 6.0);
+
+        // "bin_start" (encoding.y, the category column) must be untouched.
+        let bin_idx = out.schema().index_of("bin_start").unwrap();
+        let bin_a = out.column(bin_idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(bin_a.value(0), 0.0);
+        assert_eq!(bin_a.value(1), 0.0);
+        assert_eq!(bin_a.value(2), 1.0);
+        assert_eq!(bin_a.value(3), 1.0);
+
+        // __stack_y_base__ carries the cumulative bases for the value column.
+        let base_idx = out.schema().index_of("__stack_y_base__").unwrap();
+        let ba = out.column(base_idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(ba.value(0), 0.0);
+        assert_eq!(ba.value(1), 3.0);
+        assert_eq!(ba.value(2), 0.0);
+        assert_eq!(ba.value(3), 2.0);
+    }
+
+    #[test]
+    fn stack_value_axis_none_coord_flipped_false_byte_identical() {
+        // value_axis: None + coord_flipped=false must reproduce today's
+        // vertical-stack behavior exactly (byte-identical to
+        // stack_zero_accumulates_y, which predates GH #77).
+        let b = batch_xyg();
+        let enc = enc_xy("x", "y", Some("g"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(ya.value(0), 10.0);
+        assert_eq!(ya.value(1), 30.0);
+        assert_eq!(ya.value(2), 30.0);
+        assert_eq!(ya.value(3), 70.0);
+
+        let base_idx = out.schema().index_of("__stack_y_base__").unwrap();
+        let ba = out.column(base_idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(ba.value(0), 0.0);
+        assert_eq!(ba.value(1), 10.0);
+        assert_eq!(ba.value(2), 0.0);
+        assert_eq!(ba.value(3), 30.0);
+    }
+
+    #[test]
+    fn stack_value_axis_none_coord_flipped_true_preserved() {
+        // value_axis: None + coord_flipped=true must reproduce today's real
+        // CoordFlip stack behavior exactly (byte-identical to
+        // stack_coord_flipped_uses_x_as_value_column, which predates GH #77).
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+                Arc::new(Float64Array::from(vec![3.0, 5.0, 2.0, 4.0])),
+                Arc::new(StringArray::from(vec!["x", "y", "x", "y"])),
+            ],
+        )
+        .unwrap();
+
+        let enc = enc_xy("val", "cat", Some("grp"));
+        let s = dummy_scales();
+        let pos = PositionAdjust::Stack {
+            by: Some("grp".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+
+        let out = apply_position(&batch, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap();
+
+        let val_idx = out.schema().index_of("val").unwrap();
+        let va = out.column(val_idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(va.value(0), 3.0);
+        assert_eq!(va.value(1), 8.0);
+        assert_eq!(va.value(2), 2.0);
+        assert_eq!(va.value(3), 6.0);
+
+        let base_idx = out.schema().index_of("__stack_y_base__").unwrap();
+        let ba = out.column(base_idx).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(ba.value(0), 0.0);
+        assert_eq!(ba.value(1), 3.0);
+        assert_eq!(ba.value(2), 0.0);
+        assert_eq!(ba.value(3), 2.0);
+    }
+
+    #[test]
+    fn stack_value_axis_serde_round_trip_present_and_absent() {
+        // Wire-contract pin: value_axis Some(X) serializes with the key
+        // present ("value_axis":"x"); None must omit the key entirely so
+        // pre-#77 spec JSON (and the scale_wire_baseline.json fixture) stays
+        // byte-identical. Mirrors spec::position's own serde tests.
+        let with_axis = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: Some(StackValueAxis::X),
+        };
+        let json = serde_json::to_string(&with_axis).unwrap();
+        assert!(json.contains(r#""value_axis":"x""#), "got {json}");
+        let parsed: PositionAdjust = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, with_axis);
+
+        let without_axis = PositionAdjust::Stack {
+            by: Some("g".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let json = serde_json::to_string(&without_axis).unwrap();
+        assert!(!json.contains("value_axis"), "got {json}");
+        let parsed: PositionAdjust = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, without_axis);
+    }
 }
 
 /// Read per-row pixel offsets from synthetic `__pos_x_offset__` /
@@ -2949,4 +3577,26 @@ pub(crate) fn clamp_to_dodge_sub_band(raw_width: f64, batch: &RecordBatch) -> f6
         Some(sub_band) if sub_band > 0.0 && sub_band < raw_width => sub_band,
         _ => raw_width,
     }
+}
+
+/// Schema metadata key [`apply_stack`] stamps when the resolved stack
+/// *value* axis (GH #77's `value_on_x`) is X rather than Y — i.e. whenever
+/// `value_axis: Some(X)` (a horizontal composite-mark desugar) or a real
+/// `CoordFlip` (`coord_flipped` fallback) put the cumulated value column on
+/// `encoding.x`. `__stack_y_base__` is the same column name regardless of
+/// which axis holds the value, so mark drawers that consume it
+/// (`marks::bar`, `marks::area`) need this explicit signal to know whether
+/// to map the base through `scales.x` or `scales.y` — they can't infer it
+/// from batch shape alone. `pub(crate)` for the same reason as
+/// [`DODGE_N_GROUPS_KEY`]: mark-renderer tests build stack-shaped batches
+/// without hardcoding the string literal.
+pub(crate) const STACK_VALUE_ON_X_KEY: &str = "__stack_value_on_x__";
+
+/// Read whether [`apply_stack`] stamped the value-on-X marker, if any.
+///
+/// `false` when the key is absent — the pre-#77 default (value on Y, or no
+/// Stack at all) — so every existing vertical-stack mark drawer path stays
+/// byte-identical.
+pub(crate) fn stack_value_on_x(batch: &RecordBatch) -> bool {
+    batch.schema().metadata().get(STACK_VALUE_ON_X_KEY).is_some()
 }

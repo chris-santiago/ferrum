@@ -25,6 +25,21 @@ pub enum StackOffset { Zero, Normalize, Center }
 #[serde(rename_all = "snake_case")]
 pub enum StackAnchor { Top, Mid }
 
+/// GH #77: which positional channel carries the stacked *value* column.
+///
+/// `apply_stack` (`render/position.rs`) historically picked the value vs.
+/// category axis purely from `coord_flipped` (set only by real `CoordFlip`).
+/// Composite-mark desugars with a horizontal orientation (e.g.
+/// `desugar_histogram`/`desugar_density` with `orientation="horizontal"`)
+/// remap the value channel onto `encoding.x` directly, without setting
+/// `CoordFlip` — so `coord_flipped` stays `false` while the value lives on
+/// x. `StackValueAxis` lets the desugar declare the value axis explicitly on
+/// the wire; `None` preserves the pre-#77 `coord_flipped`-only convention
+/// byte-identically.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StackValueAxis { X, Y }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PositionAdjust {
@@ -49,6 +64,8 @@ pub enum PositionAdjust {
         offset: StackOffset,
         #[serde(default = "default_stack_anchor")]
         anchor: StackAnchor,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        value_axis: Option<StackValueAxis>,
     },
 }
 
@@ -94,6 +111,7 @@ mod tests {
             by: Some("hue".into()),
             offset: StackOffset::Normalize,
             anchor: StackAnchor::Top,
+            value_axis: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains(r#""offset":"normalize""#));
@@ -107,6 +125,7 @@ mod tests {
             by: Some("actual".into()),
             offset: StackOffset::Zero,
             anchor: StackAnchor::Mid,
+            value_axis: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains(r#""anchor":"mid""#));
@@ -159,11 +178,56 @@ mod tests {
         let json = r#"{"type":"stack"}"#;
         let parsed: PositionAdjust = serde_json::from_str(json).unwrap();
         match parsed {
-            PositionAdjust::Stack { offset, by, anchor } => {
+            PositionAdjust::Stack { offset, by, anchor, value_axis } => {
                 assert_eq!(offset, StackOffset::Zero);
                 assert!(by.is_none());
                 assert_eq!(anchor, StackAnchor::Top);
+                assert!(value_axis.is_none());
             }
+            _ => panic!("expected Stack"),
+        }
+    }
+
+    #[test]
+    fn stack_value_axis_x_round_trips_and_serializes() {
+        // GH #77: value_axis Some(X) must serialize as a present "x" key.
+        let p = PositionAdjust::Stack {
+            by: Some("hue".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: Some(StackValueAxis::X),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains(r#""value_axis":"x""#), "got {json}");
+        let parsed: PositionAdjust = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, p);
+    }
+
+    #[test]
+    fn stack_value_axis_absent_when_none() {
+        // GH #77: value_axis None must be absent from the wire JSON entirely
+        // (skip_serializing_if) so the spec-JSON byte-identity fixtures used
+        // by `tests/test_scale_spec_parity.py` (scale_wire_baseline.json)
+        // cannot change for pre-#77 specs.
+        let p = PositionAdjust::Stack {
+            by: Some("hue".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(!json.contains("value_axis"), "got {json}");
+        let parsed: PositionAdjust = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, p);
+    }
+
+    #[test]
+    fn stack_value_axis_defaults_to_none_when_absent_from_json() {
+        // Pre-#77 JSON (no value_axis key) must deserialize to None.
+        let json = r#"{"type":"stack"}"#;
+        let parsed: PositionAdjust = serde_json::from_str(json).unwrap();
+        match parsed {
+            PositionAdjust::Stack { value_axis, .. } => assert!(value_axis.is_none()),
             _ => panic!("expected Stack"),
         }
     }
