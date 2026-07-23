@@ -582,6 +582,9 @@ class Chart(
         "_annotation_primitive",  # optional annotation primitive for annotate_* helpers
         "_mark_zero",  # bool — False when mark_bar(zero=False) suppresses the y zero-anchor
         "_figure_caption",  # str or None — figure-level caption rendered below the SVG
+        "_tooltip_promoted",  # bool — chart-level tooltip came from __add__ promoting a
+        # layer's own explicit tooltip, not from a direct .encode(tooltip=...) on the
+        # merged chart (GH #78) — see _inject_auto_tooltips's short-circuit discriminator.
     )
 
     def __init__(
@@ -630,6 +633,7 @@ class Chart(
         self._annotation_primitive = None
         self._mark_zero: bool = True
         self._figure_caption: Optional[str] = None
+        self._tooltip_promoted: bool = False
 
     def _clone(self) -> "Chart":
         new = object.__new__(Chart)
@@ -1388,6 +1392,14 @@ class Chart(
 
             new._encoding[name] = channel
             new._transforms.extend(channel.to_implicit_transforms())
+            if name == "tooltip":
+                # A tooltip set directly via .encode() (even on an already
+                # merged/layered chart) is a genuine chart-wide declaration,
+                # not a value inherited from __add__ promoting a layer's own
+                # tooltip -- clear any promoted marker carried over by
+                # _clone() so _inject_auto_tooltips treats it as explicit
+                # (GH #78).
+                new._tooltip_promoted = False
 
         # Synthesize _facet whenever facet encoding channels are passed in this
         # call. This wires encode(facet_col=...) / encode(facet_row=...) /
@@ -1770,6 +1782,27 @@ class Chart(
             _merge_top_transforms(new, rhs_top_xforms)
 
         new._layers = lhs_layers + rhs_layers
+        # GH #78: record whether the merged chart's chart-level tooltip (if
+        # any) came from THIS merge promoting a layer's own explicit tooltip,
+        # vs. a genuine chart-wide override that must short-circuit per-layer
+        # injection. Promotion only actually happens when the LHS is
+        # unlayered: `_expand_layers` snapshots `dict(lhs._encoding)` --
+        # including any tooltip -- onto a freshly built layer 0 in that case,
+        # so recomputing structurally from `new._encoding` (cloned from
+        # `lhs._encoding`) is correct. When the LHS is ALREADY layered,
+        # `_expand_layers` returns `lhs._layers` as-is (chart.py -> composition
+        # `_expand_layers`) -- no promotion occurs in this merge, so a
+        # chart-level tooltip here is whatever provenance the LHS already had
+        # (e.g. `False` after an intervening `.encode(tooltip=...)` reset it),
+        # and that provenance must propagate unchanged rather than being
+        # re-derived from the now-stale-looking structural check (a chained
+        # merge like `((a + b).encode(tooltip=...)) + c` would otherwise flip
+        # a genuine chart-wide override back to "promoted" and reintroduce
+        # GH #78 one merge later).
+        if lhs._layers is not None:
+            new._tooltip_promoted = lhs._tooltip_promoted
+        else:
+            new._tooltip_promoted = "tooltip" in new._encoding or "tooltip_fields" in new._encoding
         # D2: when the LHS has no color encoding, promote the first layer's
         # color encoding to chart level so the Rust renderer can build the
         # correct color scale.  Without this, build_color_scale sees

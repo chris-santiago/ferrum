@@ -710,34 +710,71 @@ class SpecBuildMixin:
         wins over the chart-level auto-injection (skipping it entirely).
 
         Whether it ALSO short-circuits the per-layer loop below depends on
-        where the chart-level value came from (GH #71 defect 3):
+        the *provenance* of the chart-level value, not merely on whether a
+        layer happens to carry its own explicit tooltip (GH #78 fixed a
+        false positive in the earlier structural proxy -- see below):
 
         - ``Chart.__add__`` promotes the *primary* layer's own explicit
           ``tooltip=`` onto the merged chart-level encoding (``new =
           lhs._clone()``), and ``_expand_layers`` gives that same layer's
           own ``encoding`` dict the identical key -- so the primary layer's
-          own encoding ALSO carries the explicit tooltip. In that case the
-          chart-level value is just a view of the primary layer's, and
+          own encoding ALSO carries the explicit tooltip. ``Chart.__add__``
+          records this as ``self._tooltip_promoted = True``. In that case
+          the chart-level value is just a view of the primary layer's, and
           other layers must still get their own auto-injected fields --
           otherwise Rust's chart-level tooltip fallback leaks the primary
           layer's fields onto every other layer's marks.
         - A ``tooltip=`` set directly on an already-merged chart (e.g.
           ``merged.encode(tooltip=...)``) only touches the chart-level
-          ``_encoding`` -- no layer's own encoding carries it. That is a
-          genuine chart-wide override, so it short-circuits every layer's
-          auto-injection (a per-layer auto injection would otherwise beat
-          the explicit tooltip in Rust's ``inherit_from`` merge).
+          ``_encoding`` -- no layer's own encoding carries it, and
+          ``Chart.encode()`` resets ``_tooltip_promoted`` to ``False`` when
+          it sees a ``tooltip=`` channel. That is a genuine chart-wide
+          override, so it short-circuits every layer's auto-injection (a
+          per-layer auto injection would otherwise beat the explicit
+          tooltip in Rust's ``inherit_from`` merge). This case holds even
+          when SOME layer independently carries its own explicit tooltip
+          (e.g. from an earlier promotion) -- the earlier structural proxy
+          (``any_layer_explicit``) treated that as evidence of promotion
+          and incorrectly ran the per-layer loop for the *other*,
+          tooltip-less layers, injecting spurious per-layer fields that beat
+          the genuine chart-wide override in Rust's ``inherit_from`` merge.
+          Those layers must instead fall back to the chart-level value, same
+          as the all-implicit case.
+        - ``_inject_selection_tooltips`` (called earlier in ``to_spec_dict``,
+          before this method sees the wire) merges a field-based selection's
+          ``fields`` into chart-level ``tooltip_fields`` whenever the chart
+          carries an active field-based selection (GH #58) -- including when
+          the chart-level tooltip is ALSO promoted (it rewrites the
+          promoted single ``tooltip`` into a merged ``tooltip_fields`` list
+          if the selection names a field the promoted tooltip didn't
+          already cover). Neither case is a genuine chart-wide override --
+          selection injection exists purely to make cross-layer selection
+          matching work -- so the per-layer loop must still run whenever a
+          field-based selection is active, and each layer's own auto fields
+          are unioned with the selection's fields (selection fields appended
+          after each layer's own, deduplicated by field name, mirroring the
+          existing-first-then-selection-appended order
+          ``_inject_selection_tooltips`` itself uses for the unlayered
+          case). The selection's field set is re-derived directly from
+          ``self._selections`` (not read off the wire) so the union applies
+          uniformly regardless of whether the chart-level tooltip's OTHER
+          provenance is promoted, selection-only, or absent.
 
-        The discriminator is therefore: does *any* layer's own encoding
-        already carry an explicit ``tooltip``/``tooltip_fields``? If yes,
-        the per-layer loop still runs for the remaining (tooltip-less)
-        layers; if no layer has one of its own, the chart-level explicit
-        value short-circuits the whole loop. A layer that itself carries an
-        explicit ``tooltip``/``tooltip_fields`` is always left untouched by
-        the loop (its own explicit value always wins for that layer).
-        Unlayered and single-layer charts emit the exact same wire as
-        before this fix (no ``kw["layers"]`` key, or a layers list whose
-        entries already carry no distinct-from-chart-level fields to add).
+        The short-circuit discriminator is therefore provenance, not
+        structure: a chart-level explicit tooltip short-circuits the loop
+        only when it is neither promoted (``self._tooltip_promoted``) nor
+        selection-injected (chart-level ``tooltip``/``tooltip_fields``
+        present in the wire but absent from ``self._encoding`` -- the only
+        way that combination arises is ``_inject_selection_tooltips`` having
+        added it with no other source, since ``tooltip_fields`` is never
+        itself a settable channel and a promoted or directly-encoded
+        tooltip always leaves ``self._encoding`` carrying ``tooltip``). A
+        layer that itself carries an explicit ``tooltip``/``tooltip_fields``
+        is always left untouched by the loop (its own explicit value always
+        wins for that layer). Unlayered and single-layer charts emit the
+        exact same wire as before this fix (no ``kw["layers"]`` key, or a
+        layers list whose entries already carry no distinct-from-chart-level
+        fields to add).
 
         Parameters
         ----------
@@ -759,21 +796,50 @@ class SpecBuildMixin:
                 kw.setdefault("encoding", {})["tooltip_fields"] = auto_fields
 
         layers = kw.get("layers") or []
-        any_layer_explicit = any(
-            "tooltip" in (layer.get("encoding") or {})
-            or "tooltip_fields" in (layer.get("encoding") or {})
-            for layer in layers
-        )
-        if chart_level_explicit and not any_layer_explicit:
-            # The chart-level tooltip did not come from a promoted layer --
-            # it is a genuine chart-wide override, so it wins for every layer.
+        # GH #58: a selection-injected chart-level tooltip_fields entry never
+        # appears in self._encoding (only _inject_selection_tooltips's mutation
+        # of the wire kw put it there); a promoted or directly-.encode()'d
+        # tooltip always does. That distinguishes "the chart-level tooltip
+        # exists SOLELY because of a selection" (short-circuit must not fire)
+        # from the promoted/genuine cases, without threading extra state
+        # through to_spec_dict.
+        selection_injected = chart_level_explicit and "tooltip" not in self._encoding
+        if chart_level_explicit and not self._tooltip_promoted and not selection_injected:
+            # Genuine chart-wide override (set directly via
+            # .encode(tooltip=...), not promoted from a layer and not
+            # injected by a field-based selection) -- it wins for every
+            # layer via Rust's chart-level tooltip_fields fallback
+            # (Encoding::inherit_from).
             return kw
+
+        # GH #58: the selection's own field set, re-derived directly from
+        # self._selections (mirroring _inject_selection_tooltips's own
+        # field-collection) rather than gated on `selection_injected`. A
+        # PROMOTED chart-level tooltip can coexist with a field-based
+        # selection -- _inject_selection_tooltips still merges the
+        # selection's fields into the chart-level tooltip_fields in that
+        # case (self._encoding keeps carrying the promoted "tooltip" key, so
+        # `selection_injected` is False there) -- and every tooltip-less
+        # layer must still pick up those selection fields, not just its own
+        # auto fields.
+        selection_field_names: set[str] = set()
+        for sel in self._selections:
+            if sel is not None and hasattr(sel, "params") and sel.params.get("fields"):
+                selection_field_names.update(sel.params["fields"])
+        selection_fields = (
+            [{"field": f} for f in sorted(selection_field_names)] if selection_field_names else None
+        )
 
         for layer in layers:
             layer_enc = layer.get("encoding") or {}
             if "tooltip" in layer_enc or "tooltip_fields" in layer_enc:
                 continue
             layer_auto_fields = _auto_tooltip_fields(layer_enc)
+            if selection_fields:
+                seen_fields = {f.get("field") for f in layer_auto_fields}
+                layer_auto_fields = layer_auto_fields + [
+                    dict(f) for f in selection_fields if f.get("field") not in seen_fields
+                ]
             if layer_auto_fields:
                 layer.setdefault("encoding", {})["tooltip_fields"] = layer_auto_fields
         return kw
