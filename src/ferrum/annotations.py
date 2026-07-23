@@ -643,7 +643,12 @@ def annotate_arrow(
         y2=y2_coord,
         stroke=stroke or "#333",
         stroke_width=1.5,
-        head_size=8,
+        # Headless to match the mark_segment path above (spec §3.3 note):
+        # ferrum arrows have no head anywhere until `arrow=True` lands on
+        # mark_segment's validator. When that ships, revisit so all three
+        # render paths (standalone, unlabelled overlay, labelled overlay)
+        # grow arrowheads together.
+        head_size=0.0,
     )
     return _attach_primitive_with_label(
         arrow_chart,

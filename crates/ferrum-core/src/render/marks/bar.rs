@@ -421,6 +421,21 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let x2s_opt: Option<Vec<Option<f64>>> = x2f_opt
         .and_then(|f| col_as_f64(ctx.batch, f).ok());
 
+    // Stack base (segment starts on X), mirroring
+    // `build_quantitative_horizontal`'s `row_base_x`. This builder is
+    // reached only when `encoding.y` is ordinal (quantitative x + ordinal
+    // y), which under a Stack position adjustment only occurs via a real
+    // CoordFlip — and a real CoordFlip always resolves the stack's value
+    // axis to X (`resolve_stack_value_on_x`'s `coord_flipped` fallback), so
+    // the value axis is fixed to X by which builder ran and the
+    // `__stack_value_on_x__` stamp doesn't need consulting here. Priority
+    // matches `build_ordinal`'s y2-vs-base ordering: an explicit x2 range
+    // column (checked first, below) always wins over a stacking base.
+    // Absent the base column (no Stack), `x_bases` is `None` and every row
+    // falls back to the fixed `baseline_x` — byte-identical to the pre-fix
+    // formula.
+    let x_bases: Option<Vec<Option<f64>>> = col_as_f64(ctx.batch, "__stack_y_base__").ok();
+
     let panel = ctx.panel.plot_area;
     let baseline_x = panel.x;
 
@@ -472,7 +487,22 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             let px2 = px2 + x_offsets[i];
             (px.min(px2), (px - px2).abs())
         } else {
-            (baseline_x, (px - baseline_x).max(0.0))
+            // Stack base pixel for this row, falling back to the fixed axis
+            // baseline when unstacked, the base row is non-finite, or the
+            // base doesn't resolve through the x-scale (mirrors
+            // `build_quantitative_horizontal`'s `row_base_x`).
+            let row_base_x = x_bases
+                .as_ref()
+                .and_then(|v| v.get(i).copied().flatten())
+                .filter(|v| v.is_finite())
+                .and_then(|b| ctx.scales.x.to_pixel_f64(b))
+                .map(|p| p + x_offsets[i])
+                .unwrap_or(baseline_x);
+            // Clamp (not abs) to zero, matching the pre-existing unstacked
+            // formula (`(px - baseline_x).max(0.0)`): a degenerate row whose
+            // value pixel lands left of its base renders nothing, not a
+            // mirrored rect on the wrong side of the base.
+            (row_base_x, (px - row_base_x).max(0.0))
         };
 
         let fill_color = resolve_fill_color(
@@ -575,6 +605,19 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
+    // Stack base (segment bottoms), mirroring `build_quantitative_horizontal`'s
+    // `row_base_x`. Here the bin pair (x/x2) carries the category and the
+    // value lives on Y — `build()`'s dispatch only reaches this builder for
+    // the value-on-Y shape (`has_y2 && !has_x2` routes to
+    // `build_quantitative_horizontal` instead) — so the value axis is fixed
+    // to Y by which builder ran and the `__stack_value_on_x__` stamp doesn't
+    // need consulting here (unlike the horizontal builder, which shares the
+    // X axis between the bin pair and a possible value-on-X stack). Absent
+    // the base column (no Stack, or a Stack whose value lives on X),
+    // `y_bases` is `None` and every row falls back to the fixed `baseline_y`
+    // via the `unwrap_or` below — byte-identical to the pre-fix formula.
+    let y_bases: Option<Vec<Option<f64>>> = col_as_f64(ctx.batch, "__stack_y_base__").ok();
+
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
     // opacity / fill_opacity / stroke_opacity via the shared resolver (FA-11),
@@ -593,7 +636,23 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         let yv = match ys[i] { Some(v) if v.is_finite() => v, _ => continue };
         let top_y = match ctx.scales.y.to_pixel_f64(yv) { Some(p) => p, None => continue };
         let top_y = top_y + y_offsets[i];
-        let height = (baseline_y - top_y).max(0.0);
+
+        // Stack base pixel for this row, falling back to the fixed axis
+        // baseline when unstacked, the base row is non-finite, or the base
+        // doesn't resolve through the y-scale (mirrors
+        // `build_quantitative_horizontal`'s `row_base_x`).
+        let bottom_y = y_bases
+            .as_ref()
+            .and_then(|v| v.get(i).copied().flatten())
+            .filter(|v| v.is_finite())
+            .and_then(|b| ctx.scales.y.to_pixel_f64(b))
+            .map(|p| p + y_offsets[i])
+            .unwrap_or(baseline_y);
+        // Clamp (not abs) to zero, matching the pre-existing unstacked
+        // formula (`(baseline_y - top_y).max(0.0)`): a degenerate row whose
+        // value pixel lands below its base renders nothing, not a mirrored
+        // rect on the wrong side of the base.
+        let height = (bottom_y - top_y).max(0.0);
 
         let (rect_x, width) = if let Some(ref x2s) = x2s_opt {
             // x2 present: bin-style rect from x to x2 (histogram path).
@@ -2537,5 +2596,293 @@ mod tests {
         assert!((h0 - 30.0).abs() < 1e-6, "segment a height must be 30px; got {h0}");
         assert!((y1 - 20.0).abs() < 1e-6, "segment b top must be at 20px; got {y1}");
         assert!((h1 - 50.0).abs() < 1e-6, "segment b height must be 50px; got {h1}");
+    }
+
+    // ------------------------------------------------------------------
+    // Stack-base drawer symmetry follow-up: `build_quantitative` (vertical
+    // x/x2-binned bars — the default `mark_histogram(multiple="stack")`
+    // path) and `build_ordinal_y` (horizontal ordinal-category bars) must
+    // honor `__stack_y_base__` the same way `build_ordinal` and
+    // `build_quantitative_horizontal` already do.
+    // ------------------------------------------------------------------
+
+    /// RED against the pre-fix drawer: without the base-aware fix, every
+    /// bin's segments draw from `baseline_y` (panel bottom) to their own
+    /// cumulated top, so segment "b" (base=3, top=8) would render as
+    /// [20px, 100px] — fully overlapping segment "a"'s [70px, 100px] —
+    /// instead of the correct adjacent, non-overlapping [20px, 70px].
+    #[test]
+    fn vertical_stacked_binned_bar_segments_span_base_to_value_no_overlap() {
+        use crate::render::position::apply_position;
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset};
+
+        // Vertical stacked-histogram shape: bin_start/bin_end (category) on
+        // x/x2, count (value) on y — one bin, two stack groups "a" and "b".
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bin_start", DataType::Float64, false),
+            Field::new("bin_end", DataType::Float64, false),
+            Field::new("count", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let raw = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 0.0])),
+            Arc::new(Float64Array::from(vec![1.0, 1.0])),
+            Arc::new(Float64Array::from(vec![3.0, 5.0])),
+            Arc::new(StringArray::from(vec!["a", "b"])),
+        ]).unwrap();
+
+        let enc = Encoding {
+            x: Some(EncodingSpec { field: "bin_start".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            x2: Some(EncodingSpec { field: "bin_end".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            y: Some(EncodingSpec { field: "count".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            color: Some(EncodingSpec { field: "grp".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+            ..Default::default()
+        };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 1.0], vec![0.0, 300.0], false, false)),
+            y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+        };
+        let pos = PositionAdjust::Stack {
+            by: Some("grp".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: None,
+        };
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+        // value_axis=None + coord_flipped=false → value on y, not x.
+        assert!(!crate::render::position::stack_value_on_x(&adjusted), "vertical Stack must not stamp the horizontal-value marker");
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: enc,
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: Some(pos), title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &adjusted, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let rects: Vec<(f64, f64)> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { y, h, .. } = n { Some((*y, *h)) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 2, "expected 2 stacked bar segments in the one bin");
+
+        // Group order: a=0, b=1 (first-appearance). a: base=0→top=3; b: base=3→top=8.
+        // y-scale [0,10]→[100,0]px (inverted): 0→100px, 3→70px, 8→20px.
+        let (y0, h0) = rects[0];
+        let (y1, h1) = rects[1];
+        assert!((y0 - 70.0).abs() < 1e-6, "segment a top must be at value=3 → 70px; got {y0}");
+        assert!((y0 + h0 - 100.0).abs() < 1e-6, "segment a bottom must be at base=0 → 100px; got {}", y0 + h0);
+        assert!((y1 - 20.0).abs() < 1e-6, "segment b top must be at value=8 → 20px; got {y1}");
+        assert!((y1 + h1 - 70.0).abs() < 1e-6, "segment b bottom must be at its own base (=a's top, 70px); got {}", y1 + h1);
+
+        // No overlap: segment b's bottom is exactly segment a's top.
+        assert!(y1 + h1 <= y0 + 1e-9, "stacked segments in the same bin must not overlap");
+    }
+
+    /// RED against the pre-fix drawer: without the base-aware fix, every
+    /// horizontal bar draws from `baseline_x` (panel left) to its own
+    /// cumulated value, so segment "b" (base=3, top=8) would render as
+    /// [0px, 240px] — fully overlapping segment "a"'s [0px, 90px] — instead
+    /// of the correct adjacent, non-overlapping [90px, 240px].
+    #[test]
+    fn ordinal_y_stacked_bar_segments_span_base_to_value_no_overlap() {
+        use crate::render::position::apply_position;
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+        use crate::spec::position::{PositionAdjust, StackAnchor, StackOffset, StackValueAxis};
+
+        // Horizontal ordinal shape: val (value) on x, cat (category) on y —
+        // one category, two stack groups "a" and "b".
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let raw = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(StringArray::from(vec!["x", "x"])),
+            Arc::new(Float64Array::from(vec![3.0, 5.0])),
+            Arc::new(StringArray::from(vec!["a", "b"])),
+        ]).unwrap();
+
+        let enc = Encoding {
+            x: Some(EncodingSpec { field: "val".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+            y: Some(EncodingSpec { field: "cat".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+            color: Some(EncodingSpec { field: "grp".into(), type_: Some(SDT::Nominal), ..Default::default() }),
+            ..Default::default()
+        };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![0.0, 300.0], false, false)),
+            y: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["x".into()], vec![0.0, 100.0], 0.0)),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+        };
+        let pos = PositionAdjust::Stack {
+            by: Some("grp".into()),
+            offset: StackOffset::Zero,
+            anchor: StackAnchor::Top,
+            value_axis: Some(StackValueAxis::X),
+        };
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+        assert!(crate::render::position::stack_value_on_x(&adjusted), "explicit value_axis: X must stamp the horizontal-value marker");
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: enc,
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: Some(pos), title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None, params: Vec::new(),
+        };
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &adjusted, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let rects: Vec<(f64, f64)> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { x, w, .. } = n { Some((*x, *w)) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 2, "expected 2 stacked horizontal bar segments");
+
+        // Group order: a=0, b=1 (first-appearance). a: base=0→top=3; b: base=3→top=8.
+        // x-scale [0,10]→[0,300]px: 0→0px, 3→90px, 8→240px.
+        let (x0, w0) = rects[0];
+        let (x1, w1) = rects[1];
+        assert!((x0 - 0.0).abs() < 1e-6, "segment a must start at base=0 → 0px; got {x0}");
+        assert!((x0 + w0 - 90.0).abs() < 1e-6, "segment a must end at value=3 → 90px; got {}", x0 + w0);
+        assert!((x1 - 90.0).abs() < 1e-6, "segment b must start at its own base (=a's top, 90px); got {x1}");
+        assert!((x1 + w1 - 240.0).abs() < 1e-6, "segment b must end at value=8 → 240px; got {}", x1 + w1);
+
+        // No overlap: segment b starts exactly where segment a ends.
+        assert!(x0 + w0 <= x1 + 1e-9, "stacked bar segments in the same category must not overlap");
+    }
+
+    /// Byte-stability pin: an unstacked `build_quantitative` batch (no
+    /// `__stack_y_base__` column) must render the exact same bin-rect
+    /// geometry before and after the stack-base fix — the fix only takes
+    /// effect when the base column is present.
+    #[test]
+    fn build_quantitative_unstacked_geometry_byte_stable() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "bin_start".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "count".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                x2: Some(EncodingSpec { field: "bin_end".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("bin_start", DataType::Float64, false),
+            Field::new("bin_end",   DataType::Float64, false),
+            Field::new("count",     DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Float64Array::from(vec![5.0, 10.0, 3.0])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 300.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 300.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let rects: Vec<(f64, f64, f64, f64)> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { x, y, w, h, .. } = n { Some((*x, *y, *w, *h)) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 3);
+
+        // Captured against the pre-stack-base-fix drawer (2026-07-23):
+        // `git stash` the fix, `cargo test ... -- --nocapture` this test.
+        let expected = [
+            (8.0, 69.285714285714, 94.666666666667, 30.714285714286),
+            (102.666666666667, 5.0, 94.666666666667, 95.0),
+            (197.333333333333, 95.0, 94.666666666667, 5.0),
+        ];
+        for (i, ((x, y, w, h), (ex, ey, ew, eh))) in rects.iter().zip(expected.iter()).enumerate() {
+            assert!((x - ex).abs() < 1e-9, "rect[{i}].x = {x}, expected {ex}");
+            assert!((y - ey).abs() < 1e-9, "rect[{i}].y = {y}, expected {ey}");
+            assert!((w - ew).abs() < 1e-9, "rect[{i}].w = {w}, expected {ew}");
+            assert!((h - eh).abs() < 1e-9, "rect[{i}].h = {h}, expected {eh}");
+        }
+    }
+
+    /// Byte-stability pin: an unstacked `build_ordinal_y` batch (no
+    /// `__stack_y_base__` column) must render the exact same horizontal-bar
+    /// geometry before and after the stack-base fix.
+    #[test]
+    fn build_ordinal_y_unstacked_geometry_byte_stable() {
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "v".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                color: None,
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(StringArray::from(vec!["a", "b", "c"])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &ThemeInputs::default()).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let rects: Vec<(f64, f64, f64, f64)> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { x, y, w, h, .. } = n { Some((*x, *y, *w, *h)) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 3);
+
+        // Captured against the pre-stack-base-fix drawer (2026-07-23):
+        // `git stash` the fix, `cargo test ... -- --nocapture` this test.
+        let expected = [
+            (0.0, 3.333333333333, 5.0, 26.666666666667),
+            (0.0, 36.666666666667, 50.0, 26.666666666667),
+            (0.0, 70.0, 95.0, 26.666666666667),
+        ];
+        for (i, ((x, y, w, h), (ex, ey, ew, eh))) in rects.iter().zip(expected.iter()).enumerate() {
+            assert!((x - ex).abs() < 1e-9, "rect[{i}].x = {x}, expected {ex}");
+            assert!((y - ey).abs() < 1e-9, "rect[{i}].y = {y}, expected {ey}");
+            assert!((w - ew).abs() < 1e-9, "rect[{i}].w = {w}, expected {ew}");
+            assert!((h - eh).abs() < 1e-9, "rect[{i}].h = {h}, expected {eh}");
+        }
     }
 }

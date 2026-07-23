@@ -80,6 +80,36 @@ def _auto_tooltip_fields(enc: dict) -> list[dict]:
     return auto_fields
 
 
+def _selection_field_names(selections: list) -> set[str]:
+    """Collect the union of field names tracked by field-based selections.
+
+    Shared by :meth:`SpecBuildMixin._inject_selection_tooltips` and
+    :meth:`SpecBuildMixin._inject_auto_tooltips`, both of which need "every
+    field named in an active selection's ``fields`` list" to keep
+    cross-panel linked-selection matching fields rather than only data
+    index. Callers apply their own ordering (``_inject_selection_tooltips``
+    merges with existing fields then sorts; ``_inject_auto_tooltips`` sorts
+    directly) -- this helper only collects the unordered set.
+
+    Parameters
+    ----------
+    selections : list
+        Resolved selection objects (e.g. ``self._selections`` or
+        ``resolved._selections``); entries may be ``None``.
+
+    Returns
+    -------
+    set of str
+        Field names from every selection whose ``params`` dict carries a
+        non-empty ``"fields"`` list.
+    """
+    field_names: set[str] = set()
+    for s in selections:
+        if s is not None and hasattr(s, "params") and s.params.get("fields"):
+            field_names.update(s.params["fields"])
+    return field_names
+
+
 class SpecBuildMixin:
     """Spec-building helper methods consumed by ``Chart.to_spec``.
 
@@ -661,10 +691,7 @@ class SpecBuildMixin:
         selections : list
             The resolved selections list (``resolved._selections``).
         """
-        sel_fields: set[str] = set()
-        for s in selections:
-            if hasattr(s, "params") and s.params.get("fields"):
-                sel_fields.update(s.params["fields"])
+        sel_fields = _selection_field_names(selections)
         if not sel_fields:
             return
         existing: set[str] = set()
@@ -822,10 +849,7 @@ class SpecBuildMixin:
         # `selection_injected` is False there) -- and every tooltip-less
         # layer must still pick up those selection fields, not just its own
         # auto fields.
-        selection_field_names: set[str] = set()
-        for sel in self._selections:
-            if sel is not None and hasattr(sel, "params") and sel.params.get("fields"):
-                selection_field_names.update(sel.params["fields"])
+        selection_field_names = _selection_field_names(self._selections)
         selection_fields = (
             [{"field": f} for f in sorted(selection_field_names)] if selection_field_names else None
         )

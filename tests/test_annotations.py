@@ -265,6 +265,38 @@ def test_annotate_arrow_unlabeled_overlay_unchanged():
     assert "<line" in svg
 
 
+def test_annotate_arrow_labeled_overlay_matches_standalone_headless():
+    """S3 regression: the labelled `AnnotationArrow` primitive rendered a
+    filled `<path>` arrowhead triangle (`head_size=8`) while standalone and
+    unlabelled-overlay rendering both used the headless `mark_segment` (a
+    bare `<line>`, no head) -- the arrowhead appeared in exactly one of the
+    three render paths. Ferrum arrows are deliberately headless everywhere
+    until `arrow=True` lands on `mark_segment`'s validator (see the spec
+    Sec 3.3 note in `annotate_arrow`), so the labelled-overlay primitive
+    must render headless too: a `<line>` shaft and no arrowhead `<path>`
+    triangle, in BOTH the standalone and the `+`-overlay render, with the
+    label rendered exactly once in each.
+    """
+    df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    scatter = Chart(df).mark_point().encode(x="a", y="b")
+
+    standalone_svg = annotate_arrow(1, 1, 2, 2, label="peak").to_svg()
+    overlay_svg = (scatter + annotate_arrow(1, 1, 2, 2, label="peak")).to_svg()
+
+    for svg in (standalone_svg, overlay_svg):
+        assert svg.count(">peak<") == 1, "label must render exactly once"
+        assert "<line" in svg, "arrow shaft must still render as a <line>"
+        # AnnotationArrow's arrowhead is the only element that would emit a
+        # filled <path> triangle in either chart: Rust's `emit_arrow` (see
+        # crates/ferrum-core/src/render/annotation.rs) pushes a
+        # `SceneNode::Path` for the head only when `head_size > 0.0`, and a
+        # `SceneNode::Line` for the shaft unconditionally. `mark_point`'s
+        # default shape renders as `<circle>`, not `<path>`, so this
+        # discriminates "no arrowhead" rather than merely "no other
+        # path-based marks in the chart".
+        assert "<path" not in svg, "labelled arrow overlay must not render an arrowhead"
+
+
 # ---------------------------------------------------------------------------
 # COMP-06 — annotate_text anchor/align vocabulary reconciliation
 #

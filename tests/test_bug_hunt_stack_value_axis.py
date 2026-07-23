@@ -29,14 +29,19 @@ Sibling-sweep disposition (every ``Stack(`` construction under
   through real ``CoordFlip`` (the pre-existing ``coord_flipped`` fallback),
   never through this helper.
 
-Known, deliberately-xfail'd divergence discovered while writing these tests
-(NOT part of GH #77's scope — see ``test_vertical_stacked_histogram_unchanged_and_correct``):
-the vertical x2-binned bar drawer (``render::marks::bar::build_quantitative``,
-used for a plain vertical ``mark_bar`` with ``x``/``x2`` bin edges) ignores
-``__stack_y_base__`` entirely and always draws every segment from the panel
-baseline, so stacked segments in the same bin fully overlap instead of
-tiling. This is a pre-existing, separate gap (not introduced by GH #77, and
-not touched by the GH #77 Rust diff) — not fixed here.
+A separate, pre-existing gap was discovered while writing these tests (NOT
+part of GH #77's scope — see
+``test_vertical_stacked_histogram_unchanged_and_correct``) and was FIXED in
+this sweep: the vertical x2-binned bar drawer
+(``render::marks::bar::build_quantitative``, used for a plain vertical
+``mark_bar`` with ``x``/``x2`` bin edges) used to ignore
+``__stack_y_base__`` entirely and always draw every segment from the panel
+baseline, so stacked segments in the same bin fully overlapped instead of
+tiling. The sibling categorical-y drawer, ``build_ordinal_y``, had the same
+gap. Both now read ``__stack_y_base__`` and span base-to-value, mirroring
+``build_quantitative_horizontal``'s pre-existing ``row_base`` convention.
+Not introduced by GH #77 and not touched by the GH #77 Rust diff, but
+closed in the same sweep as this file.
 
 A second, broader pre-existing gap surfaced incidentally while first writing
 these tests, and was FIXED in the same sweep (before this file's tests were
@@ -78,7 +83,6 @@ import json
 import re
 
 import polars as pl
-import pytest
 
 import ferrum as fm
 from ferrum.encoding import X, Y
@@ -360,20 +364,23 @@ def test_vertical_stacked_histogram_unchanged_and_correct():
     the wire, since ``desugar_histogram``/``desugar_density`` only set it
     for ``orientation == "horizontal"``.
 
-    Probe (c): whether same-bin stacked segments actually tile without
-    overlap along y. Rust-side investigation found that
+    (c) End-to-end coverage for the default-orientation stacked histogram:
+    same-bin stacked segments must tile without overlap along y.
     ``render::marks::bar::build_quantitative`` (the vertical x2-binned bar
     drawer, dispatched whenever ``x``/``x2`` are both quantitative and
-    ``y2`` is absent — i.e. every plain vertical histogram) reads
-    ``baseline_y`` and ``top_y`` only; it never reads
-    ``__stack_y_base__``. Every segment therefore draws from the panel
-    bottom to its own (possibly cumulative) top, so segments in the same
-    bin fully overlap instead of tiling — confirmed below by asserting
-    disjoint y-spans, which fails. This is a pre-existing gap, unrelated to
-    GH #77's value_axis wire (the vertical desugar path never sets
-    value_axis, so ``apply_stack`` correctly cumulates via the y column;
-    the bug is entirely in the *drawer* ignoring the correctly-computed
-    base). Not fixed here per the task's Rust-boundary constraint.
+    ``y2`` is absent — i.e. every plain vertical histogram) used to read
+    ``baseline_y``/``top_y`` only and never ``__stack_y_base__``, so every
+    segment drew from the panel bottom to its own (possibly cumulative)
+    top and same-bin segments fully overlapped instead of tiling. This was
+    a pre-existing gap, unrelated to GH #77's value_axis wire (the vertical
+    desugar path never sets value_axis, so ``apply_stack`` already
+    cumulated correctly via the y column; the bug was entirely in the
+    *drawer* ignoring the correctly-computed base). It was completed in
+    this sweep: ``build_quantitative`` (and the sibling
+    ``build_ordinal_y``) now span base-to-value, mirroring
+    ``build_quantitative_horizontal``'s pre-existing ``row_base``
+    convention. This test now guards the default-orientation stacked
+    histogram end-to-end (wire shape + tiling geometry together).
     """
     df = pl.DataFrame(
         {
@@ -401,21 +408,11 @@ def test_vertical_stacked_histogram_unchanged_and_correct():
     position = json.loads(spec.to_json())["position"]
     assert "value_axis" not in position, position
 
-    # (c) probe: same-bin segments must tile without overlap along y.
-    # KNOWN GAP (pre-existing, not GH #77): build_quantitative ignores
-    # __stack_y_base__, so this currently FAILS with large y-overlaps.
+    # (c) same-bin segments must tile without overlap along y — regression
+    # guard for build_quantitative's now-fixed __stack_y_base__ handling.
     rects = _data_rects(svg)
     assert len(rects) == 4, f"expected 4 bar segments (2 bins x 2 groups); got {len(rects)}"
     _assert_tiles_without_overlap(rects, axis="y")
-
-
-test_vertical_stacked_histogram_unchanged_and_correct = pytest.mark.xfail(
-    reason=(
-        "vertical build_quantitative ignores __stack_y_base__ — tracked "
-        "separately (pre-existing, not GH #77)"
-    ),
-    strict=True,
-)(test_vertical_stacked_histogram_unchanged_and_correct)
 
 
 # ---------------------------------------------------------------------------
@@ -436,12 +433,13 @@ def test_horizontal_stacked_histogram_coord_flip_primitive_still_works():
 
     Shape choice: a plain categorical y (``x=``category, real CoordFlip)
     dispatches to ``build_ordinal_y``, a SIBLING drawer this task's Rust
-    diff did not touch — it never reads ``__stack_y_base__`` either (same
-    class of gap as test 3's ``build_quantitative`` finding, discovered
-    incidentally; not fixed here). The shape that genuinely exercises the
-    GH #77-fixed ``build_quantitative_horizontal`` path is a quantitative
-    x/x2 bin-edge + y2 (post-flip) bar — i.e. encode as if a normal
-    vertical binned bar (``x``=bin_lo, ``x2``=bin_hi, ``y``=count) and let
+    diff did not touch (same class of gap as test 3's
+    ``build_quantitative`` finding, discovered incidentally; both were
+    fixed together in the same later sweep — see the module docstring).
+    The shape that genuinely exercises the GH #77-fixed
+    ``build_quantitative_horizontal`` path is a quantitative x/x2
+    bin-edge + y2 (post-flip) bar — i.e. encode as if a normal vertical
+    binned bar (``x``=bin_lo, ``x2``=bin_hi, ``y``=count) and let
     ``orient="horizontal"`` flip it, exactly mirroring the Rust GH #77
     tests (``stack_value_axis_none_coord_flipped_true_preserved``,
     ``horizontal_stacked_bar_segments_span_base_to_value_no_overlap``).
