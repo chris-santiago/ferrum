@@ -286,7 +286,12 @@ def desugar_boxplot(
             name="median",
             mark="tick",
             encoding=enc("median"),
-            mark_kwargs={"band_size": band, "stroke": "theme:label", "stroke_width": 2},
+            # tick's band_size is a half-width factor (full rendered length =
+            # 2 * band_size * slot), while the box rect's band_size is a
+            # full-width factor. Halve `band` so the median tick's full
+            # rendered length matches the box's full width instead of
+            # doubling it.
+            mark_kwargs={"band_size": band / 2, "stroke": "theme:label", "stroke_width": 2},
             data_source="box",
         ),
     ]

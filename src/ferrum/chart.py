@@ -1059,7 +1059,9 @@ class Chart(
         opacity : float, optional
             Overall opacity in ``[0, 1]``.
         band_size : float, optional
-            Tick length as a fraction of band width (0–1, default 0.3).
+            Tick half-length as a fraction of the band width (0–1, default
+            0.3); the full rendered tick length is ``2 * band_size`` of the
+            band.
         orient : str, optional
             ``"vertical"`` (default ticks perpendicular to x) or
             ``"horizontal"``.
