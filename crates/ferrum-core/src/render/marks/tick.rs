@@ -73,6 +73,15 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 // falls through to `panel.w`, matching the site-pairing
                 // convention (cross-axis tick length keyed to the panel-w
                 // term regardless of which field is ordinal).
+                //
+                // GH #66 sub-band clamp NOT applicable here: Dodge offsets
+                // `cy` (the band axis, y), but this tick's length runs along
+                // the CROSS axis (x). Sibling dodge groups land at different
+                // `cy` and never share a row, so this tick length cannot
+                // collide with a neighbouring group regardless of `padding`
+                // — the `n_groups` divisor here is purely a cosmetic
+                // width-pairing convention with the band-axis formulas, not
+                // a collision-prone one.
                 let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
                 let tick_half = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
                 let baseline_x = panel.x;
@@ -144,7 +153,17 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             // x-band pixel range when the resolver recorded one; otherwise
             // identical to `panel.w`.
             let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
-            let tick_half = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+            let tick_half_raw = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+            // Clamp to the Dodge sub-band (GH #66): this tick spans the SAME
+            // axis (x) that Dodge offsets `cx` along, so — unlike the
+            // ordinal-only crossbar modes above, whose tick length runs along
+            // the cross axis and never collides with a sibling dodge group —
+            // a band_size-factor width here can genuinely overlap a
+            // neighbouring group at high padding. Byte-identical no-op when
+            // undodged or at low/default padding. `*2.0`/`/2.0` is exact in
+            // IEEE-754 (power-of-two scaling), so the no-op case round-trips
+            // to `tick_half_raw` bit-for-bit.
+            let tick_half = crate::render::position::clamp_to_dodge_sub_band(tick_half_raw * 2.0, ctx.batch) / 2.0;
             let mut acc = MarkNodes::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -188,7 +207,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             // y-band pixel range when the resolver recorded one; otherwise
             // identical to `panel.h`.
             let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
-            let tick_half = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+            let tick_half_raw = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+            // Clamp to the Dodge sub-band (GH #66); see the ordinal-x mode's
+            // analogous comment above — this tick spans y, the same axis
+            // Dodge offsets `cy` along, so the overlap risk (and the
+            // exact-round-trip `*2.0`/`/2.0` no-op) is the same.
+            let tick_half = crate::render::position::clamp_to_dodge_sub_band(tick_half_raw * 2.0, ctx.batch) / 2.0;
             let mut acc = MarkNodes::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -235,6 +259,13 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // through to `panel.h`, matching the site-pairing convention
         // (cross-axis tick length keyed to the panel-h term regardless of
         // which field is ordinal).
+        //
+        // GH #66 sub-band clamp NOT applicable here: Dodge offsets `cx` (the
+        // band axis, x), but this tick's length runs along the CROSS axis
+        // (y). Sibling dodge groups land at different `cx` and never share a
+        // column, so this tick length cannot collide with a neighbouring
+        // group regardless of `padding` — see the analogous "ordinal y only"
+        // mode above.
         let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
         let tick_half = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
         let baseline_y = panel.y + panel.h;

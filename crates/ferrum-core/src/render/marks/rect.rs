@@ -224,8 +224,14 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // Band-geometry unification (#39 phase 2): honor an explicit x-band
         // pixel range when the resolver recorded one; otherwise `panel.w`.
         let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
-        let box_w = (band_extent / n_categories as f64 / n_groups as f64)
+        let box_w_raw = (band_extent / n_categories as f64 / n_groups as f64)
             * ctx.mark_style.misc.band_size.unwrap_or(0.6);
+        // Clamp to the Dodge sub-band (GH #66): the band_size-factor width
+        // above is blind to Dodge's `padding` and can exceed the true
+        // per-group slot width at high padding, overlapping neighbouring
+        // dodge groups. No-op (byte-identical) when undodged or at
+        // low/default padding.
+        let box_w = crate::render::position::clamp_to_dodge_sub_band(box_w_raw, ctx.batch);
 
         for i in 0..xs.len() {
             let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -305,8 +311,12 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // Band-geometry unification (#39 phase 2): honor an explicit y-band
         // pixel range when the resolver recorded one; otherwise `panel.h`.
         let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
-        let box_h = (band_extent / n_categories as f64 / n_groups as f64)
+        let box_h_raw = (band_extent / n_categories as f64 / n_groups as f64)
             * ctx.mark_style.misc.band_size.unwrap_or(0.6);
+        // Clamp to the Dodge sub-band (GH #66); see the x-ordinal branch's
+        // analogous comment above — byte-identical no-op when undodged or at
+        // low/default padding.
+        let box_h = crate::render::position::clamp_to_dodge_sub_band(box_h_raw, ctx.batch);
 
         for i in 0..ys.len() {
             let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };

@@ -312,7 +312,12 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Band-geometry unification (#39 phase 2): honor an explicit x-band pixel
     // range when the resolver recorded one; otherwise identical to `panel.w`.
     let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
-    let bar_width = (band_extent / n_categories as f64 / n_groups as f64) * 0.8;
+    let bar_width_raw = (band_extent / n_categories as f64 / n_groups as f64) * 0.8;
+    // Clamp to the Dodge sub-band (GH #66): the 0.8-factor width above is
+    // blind to Dodge's `padding` and can exceed the true per-group slot
+    // width at high padding, overlapping neighbouring dodge groups. No-op
+    // (byte-identical) when undodged or at low/default padding.
+    let bar_width = crate::render::position::clamp_to_dodge_sub_band(bar_width_raw, ctx.batch);
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
@@ -434,7 +439,10 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Band-geometry unification (#39 phase 2): honor an explicit y-band pixel
     // range when the resolver recorded one; otherwise identical to `panel.h`.
     let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
-    let bar_height = (band_extent / n_categories as f64 / n_groups as f64) * 0.8;
+    let bar_height_raw = (band_extent / n_categories as f64 / n_groups as f64) * 0.8;
+    // Clamp to the Dodge sub-band (GH #66); see `build_ordinal`'s analogous
+    // comment — byte-identical no-op when undodged or at low/default padding.
+    let bar_height = crate::render::position::clamp_to_dodge_sub_band(bar_height_raw, ctx.batch);
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);

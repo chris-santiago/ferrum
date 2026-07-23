@@ -498,8 +498,23 @@ fn apply_dodge_ordinal(
     // `__pos_x_offset__` / `__pos_y_offset__` columns, so a distinct-value
     // heuristic would misread jitter noise as ≈row-count dodge groups. Only
     // this function (the ordinal-band Dodge path) ever sets this key.
+    //
+    // Also stamp the computed pixel sub-band width (GH #66 remediation):
+    // `sub_band` here is the true per-group slot width in the same pixel
+    // space the offsets above are computed in. Mark-width formulas
+    // (`bar_width = band_extent / n_categories / n_groups * 0.8`, and the
+    // analogous box/tick formulas) are blind to `padding` — they narrow by
+    // `n_groups` but never account for the padding eaten out of each
+    // sub-band, so at `padding > ~0.1` (bar) the 0.8-factor width can exceed
+    // this `sub_band` and adjacent dodge groups overlap. Stamping `sub_band`
+    // here — where `padding` is already in scope — lets those mark renderers
+    // clamp their width to it (`position::clamp_to_dodge_sub_band`) without
+    // threading `padding` through `DrawCtx` or re-deriving it from a
+    // per-layer `ChartSpec` that (for multi-layer charts) may not carry the
+    // same `PositionAdjust` that was actually applied to this batch.
     let mut metadata = schema.metadata().clone();
     metadata.insert(DODGE_N_GROUPS_KEY.to_string(), n_groups.to_string());
+    metadata.insert(DODGE_SUB_BAND_PX_KEY.to_string(), sub_band.to_string());
     let new_schema = Arc::new(Schema::new(fields).with_metadata(metadata));
 
     RecordBatch::try_new(new_schema, cols)
@@ -2717,6 +2732,112 @@ mod tests {
             );
         }
     }
+
+    /// GH #66: E=600, n=3 categories, g=2 dodge groups, Dodge padding=0.2
+    /// through the same real `apply_position` -> `dispatch_mark_build` seam
+    /// as the test above. Pre-fix (0.8-factor width, no sub-band clamp),
+    /// adjacent sub-bars within category "a" overlapped by 20px — this test
+    /// pins the real-pipeline fix (`clamp_to_dodge_sub_band`) alongside the
+    /// formula-mirror edge cases in bug_hunt_dodge_subband_overlap.rs.
+    #[test]
+    fn dodge_sub_band_clamp_prevents_overlap_at_high_padding() {
+        use crate::layout::{PanelLayout, Rect, ThemeInputs};
+        use crate::render::draw::{dispatch_mark_build, resolve_mark_style, DrawCtx};
+        use crate::spec::chart::ChartSpec;
+        use crate::spec::mark::Mark;
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+        use ferrum_scene::SceneNode;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+            Field::new("grp", DataType::Utf8, false),
+        ]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b", "c", "c"])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0])),
+                Arc::new(StringArray::from(vec!["p", "q", "p", "q", "p", "q"])),
+            ],
+        )
+        .unwrap();
+        let enc = enc_xy("cat", "val", Some("grp"));
+        let ord = ScaleKind::Ordinal(OrdinalScale::new_internal(
+            vec!["a".into(), "b".into(), "c".into()],
+            vec![0.0, 600.0],
+            0.0,
+        ));
+        let lin = ScaleKind::Linear(LinearScale::new_internal(
+            vec![0.0, 100.0], vec![0.0, 100.0], false, false,
+        ));
+        let s = ResolvedScales { x: ord, y: lin, color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default() };
+        let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.2 };
+
+        let adjusted = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+
+        let spec = ChartSpec {
+            data: Default::default(),
+            mark: Mark::Bar,
+            encoding: enc,
+            transforms: Vec::new(),
+            facet: None,
+            layers: None,
+            coord: None,
+            mark_style: None,
+            position: Some(pos),
+            title: None,
+            axis_x: None,
+            axis_y: None,
+            selections: Vec::new(),
+            conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 600.0, h: 100.0 },
+            facet_key: None,
+            row: 0,
+            col: 0,
+            strip_title: None,
+            row_strip_title: None,
+            row_facet_key: None,
+        };
+        let theme = ThemeInputs::default();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx {
+            spec: &spec,
+            panel: &panel,
+            theme: &theme,
+            scales: &s,
+            batch: &adjusted,
+            mark_style: &mark_style,
+        };
+        let result = dispatch_mark_build(&spec.mark, &ctx);
+        let rects: Vec<(f64, f64)> = result
+            .nodes
+            .iter()
+            .filter_map(|n| if let SceneNode::Rect { x, w, .. } = n { Some((*x, *w)) } else { None })
+            .collect();
+        assert_eq!(rects.len(), 6, "expected 6 dodged bars (3 categories x 2 groups)");
+        // Category "a" is the first two rects (row order preserved by MarkNodes).
+        // bandwidth_px = 600/3 = 200; sub_band = 200*(1 - 2*0.2)/2 = 60; the
+        // 0.8-factor raw width (200/2*0.8 = 80) is clamped down to 60, so the
+        // two sub-bars sit exactly edge-to-edge: [40,100) and [100,160).
+        let (x0, w0) = rects[0];
+        let (x1, w1) = rects[1];
+        assert!((w0 - 60.0).abs() < 1e-9, "clamped sub-bar width must be 60.0; got {w0}");
+        assert!((w1 - 60.0).abs() < 1e-9, "clamped sub-bar width must be 60.0; got {w1}");
+        assert!((x0 - 40.0).abs() < 1e-9, "group0 x must be 40.0; got {x0}");
+        assert!((x1 - 100.0).abs() < 1e-9, "group1 x must be 100.0; got {x1}");
+        assert!(
+            x0 + w0 <= x1 + 1e-9,
+            "adjacent dodge sub-bars in category 'a' must not overlap: group0 spans \
+             [{x0}, {}], group1 starts at {x1} — overlap of {}",
+            x0 + w0, (x0 + w0) - x1
+        );
+    }
 }
 
 /// Read per-row pixel offsets from synthetic `__pos_x_offset__` /
@@ -2785,4 +2906,47 @@ pub(crate) fn n_dodge_groups(batch: &RecordBatch) -> usize {
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n >= 1)
         .unwrap_or(1)
+}
+
+/// Schema metadata key [`apply_dodge_ordinal`] stamps with the computed
+/// pixel sub-band width (GH #66). `pub(crate)` for the same reason as
+/// [`DODGE_N_GROUPS_KEY`]: mark-renderer tests build dodge-shaped batches
+/// without hardcoding the string literal.
+pub(crate) const DODGE_SUB_BAND_PX_KEY: &str = "__dodge_sub_band_px__";
+
+/// Read the pixel sub-band width [`apply_dodge_ordinal`] stamped, if any.
+///
+/// `None` when the key is absent (no Dodge, or a batch built before this
+/// key existed) — callers must treat that as "no clamp", not zero.
+fn dodge_sub_band_px(batch: &RecordBatch) -> Option<f64> {
+    batch
+        .schema()
+        .metadata()
+        .get(DODGE_SUB_BAND_PX_KEY)
+        .and_then(|s| s.parse::<f64>().ok())
+}
+
+/// Clamp a dodged band-axis mark's pixel width to its Dodge sub-band.
+///
+/// `raw_width` is the mark's ordinary width formula
+/// (`band_extent / n_categories / n_dodge_groups * factor`, for whatever
+/// `factor` the mark uses — bar's fixed `0.8`, box/tick's `band_size`).
+/// That formula narrows by `n_groups` but is blind to Dodge's `padding`, so
+/// at high padding the 0.8-factor (or `band_size`-factor) width can exceed
+/// the true per-group slot width and adjacent dodge groups overlap
+/// (GH #66). The true slot width — `sub_band`, computed in
+/// [`apply_dodge_ordinal`] where `padding` is already in scope — is
+/// stamped into schema metadata ([`DODGE_SUB_BAND_PX_KEY`]) and read back
+/// here.
+///
+/// Returns `raw_width` unchanged whenever no Dodge sub-band was stamped
+/// (no Dodge on this batch) or the sub-band isn't tighter than the raw
+/// width — so every non-dodged chart, and every dodged chart at the
+/// default padding (where the 0.8-factor width already fits inside the
+/// sub-band), stays byte-for-byte identical to the pre-clamp formula.
+pub(crate) fn clamp_to_dodge_sub_band(raw_width: f64, batch: &RecordBatch) -> f64 {
+    match dodge_sub_band_px(batch) {
+        Some(sub_band) if sub_band > 0.0 && sub_band < raw_width => sub_band,
+        _ => raw_width,
+    }
 }
