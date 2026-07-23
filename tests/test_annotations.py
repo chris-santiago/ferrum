@@ -2,7 +2,13 @@ import polars as pl
 import pytest
 
 from ferrum import Chart
-from ferrum.annotations import annotate_hline, annotate_vline, annotate_rect, annotate_text
+from ferrum.annotations import (
+    annotate_arrow,
+    annotate_hline,
+    annotate_rect,
+    annotate_text,
+    annotate_vline,
+)
 
 
 def test_annotate_hline_returns_chart_with_rule_mark():
@@ -59,7 +65,7 @@ def test_annotate_hline_can_be_added_to_scatter():
 # helper chart's mark layers and reads only ``_annotation_primitive``, so a
 # labelled line carries BOTH the line and its label through
 # ``_annotation_primitive`` as a list (``ferrum.annotations.
-# _attach_line_with_label`` / ``ferrum.chart._annotations_from_primitive``).
+# _attach_primitive_with_label`` / ``ferrum.chart._annotations_from_primitive``).
 # A labelled line therefore stays a plain ``Chart`` (never a VConcatChart)
 # so it remains ``+``-overlay compatible, matching every other annotate_*
 # helper's return shape.
@@ -191,6 +197,72 @@ def test_annotations_from_primitive_single_primitive_matches_prior_wrapping():
     assert len(result) == 1
     assert isinstance(result[0], Annotate)
     assert result[0].items == [prim]
+
+
+# ---------------------------------------------------------------------------
+# GH #84 — annotate_arrow(label=...) composed via `&`, so the labelled form
+# returned a VConcatChart instead of a Chart: `scatter + annotate_arrow(...,
+# label=...)` raised TypeError, and standalone rendering put the label in a
+# separate vconcat panel below the arrow instead of overlaid in one panel.
+# Same `_attach_primitive_with_label` machinery as the #82 hline/vline fix
+# above, generalized to accept an `AnnotationArrow` primitive.
+# ---------------------------------------------------------------------------
+
+
+def test_annotate_arrow_label_survives_plus_overlay():
+    """Primary use case: `chart + annotate_arrow(..., label=...)` must not
+    raise, and the label text must render exactly once."""
+    df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    scatter = Chart(df).mark_point().encode(x="a", y="b")
+    composed = scatter + annotate_arrow(1, 1, 2, 2, label="peak")
+    svg = composed.to_svg()
+    assert svg.count(">peak<") == 1
+
+
+def test_annotate_arrow_with_label_returns_plain_chart():
+    """A labelled arrow MUST remain a plain Chart — not a composite like
+    VConcatChart — so it stays overlay-compatible with `+`."""
+    from ferrum.composition import VConcatChart
+
+    result = annotate_arrow(1, 1, 2, 2, label="x")
+    assert isinstance(result, Chart)
+    assert not isinstance(result, VConcatChart)
+
+
+def test_arrow_and_hline_labeled_overlay_each_label_renders_once():
+    """`annotate_arrow(label=) + annotate_hline(label=)` exercises the
+    both-operands-carry-`_annotation_primitive` branch of `Chart.__add__`
+    with two different primitive types (AnnotationArrow, AnnotationLine) —
+    each label must render exactly once (the no-double-render guard)."""
+    composed = annotate_arrow(1, 1, 2, 2, label="a") + annotate_hline(y=0, label="b")
+    svg = composed.to_svg()
+    assert svg.count(">a<") == 1
+    assert svg.count(">b<") == 1
+
+
+def test_annotate_arrow_standalone_label_renders_in_one_panel():
+    """Standalone `annotate_arrow(..., label=...).to_svg()` must render the
+    arrow and its label together in ONE panel, not split across a vconcat.
+    Each rendered panel gets its own `<clipPath>`, so a single-panel chart
+    has exactly one; a two-panel VConcatChart would have two."""
+    svg = annotate_arrow(1, 1, 2, 2, label="peak").to_svg()
+    assert svg.count(">peak<") == 1
+    assert svg.count("<clipPath") == 1
+
+
+def test_annotate_arrow_unlabeled_overlay_unchanged():
+    """Unlabelled `chart + annotate_arrow(...)` must still render successfully
+    and contain the arrow's segment/line element -- the unlabelled path is
+    untouched by the #84 fix (no `_annotation_primitive` is attached, so it
+    still merges as a plain `mark_segment` layer)."""
+    df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    scatter = Chart(df).mark_point().encode(x="a", y="b")
+    arrow = annotate_arrow(1, 1, 2, 2)
+    assert arrow._annotation_primitive is None
+    composed = scatter + arrow
+    svg = composed.to_svg()
+    assert "NaN" not in svg
+    assert "<line" in svg
 
 
 # ---------------------------------------------------------------------------

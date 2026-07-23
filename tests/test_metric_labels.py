@@ -265,25 +265,38 @@ def test_annotate_arrow_without_label_uses_mark_segment():
     assert "x2" in chart._encoding and "y2" in chart._encoding
 
 
-def test_annotate_arrow_with_label_is_vconcat_with_label_panel():
-    """annotate_arrow(..., label=...) returns a VConcatChart whose right-hand
-    chart is a mark_text annotation carrying the label string.
+def test_annotate_arrow_with_label_is_plain_chart_with_label_annotation():
+    """annotate_arrow(..., label=...) returns a plain Chart (GH #84) whose
+    ``mark_segment`` layer draws the arrow standalone and whose
+    ``_annotations`` carries the label as a real ``AnnotationText`` entry
+    (so it renders standalone too), and whose ``_annotation_primitive`` is
+    ``[AnnotationArrow, AnnotationText]`` so a ``+`` overlay carries both.
 
-    (Single-row annotation charts cannot reliably render standalone due to
-    degenerate scale domains under the post-themes-T4 5% padding default;
-    real usage composes annotate_arrow with a richer chart that supplies
-    scale extents. The structural test confirms the wiring is correct.)
+    Previously this composed via ``&`` and returned a ``VConcatChart``,
+    which broke ``chart + annotate_arrow(..., label=...)`` (TypeError) and
+    rendered the label in a separate panel below the arrow instead of
+    overlaid in one panel.
     """
+    from ferrum.annotation.primitives import AnnotationArrow, AnnotationText
     from ferrum.composition import VConcatChart
 
     chart = annotate_arrow(0.5, 1.5, 1.5, 3.5, label="trend")
-    assert isinstance(chart, VConcatChart)
-    # Locate the mark_text label chart among the VConcat children.
-    label_charts = [c for c in chart.charts if getattr(c, "_mark", None) == "text"]
-    assert len(label_charts) == 1
-    label_chart = label_charts[0]
-    text_value = label_chart._data["_text"][0]
-    assert text_value == "trend"
+    assert isinstance(chart, Chart)
+    assert not isinstance(chart, VConcatChart)
+    assert chart._mark == "segment"
+
+    # Label renders standalone via a real `_annotations` entry.
+    assert len(chart._annotations) == 1
+    text_items = [item for item in chart._annotations[0].items if isinstance(item, AnnotationText)]
+    assert len(text_items) == 1
+    assert text_items[0].text == "trend"
+
+    # `+` overlay carries both the arrow and its label via `_annotation_primitive`.
+    assert isinstance(chart._annotation_primitive, list)
+    assert len(chart._annotation_primitive) == 2
+    assert isinstance(chart._annotation_primitive[0], AnnotationArrow)
+    assert isinstance(chart._annotation_primitive[1], AnnotationText)
+    assert chart._annotation_primitive[1].text == "trend"
 
 
 def test_annotate_arrow_stroke_passes_through():

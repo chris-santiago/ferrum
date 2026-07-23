@@ -62,19 +62,19 @@ def _attach_annotation_primitive(chart: Chart, primitive: object) -> Chart:
 
     ``primitive`` is usually a single annotation primitive (``AnnotationLine``,
     ``AnnotationText``, etc.), but may also be a ``list`` of primitives — see
-    :func:`_attach_line_with_label`, which sets a two-element list so a
-    labelled reference line's ``+`` overlay carries both the line and its
-    label. ``Chart.__add__`` reads this field through the module-level
-    ``ferrum.chart._annotations_from_primitive`` helper, which accepts
-    either shape.
+    :func:`_attach_primitive_with_label`, which sets a two-element list so a
+    labelled reference line or arrow's ``+`` overlay carries both the
+    mark-equivalent primitive and its label. ``Chart.__add__`` reads this
+    field through the module-level ``ferrum.chart._annotations_from_primitive``
+    helper, which accepts either shape.
     """
     chart._annotation_primitive = primitive
     return chart
 
 
-def _attach_line_with_label(
+def _attach_primitive_with_label(
     chart: Chart,
-    line_primitive: object,
+    primitive: object,
     *,
     label: Optional[str],
     label_x: _AnnotationCoord,
@@ -83,24 +83,28 @@ def _attach_line_with_label(
     label_dy: float,
     label_align: str,
 ) -> Chart:
-    """Wire a reference-line ``Chart`` for both standalone and ``+`` overlay rendering.
+    """Wire an annotate_* ``Chart`` for both standalone and ``+`` overlay rendering.
 
-    Unlabelled (``label is None``): attaches ``line_primitive`` as the sole
+    ``primitive`` is the annotation-primitive equivalent of the chart's own
+    mark layer (``AnnotationLine`` for a ``mark_rule`` reference line,
+    ``AnnotationArrow`` for a ``mark_segment`` arrow, etc.).
+
+    Unlabelled (``label is None``): attaches ``primitive`` as the sole
     ``_annotation_primitive`` — unchanged from the pre-label behavior.
 
-    Labelled: the line's own ``mark_rule`` layer is kept (so standalone
-    rendering still draws the line), the label is added as a real
-    ``_annotations`` entry (so it also renders standalone), and
-    ``_annotation_primitive`` is set to ``[line_primitive, text_primitive]``
-    so the ``+`` overlay path — which discards the helper chart's mark
-    layers and reads only ``_annotation_primitive`` — carries both the line
-    and its label. Neither path draws the line twice: standalone draws it
-    via ``mark_rule``, not ``_annotation_primitive`` (dormant until ``+``);
-    overlay draws it via ``_annotation_primitive``, not ``mark_rule``
-    (dropped by ``Chart.__add__``).
+    Labelled: the chart's own mark layer is kept (so standalone rendering
+    still draws it), the label is added as a real ``_annotations`` entry (so
+    it also renders standalone), and ``_annotation_primitive`` is set to
+    ``[primitive, text_primitive]`` so the ``+`` overlay path — which
+    discards the helper chart's mark layers and reads only
+    ``_annotation_primitive`` — carries both the mark and its label. Neither
+    path draws the mark twice: standalone draws it via the chart's own mark
+    layer, not ``_annotation_primitive`` (dormant until ``+``); overlay
+    draws it via ``_annotation_primitive``, not the mark layer (dropped by
+    ``Chart.__add__``).
     """
     if label is None:
-        return _attach_annotation_primitive(chart, line_primitive)
+        return _attach_annotation_primitive(chart, primitive)
 
     from ferrum.annotation.container import Annotate
 
@@ -108,7 +112,7 @@ def _attach_line_with_label(
         label_x, label_y, label, dx=label_dx, dy=label_dy, align=label_align
     )._annotation_primitive
     chart._annotations = chart._annotations + [Annotate(text_primitive)]
-    chart._annotation_primitive = [line_primitive, text_primitive]
+    chart._annotation_primitive = [primitive, text_primitive]
     return chart
 
 
@@ -180,7 +184,7 @@ def annotate_hline(
     )
     # Label near the right end of the line: inset from the right axis edge
     # (dx=-6, align="right") and offset above the rule (dy=-6).
-    return _attach_line_with_label(
+    return _attach_primitive_with_label(
         chart,
         prim,
         label=label,
@@ -257,7 +261,7 @@ def annotate_vline(
     # Label near the top of the line: inset from the top axis edge (dy=6)
     # and offset to the right of the rule (dx=6, align="left") so the text
     # doesn't overlap the line.
-    return _attach_line_with_label(
+    return _attach_primitive_with_label(
         chart,
         prim,
         label=label,
@@ -552,8 +556,10 @@ def annotate_arrow(
 ) -> Chart:
     """Draw an arrow from ``(x1, y1)`` to ``(x2, y2)`` with an optional text label.
 
-    Composes a ``mark_segment`` (the arrow shaft) with an optional
-    ``annotate_text`` placed at the ``label_side`` endpoint.
+    Returns a single ``mark_segment`` (the arrow shaft) ``Chart``, with an
+    optional ``annotate_text`` label placed at the ``label_side`` endpoint.
+    Renders both standalone (``.to_svg()``) and when layered with ``+`` onto
+    another chart; when omitted, no text is rendered.
 
     Parameters
     ----------
@@ -578,8 +584,8 @@ def annotate_arrow(
     Returns
     -------
     Chart
-        Layered chart containing the arrow segment and, when *label* is
-        provided, the annotation text.
+        Single-panel chart containing the arrow segment and, when *label*
+        is provided, the annotation text — suitable for ``+`` layering.
 
     Examples
     --------
@@ -592,6 +598,8 @@ def annotate_arrow(
 
     >>> fm.annotate_arrow(0.1, 0.5, 0.8, 0.9, label="threshold", label_side="end")
     """
+    from ferrum.annotation.primitives import AnnotationArrow
+
     # Spec §3.3 lists `arrow=True` for mark_segment but the validator does
     # not yet accept it; emit a plain segment for now.
     x1_coord, y1_coord = _coerce_coord(x1), _coerce_coord(y1)
@@ -615,9 +623,35 @@ def annotate_arrow(
         )
     )
     if label is None:
+        # No annotation primitive attached: unlabelled `+` overlay merges the
+        # `mark_segment` layer directly, same as before this primitive
+        # machinery existed. `AnnotationArrow` hardcodes a stroke default
+        # ("#333") the way `AnnotationLine` does for hline/vline, whereas the
+        # mark falls back to the chart's *themed* stroke color when `stroke`
+        # is omitted — routing the unlabelled case through the primitive
+        # would silently override that themed default, so it stays on the
+        # mark-merge path.
         return arrow_chart
     lx: CoordValue = x1_coord if label_side == "start" else x2_coord
     ly: CoordValue = y1_coord if label_side == "start" else y2_coord
     dx = -6 if label_side == "start" else 6
     align = "right" if label_side == "start" else "left"
-    return arrow_chart & annotate_text(lx, ly, label, dx=dx, align=align)
+    prim = AnnotationArrow(
+        x=x1_coord,
+        y=y1_coord,
+        x2=x2_coord,
+        y2=y2_coord,
+        stroke=stroke or "#333",
+        stroke_width=1.5,
+        head_size=8,
+    )
+    return _attach_primitive_with_label(
+        arrow_chart,
+        prim,
+        label=label,
+        label_x=lx,
+        label_y=ly,
+        label_dx=dx,
+        label_dy=0,
+        label_align=align,
+    )

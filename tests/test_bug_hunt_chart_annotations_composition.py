@@ -671,14 +671,15 @@ class TestAnnotateArrow:
         assert isinstance(arrow, Chart)
         assert arrow._mark == "segment"
 
-    def test_annotate_arrow_with_label_returns_vconcat(self):
-        """annotate_arrow with label returns a VConcatChart (segment & text).
-
-        Targets annotations.py:428: 'return arrow_chart & annotate_text(...)'.
+    def test_annotate_arrow_with_label_returns_plain_chart(self):
+        """annotate_arrow with label returns a plain Chart, not a VConcatChart
+        (GH #84) -- it must stay `+`-overlay compatible like every other
+        annotate_* helper, mirroring the #82 fix for annotate_hline/vline.
         """
         result = annotate_arrow(0, 0, 1, 1, label="test")
-        # & operator produces VConcatChart
-        assert isinstance(result, VConcatChart)
+        assert isinstance(result, Chart)
+        assert not isinstance(result, VConcatChart)
+        assert result._mark == "segment"
 
     def test_chart_plus_arrow_without_label_takes_layer_path(self):
         """chart + annotate_arrow() (no label) should go through the regular

@@ -659,11 +659,19 @@ def test_annotate_arrow_without_label():
 
 
 def test_annotate_arrow_with_label():
-    """annotate_arrow with label must produce a VConcatChart (arrow & text)."""
+    """annotate_arrow with label must produce a plain Chart (GH #84), not a
+    VConcatChart, so it stays composable with `+` onto another chart.
+    """
+    from ferrum import Chart
+    from ferrum.composition import VConcatChart
+
     arrow = fr.annotate_arrow(x1=1.0, y1=2.0, x2=3.0, y2=6.0, label="test")
-    # This produces segment & text, which is a VConcatChart.
-    # It should be composable with another chart.
-    assert arrow is not None
+    assert isinstance(arrow, Chart)
+    assert not isinstance(arrow, VConcatChart)
+    combined = _base_chart() + arrow
+    svg = combined.to_svg()
+    assert "NaN" not in svg
+    assert ">test<" in svg
 
 
 # ============================================================================
