@@ -6,6 +6,27 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.20.2 — 2026-07-23
+
+A patch release closing out every open bug issue: annotation overlay, dodge geometry, tooltip provenance, and stacked-rendering fixes ([#58](https://github.com/chris-santiago/ferrum/issues/58), [#66](https://github.com/chris-santiago/ferrum/issues/66), [#77](https://github.com/chris-santiago/ferrum/issues/77), [#78](https://github.com/chris-santiago/ferrum/issues/78), [#84](https://github.com/chris-santiago/ferrum/issues/84)). Two fixes are visibly rendering-correcting: boxplot median lines previously drew at twice their box width, and stacked histograms previously relied on paint order rather than true base-to-value segment geometry.
+
+### Added
+
+None
+
+### Fixed
+
+- Labeled `annotate_arrow` stays a plain `Chart` and survives `+` overlay — previously the labeled form returned a `VConcatChart`, raising `TypeError` on overlay and splitting standalone rendering into two panels ([#84](https://github.com/chris-santiago/ferrum/issues/84))
+- Dodged mark widths (bar/rect/tick) clamp to their sub-band, so `Dodge(padding > 0.1)` can no longer render overlapping groups; `BandScale(padding_inner=)` was confirmed geometrically inert on the dodge path ([#66](https://github.com/chris-santiago/ferrum/issues/66))
+- Boxplot median lines span exactly their box body instead of twice its width — a tick-vs-rect `band_size` semantics drift in the boxplot desugar, exposed by the dodge clamp; affected goldens regenerated and visually verified ([#66](https://github.com/chris-santiago/ferrum/issues/66))
+- Tooltip provenance is carried by an explicit promotion marker instead of re-derived from structure: a genuine chart-wide `.encode(tooltip=)` on a merged chart now suppresses per-layer auto-injection even with mixed per-layer tooltips, and field-based linked selections get per-layer tooltip fields (own auto fields ∪ selection fields) instead of one shared set ([#78](https://github.com/chris-santiago/ferrum/issues/78), [#58](https://github.com/chris-santiago/ferrum/issues/58))
+- Horizontal stacked histograms and densities render correctly — `mark_histogram(orient="horizontal", multiple="stack")` previously raised `ValueError` for every input. The stack's value axis is now carried on the wire (`Stack.value_axis`), mark drawers and domain widening are axis-aware, and all four bar drawers draw true base-to-value stacked segments — fixing the default vertical stacked histogram and real coord-flip stacked bars, whose segments previously overlapped and only looked stacked via opaque paint order ([#77](https://github.com/chris-santiago/ferrum/issues/77))
+- Labeled arrow `+`-overlay renders the same headless segment as every other arrow path (cross-path parity)
+
+### Other
+
+- Violin facet goldens regenerated for the median-width fix; lock-file version sync; docstring reference conversions and new-user docs audit fixes
+
 ## 0.20.1 — 2026-07-15
 
 A patch release of interactive-rendering and annotation fixes found after v0.20.0, plus a documentation pass ([#80](https://github.com/chris-santiago/ferrum/issues/80)–[#83](https://github.com/chris-santiago/ferrum/issues/83)).
