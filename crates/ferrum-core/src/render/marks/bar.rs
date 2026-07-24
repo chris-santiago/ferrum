@@ -421,20 +421,33 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let x2s_opt: Option<Vec<Option<f64>>> = x2f_opt
         .and_then(|f| col_as_f64(ctx.batch, f).ok());
 
-    // Stack base (segment starts on X), mirroring
-    // `build_quantitative_horizontal`'s `row_base_x`. This builder is
-    // reached only when `encoding.y` is ordinal (quantitative x + ordinal
-    // y), which under a Stack position adjustment only occurs via a real
-    // CoordFlip — and a real CoordFlip always resolves the stack's value
-    // axis to X (`resolve_stack_value_on_x`'s `coord_flipped` fallback), so
-    // the value axis is fixed to X by which builder ran and the
-    // `__stack_value_on_x__` stamp doesn't need consulting here. Priority
-    // matches `build_ordinal`'s y2-vs-base ordering: an explicit x2 range
-    // column (checked first, below) always wins over a stacking base.
-    // Absent the base column (no Stack), `x_bases` is `None` and every row
-    // falls back to the fixed `baseline_x` — byte-identical to the pre-fix
-    // formula.
-    let x_bases: Option<Vec<Option<f64>>> = col_as_f64(ctx.batch, "__stack_y_base__").ok();
+    // Stack base (segment starts on X), gated on the `__stack_value_on_x__`
+    // stamp exactly like `build_quantitative_horizontal`'s `stack_bases`.
+    // This builder is reached whenever `encoding.y` is ordinal (quantitative
+    // x + ordinal y); a Stack on that shape resolves value-on-X either via a
+    // real CoordFlip (`resolve_stack_value_on_x`'s `coord_flipped`
+    // fallback) OR an explicit `value_axis: Some(X)` (a horizontal
+    // composite-mark desugar, no flip involved) — so the stamp, not the
+    // dispatch shape, is the actual signal for which scale `__stack_y_base__`
+    // maps through. Consuming it unconditionally would be unsound: an
+    // integer-typed ordinal-y column with a *vertical* Stack (no orient, no
+    // explicit `value_axis`) resolves `value_on_x = false` and cumulates on
+    // Y, emitting a stamp-less base meant for `scales.y` — mapping that
+    // through `scales.x` here would silently render at the wrong pixels
+    // (Utf8 ordinal columns fail safely via `col_as_f64`'s type error; only
+    // int-typed ones slip through). Gating on the stamp makes that
+    // disagreement fall back to `baseline_x` (the safe pre-remediation
+    // render) instead. Priority matches `build_ordinal`'s y2-vs-base
+    // ordering: an explicit x2 range column (checked first, below) always
+    // wins over a stacking base. Absent the stamp (no Stack, a vertical
+    // Stack, or a Stack whose value lives on Y), `x_bases` is `None` and
+    // every row falls back to the fixed `baseline_x` — byte-identical to
+    // the pre-fix formula.
+    let x_bases: Option<Vec<Option<f64>>> = if crate::render::position::stack_value_on_x(ctx.batch) {
+        col_as_f64(ctx.batch, "__stack_y_base__").ok()
+    } else {
+        None
+    };
 
     let panel = ctx.panel.plot_area;
     let baseline_x = panel.x;
@@ -605,18 +618,30 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
 
-    // Stack base (segment bottoms), mirroring `build_quantitative_horizontal`'s
-    // `row_base_x`. Here the bin pair (x/x2) carries the category and the
-    // value lives on Y — `build()`'s dispatch only reaches this builder for
-    // the value-on-Y shape (`has_y2 && !has_x2` routes to
-    // `build_quantitative_horizontal` instead) — so the value axis is fixed
-    // to Y by which builder ran and the `__stack_value_on_x__` stamp doesn't
-    // need consulting here (unlike the horizontal builder, which shares the
-    // X axis between the bin pair and a possible value-on-X stack). Absent
-    // the base column (no Stack, or a Stack whose value lives on X),
-    // `y_bases` is `None` and every row falls back to the fixed `baseline_y`
-    // via the `unwrap_or` below — byte-identical to the pre-fix formula.
-    let y_bases: Option<Vec<Option<f64>>> = col_as_f64(ctx.batch, "__stack_y_base__").ok();
+    // Stack base (segment bottoms), gated on the `__stack_value_on_x__`
+    // stamp like `build_quantitative_horizontal`'s `stack_bases` — mirrored,
+    // not identical: the horizontal builder consumes the base only when the
+    // stamp IS present (value on X); this builder consumes it only when the
+    // stamp is ABSENT (value on Y). `apply_stack` always writes
+    // `__stack_y_base__` regardless of which axis holds the cumulated value
+    // (position.rs), so the stamp — not column presence — is the only safe
+    // disambiguator for which scale to map a given batch's base through.
+    // `build()`'s dispatch already routes the value-on-X shape (`has_y2 &&
+    // !has_x2`) to `build_quantitative_horizontal` instead of here, so
+    // every reachable vertical-histogram path has the stamp absent today;
+    // the gate below is a defensive mirror of that invariant rather than a
+    // bet on it — a batch that somehow reaches this builder while stamped
+    // falls back to the fixed `baseline_y` (the safe pre-remediation
+    // render) instead of mapping a value-on-X base through `scales.y`.
+    // Absent a usable base (gated out by the stamp, no Stack at all, or a
+    // Stack whose base column doesn't exist), `y_bases` is `None` and every
+    // row falls back to `baseline_y` via the `unwrap_or` below —
+    // byte-identical to the pre-fix formula.
+    let y_bases: Option<Vec<Option<f64>>> = if !crate::render::position::stack_value_on_x(ctx.batch) {
+        col_as_f64(ctx.batch, "__stack_y_base__").ok()
+    } else {
+        None
+    };
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
@@ -2883,6 +2908,101 @@ mod tests {
             assert!((y - ey).abs() < 1e-9, "rect[{i}].y = {y}, expected {ey}");
             assert!((w - ew).abs() < 1e-9, "rect[{i}].w = {w}, expected {ew}");
             assert!((h - eh).abs() < 1e-9, "rect[{i}].h = {h}, expected {eh}");
+        }
+    }
+
+    /// Reviewer follow-up (S2): the narrow escape where `apply_stack`
+    /// resolves `value_on_x = false` for an ordinal-y dispatch — e.g.
+    /// `mark_bar(x=quantitative, y=integer-typed ordinal,
+    /// position=Stack())` with no orient and no explicit `value_axis`,
+    /// which cumulates the *y* column (per `apply_stack`'s
+    /// `value_on_x`-selects-`(x,y)` branch) and writes a stamp-less
+    /// `__stack_y_base__` meant for `scales.y`, not `scales.x`. Utf8
+    /// ordinal columns fail this scenario safely (a stamp-less base
+    /// resulting from a corrupted-by-cumulation Utf8 y column would fail
+    /// `col_as_f64` entirely upstream); only int-typed ordinal y columns
+    /// slip through, because both the real category codes and a
+    /// mis-cumulated numeric base are equally valid `f64`s.
+    ///
+    /// `build_ordinal_y` must NOT map a stamp-less base through
+    /// `scales.x` — it must fall back to `baseline_x` for every row,
+    /// exactly like the fully-unstacked case, ignoring the base column
+    /// entirely. This test directly supplies `__stack_y_base__` and omits
+    /// the `__stack_value_on_x__` schema metadata, isolating the gate from
+    /// `apply_stack`'s own (separately tested) cumulation logic. The base
+    /// value (1.5) is deliberately *inside* the x-scale's `[0, 3]` domain
+    /// — an out-of-domain base would map to `NaN` through the unclamped
+    /// scale and fall back to `baseline_x` for an unrelated reason (the
+    /// scale's own out-of-domain guard, not the gate), which would make
+    /// this test pass whether or not the gate exists. An in-domain,
+    /// off-baseline value fails loudly if the gate is ever removed.
+    #[test]
+    fn ordinal_y_stamp_less_base_falls_back_to_baseline_not_scales_x() {
+        use crate::render::scale_resolve::{ResolvedScales, ScaleKind};
+        use crate::scale::linear::LinearScale;
+        use crate::scale::ordinal::OrdinalScale;
+        use arrow::array::Int64Array;
+
+        let spec = ChartSpec {
+            data: DataRef::default(), mark: Mark::Bar,
+            encoding: Encoding {
+                x: Some(EncodingSpec { field: "v".into(), type_: Some(SDT::Quantitative), ..Default::default() }),
+                y: Some(EncodingSpec { field: "g".into(), type_: Some(SDT::Ordinal), ..Default::default() }),
+                color: None,
+                ..Default::default()
+            },
+            transforms: Vec::new(), facet: None, layers: None,
+            coord: None, mark_style: None, position: None, title: None,
+            axis_x: None, axis_y: None,
+            selections: Vec::new(), conditionals: Vec::new(),
+            chart_description: None,
+            params: Vec::new(),
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, false),
+            Field::new("g", DataType::Int64, false),
+            // Present but must be ignored: this schema carries no
+            // `__stack_value_on_x__` metadata, so per `apply_stack`'s own
+            // contract this base was never meant for `scales.x`. See the
+            // doc comment above for why 1.5 (in-domain, off-baseline) is
+            // the right adversarial value here.
+            Field::new("__stack_y_base__", DataType::Float64, false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(Int64Array::from(vec![1, 2, 3])),
+            Arc::new(Float64Array::from(vec![1.5, 1.5, 1.5])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let scales = ResolvedScales {
+            x: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 3.0], vec![0.0, 100.0], false, false)),
+            y: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["1".into(), "2".into(), "3".into()], vec![0.0, 100.0], 0.0)),
+            color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
+        };
+        // Sanity: this schema is genuinely stamp-less.
+        assert!(!crate::render::position::stack_value_on_x(&batch), "test batch must carry no value-on-X stamp");
+
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        let rects: Vec<(f64, f64)> = result.nodes.iter().filter_map(|n| {
+            if let SceneNode::Rect { x, w, .. } = n { Some((*x, *w)) } else { None }
+        }).collect();
+        assert_eq!(rects.len(), 3, "expected 3 bars, one per row");
+
+        // Baseline-anchored: every bar spans [panel.x, to_pixel_f64(v)],
+        // exactly the pre-remediation (unstacked) geometry — the
+        // stamp-less base (500.0) must never reach `scales.x`.
+        for (i, (x, w)) in rects.iter().enumerate() {
+            let v = 1.0 + i as f64;
+            let expected_width = scales.x.to_pixel_f64(v).unwrap();
+            assert!((x - 0.0).abs() < 1e-9, "rect[{i}].x = {x}, expected baseline 0.0 — stamp-less base must be ignored");
+            assert!((*w - expected_width).abs() < 1e-9, "rect[{i}].w = {w}, expected {expected_width} (baseline→value span, not base=500→value)");
         }
     }
 }

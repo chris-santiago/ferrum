@@ -31,3 +31,13 @@ Two reachable failures, both with `coord_flipped == false` while the value axis 
 ## Gates per work item
 
 Coder agent (python-coder / rust-coder per file type) → regression test proven RED on pre-fix code (stash-proof) → `*-review-lite` gate → commit → origin issue closed with evidence. Sequential execution (W1→W2→W3→W4); full-suite + cargo test verification at the end before `finishing-a-development-branch`.
+
+## Outcome (2026-07-23, close)
+
+All four work items shipped, plus two in-sweep extensions the gates surfaced:
+
+- **W5 (in-sweep discovery, #66 extension):** the #66 clamp flipped three goldens and exposed that every boxplot median rendered at 2× its box width — a tick-half-width vs rect-full-width `band_size` semantics drift in `desugar_boxplot`. Fixed (`band / 2`), five goldens regenerated + visually blessed (catplot_box, cv_scores_ridge_box, compare_cv_scores_two_models, 2× violin_facet). Root-semantics unification filed as #85.
+- **W4 extensions (fix-fully):** the wire fix alone left (a) mark drawers hardcoding value-on-Y (bar `build_quantitative_horizontal`, `area`), (b) no X-side stacked-domain widening (`axis_batch_for_x`), and — per the whole-change design gate — (c) the sibling drawers `build_quantitative` (default vertical stacked histogram) and `build_ordinal_y` painter's-order faking their stacking. All completed in-sweep with RED-proven drawer tests; `displot_stacked_hist` golden regenerated (visually identical, geometry now truly tiles) and stamp-gated base reads honor `apply_stack`'s consumer contract.
+- **W1 gate follow-through:** labeled-overlay arrows made headless (`head_size=0`) for cross-path parity per the spec §3.3 headless-for-now intent.
+- **Verification:** review-lite gates per diff (W2 required one block→remediate cycle: chained-merge marker propagation); whole-change `python-design-reviewer` + `rust-design-reviewer` + spec-blind `intent-reviewer`, each re-run to PASS after remediation. Final: 7273 pytest / 3058 ferrum-core / 527 ferrum-wasm, zero failures; ruff clean; clippy delta zero.
+- **Follow-ups filed:** #85 (`band_size` semantics unification + whisker-cap sweep), #86 (typed `BatchPositionMeta`), #87 (`Dodge(padding ≥ 0.5)` validation). #51 stays open as upstream wgpu tracking by user decision.
