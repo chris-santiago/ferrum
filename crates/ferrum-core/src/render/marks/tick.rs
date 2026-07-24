@@ -84,7 +84,15 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
                 // width-pairing convention with the band-axis formulas, not
                 // a collision-prone one.
                 let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
-                let tick_half = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+                // band_size is now a FULL-length factor (rect's convention,
+                // GH #85): default 0.6 (formerly a HALF-length factor
+                // defaulting to 0.3) keeps the default rendered length
+                // byte-identical — `tick_full / 2.0` is an exact power-of-2
+                // division, so `tick_half` here is bit-for-bit the old
+                // `tick_half = extent * 0.3` (see the crate's tick.rs test
+                // module for the bit-identity proof).
+                let tick_full = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
+                let tick_half = tick_full / 2.0;
                 let baseline_x = panel.x;
                 let mut acc = MarkNodes::with_capacity(ys.len());
                 for i in 0..ys.len() {
@@ -154,17 +162,25 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             // x-band pixel range when the resolver recorded one; otherwise
             // identical to `panel.w`.
             let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
-            let tick_half_raw = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+            // band_size is now a FULL-length factor (rect's convention, GH
+            // #85); default 0.6 keeps this bit-identical to the old
+            // half-length default of 0.3 (see the bit-identity proof below).
+            let tick_full_raw = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
             // Clamp to the Dodge sub-band (GH #66): this tick spans the SAME
             // axis (x) that Dodge offsets `cx` along, so — unlike the
             // ordinal-only crossbar modes above, whose tick length runs along
             // the cross axis and never collides with a sibling dodge group —
             // a band_size-factor width here can genuinely overlap a
-            // neighbouring group at high padding. Byte-identical no-op when
-            // undodged or at low/default padding. `*2.0`/`/2.0` is exact in
-            // IEEE-754 (power-of-two scaling), so the no-op case round-trips
-            // to `tick_half_raw` bit-for-bit.
-            let tick_half = pos_meta.clamp_width(tick_half_raw * 2.0) / 2.0;
+            // neighbouring group at high padding. Clamping the FULL length
+            // directly (rather than the old half-length-then-`*2.0` dance)
+            // is simpler and passes `clamp_width` the SAME bit pattern as
+            // before: `tick_full_raw` (`X * 0.6`) is bit-identical to the old
+            // `tick_half_raw * 2.0` (`(X * 0.3) * 2.0`) because doubling and
+            // halving by an exact power of two commutes with correctly
+            // rounded multiplication — see the crate's tick.rs test module
+            // for the bit-identity proof. Byte-identical no-op when undodged
+            // or at low/default padding.
+            let tick_half = pos_meta.clamp_width(tick_full_raw) / 2.0;
             let mut acc = MarkNodes::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -208,12 +224,16 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             // y-band pixel range when the resolver recorded one; otherwise
             // identical to `panel.h`.
             let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
-            let tick_half_raw = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+            // band_size is now a FULL-length factor (rect's convention, GH
+            // #85); default 0.6 keeps this bit-identical to the old
+            // half-length default of 0.3.
+            let tick_full_raw = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
             // Clamp to the Dodge sub-band (GH #66); see the ordinal-x mode's
             // analogous comment above — this tick spans y, the same axis
             // Dodge offsets `cy` along, so the overlap risk (and the
-            // exact-round-trip `*2.0`/`/2.0` no-op) is the same.
-            let tick_half = pos_meta.clamp_width(tick_half_raw * 2.0) / 2.0;
+            // bit-identical clamp input, see the tick.rs test module) is the
+            // same.
+            let tick_half = pos_meta.clamp_width(tick_full_raw) / 2.0;
             let mut acc = MarkNodes::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -268,7 +288,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // group regardless of `padding` — see the analogous "ordinal y only"
         // mode above.
         let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
-        let tick_half = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.3);
+        // band_size is now a FULL-length factor (rect's convention, GH #85);
+        // default 0.6 keeps the default rendered length byte-identical (see
+        // the ordinal-y-only mode's analogous comment above).
+        let tick_full = (band_extent / n_cats as f64 / n_groups) * ctx.mark_style.misc.band_size.unwrap_or(0.6);
+        let tick_half = tick_full / 2.0;
         let baseline_y = panel.y + panel.h;
         let mut acc = MarkNodes::with_capacity(xs.len());
         for i in 0..xs.len() {
@@ -921,8 +945,9 @@ mod tests {
         // extent (width) by the dodge group count, driven by the explicit
         // `__dodge_n_groups__` metadata Dodge stamps — not by counting distinct
         // offset values. panel.w=100, 2 cats → bandwidth 50, 2 groups →
-        // sub_band 25 → offsets -12.5 / +12.5; tick_half = (100/2/2)*0.3 = 7.5,
-        // so each tick spans 15.0.
+        // sub_band 25 → offsets -12.5 / +12.5; band_size is now a
+        // FULL-length factor (default 0.6, GH #85): tick_full =
+        // (100/2/2)*0.6 = 15.0, so each tick spans 15.0.
         let (spec, batch) = ordinal_tick_offset_batch(Some(vec![-12.5, 12.5, -12.5, 12.5]), Some(2));
         let extents = tick_horizontal_extents(&spec, &batch);
         assert_eq!(extents.len(), 4, "expected 4 dodged ticks");
@@ -945,8 +970,9 @@ mod tests {
         // Dodge uses, but never stamps __dodge_n_groups__. Four distinct
         // per-row noise values (which the old to_bits-distinct heuristic would
         // have misread as 4 dodge groups) must NOT narrow the tick: with no
-        // metadata, n_dodge_groups returns 1, so tick_half = (100/2/1)*0.3 = 15.0
-        // and each tick spans the full un-narrowed 30.0 width.
+        // metadata, n_dodge_groups returns 1, so tick_full = (100/2/1)*0.6 = 30.0
+        // (band_size is now a FULL-length factor, default 0.6, GH #85) and
+        // each tick spans the full un-narrowed 30.0 width.
         let (spec, batch) = ordinal_tick_offset_batch(Some(vec![3.1, -7.4, 0.9, -2.2]), None);
         let extents = tick_horizontal_extents(&spec, &batch);
         assert_eq!(extents.len(), 4);
@@ -959,7 +985,8 @@ mod tests {
     #[test]
     fn tick_ordinal_x_no_offsets_no_metadata_unchanged() {
         // Baseline regression: no offset columns, no metadata → n_groups == 1 →
-        // tick_half = (100/2)*0.3 = 15.0, byte-identical to pre-Task-3c.
+        // tick_full = (100/2)*0.6 = 30.0 (band_size default is now a
+        // FULL-length factor, GH #85), byte-identical to pre-Task-3c.
         let (spec, batch) = ordinal_tick_offset_batch(None, None);
         let extents = tick_horizontal_extents(&spec, &batch);
         assert_eq!(extents.len(), 4);
@@ -1023,8 +1050,9 @@ mod tests {
             if let ferrum_scene::SceneNode::Line { x1, x2, .. } = n { Some((x1 - x2).abs()) } else { None }
         }).collect();
         assert_eq!(widths.len(), 2);
-        // |260 - 40| = 220 extent; 2 categories, 1 group, band_size 0.3 (default)
-        // → tick_half = 220 / 2 * 0.3 = 33.0 → full width 66.0.
+        // |260 - 40| = 220 extent; 2 categories, 1 group, band_size 0.6
+        // (default, now a FULL-length factor — GH #85) → tick_full =
+        // 220 / 2 * 0.6 = 66.0 → full width 66.0.
         for w in widths {
             assert!((w - 66.0).abs() < 1e-9, "expected tick width 66.0 from the 220px explicit extent, got {w}");
         }
@@ -1081,10 +1109,75 @@ mod tests {
             if let ferrum_scene::SceneNode::Line { y1, y2, .. } = n { Some((y1 - y2).abs()) } else { None }
         }).collect();
         assert_eq!(heights.len(), 2);
-        // |260 - 40| = 220 extent; 2 categories, 1 group, band_size 0.3 (default)
-        // → tick_half = 220 / 2 * 0.3 = 33.0 → full height 66.0.
+        // |260 - 40| = 220 extent; 2 categories, 1 group, band_size 0.6
+        // (default, now a FULL-length factor — GH #85) → tick_full =
+        // 220 / 2 * 0.6 = 66.0 → full height 66.0.
         for h in heights {
             assert!((h - 66.0).abs() < 1e-9, "expected tick height 66.0 from the 220px explicit extent, got {h}");
+        }
+    }
+
+    // ── Bit-identity proof (GH #85: band_size half-length → full-length) ────
+    //
+    // The default rendered tick length must stay byte-identical after
+    // flipping band_size from a HALF-length factor (old default 0.3) to a
+    // FULL-length factor (new default 0.6). This holds because `2.0` is an
+    // exact power of two: for any finite, non-overflowing `x`, IEEE-754
+    // correctly-rounded multiplication/division commutes with exact
+    // power-of-two scaling — `round(x * (2*d)) == 2 * round(x * d)` and
+    // `(2*y) / 2.0 == y` bit-for-bit. So `x * 0.6 == (x * 0.3) * 2.0` and
+    // `(x * 0.6) / 2.0 == x * 0.3` for every `x` this crate produces from
+    // `band_extent / n_cats / n_groups` (finite pixel-scale panel geometry,
+    // nowhere near overflow/subnormal range). This test spot-checks that
+    // identity across every (extent, n_cats, n_groups) combination the
+    // existing tick tests exercise, both for the plain crossbar formula
+    // (`tick_full = x*0.6` vs. old `2.0 * (x*0.3)`) and for the #66
+    // clamp-input formula (`tick_full_raw = x*0.6` vs. old
+    // `tick_half_raw*2.0 = (x*0.3)*2.0`).
+    #[test]
+    fn tick_band_size_full_length_default_is_bit_identical_to_old_half_length_default() {
+        let cases: &[(f64, f64, f64)] = &[
+            // (band_extent, n_cats, n_groups)
+            (100.0, 2.0, 1.0),  // panel.w=100, 2 ordinal categories, no dodge
+            (100.0, 3.0, 1.0),  // ordinal-y-only crossbar test panel
+            (100.0, 2.0, 2.0),  // dodge: 2 groups per category
+            (220.0, 2.0, 1.0),  // explicit BandScale range (220px extent)
+            (300.0, 5.0, 3.0),  // arbitrary combination, no special structure
+        ];
+        for &(extent, n_cats, n_groups) in cases {
+            let x = extent / n_cats / n_groups;
+
+            // Plain crossbar formula: old `2.0 * (x * 0.3)` vs. new
+            // `(x * 0.6) / 2.0`, and the raw full length `x * 0.6` vs. the
+            // old rendered full length `2.0 * (x * 0.3)`.
+            let old_tick_half = x * 0.3_f64;
+            let old_full_rendered = 2.0 * old_tick_half;
+            let new_tick_full = x * 0.6_f64;
+            let new_tick_half = new_tick_full / 2.0;
+
+            assert_eq!(
+                new_tick_full.to_bits(), old_full_rendered.to_bits(),
+                "extent={extent} n_cats={n_cats} n_groups={n_groups}: new tick_full \
+                 (x*0.6) must be bit-identical to old rendered full length (2.0*(x*0.3))"
+            );
+            assert_eq!(
+                new_tick_half.to_bits(), old_tick_half.to_bits(),
+                "extent={extent} n_cats={n_cats} n_groups={n_groups}: new tick_half \
+                 ((x*0.6)/2.0) must be bit-identical to old tick_half (x*0.3)"
+            );
+
+            // #66 clamp-input formula: old `tick_half_raw * 2.0` (where
+            // tick_half_raw = x*0.3) vs. new `tick_full_raw` (x*0.6) — the
+            // value `clamp_width` receives must be bit-identical so the
+            // clamp itself (no-op or engaged) is unaffected by this change.
+            let old_clamp_input = old_tick_half * 2.0;
+            let new_clamp_input = new_tick_full;
+            assert_eq!(
+                new_clamp_input.to_bits(), old_clamp_input.to_bits(),
+                "extent={extent} n_cats={n_cats} n_groups={n_groups}: new clamp_width \
+                 input (tick_full_raw = x*0.6) must be bit-identical to old clamp_width \
+                 input (tick_half_raw*2.0 = (x*0.3)*2.0)"
+            );
         }
     }
 }

@@ -141,8 +141,10 @@ def desugar_boxplot(
     Layers emitted
     --------------
     1. ``rule``   — ``y=lower_whisker``, ``y2=upper_whisker`` (whiskers).
-    2. ``tick``   — ``y=lower_whisker``, ``band_size=0.3`` (lower cap).
-    3. ``tick``   — ``y=upper_whisker``, ``band_size=0.3`` (upper cap).
+    2. ``tick``   — ``y=lower_whisker``, ``band_size=band`` (lower cap, tracks
+       the box's width).
+    3. ``tick``   — ``y=upper_whisker``, ``band_size=band`` (upper cap, tracks
+       the box's width).
     4. ``rect``   — ``y=q1``, ``y2=q3``, axis title set to original field
        name (IQR box, ``width=size``).
     5. ``tick``   — ``y=median``, dark stroke (median line).
@@ -168,7 +170,8 @@ def desugar_boxplot(
     outliers : bool, default True
         Whether to overlay an outlier point layer.
     size : float or None, default None
-        Box half-width as a fraction of the band (default ``0.6``).
+        Box width as a fraction of the band (default ``0.6``). The lower
+        and upper whisker caps and the median tick all share this width.
     color_field : str or None, default None
         Optional column to use for color encoding (also added to the
         ``groupby`` list for the transforms).
@@ -265,14 +268,14 @@ def desugar_boxplot(
             name="lower_cap",
             mark="tick",
             encoding=enc("lower_whisker"),
-            mark_kwargs={"band_size": 0.3, "stroke": "theme:label"},
+            mark_kwargs={"band_size": band, "stroke": "theme:label"},
             data_source="box",
         ),
         _Layer(
             name="upper_cap",
             mark="tick",
             encoding=enc("upper_whisker"),
-            mark_kwargs={"band_size": 0.3, "stroke": "theme:label"},
+            mark_kwargs={"band_size": band, "stroke": "theme:label"},
             data_source="box",
         ),
         _Layer(
@@ -286,12 +289,9 @@ def desugar_boxplot(
             name="median",
             mark="tick",
             encoding=enc("median"),
-            # tick's band_size is a half-width factor (full rendered length =
-            # 2 * band_size * slot), while the box rect's band_size is a
-            # full-width factor. Halve `band` so the median tick's full
-            # rendered length matches the box's full width instead of
-            # doubling it.
-            mark_kwargs={"band_size": band / 2, "stroke": "theme:label", "stroke_width": 2},
+            # tick's band_size is a full-width factor (same convention as
+            # rect's), so this literally spans the box's width.
+            mark_kwargs={"band_size": band, "stroke": "theme:label", "stroke_width": 2},
             data_source="box",
         ),
     ]
@@ -350,9 +350,9 @@ def desugar_errorbar(
     Layers emitted
     --------------
     1. ``rule``  — ``y=lower``, ``y2=upper`` (vertical error span).
-    2. ``tick``  — ``y=lower`` (bottom cap, ``band_size=0.3``).  When
+    2. ``tick``  — ``y=lower`` (bottom cap, ``band_size=0.6``).  When
        ``ticks=True`` only.
-    3. ``tick``  — ``y=upper`` (top cap, ``band_size=0.3``).  When
+    3. ``tick``  — ``y=upper`` (top cap, ``band_size=0.6``).  When
        ``ticks=True`` only.
 
     Parameters
@@ -437,14 +437,14 @@ def desugar_errorbar(
                     name="lower_cap",
                     mark="tick",
                     encoding=_enc("lower"),
-                    mark_kwargs={"band_size": 0.3, "stroke": "theme:label"},
+                    mark_kwargs={"band_size": 0.6, "stroke": "theme:label"},
                     data_source="err",
                 ),
                 _Layer(
                     name="upper_cap",
                     mark="tick",
                     encoding=_enc("upper"),
-                    mark_kwargs={"band_size": 0.3, "stroke": "theme:label"},
+                    mark_kwargs={"band_size": 0.6, "stroke": "theme:label"},
                     data_source="err",
                 ),
             ]

@@ -70,8 +70,10 @@ pub struct MarkKwargsSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
     // ── S8: band_size (tick/rect) ────────────────────────────────────────────
-    /// Width of tick marks as a fraction of the band width (e.g. 0.3).
-    /// Also controls boxplot IQR rect width when set on rect marks.
+    /// Rendered mark length as a fraction of the band width, uniformly a
+    /// FULL-length factor across both consumers (GH #85): tick's crossbar/
+    /// median/cap length and rect's boxplot IQR width are both
+    /// `band_extent * band_size`. Default `0.6` for both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub band_size: Option<f64>,
     // ── S9: line (area) ──────────────────────────────────────────────────────

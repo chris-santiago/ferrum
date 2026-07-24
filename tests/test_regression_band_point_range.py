@@ -403,11 +403,11 @@ def test_heatmap_cell_extent_matches_explicit_range():
 
 
 def test_tick_mark_half_extent_scales_with_explicit_range():
-    """mark_tick's band-dimension half-extent derives from the explicit range
+    """mark_tick's band-dimension extent derives from the explicit range
     extent, not the full panel width; ticks nest within the requested range.
 
     Regression: issue #39 phase 2 — tick.rs's ordinal-x + quantitative-y mode
-    (``tick_half = panel.w / n_cats / n_groups * band_size``) was
+    (``tick_full = panel.w / n_cats / n_groups * band_size``, GH #85) was
     panel-derived and ignored ``range=``, spilling ticks outside [40, 260]
     and sizing them far wider than a 55px band step.
     """

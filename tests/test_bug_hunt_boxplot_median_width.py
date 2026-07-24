@@ -1,13 +1,14 @@
 """Regression tests: the boxplot median tick must render at the box's full width.
 
-``mark_boxplot``'s median layer uses the ``tick`` mark, whose ``band_size`` is a
-HALF-width factor (full rendered length = ``2 * band_size * slot``), while the
-box's ``rect`` layer uses ``band_size`` as a FULL-width factor (box width =
-``band_size * slot``). ``desugar_boxplot`` used to pass the same resolved
-``band`` value straight into both layers, so the median tick rendered at
-``2 * band`` -- exactly twice the box's width -- and, under dodge, bled into
-the neighbouring hue sub-band. Fixed in ``src/ferrum/marks/composite.py`` by
-halving ``band`` for the median tick's ``band_size``.
+The ``tick`` mark's ``band_size`` and the ``rect`` mark's ``band_size`` both
+use the same FULL-width convention (rendered length = ``band_size * slot``).
+Historically ``tick``'s ``band_size`` was a HALF-width factor (full rendered
+length = ``2 * band_size * slot``), which made the boxplot median tick render
+at twice the box's width and, under dodge, bleed into the neighbouring hue
+sub-band. ``desugar_boxplot`` originally worked around that mismatch by
+halving ``band`` for the median tick's ``band_size``; once ``tick`` adopted
+the same full-width convention as ``rect`` (T9, GH #85), the median layer
+passes ``band`` straight through and literally spans the box's width.
 
 Parse conventions mirror ``tests/test_bug_hunt_band_point_range.py``.
 """
@@ -59,8 +60,9 @@ def _median_lines(svg: str) -> list[dict[str, str]]:
 def test_median_tick_matches_box_width_undodged():
     """Undodged 2-category boxplot: median tick length == box width.
 
-    Regression test for the band_size half-width/full-width mismatch: before
-    the fix, the median tick's full rendered length was ``2 * box_width``.
+    Regression test for the band_size half-width/full-width mismatch that
+    predated the tick/rect ``band_size`` unification: before the original fix,
+    the median tick's full rendered length was ``2 * box_width``.
     """
     df = pl.DataFrame(
         {
