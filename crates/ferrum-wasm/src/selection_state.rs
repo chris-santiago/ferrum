@@ -96,7 +96,8 @@ impl InteractionState {
         panel_slot_counts: &[usize],
     ) {
         let hit = hit_test::hit_test_with_index(
-            panels, x, y, zoom, spatial_index, slot_rescales, panel_slot_counts,
+            panels, x, y, zoom, spatial_index,
+            &hit_test::SlotRescalePlan { slot_rescales, panel_slot_counts },
         );
 
         for spec in specs {
@@ -221,7 +222,8 @@ impl InteractionState {
         panel_slot_counts: &[usize],
     ) -> Option<&HitResult> {
         self.hover = hit_test::hit_test_with_index(
-            panels, x, y, zoom, spatial_index, slot_rescales, panel_slot_counts,
+            panels, x, y, zoom, spatial_index,
+            &hit_test::SlotRescalePlan { slot_rescales, panel_slot_counts },
         );
         self.hover.as_ref()
     }

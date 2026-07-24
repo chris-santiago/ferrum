@@ -97,6 +97,60 @@ impl OrdinalRangeValue {
     }
 }
 
+/// Provenance of an `OrdinalScale`'s pixel range (GH #79b).
+///
+/// Replaces the former `range_user_set`/`explicit_pixel_range` boolean pair
+/// (bug-hunt design review, GH #69). A call-site audit found the two facts
+/// are never independently meaningful on one instance — `explicit_pixel_range
+/// == true` never occurs without `range_user_set == true` also being true,
+/// because `with_explicit_range` (the only writer of the old
+/// `explicit_pixel_range`) is chained exclusively onto a fresh
+/// `new_internal` result, which unconditionally hardcoded
+/// `range_user_set = true`. Exactly three (not four) states are reachable,
+/// modeled here as one enum instead of two independent flags:
+///
+/// - [`Default`](Self::Default) — old `(range_user_set: false,
+///   explicit_pixel_range: false)`. Only reachable from `OrdinalScale::new`
+///   (the PyO3 constructor) when no `range=` kwarg was passed. The `.range`
+///   getter returns `None`; the explicit-range accessors return `None`/no-op.
+/// - [`UserSet`](Self::UserSet) — old `(true, false)`. Reachable two ways
+///   that share the exact same reader-visible behavior: `OrdinalScale::new`
+///   with a `range=` kwarg (feeds the `.range` getter and
+///   `to_scale_spec()`'s wire form via `range_orig`), and every
+///   `new_internal` render-resolver instance that is never subsequently
+///   marked explicit via `with_explicit_range(true)` (the panel-extent
+///   fallback). The `.range` getter is declared unread on render-internal
+///   instances — render code never calls it — but its `Some`-returning
+///   behavior is preserved byte-for-byte in case a future/test caller
+///   invokes it. The explicit-range accessors return `None`/no-op for this
+///   variant either way.
+/// - [`ExplicitPixel`](Self::ExplicitPixel) — old `(true, true)`. Set only
+///   via `with_explicit_range(true)` at the render-internal resolver call
+///   sites (`render::scale_resolve::positional`) that resolved a
+///   user-supplied `BandScale`/`PointScale`/positional-`OrdinalScale` pixel
+///   range (GH #39 phase 2), as opposed to the panel-extent fallback. Feeds
+///   `explicit_band_extent()`, `explicit_band_centers()`, and
+///   `translate_explicit_range()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeProvenance {
+    Default,
+    UserSet,
+    ExplicitPixel,
+}
+
+impl RangeProvenance {
+    /// Old `range_user_set` answer: `false` only for [`Default`](Self::Default).
+    fn range_is_user_set(self) -> bool {
+        !matches!(self, RangeProvenance::Default)
+    }
+
+    /// Old `explicit_pixel_range` answer: `true` only for
+    /// [`ExplicitPixel`](Self::ExplicitPixel).
+    fn is_explicit_pixel(self) -> bool {
+        matches!(self, RangeProvenance::ExplicitPixel)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct OrdinalScaleData {
     domain: Vec<String>,
@@ -181,50 +235,12 @@ impl OrdinalScaleData {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrdinalScale {
     data: OrdinalScaleData,
-    /// Whether the user explicitly supplied a range (false → auto-fill from
-    /// plot-area extent at render time).
-    ///
-    /// CAUTION: not reliable as a positional-explicitness signal —
-    /// `new_internal` (the render-resolver constructor) hardcodes it `true`
-    /// even for the panel-extent fallback, because it only feeds the Python
-    /// `.range` getter / compute facade. For "did the user supply the pixel
-    /// range this scale renders with", use `explicit_pixel_range` below.
-    ///
-    /// `range_user_set` and `explicit_pixel_range` look like a near-duplicate
-    /// pair (bug-hunt design review, GH #69) but are NOT two states of one
-    /// concept: each is written by exactly one of two disjoint constructors
-    /// and read by exactly one of two disjoint consumers, and no single
-    /// `OrdinalScale` instance ever has both fields meaningfully set at once.
-    /// `OrdinalScale::new` (the `#[pyo3(new)]` Python constructor) sets
-    /// `range_user_set` from whether a `range=` kwarg was passed and never
-    /// touches `explicit_pixel_range` (it stays `false`); it feeds the `.range`
-    /// Python getter and `to_scale_spec()`'s wire form. `new_internal` (the
-    /// render-resolver constructor) hardcodes `range_user_set = true`
-    /// unconditionally — a value that is never read on a render-internal
-    /// instance, since render code never calls `.range()` — and instead
-    /// carries its explicitness fact through `explicit_pixel_range` via the
-    /// `with_explicit_range` builder, feeding `explicit_band_extent()` /
-    /// `explicit_band_centers()`. Collapsing them into one enum would force a
-    /// single type to represent two orthogonal facts from two call sites that
-    /// never interact, at the cost of every read site here having to re-derive
-    /// which "mode" applies — a net increase in cognitive load for no removed
-    /// duplication. Kept as two booleans; this comment (not a type) is the
-    /// contract.
-    range_user_set: bool,
+    /// Range-provenance origin (GH #79b). See [`RangeProvenance`] for the
+    /// full old-booleans mapping.
+    range_provenance: RangeProvenance,
     /// Original range values as supplied by the user, preserved for the
     /// Python getter. `None` when the user did not supply a range.
     range_orig: Option<Vec<OrdinalRangeValue>>,
-    /// Render-side explicitness flag (GH #39 phase 2, band-geometry
-    /// unification): `true` only when the positional resolver constructed
-    /// this scale from a user-supplied `BandScale`/`PointScale`/positional
-    /// `OrdinalScale` pixel range, as opposed to the panel-extent fallback.
-    /// Distinct from `range_user_set`, which tracks whether the *Python
-    /// constructor* received a `range` kwarg (used for the `.range` getter,
-    /// including non-positional color ranges). Always `false` from
-    /// `new_internal`; set via `with_explicit_range` at the render-internal
-    /// call sites that resolve an explicit `ScaleSpec` range. Consumed by
-    /// `explicit_band_extent()`.
-    explicit_pixel_range: bool,
 }
 
 impl OrdinalScale {
@@ -236,9 +252,8 @@ impl OrdinalScale {
             range.iter().map(|&f| OrdinalRangeValue::Number(f)).collect();
         OrdinalScale {
             data: OrdinalScaleData { domain, range, padding },
-            range_user_set: true,
+            range_provenance: RangeProvenance::UserSet,
             range_orig: Some(range_orig),
-            explicit_pixel_range: false,
         }
     }
 
@@ -247,9 +262,13 @@ impl OrdinalScale {
     /// builder for the render-internal resolver call sites that know whether
     /// the `ScaleSpec` carried a usable range (GH #39 phase 2). Never called
     /// with `true` outside `render::scale_resolve::positional` — every other
-    /// `new_internal` call site keeps the default `false`.
+    /// `new_internal` call site keeps the default `false`. Always called
+    /// directly on a fresh `new_internal` result (never on a PyO3-constructed
+    /// instance), so `explicit == false` reverts to `RangeProvenance::UserSet`
+    /// — `new_internal`'s own provenance — rather than losing information.
     pub(crate) fn with_explicit_range(mut self, explicit: bool) -> Self {
-        self.explicit_pixel_range = explicit;
+        self.range_provenance =
+            if explicit { RangeProvenance::ExplicitPixel } else { RangeProvenance::UserSet };
         self
     }
 
@@ -259,7 +278,7 @@ impl OrdinalScale {
     /// even though that range is numerically valid — explicitness is recorded
     /// at construction, never inferred by comparing floats.
     pub(crate) fn explicit_band_extent(&self) -> Option<f64> {
-        if !self.explicit_pixel_range {
+        if !self.range_provenance.is_explicit_pixel() {
             return None;
         }
         let r0 = *self.data.range.first()?;
@@ -277,7 +296,7 @@ impl OrdinalScale {
     /// every no-range golden) byte-identical. Explicitness is recorded at
     /// construction, never inferred by comparing floats.
     pub(crate) fn explicit_band_centers(&self) -> Option<Vec<f64>> {
-        if !self.explicit_pixel_range {
+        if !self.range_provenance.is_explicit_pixel() {
             return None;
         }
         Some(self.data.domain.iter().map(|c| self.data.scale_str(c)).collect())
@@ -327,8 +346,9 @@ impl OrdinalScale {
     /// user-specified extent re-anchors inside each panel's own window.
     ///
     /// No-op when this scale's range was never recorded as explicit
-    /// (`explicit_pixel_range == false`) — the panel-extent fallback already
-    /// resolves per-panel and must not be shifted again.
+    /// (`range_provenance` is not [`RangeProvenance::ExplicitPixel`]) — the
+    /// panel-extent fallback already resolves per-panel and must not be
+    /// shifted again.
     ///
     /// Only `data.range` is load-bearing at render time (mark placement,
     /// `explicit_band_extent()`, `explicit_band_centers()`); this deliberately
@@ -339,7 +359,7 @@ impl OrdinalScale {
     /// be unread, cosmetic-looking state with no consumer, and a future reader
     /// might mistake it for load-bearing.
     pub(crate) fn translate_explicit_range(&mut self, offset: f64) {
-        if !self.explicit_pixel_range || offset == 0.0 {
+        if !self.range_provenance.is_explicit_pixel() || offset == 0.0 {
             return;
         }
         for r in self.data.range.iter_mut() {
@@ -379,7 +399,8 @@ impl OrdinalScale {
     #[new]
     #[pyo3(signature = (*, domain, range = None, padding = 0.0))]
     fn new(domain: Vec<String>, range: Option<Vec<OrdinalRangeValue>>, padding: f64) -> PyResult<Self> {
-        let range_user_set = range.is_some();
+        let range_provenance =
+            if range.is_some() { RangeProvenance::UserSet } else { RangeProvenance::Default };
         let range_orig = range.clone();
 
         // Extract numeric values from the range for the internal `OrdinalScaleData`.
@@ -414,9 +435,8 @@ impl OrdinalScale {
 
         Ok(OrdinalScale {
             data: OrdinalScaleData { domain, range: internal_range, padding },
-            range_user_set,
+            range_provenance,
             range_orig,
-            explicit_pixel_range: false,
         })
     }
 
@@ -457,7 +477,7 @@ impl OrdinalScale {
     /// strings come back as strings.
     #[getter]
     fn range(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        if !self.range_user_set {
+        if !self.range_provenance.range_is_user_set() {
             return Ok(None);
         }
         let items: Vec<Py<PyAny>> = self
@@ -603,7 +623,7 @@ mod tests {
             vec!["a".into(), "b".into()],
             vec![40.0, 260.0],
             0.0,
-        ); // no `.with_explicit_range(true)` — explicit_pixel_range stays false
+        ); // no `.with_explicit_range(true)` — range_provenance stays UserSet
         scale.translate_explicit_range(100.0);
         assert_eq!(scale.range_pair(), [40.0, 260.0]);
     }
@@ -654,13 +674,12 @@ mod tests {
                 range: vec![0.0, 1.0], // placeholder for string-only range
                 padding: 0.0,
             },
-            range_user_set: true,
+            range_provenance: RangeProvenance::UserSet,
             range_orig: Some(vec![
                 OrdinalRangeValue::Str("#cccccc".into()),
                 OrdinalRangeValue::Str("#cccccc".into()),
                 OrdinalRangeValue::Str("#e4572e".into()),
             ]),
-            explicit_pixel_range: false,
         };
         let orig = scale.range_orig.as_ref().unwrap();
         assert_eq!(orig.len(), 3);
@@ -741,5 +760,81 @@ mod tests {
         assert_eq!(OrdinalRangeValue::all_strings(&mixed), None);
         // Empty → None.
         assert_eq!(OrdinalRangeValue::all_strings(&[]), None);
+    }
+
+    // ── RangeProvenance mapping (GH #79b) ─────────────────────────────────────
+
+    /// A `new_internal` instance, never marked explicit, answers exactly as
+    /// the old `(range_user_set: true, explicit_pixel_range: false)` pair
+    /// did: the `.range`-getter fact is `true` (even though unread on
+    /// render-internal instances) and the explicit-pixel fact is `false`.
+    #[test]
+    fn range_provenance_new_internal_matches_old_booleans() {
+        let scale = OrdinalScale::new_internal(
+            vec!["a".into(), "b".into()],
+            vec![0.0, 100.0],
+            0.0,
+        );
+        assert!(scale.range_provenance.range_is_user_set(), "old range_user_set was true");
+        assert!(!scale.range_provenance.is_explicit_pixel(), "old explicit_pixel_range was false");
+        assert_eq!(scale.explicit_band_extent(), None);
+        assert_eq!(scale.explicit_band_centers(), None);
+    }
+
+    /// `OrdinalScale::new` (the PyO3 constructor) with a `range=` kwarg
+    /// matches old `(range_user_set: true, explicit_pixel_range: false)`:
+    /// the `.range` getter fires, and the render-side explicit accessors do
+    /// not (a PyO3-constructed instance is never used positionally without
+    /// first round-tripping through `ScaleSpec::Ordinal` and `new_internal`).
+    #[test]
+    fn range_provenance_pyclass_new_with_range_matches_old_booleans() {
+        let scale = OrdinalScale::new(
+            vec!["a".into(), "b".into()],
+            Some(vec![OrdinalRangeValue::Number(0.0), OrdinalRangeValue::Number(100.0)]),
+            0.0,
+        )
+        .unwrap();
+        assert!(scale.range_provenance.range_is_user_set(), "old range_user_set was true");
+        assert!(!scale.range_provenance.is_explicit_pixel(), "old explicit_pixel_range was false");
+        assert_eq!(scale.explicit_band_extent(), None);
+    }
+
+    /// `OrdinalScale::new` without a `range=` kwarg matches old
+    /// `(range_user_set: false, explicit_pixel_range: false)`: the `.range`
+    /// getter returns `None` and the explicit accessors are also inert.
+    #[test]
+    fn range_provenance_pyclass_new_without_range_matches_old_booleans() {
+        let scale = OrdinalScale::new(vec!["a".into(), "b".into()], None, 0.0).unwrap();
+        assert!(!scale.range_provenance.range_is_user_set(), "old range_user_set was false");
+        assert!(!scale.range_provenance.is_explicit_pixel(), "old explicit_pixel_range was false");
+        assert_eq!(scale.explicit_band_extent(), None);
+    }
+
+    /// `with_explicit_range(true)` flips only the explicit-side answer: the
+    /// `.range`-getter fact (`range_is_user_set`) stays `true`, matching old
+    /// behavior where `explicit_pixel_range` was set independently of
+    /// `range_user_set` (which `new_internal` had already hardcoded `true`).
+    #[test]
+    fn with_explicit_range_true_flips_only_explicit_side() {
+        let scale = OrdinalScale::new_internal(
+            vec!["a".into(), "b".into()],
+            vec![0.0, 100.0],
+            0.0,
+        )
+        .with_explicit_range(true);
+        assert!(scale.range_provenance.range_is_user_set(), "range_is_user_set unaffected");
+        assert!(scale.range_provenance.is_explicit_pixel());
+        assert_eq!(scale.explicit_band_extent(), Some(100.0));
+    }
+
+    /// `with_explicit_range(false)` is the default state `new_internal`
+    /// already produces — a no-op that keeps both facts identical to a plain
+    /// `new_internal` result.
+    #[test]
+    fn with_explicit_range_false_is_noop_vs_new_internal_default() {
+        let plain = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![0.0, 100.0], 0.0);
+        let explicit_false = OrdinalScale::new_internal(vec!["a".into(), "b".into()], vec![0.0, 100.0], 0.0)
+            .with_explicit_range(false);
+        assert_eq!(plain.range_provenance, explicit_false.range_provenance);
     }
 }

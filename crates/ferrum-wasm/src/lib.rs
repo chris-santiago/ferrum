@@ -466,7 +466,10 @@ impl WasmRenderer {
         if let Some(hr) = hit_test::hit_test_nearest_with_index(
             &loaded.baked_panels, x as f64, y as f64, &self.zoom,
             self.spatial_index.as_ref(),
-            &self.slot_rescales, &loaded.data.panel_slot_counts,
+            &hit_test::SlotRescalePlan {
+                slot_rescales: &self.slot_rescales,
+                panel_slot_counts: &loaded.data.panel_slot_counts,
+            },
         ) {
             return serde_json::json!({
                 "panel": hr.panel_id,
@@ -866,14 +869,18 @@ impl WasmRenderer {
         // reads must already be at final on-screen position for a
         // ratio-fitted panel.
         render::upload_transform_and_render(
-            &self.gpu,
-            &self.pipelines,
-            &loaded.buffers,
+            &render::GpuResources {
+                gpu: &self.gpu,
+                pipelines: &self.pipelines,
+                buffers: &loaded.buffers,
+            },
             &loaded.data,
             &loaded.baked_panels,
             &self.interaction,
-            &self.zoom.transforms,
-            &self.slot_rescales,
+            &render::PanelTransformState {
+                zoom_transforms: &self.zoom.transforms,
+                slot_rescales: &self.slot_rescales,
+            },
             panel_id,
         )
         .map_err(JsValue::from)
@@ -1106,7 +1113,7 @@ mod tests {
 
         // Use the spatial-index-aware hit test (the same path hit_test_at uses).
         let result = hit_test::hit_test_nearest_with_index(
-            &panels, 100.0, 100.0, &zoom, Some(&idx), &[], &[],
+            &panels, 100.0, 100.0, &zoom, Some(&idx), &hit_test::SlotRescalePlan::identity(),
         );
         let hr = result.expect("packed circle at (100,100) must be found via spatial index");
         assert_eq!(hr.panel_id, 0);
@@ -1116,7 +1123,7 @@ mod tests {
 
         // Also check the second packed circle.
         let result2 = hit_test::hit_test_nearest_with_index(
-            &panels, 200.0, 200.0, &zoom, Some(&idx), &[], &[],
+            &panels, 200.0, 200.0, &zoom, Some(&idx), &hit_test::SlotRescalePlan::identity(),
         );
         let hr2 = result2.expect("packed circle at (200,200) must be found");
         assert_eq!(hr2.data_idx, Some(8));

@@ -889,17 +889,20 @@ fn build_secondary_y_axis_inputs(
         // the shared helper.
         let mut layer_encoding = spec.encoding.clone();
         layer_encoding.overlay_from(&layer.encoding);
+        let layer_ctx = crate::render::scale_resolve::LayerScaleCtx {
+            spec,
+            transform_outputs,
+            theme,
+            leaf_scales: None,
+        };
         let (y_scale, layer_warnings) =
             crate::render::scale_resolve::resolve_layer_y_slot_scale(
-                spec,
+                &layer_ctx,
                 layer.mark,
                 &layer.encoding,
                 layer_batch,
-                transform_outputs,
                 (0.0, 1.0),
                 (0.0, 1.0),
-                theme,
-                None,
             )?;
         warnings.extend(layer_warnings);
         let y_tick_count = encoding_axis_tick_count(layer_encoding.y.as_ref()).unwrap_or(10);

@@ -785,9 +785,35 @@ impl YScaleSlots {
 ///
 /// `slots` follow GH #63's split indexing convention untouched: `slot_for_layer`
 /// returns 0 for the primary/left axis and layer, and `1..=n` for the n
-/// independent-y layers in layer order (the 1-based secondary numbering that
-/// `y_slot_levels`/`secondary_affines` also use). The default (empty) plan means
-/// no independent-y layer — the byte-stable pre-#52 shared path.
+/// independent-y layers in layer order — the SAME 1-based secondary numbering
+/// `y_slot_levels` (`crates/ferrum-scene`) and the WASM crate's
+/// `secondary_affines` (`render.rs`) index by. The split (all-slot 0-based
+/// collections like `y_domains`/`slot_rescales`/`panel_slot_counts` vs.
+/// secondary-only 1-based collections like `y_slot_levels`/`secondary_affines`)
+/// is intentional, not accidental drift: a secondary-only list has no slot-0
+/// entry to pad, so reindexing it to all-slot would waste an unused element on
+/// every single-y-plus-one chart. GH #63 killed the alternative — hand-computed
+/// `slot - 1` at each consumer — in favor of one named accessor per collection,
+/// so the 1-based-vs-0-based split lives in exactly one place per collection,
+/// never at a call site:
+/// - `y_domains` / `slot_rescales` / `panel_slot_counts`: already all-slot
+///   0-based, read directly (`y_domains.get(y_slot)`) or via
+///   [`crate::render::scale_resolve`]'s sibling
+///   `transform_slot_index`/`panel_slot_range` helpers
+///   (`crates/ferrum-wasm/src/scene_load.rs`) for the flat-packed
+///   `slot_rescales` array.
+/// - `secondary_layers()`/`slot_for_layer()` above: this plan's own accessors.
+/// - `secondary_affines` (WASM `render.rs`, GH #60/#73): read only through
+///   `secondary_affine_for_slot` (`crates/ferrum-wasm/src/text_json.rs`), which
+///   owns the `slot - 1` translation and the documented `.last()`/panel-affine
+///   fallback chain.
+/// - `y_slot_levels`: builder-only from Rust's side (`scene_build.rs`'s
+///   `.skip(1)`, the one place per collection the split's *range* belongs);
+///   no Rust code reads it back — the JS frontend is its only consumer, so no
+///   Rust accessor exists for it (nothing to encapsulate on this side yet).
+///
+/// The default (empty) plan means no independent-y layer — the byte-stable
+/// pre-#52 shared path.
 #[derive(Debug, Clone, Default)]
 pub struct YSlotPlan {
     /// layer index → slot index. Empty on the shared path (no independent-y
@@ -1197,6 +1223,32 @@ pub(in crate::render) fn resolve_param_domains(spec: &mut ChartSpec) {
     }
 }
 
+/// The chart-level resolution context shared by every per-layer y-slot
+/// resolution: the chart spec, transform outputs, theme, and composite
+/// leaf-scale context. These four travel together into
+/// [`resolve_scales_with_leaf_context`] at every call site in this module
+/// (both here and in the `spec`/`primary_batch`/pixel-range form it wraps),
+/// so bundling them here — rather than `resolve_layer_y_slot_scale` threading
+/// four loose parameters alongside the layer-specific ones — keeps the
+/// per-layer, per-call inputs (`layer_mark`, `layer_encoding`, `layer_batch`,
+/// the pixel ranges) visually distinct from the resolution-wide context.
+///
+/// This mirrors, at the lower `scale_resolve` layer, the same shared-context
+/// bundling [`PanelResolveCtx`](crate::render::scene_build::PanelResolveCtx)
+/// does one layer up in `scene_build` — kept as a separate, smaller type
+/// (four fields, not five) because `scene_build`'s `PreparedInputs` and
+/// `ChartConfig` are consumer-feature types this lower engine module cannot
+/// depend on without inverting the dependency (see the seam doc at the top of
+/// `scale_resolve/seam.rs`): `scene_build` calls down into `scale_resolve`,
+/// never the reverse.
+#[derive(Clone, Copy)]
+pub(in crate::render) struct LayerScaleCtx<'a> {
+    pub(in crate::render) spec: &'a ChartSpec,
+    pub(in crate::render) transform_outputs: &'a HashMap<String, RecordBatch>,
+    pub(in crate::render) theme: &'a ThemeInputs,
+    pub(in crate::render) leaf_scales: Option<&'a LeafScaleContext>,
+}
+
 /// Resolve one independent layer's y-scale slot (secondary-y-axis, GH #52 / #72).
 ///
 /// The single param-aware per-layer y-domain resolution shared by the two stages
@@ -1217,18 +1269,16 @@ pub(in crate::render) fn resolve_param_domains(spec: &mut ChartSpec) {
 /// Returns the resolved `y` [`ScaleKind`] plus any warnings the resolution
 /// produced (the caller propagates them). No-op param substitution keeps
 /// param-free dual-axis charts byte-identical.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn resolve_layer_y_slot_scale(
-    spec: &ChartSpec,
+    ctx: &LayerScaleCtx,
     layer_mark: crate::spec::mark::Mark,
     layer_encoding: &crate::spec::encoding::Encoding,
     layer_batch: &RecordBatch,
-    transform_outputs: &HashMap<String, RecordBatch>,
     x_pixel_range: (f64, f64),
     y_pixel_range: (f64, f64),
-    theme: &ThemeInputs,
-    leaf_scales: Option<&LeafScaleContext>,
 ) -> Result<(ScaleKind, Vec<crate::render::RenderWarning>), RenderError> {
+    let &LayerScaleCtx { spec, transform_outputs, theme, leaf_scales } = ctx;
+
     let mut merged_encoding = spec.encoding.clone();
     merged_encoding.overlay_from(layer_encoding);
     let mut layer_spec = ChartSpec {

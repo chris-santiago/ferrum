@@ -77,6 +77,32 @@ pub(crate) fn build_text_json_from(all_text: &[TextElementData]) -> String {
     serde_json::to_string(&elements).unwrap_or_else(|_| "[]".to_string())
 }
 
+/// Look up the composed `panel ∘ slot-rescale` affine for a right-axis tick's
+/// y-slot (secondary-y-axis, GH #52/#60/#63/#73).
+///
+/// `secondary_affines` is secondary-only and 1-based: `secondary_affines[r]` is
+/// the right axis of rank `r` (0-based, stacking outward) — y-slot `r + 1` in
+/// the all-slot numbering every mark/domain collection uses. `slot` here is
+/// the all-slot number (`>= 1`, guaranteed by the caller's `is_secondary_y_tick`
+/// gate below), so this is the ONE place that translates it into
+/// `secondary_affines`' 0-based index — no consumer should compute
+/// `slot - 1` itself. Falls back to `secondary_affines.last()` when `slot`
+/// has no corresponding entry (a documented degradation, unchanged from the
+/// pre-accessor inline chain), and to `panel_affine` when no secondary
+/// affines were supplied at all (pure zoom/pan or single-y), byte-identical
+/// to the pre-9d panel-affine-only path.
+fn secondary_affine_for_slot(
+    secondary_affines: &[crate::zoom_pan::Affine2],
+    slot: usize,
+    panel_affine: &crate::zoom_pan::Affine2,
+) -> crate::zoom_pan::Affine2 {
+    secondary_affines
+        .get(slot - 1)
+        .or_else(|| secondary_affines.last())
+        .copied()
+        .unwrap_or(*panel_affine)
+}
+
 /// Build text-element JSON for a zoomed panel.
 ///
 /// Axis tick labels are identified by clustering text elements that share the
@@ -99,7 +125,8 @@ pub(crate) fn build_text_json_from(all_text: &[TextElementData]) -> String {
 /// symmetric with the primary axis, which relabels through its own domainParam
 /// via the panel affine. `secondary_affines` is empty for single-y panels and
 /// under pure zoom/pan every entry equals the panel affine, so the output is
-/// byte-identical to the primary-only path.
+/// byte-identical to the primary-only path. Looked up per tick via
+/// [`secondary_affine_for_slot`], which owns the all-slot-to-rank translation.
 pub(crate) fn build_zoomed_text_json(
     all_text: &[TextElementData],
     interaction: &ferrum_scene::InteractionConfig,
@@ -226,20 +253,15 @@ pub(crate) fn build_zoomed_text_json(
             // domainParam/brush bound to only this layer relabels it even when
             // the shared panel affine is identity. The stacked column (x) stays
             // fixed; the label keeps its own anchor (right-axis labels are
-            // `start`-anchored, not `end`). The explicit slot tag indexes
-            // `secondary_affines` directly (GH #63: 1-based — slot 1 is
-            // `secondary_affines[0]`), so no column-position ranking is
-            // needed. Falls back to `secondary_affines.last()` when a slot
-            // has no corresponding entry (documented degradation, same as the
-            // retired ranking-based fallback), and to the panel affine when no
-            // secondary affines were supplied at all (pure zoom/pan or
-            // single-y), byte-identical to the pre-9d panel-affine path.
+            // `start`-anchored, not `end`). The explicit slot tag resolves
+            // through `secondary_affine_for_slot` (GH #63: the 1-based
+            // `secondary_affines` index translation lives there, not here),
+            // which also owns the `.last()` degradation fallback and the
+            // panel-affine fallback for when no secondary affines were
+            // supplied at all (pure zoom/pan or single-y), byte-identical to
+            // the pre-9d panel-affine path.
             let slot = te.slot.unwrap_or(1); // guarded by is_secondary_y_tick (>= 1)
-            let aff = secondary_affines
-                .get(slot - 1)
-                .or_else(|| secondary_affines.last())
-                .copied()
-                .unwrap_or(*transform);
+            let aff = secondary_affine_for_slot(secondary_affines, slot, transform);
             let new_y = te.y * aff.sy + aff.ty;
             if let Some((_px, py, _pw, ph)) = plot_area {
                 if new_y < py || new_y > py + ph {

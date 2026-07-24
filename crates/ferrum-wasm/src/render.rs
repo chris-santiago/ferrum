@@ -783,28 +783,56 @@ pub fn render_frame(
     Ok(())
 }
 
+/// The WGPU rendering resource trio — device/queue context, compiled
+/// pipelines, and GPU-resident scene buffers — that `upload_transform_and_render`
+/// (and most of this module's other render entry points) always consumes
+/// together: `render_frame` and `GpuBuffers::upload_panel_transforms` both take
+/// all three. Bundling these removes 2 of `upload_transform_and_render`'s
+/// loose parameters.
+#[derive(Clone, Copy)]
+pub(crate) struct GpuResources<'a> {
+    pub gpu: &'a GpuContext,
+    pub pipelines: &'a RenderPipelines,
+    pub buffers: &'a GpuBuffers,
+}
+
+/// The renderer's full per-scene transform state: `zoom_transforms` (one base
+/// affine per panel) and `slot_rescales` (one domain-rescale affine per
+/// allocated `(panel, y-slot)` transform slot, secondary-y-axis GH #52) — the
+/// two arrays `GpuBuffers::upload_panel_transforms` uploads together every
+/// frame and this function's own panel/secondary-axis affine composition reads
+/// together afterward.
+///
+/// Deliberately whole arrays, not one panel's resolved affine: this function
+/// uploads EVERY panel's (and slot's) transform on each call (see the doc
+/// comment below), so — unlike
+/// [`SlotRescaleCtx`](crate::spatial_index::SlotRescaleCtx), which resolves
+/// ONE panel's composed transform for a single hit-test query — this state
+/// cannot be narrowed to a single `panel_affine` without breaking that
+/// every-panel upload.
+#[derive(Clone, Copy)]
+pub(crate) struct PanelTransformState<'a> {
+    pub zoom_transforms: &'a [crate::zoom_pan::Affine2],
+    pub slot_rescales: &'a [crate::zoom_pan::Affine2],
+}
+
 /// Upload the per-panel affine transform uniform and re-render, then return
 /// zoomed text-element JSON.
 ///
 /// Extracted from `WasmRenderer::upload_transform_and_render` so the logic
 /// lives in the rendering module and the wasm_bindgen method becomes a thin
 /// delegator.
-///
-/// The parameter count mirrors the `WasmRenderer` fields this function
-/// previously accessed as `self.*`. A grouping struct would obscure the
-/// access pattern without reducing complexity at the single call site.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn upload_transform_and_render(
-    gpu: &GpuContext,
-    pipelines: &RenderPipelines,
-    buffers: &GpuBuffers,
+    gpu_resources: &GpuResources,
     scene_data: &SceneData,
     scene_panels: &[ferrum_scene::Panel],
     interaction: &ferrum_scene::InteractionConfig,
-    zoom_transforms: &[crate::zoom_pan::Affine2],
-    slot_rescales: &[crate::zoom_pan::Affine2],
+    transforms: &PanelTransformState,
     panel_id: usize,
 ) -> Result<String, crate::error::WasmRenderError> {
+    let GpuResources { gpu, pipelines, buffers } = *gpu_resources;
+    let PanelTransformState { zoom_transforms, slot_rescales } = *transforms;
+
     // Upload EVERY (panel, y-slot) composed affine into its own slot, not just
     // `panel_id`'s. A reactive domain-rescale writes a non-uniform affine into
     // one panel's — or one layer's slot's — transform while leaving the rest at

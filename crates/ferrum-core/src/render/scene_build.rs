@@ -76,6 +76,14 @@ pub fn build_scene(
         .map(|&layer_idx| prep.y_slot_plan.slot_for_layer(layer_idx))
         .collect();
 
+    // Loop-invariant chart-level scale-resolution context (SPINE-04 follow-up,
+    // T6): every panel this loop iterates resolves against the SAME spec,
+    // prepared inputs, theme, chart config, and composite leaf-scale context —
+    // constructing the bundle once here, rather than threading five loose
+    // references through every `resolve_panel_scales` call, makes that
+    // loop-invariance visible at the call site instead of implicit.
+    let panel_resolve_ctx = PanelResolveCtx { spec, prep, theme, chart_config, leaf_scales };
+
     for (panel_idx, panel) in layout.panels.iter().enumerate() {
         if panel.plot_area.w <= 0.0 || panel.plot_area.h <= 0.0 {
             warnings.push(RenderWarning::EmptyPanel { panel_index: panel_idx });
@@ -149,15 +157,11 @@ pub fn build_scene(
         // per-panel pass cannot drift on what scales get built or on remembering
         // to re-apply the color config.
         let (rendering_spec_for_panel, scales) = resolve_panel_scales(
-            spec,
-            prep,
+            &panel_resolve_ctx,
             panel,
             &panel_batch,
             &layer_batches,
-            theme,
-            chart_config,
             warnings,
-            leaf_scales,
             panel_offset,
         )?;
 
@@ -493,20 +497,36 @@ pub fn build_scene(
     })
 }
 
-/// Static reactive-rescale substitution (D6).
-///
-/// Walks the spec's continuous positional/color/size/opacity scales; for each
-/// one carrying a `domainParam` reference, substitutes the named variable's
-/// static numeric-array value as the concrete `domain` (and clears the
-/// reference). A reference to a selection (or a non-numeric variable) leaves
-/// `domain = None`, so the renderer auto-infers from data — the correct static
-/// semantics for an empty selection.
-///
-/// No-op when `spec.params` is empty (the byte-stability gate): the early return
-/// keeps param-free specs on the exact pre-D6 code path.
+/// The loop-invariant chart-level scale-resolution context: the chart spec,
+/// prepared inputs, theme, chart config, and composite leaf-scale context.
+/// These five references are identical across every panel a `build_scene`
+/// call iterates (and across both `resolve_panel_scales` and its per-layer
+/// helper `resolve_layer_y_scale`), so bundling them here removes the
+/// same five loose parameters from both functions' signatures at once —
+/// grouped because they travel together, not because they are merely
+/// adjacent. `resolve_layer_y_scale` does not read `chart_config` (the color
+/// override it carries applies once, to the primary y scale, inside
+/// `resolve_panel_scales` itself) but takes the same bundle for uniformity
+/// with its sibling, matching the `DrawCtx` precedent (`render/draw.rs`)
+/// where not every consumer reads every field.
+#[derive(Clone, Copy)]
+pub(in crate::render) struct PanelResolveCtx<'a> {
+    pub(in crate::render) spec: &'a ChartSpec,
+    pub(in crate::render) prep: &'a PreparedInputs,
+    pub(in crate::render) theme: &'a ThemeInputs,
+    pub(in crate::render) chart_config: &'a super::chart_config::ChartConfig,
+    // D4b composite seam: shared-domain context for this leaf. `None` for
+    // standalone renders → resolves exactly as before.
+    pub(in crate::render) leaf_scales: Option<&'a LeafScaleContext>,
+}
+
 /// The single per-panel scale-build seam: merge the layer-0 encoding onto the
 /// chart encoding, substitute reactive `domainParam` references into concrete
-/// domains, resolve the panel's scales over its pixel range, and re-apply the
+/// domains (D6: a named variable's static numeric-array value becomes the
+/// concrete `domain`; a selection or non-numeric reference leaves `domain =
+/// None` so the renderer auto-infers — the correct static semantics for an
+/// empty selection; param-free specs stay on the exact pre-D6 code path),
+/// resolve the panel's scales over its pixel range, and re-apply the
 /// chart-level color config to the resolved color scale.
 ///
 /// This deliberately re-does work the prepare provisional pass already did once:
@@ -524,22 +544,15 @@ pub fn build_scene(
 /// resolved scales. Scale warnings are appended to `warnings`. `panel_batch` is
 /// the caller's already-facet-filtered batch for this panel (the same one used to
 /// resolve layer batches), passed in to avoid re-running the facet filter.
-#[allow(clippy::too_many_arguments)]
 fn resolve_panel_scales(
-    spec: &ChartSpec,
-    prep: &PreparedInputs,
+    ctx: &PanelResolveCtx,
     panel: &crate::layout::PanelLayout,
     panel_batch: &RecordBatch,
     // Per-panel layer batches (one per `prep.layers`, facet-filtered). Slot 0 /
     // the primary y resolves against `panel_batch` exactly as before; each
     // independent layer's y-slot resolves against its own batch here.
     layer_batches: &[RecordBatch],
-    theme: &ThemeInputs,
-    chart_config: &super::chart_config::ChartConfig,
     warnings: &mut Vec<RenderWarning>,
-    // D4b composite seam: shared-domain context for this leaf. `None` for
-    // standalone renders → resolves exactly as before.
-    leaf_scales: Option<&LeafScaleContext>,
     // GH #70: this panel's `(x, y)` displacement from the reference (panel 0)
     // plot-area origin. `(0.0, 0.0)` for panel 0 and for every standalone
     // (non-faceted) render — byte-identical to the pre-#70 behavior. Applied
@@ -549,6 +562,8 @@ fn resolve_panel_scales(
     // panel would otherwise share.
     panel_offset: (f64, f64),
 ) -> Result<(ChartSpec, scale_resolve::ResolvedScales), RenderError> {
+    let &PanelResolveCtx { spec, prep, theme, chart_config, leaf_scales } = ctx;
+
     // Encoding merge: layer-0 encoding overlays the chart-level encoding.
     let mut merged_encoding = spec.encoding.clone();
     merged_encoding.overlay_from(&prep.layers[0].encoding);
@@ -604,13 +619,10 @@ fn resolve_panel_scales(
         let mut slots: Vec<scale_resolve::ScaleKind> = vec![scales.y.clone()];
         for &layer_idx in prep.y_slot_plan.secondary_layers() {
             let y_scale = resolve_layer_y_scale(
-                spec,
+                ctx,
                 &prep.layers[layer_idx],
                 &layer_batches[layer_idx],
-                prep,
                 panel,
-                theme,
-                leaf_scales,
                 panel_offset.1,
                 warnings,
             )?;
@@ -639,37 +651,38 @@ fn resolve_panel_scales(
 /// layer's own field), which nothing else surfaces: the primary pass only
 /// warns about layer-0's channels, and this slot's y-field is independent of
 /// layer 0's. A genuine y-field error still propagates as `Err`.
-#[allow(clippy::too_many_arguments)]
 fn resolve_layer_y_scale(
-    spec: &ChartSpec,
+    ctx: &PanelResolveCtx,
     layer: &super::prepare::LayerPrepared,
     layer_batch: &RecordBatch,
-    prep: &PreparedInputs,
     panel: &crate::layout::PanelLayout,
-    theme: &ThemeInputs,
-    leaf_scales: Option<&LeafScaleContext>,
     // GH #70: this panel's y displacement from the reference panel's
     // plot-area origin (see `resolve_panel_scales`), applied to this slot's
     // resolved y scale the same way the primary y is re-anchored.
     y_offset: f64,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<scale_resolve::ScaleKind, RenderError> {
+    let &PanelResolveCtx { spec, prep, theme, leaf_scales, .. } = ctx;
+
     // Shared param-aware per-layer y resolution (#72): the layer encoding
     // overlays the chart encoding, `layers: None` scopes the domain to this
     // layer's own field, and `domainParam` references are substituted before
     // resolution — the SAME resolution the prepare stage's axis-input builder
     // consumes, so ticks and marks cannot diverge. Only the pixel range differs
     // (panel-real here vs. prepare's placeholder).
-    let (mut y, layer_warnings) = scale_resolve::resolve_layer_y_slot_scale(
+    let layer_ctx = scale_resolve::LayerScaleCtx {
         spec,
+        transform_outputs: &prep.transform_outputs,
+        theme,
+        leaf_scales,
+    };
+    let (mut y, layer_warnings) = scale_resolve::resolve_layer_y_slot_scale(
+        &layer_ctx,
         layer.mark,
         &layer.encoding,
         layer_batch,
-        &prep.transform_outputs,
         (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
         (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
-        theme,
-        leaf_scales,
     )?;
     warnings.extend(layer_warnings);
     y.translate_explicit_ordinal_range(y_offset);
@@ -2633,12 +2646,13 @@ mod tests {
         let mut warnings = Vec::new();
         // One implicit layer → one layer batch (the whole panel batch).
         let layer_batches = vec![batch.clone()];
+        let ctx = PanelResolveCtx { spec: &spec, prep: &prep, theme: &theme, chart_config: &chart_config, leaf_scales: None };
         let (_spec_a, scales_a) = resolve_panel_scales(
-            &spec, &prep, &panel_narrow, &batch, &layer_batches, &theme, &chart_config, &mut warnings, None, (0.0, 0.0),
+            &ctx, &panel_narrow, &batch, &layer_batches, &mut warnings, (0.0, 0.0),
         )
         .unwrap();
         let (_spec_b, scales_b) = resolve_panel_scales(
-            &spec, &prep, &panel_wide, &batch, &layer_batches, &theme, &chart_config, &mut warnings, None, (0.0, 0.0),
+            &ctx, &panel_wide, &batch, &layer_batches, &mut warnings, (0.0, 0.0),
         )
         .unwrap();
 
@@ -2959,8 +2973,9 @@ mod tests {
         // Both layers read the whole panel batch (no per-layer data_source).
         let layer_batches = vec![batch.clone(), batch.clone()];
         let mut warnings = Vec::new();
+        let ctx = PanelResolveCtx { spec, prep: &prep, theme: &theme, chart_config: &chart_config, leaf_scales: None };
         let (_spec, scales) = resolve_panel_scales(
-            spec, &prep, &panel, batch, &layer_batches, &theme, &chart_config, &mut warnings, None, (0.0, 0.0),
+            &ctx, &panel, batch, &layer_batches, &mut warnings, (0.0, 0.0),
         )
         .unwrap();
         scales

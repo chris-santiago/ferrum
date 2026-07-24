@@ -1,7 +1,7 @@
 use ferrum_scene::{MarkBatch, MarkBatchKind, Panel, SceneNode};
 
 use crate::scene_load::transform_slot_index;
-use crate::spatial_index::{is_indexed_kind, SpatialIndex};
+use crate::spatial_index::{is_indexed_kind, SlotRescaleCtx, SpatialIndex};
 use crate::zoom_pan::{compose_panel_slot, select_panel_transform, Affine2};
 
 pub struct HitResult {
@@ -11,20 +11,55 @@ pub struct HitResult {
     pub data_idx: Option<usize>,
 }
 
+/// The renderer's per-slot domain-rescale state (secondary-y-axis, GH #52),
+/// paired: `slot_rescales` (one entry per allocated `(panel, y-slot)`
+/// transform slot) and `panel_slot_counts` (how many y-slots each panel
+/// owns) — the two arrays [`transform_slot_index`] resolves together.
+/// Identity/empty for every single-y scene at rest, so every hit-test entry
+/// point that threads this plan reproduces the pre-#52 behavior exactly.
+///
+/// Threaded through the whole hit-test entry-point family ([`hit_test`],
+/// [`hit_test_with_index`], [`hit_test_nearest`],
+/// [`hit_test_nearest_with_index`]) plus the two panel-level helpers below
+/// ([`slot_rescale_at`], [`panel_has_active_rescale`]), so callers pass one
+/// bundle per query instead of the same two loose slices at every call
+/// boundary. [`with_panel_affine`](Self::with_panel_affine) combines this
+/// plan with one panel's resolved affine — known only once inside the
+/// per-panel loop — into the full [`SlotRescaleCtx`] the spatial index's
+/// slot-aware queries need.
+#[derive(Debug, Clone, Copy)]
+pub struct SlotRescalePlan<'a> {
+    pub slot_rescales: &'a [Affine2],
+    pub panel_slot_counts: &'a [usize],
+}
+
+impl<'a> SlotRescalePlan<'a> {
+    /// Identity plan: no rescales, no allocated slots. The byte-stability
+    /// default for a single-y scene at rest.
+    pub fn identity() -> Self {
+        Self { slot_rescales: &[], panel_slot_counts: &[] }
+    }
+
+    /// Combine this plan with one panel's resolved zoom/pan affine into the
+    /// full [`SlotRescaleCtx`] the spatial index's slot-aware queries need.
+    pub fn with_panel_affine(&self, panel_affine: Affine2) -> SlotRescaleCtx<'a> {
+        SlotRescaleCtx {
+            panel_affine,
+            slot_rescales: self.slot_rescales,
+            panel_slot_counts: self.panel_slot_counts,
+        }
+    }
+}
+
 /// The domain-rescale affine one mark batch's y-slot maps through
 /// (secondary-y-axis, GH #52), selected by the same
 /// [`transform_slot_index`] mapping the render upload uses. Identity for every
 /// slot at rest and for every single-y scene (`slot_rescales` all identity, or
 /// an out-of-range index), so composing it with the panel affine reproduces the
 /// pre-#52 per-panel transform exactly.
-fn slot_rescale_at(
-    slot_rescales: &[Affine2],
-    panel_slot_counts: &[usize],
-    panel: usize,
-    y_slot: usize,
-) -> Affine2 {
-    let idx = transform_slot_index(panel_slot_counts, panel, y_slot);
-    slot_rescales
+fn slot_rescale_at(plan: &SlotRescalePlan, panel: usize, y_slot: usize) -> Affine2 {
+    let idx = transform_slot_index(plan.panel_slot_counts, panel, y_slot);
+    plan.slot_rescales
         .get(idx)
         .copied()
         .unwrap_or_else(Affine2::identity)
@@ -47,13 +82,9 @@ fn slot_rescale_at(
 /// is silently shadowed (GH #73 mixed-panel finding: a scene-near
 /// rescaled-slot mark could be returned as "nearest" over a display-near
 /// identity-slot mark that was wrongly skipped).
-fn panel_has_active_rescale(
-    slot_rescales: &[Affine2],
-    panel_slot_counts: &[usize],
-    panel: usize,
-) -> bool {
-    crate::scene_load::panel_slot_range(panel_slot_counts, panel)
-        .any(|idx| slot_rescales.get(idx).is_some_and(|r| !r.is_identity()))
+fn panel_has_active_rescale(plan: &SlotRescalePlan, panel: usize) -> bool {
+    crate::scene_load::panel_slot_range(plan.panel_slot_counts, panel)
+        .any(|idx| plan.slot_rescales.get(idx).is_some_and(|r| !r.is_identity()))
 }
 
 /// Resolve the `data_idx` for a spatial-index hit result.
@@ -86,10 +117,9 @@ pub fn hit_test(
     x: f64,
     y: f64,
     zoom: &crate::zoom_pan::ZoomPanState,
-    slot_rescales: &[Affine2],
-    panel_slot_counts: &[usize],
+    plan: &SlotRescalePlan,
 ) -> Option<HitResult> {
-    hit_test_with_index(panels, x, y, zoom, None, slot_rescales, panel_slot_counts)
+    hit_test_with_index(panels, x, y, zoom, None, plan)
 }
 
 /// Exact hit-test with an optional spatial index for O(log n) circle/rect lookups.
@@ -113,8 +143,7 @@ pub fn hit_test_with_index(
     y: f64,
     zoom: &crate::zoom_pan::ZoomPanState,
     spatial_index: Option<&SpatialIndex>,
-    slot_rescales: &[Affine2],
-    panel_slot_counts: &[usize],
+    plan: &SlotRescalePlan,
 ) -> Option<HitResult> {
     for (panel_pos, panel) in panels.iter().enumerate().rev() {
         let panel_affine = select_panel_transform(&zoom.transforms, panel_pos);
@@ -128,15 +157,9 @@ pub fn hit_test_with_index(
 
         // R-tree path for indexed batch kinds (Point, Bar, Rect), slot-aware.
         if let Some(idx) = spatial_index {
-            if let Some(entry) = idx.hit_test_slot_aware(
-                panel_pos,
-                x,
-                y,
-                0.0,
-                panel_affine,
-                slot_rescales,
-                panel_slot_counts,
-            ) {
+            if let Some(entry) =
+                idx.hit_test_slot_aware(panel_pos, x, y, 0.0, &plan.with_panel_affine(panel_affine))
+            {
                 let data_idx = resolve_data_idx(panel, entry.batch_idx, entry.node_idx, entry.data_idx);
                 return Some(HitResult {
                     panel_id: panel_pos,
@@ -149,13 +172,13 @@ pub fn hit_test_with_index(
 
         // Whether ANY slot this panel owns is rescaled — drives the skip gate
         // below (see `panel_has_active_rescale`).
-        let panel_rescaled = panel_has_active_rescale(slot_rescales, panel_slot_counts, panel_pos);
+        let panel_rescaled = panel_has_active_rescale(plan, panel_pos);
 
         // Linear scan for non-indexed batch kinds (Line, Area, Arc, Tick, Text, etc.),
         // for the full linear path when no spatial index is available, and for
         // indexed kinds in a rescaled (non-identity) slot the R-tree cannot place.
         for (bi, batch) in panel.marks.iter().enumerate().rev() {
-            let rescale = slot_rescale_at(slot_rescales, panel_slot_counts, panel_pos, batch.y_slot);
+            let rescale = slot_rescale_at(plan, panel_pos, batch.y_slot);
             // With an index present AND the whole panel at rest, an
             // identity-slot indexed batch is already covered by the R-tree
             // above — skip it. Once any slot in this panel is rescaled,
@@ -187,10 +210,9 @@ pub fn hit_test_nearest(
     x: f64,
     y: f64,
     zoom: &crate::zoom_pan::ZoomPanState,
-    slot_rescales: &[Affine2],
-    panel_slot_counts: &[usize],
+    plan: &SlotRescalePlan,
 ) -> Option<HitResult> {
-    hit_test_nearest_with_index(panels, x, y, zoom, None, slot_rescales, panel_slot_counts)
+    hit_test_nearest_with_index(panels, x, y, zoom, None, plan)
 }
 
 /// Nearest-mark hit-test with an optional spatial index for O(log n) circle/rect lookups.
@@ -213,8 +235,7 @@ pub fn hit_test_nearest_with_index(
     y: f64,
     zoom: &crate::zoom_pan::ZoomPanState,
     spatial_index: Option<&SpatialIndex>,
-    slot_rescales: &[Affine2],
-    panel_slot_counts: &[usize],
+    plan: &SlotRescalePlan,
 ) -> Option<HitResult> {
     let mut best: Option<(f64, HitResult)> = None;
 
@@ -227,14 +248,9 @@ pub fn hit_test_nearest_with_index(
 
         // R-tree nearest for indexed batch kinds, slot-aware.
         if let Some(idx) = spatial_index {
-            if let Some((entry, dist)) = idx.nearest_slot_aware(
-                panel_pos,
-                x,
-                y,
-                panel_affine,
-                slot_rescales,
-                panel_slot_counts,
-            ) {
+            if let Some((entry, dist)) =
+                idx.nearest_slot_aware(panel_pos, x, y, &plan.with_panel_affine(panel_affine))
+            {
                 let data_idx = resolve_data_idx(panel, entry.batch_idx, entry.node_idx, entry.data_idx);
                 let is_closer = best.as_ref().is_none_or(|(d, _)| dist < *d);
                 if is_closer {
@@ -250,7 +266,7 @@ pub fn hit_test_nearest_with_index(
 
         // Whether ANY slot this panel owns is rescaled — drives the skip gate
         // below (see `panel_has_active_rescale`).
-        let panel_rescaled = panel_has_active_rescale(slot_rescales, panel_slot_counts, panel_pos);
+        let panel_rescaled = panel_has_active_rescale(plan, panel_pos);
 
         // Linear scan for non-indexed batch kinds (and the full path when no
         // index given), plus indexed kinds in a rescaled slot.
@@ -268,7 +284,7 @@ pub fn hit_test_nearest_with_index(
         // display distance; a fully-at-rest panel keeps the original skip
         // (byte-stable fast path).
         for (bi, batch) in panel.marks.iter().enumerate() {
-            let rescale = slot_rescale_at(slot_rescales, panel_slot_counts, panel_pos, batch.y_slot);
+            let rescale = slot_rescale_at(plan, panel_pos, batch.y_slot);
             if spatial_index.is_some() && is_indexed_kind(batch.kind) && rescale.is_identity() && !panel_rescaled {
                 continue;
             }
@@ -642,7 +658,7 @@ mod bug_hunt_interactive_slots {
         let panels = dual_slot_panel((100.0, 100.0), (100.0, 100.0)); // exact overlap
         let zoom = identity_zoom();
         // The panel allocates two y-slots; rescales are all identity (at rest).
-        let hit = hit_test(&panels, 100.0, 100.0, &zoom, &[], &[2]).expect("overlap must hit");
+        let hit = hit_test(&panels, 100.0, 100.0, &zoom, &SlotRescalePlan { slot_rescales: &[], panel_slot_counts: &[2] }).expect("overlap must hit");
         assert_eq!(hit.batch_idx, 1, "topmost (slot-1) batch must win the hit");
         // The tooltip the runtime would serve for this hit is the slot-1 layer's.
         let tip = panels[0].marks[hit.batch_idx]
@@ -663,7 +679,7 @@ mod bug_hunt_interactive_slots {
         let zoom = identity_zoom();
         // Two allocated slots, all rescales identity: slot-1 hit-tests exactly
         // like slot-0 (byte-stability control).
-        let hit = hit_test(&panels, 300.0, 300.0, &zoom, &[], &[2]).expect("slot-1 mark must hit at rest");
+        let hit = hit_test(&panels, 300.0, 300.0, &zoom, &SlotRescalePlan { slot_rescales: &[], panel_slot_counts: &[2] }).expect("slot-1 mark must hit at rest");
         assert_eq!(hit.batch_idx, 1);
         assert_eq!(hit.data_idx, Some(0));
     }
@@ -699,7 +715,7 @@ mod bug_hunt_interactive_slots {
         let (disp_x, disp_y) = composed.apply(200.0, 100.0);
         assert_eq!((disp_x, disp_y), (200.0, 200.0), "fixture sanity: displayed at (200, 200)");
 
-        let hit = hit_test(&panels, disp_x, disp_y, &zoom, &slot_rescales, &counts);
+        let hit = hit_test(&panels, disp_x, disp_y, &zoom, &SlotRescalePlan { slot_rescales: &slot_rescales, panel_slot_counts: &counts });
         assert!(
             hit.is_some(),
             "click at the DISPLAYED (slot-rescaled) position of a slot-1 mark must hit"
@@ -719,7 +735,7 @@ mod bug_hunt_interactive_slots {
         // With the slot rescale threaded through, (200, 100) re-inverts through
         // the slot-1 affine to scene (200, 50) — 50px above the mark at
         // (200, 100) — so nothing is hit there any more.
-        let hit = hit_test(&panels, 200.0, 100.0, &zoom, &slot_rescales, &counts);
+        let hit = hit_test(&panels, 200.0, 100.0, &zoom, &SlotRescalePlan { slot_rescales: &slot_rescales, panel_slot_counts: &counts });
         assert!(
             hit.is_none(),
             "the stale pre-rescale position must miss once hit-testing is slot-aware"
@@ -751,7 +767,7 @@ mod bug_hunt_interactive_slots {
         let (counts, slot_rescales) = slot1_rescaled();
 
         let hit = hit_test_with_index(
-            &panels, 200.0, 100.0, &zoom, Some(&idx), &slot_rescales, &counts,
+            &panels, 200.0, 100.0, &zoom, Some(&idx), &SlotRescalePlan { slot_rescales: &slot_rescales, panel_slot_counts: &counts },
         );
         assert!(
             hit.is_none(),
@@ -780,7 +796,7 @@ mod bug_hunt_interactive_slots {
         assert_eq!((disp_x, disp_y), (200.0, 200.0), "fixture sanity");
 
         let hit = hit_test_with_index(
-            &panels, disp_x, disp_y, &zoom, Some(&idx), &slot_rescales, &counts,
+            &panels, disp_x, disp_y, &zoom, Some(&idx), &SlotRescalePlan { slot_rescales: &slot_rescales, panel_slot_counts: &counts },
         )
         .expect("click at the displayed position must hit via the R-tree/linear fallthrough");
         assert_eq!(hit.batch_idx, 1);
@@ -813,7 +829,7 @@ mod bug_hunt_interactive_slots {
         let (counts, slot_rescales) = slot1_rescaled();
 
         let hit = hit_test_nearest_with_index(
-            &panels, 100.0, 100.0, &zoom, Some(&idx), &slot_rescales, &counts,
+            &panels, 100.0, 100.0, &zoom, Some(&idx), &SlotRescalePlan { slot_rescales: &slot_rescales, panel_slot_counts: &counts },
         )
         .expect("must find a nearest mark");
         assert_eq!(
@@ -1040,7 +1056,7 @@ mod bug_hunt_tests {
     fn bug_hunt_hit_test_nearest_empty_panels_returns_none() {
         // No panels: nearest must return None, not panic
         let zoom = identity_zoom_n(0);
-        let result = hit_test_nearest(&[], 100.0, 100.0, &zoom, &[], &[]);
+        let result = hit_test_nearest(&[], 100.0, 100.0, &zoom, &SlotRescalePlan::identity());
         assert!(result.is_none(), "nearest on empty panels must return None");
     }
 
@@ -1049,7 +1065,7 @@ mod bug_hunt_tests {
         // Two circles: (100, 100) and (300, 300). Click near (110, 100) — closest is idx 0.
         let panels = make_panel_two_circles((100.0, 100.0), (300.0, 300.0));
         let zoom = identity_zoom_n(1);
-        let result = hit_test_nearest(&panels, 110.0, 100.0, &zoom, &[], &[]);
+        let result = hit_test_nearest(&panels, 110.0, 100.0, &zoom, &SlotRescalePlan::identity());
         let r = result.expect("must find nearest mark");
         assert_eq!(r.data_idx, Some(0), "circle at (100,100) must be nearest to (110,100)");
     }
@@ -1059,7 +1075,7 @@ mod bug_hunt_tests {
         // Two circles: (100, 100) and (300, 300). Click near (295, 295) — closest is idx 1.
         let panels = make_panel_two_circles((100.0, 100.0), (300.0, 300.0));
         let zoom = identity_zoom_n(1);
-        let result = hit_test_nearest(&panels, 295.0, 295.0, &zoom, &[], &[]);
+        let result = hit_test_nearest(&panels, 295.0, 295.0, &zoom, &SlotRescalePlan::identity());
         let r = result.expect("must find nearest mark");
         assert_eq!(r.data_idx, Some(1), "circle at (300,300) must be nearest to (295,295)");
     }
@@ -1069,7 +1085,7 @@ mod bug_hunt_tests {
         // plot_area is (0..500, 0..500). Click at (-50, 250) is outside.
         let panels = make_panel_two_circles((100.0, 100.0), (300.0, 300.0));
         let zoom = identity_zoom_n(1);
-        let result = hit_test_nearest(&panels, -50.0, 250.0, &zoom, &[], &[]);
+        let result = hit_test_nearest(&panels, -50.0, 250.0, &zoom, &SlotRescalePlan::identity());
         assert!(result.is_none(), "click outside plot_area must miss even for nearest");
     }
 
@@ -1080,7 +1096,7 @@ mod bug_hunt_tests {
         // Whichever batch is first in the iteration wins (no panic, deterministic).
         let panels = make_panel_two_circles((100.0, 100.0), (300.0, 100.0));
         let zoom = identity_zoom_n(1);
-        let result = hit_test_nearest(&panels, 200.0, 100.0, &zoom, &[], &[]);
+        let result = hit_test_nearest(&panels, 200.0, 100.0, &zoom, &SlotRescalePlan::identity());
         assert!(result.is_some(), "equidistant case must not return None");
     }
 
@@ -1101,7 +1117,7 @@ mod bug_hunt_tests {
             layout_scale: LayoutScale::identity(),
         }];
         let zoom = identity_zoom_n(1);
-        let result = hit_test_nearest(&panels, 250.0, 250.0, &zoom, &[], &[]);
+        let result = hit_test_nearest(&panels, 250.0, 250.0, &zoom, &SlotRescalePlan::identity());
         assert!(result.is_none(), "panel with no marks must yield None for nearest");
     }
 
@@ -1111,7 +1127,7 @@ mod bug_hunt_tests {
         let panels = make_panel_two_circles((200.0, 200.0), (400.0, 200.0));
         let zoom = identity_zoom_n(1);
         // Click just next to first circle
-        let result = hit_test_nearest(&panels, 200.0, 200.0, &zoom, &[], &[]).expect("must hit");
+        let result = hit_test_nearest(&panels, 200.0, 200.0, &zoom, &SlotRescalePlan::identity()).expect("must hit");
         assert_eq!(result.data_idx, Some(0));
     }
 
@@ -1133,11 +1149,11 @@ mod bug_hunt_tests {
         // Click at (250, 230) must hit; click at (100, 100) must miss.
         let panels = make_panel_two_circles((100.0, 100.0), (300.0, 300.0));
         let zoom = zoom_with_n(1, 2.0, 2.0, 50.0, 30.0);
-        let hit_at_visual = hit_test(&panels, 250.0, 230.0, &zoom, &[], &[]);
+        let hit_at_visual = hit_test(&panels, 250.0, 230.0, &zoom, &SlotRescalePlan::identity());
         assert!(hit_at_visual.is_some(), "click at zoomed+translated visual pos must hit");
         assert_eq!(hit_at_visual.as_ref().map(|h| h.data_idx), Some(Some(0)));
 
-        let miss_at_original = hit_test(&panels, 100.0, 100.0, &zoom, &[], &[]);
+        let miss_at_original = hit_test(&panels, 100.0, 100.0, &zoom, &SlotRescalePlan::identity());
         assert!(miss_at_original.is_none(), "click at pre-zoom pos must miss");
     }
 
@@ -1147,7 +1163,7 @@ mod bug_hunt_tests {
         // Click at canvas (200, 200) maps to scene (100, 100) — must select first circle.
         let panels = make_panel_two_circles((100.0, 100.0), (300.0, 300.0));
         let zoom = zoom_with_n(1, 2.0, 2.0, 0.0, 0.0);
-        let result = hit_test_nearest(&panels, 200.0, 200.0, &zoom, &[], &[]);
+        let result = hit_test_nearest(&panels, 200.0, 200.0, &zoom, &SlotRescalePlan::identity());
         let r = result.expect("must find nearest mark under zoom");
         assert_eq!(r.data_idx, Some(0), "canvas (200,200) / scene (100,100) must be nearest to circle 0");
     }
@@ -1159,7 +1175,7 @@ mod bug_hunt_tests {
         // Click at canvas (145, 145) maps to scene (290, 290) — nearest to (300, 300).
         let panels = make_panel_two_circles((100.0, 100.0), (300.0, 300.0));
         let zoom = zoom_with_n(1, 0.5, 0.5, 0.0, 0.0);
-        let result = hit_test_nearest(&panels, 145.0, 145.0, &zoom, &[], &[]);
+        let result = hit_test_nearest(&panels, 145.0, 145.0, &zoom, &SlotRescalePlan::identity());
         let r = result.expect("must find nearest mark");
         assert_eq!(r.data_idx, Some(1), "canvas (145,145) / scene (290,290) nearest to circle 1");
     }
@@ -1170,7 +1186,7 @@ mod bug_hunt_tests {
         // Click at canvas (150, 50) maps to scene (50, 50) — must hit circle 0.
         let panels = make_panel_two_circles((50.0, 50.0), (400.0, 400.0));
         let zoom = zoom_with_n(1, 1.0, 1.0, 100.0, 0.0);
-        let result = hit_test_nearest(&panels, 150.0, 50.0, &zoom, &[], &[]);
+        let result = hit_test_nearest(&panels, 150.0, 50.0, &zoom, &SlotRescalePlan::identity());
         let r = result.expect("must find nearest mark under pan");
         assert_eq!(r.data_idx, Some(0));
     }
@@ -1225,7 +1241,7 @@ mod bug_hunt_tests {
         // Zoom panel 0 to 2x; panel 1 stays identity
         zoom.transforms[0] = crate::zoom_pan::Affine2 { sx: 2.0, sy: 2.0, tx: 0.0, ty: 0.0 };
         // Click at panel 1's circle at identity position (350, 100)
-        let result = hit_test(&panels, 350.0, 100.0, &zoom, &[], &[]);
+        let result = hit_test(&panels, 350.0, 100.0, &zoom, &SlotRescalePlan::identity());
         assert!(result.is_some(), "panel 1 click at identity position must hit");
         assert_eq!(result.as_ref().map(|h| h.panel_id), Some(1));
     }
@@ -1709,7 +1725,7 @@ mod tests {
         let config = ferrum_scene::InteractionConfig::default();
         let zoom = ZoomPanState::new(2, &config);
         // Click at circle center in panel 1 (array pos 1, id 5)
-        let result = hit_test(&panels, 350.0, 250.0, &zoom, &[], &[])
+        let result = hit_test(&panels, 350.0, 250.0, &zoom, &SlotRescalePlan::identity())
             .expect("must hit circle in panel 1");
         assert_eq!(
             result.panel_id, 1,
@@ -1725,7 +1741,7 @@ mod tests {
         let config = ferrum_scene::InteractionConfig::default();
         let zoom = ZoomPanState::new(2, &config);
         // Click at circle center in panel 1 (array pos 1, id 5)
-        let result = hit_test_nearest(&panels, 350.0, 250.0, &zoom, &[], &[])
+        let result = hit_test_nearest(&panels, 350.0, 250.0, &zoom, &SlotRescalePlan::identity())
             .expect("must find nearest in panel 1");
         assert_eq!(
             result.panel_id, 1,
@@ -1741,8 +1757,8 @@ mod tests {
         // Baseline: identity transform — click at circle center hits.
         let panels = single_circle_panel(100.0, 100.0, 10.0);
         let zoom = identity_zoom();
-        assert!(hit_test(&panels, 100.0, 100.0, &zoom, &[], &[]).is_some());
-        assert!(hit_test(&panels, 200.0, 200.0, &zoom, &[], &[]).is_none());
+        assert!(hit_test(&panels, 100.0, 100.0, &zoom, &SlotRescalePlan::identity()).is_some());
+        assert!(hit_test(&panels, 200.0, 200.0, &zoom, &SlotRescalePlan::identity()).is_none());
     }
 
     #[test]
@@ -1751,7 +1767,7 @@ mod tests {
         // circle visually appears at (200, 200). Clicking at (200, 200) must hit.
         let panels = single_circle_panel(100.0, 100.0, 10.0);
         let zoom = zoom_with(2.0, 2.0, 0.0, 0.0);
-        let result = hit_test(&panels, 200.0, 200.0, &zoom, &[], &[]);
+        let result = hit_test(&panels, 200.0, 200.0, &zoom, &SlotRescalePlan::identity());
         assert!(result.is_some(), "click at zoomed visual position must hit");
     }
 
@@ -1761,7 +1777,7 @@ mod tests {
         // Clicking at (100, 100) — the OLD position — must miss.
         let panels = single_circle_panel(100.0, 100.0, 10.0);
         let zoom = zoom_with(2.0, 2.0, 0.0, 0.0);
-        let result = hit_test(&panels, 100.0, 100.0, &zoom, &[], &[]);
+        let result = hit_test(&panels, 100.0, 100.0, &zoom, &SlotRescalePlan::identity());
         // Inverse maps (100,100) → (50,50), which is not within radius 10 of (100,100).
         assert!(result.is_none(), "click at pre-zoom position must miss after zoom");
     }
@@ -1772,8 +1788,8 @@ mod tests {
         // Visual position = (150, 100). Click at (150, 100) must hit.
         let panels = single_circle_panel(100.0, 100.0, 10.0);
         let zoom = zoom_with(1.0, 1.0, 50.0, 0.0);
-        assert!(hit_test(&panels, 150.0, 100.0, &zoom, &[], &[]).is_some());
-        assert!(hit_test(&panels, 100.0, 100.0, &zoom, &[], &[]).is_none());
+        assert!(hit_test(&panels, 150.0, 100.0, &zoom, &SlotRescalePlan::identity()).is_some());
+        assert!(hit_test(&panels, 100.0, 100.0, &zoom, &SlotRescalePlan::identity()).is_none());
     }
 
     #[test]
@@ -1781,7 +1797,7 @@ mod tests {
         // Verify that data_idx is threaded through correctly after zoom.
         let panels = single_circle_panel(100.0, 100.0, 10.0);
         let zoom = zoom_with(2.0, 2.0, 0.0, 0.0);
-        let result = hit_test(&panels, 200.0, 200.0, &zoom, &[], &[]).expect("must hit");
+        let result = hit_test(&panels, 200.0, 200.0, &zoom, &SlotRescalePlan::identity()).expect("must hit");
         assert_eq!(result.data_idx, Some(0));
     }
 
@@ -1792,9 +1808,9 @@ mod tests {
         let panels = single_circle_panel(100.0, 100.0, 5.0);
         let zoom = zoom_with(0.5, 0.5, 0.0, 0.0);
         // Inverse: (50,50) → (100,100) → within r=5 ✓
-        assert!(hit_test(&panels, 50.0, 50.0, &zoom, &[], &[]).is_some());
+        assert!(hit_test(&panels, 50.0, 50.0, &zoom, &SlotRescalePlan::identity()).is_some());
         // Clicking at original (100,100) → inverse → (200,200) → miss
-        assert!(hit_test(&panels, 100.0, 100.0, &zoom, &[], &[]).is_none());
+        assert!(hit_test(&panels, 100.0, 100.0, &zoom, &SlotRescalePlan::identity()).is_none());
     }
 
     #[test]
@@ -2091,13 +2107,13 @@ mod tests {
         let baked = crate::scene_load::bake_panels(&scene);
         let zoom = identity_zoom();
 
-        let hit = hit_test(&baked, 16.0, 27.0, &zoom, &[], &[])
+        let hit = hit_test(&baked, 16.0, 27.0, &zoom, &SlotRescalePlan::identity())
             .expect("click at baked mark position (16, 27) must hit");
         assert_eq!(hit.panel_id, 0);
         assert_eq!(hit.data_idx, Some(7));
 
         assert!(
-            hit_test(&baked, 3.0, 4.0, &zoom, &[], &[]).is_none(),
+            hit_test(&baked, 3.0, 4.0, &zoom, &SlotRescalePlan::identity()).is_none(),
             "click at raw pre-bake position (3, 4) must miss against baked panels"
         );
     }
@@ -2109,7 +2125,7 @@ mod tests {
         let zoom = identity_zoom();
 
         // Nearest search close to the baked position finds the mark.
-        let nearest = hit_test_nearest(&baked, 16.0, 27.0, &zoom, &[], &[])
+        let nearest = hit_test_nearest(&baked, 16.0, 27.0, &zoom, &SlotRescalePlan::identity())
             .expect("nearest search at baked position must find the mark");
         assert_eq!(nearest.data_idx, Some(7));
 
@@ -2139,12 +2155,12 @@ mod tests {
         let scene = scene_with_ratio_fitted_panel();
         let zoom = identity_zoom();
 
-        let hit = hit_test(&scene.panels, 3.0, 4.0, &zoom, &[], &[])
+        let hit = hit_test(&scene.panels, 3.0, 4.0, &zoom, &SlotRescalePlan::identity())
             .expect("click at raw mark position (3, 4) must hit raw (un-baked) panels");
         assert_eq!(hit.data_idx, Some(7));
 
         assert!(
-            hit_test(&scene.panels, 16.0, 27.0, &zoom, &[], &[]).is_none(),
+            hit_test(&scene.panels, 16.0, 27.0, &zoom, &SlotRescalePlan::identity()).is_none(),
             "click at baked position (16, 27) must miss raw (un-baked) panels"
         );
     }
@@ -2162,7 +2178,7 @@ mod tests {
         // Correct: the visual position is `zoom.apply(baked_position)` —
         // (3*16+100, 3*27+50) = (148, 131).
         let correct_visual = (3.0 * 16.0 + 100.0, 3.0 * 27.0 + 50.0);
-        let hit = hit_test(&baked, correct_visual.0, correct_visual.1, &zoom, &[], &[])
+        let hit = hit_test(&baked, correct_visual.0, correct_visual.1, &zoom, &SlotRescalePlan::identity())
             .expect("click at zoom_affine(baked_position) must hit");
         assert_eq!(hit.data_idx, Some(7));
 
@@ -2174,7 +2190,7 @@ mod tests {
         let double_baked = ls.apply(16.0, 27.0);
         let wrong_visual = zoom.transforms[0].apply(double_baked.0, double_baked.1);
         assert!(
-            hit_test(&baked, wrong_visual.0, wrong_visual.1, &zoom, &[], &[]).is_none(),
+            hit_test(&baked, wrong_visual.0, wrong_visual.1, &zoom, &SlotRescalePlan::identity()).is_none(),
             "click at zoom_affine(layout_scale(baked_position)) (double-bake) must miss"
         );
     }

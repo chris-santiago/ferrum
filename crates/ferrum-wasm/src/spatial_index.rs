@@ -26,6 +26,46 @@ use crate::scene_load::{DrawKind, SceneData};
 /// return a result.  Queries farther than this snap threshold return `None`.
 pub const SNAP_DISTANCE: f64 = 50.0;
 
+// ── SlotRescaleCtx ───────────────────────────────────────────────────────────
+
+/// The composed-affine ingredients for one slot-aware query
+/// (secondary-y-axis, GH #52): this panel's resolved zoom/pan affine, plus
+/// the renderer's per-slot domain-rescale state — `slot_rescales` (one entry
+/// per allocated `(panel, y-slot)` transform slot) and `panel_slot_counts`
+/// (how many y-slots each panel owns), the pair
+/// [`transform_slot_index`](crate::scene_load::transform_slot_index) resolves
+/// together. A query resolves ONE panel's `panel_affine` (via
+/// `select_panel_transform`) and combines it with the renderer-wide
+/// `slot_rescales`/`panel_slot_counts` state to look up each candidate mark's
+/// own `(panel ∘ slot)` affine (see [`composed_slot_affine`]).
+///
+/// Threaded through the whole slot-aware family so one borrowed bundle —
+/// not three loose parameters — crosses every call boundary:
+/// [`SpatialIndex::hit_test_slot_aware`], [`SpatialIndex::nearest_slot_aware`],
+/// [`composed_slot_affine`], and (via
+/// [`SlotRescalePlan::with_panel_affine`](crate::hit_test::SlotRescalePlan::with_panel_affine))
+/// `hit_test::slot_rescale_at` / `hit_test::panel_has_active_rescale`.
+#[derive(Debug, Clone, Copy)]
+pub struct SlotRescaleCtx<'a> {
+    pub panel_affine: crate::zoom_pan::Affine2,
+    pub slot_rescales: &'a [crate::zoom_pan::Affine2],
+    pub panel_slot_counts: &'a [usize],
+}
+
+impl SlotRescaleCtx<'_> {
+    /// Identity-slot ctx: identity panel affine, no allocated rescale slots.
+    /// Reduces every slot-aware query to a plain scene-space query — the
+    /// byte-stability default [`SpatialIndex::nearest`]/[`SpatialIndex::hit_test`]
+    /// use, and the single-y-scene-at-rest case generally.
+    pub fn identity() -> Self {
+        Self {
+            panel_affine: crate::zoom_pan::Affine2::identity(),
+            slot_rescales: &[],
+            panel_slot_counts: &[],
+        }
+    }
+}
+
 // ── MarkEntry ────────────────────────────────────────────────────────────────
 
 /// Geometry of an indexed mark.
@@ -196,7 +236,7 @@ impl SpatialIndex {
     /// implementation serves both; a single-y scene (`y_slot == 0`) reads
     /// identically here and through the slot-aware path.
     pub fn nearest(&self, panel_id: usize, x: f64, y: f64) -> Option<(MarkEntry, f64)> {
-        self.nearest_slot_aware(panel_id, x, y, crate::zoom_pan::Affine2::identity(), &[], &[])
+        self.nearest_slot_aware(panel_id, x, y, &SlotRescaleCtx::identity())
     }
 
     /// All entries whose bounding box overlaps the given AABB in a panel.
@@ -230,15 +270,7 @@ impl SpatialIndex {
         y: f64,
         tolerance: f64,
     ) -> Option<MarkEntry> {
-        self.hit_test_slot_aware(
-            panel_id,
-            x,
-            y,
-            tolerance,
-            crate::zoom_pan::Affine2::identity(),
-            &[],
-            &[],
-        )
+        self.hit_test_slot_aware(panel_id, x, y, tolerance, &SlotRescaleCtx::identity())
     }
 
     /// Slot-aware exact hit-test at display-space click `(x, y)`
@@ -258,28 +290,19 @@ impl SpatialIndex {
     /// found by the caller's composed-inverse linear scan; this method's
     /// per-candidate inverse ensures a scene-space coincidence in a rescaled
     /// slot cannot register a false hit.
-    #[allow(clippy::too_many_arguments)]
     pub fn hit_test_slot_aware(
         &self,
         panel_id: usize,
         x: f64,
         y: f64,
         tolerance: f64,
-        panel_affine: crate::zoom_pan::Affine2,
-        slot_rescales: &[crate::zoom_pan::Affine2],
-        panel_slot_counts: &[usize],
+        ctx: &SlotRescaleCtx,
     ) -> Option<MarkEntry> {
-        let (sx, sy) = panel_affine.inverse_apply(x, y);
+        let (sx, sy) = ctx.panel_affine.inverse_apply(x, y);
         let aabb =
             AABB::from_corners([sx - tolerance, sy - tolerance], [sx + tolerance, sy + tolerance]);
         for entry in self.in_envelope(panel_id, aabb) {
-            let composed = composed_slot_affine(
-                panel_affine,
-                slot_rescales,
-                panel_slot_counts,
-                panel_id,
-                entry.y_slot,
-            );
+            let composed = composed_slot_affine(ctx, panel_id, entry.y_slot);
             let (cx, cy) = composed.inverse_apply(x, y);
             if geometry_contains(entry, cx, cy, tolerance) {
                 return Some(entry.clone());
@@ -302,20 +325,12 @@ impl SpatialIndex {
         panel_id: usize,
         x: f64,
         y: f64,
-        panel_affine: crate::zoom_pan::Affine2,
-        slot_rescales: &[crate::zoom_pan::Affine2],
-        panel_slot_counts: &[usize],
+        ctx: &SlotRescaleCtx,
     ) -> Option<(MarkEntry, f64)> {
-        let (sx, sy) = panel_affine.inverse_apply(x, y);
+        let (sx, sy) = ctx.panel_affine.inverse_apply(x, y);
         let panel_idx = self.trees.get(panel_id)?;
         let (entry, _) = panel_idx.nearest(sx, sy)?;
-        let composed = composed_slot_affine(
-            panel_affine,
-            slot_rescales,
-            panel_slot_counts,
-            panel_id,
-            entry.y_slot,
-        );
+        let composed = composed_slot_affine(ctx, panel_id, entry.y_slot);
         let (cx, cy) = composed.inverse_apply(x, y);
         let dist = entry.distance_2(&[cx, cy]).sqrt();
         if dist > SNAP_DISTANCE {
@@ -332,18 +347,17 @@ impl SpatialIndex {
 /// render upload uses. An absent or out-of-range slot rescale is identity, so
 /// the result is the panel affine unchanged.
 fn composed_slot_affine(
-    panel_affine: crate::zoom_pan::Affine2,
-    slot_rescales: &[crate::zoom_pan::Affine2],
-    panel_slot_counts: &[usize],
+    ctx: &SlotRescaleCtx,
     panel_id: usize,
     y_slot: usize,
 ) -> crate::zoom_pan::Affine2 {
-    let idx = crate::scene_load::transform_slot_index(panel_slot_counts, panel_id, y_slot);
-    let rescale = slot_rescales
+    let idx = crate::scene_load::transform_slot_index(ctx.panel_slot_counts, panel_id, y_slot);
+    let rescale = ctx
+        .slot_rescales
         .get(idx)
         .copied()
         .unwrap_or_else(crate::zoom_pan::Affine2::identity);
-    crate::zoom_pan::compose_panel_slot(panel_affine, rescale)
+    crate::zoom_pan::compose_panel_slot(ctx.panel_affine, rescale)
 }
 
 // ── MarkEntry constructors ───────────────────────────────────────────────────
