@@ -436,6 +436,10 @@ def desugar_errorbar(
                 _Layer(
                     name="lower_cap",
                     mark="tick",
+                    # Literal 0.6 is the deliberate full-length default
+                    # (GH #85), not an un-migrated half-width 0.3 x 2:
+                    # errorbar exposes no size= knob for caps to track,
+                    # unlike desugar_boxplot's band-derived caps.
                     encoding=_enc("lower"),
                     mark_kwargs={"band_size": 0.6, "stroke": "theme:label"},
                     data_source="err",

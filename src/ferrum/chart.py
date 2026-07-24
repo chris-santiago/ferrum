@@ -1101,6 +1101,11 @@ class Chart(
             Overall opacity in ``[0, 1]``.
         corner_radius : float, optional
             Rounded corner radius in pixels.
+        band_size : float, optional
+            Rectangle width as a fraction of the category band (0–1,
+            default 0.6) when the rect sits on an ordinal axis (e.g. a
+            boxplot body). The same full-length convention as
+            ``mark_tick``'s ``band_size``.
         position : Position, optional
             Position adjustment.
 

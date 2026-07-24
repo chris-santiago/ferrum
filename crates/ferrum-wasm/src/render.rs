@@ -784,11 +784,13 @@ pub fn render_frame(
 }
 
 /// The WGPU rendering resource trio — device/queue context, compiled
-/// pipelines, and GPU-resident scene buffers — that `upload_transform_and_render`
-/// (and most of this module's other render entry points) always consumes
-/// together: `render_frame` and `GpuBuffers::upload_panel_transforms` both take
-/// all three. Bundling these removes 2 of `upload_transform_and_render`'s
-/// loose parameters.
+/// pipelines, and GPU-resident scene buffers — bundled for
+/// `upload_transform_and_render`, currently its single consumer. The
+/// grouping is conceptual cohesion plus arg-count reduction at that one
+/// seam (GH #79a), not module-wide reuse: `render_frame` takes the three
+/// as loose params (plus a clear color) and
+/// `GpuBuffers::upload_panel_transforms` takes only `gpu` — thread this
+/// struct into them only if their signatures ever grow to want it.
 #[derive(Clone, Copy)]
 pub(crate) struct GpuResources<'a> {
     pub gpu: &'a GpuContext,
