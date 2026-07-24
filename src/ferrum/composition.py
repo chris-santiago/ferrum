@@ -794,6 +794,34 @@ def _contains_independent_y_layer(node) -> bool:
     return False
 
 
+def _raise_if_shared_y_conflicts_independent(resolve: Optional[dict], nodes, *, kind: str) -> None:
+    """Raise when *resolve* requests ``y: "shared"`` over a subtree containing
+    an independent-y (dual-axis) layered leaf anywhere in *nodes*.
+
+    The single guard shared by every composite form that can carry a
+    ``resolve=`` field: :func:`_lower_any`'s generic ``node.charts`` branch
+    (HConcat/VConcat/ConcatChart) and :func:`_build_grid_tree` (Joint/
+    ClusterMap/Repeat's grid cells, GH #57). Both call sites already computed
+    a validated *resolve* dict via :func:`_composite_resolve_field` before
+    reaching here — see :func:`_contains_independent_y_layer`'s docstring for
+    why the conflict must raise rather than silently drop the caller's
+    request (GH #52 spec §4 "Nesting"). *nodes* may contain ``None`` entries
+    (a grid's hole cells), which are skipped.
+    """
+    if resolve is None:
+        return
+    if resolve.get("y") == "shared" and any(
+        _contains_independent_y_layer(node) for node in nodes if node is not None
+    ):
+        raise ValueError(
+            f"{kind}: resolve={{'y': 'shared'}} conflicts with a nested independent-y "
+            "LayerChart (resolve={'y': 'independent'}) in this subtree -- a dual-axis "
+            "LayerChart's per-layer y-scale slots do not participate in cross-panel y "
+            "sharing (GH #52 spec §4 'Nesting'); drop the nested LayerChart's "
+            "independent-y resolve or remove this composite's explicit y sharing"
+        )
+
+
 def _lower_any(
     node,
     *,
@@ -888,16 +916,7 @@ def _lower_any(
             "a composite nested inside another composition"
         )
     resolve = _composite_resolve_field(getattr(node, "_resolve", None), kind=kind)
-    if resolve.get("y") == "shared" and any(
-        _contains_independent_y_layer(child) for child in node.charts
-    ):
-        raise ValueError(
-            f"{kind}: resolve={{'y': 'shared'}} conflicts with a nested independent-y "
-            "LayerChart (resolve={'y': 'independent'}) in this subtree -- a dual-axis "
-            "LayerChart's per-layer y-scale slots do not participate in cross-panel y "
-            "sharing (GH #52 spec §4 'Nesting'); drop the nested LayerChart's "
-            "independent-y resolve or remove this composite's explicit y sharing"
-        )
+    _raise_if_shared_y_conflicts_independent(resolve, node.charts, kind=kind)
     children: list = []
     for child in node.charts:
         child = node._inject_parent_config(child)
@@ -1121,6 +1140,7 @@ def _build_grid_tree(
             f"{chrome.kind}: figure subtitle/caption are root-only chrome and cannot be set on "
             "a composite nested inside another composition"
         )
+    _raise_if_shared_y_conflicts_independent(resolve, cells, kind=chrome.kind)
 
     payloads: list = []
     leaf_inputs: list = []

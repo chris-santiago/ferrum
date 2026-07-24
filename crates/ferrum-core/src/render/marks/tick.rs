@@ -22,10 +22,11 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     // Common setup shared by all four tick modes.
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+    let pos_meta = crate::render::position::BatchPositionMeta::from_batch(ctx.batch);
     // Under an ordinal-band Dodge, band-fraction ticks (boxplot median line,
     // whisker caps) must shrink to their sub-band so adjacent dodge groups don't
     // overlap. No Dodge → n_groups == 1 → byte-identical to the non-dodged tick.
-    let n_groups = crate::render::position::n_dodge_groups(ctx.batch) as f64;
+    let n_groups = pos_meta.dodge_n_groups() as f64;
     let stroke_color = ctx.mark_style.paint.stroke.unwrap_or(ctx.mark_style.paint.fill);
     let default_stroke_width = ctx.mark_style.paint.stroke_width.max(1.0);
 
@@ -163,7 +164,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             // undodged or at low/default padding. `*2.0`/`/2.0` is exact in
             // IEEE-754 (power-of-two scaling), so the no-op case round-trips
             // to `tick_half_raw` bit-for-bit.
-            let tick_half = crate::render::position::clamp_to_dodge_sub_band(tick_half_raw * 2.0, ctx.batch) / 2.0;
+            let tick_half = pos_meta.clamp_width(tick_half_raw * 2.0) / 2.0;
             let mut acc = MarkNodes::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -212,7 +213,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
             // analogous comment above — this tick spans y, the same axis
             // Dodge offsets `cy` along, so the overlap risk (and the
             // exact-round-trip `*2.0`/`/2.0` no-op) is the same.
-            let tick_half = crate::render::position::clamp_to_dodge_sub_band(tick_half_raw * 2.0, ctx.batch) / 2.0;
+            let tick_half = pos_meta.clamp_width(tick_half_raw * 2.0) / 2.0;
             let mut acc = MarkNodes::with_capacity(xs.len());
             for i in 0..xs.len() {
                 let xv = match xs[i] { Some(v) if v.is_finite() => v, _ => continue };
@@ -895,7 +896,7 @@ mod tests {
         let mut schema = Schema::new(fields);
         if let Some(n) = n_groups_metadata {
             let mut metadata = HashMap::new();
-            metadata.insert(crate::render::position::DODGE_N_GROUPS_KEY.to_string(), n.to_string());
+            crate::render::position::BatchPositionMeta::stamp_dodge(&mut metadata, n, None);
             schema = schema.with_metadata(metadata);
         }
         let batch = arrow::record_batch::RecordBatch::try_new(Arc::new(schema), cols).unwrap();

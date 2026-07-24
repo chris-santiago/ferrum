@@ -134,7 +134,8 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // through `scales.x` (bottom point varies in x at the row's own y) or
     // `scales.y` (bottom point varies in y at the row's own x — today's
     // default). Absent the stamp, behavior is byte-identical to pre-#77.
-    let stack_value_on_x = crate::render::position::stack_value_on_x(ctx.batch);
+    let pos_meta = crate::render::position::BatchPositionMeta::from_batch(ctx.batch);
+    let stack_value_on_x = pos_meta.stack_value_on_x();
 
     // Stacked areas use opaque fills so each band is visually distinct.
     let base_opacity = if is_stacked { 1.0 } else { ctx.mark_style.paint.opacity };
@@ -1080,7 +1081,7 @@ mod tests {
             value_axis: Some(StackValueAxis::X),
         };
         let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
-        assert!(crate::render::position::stack_value_on_x(&adjusted), "value_axis: Some(X) must stamp the marker");
+        assert!(crate::render::position::BatchPositionMeta::from_batch(&adjusted).stack_value_on_x(), "value_axis: Some(X) must stamp the marker");
 
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Area,
@@ -1178,7 +1179,7 @@ mod tests {
             value_axis: None,
         };
         let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
-        assert!(!crate::render::position::stack_value_on_x(&adjusted), "vertical Stack must not stamp the horizontal-value marker");
+        assert!(!crate::render::position::BatchPositionMeta::from_batch(&adjusted).stack_value_on_x(), "vertical Stack must not stamp the horizontal-value marker");
 
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Area,

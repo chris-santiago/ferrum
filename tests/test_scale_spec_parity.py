@@ -10,6 +10,21 @@ Three test classes:
 - ``TestEncodeSmoke`` — regression: ``QuantileScale`` and ``ThresholdScale``
   passed to ``encode(scale=...)`` build and render without error (they raised
   ``TypeError`` before the bridge collapse).
+
+Regenerating the baseline
+--------------------------
+``tests/_fixtures/scale_wire_baseline.json`` is regenerated ONLY via
+``python scripts/regen-scale-wire-baseline.py <ref>`` (default ref: the
+latest ``v*`` tag) — never by hand-editing the file or copying today's
+``to_json()`` output out of a passing test run. The script builds an
+isolated ``git worktree`` checkout of *ref*, compiles the Rust extension
+there, and captures ``_build_baseline_charts()`` from THAT ref's copy of
+this module. Regenerating from the current working tree instead would make
+``TestByteIdentity`` a tautology: the guard exists to catch the wire format
+silently drifting out from under a refactor, and a working-tree regen
+would just rebaseline against whatever the (possibly already-drifted)
+working tree currently emits, defeating the guard's purpose. See the
+script's module docstring for the full rationale and build approach.
 """
 
 from __future__ import annotations
@@ -95,14 +110,30 @@ _FIXTURE_PATH = pathlib.Path(__file__).parent / "_fixtures" / "scale_wire_baseli
 
 
 def _load_baseline() -> dict[str, str]:
-    return json.loads(_FIXTURE_PATH.read_text())
+    """Load the fixture, dropping its ``_provenance`` metadata key.
+
+    ``_provenance`` (``{"ref", "captured", "script"}``, written by
+    ``scripts/regen-scale-wire-baseline.py``) is bookkeeping, not one of the
+    14 scale-name payload entries ``TestByteIdentity`` compares against --
+    strip it here so any future dict-shaped consumer of this loader never
+    trips over it.
+    """
+    payload = json.loads(_FIXTURE_PATH.read_text())
+    payload.pop("_provenance", None)
+    return payload
 
 
 # ---------------------------------------------------------------------------
 # Baseline chart builders: these MUST reproduce the exact chart constructions
 # that generated the frozen tests/_fixtures/scale_wire_baseline.json (captured
-# from pre-change `main`). The byte-identity guard compares this file's
-# to_json() output against that fixture, so any divergence here fails loudly.
+# from the ref recorded in the fixture's "_provenance" key via
+# scripts/regen-scale-wire-baseline.py — see that script and this module's
+# docstring for why regeneration never runs against the working tree). The
+# byte-identity guard compares this file's to_json() output against that
+# fixture, so any divergence here fails loudly. If you edit a chart
+# construction below, the fixture must be regenerated via the script (not
+# hand-edited) so "baseline" keeps meaning "what a specific frozen ref
+# produced."
 # ---------------------------------------------------------------------------
 
 

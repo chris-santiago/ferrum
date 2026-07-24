@@ -11,7 +11,7 @@
 //!   - the pre-fix bar-width formula (`band_extent / n_categories /
 //!     n_groups * 0.8`, render/marks/bar.rs `build_ordinal`) and the
 //!     post-fix clamp (`min(raw_width, sub_band)`,
-//!     `position::clamp_to_dodge_sub_band`).
+//!     `position::BatchPositionMeta::clamp_width`).
 //!
 //! The exact numeric oracles below (padding=0.2 overlap of 20px; the
 //! default-padding x/width geometry) were captured by driving the REAL
@@ -34,7 +34,7 @@
 //! `padding` — so at `padding > ~0.1` (bar) the width formula could exceed
 //! the true sub-band and adjacent dodge groups would overlap. The fix
 //! clamps each mark's width to its Dodge sub-band
-//! (`position::clamp_to_dodge_sub_band`), which is byte-identical at
+//! (`position::BatchPositionMeta::clamp_width`), which is byte-identical at
 //! default padding (`test_3`) because the 0.8-factor width already fits
 //! inside the sub-band there.
 
@@ -66,7 +66,7 @@ fn dodge_offset(bandwidth_px: f64, padding: f64, n_groups: usize, group_idx: usi
 
 /// Mirrors the `sub_band` local in `apply_dodge_ordinal` — now also stamped
 /// into schema metadata as `__dodge_sub_band_px__` (GH #66 fix) and read
-/// back by `position::clamp_to_dodge_sub_band`.
+/// back by `position::BatchPositionMeta::clamp_width`.
 fn sub_band(bandwidth_px: f64, padding: f64, n_groups: usize) -> f64 {
     let pad_total = bandwidth_px * padding * 2.0;
     (bandwidth_px - pad_total) / n_groups as f64
@@ -79,7 +79,7 @@ fn bar_width_prefix(band_extent: f64, n_categories: usize, n_groups: usize) -> f
 }
 
 /// Post-fix `build_ordinal` bar width — the GH #66 clamp
-/// (`position::clamp_to_dodge_sub_band`): `min(raw_width, sub_band)`, a
+/// (`position::BatchPositionMeta::clamp_width`): `min(raw_width, sub_band)`, a
 /// no-op whenever `sub_band` isn't strictly tighter than `raw_width`.
 fn bar_width_postfix(band_extent: f64, n_categories: usize, n_groups: usize, padding: f64) -> f64 {
     let raw = bar_width_prefix(band_extent, n_categories, n_groups);

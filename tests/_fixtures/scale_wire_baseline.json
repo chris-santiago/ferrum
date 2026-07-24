@@ -1,4 +1,9 @@
 {
+  "_provenance": {
+    "captured": "86a45fe7c212bd49407f628f1f2faf7745eb90cb",
+    "ref": "v0.20.2",
+    "script": "scripts/regen-scale-wire-baseline.py"
+  },
   "band": "{\"data\":{\"kind\":\"named\",\"name\":\"default\"},\"mark\":\"bar\",\"encoding\":{\"x\":{\"field\":\"k\",\"scale\":{\"type\":\"band\",\"domain\":[\"x\",\"y\",\"z\",\"w\"],\"padding\":0.1,\"paddingInner\":0.1,\"paddingOuter\":0.1,\"align\":0.5}},\"y\":{\"field\":\"v\",\"scale\":{\"type\":\"linear\",\"clamp\":false,\"nice\":false,\"zero\":true}}}}",
   "bin_ordinal": "{\"data\":{\"kind\":\"named\",\"name\":\"default\"},\"mark\":\"point\",\"encoding\":{\"x\":{\"field\":\"a\"},\"y\":{\"field\":\"b\"},\"color\":{\"field\":\"c\",\"scale\":{\"type\":\"bin-ordinal\",\"bins\":[0.0,0.5,1.0],\"scheme\":\"viridis\"}}}}",
   "diverging": "{\"data\":{\"kind\":\"named\",\"name\":\"default\"},\"mark\":\"point\",\"encoding\":{\"x\":{\"field\":\"a\"},\"y\":{\"field\":\"b\"},\"color\":{\"field\":\"c\",\"scale\":{\"type\":\"diverging\",\"scheme\":\"redblue\",\"domainMid\":0.5}}}}",

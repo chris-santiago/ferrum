@@ -305,10 +305,11 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let n_categories = x_strs.iter().flatten().collect::<std::collections::HashSet<_>>().len().max(1);
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+    let pos_meta = crate::render::position::BatchPositionMeta::from_batch(ctx.batch);
     // Under an ordinal-band Dodge, shrink each bar to its sub-band so adjacent
-    // dodge groups don't overlap (single source of truth: `n_dodge_groups`).
+    // dodge groups don't overlap (single source of truth: `dodge_n_groups`).
     // No Dodge → n_groups == 1 → byte-identical to the non-dodged width.
-    let n_groups = crate::render::position::n_dodge_groups(ctx.batch);
+    let n_groups = pos_meta.dodge_n_groups();
     // Band-geometry unification (#39 phase 2): honor an explicit x-band pixel
     // range when the resolver recorded one; otherwise identical to `panel.w`.
     let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
@@ -317,7 +318,7 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // blind to Dodge's `padding` and can exceed the true per-group slot
     // width at high padding, overlapping neighbouring dodge groups. No-op
     // (byte-identical) when undodged or at low/default padding.
-    let bar_width = crate::render::position::clamp_to_dodge_sub_band(bar_width_raw, ctx.batch);
+    let bar_width = pos_meta.clamp_width(bar_width_raw);
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
@@ -421,6 +422,8 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let x2s_opt: Option<Vec<Option<f64>>> = x2f_opt
         .and_then(|f| col_as_f64(ctx.batch, f).ok());
 
+    let pos_meta = crate::render::position::BatchPositionMeta::from_batch(ctx.batch);
+
     // Stack base (segment starts on X), gated on the `__stack_value_on_x__`
     // stamp exactly like `build_quantitative_horizontal`'s `stack_bases`.
     // This builder is reached whenever `encoding.y` is ordinal (quantitative
@@ -443,7 +446,7 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Stack, or a Stack whose value lives on Y), `x_bases` is `None` and
     // every row falls back to the fixed `baseline_x` — byte-identical to
     // the pre-fix formula.
-    let x_bases: Option<Vec<Option<f64>>> = if crate::render::position::stack_value_on_x(ctx.batch) {
+    let x_bases: Option<Vec<Option<f64>>> = if pos_meta.stack_value_on_x() {
         col_as_f64(ctx.batch, "__stack_y_base__").ok()
     } else {
         None
@@ -463,14 +466,14 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Under an ordinal-band Dodge, shrink each horizontal bar to its sub-band so
     // adjacent dodge groups don't overlap (mirrors `build_ordinal`; the band
     // dimension is height here). No Dodge → n_groups == 1 → byte-identical.
-    let n_groups = crate::render::position::n_dodge_groups(ctx.batch);
+    let n_groups = pos_meta.dodge_n_groups();
     // Band-geometry unification (#39 phase 2): honor an explicit y-band pixel
     // range when the resolver recorded one; otherwise identical to `panel.h`.
     let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
     let bar_height_raw = (band_extent / n_categories as f64 / n_groups as f64) * 0.8;
     // Clamp to the Dodge sub-band (GH #66); see `build_ordinal`'s analogous
     // comment — byte-identical no-op when undodged or at low/default padding.
-    let bar_height = crate::render::position::clamp_to_dodge_sub_band(bar_height_raw, ctx.batch);
+    let bar_height = pos_meta.clamp_width(bar_height_raw);
 
     let (color_values, color_values_f64) = load_color_columns(ctx);
     let sc = StrokeChannels::load(ctx);
@@ -617,6 +620,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let baseline_y = panel.y + panel.h;
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+    let pos_meta = crate::render::position::BatchPositionMeta::from_batch(ctx.batch);
 
     // Stack base (segment bottoms), gated on the `__stack_value_on_x__`
     // stamp like `build_quantitative_horizontal`'s `stack_bases` — mirrored,
@@ -637,7 +641,7 @@ fn build_quantitative(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Stack whose base column doesn't exist), `y_bases` is `None` and every
     // row falls back to `baseline_y` via the `unwrap_or` below —
     // byte-identical to the pre-fix formula.
-    let y_bases: Option<Vec<Option<f64>>> = if !crate::render::position::stack_value_on_x(ctx.batch) {
+    let y_bases: Option<Vec<Option<f64>>> = if !pos_meta.stack_value_on_x() {
         col_as_f64(ctx.batch, "__stack_y_base__").ok()
     } else {
         None
@@ -757,6 +761,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
     let baseline_x = panel.x;
 
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+    let pos_meta = crate::render::position::BatchPositionMeta::from_batch(ctx.batch);
 
     // GH #77 follow-up: a stacked horizontal bar/histogram (value column on
     // X — `apply_stack` stamps `STACK_VALUE_ON_X_KEY`) must span
@@ -765,7 +770,7 @@ fn build_quantitative_horizontal(ctx: &DrawCtx) -> crate::render::draw::MarkBuil
     // overlapping from x=0. Absent the stamp (no Stack, or a vertical
     // Stack whose value lives on Y), `stack_bases` is `None` and every bar
     // keeps today's fixed `baseline_x` — byte-identical.
-    let stack_bases: Option<Vec<Option<f64>>> = if crate::render::position::stack_value_on_x(ctx.batch) {
+    let stack_bases: Option<Vec<Option<f64>>> = if pos_meta.stack_value_on_x() {
         col_as_f64(ctx.batch, "__stack_y_base__").ok()
     } else {
         None
@@ -2231,7 +2236,7 @@ mod tests {
         let mut schema = Schema::new(fields);
         if let Some(n) = n_groups_metadata {
             let mut metadata = HashMap::new();
-            metadata.insert(crate::render::position::DODGE_N_GROUPS_KEY.to_string(), n.to_string());
+            crate::render::position::BatchPositionMeta::stamp_dodge(&mut metadata, n, None);
             schema = schema.with_metadata(metadata);
         }
         let batch = arrow::record_batch::RecordBatch::try_new(Arc::new(schema), cols).unwrap();
@@ -2588,7 +2593,7 @@ mod tests {
         };
         let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
         // No STACK_VALUE_ON_X_KEY on this batch: value_axis=None + coord_flipped=false → value on y.
-        assert!(!crate::render::position::stack_value_on_x(&adjusted), "vertical Stack must not stamp the horizontal-value marker");
+        assert!(!crate::render::position::BatchPositionMeta::from_batch(&adjusted).stack_value_on_x(), "vertical Stack must not stamp the horizontal-value marker");
 
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Bar,
@@ -2678,7 +2683,7 @@ mod tests {
         };
         let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
         // value_axis=None + coord_flipped=false → value on y, not x.
-        assert!(!crate::render::position::stack_value_on_x(&adjusted), "vertical Stack must not stamp the horizontal-value marker");
+        assert!(!crate::render::position::BatchPositionMeta::from_batch(&adjusted).stack_value_on_x(), "vertical Stack must not stamp the horizontal-value marker");
 
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Bar,
@@ -2760,7 +2765,7 @@ mod tests {
             value_axis: Some(StackValueAxis::X),
         };
         let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
-        assert!(crate::render::position::stack_value_on_x(&adjusted), "explicit value_axis: X must stamp the horizontal-value marker");
+        assert!(crate::render::position::BatchPositionMeta::from_batch(&adjusted).stack_value_on_x(), "explicit value_axis: X must stamp the horizontal-value marker");
 
         let spec = ChartSpec {
             data: DataRef::default(), mark: Mark::Bar,
@@ -2984,7 +2989,7 @@ mod tests {
             color: None, size: None, shape: None, opacity: None, x2: None, y2: None, y_slots: Default::default(),
         };
         // Sanity: this schema is genuinely stamp-less.
-        assert!(!crate::render::position::stack_value_on_x(&batch), "test batch must carry no value-on-X stamp");
+        assert!(!crate::render::position::BatchPositionMeta::from_batch(&batch).stack_value_on_x(), "test batch must carry no value-on-X stamp");
 
         let mark_style = resolve_mark_style(None, &theme, &Mark::Bar);
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };

@@ -722,6 +722,20 @@ impl YScaleSlots {
         Self { slots, layer_slot }
     }
 
+    /// A single-slot value wrapping `scale` as the only (primary) slot, with
+    /// an empty `layer_slot` map — every layer index falls back to slot 0.
+    ///
+    /// For a `ResolvedScales` whose `.y` has been reassigned to one layer's
+    /// own scale (e.g. the per-layer clone in `build_panel_mark_batches` that
+    /// binds an independent-y layer), this keeps `y_slots` self-describing:
+    /// `slots()` reports exactly the one scale `.y` now points to, instead of
+    /// the stale multi-slot list from the panel-level `ResolvedScales` it was
+    /// cloned from. `has_independent()` is `false` and `slot_for_layer` is `0`
+    /// for any layer index, matching a chart with no independent-y layer.
+    pub fn single(scale: ScaleKind) -> Self {
+        Self { slots: vec![scale], layer_slot: Vec::new() }
+    }
+
     /// Ordered y-scales, `slots[0]` the primary/left axis. Empty when the chart
     /// has no independent-y layer.
     ///

@@ -597,9 +597,9 @@ fn apply_dodge_ordinal(
     fields.push(Field::new("__pos_y_offset__", DataType::Float64, false));
 
     // Stamp the dodge group count as explicit schema metadata (Task 3c
-    // remediation). `n_dodge_groups` reads this key rather than inferring the
-    // group count from distinct offset values: Jitter's ordinal branch
-    // (`apply_jitter`) writes per-row noise into these SAME
+    // remediation). `BatchPositionMeta::dodge_n_groups` reads this key rather
+    // than inferring the group count from distinct offset values: Jitter's
+    // ordinal branch (`apply_jitter`) writes per-row noise into these SAME
     // `__pos_x_offset__` / `__pos_y_offset__` columns, so a distinct-value
     // heuristic would misread jitter noise as ≈row-count dodge groups. Only
     // this function (the ordinal-band Dodge path) ever sets this key.
@@ -613,13 +613,12 @@ fn apply_dodge_ordinal(
     // sub-band, so at `padding > ~0.1` (bar) the 0.8-factor width can exceed
     // this `sub_band` and adjacent dodge groups overlap. Stamping `sub_band`
     // here — where `padding` is already in scope — lets those mark renderers
-    // clamp their width to it (`position::clamp_to_dodge_sub_band`) without
+    // clamp their width to it (`BatchPositionMeta::clamp_width`) without
     // threading `padding` through `DrawCtx` or re-deriving it from a
     // per-layer `ChartSpec` that (for multi-layer charts) may not carry the
     // same `PositionAdjust` that was actually applied to this batch.
     let mut metadata = schema.metadata().clone();
-    metadata.insert(DODGE_N_GROUPS_KEY.to_string(), n_groups.to_string());
-    metadata.insert(DODGE_SUB_BAND_PX_KEY.to_string(), sub_band.to_string());
+    BatchPositionMeta::stamp_dodge(&mut metadata, n_groups, Some(sub_band));
     let new_schema = Arc::new(Schema::new(fields).with_metadata(metadata));
 
     RecordBatch::try_new(new_schema, cols)
@@ -979,7 +978,7 @@ pub(crate) fn apply_stack(
     // default and keeps every existing vertical-stack mark byte-identical.
     let new_schema = if value_on_x {
         let mut metadata = batch.schema().metadata().clone();
-        metadata.insert(STACK_VALUE_ON_X_KEY.to_string(), "1".to_string());
+        BatchPositionMeta::stamp_stack_value_on_x(&mut metadata);
         Arc::new(Schema::new(new_fields).with_metadata(metadata))
     } else {
         Arc::new(Schema::new(new_fields))
@@ -3040,7 +3039,7 @@ mod tests {
         let mut schema = Schema::new(fields);
         if let Some(n_groups) = n_groups_metadata {
             let mut metadata = HashMap::new();
-            metadata.insert(DODGE_N_GROUPS_KEY.to_string(), n_groups.to_string());
+            BatchPositionMeta::stamp_dodge(&mut metadata, n_groups, None);
             schema = schema.with_metadata(metadata);
         }
         RecordBatch::try_new(Arc::new(schema), cols).unwrap()
@@ -3050,7 +3049,7 @@ mod tests {
     fn n_dodge_groups_no_columns_no_metadata_is_one() {
         // No offset columns, no metadata → no Dodge → 1 (callers stay byte-identical).
         let b = batch_with_offsets_and_metadata(None, None, None);
-        assert_eq!(n_dodge_groups(&b), 1);
+        assert_eq!(BatchPositionMeta::from_batch(&b).dodge_n_groups(), 1);
     }
 
     #[test]
@@ -3063,7 +3062,7 @@ mod tests {
             Some(vec![0.0; 4]),
             Some(2),
         );
-        assert_eq!(n_dodge_groups(&b), 2);
+        assert_eq!(BatchPositionMeta::from_batch(&b).dodge_n_groups(), 2);
     }
 
     #[test]
@@ -3079,7 +3078,7 @@ mod tests {
             Some(vec![0.0; 4]),
             None,
         );
-        assert_eq!(n_dodge_groups(&b), 1);
+        assert_eq!(BatchPositionMeta::from_batch(&b).dodge_n_groups(), 1);
     }
 
     #[test]
@@ -3091,7 +3090,7 @@ mod tests {
         let s = scales_one_ordinal(true);
         let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
         let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
-        assert_eq!(n_dodge_groups(&out), 2, "batch_cat_val_grp has 2 groups (p, q)");
+        assert_eq!(BatchPositionMeta::from_batch(&out).dodge_n_groups(), 2, "batch_cat_val_grp has 2 groups (p, q)");
     }
 
     /// Design-gate finding: the two tests above only exercise
@@ -3121,7 +3120,7 @@ mod tests {
         // Real producer: same call scene_build.rs makes before mark dispatch.
         let adjusted = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
         assert_eq!(
-            n_dodge_groups(&adjusted), 2,
+            BatchPositionMeta::from_batch(&adjusted).dodge_n_groups(), 2,
             "sanity: real apply_position output must carry the 2-group metadata"
         );
 
@@ -3499,85 +3498,13 @@ pub(crate) fn read_position_offsets(batch: &RecordBatch) -> (Vec<f64>, Vec<f64>)
 }
 
 /// Schema metadata key [`apply_dodge_ordinal`] stamps with the dodge group
-/// count. Read by [`n_dodge_groups`]; never set by `apply_jitter` or any other
-/// position adjustment. `pub(crate)` so mark-renderer tests (`bar.rs`,
-/// `rect.rs`, `tick.rs`) can build dodge-shaped test batches without
-/// hardcoding the string literal.
-pub(crate) const DODGE_N_GROUPS_KEY: &str = "__dodge_n_groups__";
-
-/// Count the number of ordinal-band Dodge groups active on a batch.
-///
-/// Band-dimension marks (bar bodies, box bodies, band-fraction boxplot ticks)
-/// must shrink their per-category extent to `extent / n_dodge_groups`, otherwise
-/// the dodged sub-bands overlap their neighbours. This is the single source of
-/// truth for that group count across `bar.rs`, `rect.rs`, and `tick.rs`.
-///
-/// The count comes from explicit Arrow schema metadata
-/// ([`DODGE_N_GROUPS_KEY`]) stamped by [`apply_dodge_ordinal`], **not** from
-/// inferring it off the `__pos_x_offset__` / `__pos_y_offset__` offset values.
-/// Both `tick` marks (via `apply_jitter`'s ordinal branch) and ordinal-band
-/// Dodge write per-row pixel offsets into those SAME two columns; a
-/// distinct-value heuristic run on a jittered-but-not-dodged batch would
-/// misread per-row jitter noise as ≈row-count dodge groups and collapse the
-/// band extent toward zero. Reading an explicit producer-side marker set only
-/// by Dodge avoids that ambiguity entirely.
-///
-/// Returns 1 when the metadata key is absent (no Dodge → no narrowing), so
-/// callers can divide their band extent by the result unconditionally and stay
-/// byte-identical to the non-dodged (and jitter-only) path (`/ 1.0` is exact in
-/// IEEE-754).
-pub(crate) fn n_dodge_groups(batch: &RecordBatch) -> usize {
-    batch
-        .schema()
-        .metadata()
-        .get(DODGE_N_GROUPS_KEY)
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|n| *n >= 1)
-        .unwrap_or(1)
-}
+/// count. Read back via [`BatchPositionMeta::dodge_n_groups`].
+const DODGE_N_GROUPS_KEY: &str = "__dodge_n_groups__";
 
 /// Schema metadata key [`apply_dodge_ordinal`] stamps with the computed
-/// pixel sub-band width (GH #66). `pub(crate)` for the same reason as
-/// [`DODGE_N_GROUPS_KEY`]: mark-renderer tests build dodge-shaped batches
-/// without hardcoding the string literal.
-pub(crate) const DODGE_SUB_BAND_PX_KEY: &str = "__dodge_sub_band_px__";
-
-/// Read the pixel sub-band width [`apply_dodge_ordinal`] stamped, if any.
-///
-/// `None` when the key is absent (no Dodge, or a batch built before this
-/// key existed) — callers must treat that as "no clamp", not zero.
-fn dodge_sub_band_px(batch: &RecordBatch) -> Option<f64> {
-    batch
-        .schema()
-        .metadata()
-        .get(DODGE_SUB_BAND_PX_KEY)
-        .and_then(|s| s.parse::<f64>().ok())
-}
-
-/// Clamp a dodged band-axis mark's pixel width to its Dodge sub-band.
-///
-/// `raw_width` is the mark's ordinary width formula
-/// (`band_extent / n_categories / n_dodge_groups * factor`, for whatever
-/// `factor` the mark uses — bar's fixed `0.8`, box/tick's `band_size`).
-/// That formula narrows by `n_groups` but is blind to Dodge's `padding`, so
-/// at high padding the 0.8-factor (or `band_size`-factor) width can exceed
-/// the true per-group slot width and adjacent dodge groups overlap
-/// (GH #66). The true slot width — `sub_band`, computed in
-/// [`apply_dodge_ordinal`] where `padding` is already in scope — is
-/// stamped into schema metadata ([`DODGE_SUB_BAND_PX_KEY`]) and read back
-/// here.
-///
-/// Returns `raw_width` unchanged whenever no Dodge sub-band was stamped
-/// (no Dodge on this batch) or the sub-band isn't tighter than the raw
-/// width — so every non-dodged chart, and every dodged chart at the
-/// default padding (where the 0.8-factor width already fits inside the
-/// sub-band), stays byte-for-byte identical to the pre-clamp formula.
-pub(crate) fn clamp_to_dodge_sub_band(raw_width: f64, batch: &RecordBatch) -> f64 {
-    match dodge_sub_band_px(batch) {
-        Some(sub_band) if sub_band > 0.0 && sub_band < raw_width => sub_band,
-        _ => raw_width,
-    }
-}
+/// pixel sub-band width (GH #66). Read back via
+/// [`BatchPositionMeta::clamp_width`].
+const DODGE_SUB_BAND_PX_KEY: &str = "__dodge_sub_band_px__";
 
 /// Schema metadata key [`apply_stack`] stamps when the resolved stack
 /// *value* axis (GH #77's `value_on_x`) is X rather than Y — i.e. whenever
@@ -3587,16 +3514,119 @@ pub(crate) fn clamp_to_dodge_sub_band(raw_width: f64, batch: &RecordBatch) -> f6
 /// which axis holds the value, so mark drawers that consume it
 /// (`marks::bar`, `marks::area`) need this explicit signal to know whether
 /// to map the base through `scales.x` or `scales.y` — they can't infer it
-/// from batch shape alone. `pub(crate)` for the same reason as
-/// [`DODGE_N_GROUPS_KEY`]: mark-renderer tests build stack-shaped batches
-/// without hardcoding the string literal.
-pub(crate) const STACK_VALUE_ON_X_KEY: &str = "__stack_value_on_x__";
+/// from batch shape alone. Read back via
+/// [`BatchPositionMeta::stack_value_on_x`].
+const STACK_VALUE_ON_X_KEY: &str = "__stack_value_on_x__";
 
-/// Read whether [`apply_stack`] stamped the value-on-X marker, if any.
+/// Typed view over the Dodge/Stack schema-metadata side-channel that
+/// [`apply_dodge_ordinal`] and [`apply_stack`] stamp onto a batch and that
+/// mark drawers (`marks::bar`, `marks::rect`, `marks::tick`, `marks::area`)
+/// read back. Each mark builder parses this **once** per call
+/// ([`from_batch`](Self::from_batch)) instead of re-reading raw schema
+/// metadata on every per-call width/base computation.
 ///
-/// `false` when the key is absent — the pre-#77 default (value on Y, or no
-/// Stack at all) — so every existing vertical-stack mark drawer path stays
-/// byte-identical.
-pub(crate) fn stack_value_on_x(batch: &RecordBatch) -> bool {
-    batch.schema().metadata().get(STACK_VALUE_ON_X_KEY).is_some()
+/// The three fields mirror the three metadata keys this module used to
+/// expose as separate consts + free-function readers:
+///
+/// - `dodge_n_groups` — the number of ordinal-band Dodge groups active on
+///   the batch. Band-dimension marks (bar bodies, box bodies, band-fraction
+///   boxplot ticks) shrink their per-category extent to
+///   `extent / dodge_n_groups`, otherwise dodged sub-bands overlap their
+///   neighbours. The count comes from explicit metadata rather than
+///   inferring it off `__pos_x_offset__` / `__pos_y_offset__` offset values,
+///   because Jitter's ordinal branch writes per-row noise into those SAME
+///   two columns; a distinct-value heuristic would misread jitter noise as
+///   ≈row-count dodge groups. Defaults to `1` (no narrowing) when the key is
+///   absent or unparseable, so every non-dodged batch divides by `1` and
+///   stays byte-identical (exact in IEEE-754).
+/// - `dodge_sub_band_px` — the true per-group pixel slot width Dodge
+///   computed (GH #66), used to clamp a band-axis mark's width formula
+///   (which is blind to Dodge's `padding`) so adjacent dodge groups can't
+///   overlap at high padding. `None` when absent — callers must treat that
+///   as "no clamp", not zero.
+/// - `stack_value_on_x` — whether `apply_stack` cumulated the *value* column
+///   onto X rather than Y. `false` (the pre-#77 default) when the key is
+///   absent.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct BatchPositionMeta {
+    dodge_n_groups: usize,
+    dodge_sub_band_px: Option<f64>,
+    stack_value_on_x: bool,
+}
+
+impl BatchPositionMeta {
+    /// Parse the Dodge/Stack schema-metadata side-channel off `batch`.
+    /// Absent-or-unparseable keys fall back to the same defaults the old
+    /// per-key free-function readers used (`1` / `None` / `false`), so this
+    /// is byte-identical to reading each key independently.
+    pub(crate) fn from_batch(batch: &RecordBatch) -> Self {
+        let schema = batch.schema();
+        let metadata = schema.metadata();
+        let dodge_n_groups = metadata
+            .get(DODGE_N_GROUPS_KEY)
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n >= 1)
+            .unwrap_or(1);
+        let dodge_sub_band_px = metadata.get(DODGE_SUB_BAND_PX_KEY).and_then(|s| s.parse::<f64>().ok());
+        let stack_value_on_x = metadata.contains_key(STACK_VALUE_ON_X_KEY);
+        Self { dodge_n_groups, dodge_sub_band_px, stack_value_on_x }
+    }
+
+    /// Number of ordinal-band Dodge groups active on the batch (see the
+    /// struct-level doc). `1` means "no Dodge → no narrowing".
+    pub(crate) fn dodge_n_groups(&self) -> usize {
+        self.dodge_n_groups
+    }
+
+    /// Clamp a dodged band-axis mark's pixel width to its Dodge sub-band.
+    ///
+    /// `raw_width` is the mark's ordinary width formula
+    /// (`band_extent / n_categories / dodge_n_groups * factor`, for whatever
+    /// `factor` the mark uses — bar's fixed `0.8`, box/tick's `band_size`).
+    /// That formula narrows by `dodge_n_groups` but is blind to Dodge's
+    /// `padding`, so at high padding the factor-scaled width can exceed the
+    /// true per-group slot width and adjacent dodge groups overlap (GH #66).
+    ///
+    /// Returns `raw_width` unchanged whenever no Dodge sub-band was stamped
+    /// (no Dodge on this batch) or the sub-band isn't tighter than the raw
+    /// width — so every non-dodged chart, and every dodged chart at the
+    /// default padding (where the factor-scaled width already fits inside
+    /// the sub-band), stays byte-for-byte identical to the pre-clamp
+    /// formula.
+    pub(crate) fn clamp_width(&self, raw_width: f64) -> f64 {
+        match self.dodge_sub_band_px {
+            Some(sub_band) if sub_band > 0.0 && sub_band < raw_width => sub_band,
+            _ => raw_width,
+        }
+    }
+
+    /// Whether [`apply_stack`] stamped the value-on-X marker.
+    ///
+    /// `false` when absent — the pre-#77 default (value on Y, or no Stack at
+    /// all) — so every existing vertical-stack mark drawer path stays
+    /// byte-identical.
+    pub(crate) fn stack_value_on_x(&self) -> bool {
+        self.stack_value_on_x
+    }
+
+    /// Stamp the Dodge group count (and, when computed, the pixel sub-band
+    /// width) into schema `metadata`. The single writer [`apply_dodge_ordinal`]
+    /// uses; test call sites that only need `dodge_n_groups()` to read back a
+    /// non-default value pass `sub_band_px: None` to stamp that key alone,
+    /// matching the pre-refactor behavior of inserting
+    /// `DODGE_N_GROUPS_KEY` without `DODGE_SUB_BAND_PX_KEY`.
+    pub(crate) fn stamp_dodge(metadata: &mut HashMap<String, String>, n_groups: usize, sub_band_px: Option<f64>) {
+        metadata.insert(DODGE_N_GROUPS_KEY.to_string(), n_groups.to_string());
+        if let Some(sub_band) = sub_band_px {
+            metadata.insert(DODGE_SUB_BAND_PX_KEY.to_string(), sub_band.to_string());
+        }
+    }
+
+    /// Stamp the stack value-on-X marker into schema `metadata`. The single
+    /// writer [`apply_stack`] uses, in its `value_on_x` branch only — mirrors
+    /// the pre-refactor byte-stable contract that the non-`value_on_x`
+    /// branch stamps nothing.
+    pub(crate) fn stamp_stack_value_on_x(metadata: &mut HashMap<String, String>) {
+        metadata.insert(STACK_VALUE_ON_X_KEY.to_string(), "1".to_string());
+    }
 }

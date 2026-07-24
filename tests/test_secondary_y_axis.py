@@ -25,7 +25,7 @@ import polars as pl
 import pytest
 
 import ferrum as fm
-from ferrum.composition import HConcatChart, LayerChart, _lower_composite
+from ferrum.composition import HConcatChart, LayerChart, RepeatChart, _lower_composite
 from tests._svg_extents import y_axis_extents
 
 
@@ -538,3 +538,51 @@ def test_point_line_composite_mark_default_shared_y_unaffected():
     # "y" titles; no duplication introduced by the composite-mark shape.
     titles = [t for _, t in _rotated_text(default_svg)]
     assert titles == ["y", "y"], f"expected one title per member chart, got {titles}"
+
+
+# ---------------------------------------------------------------------------
+# GH #57: grid composites (Joint/ClusterMap/Repeat) must run the SAME
+# resolve={"y": "shared"} vs. independent-y conflict guard as the generic
+# HConcat/VConcat/Concat branch above. They route through
+# _build_grid_tree instead of _lower_any's node.charts walk (JointChart,
+# ClusterMapChart, and RepeatChart all match _lower_any's
+# ``isinstance(node, (JointChart, ClusterMapChart, RepeatChart,
+# LayerChart))`` branch first and delegate to their own
+# ``_composite_tree``), which previously never consulted
+# _contains_independent_y_layer at all -- an explicit parent
+# resolve={"y": "shared"} silently rendered the dual-axis panel anyway.
+# ---------------------------------------------------------------------------
+
+
+def test_repeat_chart_explicit_shared_y_over_independent_y_template_raises():
+    """A RepeatChart whose template is a dual-axis chart (``chart +
+    SecondaryY(...)``) under an explicit ``resolve={"y": "shared"}`` hits
+    the same typed conflict as the HConcat/VConcat/Concat forms above."""
+    df = pl.DataFrame(
+        {"x": [1, 2, 3, 4], "y": [1.0, 2.0, 3.0, 4.0], "y2": [100.0, 200.0, 150.0, 300.0]}
+    )
+    template = fm.Chart(df).mark_bar().encode(x="x", y="y") + fm.SecondaryY("y2")
+    repeat = RepeatChart(template, column=["p1", "p2"], resolve={"y": "shared"})
+    with pytest.raises(ValueError, match=r"RepeatChart:.*'y': 'shared'.*independent-y"):
+        repeat.to_svg()
+
+
+def test_repeat_chart_shared_y_over_normal_template_still_lowers():
+    """Negative case: resolve={"y": "shared"} over a template with no
+    independent-y layer is unaffected by the GH #57 guard."""
+    df = pl.DataFrame({"x": [1, 2, 3, 4], "y": [1.0, 2.0, 3.0, 4.0]})
+    template = fm.Chart(df).mark_bar().encode(x="x", y="y")
+    repeat = RepeatChart(template, column=["p1", "p2"], resolve={"y": "shared"})
+    svg = repeat.to_svg()  # must not raise
+    assert svg
+
+
+# JointChart and ClusterMapChart also route through _build_grid_tree, and
+# so are covered by the same guard call inside it, but neither's public
+# constructor exposes a resolve= parameter capable of requesting
+# "y": "shared": JointChart's private ``_resolve`` slot only ever carries
+# color/size (jointplot(hue=...)'s figure-legend wiring, never "y"), and
+# ClusterMapChart has no resolve concept at all -- its panels are fixed
+# heatmap/dendrogram geometry, not scale-shareable charts. Neither can
+# express the request this guard checks for, so there is no reachable
+# positive test for them here.

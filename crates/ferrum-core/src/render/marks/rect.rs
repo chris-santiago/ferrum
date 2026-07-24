@@ -197,6 +197,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         .as_ref()
         .and_then(|e| col_as_f64(ctx.batch, &e.field).ok());
     let (x_offsets, y_offsets) = crate::render::position::read_position_offsets(ctx.batch);
+    let pos_meta = crate::render::position::BatchPositionMeta::from_batch(ctx.batch);
     let meta = MetadataColumns::from_ctx(ctx);
 
     // Accumulate nodes and source-row indices in lockstep so metadata is
@@ -220,7 +221,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // Under an ordinal-band Dodge, shrink each box body to its sub-band so
         // adjacent dodge groups don't overlap. No Dodge → n_groups == 1 →
         // byte-identical to the non-dodged box width.
-        let n_groups = crate::render::position::n_dodge_groups(ctx.batch);
+        let n_groups = pos_meta.dodge_n_groups();
         // Band-geometry unification (#39 phase 2): honor an explicit x-band
         // pixel range when the resolver recorded one; otherwise `panel.w`.
         let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.x, panel.w);
@@ -231,7 +232,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // per-group slot width at high padding, overlapping neighbouring
         // dodge groups. No-op (byte-identical) when undodged or at
         // low/default padding.
-        let box_w = crate::render::position::clamp_to_dodge_sub_band(box_w_raw, ctx.batch);
+        let box_w = pos_meta.clamp_width(box_w_raw);
 
         for i in 0..xs.len() {
             let xv = match &xs[i] { Some(s) => s.as_str(), None => continue };
@@ -307,7 +308,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // Under an ordinal-band Dodge (CoordFlip orientation), shrink each box
         // body to its sub-band so adjacent dodge groups don't overlap. No Dodge
         // → n_groups == 1 → byte-identical to the non-dodged box height.
-        let n_groups = crate::render::position::n_dodge_groups(ctx.batch);
+        let n_groups = pos_meta.dodge_n_groups();
         // Band-geometry unification (#39 phase 2): honor an explicit y-band
         // pixel range when the resolver recorded one; otherwise `panel.h`.
         let band_extent = crate::render::marks::channels::band_extent_or(&ctx.scales.y, panel.h);
@@ -316,7 +317,7 @@ fn build_ordinal_range(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
         // Clamp to the Dodge sub-band (GH #66); see the x-ordinal branch's
         // analogous comment above — byte-identical no-op when undodged or at
         // low/default padding.
-        let box_h = crate::render::position::clamp_to_dodge_sub_band(box_h_raw, ctx.batch);
+        let box_h = pos_meta.clamp_width(box_h_raw);
 
         for i in 0..ys.len() {
             let yv = match &ys[i] { Some(s) => s.as_str(), None => continue };
@@ -1683,7 +1684,7 @@ mod tests {
         let mut schema = Schema::new(fields);
         if let Some(n) = n_groups_metadata {
             let mut metadata = HashMap::new();
-            metadata.insert(crate::render::position::DODGE_N_GROUPS_KEY.to_string(), n.to_string());
+            crate::render::position::BatchPositionMeta::stamp_dodge(&mut metadata, n, None);
             schema = schema.with_metadata(metadata);
         }
         let batch = arrow::record_batch::RecordBatch::try_new(Arc::new(schema), cols).unwrap();

@@ -349,7 +349,7 @@ pub fn build_scene(
 
         // Structural features: axis breaks, insets.
         // Only applied to the first panel (non-faceted charts).
-        let (structural_axes, structural_marks, structural_annotations, break_results) =
+        let StructuralOutput { extra_annotations: structural_annotations, break_results } =
             if panel_idx == 0 && !chart_config.structural.is_empty() {
                 build_structural_nodes(
                     &chart_config.structural,
@@ -358,7 +358,7 @@ pub fn build_scene(
                     theme,
                 )
             } else {
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                StructuralOutput { extra_annotations: Vec::new(), break_results: Vec::new() }
             };
 
         // Remap mark, axis, and grid pixel coordinates through any broken scales
@@ -412,16 +412,8 @@ pub fn build_scene(
         // annotation nodes must still land in the grid slot.
         grid_below.extend(annotation_nodes.below_marks);
 
-        let final_axes: Vec<SceneNode> = {
-            let mut v = axes_nodes;
-            v.extend(structural_axes);
-            v
-        };
-        let final_marks: Vec<ferrum_scene::MarkBatch> = {
-            let mut v = mark_batches;
-            v.extend(structural_marks);
-            v
-        };
+        let final_axes: Vec<SceneNode> = axes_nodes;
+        let final_marks: Vec<ferrum_scene::MarkBatch> = mark_batches;
         // Annotation list (emitted after marks): user annotations (`above_marks`
         // bucket), then any above-marks grid + axes (zindex >= 1), then structural
         // annotations.  `below_marks` annotation nodes were routed into `grid_below`
@@ -1044,10 +1036,22 @@ fn build_panel_mark_batches(
         // through a clone whose `.y` is its own slot scale, so mark geometry and
         // position adjustment map data → pixels through that layer's y-scale
         // without touching any mark renderer (all read `ctx.scales.y`).
+        //
+        // `layer_slot_idx` is captured against the panel-level `scales` before
+        // any shadowing below, so the `MarkBatch.y_slot` tag at the end of this
+        // loop iteration always reflects this layer's real slot — independent
+        // of how the clone's own `y_slots` describes itself.
+        let layer_slot_idx = scales.y_slots.slot_for_layer(li);
         let layer_scales_owned: Option<scale_resolve::ResolvedScales> =
-            if scales.y_slots.slot_for_layer(li) != 0 {
+            if layer_slot_idx != 0 {
                 let mut s = scales.clone();
                 s.y = scales.y_for_layer(li).clone();
+                // Self-describing y_slots: the clone's `.y` now points at this
+                // one layer's own scale, so its `y_slots` should describe just
+                // that — a single slot — rather than keep the stale multi-slot
+                // list carried over from `scales.clone()`, which would let a
+                // reader of `ctx.scales.y_slots` disagree with `ctx.scales.y`.
+                s.y_slots = scale_resolve::YScaleSlots::single(s.y.clone());
                 Some(s)
             } else {
                 None
@@ -1137,7 +1141,9 @@ fn build_panel_mark_batches(
             // Secondary-y-axis (GH #52 Task 8): tag this batch with the same
             // slot its marks were positioned through above. `0` on every
             // shared-path layer (the byte-stable default, omitted from JSON).
-            y_slot: scales.y_slots.slot_for_layer(li),
+            // Uses `layer_slot_idx` (captured pre-shadow above), not the
+            // (possibly single-slot, self-describing) clone's `y_slots`.
+            y_slot: layer_slot_idx,
         });
     }
 
@@ -1722,19 +1728,13 @@ fn build_polar_axes(
 // ── Structural feature processing ────────────────────────────────────────────
 
 /// Process structural feature specs (axis breaks, insets).
-///
-/// Returns four values:
-/// - `extra_axes` — additional axis scene nodes
-/// - `extra_mark_batches` — additional mark batches
-/// - `extra_annotations` — additional annotation nodes (break indicators, insets)
-/// - `break_results` — `(axis, BreakResult)` pairs for each BreakAxis spec, used
-///   by the caller to remap primary mark pixel coordinates through the broken scale
-type StructuralOutput = (
-    Vec<SceneNode>,
-    Vec<ferrum_scene::MarkBatch>,
-    Vec<SceneNode>,
-    Vec<(String, break_axis::BreakResult)>,
-);
+struct StructuralOutput {
+    /// Additional annotation nodes (break indicators, insets).
+    extra_annotations: Vec<SceneNode>,
+    /// `(axis, BreakResult)` pairs for each BreakAxis spec, used by the
+    /// caller to remap primary mark pixel coordinates through the broken scale.
+    break_results: Vec<(String, break_axis::BreakResult)>,
+}
 
 fn build_structural_nodes(
     structural: &[StructuralSpec],
@@ -1742,8 +1742,6 @@ fn build_structural_nodes(
     plot_area: &crate::layout::Rect,
     theme: &crate::layout::ThemeInputs,
 ) -> StructuralOutput {
-    let extra_axes: Vec<SceneNode> = Vec::new();
-    let extra_mark_batches: Vec<ferrum_scene::MarkBatch> = Vec::new();
     let mut extra_annotations: Vec<SceneNode> = Vec::new();
     let mut break_results: Vec<(String, break_axis::BreakResult)> = Vec::new();
 
@@ -1825,7 +1823,7 @@ fn build_structural_nodes(
         }
     }
 
-    (extra_axes, extra_mark_batches, extra_annotations, break_results)
+    StructuralOutput { extra_annotations, break_results }
 }
 
 // ── Break-axis mark remapping ────────────────────────────────────────────────
@@ -3012,6 +3010,48 @@ mod tests {
         // Every layer draws through the one primary y-scale.
         assert_eq!(scales.y_for_layer(0).data_domain(), scales.y.data_domain());
         assert_eq!(scales.y_for_layer(1).data_domain(), scales.y.data_domain());
+    }
+
+    /// `build_panel_mark_batches` clones the panel-level `ResolvedScales` for an
+    /// independent-y layer and reassigns `.y` to that layer's own slot scale
+    /// (GH #61 T2). The clone's `y_slots` must describe just that one scale —
+    /// self-describing — rather than keep the stale multi-slot list carried
+    /// over from `scales.clone()`, which would let `.y` and `.y_slots`
+    /// disagree on a clone whose `.y` only ever holds one layer's scale. This
+    /// mirrors the exact clone-construction sequence in `build_panel_mark_batches`.
+    #[test]
+    fn independent_layer_clone_gets_self_describing_single_slot_y_slots() {
+        let (spec, batch) = two_layer_dual_y_spec(true);
+        let scales = resolve_dual_y(&spec, &batch);
+
+        let mut layer_scales = scales.clone();
+        layer_scales.y = scales.y_for_layer(1).clone();
+        layer_scales.y_slots = scale_resolve::YScaleSlots::single(layer_scales.y.clone());
+
+        assert!(
+            !layer_scales.y_slots.has_independent(),
+            "a single-slot clone must not report independent slots"
+        );
+        assert_eq!(
+            layer_scales.y_slots.slots().len(),
+            1,
+            "the clone's y_slots must describe exactly one slot"
+        );
+        assert_eq!(
+            layer_scales.y_slots.slot_for_layer(1),
+            0,
+            "slot_for_layer must fall back to 0 for any layer index on a single-slot clone"
+        );
+        assert_eq!(
+            layer_scales.y.data_domain(),
+            layer_scales.y_slots.slots()[0].data_domain(),
+            "the clone's one slot must be the same scale as its .y"
+        );
+
+        // Sanity: the clone really carries layer 1's own (large) domain, not
+        // the primary's — this isn't accidentally testing a no-op clone.
+        let (lo, hi) = layer_scales.y.data_domain().expect("layer 1 y is continuous");
+        assert!(lo > 50.0, "clone must carry layer 1's large y1 domain, got {lo}..{hi}");
     }
 
     /// Secondary-y (#52): `build_tick_levels` emits one `y_slot_levels` entry per
