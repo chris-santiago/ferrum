@@ -19,6 +19,7 @@ from ferrum.annotation.coords import (
 )
 from ferrum.chart import Chart
 from ferrum._metric_labels import AUCLabel, APLabel, BrierLabel, OutlierLabel  # noqa: F401
+from ferrum._validate import validate_choice
 
 # Type accepted by positional annotation parameters.  This is the same as
 # CoordValue: numeric, temporal, ISO-8601 string, ordinal category string,
@@ -351,6 +352,16 @@ def annotate_rect(
 _ALIGN_TO_ANCHOR = {"left": "start", "center": "middle", "right": "end"}
 _ANCHOR_TO_ALIGN = {"start": "left", "middle": "center", "end": "right"}
 
+# ``annotate_text``'s own accepted vocabulary per parameter (P6 claim-check
+# fix, 2026-08-27). ``align`` speaks exactly the CSS-style words in
+# ``_ALIGN_TO_ANCHOR``. ``anchor`` speaks every value ``AnnotationText.anchor``
+# itself accepts (``_VALID_TEXT_ANCHORS`` -- the real Rust-recognized anchor
+# tokens: start/left/end/right/middle) *plus* ``"center"``, which is not a
+# Rust anchor token but is this package's own documented alignment word
+# (``_ALIGN_TO_ANCHOR``'s key) and pre-dates any validation on this seam --
+# rejecting it here would be a self-inflicted regression, not a fix.
+_VALID_ALIGN_WORDS = tuple(_ALIGN_TO_ANCHOR)
+
 
 def _resolve_text_alignment(*, anchor: Optional[str], align: Optional[str]) -> tuple[str, str]:
     """Resolve the ``anchor``/``align`` pair to ``(mark_align, primitive_anchor)``.
@@ -361,18 +372,32 @@ def _resolve_text_alignment(*, anchor: Optional[str], align: Optional[str]) -> t
 
     - Neither supplied → ``("center", "middle")`` (the historical default).
     - ``align`` only → mark gets ``align``; primitive gets ``_ALIGN_TO_ANCHOR``.
-    - ``anchor`` only → mark gets ``_ANCHOR_TO_ALIGN``; primitive gets ``anchor``.
+    - ``anchor`` only → mark gets ``_ANCHOR_TO_ALIGN``; primitive gets ``anchor``,
+      except ``anchor="center"`` (an align-vocabulary word, not a Rust anchor
+      token) is normalized to ``"middle"`` so it keeps rendering centered
+      instead of failing ``AnnotationText.anchor``'s own, narrower validation.
     - Both supplied → ``ValueError`` (the canonical and the alias conflict).
+
+    Each parameter is validated against *its own* vocabulary here, with a
+    message naming the parameter the caller actually wrote (``anchor`` or
+    ``align``) -- not against ``AnnotationText.anchor``'s vocabulary two
+    frames below, which would misname the parameter and show the wrong
+    accepted-values list for an ``align=`` typo.
     """
+    from ferrum.annotation.primitives import _VALID_TEXT_ANCHORS
+
     if anchor is not None and align is not None:
         raise ValueError(
             "annotate_text() received both 'anchor' and 'align'; pass only one "
             "('anchor' is the canonical SVG vocabulary, 'align' is the alias)."
         )
     if anchor is not None:
-        return _ANCHOR_TO_ALIGN.get(anchor, anchor), anchor
+        validate_choice("annotate_text", "anchor", anchor, (*_VALID_TEXT_ANCHORS, "center"))
+        prim_anchor = "middle" if anchor == "center" else anchor
+        return _ANCHOR_TO_ALIGN.get(anchor, anchor), prim_anchor
     if align is not None:
-        return align, _ALIGN_TO_ANCHOR.get(align, align)
+        validate_choice("annotate_text", "align", align, _VALID_ALIGN_WORDS)
+        return align, _ALIGN_TO_ANCHOR[align]
     return "center", "middle"
 
 
@@ -412,9 +437,10 @@ def annotate_text(
         Vertical pixel offset from ``(x, y)``.
     anchor : str, optional
         Horizontal text anchor in the SVG vocabulary (matching
-        `text`): ``"start"``, ``"middle"``, or
-        ``"end"``.  This is the canonical keyword.  When neither ``anchor`` nor
-        ``align`` is supplied the anchor defaults to ``"middle"`` (centered).
+        `text`): ``"start"``, ``"middle"``, or ``"end"``.  This is the
+        canonical keyword; the renderer also accepts the aliases ``"left"``,
+        ``"center"``, and ``"right"``.  When neither ``anchor`` nor ``align``
+        is supplied the anchor defaults to ``"middle"`` (centered).
     align : str, optional
         Deprecated alias for ``anchor`` in the ``"left"``/``"center"``/
         ``"right"`` vocabulary.  Mapped to ``anchor`` via

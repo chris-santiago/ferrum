@@ -93,6 +93,30 @@ def _default_prefix(kind: str) -> str:
     return _METRIC_LABEL_SPECS[kind][1]
 
 
+_VALID_METRIC_LABEL_POSITIONS = ("end", "corner")
+
+
+def _validate_metric_label_fields(label: "AUCLabel | APLabel | BrierLabel") -> None:
+    """Construction-time validation shared by ``AUCLabel``/``APLabel``/``BrierLabel``.
+
+    Finding P6 (2026-08-27): ``position`` is ``Literal``-annotated but was
+    unenforced at runtime, and a bad ``format`` spec previously only
+    exploded deep inside an f-string with no indication of which label
+    constructed it. Both fail fast here, with the constructing class named
+    in the message.
+    """
+    cls_name = type(label).__name__
+    validate_choice(
+        f"{cls_name}.position", "position", label.position, _VALID_METRIC_LABEL_POSITIONS
+    )
+    try:
+        format(1.0, label.format)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"{cls_name}.format: {label.format!r} is not a valid format spec for a float value ({exc})"
+        ) from exc
+
+
 def _apply_metric_label(
     base: "Chart",
     label: "AUCLabel | APLabel | BrierLabel",
@@ -116,6 +140,20 @@ def _apply_metric_label(
     composites like ``mark_roc``) can compose metric labels without setting
     a chart-level color encoding that would leak into adjacent layers
     (e.g. the diagonal reference line of ``mark_roc``).
+
+    Finding P6 (2026-08-27): ``label.position`` routes the label's x anchor.
+    ``"end"`` (the historical, only-implemented behavior) anchors each
+    series' label at that series' own rightmost data point, via ``_label_x``
+    copied from the endpoint row's own ``x_col`` value — byte-identical to
+    the pre-fix unconditional behavior. ``"corner"`` anchors every series'
+    label at the same x — the dataset's overall max ``x_col`` value — so
+    multi-series labels stack in a column near the top-right of the plot
+    area instead of trailing each curve's own end, matching the documented
+    "corner" placement. Reuses this function's own per-series staggering
+    (the established idiom, shared with ``_inject_metrics_corner`` in
+    ``plots/_helpers.py``) rather than importing that residuals-specific,
+    hardcoded-column helper, which would invert the top-level/``plots``
+    dependency direction and does not compute this module's metrics anyway.
     """
     from ferrum._coerce import to_arrow_table
     from ferrum.chart import Chart
@@ -134,8 +172,12 @@ def _apply_metric_label(
 
     y_range = float(df[y_col].max() - df[y_col].min()) if n > 0 else 1.0
     y_top = float(df[y_col].max()) if n > 0 else 1.0
+    x_col_max = df[x_col].max() if n > 0 else None
+    x_top = float(x_col_max) if x_col_max is not None else 0.0
     stagger_step = max(y_range * 0.06, 1e-9)
     label_y_col: list[Optional[float]] = [None] * n
+    label_x_col: list[Optional[float]] = [None] * n
+    corner = label.position == "corner"
 
     if color_col is not None and color_col in df.columns:
         unique_colors = sorted(df[color_col].unique().to_list(), key=str)
@@ -151,10 +193,23 @@ def _apply_metric_label(
                 np.asarray(group[y_col].to_list(), dtype=float),
             )
             text = f"{label.prefix}{metric:{label.format}}"
-            endpoint_row = group.sort(x_col, descending=True).row(0, named=True)
+            # nulls_last=True so a null x (which polars' default descending
+            # sort places FIRST) never becomes the selected "endpoint" row;
+            # the endpoint is the group's highest *non-null* x, matching what
+            # the pre-fix code rendered for this data (the label text/metric
+            # already reflects any null via metric_fn's NaN propagation
+            # above -- only the label's x-position selection is guarded
+            # here). Only an entirely-null-x group falls through with the
+            # null row still selected; that case is caught explicitly below.
+            endpoint_row = group.sort(x_col, descending=True, nulls_last=True).row(0, named=True)
             global_idx = int(endpoint_row["_idx"])
+            endpoint_x = endpoint_row[x_col]
             labels_col[global_idx] = text
             label_y_col[global_idx] = y_top - stack_i * stagger_step
+            if corner:
+                label_x_col[global_idx] = x_top
+            else:
+                label_x_col[global_idx] = float(endpoint_x) if endpoint_x is not None else x_top
     else:
         import numpy as np
 
@@ -164,12 +219,21 @@ def _apply_metric_label(
         )
         text = f"{label.prefix}{metric:{label.format}}"
         global_idx = df[x_col].arg_max()
-        labels_col[global_idx] = text
-        label_y_col[global_idx] = y_top
+        # arg_max() returns None (not an int index) for an empty or
+        # entirely-null x column -- pre-existing edge case, not introduced
+        # by this change, but reachable via the same empty/null-input
+        # scenarios this fix now covers. No non-null row exists to anchor a
+        # label, so skip emission entirely (mirrors the grouped branch's
+        # own `if group.is_empty(): continue`); the base chart still renders.
+        if global_idx is not None:
+            labels_col[global_idx] = text
+            label_y_col[global_idx] = y_top
+            label_x_col[global_idx] = x_top
 
     base_pl = base._data if isinstance(base._data, pl.DataFrame) else pl.from_arrow(tbl)
     augmented = base_pl.with_columns(
         pl.Series("_label_text", labels_col, dtype=pl.Utf8),
+        pl.Series("_label_x", label_x_col, dtype=pl.Float64),
         pl.Series("_label_y", label_y_col, dtype=pl.Float64),
     )
     base_aug = base._clone()
@@ -177,7 +241,7 @@ def _apply_metric_label(
     annot_layer = (
         Chart(augmented)
         .mark_text(align="right", baseline="hanging", dx=-4, dy=4)
-        .encode(x=x_col, y="_label_y", text="_label_text")
+        .encode(x="_label_x", y="_label_y", text="_label_text")
     )
     return base_aug + annot_layer
 
@@ -214,6 +278,9 @@ class AUCLabel:
     position: Literal["end", "corner"] = "end"
     format: str = ".3f"
     prefix: str = _default_prefix("auc")
+
+    def __post_init__(self) -> None:
+        _validate_metric_label_fields(self)
 
     def __radd__(self, base: "Chart") -> "Chart":
         from ferrum.chart import Chart
@@ -254,6 +321,9 @@ class APLabel:
     format: str = ".3f"
     prefix: str = _default_prefix("ap")
 
+    def __post_init__(self) -> None:
+        _validate_metric_label_fields(self)
+
     def __radd__(self, base: "Chart") -> "Chart":
         from ferrum.chart import Chart
 
@@ -291,6 +361,9 @@ class BrierLabel:
     position: Literal["end", "corner"] = "corner"
     format: str = ".3f"
     prefix: str = _default_prefix("brier")
+
+    def __post_init__(self) -> None:
+        _validate_metric_label_fields(self)
 
     def __radd__(self, base: "Chart") -> "Chart":
         from ferrum.chart import Chart

@@ -24,6 +24,62 @@ from typing import Any
 # Re-imported (not re-defined) here so the ``to_dict()`` methods below and any
 # caller importing ``ferrum.annotation.primitives._coord`` keep working.
 from ferrum.annotation.coords import CoordValue, _coord  # noqa: F401
+from ferrum._validate import validate_choice
+
+
+# ---------------------------------------------------------------------------
+# Rust-vocabulary constants
+# ---------------------------------------------------------------------------
+#
+# Finding P6 claim-check (2026-08-27): the validated set for a field consumed
+# by Rust must be the union of every literal value Rust's own parser
+# recognizes and renders distinctly -- including aliases -- not just the
+# canonical token shown in this module's docstrings. Validating against a
+# narrower, docstring-only vocabulary regresses previously-working input
+# (e.g. ``anchor="left"``, reachable via ``annotate_text``'s
+# ``_ANCHOR_TO_ALIGN`` alias pass-through) into a construction-time
+# ``ValueError``. Each constant below is cross-checked against its Rust
+# match arm; see the per-field comment for the exact source location.
+
+# render/annotation.rs::parse_anchor -- "start"|"left" -> Start,
+# "end"|"right" -> End, anything else (including "middle") -> Middle.
+_VALID_TEXT_ANCHORS = ("start", "left", "end", "right", "middle")
+
+# render/annotation.rs::parse_baseline -> render/draw.rs::parse_text_baseline
+# -- four DISTINCT rendered variants, not three: Top ("top"/"hanging"/
+# "text-before-edge"), Middle ("middle"/"central", also the default for any
+# unrecognized string), Bottom ("bottom"/"text-after-edge"/"ideographic"),
+# and Alphabetic ("alphabetic" -- a real fourth variant absent from the
+# public docstring's {"top", "middle", "bottom"} vocabulary).
+_VALID_TEXT_BASELINES = (
+    "top",
+    "hanging",
+    "text-before-edge",
+    "middle",
+    "central",
+    "bottom",
+    "text-after-edge",
+    "ideographic",
+    "alphabetic",
+)
+
+# render/annotation.rs::build_annotations -- exact-match "below_marks" routes
+# to the pre-marks bucket; every other string (including "above_marks")
+# routes to the post-marks bucket. No further Rust-recognized alias exists.
+_VALID_ANNOTATION_Z = ("above_marks", "below_marks")
+
+# render/annotation.rs::emit_bracket -- "up"/"down"/"left"/"right" are the
+# four match arms Rust actually distinguishes; anything else (including the
+# documented default "above" and its sibling "below") falls through to the
+# same tip direction as "up". "above"/"below" are kept in the validated set
+# because "above" is the class's own documented default and "below" is
+# covered by an existing passing test/usage -- rejecting either would be a
+# self-inflicted regression, not a fix. Rust does not currently render
+# "below" distinctly from "above"/"up" (a latent Rust defect noted but not
+# fixed by this Python-only change); "up"/"down"/"left"/"right" are added
+# here because they are genuinely Rust-recognized tokens that this class's
+# validation previously rejected without ever being reachable pre-fix.
+_VALID_BRACKET_DIRECTIONS = ("above", "below", "up", "down", "left", "right")
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +102,11 @@ class AnnotationText:
     dx: float
     dy: float
     z: str
+
+    def __post_init__(self) -> None:
+        validate_choice("AnnotationText.anchor", "anchor", self.anchor, _VALID_TEXT_ANCHORS)
+        validate_choice("AnnotationText.baseline", "baseline", self.baseline, _VALID_TEXT_BASELINES)
+        validate_choice("AnnotationText.z", "z", self.z, _VALID_ANNOTATION_Z)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""
@@ -161,6 +222,15 @@ class AnnotationSpan:
     label: str | None
     label_position: str
 
+    def __post_init__(self) -> None:
+        validate_choice("AnnotationSpan.axis", "axis", self.axis, ("x", "y"))
+        validate_choice(
+            "AnnotationSpan.label_position",
+            "label_position",
+            self.label_position,
+            ("top", "middle", "bottom"),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""
         d: dict[str, Any] = {
@@ -189,6 +259,11 @@ class AnnotationBracket:
     direction: str
     stroke: str
     tip_length: float
+
+    def __post_init__(self) -> None:
+        validate_choice(
+            "AnnotationBracket.direction", "direction", self.direction, _VALID_BRACKET_DIRECTIONS
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""
@@ -219,6 +294,11 @@ class AnnotationCallout:
     background: str
     border_color: str
     border_radius: float
+
+    def __post_init__(self) -> None:
+        validate_choice(
+            "AnnotationCallout.arrow", "arrow", self.arrow, ("curved", "straight", "none")
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""
@@ -296,9 +376,15 @@ def text(
     color : str, default "#333"
         Text color.
     anchor : str, default "start"
-        Horizontal anchor: ``"start"``, ``"middle"``, or ``"end"``.
+        Horizontal anchor: ``"start"``, ``"middle"``, or ``"end"`` (SVG
+        vocabulary); ``"left"`` and ``"right"`` are accepted aliases for
+        ``"start"`` and ``"end"`` respectively.
     baseline : str, default "middle"
-        Vertical baseline: ``"top"``, ``"middle"``, or ``"bottom"``.
+        Vertical baseline: ``"top"``, ``"middle"``, ``"bottom"``, or
+        ``"alphabetic"``. Each also accepts CSS ``dominant-baseline``
+        aliases: ``"hanging"``/``"text-before-edge"`` for ``"top"``;
+        ``"central"`` for ``"middle"``; ``"text-after-edge"``/
+        ``"ideographic"`` for ``"bottom"``.
     angle : float, default 0
         Rotation angle in degrees.
     dx : float, default 0
@@ -517,7 +603,13 @@ def bracket(
     label : str
         Label text above/below the bracket.
     direction : str, default "above"
-        Which side the bracket opens toward: ``"above"`` or ``"below"``.
+        Which side the tip ticks point toward: ``"up"``, ``"down"``,
+        ``"left"``, or ``"right"``. ``"above"`` is a synonym for ``"up"``
+        (kept as the default for backward compatibility). ``"below"`` is
+        accepted for symmetry with ``"above"`` but currently renders
+        identically to ``"above"``/``"up"`` — a known renderer limitation,
+        not a Python-side validation gap; pass ``"down"`` for a tip that
+        actually points downward.
     stroke : str, default "#333"
         Bracket stroke color.
     tip_length : float, default 6
@@ -563,7 +655,10 @@ def callout(
     text_x, text_y : CoordValue, optional
         Position of the text bubble; defaults to a smart offset from ``(x, y)``.
     arrow : str, default "curved"
-        Connector style: ``"curved"``, ``"straight"``, or ``"none"``.
+        Connector style: ``"curved"``, ``"straight"``, or ``"none"`` (no
+        leader line). ``"curved"`` and ``"straight"`` currently render
+        identically (a straight leader line) — a known renderer limitation
+        (no curve is implemented), not a Python-side validation gap.
     padding : float, default 4
         Padding inside the bubble in pixels.
     background : str, default "#fff"

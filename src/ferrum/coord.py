@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, get_args, get_type_hints
+
+from ferrum._validate import validate_choice
 
 
 @dataclass(frozen=True)
@@ -167,6 +169,10 @@ class CoordPolar:
     outer_radius: float | None = None
     pad_angle: float = 0.0
 
+    def __post_init__(self) -> None:
+        validate_choice("CoordPolar.theta", "theta", self.theta, ("x", "y"))
+        validate_choice("CoordPolar.direction", "direction", self.direction, (1, -1))
+
     def to_spec_dict(self) -> dict:
         """Return dict serialization for ChartSpec coord param."""
         direction_str = "clockwise" if self.direction == 1 else "counter_clockwise"
@@ -208,6 +214,15 @@ class CoordGeo:
         "orthographic",
         "equirectangular",
     ] = "mercator"
+
+    def __post_init__(self) -> None:
+        # Choices derived from the Literal annotation so the two can't drift.
+        validate_choice(
+            "CoordGeo.projection",
+            "projection",
+            self.projection,
+            get_args(get_type_hints(CoordGeo)["projection"]),
+        )
 
     def to_spec_dict(self) -> dict:
         """Return dict serialization for ChartSpec coord param."""
