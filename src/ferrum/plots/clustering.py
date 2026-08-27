@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 from ferrum._coerce import to_polars
 from ferrum._validate import validate_choice
 from ferrum.diagnostics.source import ComparedModelSource
+from ferrum.diagnostics.sources._clustering import _ELBOW_METRICS
 from ferrum.encoding import X, Y
 from ferrum.plots._helpers import (
     _UNSET,
@@ -43,10 +44,6 @@ from ferrum.plots._helpers import (
 # ---------------------------------------------------------------------------
 # Builders (private)
 # ---------------------------------------------------------------------------
-
-# Valid elbow scoring metrics, shared by ``_elbow_scores`` and
-# ``ElbowVisualizer`` so the two cannot drift.
-_ELBOW_METRICS: tuple[str, ...] = ("distortion", "silhouette", "calinski_harabasz")
 
 
 def _silhouette_chart_from_source(
@@ -300,10 +297,7 @@ def _elbow_scores(
         the sweep produces no scores (e.g. silhouette over ``ks`` that are
         all ``< 2``).
     """
-    if metric not in _ELBOW_METRICS:
-        raise ValueError(
-            f"ElbowVisualizer(metric={metric!r}) is not valid; expected one of {_ELBOW_METRICS}."
-        )
+    validate_choice("ElbowVisualizer", "metric", metric, _ELBOW_METRICS)
     from ..diagnostics._internal.deps import require_sklearn
 
     require_sklearn("ElbowVisualizer")

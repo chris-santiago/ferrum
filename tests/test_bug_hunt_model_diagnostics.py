@@ -935,7 +935,7 @@ def test_elbow_visualizer_invalid_metric_raises():
     """ElbowVisualizer with invalid metric should raise ValueError."""
     from sklearn.cluster import KMeans
 
-    with pytest.raises(ValueError, match="not valid"):
+    with pytest.raises(ValueError, match="must be one of"):
         ferrum.ElbowVisualizer(KMeans, ks=range(2, 5), metric="not_a_metric")
 
 

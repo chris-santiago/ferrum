@@ -17,6 +17,16 @@ else:
     _MixinBase = object
 
 
+# Valid elbow scoring metrics, shared by ``ferrum.plots.clustering._elbow_scores``
+# (the elbow sweep computation itself) and ``ferrum.diagnostics.visualizers.
+# ElbowVisualizer`` so the two cannot drift. Homed here rather than in
+# ``plots.clustering`` (where the computation actually lives) because
+# ``diagnostics`` must not import from ``plots`` (P5, 2026-08-27 findings
+# batch) -- ``plots.clustering`` imports the constant from this module, not
+# the other way around.
+_ELBOW_METRICS: tuple[str, ...] = ("distortion", "silhouette", "calinski_harabasz")
+
+
 class ClusteringMixin(_MixinBase):
     """Phase 10f — clustering / manifold diagnostics (silhouette, PCA variance, embeddings, intercluster distance)."""
 

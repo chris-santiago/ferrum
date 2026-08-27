@@ -136,15 +136,6 @@ def _overlay_metrics_corner(chart):
     )
 
 
-def _sort_by(df: pl.DataFrame, col: str) -> pl.DataFrame:
-    """Sort the frame ascending by `col` so a downstream ``mark_line`` over
-    that column draws a monotonic polyline.
-    """
-    if col not in df.columns:
-        return df
-    return df.sort(col, nulls_last=True)
-
-
 def _grid_panels(charts: list, theme: Any = None):
     """Compose up to 4 panels into a grid using Phase 8a hstack/vstack."""
     if not 1 <= len(charts) <= 4:

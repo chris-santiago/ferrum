@@ -5,6 +5,17 @@ These utilities are internal to the marks package and not part of the public API
 
 from __future__ import annotations
 
+import polars as pl
+
+
+def _sort_by(df: pl.DataFrame, col: str) -> pl.DataFrame:
+    """Sort the frame ascending by `col` so a downstream ``mark_line`` over
+    that column draws a monotonic polyline.
+    """
+    if col not in df.columns:
+        return df
+    return df.sort(col, nulls_last=True)
+
 
 def resolve_cmap_alias(
     *,

@@ -129,14 +129,11 @@ class ElbowVisualizer(FerrumVisualizer):
         random_state: int | None = None,
         theme: Any = None,
     ):
-        from ferrum.plots.clustering import _ELBOW_METRICS
+        from ferrum._validate import validate_choice
+        from ferrum.diagnostics.sources._clustering import _ELBOW_METRICS
 
         super().__init__(model=None, random_state=random_state, theme=theme)
-        if metric not in _ELBOW_METRICS:
-            raise ValueError(
-                f"ElbowVisualizer(metric={metric!r}) is not valid; expected "
-                f"one of {_ELBOW_METRICS}."
-            )
+        validate_choice("ElbowVisualizer", "metric", metric, _ELBOW_METRICS)
         self.model_class = model_class
         self.ks = list(ks)
         self.metric = metric

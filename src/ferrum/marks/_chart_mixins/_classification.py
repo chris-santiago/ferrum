@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ferrum.marks._desugar_helpers import _sort_by
+
 if TYPE_CHECKING:
     from ferrum.chart import Chart
 
@@ -69,7 +71,6 @@ class ClassificationMarksMixin:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_roc
-        from ferrum.plots._helpers import _sort_by
 
         return self._set_composite_mark(
             "roc",
@@ -202,7 +203,6 @@ class ClassificationMarksMixin:
         Chart(mark='point', encoding=[])
         """
         from ferrum.marks.diagnostic import desugar_calibration
-        from ferrum.plots._helpers import _sort_by
 
         return self._set_composite_mark(
             "calibration",

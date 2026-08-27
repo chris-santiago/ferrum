@@ -472,7 +472,7 @@ def test_elbow_visualizer_rejects_bad_metric():
     """An unknown metric value must raise ValueError at construction."""
     from sklearn.cluster import KMeans
 
-    with pytest.raises(ValueError, match="not valid"):
+    with pytest.raises(ValueError, match="must be one of"):
         ferrum.ElbowVisualizer(
             KMeans,
             ks=[2, 3],
